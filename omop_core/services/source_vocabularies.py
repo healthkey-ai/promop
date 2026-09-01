@@ -146,3 +146,66 @@ def domain_for_table(omop_table):
         if table == omop_table:
             return domain
     return ''
+
+
+# ── Source vocabulary tab ordering for the Code Mapping page ─────────
+# Non-standard vocabularies (the ones curators actually need to map) come first,
+# then uncoded, then standard vocabularies last (they self-resolve).
+SOURCE_TAB_ORDER = [
+    'ICD10CM', 'ICD10', 'ICD9CM', 'CPT4', 'HCPCS',
+    'RxNorm', 'RxNorm Extension', 'NDC', 'ATC', 'HemOnc',
+    'Read', 'MeSH', 'OPCS4', 'Nebraska Lexicon',
+    'MedDRA', 'ICDO3', 'dm+d', 'CVX',
+    '',  # Uncoded / free text
+    'LOINC', 'SNOMED',  # Standard — last
+]
+
+SOURCE_TAB_LABELS = {
+    'ICD10CM': 'ICD-10-CM',
+    'ICD10': 'ICD-10',
+    'ICD9CM': 'ICD-9-CM',
+    'ICD10PCS': 'ICD-10-PCS',
+    'ICD9Proc': 'ICD-9-Proc',
+    '': 'Uncoded',
+    # Others use vocabulary_id as-is.
+}
+
+# Standard vocabularies — their concepts are already standard, so they appear
+# at the end of the tab strip as reference rather than work queue.
+STANDARD_SOURCE_VOCABULARIES = {'LOINC', 'SNOMED'}
+
+
+def source_tab_label(vocabulary_id):
+    """Human-readable tab label for a source vocabulary."""
+    return SOURCE_TAB_LABELS.get(vocabulary_id, vocabulary_id)
+
+
+def source_tab_sort_key(vocabulary_id):
+    """Sort key that places tabs in SOURCE_TAB_ORDER, unknowns before standard."""
+    try:
+        return SOURCE_TAB_ORDER.index(vocabulary_id)
+    except ValueError:
+        # Unknown vocabulary — place before the uncoded/standard block.
+        return len(SOURCE_TAB_ORDER) - 3
+
+
+def tables_for_source_vocabulary(vocabulary_id):
+    """OMOP tables a source vocabulary's codes can appear in.
+
+    A vocabulary can span multiple domains (e.g. SNOMED appears in conditions,
+    measurements, observations, procedures). Returns all relevant tables.
+    """
+    if not vocabulary_id:
+        # Uncoded — could be in any table.
+        return list(DOMAIN_TO_TABLE.values())
+    tables = []
+    for systems in SOURCE_SYSTEMS_BY_DOMAIN.values():
+        for vocab, _label in systems:
+            if vocab == vocabulary_id:
+                domain = next(
+                    d for d, s in SOURCE_SYSTEMS_BY_DOMAIN.items() if s is systems
+                )
+                table = DOMAIN_TO_TABLE.get(domain)
+                if table and table not in tables:
+                    tables.append(table)
+    return tables or list(DOMAIN_TO_TABLE.values())

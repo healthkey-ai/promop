@@ -66,7 +66,7 @@ SYNONYM_BONUS = 0.05
 
 
 def unmapped_source_values(omop_table, min_occurrences=DEFAULT_MIN_OCCURRENCES,
-                           limit=None):
+                           limit=None, source_vocabulary_id=None):
     """Source values at concept 0 that nobody has proposed a mapping for.
 
     A source value is identified by both its text and source vocabulary.  The
@@ -112,6 +112,9 @@ def unmapped_source_values(omop_table, min_occurrences=DEFAULT_MIN_OCCURRENCES,
         .filter(occurrences__gte=min_occurrences)
         .order_by('-occurrences', source_col, 'source_vocabulary_id')
     )
+    # When filtering by source vocabulary, only return rows from that vocabulary.
+    if source_vocabulary_id is not None:
+        rows = rows.filter(source_vocabulary_id=source_vocabulary_id)
 
     out = []
     for row in rows.iterator():
@@ -329,7 +332,8 @@ def rank_candidates(source_value, candidates, source_description=''):
 
 
 def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
-                     limit=None, source_system='suggest', dry_run=False):
+                     limit=None, source_system='suggest', dry_run=False,
+                     source_vocabulary_id=None):
     """Propose mappings for unmapped source values in one clinical table.
 
     Every proposal lands as ``proposed`` with ``origin='import'`` -- a machine
@@ -346,17 +350,18 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
     _hk_vocabulary, domain_id, _concept_class_id, _slug_prefix = target
 
     results = []
-    for source_value, source_vocabulary_id, occurrences in unmapped_source_values(
+    for source_value, src_vocab_id, occurrences in unmapped_source_values(
         omop_table, min_occurrences=min_occurrences, limit=limit,
+        source_vocabulary_id=source_vocabulary_id,
     ):
         # If the incoming code's vocabulary is loaded, its own concept name is
         # evidence supplied by the source system, not an inference from code
         # punctuation. It makes ranking a code such as ``85319-5`` meaningful
         # without pretending the code itself is a display name.
         source_concept = Concept.objects.filter(
-            vocabulary_id=source_vocabulary_id,
+            vocabulary_id=src_vocab_id,
             concept_code__iexact=source_value,
-        ).first() if source_vocabulary_id else None
+        ).first() if src_vocab_id else None
         source_description = source_concept.concept_name if source_concept else ''
         candidates = lexical_candidates(source_description or source_value, domain_id)
         chosen, note = rank_candidates(
@@ -365,7 +370,7 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
 
         entry = {
             'source_code': source_value,
-            'source_vocabulary_id': source_vocabulary_id,
+            'source_vocabulary_id': src_vocab_id,
             'source_code_description': source_description,
             'occurrences': occurrences,
             'suggested': chosen,
@@ -379,7 +384,7 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
         concept = Concept.objects.filter(concept_id=chosen['concept_id']).first() if chosen else None
 
         mapping, created = SourceCodeConceptMapping.objects.get_or_create(
-            source_vocabulary_id=source_vocabulary_id,
+            source_vocabulary_id=src_vocab_id,
             source_code=source_value[:SOURCE_CODE_MAX],
             defaults={
                 'domain_id': domain_id,
