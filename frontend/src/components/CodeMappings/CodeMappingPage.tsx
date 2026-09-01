@@ -218,17 +218,23 @@ const byOccurrence = (a: CodeMappingRow, b: CodeMappingRow) =>
   (b.occurrence_count || 0) - (a.occurrence_count || 0)
   || (a.source_code || "").localeCompare(b.source_code || "");
 
+/** Primary sort by origin_system (provenance), then by occurrence count. */
+const byProvenanceThenOccurrence = (a: CodeMappingRow, b: CodeMappingRow) =>
+  (a.origin_system || "").localeCompare(b.origin_system || "")
+  || byOccurrence(a, b);
+
 /**
- * Machines first, then humans alphabetically.
+ * Provenance first, then machines before humans, then author alphabetically.
  *
  * An import's proposal is nobody's decision yet — it is the work the queue
  * exists for, so it sorts above every hand-written mapping. Human drafts then
  * group by author, which keeps one curator's in-progress work together
  * instead of interleaving it with everyone else's by occurrence count.
  */
-const byAuthorThenOccurrence = (a: CodeMappingRow, b: CodeMappingRow) => {
+const byProvenanceThenAuthor = (a: CodeMappingRow, b: CodeMappingRow) => {
   const machine = (r: CodeMappingRow) => (r.origin === "import" ? 0 : 1);
-  return machine(a) - machine(b)
+  return (a.origin_system || "").localeCompare(b.origin_system || "")
+    || machine(a) - machine(b)
     || (a.created_by || "").localeCompare(b.created_by || "")
     || byOccurrence(a, b);
 };
@@ -400,13 +406,13 @@ export default function CodeMappingPage() {
     });
   }, [rows, searchQuery, selectedVocabulary, showRejected]);
 
-  // Three-section layout: ATHENA MAPPED / UNMAPPED / MAPPED.
+  // Three-section layout: UNMAPPED / MAPPED / ATHENA MAPPED.
   const athenaRows = useMemo(
-    () => visibleRows.filter((r) => r.mapping_origin === "athena").sort(byOccurrence),
+    () => visibleRows.filter((r) => r.mapping_origin === "athena").sort(byProvenanceThenOccurrence),
     [visibleRows],
   );
   const unmappedRows = useMemo(
-    () => visibleRows.filter((r) => r.mapping_origin !== "athena" && r.status !== "approved").sort(byAuthorThenOccurrence),
+    () => visibleRows.filter((r) => r.mapping_origin !== "athena" && r.status !== "approved").sort(byProvenanceThenAuthor),
     [visibleRows],
   );
   const rejectedCount = useMemo(
@@ -416,7 +422,7 @@ export default function CodeMappingPage() {
     [rows, selectedVocabulary],
   );
   const mappedRows = useMemo(
-    () => visibleRows.filter((r) => r.mapping_origin !== "athena" && r.status === "approved").sort(byOccurrence),
+    () => visibleRows.filter((r) => r.mapping_origin !== "athena" && r.status === "approved").sort(byProvenanceThenOccurrence),
     [visibleRows],
   );
 
@@ -718,20 +724,20 @@ export default function CodeMappingPage() {
     }
   };
 
-  const renderTable = (sectionRows: CodeMappingRow[], emptyText: string, { hideStatus = false, hideOrigin = false }: { hideStatus?: boolean; hideOrigin?: boolean } = {}) => {
-    const colCount = 7 + (hideOrigin ? 0 : 1) + (hideStatus ? 0 : 2);
+  const renderTable = (sectionRows: CodeMappingRow[], emptyText: string, { hideStatus = false }: { hideStatus?: boolean } = {}) => {
+    const colCount = 8 + (hideStatus ? 0 : 2);
     return (
     <div className="overflow-hidden rounded-md border border-slate-200 bg-white">
       <table className="w-full border-collapse text-left text-sm">
         <thead className="bg-slate-100 text-xs uppercase text-slate-600">
           <tr>
+            <th className="px-4 py-3 font-semibold">Provenance</th>
             <th className="px-4 py-3 font-semibold">Source code</th>
             <th className="px-4 py-3 font-semibold">Source code system</th>
             <th className="px-4 py-3 font-semibold">Destination concept</th>
             <th className="px-4 py-3 font-semibold">Concept ID</th>
             <th className="px-4 py-3 font-semibold">OMOP table</th>
             <th className="px-4 py-3 font-semibold">Seen</th>
-            {!hideOrigin && <th className="px-4 py-3 font-semibold">Origin</th>}
             {!hideStatus && <th className="px-4 py-3 font-semibold">Status</th>}
             {!hideStatus && <th className="w-16 px-4 py-3 font-semibold" aria-label="Actions" />}
           </tr>
@@ -751,6 +757,7 @@ export default function CodeMappingPage() {
               }}
               className="cursor-pointer hover:bg-slate-50"
             >
+              <td className="px-4 py-3 text-xs text-slate-700">{row.origin_system || "—"}</td>
               <td className="px-4 py-3 font-mono text-xs text-slate-900">{row.source_code}</td>
               <td className="px-4 py-3 font-mono text-xs text-slate-700">
                 {row.source_vocabulary_id || <span className="italic text-slate-400">uncoded</span>}
@@ -764,7 +771,6 @@ export default function CodeMappingPage() {
               <td className="px-4 py-3 font-mono text-xs text-slate-900">{row.destination_concept_id}</td>
               <td className="px-4 py-3 text-xs text-slate-700">{row.destination_omop_table}</td>
               <td className="px-4 py-3 text-xs text-slate-700">{row.occurrence_count || "—"}</td>
-              {!hideOrigin && <td className="px-4 py-3 text-xs text-slate-700">{row.origin_system || "—"}</td>}
               {!hideStatus && (
               <td className="px-4 py-3">
                 <div className="inline-flex items-center gap-2">
@@ -983,7 +989,7 @@ export default function CodeMappingPage() {
               {athenaCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
               Athena Mapped <span className="font-normal text-slate-500">({athenaRows.length})</span>
             </button>
-            {!athenaCollapsed && renderTable(athenaRows, "No Athena mappings in this vocabulary.", { hideStatus: true, hideOrigin: true })}
+            {!athenaCollapsed && renderTable(athenaRows, "No Athena mappings in this vocabulary.", { hideStatus: true })}
           </section>
         )}
       </div>
