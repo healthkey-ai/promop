@@ -8490,13 +8490,13 @@ def _mirror_to_concept_relationship(mapping, user):
     """Write a 'Maps to' (and reverse 'Mapped from') row to concept_relationship.
 
     Called after an SCCM row is approved and has both source_concept and
-    target_concept. Existing Athena rows are updated with HealthKey provenance
-    rather than duplicated.
+    target_concept.  Only writes the columns CR already has — we never
+    extend its schema because it is Athena's table.  If the row already
+    exists (e.g. Athena loaded it), get_or_create is a no-op.
     """
     from datetime import date as _date
     from omop_core.models import ConceptRelationship, Relationship
 
-    now = timezone.now()
     maps_to, _ = Relationship.objects.get_or_create(
         relationship_id='Maps to',
         defaults={
@@ -8517,63 +8517,31 @@ def _mirror_to_concept_relationship(mapping, user):
     )
 
     # Forward: Maps to
-    cr, created = ConceptRelationship.objects.get_or_create(
+    _cr, created = ConceptRelationship.objects.get_or_create(
         concept_1_id=mapping.source_concept_id,
         concept_2_id=mapping.target_concept_id,
         relationship=maps_to,
         defaults={
             'valid_start_date': _date(1970, 1, 1),
             'valid_end_date': _date(2099, 12, 31),
-            'source': 'HealthKey',
-            'origin_system': mapping.origin_system or 'curator',
-            'status': 'approved',
-            'reviewer': user,
-            'reviewed_at': now,
-            'updated_at': now,
         },
     )
-    if not created:
-        cr.source = 'HealthKey'
-        cr.status = 'approved'
-        cr.origin_system = mapping.origin_system or 'curator'
-        cr.reviewer = user
-        cr.reviewed_at = now
-        cr.updated_at = now
-        cr.save(update_fields=[
-            'source', 'status', 'origin_system', 'reviewer', 'reviewed_at', 'updated_at',
-        ])
 
     # Reverse: Mapped from
-    cr_rev, created_rev = ConceptRelationship.objects.get_or_create(
+    ConceptRelationship.objects.get_or_create(
         concept_1_id=mapping.target_concept_id,
         concept_2_id=mapping.source_concept_id,
         relationship=mapped_from,
         defaults={
             'valid_start_date': _date(1970, 1, 1),
             'valid_end_date': _date(2099, 12, 31),
-            'source': 'HealthKey',
-            'origin_system': mapping.origin_system or 'curator',
-            'status': 'approved',
-            'reviewer': user,
-            'reviewed_at': now,
-            'updated_at': now,
         },
     )
-    if not created_rev:
-        cr_rev.source = 'HealthKey'
-        cr_rev.status = 'approved'
-        cr_rev.origin_system = mapping.origin_system or 'curator'
-        cr_rev.reviewer = user
-        cr_rev.reviewed_at = now
-        cr_rev.updated_at = now
-        cr_rev.save(update_fields=[
-            'source', 'status', 'origin_system', 'reviewer', 'reviewed_at', 'updated_at',
-        ])
 
     logger.info(
-        'Mirrored SCCM %s → CR: concept %s Maps to %s (%s).',
+        'Mirrored SCCM %s -> CR: concept %s Maps to %s (%s).',
         mapping.id, mapping.source_concept_id, mapping.target_concept_id,
-        'created' if created else 'updated',
+        'created' if created else 'already exists',
     )
 
 

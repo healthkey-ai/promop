@@ -24118,16 +24118,13 @@ class CodeMappingSourceVocabTabsTest(TestCase):
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
-        # Verify CR row was created.
+        # Verify forward CR row was created (standard columns only).
         cr = ConceptRelationship.objects.filter(
             concept_1_id=self.source_concept.concept_id,
             concept_2_id=self.target_concept.concept_id,
             relationship_id='Maps to',
         ).first()
         self.assertIsNotNone(cr)
-        self.assertEqual(cr.source, 'HealthKey')
-        self.assertEqual(cr.status, 'approved')
-        self.assertEqual(cr.reviewer_id, self.org_admin.pk)
 
         # Also check reverse.
         cr_rev = ConceptRelationship.objects.filter(
@@ -24136,17 +24133,16 @@ class CodeMappingSourceVocabTabsTest(TestCase):
             relationship_id='Mapped from',
         ).first()
         self.assertIsNotNone(cr_rev)
-        self.assertEqual(cr_rev.source, 'HealthKey')
 
         # Cleanup
         mapping.delete()
         ConceptRelationship.objects.filter(
-            source='HealthKey',
             concept_1_id__in=[self.source_concept.concept_id, self.target_concept.concept_id],
         ).delete()
 
     def test_approval_without_source_concept_skips_cr_mirror(self):
         """Approving a mapping with no source_concept does NOT write to CR."""
+        cr_before = ConceptRelationship.objects.count()
         mapping = SourceCodeConceptMapping.objects.create(
             source_vocabulary_id='',
             source_code='M-PROTEIN, SERUM',
@@ -24165,13 +24161,8 @@ class CodeMappingSourceVocabTabsTest(TestCase):
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
-        # No CR row should exist for this mapping.
-        cr_count = ConceptRelationship.objects.filter(
-            concept_2_id=self.target_concept.concept_id,
-            relationship_id='Maps to',
-            source='HealthKey',
-        ).count()
-        self.assertEqual(cr_count, 0)
+        # No new CR rows should have been created.
+        self.assertEqual(ConceptRelationship.objects.count(), cr_before)
         mapping.delete()
 
     def test_suggest_accepts_source_vocabulary_id(self):
@@ -24185,33 +24176,48 @@ class CodeMappingSourceVocabTabsTest(TestCase):
         self.assertIn(resp.status_code, [status.HTTP_200_OK, status.HTTP_201_CREATED])
         self.assertIn('source_vocabulary_id', resp.data)
 
-    def test_cr_provenance_columns_nullable(self):
-        """ConceptRelationship provenance columns are nullable (Athena rows)."""
-        maps_to, _ = Relationship.objects.get_or_create(
+    def test_cr_mirror_is_idempotent(self):
+        """Re-approving does not duplicate CR rows (get_or_create is a no-op)."""
+        mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='ICD10CM',
+            source_code='E11.65',
+            source_code_description='Type 2 diabetes with hyperglycemia',
+            source_concept=self.source_concept,
+            target_concept=self.target_concept,
+            destination_vocabulary_id='SNOMED',
+            domain_id='Measurement',
+            omop_table='measurement',
+            status='proposed',
+            origin='curator',
+        )
+        self.client.force_authenticate(user=self.org_admin)
+        # Approve once.
+        self.client.patch(f'/api/v1/code-mappings/{mapping.pk}/', {
+            'status': 'approved',
+        }, format='json')
+        cr_count_1 = ConceptRelationship.objects.filter(
+            concept_1_id=self.source_concept.concept_id,
+            concept_2_id=self.target_concept.concept_id,
             relationship_id='Maps to',
-            defaults={
-                'relationship_name': 'Maps to', 'is_hierarchical': 0,
-                'defines_ancestry': 0, 'reverse_relationship_id': 'Mapped from',
-                'relationship_concept_id': 0,
-            },
-        )
-        cr = ConceptRelationship.objects.create(
-            concept_1=self.source_concept,
-            concept_2=self.target_concept,
-            relationship=maps_to,
-            valid_start_date=date(1970, 1, 1),
-            valid_end_date=date(2099, 12, 31),
-            # All provenance columns left NULL — simulating an Athena row.
-        )
-        cr.refresh_from_db()
-        self.assertIsNone(cr.source)
-        self.assertIsNone(cr.origin_system)
-        self.assertIsNone(cr.status)
-        self.assertIsNone(cr.notes)
-        self.assertIsNone(cr.reviewer)
-        self.assertIsNone(cr.reviewed_at)
-        self.assertIsNone(cr.updated_at)
-        cr.delete()
+        ).count()
+        self.assertEqual(cr_count_1, 1)
+
+        # "Re-approve" (patch again with approved).
+        self.client.patch(f'/api/v1/code-mappings/{mapping.pk}/', {
+            'status': 'approved',
+        }, format='json')
+        cr_count_2 = ConceptRelationship.objects.filter(
+            concept_1_id=self.source_concept.concept_id,
+            concept_2_id=self.target_concept.concept_id,
+            relationship_id='Maps to',
+        ).count()
+        self.assertEqual(cr_count_2, 1)  # Still just one row.
+
+        # Cleanup
+        mapping.delete()
+        ConceptRelationship.objects.filter(
+            concept_1_id__in=[self.source_concept.concept_id, self.target_concept.concept_id],
+        ).delete()
 
 
 # ---------------------------------------------------------------------------

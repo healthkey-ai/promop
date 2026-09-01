@@ -7,11 +7,18 @@ that the resolver cannot see. This command imports the subset that matters
 — source vocabularies we actually receive codes in — so that
 resolve_source_code() has a single lookup table.
 
+**Patient-scoped by default.** Only CR rows whose target concept already
+appears in a clinical table for at least one patient are imported. This
+keeps the SCCM table focused on concepts that matter for the current
+patient population (oncology-heavy today) rather than importing hundreds of
+thousands of mappings to concepts nobody has data for.  Pass ``--all`` to
+import every CR mapping in the five clinical domains instead.
+
 Re-runnable: safe to call after every vocabulary refresh.  Existing SCCM
 rows are left untouched (get_or_create); new Athena relationships are
 inserted as approved rows with origin_system='athena'.
 
-1:N mappings (one source code → multiple targets in CR) are handled by
+1:N mappings (one source code -> multiple targets in CR) are handled by
 keeping the first target encountered. SCCM enforces a unique constraint on
 (source_vocabulary_id, source_code) because resolve_source_code() needs a
 single answer. Additional targets for the same source code are logged at
@@ -20,6 +27,7 @@ WARNING so curators can review them.
 import logging
 from collections import defaultdict
 
+from django.db import connection
 from django.core.management.base import BaseCommand
 
 from omop_core.models import ConceptRelationship, SourceCodeConceptMapping
@@ -42,6 +50,32 @@ SOURCE_VOCABULARIES = {
     'dm+d', 'CVX', 'ICDO3',
 }
 
+# Maps each clinical table to the concept_id column that holds the
+# standard concept for a fact row.
+_CLINICAL_CONCEPT_COLUMNS = {
+    'drug_exposure': 'drug_concept_id',
+    'condition_occurrence': 'condition_concept_id',
+    'measurement': 'measurement_concept_id',
+    'observation': 'observation_concept_id',
+    'procedure_occurrence': 'procedure_concept_id',
+}
+
+
+def _patient_scoped_concept_ids():
+    """Concept IDs actually used by patients across the five clinical tables.
+
+    Returns a set of integer concept_id values.  Concept 0 (no matching
+    concept) is excluded — it is not a real mapping target.
+    """
+    ids = set()
+    with connection.cursor() as cur:
+        for table, col in _CLINICAL_CONCEPT_COLUMNS.items():
+            cur.execute(
+                f'SELECT DISTINCT {col} FROM {table} WHERE {col} != 0'  # noqa: S608
+            )
+            ids.update(row[0] for row in cur.fetchall())
+    return ids
+
 
 class Command(BaseCommand):
     help = 'Sync Athena Maps-to relationships into SourceCodeConceptMapping.'
@@ -55,26 +89,63 @@ class Command(BaseCommand):
             '--limit', type=int, default=0,
             help='Max rows to process (0 = unlimited).',
         )
+        parser.add_argument(
+            '--all', action='store_true',
+            help=(
+                'Import all Athena mappings in the five clinical domains, '
+                'not just those targeting concepts used by current patients. '
+                'Default behaviour is patient-scoped: only CR rows whose '
+                'target concept appears in at least one clinical table row '
+                'are imported.'
+            ),
+        )
 
     def handle(self, **options):
         dry_run = options['dry_run']
         limit = options['limit']
+        import_all = options['all']
+        clinical_domains = set(DOMAIN_TO_TABLE.keys())
 
-        # Athena rows: source IS NULL (HealthKey-written rows have source='HealthKey').
         qs = (
             ConceptRelationship.objects
-            .filter(relationship_id='Maps to', source__isnull=True)
+            .filter(relationship_id='Maps to')
             .filter(concept_1__vocabulary_id__in=SOURCE_VOCABULARIES)
+            .filter(concept_2__domain_id__in=clinical_domains)
             .select_related('concept_1', 'concept_2')
         )
+
+        # Patient-scoped filter (default): only import CR rows whose target
+        # concept is already used by at least one patient.  This keeps SCCM
+        # focused on the ~36K mappings that matter for the current oncology
+        # population rather than all ~688K in the five clinical domains.
+        used_concept_ids = None
+        if not import_all:
+            used_concept_ids = _patient_scoped_concept_ids()
+            self.stdout.write(
+                f'Patient-scoped: {len(used_concept_ids):,} distinct concepts '
+                f'found across clinical tables.'
+            )
+            if not used_concept_ids:
+                self.stdout.write(self.style.WARNING(
+                    'No patient data found in clinical tables. '
+                    'Nothing to import. Use --all to import all clinical-domain mappings.'
+                ))
+                return
+            qs = qs.filter(concept_2_id__in=used_concept_ids)
+        else:
+            self.stdout.write(
+                f'Importing all clinical-domain mappings: '
+                f'{sorted(clinical_domains)}'
+            )
+
         if limit:
             qs = qs[:limit]
 
         created_count = 0
         skipped_count = 0
         # Track source codes we've already seen in this run, so we can detect
-        # 1:N Athena mappings (same source code → multiple targets).
-        seen_keys = {}  # (vocab_id, code) → first target concept_id
+        # 1:N Athena mappings (same source code -> multiple targets).
+        seen_keys = {}  # (vocab_id, code) -> first target concept_id
         multi_target = defaultdict(list)  # keys with >1 target
         for cr in qs.iterator(chunk_size=2000):
             c1 = cr.concept_1
@@ -132,7 +203,7 @@ class Command(BaseCommand):
             # Log the first few for debugging.
             for (vocab, code), extras in list(multi_target.items())[:10]:
                 logger.warning(
-                    '  %s:%s → kept %s, skipped %s',
+                    '  %s:%s -> kept %s, skipped %s',
                     vocab, code, seen_keys[(vocab, code)], extras,
                 )
 
