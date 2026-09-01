@@ -201,24 +201,6 @@ export default function PatientList() {
       <div className="mb-6 flex items-center justify-between">
         <h1 className="text-2xl font-bold text-foreground">PROMOP Admin</h1>
         <div className="flex gap-2">
-          {(selectedIds.size > 0 || selectAllMode) && (
-            <button
-              onClick={() => setDeleteDialogOpen(true)}
-              className="inline-flex items-center gap-2 rounded-md border border-destructive px-4 py-2 text-sm font-medium text-destructive hover:bg-destructive/10"
-            >
-              <Trash2 size={16} />
-              Delete ({selectAllMode ? `All ${patientCount}` : selectedIds.size})
-            </button>
-          )}
-          {(currentUser?.is_staff || currentUser?.is_org_admin) && (
-            <button
-              onClick={() => navigate("/org-admin")}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 border border-gray-300 rounded hover:bg-gray-50"
-            >
-              <Settings size={14} />
-              Org Admin
-            </button>
-          )}
           {(currentUser?.is_staff || currentUser?.is_org_admin) && (
             <button
               onClick={() => navigate("/mappings")}
@@ -226,6 +208,15 @@ export default function PatientList() {
             >
               <Globe size={14} />
               Mappings
+            </button>
+          )}
+          {(selectedIds.size > 0 || selectAllMode) && (
+            <button
+              onClick={() => setDeleteDialogOpen(true)}
+              className="inline-flex items-center gap-2 rounded-md border border-destructive px-4 py-2 text-sm font-medium text-destructive hover:bg-destructive/10"
+            >
+              <Trash2 size={16} />
+              Delete ({selectAllMode ? `All ${patientCount}` : selectedIds.size})
             </button>
           )}
           <button
@@ -242,14 +233,25 @@ export default function PatientList() {
             <FileText size={16} />
             Upload FHIR
           </button>
-          {currentUser?.email && (
-            <button
-              onClick={() => navigate("/profile")}
-              className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-muted-foreground hover:bg-accent"
-            >
-              {currentUser.email}
-            </button>
-          )}
+          <div className="ml-auto flex gap-2">
+            {(currentUser?.is_staff || currentUser?.is_org_admin) && (
+              <button
+                onClick={() => navigate("/org-admin")}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 border border-gray-300 rounded hover:bg-gray-50"
+              >
+                <Settings size={14} />
+                Org Admin
+              </button>
+            )}
+            {currentUser?.email && (
+              <button
+                onClick={() => navigate("/profile")}
+                className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-muted-foreground hover:bg-accent"
+              >
+                {currentUser.email}
+              </button>
+            )}
+          </div>
           <button
             onClick={handleLogout}
             className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-muted-foreground hover:bg-accent"
