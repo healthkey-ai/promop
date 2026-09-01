@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Braces, Database, FlaskConical } from 'lucide-react';
+import { ArrowLeft, Braces, ClipboardList, Database, FlaskConical } from 'lucide-react';
 import { fetchMappingStats, type MappingStats } from '@/api/mappingHub';
 
 function DiagramBox({ children, className = '' }: { children: ReactNode; className?: string }) {
@@ -35,6 +35,25 @@ function TherapyMappingDiagram() {
   </div>;
 }
 
+const surveyQuestions = [
+  { question: 'Which medication are you taking?', table: 'Drug' },
+  { question: 'Which procedure did you have?', table: 'Procedure' },
+  { question: 'What is your date of birth?', table: 'Person' },
+  { question: 'Which condition were you diagnosed with?', table: 'Condition' },
+  { question: 'Have you experienced any symptoms?', table: 'Observation' },
+];
+
+function SurveyMappingDiagram() {
+  return <div className="relative mx-auto mt-8 min-h-72 max-w-5xl pt-2" aria-label="Five survey questions map to Drug, Procedure, Person, Condition, and Observation OMOP boxes">
+    <div className="relative z-10 mx-auto w-full max-w-xl rounded-lg border border-amber-300 bg-amber-50 p-4 text-amber-950 shadow-sm">
+      <div className="mb-2 flex items-center gap-2 font-semibold"><ClipboardList size={20} /> Survey questions</div>
+      <ol className="list-decimal space-y-1 pl-5 text-sm">{surveyQuestions.map(({ question }) => <li key={question}>{question}</li>)}</ol>
+    </div>
+    <svg className="pointer-events-none absolute inset-x-0 top-40 h-28 w-full" viewBox="0 0 1000 112" preserveAspectRatio="none" aria-hidden="true"><defs><marker id="survey-arrow" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto"><path d="M 0 8 L 4 0 L 8 8 z" className="fill-amber-400" /></marker></defs>{[100, 300, 500, 700, 900].map(x => <line key={x} x1="500" y1="2" x2={x} y2="108" className="stroke-amber-300" strokeWidth="2" markerEnd="url(#survey-arrow)" />)}</svg>
+    <div className="absolute inset-x-0 bottom-0 grid grid-cols-5 gap-2 sm:gap-4">{surveyQuestions.map(({ table }) => <DiagramBox key={table} className="border-slate-300 text-xs sm:text-sm">{table}</DiagramBox>)}</div>
+  </div>;
+}
+
 export default function MappingHubPage() {
   const navigate = useNavigate();
   const [stats, setStats] = useState<MappingStats | null>(null);
@@ -43,6 +62,7 @@ export default function MappingHubPage() {
   const load = useCallback(async () => { setLoading(true); setError(null); try { setStats(await fetchMappingStats()); } catch { setError('Failed to load mapping statistics.'); } finally { setLoading(false); } }, []);
   useEffect(() => { queueMicrotask(() => { void load(); }); }, [load]);
   const cardClass = 'w-full rounded-xl border border-border bg-background p-6 text-left shadow-sm transition-all hover:border-primary/50 hover:shadow-md sm:p-8';
+  const staticCardClass = 'w-full rounded-xl border border-border bg-background p-6 text-left shadow-sm sm:p-8';
   const stat = (content: ReactNode) => loading ? <span className="text-sm text-muted-foreground">Loading...</span> : content;
 
   return <div className="mx-auto max-w-7xl p-6">
@@ -52,6 +72,7 @@ export default function MappingHubPage() {
       <button onClick={() => navigate('/field-mappings')} className={cardClass}><div className="flex flex-wrap items-start justify-between gap-4"><div className="flex items-center gap-3"><div className="rounded-lg bg-blue-50 p-2.5 text-blue-600"><Database size={22} /></div><div><h2 className="text-lg font-semibold text-foreground">Field Mapping</h2><p className="text-sm text-muted-foreground">Map PatientRecord fields to their OMOP destinations.</p></div></div>{stat(stats && <div className="flex gap-3 text-sm"><span>{stats.field_mappings.total} fields</span><span className="text-green-600">{stats.field_mappings.approved} approved</span><span className="text-amber-600">{stats.field_mappings.proposed} proposed</span><span className="text-gray-400">{stats.field_mappings.unmapped} unmapped</span></div>)}</div><FieldMappingDiagram /></button>
       <button onClick={() => navigate('/code-mappings')} className={cardClass}><div className="flex flex-wrap items-start justify-between gap-4"><div className="flex items-center gap-3"><div className="rounded-lg bg-purple-50 p-2.5 text-purple-600"><Braces size={22} /></div><div><h2 className="text-lg font-semibold text-foreground">Code Mapping</h2><p className="text-sm text-muted-foreground">Normalize source coding systems into the OMOP vocabulary.</p></div></div>{stat(stats && <div className="flex gap-3 text-sm"><span>{stats.code_mappings.total} mappings</span><span className="text-green-600">{stats.code_mappings.approved} approved</span><span className="text-amber-600">{stats.code_mappings.proposed} proposed</span></div>)}</div><CodeMappingDiagram /></button>
       <button onClick={() => navigate('/therapy-mappings')} className={cardClass}><div className="flex flex-wrap items-start justify-between gap-4"><div className="flex items-center gap-3"><div className="rounded-lg bg-emerald-50 p-2.5 text-emerald-600"><FlaskConical size={22} /></div><div><h2 className="text-lg font-semibold text-foreground">Therapy Mapping</h2><p className="text-sm text-muted-foreground">Build therapy regimens from components and relate them to diseases.</p></div></div>{stat(stats && <div className="flex gap-3 text-sm"><span>{stats.therapy.regimens} regimens</span><span>{stats.therapy.components} components</span><span>{stats.therapy.classes} classes</span><span>{stats.therapy.disease_links} disease links</span></div>)}</div><TherapyMappingDiagram /></button>
+      <section className={staticCardClass} aria-label="Survey Mapping coming soon"><div className="flex flex-wrap items-start justify-between gap-4"><div className="flex items-center gap-3"><div className="rounded-lg bg-amber-50 p-2.5 text-amber-600"><ClipboardList size={22} /></div><div><h2 className="text-lg font-semibold text-foreground">Survey Mapping</h2><p className="text-sm text-muted-foreground">Map survey questions to their OMOP destinations.</p></div></div><span className="rounded-full bg-amber-100 px-3 py-1 text-sm font-medium text-amber-900">Coming soon</span></div><SurveyMappingDiagram /></section>
     </div>
   </div>;
 }
