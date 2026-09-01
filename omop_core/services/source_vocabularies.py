@@ -209,3 +209,32 @@ def tables_for_source_vocabulary(vocabulary_id):
                 if table and table not in tables:
                     tables.append(table)
     return tables or list(DOMAIN_TO_TABLE.values())
+
+
+# ── Patient-scoped concept filtering ────────────────────────────────
+# Shared by sync_athena_mappings and import_fhir_crossmaps to restrict
+# imported mappings to concepts that actually appear in patient data.
+
+_PATIENT_SCOPED_CONCEPT_QUERIES = (
+    'SELECT DISTINCT drug_concept_id FROM drug_exposure WHERE drug_concept_id != 0',
+    'SELECT DISTINCT condition_concept_id FROM condition_occurrence WHERE condition_concept_id != 0',
+    'SELECT DISTINCT measurement_concept_id FROM measurement WHERE measurement_concept_id != 0',
+    'SELECT DISTINCT observation_concept_id FROM observation WHERE observation_concept_id != 0',
+    'SELECT DISTINCT procedure_concept_id FROM procedure_occurrence WHERE procedure_concept_id != 0',
+)
+
+
+def patient_scoped_concept_ids():
+    """Concept IDs actually used by patients across the five clinical tables.
+
+    Returns a set of integer concept_id values.  Concept 0 (no matching
+    concept) is excluded — it is not a real mapping target.
+    """
+    from django.db import connection
+
+    ids = set()
+    with connection.cursor() as cur:
+        for query in _PATIENT_SCOPED_CONCEPT_QUERIES:
+            cur.execute(query)
+            ids.update(row[0] for row in cur.fetchall())
+    return ids

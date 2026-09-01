@@ -718,8 +718,8 @@ export default function CodeMappingPage() {
     }
   };
 
-  const renderTable = (sectionRows: CodeMappingRow[], emptyText: string, { hideStatus = false }: { hideStatus?: boolean } = {}) => {
-    const colCount = hideStatus ? 6 : 8;
+  const renderTable = (sectionRows: CodeMappingRow[], emptyText: string, { hideStatus = false, hideOrigin = false }: { hideStatus?: boolean; hideOrigin?: boolean } = {}) => {
+    const colCount = 7 + (hideOrigin ? 0 : 1) + (hideStatus ? 0 : 2);
     return (
     <div className="overflow-hidden rounded-md border border-slate-200 bg-white">
       <table className="w-full border-collapse text-left text-sm">
@@ -731,6 +731,7 @@ export default function CodeMappingPage() {
             <th className="px-4 py-3 font-semibold">Concept ID</th>
             <th className="px-4 py-3 font-semibold">OMOP table</th>
             <th className="px-4 py-3 font-semibold">Seen</th>
+            {!hideOrigin && <th className="px-4 py-3 font-semibold">Origin</th>}
             {!hideStatus && <th className="px-4 py-3 font-semibold">Status</th>}
             {!hideStatus && <th className="w-16 px-4 py-3 font-semibold" aria-label="Actions" />}
           </tr>
@@ -763,6 +764,7 @@ export default function CodeMappingPage() {
               <td className="px-4 py-3 font-mono text-xs text-slate-900">{row.destination_concept_id}</td>
               <td className="px-4 py-3 text-xs text-slate-700">{row.destination_omop_table}</td>
               <td className="px-4 py-3 text-xs text-slate-700">{row.occurrence_count || "—"}</td>
+              {!hideOrigin && <td className="px-4 py-3 text-xs text-slate-700">{row.origin_system || "—"}</td>}
               {!hideStatus && (
               <td className="px-4 py-3">
                 <div className="inline-flex items-center gap-2">
@@ -981,7 +983,7 @@ export default function CodeMappingPage() {
               {athenaCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
               Athena Mapped <span className="font-normal text-slate-500">({athenaRows.length})</span>
             </button>
-            {!athenaCollapsed && renderTable(athenaRows, "No Athena mappings in this vocabulary.", { hideStatus: true })}
+            {!athenaCollapsed && renderTable(athenaRows, "No Athena mappings in this vocabulary.", { hideStatus: true, hideOrigin: true })}
           </section>
         )}
       </div>

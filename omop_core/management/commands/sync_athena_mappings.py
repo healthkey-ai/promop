@@ -27,11 +27,13 @@ WARNING so curators can review them.
 import logging
 from collections import defaultdict
 
-from django.db import connection
 from django.core.management.base import BaseCommand
 
 from omop_core.models import ConceptRelationship, SourceCodeConceptMapping
-from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE
+from omop_core.services.source_vocabularies import (
+    DOMAIN_TO_TABLE,
+    patient_scoped_concept_ids,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,29 +51,6 @@ SOURCE_VOCABULARIES = {
     'MedDRA', 'MeSH', 'Nebraska Lexicon',
     'dm+d', 'CVX', 'ICDO3',
 }
-
-# Fixed queries for standard concept IDs used by patient clinical facts.
-_PATIENT_SCOPED_CONCEPT_QUERIES = (
-    'SELECT DISTINCT drug_concept_id FROM drug_exposure WHERE drug_concept_id != 0',
-    'SELECT DISTINCT condition_concept_id FROM condition_occurrence WHERE condition_concept_id != 0',
-    'SELECT DISTINCT measurement_concept_id FROM measurement WHERE measurement_concept_id != 0',
-    'SELECT DISTINCT observation_concept_id FROM observation WHERE observation_concept_id != 0',
-    'SELECT DISTINCT procedure_concept_id FROM procedure_occurrence WHERE procedure_concept_id != 0',
-)
-
-
-def _patient_scoped_concept_ids():
-    """Concept IDs actually used by patients across the five clinical tables.
-
-    Returns a set of integer concept_id values.  Concept 0 (no matching
-    concept) is excluded — it is not a real mapping target.
-    """
-    ids = set()
-    with connection.cursor() as cur:
-        for query in _PATIENT_SCOPED_CONCEPT_QUERIES:
-            cur.execute(query)
-            ids.update(row[0] for row in cur.fetchall())
-    return ids
 
 
 class Command(BaseCommand):
@@ -117,7 +96,7 @@ class Command(BaseCommand):
         # population rather than all ~688K in the five clinical domains.
         used_concept_ids = None
         if not import_all:
-            used_concept_ids = _patient_scoped_concept_ids()
+            used_concept_ids = patient_scoped_concept_ids()
             self.stdout.write(
                 f'Patient-scoped: {len(used_concept_ids):,} distinct concepts '
                 f'found across clinical tables.'
