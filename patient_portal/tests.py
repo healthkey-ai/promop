@@ -24153,19 +24153,42 @@ class CodeMappingSourceVocabTabsTest(TestCase):
         self.client = APIClient()
 
     def test_reference_includes_source_vocabulary_tabs(self):
-        """The reference endpoint returns source_vocabulary_tabs."""
-        # Seed an SCCM row so there's at least one tab.
-        SourceCodeConceptMapping.objects.create(
-            source_vocabulary_id='ICD10CM',
-            source_code='E11',
-            source_code_description='Type 2 diabetes',
-            target_concept=self.target_concept,
-            destination_vocabulary_id='SNOMED',
-            domain_id='Measurement',
-            omop_table='measurement',
-            status='proposed',
-            origin='import',
-        )
+        """The reference endpoint returns a tab for every mapped source system."""
+        mappings = [
+            SourceCodeConceptMapping(
+                source_vocabulary_id='ICD10CM',
+                source_code='E11',
+                source_code_description='Type 2 diabetes',
+                target_concept=self.target_concept,
+                destination_vocabulary_id='SNOMED',
+                domain_id='Measurement',
+                omop_table='measurement',
+                status='proposed',
+                origin='import',
+            ),
+            SourceCodeConceptMapping(
+                source_vocabulary_id='MedDRA',
+                source_code='10000001',
+                source_code_description='Ventilation pneumonitis',
+                target_concept=self.target_concept,
+                destination_vocabulary_id='SNOMED',
+                domain_id='Condition',
+                omop_table='condition',
+                status='proposed',
+                origin='import',
+            ),
+            SourceCodeConceptMapping(
+                source_vocabulary_id='PartnerCodes',
+                source_code='CUSTOM-1',
+                target_concept=self.target_concept,
+                destination_vocabulary_id='SNOMED',
+                domain_id='Condition',
+                omop_table='condition',
+                status='proposed',
+                origin='import',
+            ),
+        ]
+        SourceCodeConceptMapping.objects.bulk_create(mappings)
         self.client.force_authenticate(user=self.staff)
         resp = self.client.get('/api/v1/code-mappings/reference/')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
@@ -24176,8 +24199,12 @@ class CodeMappingSourceVocabTabsTest(TestCase):
         self.assertIsNotNone(icd_tab)
         self.assertEqual(icd_tab['label'], 'ICD-10-CM')
         self.assertFalse(icd_tab['is_standard'])
+        self.assertIn('MedDRA', [tab['vocabulary_id'] for tab in tabs])
+        self.assertIn('PartnerCodes', [tab['vocabulary_id'] for tab in tabs])
         # Clean up
-        SourceCodeConceptMapping.objects.filter(source_code='E11', source_vocabulary_id='ICD10CM').delete()
+        SourceCodeConceptMapping.objects.filter(
+            source_code__in=['E11', '10000001', 'CUSTOM-1'],
+        ).delete()
 
     def test_list_includes_mapping_origin(self):
         """GET code-mappings/ rows include mapping_origin field."""

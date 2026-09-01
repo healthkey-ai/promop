@@ -175,14 +175,12 @@ describe("CodeMappingPage", () => {
     mockDelete.mockResolvedValue({ data: {} });
   });
 
-  it("puts the source code first and shows an uncoded source as such", async () => {
+  it("puts the source code first without repeating the selected source-system tab", async () => {
     renderPage();
     const row = (await screen.findByText("M-PROTEIN, SERUM", { selector: "td" })).closest("tr")!;
     const cells = within(row).getAllByRole("cell");
     expect(cells[0]).toHaveTextContent("M-PROTEIN, SERUM");
-    // Not the destination's vocabulary: a mapping with no source code system
-    // genuinely has none, and borrowing the destination's is the #834 bug.
-    expect(cells[1]).toHaveTextContent("uncoded");
+    expect(screen.queryByRole("columnheader", { name: "Source code system" })).not.toBeInTheDocument();
   });
 
   it("splits proposed and approved into Unmapped and Mapped sections", async () => {
@@ -202,6 +200,14 @@ describe("CodeMappingPage", () => {
     const tabs = within(screen.getByRole("tablist", { name: "Source vocabularies" }));
     expect(tabs.getByRole("tab", { name: /Uncoded/ })).toBeInTheDocument();
     expect(tabs.getByRole("tab", { name: /ICD10CM/ })).toBeInTheDocument();
+  });
+
+  it("adds a tab for a source system that arrives in SCCM data", async () => {
+    renderPage([{ ...proposedRow, source_vocabulary_id: "MedDRA", source_code: "10000001" }]);
+    const tabs = within(await screen.findByRole("tablist", { name: "Source vocabularies" }));
+    const medDra = tabs.getByRole("tab", { name: "MedDRA" });
+    fireEvent.click(medDra);
+    expect(await screen.findByText("10000001", { selector: "td" })).toBeInTheDocument();
   });
 
   it("has no All tab", async () => {
