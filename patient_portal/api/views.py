@@ -8389,6 +8389,10 @@ def _serialize_code_mapping_row(concept, mapping=None):
             'first_seen': mapping.first_seen if mapping else None,
             'last_seen': mapping.last_seen if mapping else None,
             'has_mapping': bool(mapping),
+            'mapping_origin': (
+                'athena' if mapping and mapping.origin_system == 'athena'
+                else 'healthkey'
+            ),
             'concept_id': None,
             'concept_name': '',
             'concept_code': '',
@@ -8438,6 +8442,10 @@ def _serialize_code_mapping_row(concept, mapping=None):
         'first_seen': mapping.first_seen if mapping else None,
         'last_seen': mapping.last_seen if mapping else None,
         'has_mapping': bool(mapping),
+        'mapping_origin': (
+            'athena' if mapping and mapping.origin_system == 'athena'
+            else 'healthkey'
+        ),
         # Legacy alias. The frontend and App.test.tsx read concept_id today;
         # kept for one release so this rename is not a breaking change.
         'concept_id': concept.concept_id,
@@ -8476,6 +8484,92 @@ def _get_destination_concept(data):
         raise serializers.ValidationError({
             'target_concept_id': 'Destination OMOP concept not found.'
         })
+
+
+def _mirror_to_concept_relationship(mapping, user):
+    """Write a 'Maps to' (and reverse 'Mapped from') row to concept_relationship.
+
+    Called after an SCCM row is approved and has both source_concept and
+    target_concept. Existing Athena rows are updated with HealthKey provenance
+    rather than duplicated.
+    """
+    from datetime import date as _date
+    from omop_core.models import ConceptRelationship, Relationship
+
+    now = timezone.now()
+    maps_to, _ = Relationship.objects.get_or_create(
+        relationship_id='Maps to',
+        defaults={
+            'relationship_name': 'Maps to',
+            'is_hierarchical': 0, 'defines_ancestry': 0,
+            'reverse_relationship_id': 'Mapped from',
+            'relationship_concept_id': 0,
+        },
+    )
+    mapped_from, _ = Relationship.objects.get_or_create(
+        relationship_id='Mapped from',
+        defaults={
+            'relationship_name': 'Mapped from',
+            'is_hierarchical': 0, 'defines_ancestry': 0,
+            'reverse_relationship_id': 'Maps to',
+            'relationship_concept_id': 0,
+        },
+    )
+
+    # Forward: Maps to
+    cr, created = ConceptRelationship.objects.get_or_create(
+        concept_1_id=mapping.source_concept_id,
+        concept_2_id=mapping.target_concept_id,
+        relationship=maps_to,
+        defaults={
+            'valid_start_date': _date(1970, 1, 1),
+            'valid_end_date': _date(2099, 12, 31),
+            'source': 'HealthKey',
+            'origin_system': mapping.origin_system or 'curator',
+            'status': 'approved',
+            'reviewer': user,
+            'reviewed_at': now,
+            'updated_at': now,
+        },
+    )
+    if not created:
+        cr.source = 'HealthKey'
+        cr.status = 'approved'
+        cr.origin_system = mapping.origin_system or 'curator'
+        cr.reviewer = user
+        cr.reviewed_at = now
+        cr.updated_at = now
+        cr.save(update_fields=[
+            'source', 'status', 'origin_system', 'reviewer', 'reviewed_at', 'updated_at',
+        ])
+
+    # Reverse: Mapped from
+    cr_rev, created_rev = ConceptRelationship.objects.get_or_create(
+        concept_1_id=mapping.target_concept_id,
+        concept_2_id=mapping.source_concept_id,
+        relationship=mapped_from,
+        defaults={
+            'valid_start_date': _date(1970, 1, 1),
+            'valid_end_date': _date(2099, 12, 31),
+            'source': 'HealthKey',
+            'origin_system': mapping.origin_system or 'curator',
+            'status': 'approved',
+            'reviewer': user,
+            'reviewed_at': now,
+            'updated_at': now,
+        },
+    )
+    if not created_rev:
+        cr_rev.source = 'HealthKey'
+        cr_rev.status = 'approved'
+        cr_rev.updated_at = now
+        cr_rev.save(update_fields=['source', 'status', 'updated_at'])
+
+    logger.info(
+        'Mirrored SCCM %s → CR: concept %s Maps to %s (%s).',
+        mapping.id, mapping.source_concept_id, mapping.target_concept_id,
+        'created' if created else 'updated',
+    )
 
 
 def _upsert_source_code_mapping(concept, data, user, mapping=None):
@@ -8722,6 +8816,11 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
             # Distinct patients, not the sum of each sweep's total: a person
             # with rows in both would otherwise be reported twice.
             repoint['persons_marked_stale'] = len(affected_persons)
+
+    # Mirror to concept_relationship when both concepts exist.
+    if status_value == 'approved' and mapping.source_concept_id and concept:
+        _mirror_to_concept_relationship(mapping, user)
+
     return mapping, repoint
 
 
@@ -8815,12 +8914,11 @@ def code_mapping_detail(request, mapping_id):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def code_mapping_suggest(request):
-    """Propose mappings for unmapped source codes in one HK-* vocabulary.
+    """Propose mappings for unmapped source codes in one source vocabulary.
 
-    The tab picks the vocabulary, the vocabulary picks the domain, and the
-    domain picks which clinical table's concept-0 rows to work from. Standard
-    vocabularies get no Suggest: they hold destinations a curator re-points
-    *into*, and enumerating SNOMED's 1.09M concepts is not a queue.
+    Accepts ``source_vocabulary_id`` (new) or ``destination_vocabulary_id``
+    (legacy, deprecated). The source vocabulary determines which clinical
+    tables to scan for concept-0 rows.
 
     Defaults to codes seen ten or more times. Staging has 10,483 distinct
     unmapped source values and 43% of them appear exactly once, so proposing
@@ -8829,17 +8927,26 @@ def code_mapping_suggest(request):
     if not _can_manage_field_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
-    vocabulary_id = str(request.data.get('destination_vocabulary_id') or '').strip()
-    table = _table_for_hk_vocabulary(vocabulary_id)
-    if table is None:
-        return Response(
-            {'destination_vocabulary_id': (
-                f'Suggest works on the HK-* vocabularies, not {vocabulary_id!r}. '
-                'Standard vocabularies hold destinations to re-point into, not '
-                'source codes to propose for.'
-            )},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+    # New path: source_vocabulary_id. Legacy path: destination_vocabulary_id.
+    source_vocab = request.data.get('source_vocabulary_id')
+    if source_vocab is not None:
+        source_vocab = str(source_vocab).strip()
+        tables = source_vocabularies.tables_for_source_vocabulary(source_vocab)
+    else:
+        # Legacy: destination_vocabulary_id → HK-* → single table.
+        vocabulary_id = str(request.data.get('destination_vocabulary_id') or '').strip()
+        table = _table_for_hk_vocabulary(vocabulary_id)
+        if table is None:
+            return Response(
+                {'destination_vocabulary_id': (
+                    f'Suggest works on the HK-* vocabularies, not {vocabulary_id!r}. '
+                    'Standard vocabularies hold destinations to re-point into, not '
+                    'source codes to propose for.'
+                )},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        tables = [table]
+        source_vocab = None  # multi-table merge not needed
 
     try:
         min_occurrences = int(request.data.get('min_occurrences', DEFAULT_MIN_OCCURRENCES))
@@ -8860,32 +8967,37 @@ def code_mapping_suggest(request):
                         status=status.HTTP_400_BAD_REQUEST)
     limit = min(limit, SUGGEST_MAX_PER_CALL)
 
-    results = suggest_mappings(
-        table, min_occurrences=min_occurrences, limit=limit,
-        dry_run=bool(request.data.get('dry_run')),
-    )
+    dry_run = bool(request.data.get('dry_run'))
+
+    # Multi-table: scan each relevant table, merge results by occurrence.
+    all_results = []
+    for tbl in tables:
+        tbl_results = suggest_mappings(
+            tbl, min_occurrences=min_occurrences, limit=limit,
+            dry_run=dry_run,
+            source_vocabulary_id=source_vocab,
+        )
+        all_results.extend(tbl_results)
+
+    # Sort by occurrence descending, take top `limit`.
+    all_results.sort(key=lambda r: r.get('occurrences', 0), reverse=True)
+    results = all_results[:limit]
+
     created = [r for r in results if r.get('created')]
-    # Where the new rows landed. A ranked suggestion's destination is a standard
-    # concept, so its mapping belongs to the LOINC/SNOMED tab, not the HK-* one
-    # the button was on -- correct by the tab semantics, and baffling unless the
-    # response says so.
     landed = {}
     for entry in created:
         suggested = entry.get('suggested')
-        vocab = suggested['vocabulary_id'] if suggested else vocabulary_id
+        vocab = suggested['vocabulary_id'] if suggested else (source_vocab or '')
         landed[vocab] = landed.get(vocab, 0) + 1
     return Response({
         'landed_in': landed,
-        'destination_vocabulary_id': vocabulary_id,
-        'omop_table': table,
+        'source_vocabulary_id': source_vocab,
         'min_occurrences': min_occurrences,
         'considered': len(results),
         'created': len(created),
         'ranked': sum(1 for r in results if r.get('suggested')),
         'results': results,
-        # Said plainly rather than left for the curator to infer from a count
-        # that stopped at a round number.
-        'truncated': len(results) >= limit,
+        'truncated': len(all_results) > limit,
     }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
@@ -8931,6 +9043,44 @@ def _table_for_hk_vocabulary(vocabulary_id):
 SUGGEST_MAX_PER_CALL = 10
 
 
+def _source_vocabulary_tabs():
+    """Source vocabulary tabs for the Code Mapping page.
+
+    Queries SCCM for distinct source_vocabulary_id values that have at least
+    one row, then orders them: non-standard vocabularies first (the curation
+    work queue), uncoded in the middle, standard vocabularies last (reference).
+    """
+    from django.db.models import Count
+    vocab_counts = dict(
+        SourceCodeConceptMapping.objects
+        .values_list('source_vocabulary_id')
+        .annotate(cnt=Count('id'))
+        .order_by()
+    )
+    if not vocab_counts:
+        return []
+    tabs = []
+    seen = set()
+    # Walk the defined order first.
+    for vocab_id in source_vocabularies.SOURCE_TAB_ORDER:
+        if vocab_id in vocab_counts:
+            tabs.append({
+                'vocabulary_id': vocab_id,
+                'label': source_vocabularies.source_tab_label(vocab_id),
+                'is_standard': vocab_id in source_vocabularies.STANDARD_SOURCE_VOCABULARIES,
+            })
+            seen.add(vocab_id)
+    # Any vocabulary present in data but not in the defined order.
+    extras = sorted(set(vocab_counts) - seen, key=source_vocabularies.source_tab_sort_key)
+    for vocab_id in extras:
+        tabs.append({
+            'vocabulary_id': vocab_id,
+            'label': source_vocabularies.source_tab_label(vocab_id),
+            'is_standard': vocab_id in source_vocabularies.STANDARD_SOURCE_VOCABULARIES,
+        })
+    return tabs
+
+
 def _code_mapping_reference_payload():
     known = {
         v.vocabulary_id: v.vocabulary_name
@@ -8972,6 +9122,9 @@ def _code_mapping_reference_payload():
         # the consequence of the domain choice is visible without the frontend
         # holding a second copy of the mapping.
         'omop_tables': dict(source_vocabularies.DOMAIN_TO_TABLE),
+        # Source vocabulary tabs for the Code Mapping page. Ordered: non-standard
+        # first (the work queue), then uncoded, then standard (reference).
+        'source_vocabulary_tabs': _source_vocabulary_tabs(),
     }
 
 

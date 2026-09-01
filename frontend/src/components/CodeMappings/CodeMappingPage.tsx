@@ -13,17 +13,16 @@ import { useAuth } from "@/hooks/useAuth";
  * phrase from a note. The destination is the OMOP concept it means, either an
  * existing Athena concept or one minted locally under an HK-* vocabulary.
  *
- * Tabs are destination vocabularies, and each splits into Unmapped (proposed,
- * awaiting an SME) and Mapped (approved). Curation is mostly re-pointing a
- * proposed mapping off the concept an import minted and onto a standard one -
- * which is why SNOMED and LOINC have tabs too: that re-pointing is what puts
- * mappings there.
+ * Tabs are **source vocabularies** (ICD-10-CM, CPT4, RxNorm, etc.) — what
+ * arrived, not where it landed. Each tab has three sections:
+ *   - ATHENA MAPPED: existing Athena-provided Maps-to relationships (read-only)
+ *   - UNMAPPED: proposed/rejected rows awaiting curation (editable)
+ *   - MAPPED: approved HealthKey-curated rows (editable, collapsible)
  *
  * The dialog reads top to bottom in the direction of the mapping: a SOURCE
  * block then a DESTINATION block. Every control is labelled and carries a
  * tooltip - the screen is dense enough that a field whose meaning has to be
- * inferred is a defect, and it had one (the source code value sat in an
- * unlabelled input).
+ * inferred is a defect.
  */
 
 interface CodeMappingRow {
@@ -53,6 +52,7 @@ interface CodeMappingRow {
   reviewed_at?: string | null;
   occurrence_count: number;
   has_mapping: boolean;
+  mapping_origin?: "athena" | "healthkey";
 }
 
 interface ConceptResult {
@@ -81,11 +81,18 @@ interface SourceCodeSystemRef {
   label: string;
 }
 
+interface SourceVocabularyTab {
+  vocabulary_id: string;
+  label: string;
+  is_standard: boolean;
+}
+
 interface Reference {
   domains: DomainRef[];
   source_code_systems_by_domain: Record<string, SourceCodeSystemRef[]>;
   destination_vocabularies: VocabularyRef[];
   omop_tables: Record<string, string>;
+  source_vocabulary_tabs?: SourceVocabularyTab[];
 }
 
 interface RepointResult {
@@ -143,40 +150,12 @@ const statusClass: Record<string, string> = {
 };
 
 /**
- * Which tab a row belongs to.
- *
- * A proposal with no destination yet -- a code seen at ingest whose concept is
- * not loaded here -- has a blank destination vocabulary, so matching the tab on
- * that alone put it in no tab at all. Those are exactly the rows that most need
- * a curator, so they fall back to the HK-* vocabulary of their domain.
+ * Which tab a row belongs to — keyed by source vocabulary.
+ * Blank source_vocabulary_id ("") means uncoded/free text.
  */
 function tabForRow(row: CodeMappingRow): string {
-  if (row.destination_vocabulary_id) return row.destination_vocabulary_id;
-  // Fall back through both fields a gap row might carry. domain_id alone was
-  // not enough: the rows this fallback exists for are created by
-  // _record_proposal, which sets the OMOP table but historically not the
-  // domain, so keying on domain_id left them in no tab at all.
-  const domain = row.domain_id || TABLE_TO_DOMAIN[row.destination_omop_table] || "";
-  return DOMAIN_TO_HK_VOCABULARY[domain] || "";
+  return row.source_vocabulary_id;
 }
-
-/** Clinical table -> the OMOP domain whose facts it holds. */
-const TABLE_TO_DOMAIN: Record<string, string> = {
-  measurement: "Measurement",
-  observation: "Observation",
-  condition: "Condition",
-  drug_exposure: "Drug",
-  procedure: "Procedure",
-};
-
-/** OMOP domain -> the HK-* vocabulary its locally-minted concepts live in. */
-const DOMAIN_TO_HK_VOCABULARY: Record<string, string> = {
-  Measurement: "HK-Labs",
-  Observation: "HK-Observation",
-  Condition: "HK-Condition",
-  Drug: "HK-Drug",
-  Procedure: "HK-Procedure",
-};
 
 /**
  * OMOP domain -> the clinical table its facts land in. Only a fallback: the
@@ -403,6 +382,7 @@ export default function CodeMappingPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [activeVocabulary, setActiveVocabulary] = useState("");
   const [mappedCollapsed, setMappedCollapsed] = useState(true);
+  const [athenaCollapsed, setAthenaCollapsed] = useState(true);
   const [showRejected, setShowRejected] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
   const [suggesting, setSuggesting] = useState(false);
@@ -445,44 +425,47 @@ export default function CodeMappingPage() {
   }, [fetchAll]);
 
   const vocabularyTabs = useMemo(() => {
-    const counts: Record<string, { proposed: number; approved: number }> = {};
-    reference.destination_vocabularies.forEach((v) => {
-      counts[v.vocabulary_id] = { proposed: 0, approved: 0 };
+    const sourceVocabTabs = reference.source_vocabulary_tabs || [];
+    const counts: Record<string, { proposed: number; approved: number; athena: number }> = {};
+    sourceVocabTabs.forEach((v) => {
+      counts[v.vocabulary_id] = { proposed: 0, approved: 0, athena: 0 };
     });
     rows.forEach((row) => {
       const key = tabForRow(row);
-      if (!key) return;
-      if (!counts[key]) counts[key] = { proposed: 0, approved: 0 };
-      if (row.status === "approved") counts[key].approved += 1;
+      if (!counts[key]) counts[key] = { proposed: 0, approved: 0, athena: 0 };
+      if (row.mapping_origin === "athena") counts[key].athena += 1;
+      else if (row.status === "approved") counts[key].approved += 1;
       else if (row.status === "proposed") counts[key].proposed += 1;
     });
-    return reference.destination_vocabularies
-      .map((v) => ({ ...v, ...counts[v.vocabulary_id] }))
-      .concat(
-        Object.keys(counts)
-          .filter((k) => !reference.destination_vocabularies.some((v) => v.vocabulary_id === k))
-          .map((k) => ({ vocabulary_id: k, vocabulary_name: k, is_local: true, ...counts[k] })),
-      );
+    // Use server-provided tab order. Add any data-only tabs not in the list.
+    const result = sourceVocabTabs.map((v) => ({
+      ...v,
+      ...(counts[v.vocabulary_id] || { proposed: 0, approved: 0, athena: 0 }),
+    }));
+    const known = new Set(sourceVocabTabs.map((v) => v.vocabulary_id));
+    Object.keys(counts)
+      .filter((k) => !known.has(k))
+      .forEach((k) => {
+        result.push({
+          vocabulary_id: k,
+          label: k || "Uncoded",
+          is_standard: false,
+          ...counts[k],
+        });
+      });
+    return result;
   }, [rows, reference]);
 
-  // Land on work, not on the alphabetically-first tab. A curator opens this
-  // page to review proposals; defaulting to an empty SNOMED tab would make the
-  // queue look empty when it is not.
+  // Land on work, not on the alphabetically-first tab.
   const defaultVocabulary = useMemo(() => {
     const withWork = vocabularyTabs.find((t) => t.proposed > 0);
     if (withWork) return withWork.vocabulary_id;
-    const withAny = vocabularyTabs.find((t) => t.proposed + t.approved > 0);
+    const withAny = vocabularyTabs.find((t) => t.proposed + t.approved + t.athena > 0);
     if (withAny) return withAny.vocabulary_id;
-    // Nothing anywhere: land on an HK-* tab, not the alphabetically-first
-    // standard one. Standard vocabularies come first in the tab strip, so an
-    // empty queue opened on SNOMED — a tab with no Suggest button, which made
-    // the button unreachable in exactly the state it exists to fix.
-    const local = vocabularyTabs.find((t) => t.vocabulary_id.startsWith("HK-"));
-    return local?.vocabulary_id ?? vocabularyTabs[0]?.vocabulary_id ?? "";
+    return vocabularyTabs[0]?.vocabulary_id ?? "";
   }, [vocabularyTabs]);
 
   const selectedVocabulary = activeVocabulary || defaultVocabulary;
-  const isLocalVocabulary = selectedVocabulary.startsWith("HK-");
 
   const visibleRows = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -505,17 +488,23 @@ export default function CodeMappingPage() {
     });
   }, [rows, searchQuery, selectedVocabulary, showRejected]);
 
+  // Three-section layout: ATHENA MAPPED / UNMAPPED / MAPPED.
+  const athenaRows = useMemo(
+    () => visibleRows.filter((r) => r.mapping_origin === "athena").sort(byOccurrence),
+    [visibleRows],
+  );
   const unmappedRows = useMemo(
-    () => visibleRows.filter((r) => r.status !== "approved").sort(byAuthorThenOccurrence),
+    () => visibleRows.filter((r) => r.mapping_origin !== "athena" && r.status !== "approved").sort(byAuthorThenOccurrence),
     [visibleRows],
   );
   const rejectedCount = useMemo(
     () => rows.filter((r) => r.status === "rejected"
+      && r.mapping_origin !== "athena"
       && (!selectedVocabulary || tabForRow(r) === selectedVocabulary)).length,
     [rows, selectedVocabulary],
   );
   const mappedRows = useMemo(
-    () => visibleRows.filter((r) => r.status === "approved").sort(byOccurrence),
+    () => visibleRows.filter((r) => r.mapping_origin !== "athena" && r.status === "approved").sort(byOccurrence),
     [visibleRows],
   );
 
@@ -731,7 +720,7 @@ export default function CodeMappingPage() {
     setBanner(null);
     try {
       const resp = await api.post("/v1/code-mappings/suggest/", {
-        destination_vocabulary_id: selectedVocabulary,
+        source_vocabulary_id: selectedVocabulary,
         min_occurrences: Number(minOccurrences) || 1,
       });
       const { created = 0, considered = 0, ranked = 0, truncated,
@@ -969,27 +958,31 @@ export default function CodeMappingPage() {
 
         <div
           role="tablist"
-          aria-label="Destination vocabularies"
+          aria-label="Source vocabularies"
           className="mb-4 flex gap-2 overflow-x-auto border-b border-slate-200"
         >
           {vocabularyTabs.map((tab) => {
             const selected = tab.vocabulary_id === selectedVocabulary;
             return (
               <button
-                key={tab.vocabulary_id}
+                key={tab.vocabulary_id || "__uncoded__"}
                 type="button"
+                role="tab"
+                aria-selected={selected}
                 onClick={() => setActiveVocabulary(tab.vocabulary_id)}
+                title={`Source vocabulary: ${tab.label}`}
                 className={`whitespace-nowrap border-b-2 px-3 py-2 text-sm font-medium ${
                   selected
                     ? "border-slate-950 text-slate-950"
                     : "border-transparent text-slate-600 hover:border-slate-300 hover:text-slate-950"
-                }`}
+                } ${tab.is_standard ? "italic" : ""}`}
               >
-                {tab.vocabulary_id}
-                {/* The badge counts review work, which is the number a curator is working down. */}
-                <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-600">
-                  {tab.proposed}
-                </span>
+                {tab.label}
+                {tab.proposed > 0 && (
+                  <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-800">
+                    {tab.proposed}
+                  </span>
+                )}
               </button>
             );
           })}
@@ -1016,23 +1009,64 @@ export default function CodeMappingPage() {
           <button
             type="button"
             onClick={() => void runSuggest()}
-            disabled={suggesting || !isLocalVocabulary}
-            title={
-              isLocalVocabulary
-                ? "Propose mappings for source codes in this domain that nobody has mapped yet."
-                : `${selectedVocabulary} holds destinations to re-point into, not source codes to propose for. Switch to an HK-* tab to suggest.`
-            }
+            disabled={suggesting}
+            title="Propose mappings for unmapped source codes in this vocabulary."
             className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Sparkles size={13} />
             {suggesting ? "Suggesting…" : "Suggest"}
           </button>
-          {!isLocalVocabulary && (
-            <span className="text-xs text-slate-500">
-              — only on HK-* tabs, where locally minted destinations live
-            </span>
-          )}
         </div>
+
+        {athenaRows.length > 0 && (
+          <section className="mb-6">
+            <button
+              type="button"
+              onClick={() => setAthenaCollapsed((v) => !v)}
+              className="mb-2 inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-slate-700"
+            >
+              {athenaCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+              Athena Mapped <span className="font-normal text-slate-500">({athenaRows.length})</span>
+            </button>
+            {!athenaCollapsed && (
+              <div className="overflow-hidden rounded-md border border-slate-200 bg-white">
+                <table className="w-full border-collapse text-left text-sm">
+                  <thead className="bg-blue-50 text-xs uppercase text-slate-600">
+                    <tr>
+                      <th className="px-4 py-3 font-semibold">Source code</th>
+                      <th className="px-4 py-3 font-semibold">Source code system</th>
+                      <th className="px-4 py-3 font-semibold">Destination concept</th>
+                      <th className="px-4 py-3 font-semibold">Concept ID</th>
+                      <th className="px-4 py-3 font-semibold">Origin</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {athenaRows.map((row) => (
+                      <tr key={row.mapping_id ?? `athena-${row.destination_concept_id}`} className="text-slate-600">
+                        <td className="px-4 py-3 font-mono text-xs">{row.source_code}</td>
+                        <td className="px-4 py-3 font-mono text-xs">
+                          {row.source_vocabulary_id || <span className="italic text-slate-400">uncoded</span>}
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="font-medium text-slate-800">{row.destination_concept_name}</div>
+                          <div className="font-mono text-xs text-slate-500">
+                            {row.destination_vocabulary_id}:{row.destination_concept_code}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 font-mono text-xs">{row.destination_concept_id}</td>
+                        <td className="px-4 py-3">
+                          <span className="inline-flex rounded bg-blue-100 px-2 py-1 text-xs font-medium text-blue-800">
+                            Athena
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        )}
 
         <section className="mb-6">
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-700">

@@ -5312,13 +5312,15 @@ class VocabularyRelationshipModelTest(TestCase):
         )
 
     def test_concept_relationship_model(self):
-        r = Relationship.objects.create(
+        r, _ = Relationship.objects.get_or_create(
             relationship_id='Maps to',
-            relationship_name='Maps to',
-            is_hierarchical=0,
-            defines_ancestry=0,
-            reverse_relationship_id='Mapped from',
-            relationship_concept_id=0,
+            defaults={
+                'relationship_name': 'Maps to',
+                'is_hierarchical': 0,
+                'defines_ancestry': 0,
+                'reverse_relationship_id': 'Mapped from',
+                'relationship_concept_id': 0,
+            },
         )
         ConceptRelationship.objects.create(
             concept_1=self.c1,
@@ -23940,3 +23942,273 @@ class MappingApprovalRoleTest(TestCase):
         mapping.refresh_from_db()
         self.assertEqual(mapping.status, 'approved')
         mapping.delete()
+
+
+class CodeMappingSourceVocabTabsTest(TestCase):
+    """Tests for source vocabulary tabs and CR mirroring (#877)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.staff = Identity.objects.create_user(
+            email='svt_staff@t.com', password='x', is_staff=True,
+        )
+        cls.org_admin = Identity.objects.create_user(
+            email='svt_org_admin@t.com', password='x',
+        )
+        cls.org = Organization.objects.create(
+            name='SVT Admin Org', slug='svt-admin-org',
+        )
+        GroupAccess.objects.create(
+            identity=cls.org_admin, org=cls.org, role='org_admin',
+        )
+
+        cls.domain, _ = Domain.objects.get_or_create(
+            domain_id='Measurement',
+            defaults={'domain_name': 'Measurement', 'domain_concept_id': 21},
+        )
+        cls.concept_class, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Lab Test',
+            defaults={'concept_class_name': 'Lab Test', 'concept_class_concept_id': 0},
+        )
+        cls.loinc_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='LOINC',
+            defaults={
+                'vocabulary_name': 'LOINC',
+                'vocabulary_reference': 'https://loinc.org',
+                'vocabulary_version': '2.77',
+                'vocabulary_concept_id': 0,
+            },
+        )
+        cls.icd10_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='ICD10CM',
+            defaults={
+                'vocabulary_name': 'ICD-10-CM',
+                'vocabulary_reference': 'https://www.cdc.gov/nchs/icd/icd10cm.htm',
+                'vocabulary_version': '2024',
+                'vocabulary_concept_id': 0,
+            },
+        )
+        cls.snomed_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='SNOMED',
+            defaults={
+                'vocabulary_name': 'SNOMED',
+                'vocabulary_reference': 'https://www.snomed.org',
+                'vocabulary_version': 'latest',
+                'vocabulary_concept_id': 0,
+            },
+        )
+
+        # Source concept (ICD-10-CM)
+        cls.source_concept = Concept.objects.create(
+            concept_id=2039100001,
+            concept_name='Type 2 diabetes mellitus',
+            domain=cls.domain,
+            vocabulary=cls.icd10_vocab,
+            concept_class=cls.concept_class,
+            standard_concept=None,
+            concept_code='E11',
+            valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+        # Target concept (SNOMED)
+        cls.target_concept = Concept.objects.create(
+            concept_id=2039100002,
+            concept_name='Diabetes mellitus type 2',
+            domain=cls.domain,
+            vocabulary=cls.snomed_vocab,
+            concept_class=cls.concept_class,
+            standard_concept='S',
+            concept_code='44054006',
+            valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def test_reference_includes_source_vocabulary_tabs(self):
+        """The reference endpoint returns source_vocabulary_tabs."""
+        # Seed an SCCM row so there's at least one tab.
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='ICD10CM',
+            source_code='E11',
+            source_code_description='Type 2 diabetes',
+            target_concept=self.target_concept,
+            destination_vocabulary_id='SNOMED',
+            domain_id='Measurement',
+            omop_table='measurement',
+            status='proposed',
+            origin='import',
+        )
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/code-mappings/reference/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn('source_vocabulary_tabs', resp.data)
+        tabs = resp.data['source_vocabulary_tabs']
+        self.assertTrue(len(tabs) > 0)
+        icd_tab = next((t for t in tabs if t['vocabulary_id'] == 'ICD10CM'), None)
+        self.assertIsNotNone(icd_tab)
+        self.assertEqual(icd_tab['label'], 'ICD-10-CM')
+        self.assertFalse(icd_tab['is_standard'])
+        # Clean up
+        SourceCodeConceptMapping.objects.filter(source_code='E11', source_vocabulary_id='ICD10CM').delete()
+
+    def test_list_includes_mapping_origin(self):
+        """GET code-mappings/ rows include mapping_origin field."""
+        mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='ICD10CM',
+            source_code='E11.9',
+            source_code_description='Type 2 diabetes unspecified',
+            target_concept=self.target_concept,
+            destination_vocabulary_id='SNOMED',
+            domain_id='Measurement',
+            omop_table='measurement',
+            status='proposed',
+            origin='import',
+            origin_system='fhir-upload',
+        )
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/code-mappings/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        row = next((r for r in resp.data if r['mapping_id'] == mapping.pk), None)
+        self.assertIsNotNone(row)
+        self.assertEqual(row['mapping_origin'], 'healthkey')
+        mapping.delete()
+
+    def test_list_athena_origin(self):
+        """Rows with origin_system='athena' report mapping_origin='athena'."""
+        mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='ICD10CM',
+            source_code='E11.65',
+            source_code_description='Type 2 diabetes with hyperglycemia',
+            target_concept=self.target_concept,
+            destination_vocabulary_id='SNOMED',
+            domain_id='Measurement',
+            omop_table='measurement',
+            status='approved',
+            origin='import',
+            origin_system='athena',
+            source='Athena',
+        )
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/code-mappings/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        row = next((r for r in resp.data if r['mapping_id'] == mapping.pk), None)
+        self.assertIsNotNone(row)
+        self.assertEqual(row['mapping_origin'], 'athena')
+        mapping.delete()
+
+    def test_approval_mirrors_to_concept_relationship(self):
+        """Approving a mapping with both concepts writes a CR 'Maps to' row."""
+        mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='ICD10CM',
+            source_code='E11',
+            source_code_description='Type 2 diabetes',
+            source_concept=self.source_concept,
+            target_concept=self.target_concept,
+            destination_vocabulary_id='SNOMED',
+            domain_id='Measurement',
+            omop_table='measurement',
+            status='proposed',
+            origin='curator',
+        )
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.patch(f'/api/v1/code-mappings/{mapping.pk}/', {
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        # Verify CR row was created.
+        cr = ConceptRelationship.objects.filter(
+            concept_1_id=self.source_concept.concept_id,
+            concept_2_id=self.target_concept.concept_id,
+            relationship_id='Maps to',
+        ).first()
+        self.assertIsNotNone(cr)
+        self.assertEqual(cr.source, 'HealthKey')
+        self.assertEqual(cr.status, 'approved')
+        self.assertEqual(cr.reviewer_id, self.org_admin.pk)
+
+        # Also check reverse.
+        cr_rev = ConceptRelationship.objects.filter(
+            concept_1_id=self.target_concept.concept_id,
+            concept_2_id=self.source_concept.concept_id,
+            relationship_id='Mapped from',
+        ).first()
+        self.assertIsNotNone(cr_rev)
+        self.assertEqual(cr_rev.source, 'HealthKey')
+
+        # Cleanup
+        mapping.delete()
+        ConceptRelationship.objects.filter(
+            source='HealthKey',
+            concept_1_id__in=[self.source_concept.concept_id, self.target_concept.concept_id],
+        ).delete()
+
+    def test_approval_without_source_concept_skips_cr_mirror(self):
+        """Approving a mapping with no source_concept does NOT write to CR."""
+        mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='M-PROTEIN, SERUM',
+            source_code_description='Uncoded lab',
+            source_concept=None,  # No source concept — uncoded
+            target_concept=self.target_concept,
+            destination_vocabulary_id='SNOMED',
+            domain_id='Measurement',
+            omop_table='measurement',
+            status='proposed',
+            origin='import',
+        )
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.patch(f'/api/v1/code-mappings/{mapping.pk}/', {
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        # No CR row should exist for this mapping.
+        cr_count = ConceptRelationship.objects.filter(
+            concept_2_id=self.target_concept.concept_id,
+            relationship_id='Maps to',
+            source='HealthKey',
+        ).count()
+        self.assertEqual(cr_count, 0)
+        mapping.delete()
+
+    def test_suggest_accepts_source_vocabulary_id(self):
+        """The suggest endpoint accepts source_vocabulary_id parameter."""
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post('/api/v1/code-mappings/suggest/', {
+            'source_vocabulary_id': 'ICD10CM',
+            'min_occurrences': 1,
+        }, format='json')
+        # Should not return 400 — the endpoint accepts source_vocabulary_id.
+        self.assertIn(resp.status_code, [status.HTTP_200_OK, status.HTTP_201_CREATED])
+        self.assertIn('source_vocabulary_id', resp.data)
+
+    def test_cr_provenance_columns_nullable(self):
+        """ConceptRelationship provenance columns are nullable (Athena rows)."""
+        maps_to, _ = Relationship.objects.get_or_create(
+            relationship_id='Maps to',
+            defaults={
+                'relationship_name': 'Maps to', 'is_hierarchical': 0,
+                'defines_ancestry': 0, 'reverse_relationship_id': 'Mapped from',
+                'relationship_concept_id': 0,
+            },
+        )
+        cr = ConceptRelationship.objects.create(
+            concept_1=self.source_concept,
+            concept_2=self.target_concept,
+            relationship=maps_to,
+            valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+            # All provenance columns left NULL — simulating an Athena row.
+        )
+        cr.refresh_from_db()
+        self.assertIsNone(cr.source)
+        self.assertIsNone(cr.origin_system)
+        self.assertIsNone(cr.status)
+        self.assertIsNone(cr.notes)
+        self.assertIsNone(cr.reviewer)
+        self.assertIsNone(cr.reviewed_at)
+        self.assertIsNone(cr.updated_at)
+        cr.delete()
