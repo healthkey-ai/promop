@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Search, Sparkles, X } from "lucide-react";
 import api from "@/api/axios";
+import { HelpTip, Field, ReadOnlyField, INPUT_CLASS } from "@/components/UI/MappingFormPrimitives";
 
 interface ConceptResult {
   concept_id: number;
@@ -68,84 +68,6 @@ const TIP = {
   status_new:
     "A new mapping always starts as Proposed. Only org admins and staff can approve it once reviewed.",
 } as const;
-
-const READ_ONLY_CLASS =
-  "h-10 w-full rounded-md border border-slate-200 bg-slate-100 px-3 font-mono text-sm font-normal text-slate-700";
-const INPUT_CLASS = "h-10 w-full rounded-md border border-slate-300 px-3 text-sm font-normal text-slate-950";
-
-function HelpTip({ tip }: { tip: string }) {
-  const tooltipId = useId();
-  return (
-    <span className="group relative inline-flex">
-      <button
-        type="button"
-        aria-label="Help"
-        aria-describedby={tooltipId}
-        className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300 text-[10px] leading-none text-slate-500 hover:border-slate-500 hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-400"
-      >
-        ?
-      </button>
-      <span
-        id={tooltipId}
-        role="tooltip"
-        className="pointer-events-none absolute left-0 top-full z-20 mt-1 w-72 rounded-md bg-slate-900 px-3 py-2 text-xs font-normal normal-case leading-relaxed tracking-normal text-white opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
-      >
-        {tip}
-      </span>
-    </span>
-  );
-}
-
-function Field({
-  id,
-  label,
-  tip,
-  className = "",
-  children,
-}: {
-  id: string;
-  label: string;
-  tip: string;
-  className?: string;
-  children: ReactNode;
-}) {
-  return (
-    <div className={`grid gap-1 ${className}`}>
-      <div className="flex items-center gap-1">
-        <label htmlFor={id} className="text-sm font-medium text-slate-700">
-          {label}
-        </label>
-        <HelpTip tip={tip} />
-      </div>
-      {children}
-    </div>
-  );
-}
-
-function ReadOnlyField({
-  id,
-  label,
-  tip,
-  value,
-}: {
-  id: string;
-  label: string;
-  tip: string;
-  value: string;
-}) {
-  return (
-    <Field id={id} label={label} tip={tip}>
-      <input
-        id={id}
-        value={value}
-        readOnly
-        title={tip}
-        placeholder="—"
-        className={READ_ONLY_CLASS}
-      />
-    </Field>
-  );
-}
 
 export function ConceptAssignDialog({
   fieldName, fieldType, onClose, onSaved,
@@ -421,36 +343,42 @@ export function ConceptAssignDialog({
                 label="Source Concept ID"
                 tip={TIP.source_concept_id}
                 value={selected ? String(selected.concept_id) : ""}
+                fullWidth
               />
               <ReadOnlyField
                 id="source_concept_name"
                 label="Source Concept Name"
                 tip={TIP.source_concept_name}
                 value={selected?.concept_name || ""}
+                fullWidth
               />
               <ReadOnlyField
                 id="source_concept_code"
                 label="Source Concept Code"
                 tip={TIP.source_concept_code}
                 value={selected?.concept_code || ""}
+                fullWidth
               />
               <ReadOnlyField
                 id="source_vocabulary_id"
                 label="Source Vocabulary ID"
                 tip={TIP.source_vocabulary_id}
                 value={selected?.vocabulary_id || ""}
+                fullWidth
               />
               <ReadOnlyField
                 id="source_concept_class"
                 label="Source Concept Class"
                 tip={TIP.source_concept_class}
                 value={selected?.concept_class_id || ""}
+                fullWidth
               />
               <ReadOnlyField
                 id="standard_concept"
                 label="Standard Concept"
                 tip={TIP.standard_concept}
                 value={selected?.standard_concept || ""}
+                fullWidth
               />
               <Field id="source_table" label="Source Table" tip={TIP.source_table}>
                 <select
@@ -458,7 +386,7 @@ export function ConceptAssignDialog({
                   title={TIP.source_table}
                   value={omopTable}
                   onChange={(e) => setOmopTable(e.target.value)}
-                  className={INPUT_CLASS}
+                  className={`${INPUT_CLASS} w-full`}
                 >
                   {OMOP_TABLES.map((table) => <option key={table} value={table}>{table}</option>)}
                 </select>
@@ -478,7 +406,7 @@ export function ConceptAssignDialog({
                     id="unit"
                     value={isCustomUnit ? "__custom__" : unit}
                     onChange={(e) => handleUnitDropdownChange(e.target.value)}
-                    className={INPUT_CLASS}
+                    className={`${INPUT_CLASS} w-full`}
                   >
                     <option value="">Select unit...</option>
                     {unitChoices.map((u) => (
@@ -492,7 +420,7 @@ export function ConceptAssignDialog({
                       value={customUnit}
                       onChange={(e) => setCustomUnit(e.target.value)}
                       placeholder="Enter custom unit..."
-                      className={INPUT_CLASS}
+                      className={`${INPUT_CLASS} w-full`}
                     />
                   )}
                 </div>
@@ -503,7 +431,7 @@ export function ConceptAssignDialog({
                   value={unit}
                   onChange={(e) => setUnit(e.target.value)}
                   placeholder="e.g. mg/dL"
-                  className={INPUT_CLASS}
+                  className={`${INPUT_CLASS} w-full`}
                 />
               )}
             </Field>
