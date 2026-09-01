@@ -1,4 +1,5 @@
 import functools
+from collections import defaultdict
 from typing import Any, Callable, ContextManager
 
 from rest_framework import serializers, viewsets, status
@@ -5596,6 +5597,10 @@ OMOP_BULK_MAX_ROWS = int(os.environ.get('OMOP_BULK_MAX_ROWS', 1000))
 #: ~250 KB, so this leaves ample headroom.
 OMOP_BULK_MAX_BYTES = int(os.environ.get('OMOP_BULK_MAX_BYTES', 8 * 1024 * 1024))
 
+#: Maximum ids accepted by a bulk delete. Higher than the row cap because an id is
+#: ~10 bytes against a row's ~250, and the work per id is one index hit.
+OMOP_BULK_DELETE_MAX_IDS = int(os.environ.get('OMOP_BULK_DELETE_MAX_IDS', 5000))
+
 
 def _cached_pk_lookup(field, cache):
     """Wrap a PrimaryKeyRelatedField's to_internal_value with a prefetched cache.
@@ -5626,19 +5631,19 @@ def _cached_pk_lookup(field, cache):
     return to_internal_value
 
 
-def _prefetch_bulk_related(serializer, rows):
-    """Resolve every FK referenced anywhere in the batch in one query per model."""
+def _bulk_fk_caches(
+    serializer: serializers.Serializer, rows: list[Any],
+) -> dict[str, dict[Any, Any]]:
+    """Resolve every FK referenced anywhere in the batch, one query per column."""
     from rest_framework.relations import PrimaryKeyRelatedField
 
-    for name, field in serializer.child.fields.items():
+    caches: dict[str, dict[Any, Any]] = {}
+    for name, field in serializer.fields.items():
         if not isinstance(field, PrimaryKeyRelatedField) or field.read_only:
             continue
-        # Collect one value at a time rather than in a set comprehension: an
-        # unhashable id ({"person": {"id": 5}}) would raise TypeError out of the
-        # comprehension, escape as a 500, and lose the per-index 400 the
-        # single-row path gives for the same input. Skipping the value here
-        # leaves it out of the cache, so _cached_pk_lookup falls through to DRF
-        # and the offending row gets its normal validation error.
+        # Collected one at a time: an unhashable id ({"person": {"id": 5}}) would
+        # raise out of a set comprehension and escape as a 500, losing the
+        # per-index 400 the single-row path gives for the same input.
         raw = set()
         for row in rows:
             if not isinstance(row, dict):
@@ -5655,11 +5660,27 @@ def _prefetch_bulk_related(serializer, rows):
         try:
             objs = {obj.pk: obj for obj in field.get_queryset().filter(pk__in=raw)}
         except (ValueError, TypeError, DjangoValidationError):
-            # Non-integer ids in the batch — skip the optimisation and let DRF
+            # Non-integer ids in the batch. Skip the optimisation and let DRF
             # produce the per-index error for the offending rows.
             continue
         if objs:
+            caches[name] = objs
+    return caches
+
+
+def _apply_fk_caches(
+    serializer: serializers.Serializer, caches: dict[str, dict[Any, Any]],
+) -> None:
+    """Answer this serializer's FK lookups from an already-resolved batch."""
+    for name, objs in caches.items():
+        field = serializer.fields.get(name)
+        if field is not None:
             field.to_internal_value = _cached_pk_lookup(field, objs)
+
+
+def _prefetch_bulk_related(serializer, rows):
+    """Resolve every FK referenced anywhere in the batch in one query per model."""
+    _apply_fk_caches(serializer.child, _bulk_fk_caches(serializer.child, rows))
 
 
 #: Identity of a clinical event for the idempotent bulk write, mirroring
@@ -5884,6 +5905,46 @@ def _apply_upsert_plan(plan, model_cls, pk_field, model_name):
     return ids, new_ids
 
 
+def _bulk_body_too_large(request: Request) -> Response | None:
+    """Return a 413 for a body over the byte ceiling, or None to proceed."""
+    # Read CONTENT_LENGTH, not request.data, because touching request.data
+    # already parses the whole body into memory.
+    try:
+        declared = int(request.META.get('CONTENT_LENGTH') or 0)
+    except (TypeError, ValueError):
+        declared = 0
+    if declared <= OMOP_BULK_MAX_BYTES:
+        return None
+    return Response(
+        {'detail': (
+            f'Request body too large: {declared} bytes exceeds the maximum '
+            f'of {OMOP_BULK_MAX_BYTES} bytes. Split the batch and retry.'
+        ), 'max_bytes': OMOP_BULK_MAX_BYTES},
+        status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+    )
+
+
+def _authorize_person_write(request: Request, person: Person) -> Organization | None:
+    """Authorize a write against one person and return the requesting org."""
+    from rest_framework.exceptions import PermissionDenied
+
+    org = get_request_org(request)
+    if is_service_token(request):
+        return org
+    if org is not None:
+        existing_pi = PatientRecord.objects.filter(person=person).first()
+        if (existing_pi is not None
+                and existing_pi.organization is not None
+                and existing_pi.organization != org):
+            raise PermissionDenied('Person does not belong to your organization.')
+        return org
+    if not getattr(request.user, 'is_staff', False):
+        from omop_core.authorization import can_write_patient
+        if not can_write_patient(request.user, person.person_id):
+            raise PermissionDenied('Access denied.')
+    return org
+
+
 def _is_admin_actor(request: Request) -> bool:
     """Whether this caller may act on a patient administratively."""
     actor = request.user
@@ -6010,21 +6071,9 @@ class _OmopBulkCreateMixin:
     """
 
     def create(self, request, *args, **kwargs):
-        # Checked before request.data, which is what triggers parsing. Chunked
-        # uploads send no CONTENT_LENGTH; there is nothing to check pre-parse in
-        # that case, and the row cap still bounds what gets written.
-        try:
-            declared = int(request.META.get('CONTENT_LENGTH') or 0)
-        except (TypeError, ValueError):
-            declared = 0
-        if declared > OMOP_BULK_MAX_BYTES:
-            return Response(
-                {'detail': (
-                    f'Request body too large: {declared} bytes exceeds the maximum '
-                    f'of {OMOP_BULK_MAX_BYTES} bytes. Split the batch and retry.'
-                ), 'max_bytes': OMOP_BULK_MAX_BYTES},
-                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            )
+        oversized = _bulk_body_too_large(request)
+        if oversized is not None:
+            return oversized
         if not isinstance(request.data, list):
             if self._should_single_upsert(request):
                 return self._single_upsert_create(request)
@@ -6044,25 +6093,6 @@ class _OmopBulkCreateMixin:
             request.query_params.get('upsert', 'true')
         ).strip().lower() not in ('0', 'false', 'no')
 
-    def _authorize_single_upsert_person(self, request, person):
-        from rest_framework.exceptions import PermissionDenied
-
-        org = get_request_org(request)
-        if is_service_token(request):
-            return org
-        if org is not None:
-            existing_pi = PatientRecord.objects.filter(person=person).first()
-            if (existing_pi is not None
-                    and existing_pi.organization is not None
-                    and existing_pi.organization != org):
-                raise PermissionDenied('Person does not belong to your organization.')
-            return org
-        if not getattr(request.user, 'is_staff', False):
-            from omop_core.authorization import can_write_patient
-            if not can_write_patient(request.user, person.person_id):
-                raise PermissionDenied('Access denied.')
-        return org
-
     def _single_upsert_create(self, request):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -6075,7 +6105,7 @@ class _OmopBulkCreateMixin:
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        org = self._authorize_single_upsert_person(request, person)
+        org = _authorize_person_write(request, person)
         source, source_user_id, reason = _extract_provenance(request)
         skip_refresh = str(
             request.query_params.get('skip_refresh', 'false')
@@ -6125,8 +6155,6 @@ class _OmopBulkCreateMixin:
         return Response(response_serializer.data, status=http_status)
 
     def _bulk_create(self, request):
-        from rest_framework.exceptions import PermissionDenied
-
         rows = request.data
         if len(rows) > OMOP_BULK_MAX_ROWS:
             return Response(
@@ -6182,18 +6210,7 @@ class _OmopBulkCreateMixin:
 
         # Same authorization the single-row path applies in perform_create, run
         # once for the batch's single person.
-        org = get_request_org(request)
-        if not is_service_token(request):
-            if org is not None:
-                existing_pi = PatientRecord.objects.filter(person=person).first()
-                if (existing_pi is not None
-                        and existing_pi.organization is not None
-                        and existing_pi.organization != org):
-                    raise PermissionDenied('Person does not belong to your organization.')
-            elif not getattr(request.user, 'is_staff', False):
-                from omop_core.authorization import can_write_patient
-                if not can_write_patient(request.user, person.person_id):
-                    raise PermissionDenied('Access denied.')
+        org = _authorize_person_write(request, person)
 
         source, source_user_id, reason = _extract_provenance(request)
         skip_refresh = str(
@@ -6308,6 +6325,396 @@ class _OmopBulkCreateMixin:
             {'created': len(new_ids), 'updated': updated, 'ids': list(ids)},
             status=status.HTTP_201_CREATED,
         )
+
+
+def _visible_clinical_rows(
+    request: Request,
+    model_cls: type[models.Model],
+    pk_field: str,
+    ids: list[int],
+) -> models.QuerySet:
+    """Narrow ids to the rows this caller may reach, as the row level path does.
+
+    Scoping here and not through get_queryset(), because that one also hides
+    is_erroneous rows and those are the ones a reconciliation wants to fix.
+    Rows outside the scope end up in `missing`, so the batch cannot be used to
+    tell an id that does not exist from one owned by somebody else.
+    """
+    qs = model_cls.objects.filter(**{f'{pk_field}__in': ids})
+    if is_service_token(request) or getattr(request.user, 'is_staff', False):
+        return qs
+    org = get_request_org(request)
+    if org is not None:
+        return qs.filter(person_id__in=PatientRecord.objects.filter(
+            organization=org).values('person_id'))
+    # Every grant the row level path honours: self, verified representative,
+    # professional through GroupAccess. A batch is one person, so this is one
+    # predicate call in practice.
+    from omop_core.authorization import can_access_patient
+    allowed = {
+        person_id for person_id in set(qs.values_list('person_id', flat=True))
+        if can_access_patient(request.user, person_id)
+    }
+    return qs.filter(person_id__in=allowed)
+
+
+class _OmopBulkUpdateMixin:
+    """Patch many clinical rows of one person in a single request."""
+
+    @action(detail=False, methods=['patch'], url_path='bulk_update')
+    def bulk_update(self, request: Request, *args: Any, **kwargs: Any) -> Response:
+        """Apply a list of partial rows, each naming its own primary key."""
+        oversized: Response | None = _bulk_body_too_large(request)
+        if oversized is not None:
+            return oversized
+
+        model_name: str = self.serializer_class.Meta.model.__name__
+        pk_field, model_cls = _MODEL_PK_MAP[model_name]
+
+        parsed = self._parse_bulk_update_rows(request, pk_field)
+        if isinstance(parsed, Response):
+            return parsed
+        ids, payloads = parsed
+        if not ids:
+            return Response({'updated': 0, 'missing': []})
+
+        try:
+            with transaction.atomic():
+                return self._write_bulk_update(
+                    request, model_cls, pk_field, ids, payloads)
+        except IntegrityError as exc:
+            logger.exception(
+                'bulk %s update for %s rows failed on a database constraint',
+                model_name, len(ids))
+            return Response(
+                {'detail': (
+                    'The batch conflicted with a database constraint and was '
+                    'rolled back whole, no rows were changed. Retrying is safe.'
+                ), 'error': str(exc).strip().partition('\n')[0]},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+    def _write_bulk_update(
+        self,
+        request: Request,
+        model_cls: type[models.Model],
+        pk_field: str,
+        ids: list[int],
+        payloads: list[dict[str, Any]],
+    ) -> Response:
+        """Lock, validate and write one batch inside the caller's transaction."""
+        from omop_core.signals import suppress_patient_record_refresh
+
+        # Locked and read inside the transaction, so a concurrent write cannot
+        # make these instances stale between the read and the update.
+        by_id: dict[int, models.Model] = {
+            getattr(obj, pk_field): obj
+            for obj in _visible_clinical_rows(
+                request, model_cls, pk_field, ids).select_for_update()
+        }
+        missing: list[int] = [i for i in ids if i not in by_id]
+        present: list[tuple[int, dict[str, Any]]] = [
+            (i, payload) for i, payload in zip(ids, payloads) if i in by_id
+        ]
+        if not present:
+            return Response({'updated': 0, 'missing': missing})
+
+        person_ids: set[int] = {by_id[i].person_id for i, _ in present}
+        if len(person_ids) > 1:
+            return Response(
+                {'detail': (
+                    'A bulk update must name rows for exactly one person, '
+                    f'found {len(person_ids)} distinct person values. '
+                    'Split the batch by person and retry.'
+                )},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        person: Person = Person.objects.get(person_id=person_ids.pop())
+        _authorize_person_write(request, person)
+
+        # One serializer per row, bound to its instance, so a partial write reads
+        # the columns it omits off the stored row exactly as the row level PATCH
+        # does. The FK caches are resolved once for the batch, so this stays one
+        # query per FK column rather than one per row.
+        matched_payloads: list[dict[str, Any]] = [p for _, p in present]
+        caches = _bulk_fk_caches(self.get_serializer(), matched_payloads)
+
+        instances: list[models.Model] = []
+        by_shape: dict[frozenset[str], list[models.Model]] = defaultdict(list)
+        errors: list[dict[str, Any]] = []
+        for row_id, payload in present:
+            row_serializer = self.get_serializer(
+                by_id[row_id], data=payload, partial=True)
+            _apply_fk_caches(row_serializer, caches)
+            if not row_serializer.is_valid():
+                errors.append(row_serializer.errors)
+                continue
+            errors.append({})
+            attrs = row_serializer.validated_data
+            if not attrs:
+                continue
+            instance = by_id[row_id]
+            for name, value in attrs.items():
+                setattr(instance, name, value)
+            by_shape[frozenset(attrs)].append(instance)
+            instances.append(instance)
+
+        if any(errors):
+            return Response(
+                self._errors_by_request_row(ids, present, errors),
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not instances:
+            return Response({'updated': 0, 'missing': missing})
+
+        with suppress_patient_record_refresh():
+            # Grouped by patched column set, so a row never writes back a column
+            # its own payload did not carry.
+            for shape, group in by_shape.items():
+                model_cls.objects.bulk_update(group, sorted(shape))
+            self._record_bulk_provenance(
+                request, person, model_cls, pk_field, instances)
+
+        # Unguarded and inside the transaction, so a failed derivation rolls the
+        # batch back instead of leaving a stale read model.
+        if not _skip_refresh_requested(request):
+            refresh_patient_record(person)
+
+        return Response({'updated': len(instances), 'missing': missing})
+
+    @staticmethod
+    def _errors_by_request_row(
+        ids: list[int],
+        present: list[tuple[int, dict[str, Any]]],
+        errors: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Re-index errors from the matched rows back onto the request rows."""
+        # Validation runs over matched rows only, so its indices are shifted
+        # whenever the batch names an id that matched nothing.
+        matched: set[int] = {row_id for row_id, _ in present}
+        remaining = iter(errors)
+        return [next(remaining, {}) if i in matched else {} for i in ids]
+
+    @staticmethod
+    def _record_bulk_provenance(
+        request: Request,
+        person: Person,
+        model_cls: type[models.Model],
+        pk_field: str,
+        instances: list[models.Model],
+    ) -> None:
+        """Attribute the batch to its source, when the caller names one."""
+        source, source_user_id, reason = _extract_provenance(request)
+        if not source:
+            return
+        content_type = ContentType.objects.get_for_model(model_cls)
+        # One record per row, actor and source, as the constraint requires. The
+        # conflict update keeps the reason for the latest correction, which
+        # _record_provenance also does through update_or_create.
+        ProvenanceRecord.objects.bulk_create(
+            [
+                ProvenanceRecord(
+                    source=source,
+                    source_user_id=source_user_id or '',
+                    target_patient_id=str(person.person_id),
+                    modification_reason=reason,
+                    organization=get_request_org(request),
+                    content_type=content_type,
+                    object_id=getattr(obj, pk_field),
+                )
+                for obj in instances
+            ],
+            update_conflicts=True,
+            update_fields=['modification_reason', 'organization',
+                           'target_patient_id'],
+            unique_fields=['content_type', 'object_id', 'source_user_id',
+                           'source'],
+        )
+
+    def _parse_bulk_update_rows(
+        self, request: Request, pk_field: str,
+    ) -> tuple[list[int], list[dict[str, Any]]] | Response:
+        """Split the body into ids and payloads, or return the error response."""
+        rows: Any = request.data
+        if not isinstance(rows, list):
+            return Response(
+                {'detail': (
+                    'Request body must be a list of partial rows, each naming '
+                    f'its own {pk_field}.'
+                )},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(rows) > OMOP_BULK_MAX_ROWS:
+            return Response(
+                {'detail': (
+                    f'Batch too large: {len(rows)} rows exceeds the maximum of '
+                    f'{OMOP_BULK_MAX_ROWS} rows per request. '
+                    'Split the batch and retry.'
+                ), 'max_rows': OMOP_BULK_MAX_ROWS},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+
+        ids: list[int] = []
+        payloads: list[dict[str, Any]] = []
+        errors: list[dict[str, list[str]]] = []
+        seen: set[int] = set()
+        for row in rows:
+            error: dict[str, list[str]] = {}
+            row_id: Any = row.get(pk_field) if isinstance(row, dict) else None
+            if not isinstance(row, dict):
+                error['non_field_errors'] = ['Each row must be an object.']
+            # bool is an int subclass, so True would silently address pk 1.
+            elif isinstance(row_id, bool) or not isinstance(row_id, int):
+                error[pk_field] = [
+                    f'{pk_field} is required on every row of a bulk update and '
+                    'must be an integer.']
+            elif row_id in seen:
+                error[pk_field] = [
+                    'Duplicate id in this batch. Two partial patches of one row '
+                    'have no defined order, merge them into a single row.']
+            elif 'person' in row:
+                error['person'] = [
+                    'person cannot be changed by a bulk update, a batch is '
+                    'authorized and refreshed as one person. Use the row level '
+                    'PATCH to move a row to another person.']
+            errors.append(error)
+            if error:
+                continue
+            seen.add(row_id)
+            ids.append(row_id)
+            payloads.append({k: v for k, v in row.items() if k != pk_field})
+        if any(errors):
+            return Response(errors, status=status.HTTP_400_BAD_REQUEST)
+        return ids, payloads
+
+
+class _OmopBulkDeleteMixin:
+    """Delete many clinical rows of one person in a single request."""
+
+    # POST, because a DELETE with a body gets stripped by intermediaries. That
+    # makes the permission class matter: the viewsets use PatientCrudPermission,
+    # which grants a session patient POST but denies them DELETE. Evaluated on a
+    # POST the base class reproduces the DELETE rule, so the batch grants nothing
+    # the row level delete refuses.
+    @action(detail=False, methods=['post'], url_path='bulk_delete',
+            permission_classes=[ScopedTokenPermission])
+    def bulk_delete(self, request: Request, *args: Any, **kwargs: Any) -> Response:
+        """Delete the rows named by an id list, ignoring ids that match nothing."""
+        oversized: Response | None = _bulk_body_too_large(request)
+        if oversized is not None:
+            return oversized
+
+        ids = self._parse_bulk_delete_ids(request)
+        if isinstance(ids, Response):
+            return ids
+
+        model_name: str = self.serializer_class.Meta.model.__name__
+        pk_field, model_cls = _MODEL_PK_MAP[model_name]
+        with transaction.atomic():
+            return self._write_bulk_delete(request, model_cls, pk_field, ids)
+
+    def _write_bulk_delete(
+        self,
+        request: Request,
+        model_cls: type[models.Model],
+        pk_field: str,
+        ids: list[int],
+    ) -> Response:
+        """Lock and delete one batch inside the caller's transaction."""
+        from omop_core.signals import suppress_patient_record_refresh
+
+        # Locked and read inside the transaction, so a concurrent write cannot
+        # move a row to another person between the check and the delete.
+        found: list[tuple[int, int]] = list(
+            _visible_clinical_rows(request, model_cls, pk_field, ids)
+            .select_for_update()
+            .values_list(pk_field, 'person_id')
+        )
+        found_ids: list[int] = [row_id for row_id, _ in found]
+        present: set[int] = set(found_ids)
+        missing: list[int] = [i for i in ids if i not in present]
+        if not found_ids:
+            return Response({'deleted': 0, 'missing': missing})
+
+        person_ids: set[int] = {person_id for _, person_id in found}
+        if len(person_ids) > 1:
+            return Response(
+                {'detail': (
+                    'A bulk delete must name rows for exactly one person, '
+                    f'found {len(person_ids)} distinct person values. '
+                    'Split the batch by person and retry.'
+                )},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        person: Person = Person.objects.get(person_id=person_ids.pop())
+        _authorize_person_write(request, person)
+
+        # Unlike bulk_create, queryset.delete() does fire post_delete, so without
+        # the suppression the batch costs one derivation per row.
+        with suppress_patient_record_refresh():
+            self._delete_dangling_links(model_cls, found_ids)
+            model_cls.objects.filter(**{f'{pk_field}__in': found_ids}).delete()
+
+        # Unguarded and inside the transaction, so a failed derivation rolls the
+        # batch back instead of leaving a stale read model.
+        if not _skip_refresh_requested(request):
+            refresh_patient_record(person)
+
+        return Response({'deleted': len(found_ids), 'missing': missing})
+
+    @staticmethod
+    def _delete_dangling_links(
+        model_cls: type[models.Model], row_ids: list[int],
+    ) -> None:
+        """Remove rows that point at these ids without a database cascade."""
+        # A GenericForeignKey has no cascade, and MeasurementOwnership holds a
+        # bare integer, so both outlive the row they describe.
+        ProvenanceRecord.objects.filter(
+            content_type=ContentType.objects.get_for_model(model_cls),
+            object_id__in=row_ids,
+        ).delete()
+        if model_cls is Measurement:
+            MeasurementOwnership.objects.filter(
+                measurement_id__in=row_ids).delete()
+
+    def _parse_bulk_delete_ids(self, request: Request) -> list[int] | Response:
+        """Validate the body, or return the error response to send instead."""
+        body: Any = request.data
+        if not isinstance(body, dict) or not isinstance(body.get('ids'), list):
+            return Response(
+                {'detail': 'Request body must be an object with an "ids" list.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        raw: list[Any] = body['ids']
+        if len(raw) > OMOP_BULK_DELETE_MAX_IDS:
+            return Response(
+                {'detail': (
+                    f'Batch too large: {len(raw)} ids exceeds the maximum of '
+                    f'{OMOP_BULK_DELETE_MAX_IDS} ids per request. '
+                    'Split the batch and retry.'
+                ), 'max_ids': OMOP_BULK_DELETE_MAX_IDS},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+
+        ids: list[int] = []
+        seen: set[int] = set()
+        invalid: list[Any] = []
+        for value in raw:
+            # bool is an int subclass, so True would silently address pk 1.
+            if isinstance(value, bool) or not isinstance(value, int):
+                invalid.append(value)
+                continue
+            if value not in seen:
+                seen.add(value)
+                ids.append(value)
+        if invalid:
+            return Response(
+                {'detail': 'Every id must be an integer primary key.',
+                 'invalid_ids': invalid[:20]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return ids
 
 
 class _ProvenanceMixin:
@@ -6473,6 +6880,32 @@ class ProcedureOccurrenceViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _
     }
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'omop_write'
+
+
+# Batch actions are v1 only, the legacy /api/ prefix stays frozen.
+class V1ConditionOccurrenceViewSet(
+        _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, ConditionOccurrenceViewSet):
+    """Conditions on /api/v1/, with the batch actions."""
+
+
+class V1DrugExposureViewSet(
+        _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, DrugExposureViewSet):
+    """Drug exposures on /api/v1/, with the batch actions."""
+
+
+class V1MeasurementViewSet(
+        _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, MeasurementViewSet):
+    """Measurements on /api/v1/, with the batch actions."""
+
+
+class V1ObservationViewSet(
+        _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, ObservationViewSet):
+    """Observations on /api/v1/, with the batch actions."""
+
+
+class V1ProcedureOccurrenceViewSet(
+        _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, ProcedureOccurrenceViewSet):
+    """Procedures on /api/v1/, with the batch actions."""
 
 
 @method_decorator(csrf_exempt, name='dispatch')

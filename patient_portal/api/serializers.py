@@ -1,3 +1,5 @@
+from typing import Any
+
 from rest_framework import serializers
 from patient_portal.models import Identity, PatientConsent, PatientMessage
 from omop_core.models import (
@@ -17,6 +19,9 @@ from django.utils.timezone import localdate
 from django.utils import timezone
 from omop_core.services.access import has_org_admin_access
 from omop_core.services.patient_record_service import PATIENT_RECORD_OMOP_MAPPED_FIELDS
+
+#: Columns that Measurement and Observation validate as one value.
+_VALUE_FIELDS = frozenset({'value_as_number', 'value_as_string'})
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -779,17 +784,36 @@ class MeasurementSerializer(serializers.ModelSerializer):
         ]
         extra_kwargs = {'measurement_id': {'required': False}}
 
-    def validate(self, attrs):
+    def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
         attrs = super().validate(attrs)
-        from omop_core.services.field_write_service import coerce_assertion_value
-        source_value = attrs.get('measurement_source_value')
-        num, string, error = coerce_assertion_value(
-            source_value, attrs.get('value_as_number'), attrs.get('value_as_string'),
+        from omop_core.services.field_write_service import (
+            coerce_assertion_value, is_boolean_assertion_code,
         )
+        source_value = attrs.get(
+            'measurement_source_value', getattr(self.instance, 'measurement_source_value', None))
+        explicit = _VALUE_FIELDS & attrs.keys()
+        # An explicit value decides on its own. Feeding the stored sibling back in
+        # would let it win the precedence inside coerce_assertion_value, so
+        # patching a boolean assertion from 1 to 0 would stay true.
+        if explicit or not self.partial:
+            number, string = attrs.get('value_as_number'), attrs.get('value_as_string')
+        else:
+            number = getattr(self.instance, 'value_as_number', None)
+            string = getattr(self.instance, 'value_as_string', None)
+        number, string, error = coerce_assertion_value(source_value, number, string)
         if error:
             raise serializers.ValidationError({'value_as_string': error})
-        attrs['value_as_number'] = num
-        attrs['value_as_string'] = string
+        # The two columns are one answer only for an assertion code, and there
+        # coercion can rewrite the column the caller left out. Anywhere else a
+        # partial write must not touch what it did not carry, which assigning
+        # both unconditionally did.
+        if not self.partial or is_boolean_assertion_code(source_value):
+            attrs['value_as_number'] = number
+            attrs['value_as_string'] = string
+        elif explicit:
+            attrs.update({k: v for k, v in
+                         (('value_as_number', number), ('value_as_string', string))
+                         if k in explicit})
         return attrs
 
 
@@ -808,17 +832,36 @@ class ObservationSerializer(serializers.ModelSerializer):
         ]
         extra_kwargs = {'observation_id': {'required': False}}
 
-    def validate(self, attrs):
+    def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
         attrs = super().validate(attrs)
-        from omop_core.services.field_write_service import coerce_assertion_value
-        source_value = attrs.get('observation_source_value')
-        num, string, error = coerce_assertion_value(
-            source_value, attrs.get('value_as_number'), attrs.get('value_as_string'),
+        from omop_core.services.field_write_service import (
+            coerce_assertion_value, is_boolean_assertion_code,
         )
+        source_value = attrs.get(
+            'observation_source_value', getattr(self.instance, 'observation_source_value', None))
+        explicit = _VALUE_FIELDS & attrs.keys()
+        # An explicit value decides on its own. Feeding the stored sibling back in
+        # would let it win the precedence inside coerce_assertion_value, so
+        # patching a boolean assertion from 1 to 0 would stay true.
+        if explicit or not self.partial:
+            number, string = attrs.get('value_as_number'), attrs.get('value_as_string')
+        else:
+            number = getattr(self.instance, 'value_as_number', None)
+            string = getattr(self.instance, 'value_as_string', None)
+        number, string, error = coerce_assertion_value(source_value, number, string)
         if error:
             raise serializers.ValidationError({'value_as_string': error})
-        attrs['value_as_number'] = num
-        attrs['value_as_string'] = string
+        # The two columns are one answer only for an assertion code, and there
+        # coercion can rewrite the column the caller left out. Anywhere else a
+        # partial write must not touch what it did not carry, which assigning
+        # both unconditionally did.
+        if not self.partial or is_boolean_assertion_code(source_value):
+            attrs['value_as_number'] = number
+            attrs['value_as_string'] = string
+        elif explicit:
+            attrs.update({k: v for k, v in
+                         (('value_as_number', number), ('value_as_string', string))
+                         if k in explicit})
         return attrs
 
 

@@ -7,8 +7,8 @@ from .views import (
     change_password,
     PersonViewSet,
     derivation_status,
-    ConditionOccurrenceViewSet, DrugExposureViewSet, MeasurementViewSet,
-    ObservationViewSet, ProcedureOccurrenceViewSet, EpisodeViewSet, EpisodeEventViewSet,
+    V1ConditionOccurrenceViewSet, V1DrugExposureViewSet, V1MeasurementViewSet,
+    V1ObservationViewSet, V1ProcedureOccurrenceViewSet, EpisodeViewSet, EpisodeEventViewSet,
     TherapyLineViewSet,
     PatientDocumentViewSet,
     PatientTrialEnrollmentViewSet,
@@ -60,11 +60,11 @@ router = DefaultRouter()
 router.register(r'user', CurrentUserViewSet, basename='v1-user')
 router.register(r'patient-records', PatientRecordV1ViewSet, basename='v1-patient-records')
 router.register(r'persons', PersonViewSet, basename='v1-persons')
-router.register(r'conditions', ConditionOccurrenceViewSet, basename='v1-conditions')
-router.register(r'drug-exposures', DrugExposureViewSet, basename='v1-drug-exposures')
-router.register(r'measurements', MeasurementViewSet, basename='v1-measurements')
-router.register(r'observations', ObservationViewSet, basename='v1-observations')
-router.register(r'procedures', ProcedureOccurrenceViewSet, basename='v1-procedures')
+router.register(r'conditions', V1ConditionOccurrenceViewSet, basename='v1-conditions')
+router.register(r'drug-exposures', V1DrugExposureViewSet, basename='v1-drug-exposures')
+router.register(r'measurements', V1MeasurementViewSet, basename='v1-measurements')
+router.register(r'observations', V1ObservationViewSet, basename='v1-observations')
+router.register(r'procedures', V1ProcedureOccurrenceViewSet, basename='v1-procedures')
 router.register(r'episodes', EpisodeViewSet, basename='v1-episodes')
 router.register(r'episode-events', EpisodeEventViewSet, basename='v1-episode-events')
 # Authoring a line of therapy, which is an Episode grouping drug exposures rather

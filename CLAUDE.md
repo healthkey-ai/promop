@@ -884,6 +884,125 @@ Three things to know before touching this code:
 
 ---
 
+## Bulk OMOP Row Deletes
+
+The five clinical endpoints delete in batches, on `/api/v1/` only:
+
+```
+POST /api/v1/measurements/bulk_delete/     {"ids": [10605646, 10605649, ...]}
+  200 {"deleted": 2, "missing": []}
+```
+
+Ids come from a prior read, so there is no matching logic server-side. One
+transaction, all-or-nothing. One batch is one person (mixed-person → 400).
+Max 5,000 ids (`OMOP_BULK_DELETE_MAX_IDS`) → 413. `?skip_refresh=true` defers
+the derivation, admin-gated as on the row level `DELETE`.
+
+**Ids that name no row come back in `missing` rather than failing the batch.**
+A retry after a read timeout, or a re-run of an applied batch, has to converge.
+Rows the caller cannot reach are reported the same way, so the endpoint cannot
+be used to tell an absent id from somebody else's.
+
+`POST`, not `DELETE`, because a `DELETE` with a body gets stripped by
+intermediaries. That makes the permission class matter: the viewsets use
+`PatientCrudPermission`, which grants a session patient `POST` but denies them
+`DELETE`, so the action overrides it with the base `ScopedTokenPermission`.
+Evaluated on a `POST` that class reproduces the `DELETE` rule. Per-person write
+access is `_authorize_person_write`, shared with the bulk create path.
+
+Three things that are easy to get wrong:
+
+- **Scoping is `_visible_clinical_rows`, not `get_queryset()`.** That queryset
+  carries the tenancy filter *and* hides `is_erroneous` rows. Only the first
+  half is wanted here, since a row flagged in error is one a reconciliation
+  most wants to drop.
+- **The lookup is locked inside the transaction.** Without `select_for_update`
+  a concurrent row level `PATCH` could move a row to another person between the
+  authorization and the delete.
+- **`queryset.delete()` fires `post_delete`**, unlike `bulk_create`. The delete
+  runs inside `suppress_patient_record_refresh()` with one explicit
+  `refresh_patient_record` after it. Without the suppression a 40-row batch
+  costs 40 derivations.
+
+`ProvenanceRecord` and `MeasurementOwnership` rows for the deleted ids go too.
+Neither has a database cascade: provenance points through a `GenericForeignKey`,
+and ownership holds a bare `measurement_id`. Ids are never reused
+(`next_pk` only advances its sequence), so the risk is orphan rows rather than
+mis-attribution. `EpisodeEvent` is deliberately left alone: its `event_id` is
+ambiguous without the field concept, and deleting by id alone would take out
+links belonging to another domain.
+
+---
+
+## Bulk OMOP Row Updates
+
+Updates are ~3% of the migration's volume, so this is the smallest of the three
+batch entrances. A correction pass still paid one request per row:
+
+```
+PATCH /api/v1/measurements/bulk_update/   [{"measurement_id": 106, "value_as_number": 7.5}, ...]
+  200 {"updated": 1, "missing": []}
+```
+
+Partial per row, through the same serializer and the same `partial=True` as the
+row level `PATCH`. One transaction, one person, one refresh, ids reported in
+`missing`, `409` on a constraint, per-index validation errors. Max 1,000 rows
+(`OMOP_BULK_MAX_ROWS`) → 413. Same locking and same scoping as the delete path.
+
+Rules specific to updates:
+
+- **`person` is rejected in the payload.** Moving a row to another person breaks
+  both the batch's single authorization and its single refresh. Use the row
+  level `PATCH` for that.
+- **Duplicate ids are rejected, not last-wins.** Two partial patches of one row
+  in one batch have no defined order.
+- **Rows carrying only an id are not counted and get no provenance.** They wrote
+  nothing.
+- **Errors are re-indexed onto the request rows.** Validation runs over matched
+  rows only, so an id that matched nothing would otherwise shift every error
+  after it onto the wrong row.
+
+Permissions are the viewset's own, because `PATCH` is open to session patients
+at the row level. `_authorize_person_write` on the batch's person is the guard,
+and `_visible_clinical_rows` builds the reachable set from the same access
+grants the row level path honours: self, verified representative, professional
+through `GroupAccess`.
+
+Writes are grouped by patched column set, one `bulk_update` per distinct shape.
+A single call takes one column list for every instance, so an ungrouped batch
+would write a column back onto rows whose payload never carried it, clobbering
+a concurrent change.
+
+**Each row is validated by its own serializer, bound to its instance.** That is
+what keeps the batch honest about partial writes: a serializer with no instance
+cannot tell a column the caller omitted from one it set to null. The FK caches
+are resolved once for the batch (`_bulk_fk_caches`) and shared across the row
+serializers, so the query count stays flat in batch size.
+
+### The partial-write trap behind it
+
+`MeasurementSerializer.validate` and `ObservationSerializer.validate` assigned
+`value_as_number` and `value_as_string` unconditionally, reading them out of
+`attrs` where a partial update had never put them. So a `PATCH` of an unrelated
+field wrote `None` over the row value. That was live on the row level `PATCH`,
+and `bulk_update` would have amplified it to a thousand rows a request.
+
+Both serializers now decide by what the write carries:
+
+| The write carries | Value columns |
+|---|---|
+| nothing, source is not an assertion code | untouched |
+| nothing, source becomes an assertion code | stored values coerced, both written |
+| one value column, source is not an assertion code | only that column written |
+| either value column, source is an assertion code | both written, coerced |
+
+An explicitly supplied value is never mixed with the stored sibling.
+`coerce_assertion_value` gives `value_as_string` precedence, so feeding the
+stored string back in would let it beat a patch that sets the number, and
+setting an assertion from 1 to 0 would silently stay true.
+
+---
+
 ## FHIR Bundle Generator Architecture
 
 `omop_core/management/commands/generate_fhir_bundle.py`:
