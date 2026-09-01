@@ -779,6 +779,19 @@ class MeasurementSerializer(serializers.ModelSerializer):
         ]
         extra_kwargs = {'measurement_id': {'required': False}}
 
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        from omop_core.services.field_write_service import coerce_assertion_value
+        source_value = attrs.get('measurement_source_value')
+        num, string, error = coerce_assertion_value(
+            source_value, attrs.get('value_as_number'), attrs.get('value_as_string'),
+        )
+        if error:
+            raise serializers.ValidationError({'value_as_string': error})
+        attrs['value_as_number'] = num
+        attrs['value_as_string'] = string
+        return attrs
+
 
 class ObservationSerializer(serializers.ModelSerializer):
     class Meta:
@@ -794,6 +807,19 @@ class ObservationSerializer(serializers.ModelSerializer):
             'is_erroneous', 'erroneous_reason',
         ]
         extra_kwargs = {'observation_id': {'required': False}}
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        from omop_core.services.field_write_service import coerce_assertion_value
+        source_value = attrs.get('observation_source_value')
+        num, string, error = coerce_assertion_value(
+            source_value, attrs.get('value_as_number'), attrs.get('value_as_string'),
+        )
+        if error:
+            raise serializers.ValidationError({'value_as_string': error})
+        attrs['value_as_number'] = num
+        attrs['value_as_string'] = string
+        return attrs
 
 
 class ProcedureOccurrenceSerializer(serializers.ModelSerializer):
