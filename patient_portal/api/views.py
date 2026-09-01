@@ -8486,7 +8486,7 @@ def _get_destination_concept(data):
         })
 
 
-def _mirror_to_concept_relationship(mapping, user):
+def _mirror_to_concept_relationship(mapping):
     """Write a 'Maps to' (and reverse 'Mapped from') row to concept_relationship.
 
     Called after an SCCM row is approved and has both source_concept and
@@ -8792,7 +8792,7 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
 
     # Mirror to concept_relationship when both concepts exist.
     if status_value == 'approved' and mapping.source_concept_id and concept:
-        _mirror_to_concept_relationship(mapping, user)
+        _mirror_to_concept_relationship(mapping)
 
     return mapping, repoint
 
