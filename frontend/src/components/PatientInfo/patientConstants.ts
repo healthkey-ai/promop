@@ -86,8 +86,8 @@ export const STAGING_MODALITIES_OPTIONS = [
 ];
 
 export const ER_OPTIONS = ['Positive', 'Negative', 'Equivocal', 'Unknown'];
-export const PR_OPTIONS = ['PR+', 'PR-', 'PR+ with low expression', 'PR+ with high expression', 'Unknown'];
-export const HER2_OPTIONS = ['HER2+', 'HER2-', 'HER2 low', 'Unknown'];
+export const PR_OPTIONS = ['Positive', 'Negative', 'Equivocal', 'Unknown'];
+export const HER2_OPTIONS = ['Positive', 'Negative', 'Equivocal', 'Unknown'];
 export const HR_OPTIONS = ['HR+', 'HR-', 'HR+ with low expression', 'HR+ with high expression', 'Unknown'];
 export const HRD_OPTIONS = ['HRD+', 'HRD-', 'Unknown'];
 export const MENOPAUSAL_OPTIONS = ['Pre-menopausal', 'Peri-menopausal', 'Post-menopausal', 'Unknown'];
