@@ -657,7 +657,7 @@ class ConceptRelationship(models.Model):
 
     # ── Provenance (NULL on Athena-loaded rows) ─────────────────────────
     source = models.CharField(
-        max_length=50, null=True, blank=True,
+        max_length=50, null=True, blank=True, db_index=True,
         help_text="NULL = Athena-loaded, 'HealthKey' = curated by us.",
     )
     origin_system = models.CharField(
