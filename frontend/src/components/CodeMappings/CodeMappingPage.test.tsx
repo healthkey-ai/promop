@@ -179,7 +179,7 @@ describe("CodeMappingPage", () => {
     renderPage();
     const row = (await screen.findByText("M-PROTEIN, SERUM", { selector: "td" })).closest("tr")!;
     const cells = within(row).getAllByRole("cell");
-    expect(cells[0]).toHaveTextContent("M-PROTEIN, SERUM");
+    expect(cells[1]).toHaveTextContent("M-PROTEIN, SERUM");
     expect(screen.queryByRole("columnheader", { name: "Source code system" })).not.toBeInTheDocument();
   });
 
@@ -205,7 +205,7 @@ describe("CodeMappingPage", () => {
   it("adds a tab for a source system that arrives in SCCM data", async () => {
     renderPage([{ ...proposedRow, source_vocabulary_id: "MedDRA", source_code: "10000001" }]);
     const tabs = within(await screen.findByRole("tablist", { name: "Source vocabularies" }));
-    const medDra = tabs.getByRole("tab", { name: "MedDRA" });
+    const medDra = tabs.getByRole("tab", { name: /MedDRA/ });
     fireEvent.click(medDra);
     expect(await screen.findByText("10000001", { selector: "td" })).toBeInTheDocument();
   });
