@@ -718,7 +718,9 @@ export default function CodeMappingPage() {
     }
   };
 
-  const renderTable = (sectionRows: CodeMappingRow[], emptyText: string) => (
+  const renderTable = (sectionRows: CodeMappingRow[], emptyText: string, { hideStatus = false }: { hideStatus?: boolean } = {}) => {
+    const colCount = hideStatus ? 6 : 8;
+    return (
     <div className="overflow-hidden rounded-md border border-slate-200 bg-white">
       <table className="w-full border-collapse text-left text-sm">
         <thead className="bg-slate-100 text-xs uppercase text-slate-600">
@@ -729,8 +731,8 @@ export default function CodeMappingPage() {
             <th className="px-4 py-3 font-semibold">Concept ID</th>
             <th className="px-4 py-3 font-semibold">OMOP table</th>
             <th className="px-4 py-3 font-semibold">Seen</th>
-            <th className="px-4 py-3 font-semibold">Status</th>
-            <th className="w-16 px-4 py-3 font-semibold" aria-label="Actions" />
+            {!hideStatus && <th className="px-4 py-3 font-semibold">Status</th>}
+            {!hideStatus && <th className="w-16 px-4 py-3 font-semibold" aria-label="Actions" />}
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
@@ -761,6 +763,7 @@ export default function CodeMappingPage() {
               <td className="px-4 py-3 font-mono text-xs text-slate-900">{row.destination_concept_id}</td>
               <td className="px-4 py-3 text-xs text-slate-700">{row.destination_omop_table}</td>
               <td className="px-4 py-3 text-xs text-slate-700">{row.occurrence_count || "—"}</td>
+              {!hideStatus && (
               <td className="px-4 py-3">
                 <div className="inline-flex items-center gap-2">
                   <button
@@ -782,6 +785,8 @@ export default function CodeMappingPage() {
                   </span>
                 </div>
               </td>
+              )}
+              {!hideStatus && (
               <td className="px-4 py-3">
                 <button
                   type="button"
@@ -792,17 +797,19 @@ export default function CodeMappingPage() {
                   <Pencil size={14} />
                 </button>
               </td>
+              )}
             </tr>
           ))}
           {sectionRows.length === 0 && (
             <tr>
-              <td colSpan={8} className="px-4 py-8 text-center text-sm text-slate-500">{emptyText}</td>
+              <td colSpan={colCount} className="px-4 py-8 text-center text-sm text-slate-500">{emptyText}</td>
             </tr>
           )}
         </tbody>
       </table>
     </div>
-  );
+    );
+  };
 
   if (loading) {
     return (
@@ -930,56 +937,6 @@ export default function CodeMappingPage() {
           </button>
         </div>
 
-        {athenaRows.length > 0 && (
-          <section className="mb-6">
-            <button
-              type="button"
-              onClick={() => setAthenaCollapsed((v) => !v)}
-              className="mb-2 inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-slate-700"
-            >
-              {athenaCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-              Athena Mapped <span className="font-normal text-slate-500">({athenaRows.length})</span>
-            </button>
-            {!athenaCollapsed && (
-              <div className="overflow-hidden rounded-md border border-slate-200 bg-white">
-                <table className="w-full border-collapse text-left text-sm">
-                  <thead className="bg-blue-50 text-xs uppercase text-slate-600">
-                    <tr>
-                      <th className="px-4 py-3 font-semibold">Source code</th>
-                      <th className="px-4 py-3 font-semibold">Source code system</th>
-                      <th className="px-4 py-3 font-semibold">Destination concept</th>
-                      <th className="px-4 py-3 font-semibold">Concept ID</th>
-                      <th className="px-4 py-3 font-semibold">Origin</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {athenaRows.map((row) => (
-                      <tr key={row.mapping_id ?? `athena-${row.destination_concept_id}`} className="text-slate-600">
-                        <td className="px-4 py-3 font-mono text-xs">{row.source_code}</td>
-                        <td className="px-4 py-3 font-mono text-xs">
-                          {row.source_vocabulary_id || <span className="italic text-slate-400">uncoded</span>}
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="font-medium text-slate-800">{row.destination_concept_name}</div>
-                          <div className="font-mono text-xs text-slate-500">
-                            {row.destination_vocabulary_id}:{row.destination_concept_code}
-                          </div>
-                        </td>
-                        <td className="px-4 py-3 font-mono text-xs">{row.destination_concept_id}</td>
-                        <td className="px-4 py-3">
-                          <span className="inline-flex rounded bg-blue-100 px-2 py-1 text-xs font-medium text-blue-800">
-                            Athena
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
-        )}
-
         <section className="mb-6">
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-700">
             Unmapped <span className="font-normal text-slate-500">({unmappedRows.length})</span>
@@ -1002,7 +959,7 @@ export default function CodeMappingPage() {
           {renderTable(unmappedRows, "Nothing awaiting review in this vocabulary.")}
         </section>
 
-        <section>
+        <section className="mb-6">
           <button
             type="button"
             onClick={() => setMappedCollapsed((v) => !v)}
@@ -1013,6 +970,20 @@ export default function CodeMappingPage() {
           </button>
           {!mappedCollapsed && renderTable(mappedRows, "No approved mappings in this vocabulary.")}
         </section>
+
+        {athenaRows.length > 0 && (
+          <section>
+            <button
+              type="button"
+              onClick={() => setAthenaCollapsed((v) => !v)}
+              className="mb-2 inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-slate-700"
+            >
+              {athenaCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+              Athena Mapped <span className="font-normal text-slate-500">({athenaRows.length})</span>
+            </button>
+            {!athenaCollapsed && renderTable(athenaRows, "No Athena mappings in this vocabulary.", { hideStatus: true })}
+          </section>
+        )}
       </div>
 
       {dialogMode && (
