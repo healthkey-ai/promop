@@ -642,5 +642,12 @@ PROLOG_PARTICIPANT_FACTORY = 'patient_portal.services.create_unidentified_person
 PROLOG_DEFINITION_DIRS = [d for d in os.environ.get('PROLOG_DEFINITION_DIRS', '').split(os.pathsep) if d]
 PROLOG_THEME_DIRS = [d for d in os.environ.get('PROLOG_THEME_DIRS', '').split(os.pathsep) if d]
 
+# The built runner front end, when a deployment mounts one. It is a separate SPA
+# from PRomop's own, so its assets are served under their own prefix
+# (/prolog-static/) — PRomop's build already owns /assets/. Unset means the API
+# is mounted but no page is served, which is the default.
+# prolog_surveys.views.runner_index reads settings.RUNNER_DIST directly.
+RUNNER_DIST = Path(os.environ['PROLOG_RUNNER_DIST']) if os.environ.get('PROLOG_RUNNER_DIST') else None
+
 PROLOG_PUBLIC_URL = os.environ.get('PROLOG_PUBLIC_URL', APP_BASE_URL)
 PROLOG_EMAIL_FROM = os.environ.get('PROLOG_EMAIL_FROM', DEFAULT_FROM_EMAIL)

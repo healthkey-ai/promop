@@ -11,7 +11,8 @@ Class-based views
     1. Add an import:  from other_app.views import Home
     2. Add a URL to urlpatterns:  path('', Home.as_view(), name='home')
 Including another URLconf
-    1. Import the include() function: from django.urls import include, path
+    1. Import the include() function: from django.conf import settings
+from django.urls import include, path
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 from django.contrib import admin
@@ -20,6 +21,7 @@ from django.views.generic import TemplateView
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 from rest_framework.permissions import AllowAny
 from patient_portal.api import views
+from django.conf import settings
 
 # Versioned API URL patterns (v1) — the canonical contract.
 # INVARIANT: every sub-app URL module included here must also appear in the
@@ -67,3 +69,16 @@ urlpatterns = [
     # Serve React app for all other routes
     re_path(r'^.*$', TemplateView.as_view(template_name='index.html'), name='home'),
 ]
+
+# The PROlog runner's own SPA, when a deployment mounts a build. Inserted before
+# the catch-all above so the runner's routes reach it rather than PRomop's shell;
+# its assets sit under their own prefix because PRomop's build owns /assets/.
+if getattr(settings, 'RUNNER_DIST', None) and settings.RUNNER_DIST.exists():
+    from django.views.static import serve as _serve_static
+    from prolog_surveys.views import runner_index
+
+    urlpatterns.insert(-1, re_path(
+        r'^prolog-static/(?P<path>.*)$', _serve_static,
+        {'document_root': settings.RUNNER_DIST},
+    ))
+    urlpatterns.insert(-1, re_path(r'^s/', runner_index, name='prolog_runner'))
