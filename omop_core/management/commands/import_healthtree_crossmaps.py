@@ -58,7 +58,13 @@ class Command(BaseCommand):
                 stats['existing'] += 1
                 continue
             stats['created'] += 1
-            origin_system = row['origins'][0] if row.get('origins') else 'HT-One'
+            # Both HealthTree projects contribute every generated mapping. Prefer
+            # One as the canonical provenance; Next remains meaningful for a
+            # future Next-only artifact row.
+            origin_system = (
+                'HT-One' if 'HT-One' in row.get('origins', [])
+                else (row['origins'][0] if row.get('origins') else 'HT-One')
+            )
             pending.append(SourceCodeConceptMapping(
                 source_vocabulary_id=row['source_vocabulary_id'],
                 source_code=row['source_code'],
