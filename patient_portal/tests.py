@@ -16390,6 +16390,20 @@ class OrgSignupDirectoryTest(TestCase):
         resp = APIClient().get(self.URL)
         self.assertEqual(set(resp.data[0].keys()), {'name', 'slug'})
 
+    def test_email_filters_to_pending_invitations_and_trusted_domains(self):
+        invited = Organization.objects.get(slug='closed-clinic')
+        trusted = Organization.objects.get(slug='zeta-clinic')
+        OrgInvitation.objects.create(
+            org=invited, email='member@trusted.example', role='patient',
+            token='b' * 64, expires_at=timezone.now() + timedelta(days=7),
+        )
+        OrgTrust.objects.create(granting_org=trusted, trusted_domain='trusted.example')
+
+        resp = APIClient().get(f'{self.URL}?email=member@trusted.example')
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual([org['slug'] for org in resp.data], ['closed-clinic', 'zeta-clinic'])
+
     def test_empty_when_no_org_allows_signup(self):
         Organization.objects.all().update(allows_patient_signup=False)
         resp = APIClient().get(self.URL)

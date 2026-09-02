@@ -746,19 +746,31 @@ class OrgVocabularyUsageView(APIView):
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def org_signup_directory(request):
-    """List orgs a logged-out visitor may self-register with.
+    """List organizations eligible for a logged-out visitor's sign-up.
 
-    The homepage Sign Up tab needs to know which orgs accept registrations, and
-    an anonymous visitor cannot read the authenticated org list. Only name and
-    slug are exposed — the same two fields `org_public_info` already publishes
-    per org, just enumerated.
+    With no email, return the public self-signup directory so the homepage can
+    decide whether to offer Sign Up.  With an email, return only active orgs
+    that have invited that email or trust its domain; the email field therefore
+    determines the Organization choices shown directly beneath it.
     """
-    orgs = (
-        Organization.objects
-        .filter(is_active=True, allows_patient_signup=True)
-        .order_by('name')
-        .values('name', 'slug')
-    )
+    email = (request.query_params.get('email') or '').strip().lower()
+    if '@' not in email:
+        orgs = Organization.objects.filter(is_active=True, allows_patient_signup=True)
+    else:
+        domain = email.rsplit('@', 1)[1]
+        now = timezone.now()
+        orgs = Organization.objects.filter(
+            is_active=True,
+        ).filter(
+            Q(trusts_granted__trusted_domain__iexact=domain)
+            | Q(
+                invitations__email__iexact=email,
+                invitations__confirmed_at__isnull=True,
+                invitations__cancelled_at__isnull=True,
+                invitations__expires_at__gt=now,
+            )
+        )
+    orgs = orgs.order_by('name').distinct().values('name', 'slug')
     return Response(list(orgs))
 
 
@@ -786,12 +798,6 @@ class OrgPatientSignupView(APIView):
 
     def post(self, request, slug):
         org = get_object_or_404(Organization, slug=slug, is_active=True)
-        if not org.allows_patient_signup:
-            return Response(
-                {'error': 'This organization does not allow direct patient signup.'},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
         email = (request.data.get('email') or '').strip().lower()
         password = request.data.get('password', '')
         given_name = (request.data.get('given_name') or '').strip()
@@ -824,6 +830,26 @@ class OrgPatientSignupView(APIView):
             return Response(
                 {'errors': field_errors},
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        domain = email.rsplit('@', 1)[1]
+        invitation_or_domain_access = (
+            OrgInvitation.objects.filter(
+                org=org,
+                email__iexact=email,
+                confirmed_at__isnull=True,
+                cancelled_at__isnull=True,
+                expires_at__gt=timezone.now(),
+            ).exists()
+            or OrgTrust.objects.filter(
+                granting_org=org,
+                trusted_domain__iexact=domain,
+            ).exists()
+        )
+        if not org.allows_patient_signup and not invitation_or_domain_access:
+            return Response(
+                {'error': 'This organization does not allow direct patient signup.'},
+                status=status.HTTP_403_FORBIDDEN,
             )
 
         from patient_portal.services import set_new_password
