@@ -214,6 +214,21 @@ describe("CodeMappingPage", () => {
     expect(tabs.getByRole("tab", { name: /ICD10CM/ })).toBeInTheDocument();
   });
 
+  it("selects Uncoded instead of falling back to the default vocabulary", async () => {
+    renderPage();
+    const tabs = within(await screen.findByRole("tablist", { name: "Source vocabularies" }));
+    const uncoded = tabs.getByRole("tab", { name: /Uncoded/ });
+    const icd10cm = tabs.getByRole("tab", { name: /ICD10CM/ });
+
+    fireEvent.click(icd10cm);
+    expect(icd10cm).toHaveAttribute("aria-selected", "true");
+
+    fireEvent.click(uncoded);
+    expect(uncoded).toHaveAttribute("aria-selected", "true");
+    expect(icd10cm).toHaveAttribute("aria-selected", "false");
+    expect(await screen.findByText("M-PROTEIN, SERUM", { selector: "td" })).toBeInTheDocument();
+  });
+
   it("adds a tab for a source system that arrives in SCCM data", async () => {
     renderPage([{ ...proposedRow, source_vocabulary_id: "MedDRA", source_code: "10000001" }]);
     const tabs = within(await screen.findByRole("tablist", { name: "Source vocabularies" }));

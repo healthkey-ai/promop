@@ -298,7 +298,9 @@ export default function CodeMappingPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
-  const [activeVocabulary, setActiveVocabulary] = useState("");
+  // `null` means no choice has been made, so use the work-prioritized default.
+  // The empty string is a real vocabulary ID: it represents the Uncoded tab.
+  const [activeVocabulary, setActiveVocabulary] = useState<string | null>(null);
   const [unmappedCollapsed, setUnmappedCollapsed] = useState(false);
   const [mappedCollapsed, setMappedCollapsed] = useState(true);
   const [athenaCollapsed, setAthenaCollapsed] = useState(true);
@@ -384,7 +386,7 @@ export default function CodeMappingPage() {
     return vocabularyTabs[0]?.vocabulary_id ?? "";
   }, [vocabularyTabs]);
 
-  const selectedVocabulary = activeVocabulary || defaultVocabulary;
+  const selectedVocabulary = activeVocabulary ?? defaultVocabulary;
 
   const visibleRows = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
