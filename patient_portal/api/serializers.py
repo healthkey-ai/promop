@@ -1476,4 +1476,6 @@ class PrologSurveyResponseSerializer(serializers.Serializer):
     values = serializers.SerializerMethodField()
 
     def get_values(self, obj):
+        # `.all()` on purpose: it reads the viewset's prefetch cache, where a
+        # filtered queryset would issue a query per row.
         return {a.question_key: a.value for a in obj.answers.all()}

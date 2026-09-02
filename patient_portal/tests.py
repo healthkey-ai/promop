@@ -14,6 +14,7 @@ import json
 from typing import Any
 import os
 import tempfile
+from pathlib import Path
 import unittest
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -24288,3 +24289,301 @@ class AdminDeletePatientWithSurveyTest(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.assertFalse(Person.objects.filter(person_id=person_id).exists())
         self.assertFalse(SurveyResponse.objects.filter(participant_id=person_id).exists())
+
+
+class PrologSurveyApiContractTest(TestCase):
+    """The restored endpoints keep the list behaviour of the ones they replace.
+
+    They scope differently from the OMOP viewsets, but a caller cannot see
+    that: it still expects ?page to paginate, a misspelt filter to be refused,
+    and an unpublished instrument to stay unpublished.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.services.pk import next_pk
+        from prolog_surveys.definitions.loader import load_definition
+        from prolog_surveys.models import SurveyAnswer, SurveyResponse
+
+        cls.identity = Identity.objects.create(issuer='urn:local', sub='contract-patient')
+        cls.person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=cls.person)
+        PatientUser.objects.create(identity=cls.identity, person=cls.person)
+        cls.staff = Identity.objects.create(
+            issuer='urn:local', sub='contract-staff', is_staff=True
+        )
+
+        def definition(slug, title):
+            return {
+                'schema_version': 1, 'slug': slug, 'version': '1.0', 'status': 'draft',
+                'default_language': 'en', 'languages': ['en'], 'title': {'en': title},
+                'sections': [{'key': 's1', 'title': {'en': 'S'}, 'questions': [
+                    {'key': 'mood', 'type': 'text', 'text': {'en': 'How are you?'}}]}],
+            }
+
+        cls.active = load_definition(definition('published', 'Published'), activate=True).version
+        # Loaded but never activated: an instrument still being written.
+        cls.draft = load_definition(definition('unpublished', 'Unpublished')).version
+        for _ in range(3):
+            response = SurveyResponse.objects.create(
+                survey_version=cls.active, participant_id=cls.person.person_id, language='en'
+            )
+            SurveyAnswer.objects.create(
+                response=response, question_key='mood', value={'text': 'fine'}
+            )
+
+    def test_a_patient_cannot_read_an_unpublished_instrument(self):
+        self.client.force_login(self.identity)
+
+        body = self.client.get('/api/v1/surveys/?status=draft').json()
+
+        self.assertEqual(
+            [row['slug'] for row in body], ['published'],
+            'the definition of an unpublished instrument is not a patient-facing document',
+        )
+
+    def test_staff_can_read_an_unpublished_instrument(self):
+        self.client.force_login(self.staff)
+
+        body = self.client.get('/api/v1/surveys/?status=draft').json()
+
+        self.assertEqual([row['slug'] for row in body], ['unpublished'])
+
+    def test_an_unknown_status_is_refused(self):
+        self.client.force_login(self.staff)
+
+        response = self.client.get('/api/v1/surveys/?status=nonsense')
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_page_paginates_rather_than_being_ignored(self):
+        self.client.force_login(self.identity)
+
+        body = self.client.get('/api/v1/survey-responses/?page=1&page_size=2').json()
+
+        self.assertEqual(body['count'], 3)
+        self.assertEqual(len(body['results']), 2)
+
+    def test_a_misspelt_filter_is_refused_rather_than_ignored(self):
+        self.client.force_login(self.identity)
+
+        response = self.client.get('/api/v1/survey-responses/?persn_id=1')
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('persn_id', response.json()['unsupported_params'])
+
+    def test_a_numeric_survey_filter_says_what_it_wants(self):
+        """The retired endpoint took an id here; an empty list would look like an answer."""
+        self.client.force_login(self.identity)
+
+        response = self.client.get('/api/v1/survey-responses/?survey=3')
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('slug', str(response.json()['survey']))
+
+    def test_the_values_map_costs_no_query_per_row(self):
+        """Doubling the rows must not double the queries.
+
+        Asserted as a comparison rather than a fixed count, so it measures the
+        thing that matters — that `values` reads a prefetch — without pinning
+        the unrelated per-request queries.
+        """
+        from django.test.utils import CaptureQueriesContext
+        from django.db import connection
+        from prolog_surveys.models import SurveyAnswer, SurveyResponse
+
+        self.client.force_login(self.identity)
+        with CaptureQueriesContext(connection) as first:
+            body = self.client.get('/api/v1/survey-responses/').json()
+        self.assertEqual(len(body), 3)
+        self.assertEqual(body[0]['values'], {'mood': {'text': 'fine'}})
+
+        for _ in range(3):
+            response = SurveyResponse.objects.create(
+                survey_version=self.active, participant_id=self.person.person_id,
+                language='en',
+            )
+            SurveyAnswer.objects.create(
+                response=response, question_key='mood', value={'text': 'fine'}
+            )
+        with CaptureQueriesContext(connection) as second:
+            self.assertEqual(len(self.client.get('/api/v1/survey-responses/').json()), 6)
+
+        self.assertEqual(
+            len(second), len(first),
+            'the answers are prefetched, so row count must not move the query count',
+        )
+
+
+class PrologRunnerMountTest(TestCase):
+    """Mounting the runner: the routes, the asset caching, and the checks.
+
+    The mount is conditional on a directory existing at startup, and the
+    Surveys tab links to /s/<slug> whether or not it is there — so the failure
+    mode is a patient clicking Start and landing on the dashboard. These cover
+    the pieces that make that visible.
+    """
+
+    def test_no_dist_means_no_routes(self):
+        from ctomop.urls import runner_urlpatterns
+
+        self.assertEqual(runner_urlpatterns(None), [])
+        self.assertEqual(runner_urlpatterns(Path('/no/such/runner')), [])
+
+    def test_a_dist_is_matched_before_the_spa_catch_all(self):
+        from ctomop.urls import runner_urlpatterns, urlpatterns
+
+        with tempfile.TemporaryDirectory() as tmp:
+            patterns = runner_urlpatterns(Path(tmp))
+
+        self.assertEqual(len(patterns), 1)
+        self.assertTrue(patterns[0].pattern.match('s/my-survey'))
+        # The order that matters: inserted at -1, so before the catch-all.
+        assembled = urlpatterns[:-1] + patterns + urlpatterns[-1:]
+        self.assertTrue(
+            assembled.index(patterns[0]) < len(assembled) - 1,
+            'the runner must be tried before the pattern that returns the portal shell',
+        )
+        self.assertTrue(assembled[-1].pattern.match('anything/at/all'))
+
+    def test_hashed_runner_assets_are_cacheable_and_the_page_is_not(self):
+        from ctomop.whitenoise import PromopWhiteNoise
+
+        test = PromopWhiteNoise.immutable_file_test
+        instance = PromopWhiteNoise.__new__(PromopWhiteNoise)
+
+        self.assertTrue(test(instance, '', '/prolog-static/assets/index-CvVEhs4B.js'))
+        self.assertFalse(test(instance, '', '/prolog-static/index.html'))
+
+    def test_a_runner_path_that_does_not_exist_fails_the_check(self):
+        from patient_portal.checks import prolog_runner_mount_check
+
+        with self.settings(RUNNER_DIST=Path('/no/such/runner')):
+            issues = prolog_runner_mount_check(None)
+
+        self.assertEqual([i.id for i in issues], ['patient_portal.E004'])
+
+    def test_a_dist_without_an_index_fails_the_check(self):
+        from patient_portal.checks import prolog_runner_mount_check
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.settings(RUNNER_DIST=Path(tmp)):
+                issues = prolog_runner_mount_check(None)
+
+        self.assertEqual([i.id for i in issues], ['patient_portal.E004'])
+
+    def test_surveys_configured_with_no_runner_warns(self):
+        from patient_portal.checks import prolog_runner_mount_check
+
+        with self.settings(RUNNER_DIST=None, PROLOG_DEFINITION_DIRS=['/data/surveys']):
+            issues = prolog_runner_mount_check(None)
+
+        self.assertEqual([i.id for i in issues], ['patient_portal.W004'])
+
+    def test_a_per_process_throttle_counter_is_reported_in_production(self):
+        from patient_portal.checks import throttle_cache_is_shared_check
+
+        locmem = {'default': {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache'}}
+        with self.settings(DEBUG=False, CACHES=locmem):
+            issues = throttle_cache_is_shared_check(None)
+        self.assertEqual([i.id for i in issues], ['patient_portal.W005'])
+
+        redis = {'default': {'BACKEND': 'django.core.cache.backends.redis.RedisCache'}}
+        with self.settings(DEBUG=False, CACHES=redis):
+            self.assertEqual(throttle_cache_is_shared_check(None), [])
+
+
+class RetireLegacySurveysGuardTest(TestCase):
+    """The guard in migration 0201, run directly against its own SQL.
+
+    The migration is already applied in the test database and its tables are
+    gone, so what is exercised here is the check function against tables built
+    for the purpose — which is the state a deployment is in when it runs.
+    """
+
+    _DDL = (
+        """create table survey (
+               id serial primary key,
+               name varchar(200) unique not null
+           )""",
+        """create table patient_survey_response (
+               id serial primary key,
+               survey_id integer not null references survey(id),
+               person_id bigint not null
+           )""",
+    )
+
+    def setUp(self):
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            for statement in self._DDL:
+                cursor.execute(statement)
+
+    def tearDown(self):
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            cursor.execute('drop table if exists patient_survey_response')
+            cursor.execute('drop table if exists survey')
+
+    def _run_guard(self):
+        from django.db import connection
+        from importlib import import_module
+
+        module = import_module('omop_core.migrations.0201_retire_legacy_surveys')
+
+        class _SchemaEditor:
+            def __init__(self, conn):
+                self.connection = conn
+
+        module.refuse_if_unmigrated(None, _SchemaEditor(connection))
+
+    def test_an_unconverted_template_stops_the_drop(self):
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            cursor.execute("insert into survey (name) values ('symptom check')")
+
+        with self.assertRaises(RuntimeError) as caught:
+            self._run_guard()
+
+        self.assertIn('symptom check', str(caught.exception))
+        self.assertIn('--purge-source', str(caught.exception))
+
+    def test_a_converted_template_passes(self):
+        from django.db import connection
+        from prolog_surveys.definitions.loader import load_definition
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "insert into survey (name) values ('symptom check') returning id"
+            )
+            (legacy_id,) = cursor.fetchone()
+        load_definition({
+            'schema_version': 1, 'slug': 'symptom-check', 'version': '1.0',
+            'status': 'draft', 'default_language': 'en', 'languages': ['en'],
+            'title': {'en': 'Symptom check'},
+            'sections': [{'key': 's1', 'title': {'en': 'S'}, 'questions': [
+                {'key': 'mood', 'type': 'text', 'text': {'en': 'How are you?'}}]}],
+        }, source=f'legacy survey:{legacy_id}')
+
+        self._run_guard()  # does not raise
+
+    def test_a_response_still_present_stops_the_drop(self):
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "insert into survey (name) values ('symptom check') returning id"
+            )
+            (legacy_id,) = cursor.fetchone()
+            cursor.execute(
+                'insert into patient_survey_response (survey_id, person_id) values (%s, %s)',
+                [legacy_id, 1],
+            )
+
+        with self.assertRaises(RuntimeError) as caught:
+            self._run_guard()
+
+        self.assertIn('still in `patient_survey_response`', str(caught.exception))

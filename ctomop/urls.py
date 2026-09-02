@@ -11,10 +11,11 @@ Class-based views
     1. Add an import:  from other_app.views import Home
     2. Add a URL to urlpatterns:  path('', Home.as_view(), name='home')
 Including another URLconf
-    1. Import the include() function: from django.conf import settings
-from django.urls import include, path
+    1. Import the include() function: from django.urls import include, path
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
+from pathlib import Path
+
 from django.contrib import admin
 from django.urls import path, include, re_path
 from django.views.generic import TemplateView
@@ -70,15 +71,25 @@ urlpatterns = [
     re_path(r'^.*$', TemplateView.as_view(template_name='index.html'), name='home'),
 ]
 
-# The PROlog runner's own SPA, when a deployment mounts a build. Inserted before
-# the catch-all above so the runner's routes reach it rather than PRomop's shell;
-# its assets sit under their own prefix because PRomop's build owns /assets/.
-if getattr(settings, 'RUNNER_DIST', None) and settings.RUNNER_DIST.exists():
-    from django.views.static import serve as _serve_static
+def runner_urlpatterns(dist):
+    """The PROlog runner's routes, for a deployment that mounts a build.
+
+    A function rather than a conditional block so that it can be tested: the
+    thing that matters is that `/s/...` is matched before the catch-all that
+    returns PRomop's shell, and a module-level `if` evaluated once at import
+    is not something a test can exercise.
+
+    Only the page: the runner's assets are served by WhiteNoise, which is
+    given the same directory in ctomop/whitenoise.py.
+    """
+    if not dist or not Path(dist).exists():
+        return []
     from prolog_surveys.views import runner_index
 
-    urlpatterns.insert(-1, re_path(
-        r'^prolog-static/(?P<path>.*)$', _serve_static,
-        {'document_root': settings.RUNNER_DIST},
-    ))
-    urlpatterns.insert(-1, re_path(r'^s/', runner_index, name='prolog_runner'))
+    return [re_path(r'^s/', runner_index, name='prolog_runner')]
+
+
+# Inserted before the catch-all above, so the runner's routes reach it rather
+# than PRomop's shell.
+for _pattern in runner_urlpatterns(getattr(settings, 'RUNNER_DIST', None)):
+    urlpatterns.insert(-1, _pattern)

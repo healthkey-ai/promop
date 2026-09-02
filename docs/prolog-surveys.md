@@ -80,6 +80,13 @@ The rate at which they can be created is the `run.create` throttle:
 which an anonymous caller can add rows to `person`, and should be read that way
 when it is set.
 
+**It is only a limit if the counter is shared.** DRF counts throttled requests
+in `caches['default']`. Set `CACHE_URL` — or run a Redis `CELERY_BROKER_URL`,
+which is used as the cache when no `CACHE_URL` is given — so the count is shared
+across workers. Without one it falls back to per-process memory: every rate is
+multiplied by the worker count, and a restart forgets them all. `manage.py check
+--deploy` reports that as `patient_portal.W005`.
+
 ## Answers are not clinical data
 
 PROlog never writes OMOP clinical tables (its DEP-7). Answers live in the survey
@@ -93,9 +100,11 @@ built: patient-originated rows are typed 32865 "Patient self-report", never 3288
 ## Serving surveys
 
 No survey is offered until a deployment mounts one. Both directories are empty by
-default, so a PRomop that runs no surveys loads none and the runner's health
-endpoint reports `degraded` with `active_surveys: 0` — which is correct rather
-than broken, and is not the container's health check.
+default, so a PRomop that runs no surveys loads none: the runner's health
+endpoint answers 200 `"status": "ok"` with `active_surveys: 0`, which is a
+deployment that simply serves no instrument. `degraded` (503) means something
+else — pending migrations, or no `default` theme — and is always worth
+investigating. Neither is the container's health check.
 
 ```sh
 PROLOG_DEFINITION_DIRS=/data/surveys   # *.json instruments, loaded as drafts
@@ -119,6 +128,15 @@ PRomop's shell:
 VITE_API_BASE=/api/v1/prolog/run npx vite build --base=/prolog-static/
 # then point PROLOG_RUNNER_DIST at frontend/dist
 ```
+
+The directory is registered with WhiteNoise (`ctomop/whitenoise.py`), so its
+assets get the caching and conditional requests PRomop's own build gets, and the
+content-hashed files under `assets/` are cached for a year. WhiteNoise reads the
+directory at startup, so replacing a build in place needs a restart — which is
+what a deploy does anyway. A path that does not exist, or one with no
+`index.html`, fails `manage.py check` (`patient_portal.E004`) rather than
+silently serving the portal shell at `/s/<slug>`; definitions mounted with no
+runner is a warning (`patient_portal.W004`).
 
 A survey is then answered at `/s/<slug>`.
 
@@ -225,6 +243,7 @@ tables are not, until you migrate. That gap is the upgrade window, and the order
 matters:
 
 ```sh
+python manage.py migrate prolog_surveys                # 0. create PROlog's tables
 python manage.py migrate_surveys_to_prolog             # 1. see what would move
 python manage.py migrate_surveys_to_prolog --apply     # 2. move it
 #    ... check the result in the portal ...
@@ -242,6 +261,11 @@ share a slug is not mistaken for a counterpart. It deletes, so it needs
 
 Step 3 is not optional. Conversion copies rather than moves, so the guard in
 step 4 still counts the originals until they are purged.
+
+Step 0 is not redundant either, on a deployment coming from a release that never
+had `prolog_surveys`: the converter writes through PROlog's models, and step 2
+dies with `relation "prolog_surveys_survey" does not exist` until they have
+tables. Step 1 is pure and works either way.
 
 **Migration `0201` refuses to run while anything is unconverted.** `start.sh`
 migrates on every deploy, so a deployment that skipped the steps above fails

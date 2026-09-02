@@ -3,6 +3,7 @@ from typing import Any, Callable, ContextManager
 
 from rest_framework import serializers, viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -5425,30 +5426,20 @@ _MODEL_PK_MAP = {
 }
 
 
-class _OmopFilterMixin:
-    """Filter by person_id query param and restrict to the requesting org's patients."""
+class _ListQueryParamsMixin:
+    """Paginated list responses, and a 400 for a query parameter nobody reads.
+
+    Split out of _OmopFilterMixin so that an endpoint which does its own
+    scoping still answers ?page/?limit and still refuses a misspelt filter,
+    rather than silently returning everything — which is what a caller
+    experiences as a filter that stopped working.
+    """
     pagination_query_params = frozenset({'page', 'page_size', 'limit'})
-    allowed_list_query_params = (
-        frozenset({'person_id', 'include_erroneous', 'format'})
-        | pagination_query_params
-    )
-    clinical_filter_fields = None
+    allowed_list_query_params = frozenset({'format'}) | pagination_query_params
     pagination_class = ClinicalOmopPagination
 
     def get_allowed_list_query_params(self):
-        allowed = set(self.allowed_list_query_params)
-        config = self.clinical_filter_fields
-        if config:
-            allowed.update({
-                config['concept_param'],
-                config['source_concept_param'],
-                'concept_code',
-                f"{config['date_field']}__gte",
-                f"{config['date_field']}__lte",
-            })
-            if config.get('visit_filter', True):
-                allowed.add('visit_occurrence_id')
-        return allowed
+        return set(self.allowed_list_query_params)
 
     def _pagination_requested(self):
         return bool(set(self.request.query_params) & self.pagination_query_params)
@@ -5487,6 +5478,30 @@ class _OmopFilterMixin:
         queryset = self.filter_queryset(self.get_queryset())
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
+
+
+class _OmopFilterMixin(_ListQueryParamsMixin):
+    """Filter by person_id query param and restrict to the requesting org's patients."""
+    allowed_list_query_params = (
+        frozenset({'person_id', 'include_erroneous', 'format'})
+        | _ListQueryParamsMixin.pagination_query_params
+    )
+    clinical_filter_fields = None
+
+    def get_allowed_list_query_params(self):
+        allowed = super().get_allowed_list_query_params()
+        config = self.clinical_filter_fields
+        if config:
+            allowed.update({
+                config['concept_param'],
+                config['source_concept_param'],
+                'concept_code',
+                f"{config['date_field']}__gte",
+                f"{config['date_field']}__lte",
+            })
+            if config.get('visit_filter', True):
+                allowed.add('visit_occurrence_id')
+        return allowed
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -7792,7 +7807,7 @@ class PatientTrialEnrollmentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     queryset = PatientTrialEnrollment.objects.all()
 
 
-class SurveyViewSet(viewsets.ReadOnlyModelViewSet):
+class SurveyViewSet(_ListQueryParamsMixin, viewsets.ReadOnlyModelViewSet):
     """`/surveys/` — the instruments this deployment serves.
 
     Backed by PROlog. Read-only, and that is a real change from the retired
@@ -7806,21 +7821,37 @@ class SurveyViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [ScopedTokenPermission]
     serializer_class = PrologSurveySerializer
     http_method_names = ['get', 'head', 'options']
+    allowed_list_query_params = (
+        frozenset({'status', 'format'}) | _ListQueryParamsMixin.pagination_query_params
+    )
+
+    #: ACTIVE / DRAFT / ARCHIVED, as the retired feature spelled them.
+    _STATUSES = ('active', 'draft', 'archived')
 
     def get_queryset(self):
         from prolog_surveys.models import LifecycleStatus, SurveyVersion
 
         qs = SurveyVersion.objects.select_related('survey').order_by('survey__slug', '-created_at')
-        status_filter = self.request.query_params.get('status')
-        if status_filter:
-            # ACTIVE / DRAFT / ARCHIVED, as the retired feature spelled them.
-            qs = qs.filter(status=status_filter.lower())
+        status_filter = (self.request.query_params.get('status') or '').lower()
+        if status_filter and status_filter not in self._STATUSES:
+            raise ValidationError({
+                'status': f"Must be one of: {', '.join(self._STATUSES)}.",
+            })
+        # A draft or archived version is an instrument that is deliberately not
+        # being offered, and this serializer exposes the whole definition —
+        # every question, its logic and its unpublished wording. Only a caller
+        # who administers instruments sees those.
+        privileged = is_service_token(self.request) or getattr(
+            self.request.user, 'is_staff', False
+        )
+        if status_filter and privileged:
+            qs = qs.filter(status=status_filter)
         else:
             qs = qs.filter(status=LifecycleStatus.ACTIVE)
         return qs
 
 
-class PatientSurveyResponseViewSet(viewsets.ReadOnlyModelViewSet):
+class PatientSurveyResponseViewSet(_ListQueryParamsMixin, viewsets.ReadOnlyModelViewSet):
     """`/survey-responses/` — responses, scoped to who is asking.
 
     Backed by PROlog. Read-only: answering goes through the runner at
@@ -7832,13 +7863,24 @@ class PatientSurveyResponseViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [ScopedTokenPermission]
     serializer_class = PrologSurveyResponseSerializer
     http_method_names = ['get', 'head', 'options']
+    allowed_list_query_params = (
+        frozenset({'person_id', 'survey', 'format'})
+        | _ListQueryParamsMixin.pagination_query_params
+    )
 
     def get_queryset(self):
         from omop_core.authorization import can_access_patient
         from patient_portal.services import patient_person_for
         from prolog_surveys.models import SurveyResponse
 
-        qs = SurveyResponse.objects.select_related('survey_version__survey').order_by('-started_at')
+        # `answers` is prefetched because the serializer derives `values` from
+        # it: without this each row in a list response costs its own query.
+        qs = (
+            SurveyResponse.objects
+            .select_related('survey_version__survey')
+            .prefetch_related('answers')
+            .order_by('-started_at')
+        )
         request = self.request
 
         # `participant_id` is an integer column, so the filter value has to be
@@ -7881,6 +7923,17 @@ class PatientSurveyResponseViewSet(viewsets.ReadOnlyModelViewSet):
             qs = qs.filter(participant_id=person_id)
         survey = request.query_params.get('survey')
         if survey:
+            # The retired endpoint took the Survey primary key here. PROlog
+            # identifies an instrument by slug, and a stale numeric id would
+            # match nothing and read as "this survey has no responses", so it
+            # is refused rather than answered with an empty list.
+            if survey.isdigit():
+                raise ValidationError({
+                    'survey': (
+                        'Takes an instrument slug, not a numeric id. The slug '
+                        'is the `slug` field of /surveys/.'
+                    ),
+                })
             qs = qs.filter(survey_version__survey__slug=survey)
         return qs
 

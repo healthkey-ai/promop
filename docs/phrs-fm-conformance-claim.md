@@ -50,10 +50,10 @@
 | PH.1.4 | Manage advance directives | 3/3 MET |
 | PH.1.5 | Manage consents & authorizations | 2/2 MET |
 | PH.2 | Manage historical & current-state data | 2/2 MET |
-| PH.2.1 | Manage account-holder-originated data | 3/3 MET |
+| PH.2.1 | Manage account-holder-originated data | 3/3 MET *(in transition — see §7.8)* |
 | PH.2.3 | Manage data from external clinical sources | 3/3 MET *(see §7.4)* |
 | PH.2.4 | Produce & present ad-hoc views (FHIR export) | no SHALL criteria; implemented |
-| PH.3.1.1 | Manage personal observations & care | 1/1 MET |
+| PH.3.1.1 | Manage personal observations & care | 1/1 MET *(in transition — see §7.8)* |
 | PH.6.3 | Provider ↔ account-holder communications | 4/4 MET |
 | TI.1.1 | Entity authentication | 12/12 MET *(see §7.6)* |
 | TI.1.2 | Entity authorization | 4/4 MET |
@@ -78,12 +78,15 @@
 | TI.5.4 Interchange agreements | Optional (out of scope) | #01 PARTIAL — `InterchangeAgreement` records exist but exchange is gated by OAuth/`OrgTrust`, not driven/enforced by the agreement | bind provisioning to agreement records |
 
 Both remaining PARTIAL functions (TI.5.2, TI.5.4) are declared **Optional** and do not block the
-profile claim. As of #318 **every Essential function of the profile is fully conformant.**
+profile claim. As of #318 **every Essential function of the profile is fully conformant**, except
+that the evidence for **PH.2.1 / PH.3.1.1 is in transition** and awaits re-verification against the
+replacement survey model (§7.8).
 
 ## 7. Limitations & caveats (disclosed)
 1. **Scoped, function-level claim** against the HealthKey Oncology Patient PHR Profile — not a claim
-   of full-model conformance. The profile's **entire Essential set is fully conformant** (as of #318);
-   the only remaining PARTIAL functions are Optional (§6).
+   of full-model conformance. The profile's **entire Essential set is fully conformant** (as of #318),
+   with PH.2.1 / PH.3.1.1 pending re-verification (§7.8); the only remaining PARTIAL functions are
+   Optional (§6).
 2. **TI.2.2.1 indelibility** — implemented as tamper-**evidence**: per-row HMAC-SHA256 `signature`
    (detects field alteration) **plus a hash chain** (`chain_hash` links each row to its predecessor,
    sealed under an advisory lock; #318) so whole-row deletion/insertion between survivors is now
@@ -116,8 +119,8 @@ profile claim. As of #318 **every Essential function of the profile is fully con
    capability should be cited as settled** for these functions. Two specifics a re-verification has
    to address: responses migrated from the old model are attached to their template *as it stands
    now*, because the old model never recorded which revision an answer was given against; and
-   `percent_complete`, `values_dates` and `consent_signature` have no equivalent in the new model
-   and are not carried.
+   `percent_complete`, `values_dates`, `consent_signature` and `consent_date` have no equivalent in
+   the new model and are not carried.
 9. **Not HL7-validated** — self-attestation; accuracy is the vendor's responsibility.
 
 ## 8. Signatory
@@ -141,9 +144,9 @@ Four independent criterion-level audit passes over the current `dev` code. **✅
 | PH.1.4 | 3 | 3 | ✅ |
 | PH.1.5 | 2 | 2 | ✅ |
 | PH.2 | 2 | 2 | ✅ |
-| PH.2.1 | 3 | 3 | ✅ |
+| PH.2.1 | 3 | 3 | ✅ *(§7.8)* |
 | PH.2.3 | 3 | 3 | ✅ |
-| PH.3.1.1 | 1 | 1 | ✅ |
+| PH.3.1.1 | 1 | 1 | ✅ *(§7.8)* |
 | PH.6.3 | 4 | 4 | ✅ |
 | TI.1.1 | 12 | 12 | ✅ |
 | TI.1.2 | 4 | 4 | ✅ |
@@ -183,4 +186,5 @@ TI.5.4#01 (agreement records descriptive, not enforcement-bound). Both are in Op
 | #319 | #321 | TI.1.1#09 wire the `must_change_password` force-change flag (set / enforce / clear) |
 
 **Residual follow-ups:** external `chain_hash` anchoring to close audit tail-truncation (TI.2.2.1
-limit, §7.2). TI.5.2 / TI.5.4 remain Optional. No open Essential residuals.
+limit, §7.2). TI.5.2 / TI.5.4 remain Optional. One open Essential residual: PH.2.1 / PH.3.1.1 must
+be re-verified against the PROlog survey model before this claim is restated (§7.8).

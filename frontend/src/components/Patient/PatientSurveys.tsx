@@ -116,7 +116,10 @@ export default function PatientSurveys({ user }: { user: User | null }) {
       </p>
 
       {error && (
-        <div className="mb-4 flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3">
+        <div
+          role="alert"
+          className="mb-4 flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3"
+        >
           <AlertCircle className="h-4 w-4 shrink-0 text-red-500" />
           <p className="text-sm text-red-700">{error}</p>
           <button
@@ -133,9 +136,11 @@ export default function PatientSurveys({ user }: { user: User | null }) {
         <p className="text-sm text-muted-foreground">No surveys available at this time.</p>
       )}
 
-      <div className="space-y-3">
+      {/* A list, so the rows are announced as a set and each link has its own
+          context; the action links below are otherwise all named "Start". */}
+      <ul className="space-y-3 list-none p-0 m-0">
         {surveys.map((survey) => (
-          <div
+          <li
             key={survey.slug}
             data-testid={`survey-${survey.slug}`}
             className="flex items-center justify-between rounded-lg border border-border px-5 py-4 transition-colors hover:bg-muted/30"
@@ -153,13 +158,14 @@ export default function PatientSurveys({ user }: { user: User | null }) {
             {/* A link, not a button: the runner is a separate application. */}
             <a
               href={survey.url}
+              aria-label={`${ACTION[survey.status]} ${survey.title}`}
               className="ml-4 shrink-0 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
             >
               {ACTION[survey.status]}
             </a>
-          </div>
+          </li>
         ))}
-      </div>
+      </ul>
     </div>
   );
 }

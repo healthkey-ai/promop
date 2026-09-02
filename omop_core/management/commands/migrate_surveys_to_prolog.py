@@ -11,7 +11,10 @@ translation and not a copy, and the differences matter:
   reinterpretation of somebody's answers — which is exactly the failure the
   immutable-version design exists to prevent, and cannot be undone here.
 * **Some fields have nowhere to go**: `percent_complete` (PROlog computes
-  progress from the definition), `values_dates`, and `consent_signature`.
+  progress from the definition), `values_dates`, `consent_signature` and
+  `consent_date` — PROlog records consent against a response in its own
+  `SurveyConsent` table, which this does not attempt to reconstruct, so a
+  deployment that needs the attestation kept has to carry it deliberately.
   Answers whose key is not in the template, or whose value does not fit the
   question type, are reported rather than guessed at.
 
@@ -142,6 +145,25 @@ def source_for(survey: dict) -> str:
     return f"legacy survey:{survey['id']}"
 
 
+def input_key_map(survey: dict) -> dict:
+    """Legacy input name -> the PROlog question key its answers belong under.
+
+    Built by running the same `_question` the definition is built from, rather
+    than by recomputing the key: the two derivations drifting apart is how an
+    answer ends up looking for a question that does not exist. They diverge for
+    any name that slugifies to nothing — a name with no ASCII alphanumerics —
+    where the question gets its positional fallback and a recomputed lookup
+    does not.
+    """
+    mapping = {}
+    for page in (_json(survey.get("pages")) or []):
+        for qi, inp in enumerate(page.get("inputs") or []):
+            question, _ = _question(inp, qi)
+            if question:
+                mapping[inp.get("name")] = question["key"]
+    return mapping
+
+
 def build_definition(survey: dict) -> tuple[dict, list[str]]:
     """A PROlog definition document for one template, plus what it could not carry."""
     notes: list[str] = []
@@ -220,7 +242,12 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        from prolog_surveys.definitions.loader import DefinitionError, load_definition
+        from prolog_surveys.definitions.loader import (
+            DefinitionError,
+            has_errors,
+            load_definition,
+            validate_definition,
+        )
         from prolog_surveys.models import SurveyAnswer, SurveyResponse
 
         apply = options["apply"]
@@ -276,6 +303,7 @@ class Command(BaseCommand):
             )
 
         totals = {"templates": 0, "responses": 0, "answers": 0, "skipped": 0}
+        refused: list[str] = []
         for survey in templates:
             doc, notes = build_definition(survey)
             self.stdout.write(f"\n{survey['name']} -> {doc['slug']}")
@@ -291,13 +319,23 @@ class Command(BaseCommand):
                 [survey["id"]],
             )
             questions = {q["key"]: q for s in doc["sections"] for q in s["questions"]}
-            by_input = {
-                inp.get("name"): _key(inp.get("name", ""), "")
-                for page in (_json(survey.get("pages")) or [])
-                for inp in (page.get("inputs") or [])
-            }
+            by_input = input_key_map(survey)
 
             if not apply:
+                # The loader is what refuses a definition, so the dry run has
+                # to ask it: without this a report promises a migration that
+                # --apply then declines outright, which is the one thing a dry
+                # run exists to prevent.
+                issues = validate_definition(doc)
+                for issue in issues:
+                    style = self.style.ERROR if issue.level == "error" else self.style.WARNING
+                    self.stdout.write(style(f"  {issue}"))
+                if has_errors(issues):
+                    self.stdout.write(self.style.ERROR(
+                        "  this template would be refused; nothing would migrate"
+                    ))
+                    refused.append(survey["name"])
+                    continue
                 carried = skipped = 0
                 for response in responses:
                     for name, raw in (_json(response["values"]) or {}).items():
@@ -386,11 +424,18 @@ class Command(BaseCommand):
         )
         if not apply:
             self.stdout.write("dry run; nothing written. Re-run with --apply.")
+            if refused:
+                raise CommandError(
+                    "these templates would be refused as they stand: "
+                    + ", ".join(sorted(refused))
+                    + ". Fix them before --apply; a scripted upgrade should stop here."
+                )
         else:
             self.stdout.write(
                 "Definitions are drafts: review each, then activate it deliberately with "
-                "`manage.py load_definition ... --activate`. percent_complete, values_dates "
-                "and consent_signature have no PROlog equivalent and were not carried."
+                "`manage.py load_definition ... --activate`. percent_complete, values_dates, "
+                "consent_signature and consent_date have no PROlog equivalent and were "
+                "not carried."
             )
 
     def _purge(self, templates):

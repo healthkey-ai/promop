@@ -41,7 +41,7 @@ describe("PatientSurveys", () => {
 
     render(<PatientSurveys user={patient} />);
 
-    const action = await screen.findByRole("link", { name: "Start" });
+    const action = await screen.findByRole("link", { name: "Start Weekly symptom check" });
     // A real navigation out of the portal: the runner is its own application,
     // so this must stay an anchor with an href, not a click handler.
     expect(action).toHaveAttribute("href", "/s/symptom-check");
@@ -59,8 +59,33 @@ describe("PatientSurveys", () => {
 
     expect(await screen.findByText("In progress")).toBeInTheDocument();
     expect(screen.getByText("Completed")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Continue" })).toHaveAttribute("href", "/s/a");
-    expect(screen.getByRole("link", { name: "View" })).toHaveAttribute("href", "/s/b");
+    expect(screen.getByRole("link", { name: "Continue A" })).toHaveAttribute("href", "/s/a");
+    expect(screen.getByRole("link", { name: "View B" })).toHaveAttribute("href", "/s/b");
+  });
+
+  it("names each action link by the survey it opens", async () => {
+    // Three rows would otherwise offer three links all called "Start", which
+    // is what a screen reader reads out of the links list.
+    vi.mocked(api.get).mockResolvedValueOnce({
+      data: [
+        survey({ slug: "a", title: "Pain diary", url: "/s/a" }),
+        survey({ slug: "b", title: "Sleep diary", url: "/s/b" }),
+      ],
+    });
+
+    render(<PatientSurveys user={patient} />);
+
+    expect(await screen.findByRole("link", { name: "Start Pain diary" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Start Sleep diary" })).toBeInTheDocument();
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+  });
+
+  it("announces a load failure rather than only showing it", async () => {
+    vi.mocked(api.get).mockRejectedValueOnce(new Error("nope"));
+
+    render(<PatientSurveys user={patient} />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Failed to load surveys/);
   });
 
   it("says so when there is nothing to answer", async () => {

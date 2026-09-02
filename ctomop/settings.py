@@ -106,7 +106,9 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
-    'whitenoise.middleware.WhiteNoiseMiddleware',
+    # WhiteNoise, plus the PROlog runner's build when one is mounted — see
+    # ctomop/whitenoise.py.
+    'ctomop.whitenoise.PromopWhiteNoise',
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -530,6 +532,37 @@ for host in ALLOWED_HOSTS:
 
 CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(csrf_origins))
 
+
+# ── Caches ────────────────────────────────────────────────────────────────
+# DRF's throttles count in caches['default'], so this is what makes a rate
+# limit a limit. Without a shared backend the counter is per worker process,
+# and every rate in DEFAULT_THROTTLE_RATES is silently multiplied by the worker
+# count — which matters most for `run.create`, the only bound on how fast an
+# anonymous survey respondent can create Person rows.
+#
+# CACHE_URL, else the Celery broker if it is Redis (the same instance is fine —
+# separate keyspace), else per-process memory, which is correct for a developer
+# machine and is what the deploy check warns about anywhere else.
+_CACHE_URL = os.environ.get('CACHE_URL') or (
+    os.environ.get('CELERY_BROKER_URL', '')
+    if os.environ.get('CELERY_BROKER_URL', '').startswith(('redis://', 'rediss://'))
+    else ''
+)
+if _CACHE_URL:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            'LOCATION': _CACHE_URL,
+            'KEY_PREFIX': 'promop',
+        }
+    }
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'promop-locmem',
+        }
+    }
 
 # ── Celery ────────────────────────────────────────────────────────────────
 # An empty broker means no queue, so the derivation runs inline in the request.

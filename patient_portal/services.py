@@ -213,10 +213,17 @@ def prolog_participant_id(request):
     """PROLOG_PARTICIPANT_RESOLVER: the signed-in patient's person_id, or None.
 
     Returns None for anyone who is not a PHR Account Holder — staff, providers,
-    service tokens, anonymous callers. The runner then mints an unidentified
-    person for the response instead (see create_unidentified_person), so a
-    provider trying a survey never has it recorded against a patient they can
-    see.
+    service tokens, anonymous callers — so a provider trying a survey never has
+    it recorded against a patient they can see.
+
+    What None then means depends on the instrument, and the difference is worth
+    being precise about: on an anonymous survey (or for an invited respondent)
+    the runner mints an unidentified person for the response, see
+    create_unidentified_person. On any other survey the runner refuses the
+    caller outright — its _check_access requires an authenticated caller the
+    resolver recognises — so a staff member cannot take an account survey at
+    all. If they need to, the instrument has to be anonymous, or this resolver
+    needs a path of its own.
     """
     person = patient_person_for(getattr(request, 'user', None))
     return person.person_id if person is not None else None
