@@ -16,7 +16,7 @@ PROJECTS = {
 }
 FHIR_ROOT = Path('functions/main/firestore/apps/curehub')
 DEFAULT_ARTIFACT = Path(__file__).resolve().parents[2] / 'data' / 'healthtree_crossmaps.json'
-DEFAULT_MARKDOWN = Path(__file__).resolve().parents[3] / 'docs' / 'HealthTree_Code_To_Concept_Mapping.md'
+DEFAULT_MARKDOWN = Path(__file__).resolve().parents[3] / 'docs' / 'ht-code-concept-mapping.md'
 
 
 class Command(BaseCommand):
