@@ -159,12 +159,10 @@ def domain_for_table(omop_table):
 # then uncoded, then standard vocabularies last (they self-resolve).
 SOURCE_TAB_ORDER = [
     'ICD10CM', 'ICD10', 'ICD9CM', 'CPT4', 'HCPCS',
-    'RxNorm', 'RxNorm Extension', 'NDC', 'ATC', 'HemOnc',
+    'RxNorm', 'NDC',
     'Read', 'MeSH', 'OPCS4', 'Nebraska Lexicon',
-    'MedDRA', 'ICDO3', 'dm+d', 'CVX',
-    'OpenWearables',  # Wearable device metrics
-    'Apple',  # Apple HealthKit wearable metrics
-    'Garmin',  # Garmin FIT wearable metrics
+    'MedDRA', 'ICDO3', 'dm+d',
+    'OpenWearables',  # Wearable device metrics (includes Apple + Garmin)
     '',  # Uncoded / free text
     'LOINC', 'SNOMED',  # Standard — last
 ]
@@ -178,6 +176,17 @@ SOURCE_TAB_LABELS = {
     'OpenWearables': 'Wearables',
     '': 'Uncoded',
     # Others use vocabulary_id as-is.
+}
+
+# Wearable device vocabularies that are consolidated under the single
+# "Wearables" tab (OpenWearables) on the Code Mapping page.
+WEARABLE_SOURCE_VOCABULARIES = {'OpenWearables', 'Apple', 'Garmin'}
+
+# FHIR OID URIs that are aliases for OMOP vocabulary_ids.  Rows arriving
+# via crossmap imports sometimes carry the OID instead of the OMOP spelling.
+# The tab logic merges these into the canonical vocabulary.
+VOCABULARY_OID_ALIASES = {
+    'urn:oid:2.16.840.1.113883.6.96': 'SNOMED',
 }
 
 # Standard vocabularies — their concepts are already standard, so they appear

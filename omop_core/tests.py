@@ -7030,16 +7030,16 @@ class WearableDeviceVocabularyTest(TestCase):
         vocabs = [s['vocabulary_id'] for s in source_systems_for('Observation')]
         self.assertIn('Garmin', vocabs)
 
-    def test_tab_ordering_before_uncoded_and_standard(self):
-        from omop_core.services.source_vocabularies import source_tab_sort_key
-        apple_key = source_tab_sort_key('Apple')
-        garmin_key = source_tab_sort_key('Garmin')
-        uncoded_key = source_tab_sort_key('')
-        loinc_key = source_tab_sort_key('LOINC')
-        self.assertLess(apple_key, uncoded_key)
-        self.assertLess(garmin_key, uncoded_key)
-        self.assertLess(apple_key, loinc_key)
-        self.assertLess(garmin_key, loinc_key)
+    def test_apple_garmin_consolidated_under_wearables(self):
+        from omop_core.services.source_vocabularies import (
+            WEARABLE_SOURCE_VOCABULARIES, SOURCE_TAB_ORDER,
+        )
+        self.assertIn('Apple', WEARABLE_SOURCE_VOCABULARIES)
+        self.assertIn('Garmin', WEARABLE_SOURCE_VOCABULARIES)
+        self.assertIn('OpenWearables', WEARABLE_SOURCE_VOCABULARIES)
+        # Apple and Garmin should NOT appear as separate tabs.
+        self.assertNotIn('Apple', SOURCE_TAB_ORDER)
+        self.assertNotIn('Garmin', SOURCE_TAB_ORDER)
 
     def test_openwearables_tab_label_is_wearables(self):
         from omop_core.services.source_vocabularies import source_tab_label
@@ -7056,6 +7056,19 @@ class WearableDeviceVocabularyTest(TestCase):
         tables = tables_for_source_vocabulary('Garmin')
         self.assertIn('measurement', tables)
         self.assertIn('observation', tables)
+
+    def test_low_volume_vocabs_not_in_tab_order(self):
+        """ATC, HemOnc, CVX, RxNorm Extension only appear when they have proposals."""
+        from omop_core.services.source_vocabularies import SOURCE_TAB_ORDER
+        for vocab in ('ATC', 'HemOnc', 'CVX', 'RxNorm Extension'):
+            self.assertNotIn(vocab, SOURCE_TAB_ORDER)
+
+    def test_snomed_oid_alias(self):
+        from omop_core.services.source_vocabularies import VOCABULARY_OID_ALIASES
+        self.assertEqual(
+            VOCABULARY_OID_ALIASES.get('urn:oid:2.16.840.1.113883.6.96'),
+            'SNOMED',
+        )
 
 
 class SeedWearableDeviceMappingsTest(TestCase):

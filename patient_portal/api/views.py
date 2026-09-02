@@ -9048,8 +9048,15 @@ def _source_vocabulary_tabs():
     Queries SCCM for distinct source_vocabulary_id values that have at least
     one row, then orders them: non-standard vocabularies first (the curation
     work queue), uncoded in the middle, standard vocabularies last (reference).
+
+    Apple and Garmin SCCM rows are consolidated under the OpenWearables
+    ("Wearables") tab — they share one tab to save horizontal space.
+
+    Vocabularies not in SOURCE_TAB_ORDER only appear when they have at least
+    one proposed mapping needing curation — fully-mapped vocabularies stay
+    hidden to save horizontal tab space.
     """
-    from django.db.models import Count
+    from django.db.models import Count, Q
     vocab_counts = dict(
         SourceCodeConceptMapping.objects
         .values_list('source_vocabulary_id')
@@ -9058,6 +9065,28 @@ def _source_vocabulary_tabs():
     )
     if not vocab_counts:
         return []
+
+    # Merge wearable sub-vocabularies into OpenWearables.
+    wearable_subs = source_vocabularies.WEARABLE_SOURCE_VOCABULARIES - {'OpenWearables'}
+    for sub in wearable_subs:
+        if sub in vocab_counts:
+            vocab_counts['OpenWearables'] = vocab_counts.get('OpenWearables', 0) + vocab_counts.pop(sub)
+
+    # Merge FHIR OID aliases into their canonical OMOP vocabulary.
+    for oid, canonical in source_vocabularies.VOCABULARY_OID_ALIASES.items():
+        if oid in vocab_counts:
+            vocab_counts[canonical] = vocab_counts.get(canonical, 0) + vocab_counts.pop(oid)
+
+    # Proposed counts — needed to decide whether extras qualify for a tab.
+    proposed_counts = dict(
+        SourceCodeConceptMapping.objects
+        .filter(status='proposed')
+        .values_list('source_vocabulary_id')
+        .annotate(cnt=Count('id'))
+        .order_by()
+    )
+
+    ordered_set = set(source_vocabularies.SOURCE_TAB_ORDER)
     tabs = []
     seen = set()
     # Walk the defined order first.
@@ -9069,9 +9098,12 @@ def _source_vocabulary_tabs():
                 'is_standard': vocab_id in source_vocabularies.STANDARD_SOURCE_VOCABULARIES,
             })
             seen.add(vocab_id)
-    # Any vocabulary present in data but not in the defined order.
+    # Vocabularies present in data but not in the defined order — only if
+    # they have proposed mappings that need curator attention.
     extras = sorted(set(vocab_counts) - seen, key=source_vocabularies.source_tab_sort_key)
     for vocab_id in extras:
+        if proposed_counts.get(vocab_id, 0) == 0:
+            continue
         tabs.append({
             'vocabulary_id': vocab_id,
             'label': source_vocabularies.source_tab_label(vocab_id),
