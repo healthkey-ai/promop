@@ -2,6 +2,7 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from .views import (
+    PrologSurveyListView,
     CurrentUserViewSet, PatientRecordViewSet,
     PatientRecordV1ViewSet, login_view, logout_view, auth_test,
     change_password,
@@ -83,6 +84,8 @@ router.register(r'personal-representatives', PersonalRepresentativeViewSet, base
 router.register(r'interchange-agreements', InterchangeAgreementViewSet, basename='v1-interchange-agreements')
 
 urlpatterns = [
+    # The surveys the PROlog runner serves, for the portal's Surveys tab.
+    path('prolog-surveys/', PrologSurveyListView.as_view(), name='v1-prolog-surveys'),
     path('', include(router.urls)),
     path('auth/login/', login_view, name='v1-login'),
     path('auth/logout/', logout_view, name='v1-logout'),

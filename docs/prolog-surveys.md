@@ -195,11 +195,34 @@ reinterpretation of somebody's data — the failure the immutable-version design
 exists to prevent, applied retroactively. Check whether any template was edited
 after its first response before trusting migrated answers.
 
+### The Surveys tab
+
+The portal's Surveys tab now lists what the runner serves and links into it.
+`GET /api/v1/prolog-surveys/` returns, for the calling patient, each active
+survey inside its effective window with `not_started` / `in_progress` /
+`completed` and the `/s/<slug>` to open. The runner is entered by link and has
+no list endpoint of its own; it does not need one, because its tables are in
+this database and the portal reads them directly rather than calling itself over
+HTTP.
+
+Starting a survey is a real navigation out of the portal, so the tab renders
+links rather than buttons. A signed-in patient is resolved by
+`PROLOG_PARTICIPANT_RESOLVER`, so their response binds to their own `Person`
+rather than a minted one.
+
+The old `SurveyForm` renderer is gone — nothing could reach it once the tab
+switched, and an unreachable renderer with its own passing test suite is worse
+than no renderer.
+
+**Migrate before you switch a deployment.** The tab lists PROlog surveys only,
+so any response still living in `PatientSurveyResponse` becomes invisible until
+`migrate_surveys_to_prolog --apply` has run.
+
 ### Still to do
 
-- Point the patient portal's Surveys tab at the runner instead of `SurveyForm`.
-- Drop the old models, viewsets, serializers and components once nothing reads
-  them — a separate, destructive change.
+- Drop the old models, viewsets and serializers once nothing reads them — a
+  separate, destructive change. The old API is still served and the migration
+  command still reads from it.
 - Re-verify the **PH.2.1 / PH.3.1.1** conformance criteria against the new model
   before the claim is restated; `docs/phrs-fm-conformance-claim.md` §7 records
   that they are in transition.

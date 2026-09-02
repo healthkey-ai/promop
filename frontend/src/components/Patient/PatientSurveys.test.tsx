@@ -4,249 +4,88 @@ import PatientSurveys from "./PatientSurveys";
 import type { User } from "@/hooks/useAuth";
 
 vi.mock("@/api/axios", () => ({
-  default: {
-    get: vi.fn(),
-    post: vi.fn(),
-    patch: vi.fn(),
-  },
+  default: { get: vi.fn() },
 }));
 
 import api from "@/api/axios";
 
-const makeUser = (overrides: Partial<User> = {}): User => ({
-  id: 1,
-  sub: "sub",
-  email: "p@test.com",
-  name: "Pat",
-  is_patient: true,
-  person_id: 7,
-  ...overrides,
-});
+const patient = { id: 1, username: "p", is_patient: true, person_id: 42 } as unknown as User;
 
-const mockSurveys = [
-  {
-    id: 10,
-    name: "symptoms_mm",
-    title: "Symptom Tracker",
-    description: "Track your daily symptoms",
-    status: "ACTIVE",
-    disease: "mm",
-    pages: [
-      {
-        name: "page1",
-        title: "Symptoms",
-        inputs: [
-          { name: "fatigue", label: "Fatigue level", type: "rating", data: { maxRating: 10 } },
-          { name: "pain_notes", label: "Pain notes", type: "textarea" },
-        ],
-      },
-    ],
-    estimated_minutes: 5,
-  },
-  {
-    id: 11,
-    name: "quality_of_life",
-    title: "Quality of Life",
-    description: "Assess your overall well-being",
-    status: "ACTIVE",
-    disease: "mm",
-    pages: [
-      {
-        name: "page1",
-        title: "Well-being",
-        inputs: [
-          { name: "mood", label: "Mood", type: "select", data: { options: ["Good", "Fair", "Poor"] } },
-        ],
-      },
-    ],
-    estimated_minutes: 3,
-  },
-];
-
-const mockResponseInProgress = {
-  id: 100,
-  person: 7,
-  survey: 10,
-  survey_title: "Symptom Tracker",
-  survey_name: "symptoms_mm",
-  values: { fatigue: 5 },
-  values_dates: {},
-  percent_complete: 50,
-  started_at: "2025-07-20T10:00:00Z",
+const survey = (over: Partial<Record<string, unknown>> = {}) => ({
+  slug: "symptom-check",
+  version: "1.0",
+  title: "Weekly symptom check",
+  url: "/s/symptom-check",
+  status: "not_started",
+  started_at: null,
   completed_at: null,
-  created_at: "2025-07-20T10:00:00Z",
-  updated_at: "2025-07-20T10:30:00Z",
-};
-
-const mockResponseCompleted = {
-  id: 101,
-  person: 7,
-  survey: 11,
-  survey_title: "Quality of Life",
-  survey_name: "quality_of_life",
-  values: { mood: "Good" },
-  values_dates: {},
-  percent_complete: 100,
-  started_at: "2025-07-19T10:00:00Z",
-  completed_at: "2025-07-19T10:15:00Z",
-  created_at: "2025-07-19T10:00:00Z",
-  updated_at: "2025-07-19T10:15:00Z",
-};
+  ...over,
+});
 
 describe("PatientSurveys", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("renders survey list after loading", async () => {
-    (api.get as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce({ data: mockSurveys })
-      .mockResolvedValueOnce({ data: [] });
+  it("lists what the runner is serving", async () => {
+    vi.mocked(api.get).mockResolvedValueOnce({ data: [survey()] });
 
-    render(<PatientSurveys user={makeUser()} />);
+    render(<PatientSurveys user={patient} />);
 
-    await waitFor(() => {
-      expect(screen.getByText("Symptom Tracker")).toBeInTheDocument();
-    });
-    expect(screen.getByText("Quality of Life")).toBeInTheDocument();
-    expect(screen.getByText("~5 min")).toBeInTheDocument();
-    expect(screen.getByText("~3 min")).toBeInTheDocument();
+    expect(await screen.findByText("Weekly symptom check")).toBeInTheDocument();
+    expect(api.get).toHaveBeenCalledWith("/v1/prolog-surveys/");
   });
 
-  it("shows 'Not started' for surveys without a response", async () => {
-    (api.get as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce({ data: mockSurveys })
-      .mockResolvedValueOnce({ data: [] });
+  it("links into the runner rather than answering here", async () => {
+    vi.mocked(api.get).mockResolvedValueOnce({ data: [survey()] });
 
-    render(<PatientSurveys user={makeUser()} />);
+    render(<PatientSurveys user={patient} />);
 
-    await waitFor(() => {
-      expect(screen.getByText("Symptom Tracker")).toBeInTheDocument();
-    });
-    const badges = screen.getAllByText("Not started");
-    expect(badges.length).toBe(2);
+    const action = await screen.findByRole("link", { name: "Start" });
+    // A real navigation out of the portal: the runner is its own application,
+    // so this must stay an anchor with an href, not a click handler.
+    expect(action).toHaveAttribute("href", "/s/symptom-check");
   });
 
-  it("shows 'In progress' with percentage for partial responses", async () => {
-    (api.get as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce({ data: mockSurveys })
-      .mockResolvedValueOnce({ data: [mockResponseInProgress] });
-
-    render(<PatientSurveys user={makeUser()} />);
-
-    await waitFor(() => {
-      expect(screen.getByText("In progress (50%)")).toBeInTheDocument();
+  it("labels each survey by where the patient stands", async () => {
+    vi.mocked(api.get).mockResolvedValueOnce({
+      data: [
+        survey({ slug: "a", title: "A", url: "/s/a", status: "in_progress" }),
+        survey({ slug: "b", title: "B", url: "/s/b", status: "completed" }),
+      ],
     });
+
+    render(<PatientSurveys user={patient} />);
+
+    expect(await screen.findByText("In progress")).toBeInTheDocument();
+    expect(screen.getByText("Completed")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Continue" })).toHaveAttribute("href", "/s/a");
+    expect(screen.getByRole("link", { name: "View" })).toHaveAttribute("href", "/s/b");
   });
 
-  it("shows 'Completed' for completed responses", async () => {
-    (api.get as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce({ data: mockSurveys })
-      .mockResolvedValueOnce({ data: [mockResponseCompleted] });
+  it("says so when there is nothing to answer", async () => {
+    vi.mocked(api.get).mockResolvedValueOnce({ data: [] });
 
-    render(<PatientSurveys user={makeUser()} />);
+    render(<PatientSurveys user={patient} />);
 
-    await waitFor(() => {
-      expect(screen.getByText("Completed")).toBeInTheDocument();
-    });
+    expect(await screen.findByText("No surveys available at this time.")).toBeInTheDocument();
   });
 
-  it("Start button creates a response via POST", async () => {
-    (api.get as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce({ data: [mockSurveys[0]] })
-      .mockResolvedValueOnce({ data: [] });
+  it("offers a retry when the list cannot be loaded", async () => {
+    vi.mocked(api.get).mockRejectedValueOnce(new Error("nope"));
 
-    const newResponse = {
-      id: 200,
-      person: 7,
-      survey: 10,
-      survey_title: "Symptom Tracker",
-      survey_name: "symptoms_mm",
-      values: {},
-      values_dates: {},
-      percent_complete: 0,
-      started_at: "2025-07-25T12:00:00Z",
-      completed_at: null,
-      created_at: "2025-07-25T12:00:00Z",
-      updated_at: "2025-07-25T12:00:00Z",
-    };
-    (api.post as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-      data: newResponse,
-    });
+    render(<PatientSurveys user={patient} />);
 
-    render(<PatientSurveys user={makeUser()} />);
-
-    await waitFor(() => {
-      expect(screen.getByText("Symptom Tracker")).toBeInTheDocument();
-    });
-
-    const startBtn = screen.getByRole("button", { name: "Start" });
-    fireEvent.click(startBtn);
-
-    await waitFor(() => {
-      expect(api.post).toHaveBeenCalledWith(
-        "/v1/survey-responses/",
-        expect.objectContaining({
-          person: 7,
-          survey: 10,
-        })
-      );
-    });
+    expect(await screen.findByText(/Failed to load surveys/)).toBeInTheDocument();
+    vi.mocked(api.get).mockResolvedValueOnce({ data: [survey()] });
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Weekly symptom check")).toBeInTheDocument();
   });
 
-  it("shows error message when fetch fails", async () => {
-    (api.get as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-      new Error("Network error")
-    );
+  it("asks for nothing when the account has no patient record", async () => {
+    render(<PatientSurveys user={{ ...patient, person_id: null } as unknown as User} />);
 
-    render(<PatientSurveys user={makeUser()} />);
-
-    await waitFor(() => {
-      expect(
-        screen.getByText(/failed to load surveys/i)
-      ).toBeInTheDocument();
-    });
-  });
-
-  it("shows no-record message when user has no person_id", () => {
-    render(<PatientSurveys user={makeUser({ person_id: null })} />);
-
-    expect(
-      screen.getByText(/no health record is linked/i)
-    ).toBeInTheDocument();
-    expect(api.get).not.toHaveBeenCalled();
-  });
-
-  it("shows no-record message when user is null", () => {
-    render(<PatientSurveys user={null} />);
-
-    expect(
-      screen.getByText(/no health record is linked/i)
-    ).toBeInTheDocument();
-    expect(api.get).not.toHaveBeenCalled();
-  });
-
-  it("shows Continue button for in-progress response", async () => {
-    (api.get as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce({ data: [mockSurveys[0]] })
-      .mockResolvedValueOnce({ data: [mockResponseInProgress] });
-
-    render(<PatientSurveys user={makeUser()} />);
-
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Continue" })).toBeInTheDocument();
-    });
-  });
-
-  it("shows View button for completed response", async () => {
-    (api.get as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce({ data: [mockSurveys[1]] })
-      .mockResolvedValueOnce({ data: [mockResponseCompleted] });
-
-    render(<PatientSurveys user={makeUser()} />);
-
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "View" })).toBeInTheDocument();
-    });
+    expect(await screen.findByText(/No health record is linked/)).toBeInTheDocument();
+    await waitFor(() => expect(api.get).not.toHaveBeenCalled());
   });
 });

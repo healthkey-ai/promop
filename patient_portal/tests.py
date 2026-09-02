@@ -24743,3 +24743,86 @@ class PrologSurveyMigrationTest(TestCase):
         self.assertIn('is not one of its options', report)
         self.assertIn("'ghost' is not in the template", report)
         self.assertFalse(SurveyAnswer.objects.exists(), 'nothing is guessed at')
+
+
+class PrologSurveyListTest(TestCase):
+    """The Surveys tab's index: what the runner is serving, and where I stand.
+
+    Answering happens in the runner at /s/<slug>; this only lists.
+    """
+
+    def setUp(self):
+        from omop_core.services.pk import next_pk
+        from prolog_surveys.definitions.loader import load_definition
+
+        self.identity = Identity.objects.create(issuer='urn:local', sub='surveys-tab')
+        self.person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=self.person)
+        PatientUser.objects.create(identity=self.identity, person=self.person)
+        self.version = load_definition({
+            'schema_version': 1,
+            'slug': 'symptom-check',
+            'version': '1.0',
+            'status': 'draft',
+            'default_language': 'en',
+            'languages': ['en'],
+            'title': {'en': 'Weekly symptom check'},
+            'sections': [{
+                'key': 's1',
+                'title': {'en': 'Symptoms'},
+                'questions': [{'key': 'fatigue', 'type': 'text', 'text': {'en': 'How tired?'}}],
+            }],
+        }, activate=True).version
+        self.client.force_login(self.identity)
+
+    def test_a_patient_sees_an_active_survey_and_where_to_answer_it(self):
+        body = self.client.get('/api/v1/prolog-surveys/').json()
+
+        self.assertEqual(len(body), 1)
+        self.assertEqual(body[0]['slug'], 'symptom-check')
+        self.assertEqual(body[0]['title'], 'Weekly symptom check')
+        self.assertEqual(body[0]['url'], '/s/symptom-check', 'the runner, not this API')
+        self.assertEqual(body[0]['status'], 'not_started')
+
+    def test_status_follows_the_patients_own_response(self):
+        from prolog_surveys.models import SurveyResponse
+
+        SurveyResponse.objects.create(
+            survey_version=self.version,
+            participant_id=self.person.person_id,
+            language='en',
+        )
+
+        body = self.client.get('/api/v1/prolog-surveys/').json()
+
+        self.assertEqual(body[0]['status'], 'in_progress')
+
+    def test_another_patients_response_does_not_change_my_status(self):
+        from omop_core.services.pk import next_pk
+        from prolog_surveys.models import SurveyResponse
+
+        someone_else = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        SurveyResponse.objects.create(
+            survey_version=self.version,
+            participant_id=someone_else.person_id,
+            language='en',
+        )
+
+        body = self.client.get('/api/v1/prolog-surveys/').json()
+
+        self.assertEqual(body[0]['status'], 'not_started')
+
+    def test_a_survey_outside_its_effective_window_is_not_offered(self):
+        from datetime import date, timedelta
+
+        survey = self.version.survey
+        survey.effective_to = date.today() - timedelta(days=1)
+        survey.save(update_fields=['effective_to'])
+
+        self.assertEqual(self.client.get('/api/v1/prolog-surveys/').json(), [])
+
+    def test_staff_have_no_surveys_of_their_own(self):
+        staff = Identity.objects.create(issuer='urn:local', sub='surveys-tab-staff', is_staff=True)
+        self.client.force_login(staff)
+
+        self.assertEqual(self.client.get('/api/v1/prolog-surveys/').json(), [])

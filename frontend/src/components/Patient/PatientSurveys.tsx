@@ -2,193 +2,71 @@ import { useState, useEffect, useCallback } from "react";
 import { AlertCircle, ClipboardList } from "lucide-react";
 import type { User } from "@/hooks/useAuth";
 import api from "@/api/axios";
-import SurveyForm from "@/components/Patient/SurveyForm";
 
-interface SurveyInput {
-  name: string;
-  label: string;
-  type: string;
-  data?: {
-    maxRating?: number;
-    options?: string[];
-  };
-}
+/**
+ * The Surveys tab.
+ *
+ * Surveys are answered in the PROlog runner — its own application, served at
+ * /s/<slug> from this origin. This tab is the index: what is open, and where
+ * this patient stands in each.
+ *
+ * Starting or continuing one navigates out of the portal into the runner, so
+ * these are links rather than buttons: middle-click and "open in a new tab"
+ * behave, and the runner keeps a respondent's place itself rather than this
+ * component tracking answers it no longer owns.
+ */
 
-interface SurveyPage {
-  name: string;
+interface PrologSurvey {
+  slug: string;
+  version: string;
   title: string;
-  inputs: SurveyInput[];
-}
-
-export interface Survey {
-  id: number;
-  name: string;
-  title: string;
-  description: string;
-  status: string;
-  disease: string;
-  pages: SurveyPage[];
-  estimated_minutes: number | null;
-}
-
-export interface SurveyResponse {
-  id: number;
-  person: number;
-  survey: number;
-  survey_title: string;
-  survey_name: string;
-  values: Record<string, unknown>;
-  values_dates: Record<string, string>;
-  percent_complete: number;
+  url: string;
+  status: "not_started" | "in_progress" | "completed";
   started_at: string | null;
   completed_at: string | null;
-  consent_date: string | null;
-  consent_signature: string | null;
-  created_at: string;
-  updated_at: string;
 }
 
-function statusBadge(response: SurveyResponse | undefined) {
-  if (!response) {
-    return (
-      <span className="inline-flex items-center rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-600">
-        Not started
-      </span>
-    );
-  }
-  if (response.completed_at) {
-    return (
-      <span className="inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-700">
-        Completed
-      </span>
-    );
-  }
-  return (
-    <span className="inline-flex items-center rounded-full bg-blue-100 px-2.5 py-0.5 text-xs font-medium text-blue-700">
-      In progress ({response.percent_complete}%)
-    </span>
-  );
-}
+const STATUS: Record<PrologSurvey["status"], { label: string; className: string }> = {
+  not_started: { label: "Not started", className: "bg-gray-100 text-gray-600" },
+  in_progress: { label: "In progress", className: "bg-blue-100 text-blue-700" },
+  completed: { label: "Completed", className: "bg-green-100 text-green-700" },
+};
 
-function actionLabel(response: SurveyResponse | undefined): string {
-  if (!response) return "Start";
-  if (response.completed_at) return "View";
-  return "Continue";
-}
+const ACTION: Record<PrologSurvey["status"], string> = {
+  not_started: "Start",
+  in_progress: "Continue",
+  completed: "View",
+};
 
 export default function PatientSurveys({ user }: { user: User | null }) {
-  const [surveys, setSurveys] = useState<Survey[]>([]);
-  const [responses, setResponses] = useState<SurveyResponse[]>([]);
+  const [surveys, setSurveys] = useState<PrologSurvey[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeSurvey, setActiveSurvey] = useState<Survey | null>(null);
-  const [activeResponse, setActiveResponse] = useState<SurveyResponse | null>(null);
-  const [starting, setStarting] = useState<number | null>(null);
 
-  const fetchData = useCallback(async () => {
-    if (!user || user.person_id == null) return;
+  const fetchSurveys = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [surveysRes, responsesRes] = await Promise.all([
-        api.get("/v1/surveys/?status=ACTIVE"),
-        api.get(`/v1/survey-responses/?person_id=${user.person_id}`),
-      ]);
-      setSurveys(
-        Array.isArray(surveysRes.data) ? surveysRes.data : surveysRes.data.results ?? []
-      );
-      setResponses(
-        Array.isArray(responsesRes.data) ? responsesRes.data : responsesRes.data.results ?? []
-      );
+      const res = await api.get("/v1/prolog-surveys/");
+      setSurveys(Array.isArray(res.data) ? res.data : (res.data.results ?? []));
     } catch {
       setError("Failed to load surveys. Please try again.");
     } finally {
       setLoading(false);
     }
-  }, [user]);
+  }, []);
 
   useEffect(() => {
     // No synchronous setState in the effect body (react-hooks/set-state-in-effect)
     // — both branches live in the async IIFE, matching the #269 pattern.
     (async () => {
       if (user && user.person_id != null) {
-        await fetchData();
+        await fetchSurveys();
       } else {
         setLoading(false);
       }
     })();
-  }, [user, fetchData]);
-
-  const getResponseForSurvey = (surveyId: number): SurveyResponse | undefined =>
-    responses.find((r) => r.survey === surveyId);
-
-  const handleStart = async (survey: Survey) => {
-    if (!user || user.person_id == null) return;
-    setStarting(survey.id);
-    setError(null);
-    try {
-      const res = await api.post("/v1/survey-responses/", {
-        person: user.person_id,
-        survey: survey.id,
-        started_at: new Date().toISOString(),
-      });
-      const newResponse: SurveyResponse = res.data;
-      setResponses((prev) => [...prev, newResponse]);
-      setActiveSurvey(survey);
-      setActiveResponse(newResponse);
-    } catch {
-      setError("Failed to start survey. Please try again.");
-    } finally {
-      setStarting(null);
-    }
-  };
-
-  const handleAction = (survey: Survey) => {
-    const response = getResponseForSurvey(survey.id);
-    if (!response) {
-      handleStart(survey);
-      return;
-    }
-    setActiveSurvey(survey);
-    setActiveResponse(response);
-  };
-
-  const handleSave = async (values: Record<string, unknown>, percentComplete: number) => {
-    if (!activeResponse) return;
-    const res = await api.patch(`/v1/survey-responses/${activeResponse.id}/`, {
-      values,
-      percent_complete: percentComplete,
-    });
-    const updated: SurveyResponse = res.data;
-    setActiveResponse(updated);
-    setResponses((prev) =>
-      prev.map((r) => (r.id === updated.id ? updated : r))
-    );
-  };
-
-  const handleComplete = async () => {
-    if (!activeResponse) return;
-    try {
-      const res = await api.patch(`/v1/survey-responses/${activeResponse.id}/`, {
-        completed_at: new Date().toISOString(),
-        percent_complete: 100,
-      });
-      const updated: SurveyResponse = res.data;
-      setActiveResponse(updated);
-      setResponses((prev) =>
-        prev.map((r) => (r.id === updated.id ? updated : r))
-      );
-      setActiveSurvey(null);
-      setActiveResponse(null);
-    } catch {
-      setError("Failed to complete survey. Please try again.");
-    }
-  };
-
-  const handleBack = () => {
-    setActiveSurvey(null);
-    setActiveResponse(null);
-  };
+  }, [user, fetchSurveys]);
 
   if (!user || user.person_id == null) {
     return (
@@ -217,7 +95,6 @@ export default function PatientSurveys({ user }: { user: User | null }) {
             >
               <div className="space-y-1.5">
                 <div className="h-4 w-48 animate-pulse rounded bg-muted" />
-                <div className="h-3 w-64 animate-pulse rounded bg-muted" />
                 <div className="h-3 w-20 animate-pulse rounded bg-muted" />
               </div>
               <div className="h-8 w-20 animate-pulse rounded bg-muted" />
@@ -225,19 +102,6 @@ export default function PatientSurveys({ user }: { user: User | null }) {
           ))}
         </div>
       </div>
-    );
-  }
-
-  if (activeSurvey && activeResponse) {
-    return (
-      <SurveyForm
-        survey={activeSurvey}
-        response={activeResponse}
-        onSave={handleSave}
-        onComplete={handleComplete}
-        onBack={handleBack}
-        readOnly={!!activeResponse.completed_at}
-      />
     );
   }
 
@@ -255,6 +119,13 @@ export default function PatientSurveys({ user }: { user: User | null }) {
         <div className="mb-4 flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3">
           <AlertCircle className="h-4 w-4 shrink-0 text-red-500" />
           <p className="text-sm text-red-700">{error}</p>
+          <button
+            type="button"
+            onClick={fetchSurveys}
+            className="ml-auto text-sm text-red-700 underline"
+          >
+            Try again
+          </button>
         </div>
       )}
 
@@ -263,44 +134,31 @@ export default function PatientSurveys({ user }: { user: User | null }) {
       )}
 
       <div className="space-y-3">
-        {surveys.map((survey) => {
-          const response = getResponseForSurvey(survey.id);
-          const label = actionLabel(response);
-          const isStarting = starting === survey.id;
-
-          return (
-            <div
-              key={survey.id}
-              className="flex items-center justify-between rounded-lg border border-border px-5 py-4 transition-colors hover:bg-muted/30"
-            >
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <p className="text-sm font-medium text-foreground">
-                    {survey.title}
-                  </p>
-                  {statusBadge(response)}
-                </div>
-                {survey.description && (
-                  <p className="mt-1 text-xs text-muted-foreground line-clamp-2">
-                    {survey.description}
-                  </p>
-                )}
-                {survey.estimated_minutes && (
-                  <p className="mt-0.5 text-xs text-muted-foreground">
-                    ~{survey.estimated_minutes} min
-                  </p>
-                )}
+        {surveys.map((survey) => (
+          <div
+            key={survey.slug}
+            data-testid={`survey-${survey.slug}`}
+            className="flex items-center justify-between rounded-lg border border-border px-5 py-4 transition-colors hover:bg-muted/30"
+          >
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <p className="text-sm font-medium text-foreground">{survey.title}</p>
+                <span
+                  className={`rounded-full px-2 py-0.5 text-xs ${STATUS[survey.status].className}`}
+                >
+                  {STATUS[survey.status].label}
+                </span>
               </div>
-              <button
-                onClick={() => handleAction(survey)}
-                disabled={isStarting}
-                className="ml-4 shrink-0 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {isStarting ? "Starting..." : label}
-              </button>
             </div>
-          );
-        })}
+            {/* A link, not a button: the runner is a separate application. */}
+            <a
+              href={survey.url}
+              className="ml-4 shrink-0 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+            >
+              {ACTION[survey.status]}
+            </a>
+          </div>
+        ))}
       </div>
     </div>
   );

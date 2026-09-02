@@ -7868,6 +7868,69 @@ class SurveyViewSet(viewsets.ModelViewSet):
         return qs
 
 
+class PrologSurveyListView(APIView):
+    """The surveys the PROlog runner is serving, and where this patient stands.
+
+    The runner is entered by link, so it has no list endpoint of its own — and
+    it does not need one: its tables are in this database, so the portal reads
+    them directly rather than calling itself over HTTP.
+
+    Answering happens in the runner at /s/<slug>, not here. This is only the
+    index the Surveys tab shows.
+    """
+
+    permission_classes = [PatientCrudPermission]
+    http_method_names = ['get', 'head', 'options']
+
+    def get(self, request):
+        from patient_portal.services import patient_person_for
+        from prolog_surveys.models import (
+            LifecycleStatus,
+            ResponseStatus,
+            SurveyResponse,
+            SurveyVersion,
+        )
+
+        person = patient_person_for(request.user)
+        if person is None:
+            # Staff and providers have no surveys of their own to answer.
+            return Response([])
+
+        versions = (
+            SurveyVersion.objects.filter(status=LifecycleStatus.ACTIVE)
+            .select_related('survey')
+            .order_by('survey__slug')
+        )
+        mine = {
+            r.survey_version_id: r
+            for r in SurveyResponse.objects.filter(participant_id=person.person_id)
+            .order_by('-started_at')
+        }
+
+        out = []
+        for version in versions:
+            if version.survey.closed_reason():
+                continue
+            definition = version.cached_definition
+            default = definition.get('default_language', 'en')
+            title = definition.get('title') or {}
+            response = mine.get(version.id)
+            out.append({
+                'slug': version.survey.slug,
+                'version': version.version,
+                'title': title.get(default) or version.survey.slug,
+                'url': f'/s/{version.survey.slug}',
+                'status': (
+                    'not_started' if response is None
+                    else 'completed' if response.status == ResponseStatus.SUBMITTED
+                    else 'in_progress'
+                ),
+                'started_at': response.started_at if response else None,
+                'completed_at': response.submitted_at if response else None,
+            })
+        return Response(out)
+
+
 class PatientSurveyResponseViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     """Patient survey responses — one record per (person, survey) pair.
 
