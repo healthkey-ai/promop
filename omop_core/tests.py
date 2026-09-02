@@ -7005,3 +7005,123 @@ class SeedOpenWearablesMappingsTest(TestCase):
             source_vocabulary_id='OpenWearables',
         ).count()
         self.assertEqual(count1, count2)
+
+
+class SeedHkLabsMappingsTest(TestCase):
+    """Test the seed_hklabs_mappings management command."""
+
+    @classmethod
+    def setUpTestData(cls):
+        seed_test_concepts()
+        # The fixture has LOINC 6690-2 (WBC) and 718-7 (Hemoglobin).
+        cls.wbc_concept = Concept.objects.get(concept_code='6690-2', vocabulary_id='LOINC')
+        cls.hgb_concept = Concept.objects.get(concept_code='718-7', vocabulary_id='LOINC')
+
+    def setUp(self):
+        import json
+        import tempfile
+        self.tmpdir = tempfile.mkdtemp()
+        data_dir = Path(self.tmpdir) / 'data'
+        fixtures_dir = Path(self.tmpdir) / 'fixtures'
+        data_dir.mkdir()
+        fixtures_dir.mkdir()
+
+        # Minimal loinc_common.json with two entries
+        (data_dir / 'loinc_common.json').write_text(json.dumps({
+            'codes': [
+                {'loinc_code': '6690-2', 'loinc_short_name': 'WBC',
+                 'loinc_default_unit': '10^3/uL', 'value_type': 'numeric'},
+                {'loinc_code': '718-7', 'loinc_short_name': 'Hemoglobin',
+                 'loinc_default_unit': 'g/dL', 'value_type': 'numeric'},
+                {'loinc_code': '99999-9', 'loinc_short_name': 'Fake Test',
+                 'loinc_default_unit': 'mg/dL', 'value_type': 'numeric'},
+            ],
+        }))
+
+        # Minimal lab_catalog.json — one entry that maps via _CATALOG_LOINC
+        (fixtures_dir / 'lab_catalog.json').write_text(json.dumps([{
+            'model': 'labs.labtestentry', 'pk': 1,
+            'fields': {
+                'abbreviation': 'wbc',
+                'name': 'White blood cell count',
+                'name_normalized': 'white blood cell count',
+            },
+        }]))
+
+        # Minimal curated_aliases_manual.json
+        (fixtures_dir / 'curated_aliases_manual.json').write_text(json.dumps([
+            {'loinc_num': '718-7', 'alias': 'Hgb', 'note': 'test alias'},
+        ]))
+
+        # Clean up any prior SCCM rows from this origin
+        SourceCodeConceptMapping.objects.filter(origin_system='hk-labs-seed').delete()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_dry_run_creates_nothing(self):
+        call_command('seed_hklabs_mappings', '--dry-run',
+                     '--hklabs-root', self.tmpdir, verbosity=0)
+        self.assertEqual(
+            SourceCodeConceptMapping.objects.filter(
+                origin_system='hk-labs-seed',
+            ).count(),
+            0,
+        )
+
+    def test_creates_mappings(self):
+        call_command('seed_hklabs_mappings',
+                     '--hklabs-root', self.tmpdir, verbosity=0)
+        rows = SourceCodeConceptMapping.objects.filter(
+            origin_system='hk-labs-seed',
+        )
+        # 3 from loinc_common (wbc, hemoglobin, fake test)
+        # + 1 from catalog (white blood cell count — deduped from "wbc")
+        # + 1 from aliases (hgb)
+        # = 5 unique normalized source codes
+        self.assertEqual(rows.count(), 5)
+
+    def test_all_entries_are_uncoded_text(self):
+        call_command('seed_hklabs_mappings',
+                     '--hklabs-root', self.tmpdir, verbosity=0)
+        rows = SourceCodeConceptMapping.objects.filter(
+            origin_system='hk-labs-seed',
+        )
+        for row in rows:
+            self.assertEqual(row.source_vocabulary_id, '',
+                             f'{row.source_code} has non-empty source_vocabulary_id')
+
+    def test_resolved_concept_linked(self):
+        call_command('seed_hklabs_mappings',
+                     '--hklabs-root', self.tmpdir, verbosity=0)
+        row = SourceCodeConceptMapping.objects.get(
+            source_vocabulary_id='', source_code='wbc',
+        )
+        self.assertEqual(row.target_concept_id, self.wbc_concept.concept_id)
+        self.assertEqual(row.destination_vocabulary_id, 'LOINC')
+        self.assertEqual(row.domain_id, 'Measurement')
+        self.assertEqual(row.omop_table, 'measurement')
+        self.assertEqual(row.status, 'approved')
+        self.assertEqual(row.origin, 'import')
+
+    def test_unresolved_concept_is_null(self):
+        call_command('seed_hklabs_mappings',
+                     '--hklabs-root', self.tmpdir, verbosity=0)
+        row = SourceCodeConceptMapping.objects.get(
+            source_vocabulary_id='', source_code='fake test',
+        )
+        self.assertIsNone(row.target_concept)
+
+    def test_idempotent(self):
+        call_command('seed_hklabs_mappings',
+                     '--hklabs-root', self.tmpdir, verbosity=0)
+        count1 = SourceCodeConceptMapping.objects.filter(
+            origin_system='hk-labs-seed',
+        ).count()
+        call_command('seed_hklabs_mappings',
+                     '--hklabs-root', self.tmpdir, verbosity=0)
+        count2 = SourceCodeConceptMapping.objects.filter(
+            origin_system='hk-labs-seed',
+        ).count()
+        self.assertEqual(count1, count2)
