@@ -7329,7 +7329,7 @@ def vocabulary_list(request, model_name):
 
 def _require_mapping_admin(request):
     """Return a 403 Response if the user is not staff or org_admin, else None."""
-    if not (request.user.is_staff or getattr(request.user, 'is_org_admin', False)):
+    if not has_org_admin_access(request.user):
         return Response({'detail': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
     return None
 
@@ -7540,7 +7540,7 @@ def mapping_stats(request):
     Returns counts for field mappings, code mappings, and therapy reference data.
     Restricted to staff or org_admin users.
     """
-    if not (request.user.is_staff or getattr(request.user, 'is_org_admin', False)):
+    if not has_org_admin_access(request.user):
         return Response({'detail': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldConceptMapping
