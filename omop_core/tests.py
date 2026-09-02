@@ -23,7 +23,7 @@ from django.test import TestCase, override_settings
 from omop_core.models import (
     Concept, ConceptClass, Domain, Vocabulary,
     Organization, Person, PatientRecord, ConditionOccurrence, DrugExposure, Measurement, Observation,
-    PersonLanguageSkill,
+    PersonLanguageSkill, SourceCodeConceptMapping,
 )
 from omop_core.services.patient_record_service import refresh_patient_record
 
@@ -6908,3 +6908,100 @@ class RepointResolvableZerosCommandTest(_AllowsDuplicateConceptCodes):
         self.assertEqual(Measurement.objects.get(measurement_id=84606).measurement_concept_id, self.measurement_target.concept_id)
         self.assertEqual(Measurement.objects.get(measurement_id=84607).measurement_concept_id, 0)
         self.assertNotEqual(self.measurement_target.concept_id, direct.concept_id)
+
+
+# ── TEST: OpenWearables Source Vocabulary ────────────────────────────
+
+
+class OpenWearablesVocabularyTest(TestCase):
+    """Verify OpenWearables is registered as a source vocabulary."""
+
+    def test_openwearables_in_measurement_systems(self):
+        from omop_core.services.source_vocabularies import source_systems_for
+        vocabs = [s['vocabulary_id'] for s in source_systems_for('Measurement')]
+        self.assertIn('OpenWearables', vocabs)
+
+    def test_openwearables_in_observation_systems(self):
+        from omop_core.services.source_vocabularies import source_systems_for
+        vocabs = [s['vocabulary_id'] for s in source_systems_for('Observation')]
+        self.assertIn('OpenWearables', vocabs)
+
+    def test_tab_ordering_before_uncoded_and_standard(self):
+        from omop_core.services.source_vocabularies import source_tab_sort_key
+        ow_key = source_tab_sort_key('OpenWearables')
+        uncoded_key = source_tab_sort_key('')
+        loinc_key = source_tab_sort_key('LOINC')
+        self.assertLess(ow_key, uncoded_key)
+        self.assertLess(ow_key, loinc_key)
+
+    def test_tables_for_openwearables(self):
+        from omop_core.services.source_vocabularies import tables_for_source_vocabulary
+        tables = tables_for_source_vocabulary('OpenWearables')
+        self.assertIn('measurement', tables)
+        self.assertIn('observation', tables)
+
+
+class SeedOpenWearablesMappingsTest(TestCase):
+    """Test the seed_openwearables_mappings management command."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.management.commands.seed_openwearables_mappings import (
+            OPENWEARABLES_METRICS,
+        )
+        cls.metric_count = len(OPENWEARABLES_METRICS)
+
+        # seed_test_concepts creates LOINC vocabulary, domains, concept classes,
+        # and concepts including heart rate (8867-4 / concept_id 3027018).
+        seed_test_concepts()
+        cls.hr_concept = Concept.objects.get(concept_id=3027018)
+
+    def test_dry_run_creates_nothing(self):
+        call_command('seed_openwearables_mappings', '--dry-run', verbosity=0)
+        self.assertEqual(
+            SourceCodeConceptMapping.objects.filter(
+                source_vocabulary_id='OpenWearables',
+            ).count(),
+            0,
+        )
+
+    def test_creates_all_metrics(self):
+        call_command('seed_openwearables_mappings', verbosity=0)
+        count = SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='OpenWearables',
+        ).count()
+        self.assertEqual(count, self.metric_count)
+
+    def test_heart_rate_mapped_to_loinc(self):
+        call_command('seed_openwearables_mappings', verbosity=0)
+        row = SourceCodeConceptMapping.objects.get(
+            source_vocabulary_id='OpenWearables',
+            source_code='heart_rate',
+        )
+        self.assertEqual(row.target_concept_id, self.hr_concept.concept_id)
+        self.assertEqual(row.destination_vocabulary_id, 'LOINC')
+        self.assertEqual(row.domain_id, 'Measurement')
+        self.assertEqual(row.omop_table, 'measurement')
+        self.assertEqual(row.status, 'proposed')
+        self.assertEqual(row.origin, 'import')
+        self.assertEqual(row.origin_system, 'open-wearables-seed')
+
+    def test_unmapped_metric_has_no_target(self):
+        call_command('seed_openwearables_mappings', verbosity=0)
+        row = SourceCodeConceptMapping.objects.get(
+            source_vocabulary_id='OpenWearables',
+            source_code='running_power',
+        )
+        self.assertIsNone(row.target_concept)
+        self.assertEqual(row.destination_vocabulary_id, '')
+
+    def test_idempotent(self):
+        call_command('seed_openwearables_mappings', verbosity=0)
+        count1 = SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='OpenWearables',
+        ).count()
+        call_command('seed_openwearables_mappings', verbosity=0)
+        count2 = SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='OpenWearables',
+        ).count()
+        self.assertEqual(count1, count2)
