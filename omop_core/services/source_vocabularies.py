@@ -98,6 +98,7 @@ _DRUG_SYSTEMS = (
 _MEASUREMENT_SYSTEMS = (
     ('LOINC', 'LOINC — OMOP standard for labs and measurements'),
     ('SNOMED', 'SNOMED CT — findings and qualitative results'),
+    ('OpenWearables', 'OpenWearables — unified wearable device metrics'),
     ('CPT4', 'CPT-4 — billed lab panels'),
     ('UCUM', 'UCUM — units of measure'),
     ('Nebraska Lexicon', 'Nebraska Lexicon — interface terminology'),
@@ -106,6 +107,7 @@ _MEASUREMENT_SYSTEMS = (
 _OBSERVATION_SYSTEMS = (
     ('SNOMED', 'SNOMED CT — OMOP standard for observations'),
     ('LOINC', 'LOINC — survey and assessment items'),
+    ('OpenWearables', 'OpenWearables — unified wearable device metrics'),
     ('ICD10CM', 'ICD-10-CM — Z-codes and social history'),
     ('HCPCS', 'HCPCS — assessments and screenings'),
     ('NCIt', 'NCIt — NCI thesaurus'),
@@ -156,6 +158,7 @@ SOURCE_TAB_ORDER = [
     'RxNorm', 'RxNorm Extension', 'NDC', 'ATC', 'HemOnc',
     'Read', 'MeSH', 'OPCS4', 'Nebraska Lexicon',
     'MedDRA', 'ICDO3', 'dm+d', 'CVX',
+    'OpenWearables',  # Wearable device metrics
     '',  # Uncoded / free text
     'LOINC', 'SNOMED',  # Standard — last
 ]
