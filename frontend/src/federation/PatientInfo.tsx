@@ -240,9 +240,12 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated }: Pick<Patien
     }
   }, [handleFieldChange, scheduleAutoSave]);
 
-  const getDiseaseType = (): "breast" | "lymphoma" | "myeloma" | "cll" | "other" => {
+  const getDiseaseType = (): "breast" | "lymphoma" | "mcl" | "myeloma" | "cll" | "other" => {
     const d = (typeof editedInfo?.disease === "string" ? editedInfo.disease : "").toLowerCase();
     if (d.includes("breast")) return "breast";
+    // Mantle cell lymphoma must be matched BEFORE the broad "lymphoma" check — otherwise it fell
+    // through to the Follicular Lymphoma section (FLIPI/GELF fields under a "Follicular Lymphoma" tab).
+    if (d.includes("mantle") || d.includes("mcl")) return "mcl";
     if (d.includes("lymphoma")) return "lymphoma";
     if (d.includes("myeloma")) return "myeloma";
     if (d.includes("cll") || d.includes("chronic lymphocytic")) return "cll";
@@ -250,7 +253,7 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated }: Pick<Patien
   };
 
   const getDiseaseTabLabel = () =>
-    ({ breast: "Breast Cancer", lymphoma: "Follicular Lymphoma", myeloma: "Multiple Myeloma", cll: "CLL", other: "Disease Specific" })[getDiseaseType()];
+    ({ breast: "Breast Cancer", lymphoma: "Follicular Lymphoma", mcl: "Mantle Cell Lymphoma", myeloma: "Multiple Myeloma", cll: "CLL", other: "Disease Specific" })[getDiseaseType()];
 
   if (isLoading) return <PatientInfoSkeleton />;
 
