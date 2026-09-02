@@ -21,7 +21,7 @@ interface LaterTherapy {
 interface Props {
   formData: Record<string, unknown>;
   onChange: (field: string, value: unknown) => void;
-  diseaseType: 'breast' | 'lymphoma' | 'myeloma' | 'cll' | 'other';
+  diseaseType: 'breast' | 'lymphoma' | 'mcl' | 'myeloma' | 'cll' | 'other';
 }
 
 function getTherapyOptions(diseaseType: string, line: 'first' | 'second' | 'later', bcFirst: { value: string }[], bcSecond: { value: string }[], bcLater: { value: string }[]) {
@@ -31,6 +31,9 @@ function getTherapyOptions(diseaseType: string, line: 'first' | 'second' | 'late
       if (line === 'second') return bcSecond.length ? bcSecond.map((o) => o.value) : BREAST_CANCER_SECOND_LINE;
       return bcLater.length ? bcLater.map((o) => o.value) : BREAST_CANCER_LATER_LINE;
     case 'lymphoma':
+    // MCL reuses the B-cell NHL regimen lists (R-CHOP / BR / rituximab overlap) until a curated
+    // mantle-cell list exists — correct-adjacent, and far better than the generic 'Other'.
+    case 'mcl':
       if (line === 'first') return LYMPHOMA_FIRST_LINE;
       if (line === 'second') return LYMPHOMA_SECOND_LINE;
       return LYMPHOMA_LATER_LINE;
