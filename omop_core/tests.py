@@ -7077,7 +7077,7 @@ class SeedHkLabsMappingsTest(TestCase):
             origin_system='hk-labs-seed',
         )
         # 3 from loinc_common (wbc, hemoglobin, fake test)
-        # + 1 from catalog (white blood cell count — deduped from "wbc")
+        # + 1 from catalog (white blood cell count — distinct from "wbc")
         # + 1 from aliases (hgb)
         # = 5 unique normalized source codes
         self.assertEqual(rows.count(), 5)
@@ -7112,6 +7112,8 @@ class SeedHkLabsMappingsTest(TestCase):
             source_vocabulary_id='', source_code='fake test',
         )
         self.assertIsNone(row.target_concept)
+        self.assertEqual(row.destination_vocabulary_id, '')
+        self.assertEqual(row.status, 'proposed')
 
     def test_idempotent(self):
         call_command('seed_hklabs_mappings',

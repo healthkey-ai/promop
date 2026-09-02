@@ -139,7 +139,7 @@ class Command(BaseCommand):
         loinc_count = 0
         if loinc_path.exists():
             for short_name, loinc_code, unit in _load_loinc_common(loinc_path):
-                normalized = _normalize(short_name)
+                normalized = _normalize(short_name)[:100]
                 if not normalized:
                     continue
                 desc = f'{short_name} ({unit})' if unit else short_name
@@ -156,9 +156,11 @@ class Command(BaseCommand):
             for entry in _load_lab_catalog(catalog_path):
                 loinc_code = _CATALOG_LOINC.get(entry['abbreviation'])
                 if not loinc_code:
-                    logger.warning('No LOINC code for catalog entry: %s', entry['abbreviation'])
+                    self.stderr.write(self.style.WARNING(
+                        f'No LOINC code for catalog entry: {entry["abbreviation"]} — skipping'
+                    ))
                     continue
-                normalized = _normalize(entry['name_normalized'])
+                normalized = _normalize(entry['name_normalized'])[:100]
                 if not normalized:
                     continue
                 if normalized not in mappings:
@@ -172,7 +174,7 @@ class Command(BaseCommand):
         alias_count = 0
         if aliases_path.exists():
             for alias, loinc_code, note in _load_curated_aliases(aliases_path):
-                normalized = _normalize(alias)
+                normalized = _normalize(alias)[:100]
                 if not normalized:
                     continue
                 if normalized not in mappings:
@@ -222,9 +224,9 @@ class Command(BaseCommand):
                         'domain_id': 'Measurement',
                         'source_code_description': description[:255],
                         'target_concept': target,
-                        'destination_vocabulary_id': 'LOINC',
+                        'destination_vocabulary_id': 'LOINC' if target else '',
                         'omop_table': 'measurement',
-                        'status': 'approved',
+                        'status': 'approved' if target else 'proposed',
                         'origin': 'import',
                         'origin_system': ORIGIN_SYSTEM,
                         'source': 'HealthKey',
