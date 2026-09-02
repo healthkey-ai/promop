@@ -23,6 +23,7 @@ database by this project's migrations, and every response is bound to an
 | `patient_portal.services.prolog_participant_id` | `PROLOG_PARTICIPANT_RESOLVER` — the signed-in patient's `person_id`, or `None` |
 | `patient_portal.services.create_unidentified_person` | `PROLOG_PARTICIPANT_FACTORY` — mints the person for a respondent who is not signed in |
 | `REST_FRAMEWORK.DEFAULT_THROTTLE_RATES` | the `run.*` scopes, per hashed client key |
+| `RUNNER_DIST` | the built runner front end, when `PROLOG_RUNNER_DIST` names one |
 
 ## Every response has a person
 
@@ -105,8 +106,21 @@ Definitions load as drafts and activation is a separate, deliberate step
 (`manage.py load_definition <file> --activate`), so a new instrument is never
 served by the act of deploying it.
 
-The runner's own front end is not served by this project yet; only the API is
-mounted. That is the remaining half of M1 in the PROlog plan.
+### The runner's front end
+
+`PROLOG_RUNNER_DIST` points at a built runner; unset, only the API is mounted and
+no page is served. The runner is a second SPA in a project that already has one,
+so it is built with its assets under their own prefix — PRomop's build owns
+`/assets/` — and its routes are matched before the catch-all that returns
+PRomop's shell:
+
+```sh
+# in a prolog checkout
+VITE_API_BASE=/api/v1/prolog/run npx vite build --base=/prolog-static/
+# then point PROLOG_RUNNER_DIST at frontend/dist
+```
+
+A survey is then answered at `/s/<slug>`.
 
 ## Upgrading
 
