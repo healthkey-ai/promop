@@ -118,6 +118,14 @@ const reference = {
     Observation: "observation",
     Procedure: "procedure",
   },
+  // The API supplies the full tab catalog, including source vocabularies whose
+  // current queue contains only approved mappings. Without it, ICD10CM is
+  // intentionally hidden as a data-only tab and these fixtures cannot open
+  // their approved rows.
+  source_vocabulary_tabs: [
+    { vocabulary_id: "", label: "Uncoded", is_standard: false },
+    { vocabulary_id: "ICD10CM", label: "ICD10CM", is_standard: true },
+  ],
 };
 
 const loincHit = {
