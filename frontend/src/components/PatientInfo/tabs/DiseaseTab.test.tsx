@@ -366,3 +366,48 @@ describe('LymphomaSection — transformation to DLBCL fields', () => {
     expect(onChange).toHaveBeenCalledWith('post_transformation_outcome', 'Progressive Disease');
   });
 });
+
+// ---------------------------------------------------------------------------
+// MantleCellLymphomaSection — MCL routes to its own section, not Follicular
+// Lymphoma. Regression: getDiseaseType()'s broad includes("lymphoma") used to
+// catch "mantle cell lymphoma", so MCL patients saw FLIPI/GELF/DLBCL fields.
+// ---------------------------------------------------------------------------
+function renderMcl(
+  formData: Record<string, unknown> = {},
+  onChange = vi.fn(),
+) {
+  (useVocabulary as Mock).mockImplementation(() => ({ options: [], loading: false, source: null }));
+  return render(
+    <DiseaseTab {...BASE_PROPS} diseaseType="mcl" formData={formData} onChange={onChange} />,
+  );
+}
+
+describe('MantleCellLymphomaSection — MCL-specific routing', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('renders MCL-relevant fields', () => {
+    renderMcl();
+    expect(screen.getByText('Ki-67 Proliferation Index (%)')).toBeInTheDocument();
+    expect(screen.getByText('Tumor Burden')).toBeInTheDocument();
+    expect(screen.getByText('TP53 Disruption')).toBeInTheDocument();
+    expect(screen.getByText('Ann Arbor Stage')).toBeInTheDocument();
+    expect(screen.getByText('Largest Lymph Node Size (cm)')).toBeInTheDocument();
+  });
+
+  it('does NOT render Follicular-Lymphoma-specific fields', () => {
+    renderMcl();
+    expect(screen.queryByText('GELF Criteria')).not.toBeInTheDocument();
+    expect(screen.queryByText('FLIPI Risk Category')).not.toBeInTheDocument();
+    expect(screen.queryByText('Transformed to DLBCL')).not.toBeInTheDocument();
+  });
+
+  it('emits onChange for an MCL field edit', () => {
+    const onChange = vi.fn();
+    renderMcl({ ki67_proliferation_index: 30 }, onChange);
+    const kiInput = screen.getByDisplayValue('30');
+    fireEvent.change(kiInput, { target: { value: '45' } });
+    expect(onChange).toHaveBeenCalledWith('ki67_proliferation_index', 45);
+  });
+});

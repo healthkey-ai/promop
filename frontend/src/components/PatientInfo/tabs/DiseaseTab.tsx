@@ -27,7 +27,7 @@ interface Props {
   onMutationAdd: () => void;
   onMutationRemove: (index: number) => void;
   onMutationChange: (index: number, field: string, value: string) => void;
-  diseaseType: 'breast' | 'lymphoma' | 'myeloma' | 'cll' | 'other';
+  diseaseType: 'breast' | 'lymphoma' | 'mcl' | 'myeloma' | 'cll' | 'other';
 }
 
 function BreastCancerSection({ formData, onChange, onMutationAdd, onMutationRemove, onMutationChange }: Omit<Props, 'diseaseType'>) {
@@ -340,6 +340,49 @@ function CLLSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>
   );
 }
 
+function MantleCellLymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>) {
+  const { options: histologicOptions, source: histologicSource } = useVocabulary('histologic-type', 'title');
+  const histOptions = histologicOptions.length ? histologicOptions.map((o: { value: string }) => o.value) : HISTOLOGIC_TYPE_OPTIONS;
+
+  // MCL previously fell through `getDiseaseType()`'s broad `includes("lymphoma")` into the Follicular
+  // Lymphoma section, so a mantle-cell patient saw FLIPI/GELF fields under a "Follicular Lymphoma" tab.
+  // This section shows the MCL-relevant fields the federation patient-info projection actually carries.
+  // MIPI / MIPI-c, morphologic variant, disease behaviour/subtype and extranodal sites are NOT yet in
+  // the projection (they read/write as absent), so they are intentionally omitted until it exposes them.
+  return (
+    <>
+      <Section title="Disease Characteristics">
+        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
+          <div className="sm:col-span-2">
+            <Field label="Histologic Subtype" name="histologic_type" type="select" value={formData?.histologic_type} options={histOptions} onChange={onChange} vocabSource={histologicSource} />
+          </div>
+          <Field label="Ann Arbor Stage" name="stage" type="select" value={formData?.stage} options={STAGE_OPTIONS} onChange={onChange} />
+          <Field label="Ki-67 Proliferation Index (%)" name="ki67_proliferation_index" type="number" value={formData?.ki67_proliferation_index} onChange={onChange} />
+          <Field label="Tumor Burden" name="tumor_burden" type="select" value={formData?.tumor_burden} options={TUMOR_BURDEN_OPTIONS} onChange={onChange} />
+          <Field label="TP53 Disruption" name="tp53_disruption" type="boolean" value={formData?.tp53_disruption} onChange={onChange} />
+        </div>
+      </Section>
+
+      <Section title="Laboratory Markers">
+        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
+          <Field label="LDH Level (U/L)" name="ldh_level" type="number" value={formData?.ldh_level} onChange={onChange} />
+          <Field label="Beta-2 Microglobulin (mg/L)" name="beta2_microglobulin" type="number" value={formData?.beta2_microglobulin} onChange={onChange} />
+          <Field label="Bone Marrow Involvement" name="bone_marrow_involvement" type="select" value={formData?.bone_marrow_involvement} options={YES_NO_OPTIONS} onChange={onChange} />
+        </div>
+      </Section>
+
+      <Section title="Clinical Findings">
+        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
+          <Field label="Largest Lymph Node Size (cm)" name="largest_lymph_node_size" type="number" value={formData?.largest_lymph_node_size} onChange={onChange} />
+          <Field label="Spleen Size (cm)" name="spleen_size" type="number" value={formData?.spleen_size} onChange={onChange} />
+          <Field label="Splenomegaly" name="splenomegaly" type="boolean" value={formData?.splenomegaly} onChange={onChange} />
+          <Field label="Lymphadenopathy" name="lymphadenopathy" type="boolean" value={formData?.lymphadenopathy} onChange={onChange} />
+        </div>
+      </Section>
+    </>
+  );
+}
+
 function OtherSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>) {
   const { options: histologicOptions, source: histologicSource } = useVocabulary('histologic-type', 'title');
   const histOptions = histologicOptions.length ? histologicOptions.map((o: { value: string }) => o.value) : HISTOLOGIC_TYPE_OPTIONS;
@@ -366,6 +409,8 @@ export default function DiseaseTab({ formData, onChange, onMutationAdd, onMutati
       return <BreastCancerSection formData={formData} onChange={onChange} onMutationAdd={onMutationAdd} onMutationRemove={onMutationRemove} onMutationChange={onMutationChange} />;
     case 'lymphoma':
       return <LymphomaSection formData={formData} onChange={onChange} />;
+    case 'mcl':
+      return <MantleCellLymphomaSection formData={formData} onChange={onChange} />;
     case 'myeloma':
       return <MyelomaSection formData={formData} onChange={onChange} />;
     case 'cll':

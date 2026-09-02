@@ -14,7 +14,7 @@ interface Props {
   editedName: string;
   onNameChange: (name: string) => void;
   onZipcodeChange: (zip: string) => void;
-  diseaseType?: 'breast' | 'lymphoma' | 'myeloma' | 'cll' | 'other';
+  diseaseType?: 'breast' | 'lymphoma' | 'mcl' | 'myeloma' | 'cll' | 'other';
 }
 
 function calculateAge(dateOfBirth: string): number | null {
