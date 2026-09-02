@@ -31,7 +31,10 @@ def test_importer_reads_reviewable_markdown_in_batches(tmp_path):
     )
     call_command('import_healthtree_crossmaps', f'--artifact={artifact}', stdout=StringIO())
     assert SourceCodeConceptMapping.objects.count() == 2
-    assert SourceCodeConceptMapping.objects.get(source_code='A01').status == 'proposed'
+    mapping = SourceCodeConceptMapping.objects.get(source_code='A01')
+    assert mapping.status == 'proposed'
+    assert mapping.origin_system == 'HT-One'
+    assert mapping.source == 'HT-One'
     call_command('import_healthtree_crossmaps', f'--artifact={artifact}', stdout=StringIO())
     assert SourceCodeConceptMapping.objects.count() == 2
 

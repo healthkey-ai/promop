@@ -301,6 +301,7 @@ export default function CodeMappingPage() {
   // `null` means no choice has been made, so use the work-prioritized default.
   // The empty string is a real vocabulary ID: it represents the Uncoded tab.
   const [activeVocabulary, setActiveVocabulary] = useState<string | null>(null);
+  const [unmappedCollapsed, setUnmappedCollapsed] = useState(false);
   const [mappedCollapsed, setMappedCollapsed] = useState(true);
   const [athenaCollapsed, setAthenaCollapsed] = useState(true);
   const [showRejected, setShowRejected] = useState(false);
@@ -944,9 +945,16 @@ export default function CodeMappingPage() {
         </div>
 
         <section className="mb-6">
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-700">
+          <button
+            type="button"
+            onClick={() => setUnmappedCollapsed((v) => !v)}
+            className="mb-2 inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-slate-700"
+          >
+            {unmappedCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
             Unmapped <span className="font-normal text-slate-500">({unmappedRows.length})</span>
-          </h2>
+          </button>
+          {!unmappedCollapsed && (
+            <>
           <div className="mb-2 flex items-center justify-between gap-3">
             <p className="text-xs text-slate-500">
               The destination concept exists — an import minted or chose it — but no curator has confirmed it.
@@ -963,6 +971,8 @@ export default function CodeMappingPage() {
             )}
           </div>
           {renderTable(unmappedRows, "Nothing awaiting review in this vocabulary.")}
+            </>
+          )}
         </section>
 
         <section className="mb-6">
