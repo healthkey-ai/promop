@@ -28,7 +28,7 @@ from omop_core.models import (
     SourceCodeConceptMapping,
     ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
     Observation, ProcedureOccurrence, VisitOccurrence, VisitDetail, Location, Death,
-    PatientDocument, PatientTrialEnrollment, PatientGroupMembership, Survey, PatientSurveyResponse,
+    PatientDocument, PatientTrialEnrollment, PatientGroupMembership,
     Relationship, ConceptRelationship, ConceptAncestor, ConceptSynonym,
     # Controlled vocabulary lookup models
     Ethnicity, StemCellTransplant, SctEligibility, HistologicType, EstrogenReceptorStatus,
@@ -108,7 +108,6 @@ from .serializers import (
     ObservationSerializer, ProcedureOccurrenceSerializer,
     EpisodeSerializer, EpisodeEventSerializer,
     PatientDocumentSerializer, PatientTrialEnrollmentSerializer,
-    SurveySerializer, PatientSurveyResponseSerializer,
     PatientConsentSerializer,
     PatientMessageSerializer,
     ImmunizationSerializer, AllergySerializer,
@@ -7788,86 +7787,6 @@ class PatientTrialEnrollmentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     queryset = PatientTrialEnrollment.objects.all()
 
 
-class SurveyViewSet(viewsets.ModelViewSet):
-    """Survey definitions — create/read/update/archive surveys.
-
-    Surveys are global templates (no org FK). Reads are available to any
-    authenticated token. Writes (create/update/archive) require service-token
-    or staff — arbitrary write-scope patient tokens must not mutate the shared
-    template library.
-
-    Filter by disease: GET /api/surveys/?disease=Multiple+Myeloma
-    Filter by status:  GET /api/surveys/?status=ACTIVE
-    Surveys are archived via PATCH {status: ARCHIVED}; DELETE is not allowed.
-    """
-    serializer_class = SurveySerializer
-    permission_classes = [ScopedTokenPermission]
-    queryset = Survey.objects.all()
-
-    def _require_admin_for_writes(self, request):
-        """Block non-service callers from mutating shared survey templates.
-
-        Allowed:
-          - service-token (trusted backend string)
-          - OAuth2 tokens from internal service apps (no org_profile)
-          - Staff / superuser session users
-
-        Blocked:
-          - OAuth2 tokens from partner/EHR org apps (have an org_profile)
-          - Session / Firebase / SAML non-staff users (patients)
-        """
-        if request.method in ('GET', 'HEAD', 'OPTIONS'):
-            return
-        token = getattr(request, 'auth', None)
-        if is_service_token(request):
-            return
-        if token is not None and not isinstance(token, TokenClaims):
-            # OAuth2: allow only internal service apps (no org).
-            # Partner org apps have an org_profile and must not touch shared
-            # templates. Read org_profile off the application directly rather
-            # than through get_request_org(), which also returns None for any
-            # non client_credentials grant — that would read an org-linked
-            # human-facing app as "internal" and let it through here, since
-            # this is the one call site where no org means allowed.
-            if getattr(getattr(token, 'application', None), 'org_profile', None) is None:
-                return
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied('Survey templates can only be modified by staff or service tokens.')
-        # Session / Firebase / SAML: require staff.
-        user = request.user
-        if not (user and getattr(user, 'is_staff', False)):
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied('Survey templates can only be modified by staff or service tokens.')
-
-    def create(self, request, *args, **kwargs):
-        self._require_admin_for_writes(request)
-        return super().create(request, *args, **kwargs)
-
-    def update(self, request, *args, **kwargs):
-        self._require_admin_for_writes(request)
-        return super().update(request, *args, **kwargs)
-
-    def partial_update(self, request, *args, **kwargs):
-        self._require_admin_for_writes(request)
-        return super().partial_update(request, *args, **kwargs)
-
-    def destroy(self, request, *args, **kwargs):
-        return Response(
-            {'detail': 'Surveys cannot be deleted. Set status to ARCHIVED instead.'},
-            status=405,
-        )
-
-    def get_queryset(self):
-        qs = Survey.objects.all()
-        disease = self.request.query_params.get('disease')
-        if disease is not None:
-            qs = qs.filter(disease=disease)
-        status_filter = self.request.query_params.get('status')
-        if status_filter is not None:
-            qs = qs.filter(status=status_filter)
-        return qs
-
-
 class PrologSurveyListView(APIView):
     """The surveys the PROlog runner is serving, and where this patient stands.
 
@@ -7930,47 +7849,6 @@ class PrologSurveyListView(APIView):
             })
         return Response(out)
 
-
-class PatientSurveyResponseViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
-    """Patient survey responses — one record per (person, survey) pair.
-
-    Filter by person: GET /api/survey-responses/?person_id=42
-    Filter by survey: GET /api/survey-responses/?survey=3
-    Supports partial update (PATCH) for incremental autosave of individual answers.
-    PUT is disabled: values/values_dates are append-only dicts; use PATCH.
-    """
-    serializer_class = PatientSurveyResponseSerializer
-    permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
-    queryset = PatientSurveyResponse.objects.select_related('survey').all()
-    http_method_names = ['get', 'post', 'patch', 'head', 'options']
-    allowed_list_query_params = _OmopFilterMixin.allowed_list_query_params | frozenset({
-        'survey',
-    })
-
-    def get_queryset(self):
-        qs = super().get_queryset()
-        survey_id = self.request.query_params.get('survey')
-        if survey_id:
-            qs = qs.filter(survey_id=survey_id)
-        # Guard: unfiltered list leaks all responses when no org context.
-        # Require ?person_id= or staff/superuser for list actions.
-        if self.action == 'list':
-            org = get_request_org(self.request)
-            person_id = self.request.query_params.get('person_id')
-            user = self.request.user
-            is_privileged = user and getattr(user, 'is_staff', False)
-            if org is None and not person_id and not is_privileged:
-                return qs.none()
-        return qs
-
-    def partial_update(self, request, *args, **kwargs):
-        kwargs['partial'] = True
-        return self.update(request, *args, **kwargs)
-
-
-# ---------------------------------------------------------------------------
-# Patient Consent management (PHR-S FM Phase 3)
-# ---------------------------------------------------------------------------
 
 class PatientConsentViewSet(viewsets.ModelViewSet):
     """Patient consent grants — auto-created for each consent type.

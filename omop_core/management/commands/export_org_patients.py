@@ -35,7 +35,6 @@ Output structure (JSON mode):
                 "documents": [...],
                 "trial_enrollments": [...],
                 "language_skills": [...],
-                "survey_responses": [...]
             }
         ]
     }
@@ -66,7 +65,6 @@ from omop_core.models import (
     Organization,
     PatientDocument,
     PatientRecord,
-    PatientSurveyResponse,
     PatientTrialEnrollment,
     Person,
     PersonLanguageSkill,
@@ -209,7 +207,6 @@ class Command(BaseCommand):
             ('documents',         PatientDocument,        _group_by_person),
             ('trial_enrollments', PatientTrialEnrollment, _group_by_person),
             ('language_skills',   PersonLanguageSkill,    _group_by_person),
-            ('survey_responses',  PatientSurveyResponse,  _group_by_person),
         ]
 
         fetched_omop = {}
@@ -290,7 +287,6 @@ class Command(BaseCommand):
                 'documents':         _rows(fetched_related['documents'], pid),
                 'trial_enrollments': _rows(fetched_related['trial_enrollments'], pid),
                 'language_skills':   _rows(fetched_related['language_skills'], pid),
-                'survey_responses':  _rows(fetched_related['survey_responses'], pid),
             }
             patient_docs.append(row)
 

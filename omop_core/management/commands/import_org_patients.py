@@ -62,14 +62,12 @@ from omop_core.models import (
     Organization,
     PatientDocument,
     PatientRecord,
-    PatientSurveyResponse,
     PatientTrialEnrollment,
     Person,
     PersonLanguageSkill,
     SKILL_LEVEL_CHOICES,
     ProcedureOccurrence,
     Specimen,
-    Survey,
     VisitDetail,
     VisitOccurrence,
     Vocabulary,
@@ -575,21 +573,11 @@ class Command(BaseCommand):
             except Exception:
                 pass
 
-        # ---- PatientSurveyResponse ----
-        for resp in patient.get('survey_responses') or []:
-            if not isinstance(resp, dict):
-                continue
-            survey_id = resp.get('survey_id')
-            if not survey_id or not Survey.objects.filter(id=survey_id).exists():
-                continue  # skip if survey definition is absent
-            fields = {
-                k: v for k, v in resp.items()
-                if k not in ('id', 'person_id')
-            }
-            try:
-                PatientSurveyResponse.objects.create(person=person, **fields)
-            except Exception:
-                pass
+        # Survey responses are not imported: omop_core.Survey and
+        # PatientSurveyResponse are retired (PROlog replaces them), and a PROlog
+        # response belongs to an immutable version this payload does not carry.
+        # An export written before that change still has a `survey_responses`
+        # key; it is ignored rather than half-restored.
 
         # ---- PatientRecord ----
         # Derived by default: the OMOP rows above are the facts, and every other

@@ -20,16 +20,20 @@ Dry run by default. `--apply` is the only path that writes.
     manage.py migrate_surveys_to_prolog                    # report only
     manage.py migrate_surveys_to_prolog --apply
     manage.py migrate_surveys_to_prolog --survey symptom-check --apply
+
+It reads the legacy tables with SQL rather than through models, because the
+models are gone from this release and the tables are not: that gap is the
+upgrade window. Pull this release, run this command, then migrate — which drops
+the tables, and refuses to if anything is still unmigrated.
 """
 
 from __future__ import annotations
 
+import json
 import re
 
 from django.core.management.base import BaseCommand, CommandError
-from django.db import transaction
-
-from omop_core.models import PatientSurveyResponse, Survey
+from django.db import connection, transaction
 
 #: PROlog question and section keys: lower-case, digits, underscores.
 _KEY_RE = re.compile(r"[^a-z0-9]+")
@@ -85,11 +89,39 @@ def _question(inp: dict, index: int) -> tuple[dict, str | None]:
     return question, note
 
 
-def build_definition(survey: Survey) -> tuple[dict, list[str]]:
+LEGACY_TEMPLATES = "survey"
+LEGACY_RESPONSES = "patient_survey_response"
+
+
+def _json(value):
+    """jsonb comes back decoded through the ORM and as text through a cursor."""
+    if isinstance(value, (str, bytes)):
+        return json.loads(value)
+    return value
+
+
+def _rows(sql: str, params=()) -> list[dict]:
+    with connection.cursor() as cur:
+        cur.execute(sql, params)
+        columns = [c[0] for c in cur.description]
+        return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+
+def legacy_tables_exist() -> bool:
+    return bool(
+        _rows(
+            "select 1 from information_schema.tables "
+            "where table_schema = current_schema() and table_name = %s",
+            [LEGACY_RESPONSES],
+        )
+    )
+
+
+def build_definition(survey: dict) -> tuple[dict, list[str]]:
     """A PROlog definition document for one template, plus what it could not carry."""
     notes: list[str] = []
     sections = []
-    for si, page in enumerate(survey.pages or []):
+    for si, page in enumerate(_json(survey.get("pages")) or []):
         questions = []
         for qi, inp in enumerate(page.get("inputs") or []):
             question, note = _question(inp, qi)
@@ -109,16 +141,16 @@ def build_definition(survey: Survey) -> tuple[dict, list[str]]:
         )
     doc = {
         "schema_version": 1,
-        "slug": _key(survey.name, "survey").replace("_", "-"),
+        "slug": _key(survey["name"], "survey").replace("_", "-"),
         "version": "1.0",
         "status": "draft",
         "default_language": "en",
         "languages": ["en"],
-        "title": {"en": survey.title or survey.name},
+        "title": {"en": survey["title"] or survey["name"]},
         "sections": sections,
     }
-    if survey.description:
-        doc["intro"] = {"en": survey.description}
+    if survey.get("description"):
+        doc["intro"] = {"en": survey["description"]}
     return doc, notes
 
 
@@ -153,6 +185,14 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("--apply", action="store_true", help="Write. Default is dry-run.")
         parser.add_argument("--survey", action="append", help="Template name; repeat to restrict.")
+        parser.add_argument(
+            "--purge-source",
+            action="store_true",
+            help=(
+                "Delete the legacy rows that have already been converted. Separate from --apply "
+                "on purpose: convert, look at the result, then let go of the original."
+            ),
+        )
 
     def handle(self, *args, **options):
         from prolog_surveys.definitions.loader import DefinitionError, load_definition
@@ -160,12 +200,20 @@ class Command(BaseCommand):
 
         apply = options["apply"]
         names = options.get("survey")
-        templates = Survey.objects.all().order_by("name")
+        if not legacy_tables_exist():
+            self.stdout.write(
+                "the legacy survey tables are already gone; nothing to migrate"
+            )
+            return
+        templates = _rows(
+            f"select id, name, title, description, pages from {LEGACY_TEMPLATES} order by name"
+        )
         if names:
-            templates = templates.filter(name__in=names)
-            missing = set(names) - set(templates.values_list("name", flat=True))
+            found = {t["name"] for t in templates}
+            missing = set(names) - found
             if missing:
                 raise CommandError(f"no such survey: {', '.join(sorted(missing))}")
+            templates = [t for t in templates if t["name"] in names]
         if not templates:
             self.stdout.write("no surveys to migrate")
             return
@@ -173,25 +221,29 @@ class Command(BaseCommand):
         totals = {"templates": 0, "responses": 0, "answers": 0, "skipped": 0}
         for survey in templates:
             doc, notes = build_definition(survey)
-            self.stdout.write(f"\n{survey.name} -> {doc['slug']}")
+            self.stdout.write(f"\n{survey['name']} -> {doc['slug']}")
             if not doc["sections"]:
                 self.stdout.write(self.style.WARNING("  no usable pages; nothing to migrate"))
                 continue
             for note in notes:
                 self.stdout.write(self.style.WARNING(f"  {note}"))
 
-            responses = PatientSurveyResponse.objects.filter(survey=survey).select_related("person")
+            responses = _rows(
+                f"select person_id, values, started_at, completed_at, created_at "
+                f"from {LEGACY_RESPONSES} where survey_id = %s",
+                [survey["id"]],
+            )
             questions = {q["key"]: q for s in doc["sections"] for q in s["questions"]}
             by_input = {
                 inp.get("name"): _key(inp.get("name", ""), "")
-                for page in (survey.pages or [])
+                for page in (_json(survey.get("pages")) or [])
                 for inp in (page.get("inputs") or [])
             }
 
             if not apply:
                 carried = skipped = 0
                 for response in responses:
-                    for name, raw in (response.values or {}).items():
+                    for name, raw in (_json(response["values"]) or {}).items():
                         question = questions.get(by_input.get(name, ""))
                         if question is None:
                             skipped += 1
@@ -202,32 +254,39 @@ class Command(BaseCommand):
                         elif value is not None:
                             carried += 1
                 self.stdout.write(
-                    f"  would migrate {responses.count()} response(s), "
+                    f"  would migrate {len(responses)} response(s), "
                     f"{carried} answer(s); {skipped} answer(s) could not be carried"
                 )
                 totals["templates"] += 1
-                totals["responses"] += responses.count()
+                totals["responses"] += len(responses)
                 totals["answers"] += carried
                 totals["skipped"] += skipped
                 continue
 
             with transaction.atomic():
                 try:
-                    result = load_definition(doc, source=f"omop_core.Survey:{survey.pk}")
+                    result = load_definition(doc, source=f"legacy survey:{survey['id']}")
                 except DefinitionError as exc:
                     self.stdout.write(self.style.ERROR(f"  refused: {exc}"))
                     continue
                 version = result.version
                 for response in responses:
+                    # Idempotent: the old model allowed one response per person
+                    # per survey, so that pair identifies it here too. A second
+                    # run must not give anyone a duplicate.
+                    if SurveyResponse.objects.filter(
+                        survey_version=version, participant_id=response["person_id"]
+                    ).exists():
+                        continue
                     migrated = SurveyResponse.objects.create(
                         survey_version=version,
-                        participant_id=response.person_id,
+                        participant_id=response["person_id"],
                         language="en",
-                        status="submitted" if response.completed_at else "in_progress",
-                        started_at=response.started_at or response.created_at,
-                        submitted_at=response.completed_at,
+                        status="submitted" if response["completed_at"] else "in_progress",
+                        started_at=response["started_at"] or response["created_at"],
+                        submitted_at=response["completed_at"],
                     )
-                    for name, raw in (response.values or {}).items():
+                    for name, raw in (_json(response["values"]) or {}).items():
                         question = questions.get(by_input.get(name, ""))
                         if question is None:
                             self.stdout.write(
@@ -251,7 +310,10 @@ class Command(BaseCommand):
                         totals["answers"] += 1
                     totals["responses"] += 1
                 totals["templates"] += 1
-                self.stdout.write(self.style.SUCCESS(f"  migrated {responses.count()} response(s)"))
+                self.stdout.write(self.style.SUCCESS(f"  migrated {len(responses)} response(s)"))
+
+        if options["purge_source"]:
+            self._purge(templates)
 
         verb = "migrated" if apply else "would migrate"
         self.stdout.write(
@@ -266,3 +328,41 @@ class Command(BaseCommand):
                 "`manage.py load_definition ... --activate`. percent_complete, values_dates "
                 "and consent_signature have no PROlog equivalent and were not carried."
             )
+
+    def _purge(self, templates):
+        """Delete legacy rows whose responses are already in PROlog.
+
+        Kept apart from --apply so the original is still there while the
+        conversion is checked. A response is only dropped when a PROlog one
+        exists for the same person and the same instrument, so a partial or
+        refused conversion leaves its source alone.
+        """
+        from prolog_surveys.models import SurveyResponse
+
+        for survey in templates:
+            slug = _key(survey["name"], "survey").replace("_", "-")
+            converted = set(
+                SurveyResponse.objects.filter(
+                    survey_version__survey__slug=slug
+                ).values_list("participant_id", flat=True)
+            )
+            rows = _rows(
+                f"select person_id from {LEGACY_RESPONSES} where survey_id = %s", [survey["id"]]
+            )
+            unconverted = [r["person_id"] for r in rows if r["person_id"] not in converted]
+            if unconverted:
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"  {survey['name']}: {len(unconverted)} response(s) have no PROlog "
+                        f"counterpart; left in place"
+                    )
+                )
+            with connection.cursor() as cur:
+                cur.execute(
+                    f"delete from {LEGACY_RESPONSES} where survey_id = %s and person_id = any(%s)",
+                    [survey["id"], list(converted)],
+                )
+                deleted = cur.rowcount
+                if not unconverted:
+                    cur.execute(f"delete from {LEGACY_TEMPLATES} where id = %s", [survey["id"]])
+            self.stdout.write(f"  {survey['name']}: purged {deleted} legacy response(s)")

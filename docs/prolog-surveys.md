@@ -218,11 +218,37 @@ than no renderer.
 so any response still living in `PatientSurveyResponse` becomes invisible until
 `migrate_surveys_to_prolog --apply` has run.
 
-### Still to do
+### Upgrading a deployment that has old survey data
 
-- Drop the old models, viewsets and serializers once nothing reads them — a
-  separate, destructive change. The old API is still served and the migration
-  command still reads from it.
+`omop_core.Survey` and `PatientSurveyResponse` are gone from this release; their
+tables are not, until you migrate. That gap is the upgrade window, and the order
+matters:
+
+```sh
+python manage.py migrate_surveys_to_prolog             # 1. see what would move
+python manage.py migrate_surveys_to_prolog --apply     # 2. move it
+#    ... check the result in the portal ...
+python manage.py migrate_surveys_to_prolog --purge-source   # 3. let go of the original
+python manage.py migrate                               # 4. drop the tables
+```
+
+Steps 2 and 3 are separate on purpose: the original is still there while you
+check the conversion. Converting twice is safe — a response already in PROlog is
+not duplicated — and `--purge-source` only deletes rows that have a PROlog
+counterpart, so a partial conversion leaves the rest alone.
+
+**Migration `0201` refuses to run while anything is unconverted.** `start.sh`
+migrates on every deploy, so a deployment that skipped the steps above fails
+loudly instead of dropping patient-entered data.
+
+### What the removal changed beyond the models
+
+- `/api/surveys/` and `/api/survey-responses/` (and their `/api/v1/` twins) are
+  gone. The Surveys tab uses `/api/v1/prolog-surveys/`.
+- **Org export no longer contains `survey_responses`**, and org import ignores
+  the key in an older export rather than half-restoring it. PROlog responses are
+  not exported in their place yet; that is a separate piece of work.
+- An organisation purge now deletes the PROlog rows for those people.
 - Re-verify the **PH.2.1 / PH.3.1.1** conformance criteria against the new model
   before the claim is restated; `docs/phrs-fm-conformance-claim.md` §7 records
   that they are in transition.

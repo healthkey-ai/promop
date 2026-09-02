@@ -20,7 +20,6 @@ from omop_core.models import (
     PatientGroup,
     PatientGroupMembership,
     PatientRecord,
-    PatientSurveyResponse,
     PatientTrialEnrollment,
     PersonalRepresentative,
     Person,
@@ -92,7 +91,12 @@ def delete_organization_with_patient_cascade(org: Organization) -> None:
             # so it must go before VisitOccurrence is deleted.
             f"DELETE FROM {StemTable._meta.db_table} WHERE person_id IN ({person_subquery})",
             f"DELETE FROM {PersonLanguageSkill._meta.db_table} WHERE person_id IN ({person_subquery})",
-            f"DELETE FROM {PatientSurveyResponse._meta.db_table} WHERE person_id IN ({person_subquery})",
+            # PROlog survey rows for these people. Answers cascade from the
+            # response, which is what the person is attached to.
+            f"DELETE FROM prolog_surveys_surveyanswer WHERE response_id IN "
+            f"(SELECT id FROM prolog_surveys_surveyresponse WHERE participant_id IN ({person_subquery}))",
+            f"DELETE FROM prolog_surveys_surveyresponse WHERE participant_id IN ({person_subquery})",
+            f"DELETE FROM prolog_surveys_mintedparticipant WHERE participant_id IN ({person_subquery})",
             f"DELETE FROM {FhirConnection._meta.db_table} WHERE person_id IN ({person_subquery})",
             f"DELETE FROM {FhirOauthState._meta.db_table} WHERE person_id IN ({person_subquery})",
             (

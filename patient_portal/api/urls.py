@@ -12,7 +12,6 @@ from .views import (
     # Clinical trial enrollment tracker (metadata from EXACT)
     PatientTrialEnrollmentViewSet,
     # Patient surveys
-    SurveyViewSet, PatientSurveyResponseViewSet,
     # Controlled vocabulary + OMOP concept lookup
     vocabulary_list, concept_lookup,
     # Stats
@@ -54,8 +53,6 @@ router.register(r'documents', PatientDocumentViewSet, basename='documents')
 router.register(r'trial-enrollments', PatientTrialEnrollmentViewSet, basename='trial-enrollments')
 
 # Patient surveys
-router.register(r'surveys', SurveyViewSet, basename='surveys')
-router.register(r'survey-responses', PatientSurveyResponseViewSet, basename='survey-responses')
 
 urlpatterns = [
     path('', include(router.urls)),
