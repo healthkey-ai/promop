@@ -99,6 +99,8 @@ _MEASUREMENT_SYSTEMS = (
     ('LOINC', 'LOINC — OMOP standard for labs and measurements'),
     ('SNOMED', 'SNOMED CT — findings and qualitative results'),
     ('OpenWearables', 'OpenWearables — unified wearable device metrics'),
+    ('Apple', 'Apple — Apple HealthKit wearable metrics'),
+    ('Garmin', 'Garmin — Garmin FIT wearable metrics'),
     ('CPT4', 'CPT-4 — billed lab panels'),
     ('UCUM', 'UCUM — units of measure'),
     ('Nebraska Lexicon', 'Nebraska Lexicon — interface terminology'),
@@ -108,6 +110,8 @@ _OBSERVATION_SYSTEMS = (
     ('SNOMED', 'SNOMED CT — OMOP standard for observations'),
     ('LOINC', 'LOINC — survey and assessment items'),
     ('OpenWearables', 'OpenWearables — unified wearable device metrics'),
+    ('Apple', 'Apple — Apple HealthKit wearable metrics'),
+    ('Garmin', 'Garmin — Garmin FIT wearable metrics'),
     ('ICD10CM', 'ICD-10-CM — Z-codes and social history'),
     ('HCPCS', 'HCPCS — assessments and screenings'),
     ('NCIt', 'NCIt — NCI thesaurus'),
@@ -159,6 +163,8 @@ SOURCE_TAB_ORDER = [
     'Read', 'MeSH', 'OPCS4', 'Nebraska Lexicon',
     'MedDRA', 'ICDO3', 'dm+d', 'CVX',
     'OpenWearables',  # Wearable device metrics
+    'Apple',  # Apple HealthKit wearable metrics
+    'Garmin',  # Garmin FIT wearable metrics
     '',  # Uncoded / free text
     'LOINC', 'SNOMED',  # Standard — last
 ]
@@ -169,6 +175,7 @@ SOURCE_TAB_LABELS = {
     'ICD9CM': 'ICD-9-CM',
     'ICD10PCS': 'ICD-10-PCS',
     'ICD9Proc': 'ICD-9-Proc',
+    'OpenWearables': 'Wearables',
     '': 'Uncoded',
     # Others use vocabulary_id as-is.
 }

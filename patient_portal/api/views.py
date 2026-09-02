@@ -4117,10 +4117,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         from omop_core.services.wearable_parsers import parse_garmin_fit, parse_apple_health_export
         from omop_core.services.pk import next_pk_batch as _next_pk_batch
         from omop_core.services.mappings import (
-            WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB, WEARABLE_ARTIFACT_BOUNDS,
-            WEARABLE_TYPE_CONCEPT_ID,
+            WEARABLE_ARTIFACT_BOUNDS,
+            WEARABLE_TYPE_CONCEPT_ID, resolve_wearable_mappings,
         )
-        from omop_core.services.concept_cache import concept_by_vocab as _cc_by_vocab
 
         if 'file' not in request.FILES:
             return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
@@ -4177,13 +4176,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if not samples:
             return Response({'samples_created': 0, 'duplicates_skipped': 0})
 
-        # Resolve each metric's concept, scoped by (vocabulary_id, concept_code).
-        # A bare concept_code is ambiguous — 852 codes are reused across
-        # vocabularies — and four wearable metrics live in HK-Wearable, not LOINC.
-        metric_concepts: dict[str, Concept | None] = {}
-        for metric_key, concept_code in WEARABLE_CONCEPT_CODE.items():
-            metric_concepts[metric_key] = _cc_by_vocab(
-                WEARABLE_CONCEPT_VOCAB[metric_key], concept_code)
+        # Resolve each metric's concept from approved SourceCodeConceptMapping
+        # rows for this device type, falling back to the hard-coded
+        # WEARABLE_CONCEPT_CODE dict for any metric without a DB mapping.
+        metric_concepts: dict[str, Concept | None] = resolve_wearable_mappings(device_type)
 
         unresolved = sorted(k for k, c in metric_concepts.items() if c is None)
         if unresolved:
@@ -4309,7 +4305,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             existing_keys.add(dedup_key)
 
             unit = unit_map.get(sample.metric_key)
-            source_code = WEARABLE_CONCEPT_CODE[sample.metric_key]
+            source_code = concept.concept_code
 
             if _is_observation(concept):
                 obs = Observation(
@@ -4424,8 +4420,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             permission_classes=[IsAuthenticated])
     def delete_wearable_upload(self, request, upload_id=None):
         """Delete a wearable upload and its associated Measurement/Observation rows."""
-        from omop_core.services.mappings import WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB
-        from omop_core.services.concept_cache import concept_by_vocab as _cc_by_vocab
+        from omop_core.services.mappings import resolve_wearable_mappings
 
         patient_user = getattr(request.user, 'patient_user', None)
         if not patient_user:
@@ -4437,6 +4432,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         except WearableUpload.DoesNotExist:
             return Response({'error': 'Upload not found'}, status=status.HTTP_404_NOT_FOUND)
 
+        # Resolve mappings for the device type that created this upload.
+        metric_concepts = resolve_wearable_mappings(upload.device_type)
+
         # Delete associated Measurement/Observation rows using sample_summary
         deleted_count = 0
         for entry in upload.sample_summary or []:
@@ -4446,10 +4444,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             if not metric_key or not date_str or value is None:
                 continue
 
-            concept_code = WEARABLE_CONCEPT_CODE.get(metric_key)
-            if not concept_code:
-                continue
-            concept = _cc_by_vocab(WEARABLE_CONCEPT_VOCAB[metric_key], concept_code)
+            concept = metric_concepts.get(metric_key)
             if not concept:
                 continue
 
