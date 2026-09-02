@@ -10,6 +10,7 @@ const ROLE_LABELS: Record<string, string> = {
 
 const ACCESS_LABELS: Record<string, string> = {
   invitation: 'Invited',
+  invitation_pending: 'Invitation pending',
   trusted_domain: 'Trusted domain',
 };
 

@@ -32,6 +32,13 @@ describe('UserProfilePage', () => {
             expires_at: null,
             access_via: ['trusted_domain'],
           },
+          {
+            org_name: 'Pending Invite Org',
+            org_slug: 'pending-invite-org',
+            role: 'analyst',
+            expires_at: '2099-01-01T00:00:00Z',
+            access_via: ['invitation_pending'],
+          },
         ],
       },
       loading: false,
@@ -45,8 +52,10 @@ describe('UserProfilePage', () => {
 
     expect(screen.getByText('Invited Org')).toBeInTheDocument();
     expect(screen.getByText('Trusted Domain Org')).toBeInTheDocument();
+    expect(screen.getByText('Pending Invite Org')).toBeInTheDocument();
     expect(screen.getByText('Invited')).toBeInTheDocument();
     expect(screen.getByText('Trusted domain')).toBeInTheDocument();
+    expect(screen.getByText('Invitation pending')).toBeInTheDocument();
     expect(screen.getByText('Org Access').compareDocumentPosition(screen.getByText('System Rights')))
       .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });

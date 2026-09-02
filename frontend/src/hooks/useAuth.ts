@@ -6,7 +6,7 @@ interface OrgAccess {
   org_slug: string;
   role: string | null;
   expires_at: string | null;
-  access_via?: Array<"invitation" | "trusted_domain">;
+  access_via?: Array<"invitation" | "invitation_pending" | "trusted_domain">;
 }
 
 export interface User {
