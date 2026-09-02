@@ -20,8 +20,9 @@ from decimal import Decimal
 
 from patient_portal.models import Identity
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.test import TestCase, TransactionTestCase
+from django.test import RequestFactory, TestCase, TransactionTestCase
 from django.utils import timezone
+from patient_portal.models import PatientUser
 from django.contrib.contenttypes.models import ContentType
 from rest_framework import status
 from rest_framework.test import APIClient
@@ -24553,3 +24554,96 @@ class CodeMappingLookupTest(TestCase):
             'codes': [{'source_vocabulary_id': 'CPT4', 'source_code': '99213'}],
         }, format='json')
         self.assertIn(resp.status_code, [401, 403])
+
+
+class PrologSurveyParticipantTest(TestCase):
+    """The host primitives the PROlog survey runner binds responses to.
+
+    PROlog binds every response to a Person (its DEP-2/RUN-2). A signed-in
+    patient gets their own; anyone else gets one minted with no identity and no
+    demographics. See docs/prolog-surveys.md.
+    """
+
+    def test_minted_person_has_no_identity_and_no_demographics(self):
+        from patient_portal.services import create_unidentified_person
+
+        person = create_unidentified_person(source='test')
+
+        self.assertIsNone(
+            PatientUser.objects.filter(person=person).first(),
+            'a respondent who is not signed in must not get an account',
+        )
+        for field in (
+            'year_of_birth', 'month_of_birth', 'day_of_birth', 'birth_datetime',
+            'gender_source_value', 'race_source_value', 'ethnicity_source_value',
+            'email', 'phone_number', 'given_name', 'family_name',
+        ):
+            self.assertIsNone(
+                getattr(person, field),
+                f'{field} would be an identifying attribute on an unidentified person',
+            )
+
+    def test_minted_person_has_a_patient_record(self):
+        """Issue #883: a Person without one is underivable and unfixable by API."""
+        from patient_portal.services import create_unidentified_person
+
+        person = create_unidentified_person(source='test')
+
+        self.assertTrue(
+            PatientRecord.objects.filter(person=person).exists(),
+            'without a PatientRecord, refresh answers 404 for the rest of this row\'s life',
+        )
+
+    def test_each_response_gets_its_own_person(self):
+        from patient_portal.services import create_unidentified_person
+
+        first = create_unidentified_person(source='test')
+        second = create_unidentified_person(source='test')
+
+        self.assertNotEqual(first.person_id, second.person_id)
+
+    def test_resolver_returns_the_person_of_a_patient(self):
+        from omop_core.services.pk import next_pk
+        from patient_portal.services import prolog_participant_id
+
+        identity = Identity.objects.create(issuer='urn:local', sub='prolog-patient')
+        person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientUser.objects.create(identity=identity, person=person)
+        request = RequestFactory().get('/')
+        request.user = identity
+
+        self.assertEqual(prolog_participant_id(request), person.person_id)
+
+    def test_resolver_returns_none_for_staff_and_for_anonymous(self):
+        """A provider trying a survey must not have it recorded against a patient."""
+        from django.contrib.auth.models import AnonymousUser
+        from omop_core.services.pk import next_pk
+        from patient_portal.services import prolog_participant_id
+
+        staff = Identity.objects.create(issuer='urn:local', sub='prolog-staff', is_staff=True)
+        person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientUser.objects.create(identity=staff, person=person)
+        request = RequestFactory().get('/')
+        request.user = staff
+        self.assertIsNone(prolog_participant_id(request))
+
+        anonymous = RequestFactory().get('/')
+        anonymous.user = AnonymousUser()
+        self.assertIsNone(prolog_participant_id(anonymous))
+
+
+class PrologSurveyInstallationTest(TestCase):
+    """The app is installed in this project, not deployed beside it."""
+
+    def test_response_participant_points_at_an_omop_person(self):
+        from prolog_surveys.models import SurveyResponse
+
+        field = SurveyResponse._meta.get_field('participant')
+
+        self.assertIs(field.related_model, Person)
+
+    def test_runner_is_mounted_and_does_not_shadow_promop_health(self):
+        from django.urls import reverse
+
+        self.assertEqual(reverse('health'), '/api/v1/prolog/health/')
+        self.assertEqual(reverse('health_check'), '/api/health/')

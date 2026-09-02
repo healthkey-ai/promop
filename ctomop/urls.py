@@ -56,6 +56,10 @@ urlpatterns = [
     path('api/fhir/', include('patient_portal.api.fhir.urls')),
     path('api/health/', views.health_check, name='health_check'),
 
+    # PROlog survey runner. Its own URL tree (health + /run/), mounted under the
+    # versioned prefix; /api/v1/prolog/run/... is what the runner front end calls.
+    path('api/v1/prolog/', include('prolog_surveys.urls')),
+
     # OAuth2 / SMART on FHIR authorization server endpoints
     path('o/', include('oauth2_provider.urls', namespace='oauth2_provider')),
     # SMART on FHIR discovery

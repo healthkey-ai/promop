@@ -203,3 +203,54 @@ def resolve_or_create_person(identity, email=None, allow_create=True, email_veri
 
     logger.debug("auto-provisioned new Person for new Identity")
     return person
+
+
+# ---------------------------------------------------------------------------
+# PROlog survey runner (prolog_surveys)
+# ---------------------------------------------------------------------------
+
+def prolog_participant_id(request):
+    """PROLOG_PARTICIPANT_RESOLVER: the signed-in patient's person_id, or None.
+
+    Returns None for anyone who is not a PHR Account Holder — staff, providers,
+    service tokens, anonymous callers. The runner then mints an unidentified
+    person for the response instead (see create_unidentified_person), so a
+    provider trying a survey never has it recorded against a patient they can
+    see.
+    """
+    person = patient_person_for(getattr(request, 'user', None))
+    return person.person_id if person is not None else None
+
+
+def create_unidentified_person(source='prolog'):
+    """Create a Person with no Identity, no PatientUser and no demographics.
+
+    The counterpart to resolve_or_create_person, which provisions a person *for
+    an identity*. This one mints a person who is not anyone yet: the subject of
+    a survey response that may never be claimed. PROlog binds every response to
+    a person (DEP-2/RUN-2), and "anonymous" means this person carries nothing
+    that could name them — not that no record exists.
+
+    Three things this deliberately does:
+
+    * **Creates the PatientRecord.** Issue #883 is this same primitive built
+      without one: a Person created through find_or_create has no record, so
+      /api/v1/patient-records/<id>/refresh/ answers 404 and the patient is
+      underivable with no API call that can fix it. Thirty-nine patients ended
+      that way in the 2026-08-31 migration.
+    * **Does not run derivation.** There is nothing clinical to derive for a
+      person who has only just been minted, and refresh is expensive.
+    * **Sets no demographics.** resolve_or_create_person writes
+      year_of_birth=1900 and "unknown" source values because it is provisioning
+      a patient. This person is not a patient yet, and a placeholder birth year
+      is an identifying attribute that is also false.
+
+    Callers that later learn who this is promote the same row in place — an
+    Identity and a PatientUser are attached to it — so no answer moves and no
+    second person appears.
+    """
+    with transaction.atomic():
+        person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=person)
+    logger.info('minted unidentified person %s for %s', person.person_id, source)
+    return person
