@@ -396,7 +396,7 @@ export default function CodeMappingPage() {
       // section, cannot be re-opened to un-reject, and re-creating it trips the
       // (source_vocabulary_id, source_code) unique constraint.
       if (row.status === "rejected" && !showRejected) return false;
-      if (selectedVocabulary && tabForRow(row) !== selectedVocabulary) return false;
+      if (tabForRow(row) !== selectedVocabulary) return false;
       if (!q) return true;
       return [
         row.source_code,
@@ -421,7 +421,7 @@ export default function CodeMappingPage() {
   const rejectedCount = useMemo(
     () => rows.filter((r) => r.status === "rejected"
       && r.mapping_origin !== "athena"
-      && (!selectedVocabulary || tabForRow(r) === selectedVocabulary)).length,
+      && tabForRow(r) === selectedVocabulary).length,
     [rows, selectedVocabulary],
   );
   const mappedRows = useMemo(

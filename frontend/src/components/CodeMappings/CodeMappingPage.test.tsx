@@ -190,6 +190,8 @@ describe("CodeMappingPage", () => {
     // Approved rows live under Mapped, which is collapsed by default.
     expect(screen.queryByText("C90.00")).not.toBeInTheDocument();
 
+    fireEvent.click(within(screen.getByRole("tablist", { name: "Source vocabularies" }))
+      .getByRole("tab", { name: /ICD10CM/ }));
     fireEvent.click(screen.getByText(/^Mapped/));
     expect(await screen.findByText("C90.00")).toBeInTheDocument();
   });
@@ -215,18 +217,21 @@ describe("CodeMappingPage", () => {
   });
 
   it("selects Uncoded instead of falling back to the default vocabulary", async () => {
-    renderPage();
+    const proposedIcd10Row = { ...approvedRow, status: "proposed" as const };
+    renderPage([proposedRow, proposedIcd10Row]);
     const tabs = within(await screen.findByRole("tablist", { name: "Source vocabularies" }));
     const uncoded = tabs.getByRole("tab", { name: /Uncoded/ });
     const icd10cm = tabs.getByRole("tab", { name: /ICD10CM/ });
 
     fireEvent.click(icd10cm);
     expect(icd10cm).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByText("C90.00", { selector: "td" })).toBeInTheDocument();
 
     fireEvent.click(uncoded);
     expect(uncoded).toHaveAttribute("aria-selected", "true");
     expect(icd10cm).toHaveAttribute("aria-selected", "false");
     expect(await screen.findByText("M-PROTEIN, SERUM", { selector: "td" })).toBeInTheDocument();
+    expect(screen.queryByText("C90.00", { selector: "td" })).not.toBeInTheDocument();
   });
 
   it("adds a tab for a source system that arrives in SCCM data", async () => {
@@ -628,6 +633,8 @@ describe("CodeMappingPage", () => {
   describe("Sign-off on the provenance line", () => {
     /** Open the dialog for a row that lives under the collapsed Mapped section. */
     const openApproved = async (code: string) => {
+      const tabs = within(await screen.findByRole("tablist", { name: "Source vocabularies" }));
+      fireEvent.click(tabs.getByRole("tab", { name: /ICD10CM/ }));
       fireEvent.click(await screen.findByText(/^Mapped/));
       const cell = await screen.findByText(code, { selector: "td" });
       fireEvent.click(cell.closest("tr")!);
