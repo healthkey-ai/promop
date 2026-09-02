@@ -59,10 +59,20 @@ The minted person is deliberately three things:
 ### Counting
 
 A minted person is a `Person` row like any other, so **any query that counts
-patients will count survey respondents too** until the marker described in the
-PROlog plan (M3) lands — a table the survey app owns, recording which persons it
-minted and whether they have since been claimed. Until then, treat person counts
-in a deployment that runs surveys as including respondents.
+patients will count survey respondents too unless it excludes them**. The survey
+app records which ones it minted, in a table it owns:
+
+```sql
+select * from person p
+where not exists (
+  select 1 from prolog_surveys_mintedparticipant m
+  where m.participant_id = p.person_id and m.identified_at is null
+);
+```
+
+A row there with `identified_at` unset is a respondent nobody has claimed.
+`identified_at` is stamped if that same person later gains an account, after
+which they are an ordinary patient and the marker is only history.
 
 The rate at which they can be created is the `run.create` throttle:
 30/hour per hashed client key by default. That limit is now also the rate at
@@ -118,12 +128,9 @@ Python 3.12, and its ceiling excludes Django 6.
 
 ## What is not done yet
 
-- **The participant foreign key is still nullable**, and PROlog does not yet call
-  `PROLOG_PARTICIPANT_FACTORY` — the hook is named in its plan and consumed in a
-  later phase. Until then a response created by the runner has no person, and
-  the primitives above are available but unused by it.
-- **No marker table**, so minted persons are indistinguishable from patients in
-  counts (above).
+- **The participant foreign key is still nullable.** The runner binds every
+  response it creates, but the column allows null until a deployment cannot be
+  configured without a factory. Rows created before this landed have no person.
 - **No promotion path**: when a respondent gives an email, nothing yet attaches
   an `Identity` and `PatientUser` to the person the response is bound to. The
   collision case — the address already belongs to a *different* person — is open
