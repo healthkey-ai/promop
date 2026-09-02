@@ -10977,8 +10977,16 @@ class UserSerializerOrgAdminTest(TestCase):
 
     def test_org_accesses_include_invited_and_trusted_domain_orgs(self):
         invited_org = _make_org('Invited Org', 'invited-org')
+        pending_org = _make_org('Pending Org', 'pending-org')
         domain_org = _make_org('Domain Org', 'domain-org')
         GroupAccess.objects.create(identity=self.user, org=invited_org, role='doctor')
+        OrgInvitation.objects.create(
+            org=pending_org,
+            email=self.user.email,
+            role='analyst',
+            token='a' * 64,
+            expires_at=timezone.now() + timedelta(days=7),
+        )
         OrgTrust.objects.create(granting_org=domain_org, trusted_domain='example.com')
 
         self.client.force_authenticate(user=self.user)
@@ -11000,6 +11008,13 @@ class UserSerializerOrgAdminTest(TestCase):
                 'role': 'doctor',
                 'expires_at': None,
                 'access_via': ['invitation'],
+            },
+            {
+                'org_name': 'Pending Org',
+                'org_slug': 'pending-org',
+                'role': 'analyst',
+                'expires_at': accesses[2]['expires_at'],
+                'access_via': ['invitation_pending'],
             },
         ])
 

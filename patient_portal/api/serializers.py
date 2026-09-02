@@ -66,6 +66,14 @@ class UserSerializer(serializers.ModelSerializer):
         """
         now = timezone.now()
         from django.db.models import Q
+        pending_invitations = OrgInvitation.objects.filter(
+            email__iexact=obj.email,
+            confirmed_at__isnull=True,
+            cancelled_at__isnull=True,
+            expires_at__gt=now,
+            org__is_active=True,
+        ).select_related('org').order_by('org__name')
+        pending_invitation_org_ids = set(pending_invitations.values_list('org_id', flat=True))
         grants = GroupAccess.objects.filter(
             identity=obj,
         ).filter(
@@ -83,8 +91,25 @@ class UserSerializer(serializers.ModelSerializer):
                 'expires_at': g.expires_at,
                 'access_via': [],
             })
-            if 'invitation' not in access['access_via']:
-                access['access_via'].append('invitation')
+            invitation_source = (
+                'invitation_pending'
+                if org.id in pending_invitation_org_ids
+                else 'invitation'
+            )
+            if invitation_source not in access['access_via']:
+                access['access_via'].append(invitation_source)
+
+        for invitation in pending_invitations:
+            org = invitation.org
+            access = accesses.setdefault(org.id, {
+                'org_name': org.name,
+                'org_slug': org.slug,
+                'role': invitation.role,
+                'expires_at': invitation.expires_at,
+                'access_via': [],
+            })
+            if 'invitation_pending' not in access['access_via']:
+                access['access_via'].append('invitation_pending')
 
         email = (obj.email or '').lower()
         domain = email.rsplit('@', 1)[1] if '@' in email else ''
@@ -99,7 +124,7 @@ class UserSerializer(serializers.ModelSerializer):
                     'org_slug': org.slug,
                     'role': None,
                     'expires_at': None,
-                    'access_via': [],
+                'access_via': [],
                 })
                 if 'trusted_domain' not in access['access_via']:
                     access['access_via'].append('trusted_domain')
