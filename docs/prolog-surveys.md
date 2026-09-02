@@ -243,12 +243,32 @@ loudly instead of dropping patient-entered data.
 
 ### What the removal changed beyond the models
 
-- `/api/surveys/` and `/api/survey-responses/` (and their `/api/v1/` twins) are
-  gone. The Surveys tab uses `/api/v1/prolog-surveys/`.
-- **Org export no longer contains `survey_responses`**, and org import ignores
-  the key in an older export rather than half-restoring it. PROlog responses are
-  not exported in their place yet; that is a separate piece of work.
-- An organisation purge now deletes the PROlog rows for those people.
+**The API paths survive.** `/surveys/` and `/survey-responses/` still answer on
+both the `/api/` and `/api/v1/` prefixes, now backed by PROlog, so a reader of
+the v1 contract keeps working. Two differences:
+
+- **They are read-only.** A PROlog instrument is a validated, versioned
+  definition loaded with `load_definition`, not a row created over HTTP; and
+  answering goes through the runner at `/api/v1/prolog/run/…`, which owns
+  visibility, validation and cascade invalidation. A second write path here
+  would be a second engine, which is what replacing the old feature was for.
+- **The shapes are close, not identical.** `/surveys/` returns a version, with
+  `name` and `slug` both the survey's slug and the whole `definition` alongside;
+  there is no `pages`. `/survey-responses/` keeps `person`, `status`,
+  `started_at`, `completed_at` and a `values` map keyed by question — derived
+  from the answer rows rather than stored as a blob.
+
+`/api/v1/prolog-surveys/` remains the tab's own endpoint: it answers "what
+should *I* do next", which is a different question from "what exists".
+
+**Org export carries `survey_responses` again**, sourced from PROlog. Each entry
+names its instrument by `survey_slug` and `survey_version`, because a response
+belongs to an immutable version: an import attaches to the same one, or **skips
+and says which instrument it would have needed**, rather than hanging answers off
+a different set of questions. Re-running an import does not duplicate a
+response.
+
+An organisation purge deletes the PROlog rows for those people.
 - Re-verify the **PH.2.1 / PH.3.1.1** conformance criteria against the new model
   before the claim is restated; `docs/phrs-fm-conformance-claim.md` §7 records
   that they are in transition.

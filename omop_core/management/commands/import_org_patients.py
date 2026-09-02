@@ -74,6 +74,11 @@ from omop_core.models import (
 )
 from omop_core.services.pk import next_pk_batch
 from omop_core.services.patient_record_service import refresh_patient_record
+from prolog_surveys.models import (
+    SurveyAnswer as PrologSurveyAnswer,
+    SurveyResponse as PrologSurveyResponse,
+    SurveyVersion as PrologSurveyVersion,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -288,6 +293,10 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+
+        # Instruments this deployment does not have; reported once at the end.
+
+        self._survey_versions_missing = set()
         input_path = options['input'] or options['input_flag']
         if not input_path:
             raise CommandError(
@@ -457,6 +466,12 @@ class Command(BaseCommand):
         self.stdout.write(f'  Replaced          : {counts["replaced"]:>8,}')
         self.stdout.write(f'  Skipped (exists)  : {counts["skipped"]:>8,}')
         self.stdout.write(f'  Errors            : {counts["errors"]:>8,}')
+        if self._survey_versions_missing:
+            self.stdout.write(self.style.WARNING(
+                '  Survey responses skipped: this deployment has no '
+                + ', '.join(sorted(self._survey_versions_missing))
+                + '. Load those instruments and re-run to restore them.'
+            ))
 
     # ------------------------------------------------------------------
     # Per-patient import (runs inside its own transaction)
@@ -573,11 +588,53 @@ class Command(BaseCommand):
             except Exception:
                 pass
 
-        # Survey responses are not imported: omop_core.Survey and
-        # PatientSurveyResponse are retired (PROlog replaces them), and a PROlog
-        # response belongs to an immutable version this payload does not carry.
-        # An export written before that change still has a `survey_responses`
-        # key; it is ignored rather than half-restored.
+        # ---- PROlog survey responses ----
+        # A response belongs to an immutable version, so it is restored only
+        # where this deployment has the same instrument at the same version.
+        # Anything else is skipped rather than attached to a different set of
+        # questions — which is the whole reason versions exist.
+        for resp in patient.get('survey_responses') or []:
+            if not isinstance(resp, dict):
+                continue
+            slug, version_label = resp.get('survey_slug'), resp.get('survey_version')
+            if not slug or not version_label:
+                continue  # an export written before survey_responses carried them
+            version = PrologSurveyVersion.objects.filter(
+                survey__slug=slug, version=version_label
+            ).first()
+            if version is None:
+                self._survey_versions_missing.add(f'{slug}@{version_label}')
+                continue
+            if PrologSurveyResponse.objects.filter(
+                survey_version=version,
+                participant_id=person.person_id,
+                started_at=resp.get('started_at'),
+            ).exists():
+                continue  # re-running an import must not duplicate a response
+            try:
+                restored = PrologSurveyResponse.objects.create(
+                    survey_version=version,
+                    participant_id=person.person_id,
+                    language=resp.get('language') or version.definition.get(
+                        'default_language', 'en'
+                    ),
+                    status=resp.get('status') or 'in_progress',
+                    started_at=resp.get('started_at'),
+                    submitted_at=resp.get('submitted_at'),
+                    last_question_key=resp.get('last_question_key') or '',
+                )
+                PrologSurveyAnswer.objects.bulk_create([
+                    PrologSurveyAnswer(
+                        response=restored,
+                        question_key=a['question_key'],
+                        value=a['value'],
+                        option_keys=a.get('option_keys') or [],
+                    )
+                    for a in (resp.get('answers') or [])
+                    if isinstance(a, dict) and a.get('question_key')
+                ])
+            except Exception:
+                pass
 
         # ---- PatientRecord ----
         # Derived by default: the OMOP rows above are the facts, and every other

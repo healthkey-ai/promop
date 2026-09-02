@@ -103,6 +103,7 @@ from io import StringIO
 from .permissions import ScopedTokenPermission, VocabReadPermission, PatientCrudPermission, PatientSelfScopePermission, PatientDeletePermission, get_request_org, is_service_token
 from .providers.base import TokenClaims
 from .serializers import (
+    PrologSurveySerializer, PrologSurveyResponseSerializer,
     UserSerializer, PatientRecordSerializer, PatientListSerializer, ProvenanceRecordSerializer,
     ConditionOccurrenceSerializer, DrugExposureSerializer, MeasurementSerializer,
     ObservationSerializer, ProcedureOccurrenceSerializer,
@@ -7785,6 +7786,82 @@ class PatientTrialEnrollmentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = PatientTrialEnrollmentSerializer
     permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = PatientTrialEnrollment.objects.all()
+
+
+class SurveyViewSet(viewsets.ReadOnlyModelViewSet):
+    """`/surveys/` — the instruments this deployment serves.
+
+    Backed by PROlog. Read-only, and that is a real change from the retired
+    feature, which let staff and service tokens POST a template: a PROlog
+    instrument is a validated, versioned definition loaded with
+    `manage.py load_definition`, not a row somebody can create over HTTP.
+
+    Kept at the original path so existing readers keep working.
+    """
+
+    permission_classes = [ScopedTokenPermission]
+    serializer_class = PrologSurveySerializer
+    http_method_names = ['get', 'head', 'options']
+
+    def get_queryset(self):
+        from prolog_surveys.models import LifecycleStatus, SurveyVersion
+
+        qs = SurveyVersion.objects.select_related('survey').order_by('survey__slug', '-created_at')
+        status_filter = self.request.query_params.get('status')
+        if status_filter:
+            # ACTIVE / DRAFT / ARCHIVED, as the retired feature spelled them.
+            qs = qs.filter(status=status_filter.lower())
+        else:
+            qs = qs.filter(status=LifecycleStatus.ACTIVE)
+        return qs
+
+
+class PatientSurveyResponseViewSet(viewsets.ReadOnlyModelViewSet):
+    """`/survey-responses/` — responses, scoped to who is asking.
+
+    Backed by PROlog. Read-only: answering goes through the runner at
+    `/api/v1/prolog/run/…`, which owns visibility, validation and cascade
+    invalidation. A second write path here would be a second engine, which is
+    what replacing the old feature was meant to avoid.
+    """
+
+    permission_classes = [ScopedTokenPermission]
+    serializer_class = PrologSurveyResponseSerializer
+    http_method_names = ['get', 'head', 'options']
+
+    def get_queryset(self):
+        from omop_core.authorization import can_access_patient
+        from patient_portal.services import patient_person_for
+        from prolog_surveys.models import SurveyResponse
+
+        qs = SurveyResponse.objects.select_related('survey_version__survey').order_by('-started_at')
+        request = self.request
+        if is_service_token(request):
+            pass  # a service token sees everything, as it does elsewhere
+        else:
+            org = get_request_org(request)
+            if org is not None:
+                qs = qs.filter(
+                    participant_id__in=PatientRecord.objects.filter(
+                        organization=org
+                    ).values('person_id')
+                )
+            else:
+                person = patient_person_for(request.user)
+                if person is None:
+                    if not getattr(request.user, 'is_staff', False):
+                        return qs.none()
+                else:
+                    qs = qs.filter(participant_id=person.person_id)
+        person_id = request.query_params.get('person_id')
+        if person_id:
+            if not can_access_patient(request.user, person_id):
+                return qs.none()
+            qs = qs.filter(participant_id=person_id)
+        survey = request.query_params.get('survey')
+        if survey:
+            qs = qs.filter(survey_version__survey__slug=survey)
+        return qs
 
 
 class PrologSurveyListView(APIView):

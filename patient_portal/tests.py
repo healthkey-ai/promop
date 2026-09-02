@@ -23596,3 +23596,133 @@ class PrologSurveyListTest(TestCase):
         self.client.force_login(staff)
 
         self.assertEqual(self.client.get('/api/v1/prolog-surveys/').json(), [])
+
+
+class RestoredSurveyEndpointsTest(TestCase):
+    """`/surveys/` and `/survey-responses/` still answer, backed by PROlog.
+
+    The paths are part of the v1 contract, so they survive the model change;
+    what changed is that they are read-only, because a PROlog instrument is a
+    loaded definition and answering goes through the runner.
+    """
+
+    def setUp(self):
+        from omop_core.services.pk import next_pk
+        from prolog_surveys.definitions.loader import load_definition
+        from prolog_surveys.models import SurveyAnswer, SurveyResponse
+
+        self.identity = Identity.objects.create(issuer='urn:local', sub='restored-endpoints')
+        self.person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=self.person)
+        PatientUser.objects.create(identity=self.identity, person=self.person)
+        self.version = load_definition({
+            'schema_version': 1, 'slug': 'checkin', 'version': '1.0', 'status': 'draft',
+            'default_language': 'en', 'languages': ['en'], 'title': {'en': 'Check-in'},
+            'sections': [{'key': 's1', 'title': {'en': 'S'}, 'questions': [
+                {'key': 'mood', 'type': 'text', 'text': {'en': 'How are you?'}}]}],
+        }, activate=True).version
+        self.response = SurveyResponse.objects.create(
+            survey_version=self.version, participant_id=self.person.person_id, language='en'
+        )
+        SurveyAnswer.objects.create(
+            response=self.response, question_key='mood', value={'text': 'fine'}
+        )
+        self.client.force_login(self.identity)
+
+    def test_surveys_answers_on_both_prefixes(self):
+        for path in ('/api/v1/surveys/', '/api/surveys/'):
+            body = self.client.get(path).json()
+            rows = body if isinstance(body, list) else body['results']
+            self.assertEqual([r['name'] for r in rows], ['checkin'], path)
+            self.assertEqual(rows[0]['title'], 'Check-in')
+
+    def test_a_patient_sees_their_own_responses_with_answers_as_values(self):
+        body = self.client.get('/api/v1/survey-responses/').json()
+        rows = body if isinstance(body, list) else body['results']
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['person'], self.person.person_id)
+        self.assertEqual(rows[0]['survey'], 'checkin')
+        # The shape the retired endpoint returned, derived rather than stored.
+        self.assertEqual(rows[0]['values'], {'mood': {'text': 'fine'}})
+
+    def test_another_patients_response_is_not_visible(self):
+        from omop_core.services.pk import next_pk
+        from prolog_surveys.models import SurveyResponse
+
+        other = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        SurveyResponse.objects.create(
+            survey_version=self.version, participant_id=other.person_id, language='en'
+        )
+
+        body = self.client.get('/api/v1/survey-responses/').json()
+        rows = body if isinstance(body, list) else body['results']
+
+        self.assertEqual([r['person'] for r in rows], [self.person.person_id])
+
+    def test_writing_is_refused_because_the_runner_owns_it(self):
+        """Answering goes through /api/v1/prolog/run/, which validates."""
+        created = self.client.post(
+            '/api/v1/survey-responses/', {'survey': 'checkin'}, content_type='application/json'
+        )
+        self.assertIn(created.status_code, (403, 405))
+
+        patched = self.client.patch(
+            f'/api/v1/survey-responses/{self.response.id}/',
+            {'values': {'mood': {'text': 'changed'}}},
+            content_type='application/json',
+        )
+        self.assertIn(patched.status_code, (403, 405))
+
+
+class OrgSurveyExportRoundTripTest(TestCase):
+    """Survey responses survive an org export and import, sourced from PROlog.
+
+    A response belongs to an immutable version, so the export names the
+    instrument by slug and version and the import attaches to the same one — or
+    skips, rather than hanging answers off a different set of questions.
+    """
+
+    def _definition(self, slug):
+        return {
+            'schema_version': 1, 'slug': slug, 'version': '1.0', 'status': 'draft',
+            'default_language': 'en', 'languages': ['en'], 'title': {'en': slug},
+            'sections': [{'key': 's1', 'title': {'en': 'S'}, 'questions': [
+                {'key': 'mood', 'type': 'text', 'text': {'en': 'How are you?'}}]}],
+        }
+
+    def setUp(self):
+        from omop_core.services.pk import next_pk
+        from prolog_surveys.definitions.loader import load_definition
+        from prolog_surveys.models import SurveyAnswer, SurveyResponse
+
+        self.person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=self.person)
+        self.version = load_definition(self._definition('checkin'), activate=True).version
+        response = SurveyResponse.objects.create(
+            survey_version=self.version, participant_id=self.person.person_id, language='en'
+        )
+        SurveyAnswer.objects.create(
+            response=response, question_key='mood', value={'text': 'fine'}
+        )
+
+    def test_the_export_carries_the_instrument_and_the_answers(self):
+        from omop_core.management.commands.export_org_patients import _prolog_survey_responses
+
+        exported = _prolog_survey_responses([self.person.person_id])
+
+        rows = exported[self.person.person_id]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['survey_slug'], 'checkin')
+        self.assertEqual(rows[0]['survey_version'], '1.0', 'the version is what makes it restorable')
+        self.assertEqual(rows[0]['answers'], [
+            {'question_key': 'mood', 'value': {'text': 'fine'}, 'option_keys': []},
+        ])
+
+    def test_an_export_of_someone_with_no_responses_is_empty(self):
+        from omop_core.management.commands.export_org_patients import _prolog_survey_responses
+        from omop_core.services.pk import next_pk
+
+        other = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+
+        self.assertEqual(_prolog_survey_responses([other.person_id]), {})

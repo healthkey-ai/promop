@@ -1,6 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
+    SurveyViewSet, PatientSurveyResponseViewSet,
     CurrentUserViewSet, PatientRecordViewSet, login_view, logout_view, auth_test,
     # Person identity resolution
     PersonViewSet,
@@ -51,6 +52,8 @@ router.register(r'documents', PatientDocumentViewSet, basename='documents')
 
 # Clinical trial enrollment status tracker (trial metadata from EXACT)
 router.register(r'trial-enrollments', PatientTrialEnrollmentViewSet, basename='trial-enrollments')
+router.register(r'surveys', SurveyViewSet, basename='surveys')
+router.register(r'survey-responses', PatientSurveyResponseViewSet, basename='survey-responses')
 
 # Patient surveys
 
