@@ -109,7 +109,7 @@ function AppRoutes() {
   // doctor, analyst).  Doctors and analysts can propose; only staff and
   // org_admin can approve.  The API independently enforces the same policy.
   const hasProfessionalRole = currentUser?.is_staff || currentUser?.is_org_admin
-    || currentUser?.org_accesses?.some(a => ['org_admin', 'doctor', 'analyst'].includes(a.role));
+    || currentUser?.org_accesses?.some(a => ['org_admin', 'doctor', 'analyst'].includes(a.role ?? ''));
   const mappingAdminRoute = (element: ReactNode) => {
     if (!currentUser) return <Navigate to="/login" replace />;
     if (!hasProfessionalRole) return <Navigate to="/" replace />;
