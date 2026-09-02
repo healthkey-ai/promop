@@ -104,18 +104,23 @@ class Command(BaseCommand):
 
                     if not target:
                         logger.warning(
-                            'Concept not found: %s %s for %s metric %s',
+                            'Concept not found: %s %s for %s metric %s — '
+                            'skipping (run load_athena_vocabularies first)',
                             d_vocab, d_code, source_vocab, src_code,
                         )
+                        unresolved += 1
+                        if dry_run:
+                            self.stdout.write(
+                                f'  [UNMAPPED] {source_vocab}:{src_code} -> '
+                                f'{d_vocab}:{d_code}'
+                            )
+                        continue
 
                     if dry_run:
-                        status_str = 'MAPPED' if target else 'UNMAPPED'
                         self.stdout.write(
-                            f'  [{status_str}] {source_vocab}:{src_code} -> '
+                            f'  [MAPPED] {source_vocab}:{src_code} -> '
                             f'{d_vocab}:{d_code}'
                         )
-                        if not target:
-                            unresolved += 1
                         continue
 
                     _, was_created = SourceCodeConceptMapping.objects.get_or_create(
@@ -138,8 +143,6 @@ class Command(BaseCommand):
                         created += 1
                     else:
                         existed += 1
-                    if not target:
-                        unresolved += 1
 
                 total_created += created
                 total_existed += existed
