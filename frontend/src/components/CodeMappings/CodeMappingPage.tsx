@@ -370,9 +370,12 @@ export default function CodeMappingPage() {
       ...v,
       ...(counts[v.vocabulary_id] || { proposed: 0, approved: 0, athena: 0 }),
     }));
+    // Data-only tabs (not in server list) only appear when they have
+    // proposed mappings needing curation — fully-mapped vocabularies
+    // (e.g. ATC, HemOnc, RxNorm Extension with only Athena rows) stay hidden.
     const known = new Set(sourceVocabTabs.map((v) => v.vocabulary_id));
     Object.keys(counts)
-      .filter((k) => !known.has(k))
+      .filter((k) => !known.has(k) && counts[k].proposed > 0)
       .forEach((k) => {
         result.push({
           vocabulary_id: k,
