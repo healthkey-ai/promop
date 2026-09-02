@@ -22,6 +22,8 @@ from patient_portal.models import Identity
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.test import RequestFactory, TestCase, TransactionTestCase
 from django.utils import timezone
+from omop_core.models import PatientSurveyResponse, Survey
+from django.core.management import call_command
 from patient_portal.models import PatientUser
 from django.contrib.contenttypes.models import ContentType
 from rest_framework import status
@@ -24647,3 +24649,97 @@ class PrologSurveyInstallationTest(TestCase):
 
         self.assertEqual(reverse('health'), '/api/v1/prolog/health/')
         self.assertEqual(reverse('health_check'), '/api/health/')
+
+
+class PrologSurveyMigrationTest(TestCase):
+    """Converting this project's own surveys into PROlog ones (decision 9).
+
+    The two models do not have the same shape, so the command translates rather
+    than copies, and says what it could not carry.
+    """
+
+    def setUp(self):
+        from omop_core.services.pk import next_pk
+
+        self._next_pk = next_pk
+        self.survey = Survey.objects.create(
+            name='symptom-check',
+            title='Weekly symptom check',
+            pages=[{
+                'name': 'page1',
+                'title': 'Symptoms',
+                'inputs': [
+                    {'name': 'fatigue', 'label': 'Fatigue level', 'type': 'rating',
+                     'data': {'maxRating': 10}},
+                    {'name': 'worst_day', 'label': 'Worst day', 'type': 'select',
+                     'data': {'options': ['Monday', 'Tuesday']}},
+                    {'name': 'notes', 'label': 'Notes', 'type': 'textarea'},
+                ],
+            }],
+        )
+        self.person = Person.objects.create(person_id=self._next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=self.person)
+
+    def _response(self, values):
+        return PatientSurveyResponse.objects.create(
+            person=self.person, survey=self.survey, values=values
+        )
+
+    def test_dry_run_writes_nothing(self):
+        from prolog_surveys.models import SurveyVersion
+
+        self._response({'fatigue': 5})
+        out = io.StringIO()
+        call_command('migrate_surveys_to_prolog', stdout=out)
+
+        self.assertIn('would migrate', out.getvalue())
+        self.assertFalse(SurveyVersion.objects.exists(), 'a dry run must not write')
+
+    def test_a_template_becomes_a_draft_definition_with_mapped_types(self):
+        from prolog_surveys.models import SurveyVersion
+
+        call_command('migrate_surveys_to_prolog', '--apply', stdout=io.StringIO())
+
+        version = SurveyVersion.objects.get(survey__slug='symptom-check')
+        self.assertEqual(version.status, 'draft', 'activation stays a deliberate step')
+        questions = {
+            q['key']: q for s in version.definition['sections'] for q in s['questions']
+        }
+        self.assertEqual(questions['fatigue']['type'], 'scale')
+        self.assertEqual(questions['fatigue']['config']['scale'], {'min': 1, 'max': 10})
+        self.assertEqual(questions['worst_day']['type'], 'single')
+        self.assertEqual(questions['notes']['type'], 'text')
+        # Nothing was ever required: the old Complete button did not check.
+        self.assertFalse(any(q.get('required') for q in questions.values()))
+
+    def test_a_response_keeps_its_person_and_its_answers(self):
+        from prolog_surveys.models import SurveyAnswer, SurveyResponse
+
+        self._response({'fatigue': 7, 'worst_day': 'Tuesday', 'notes': 'tired'})
+
+        call_command('migrate_surveys_to_prolog', '--apply', stdout=io.StringIO())
+
+        migrated = SurveyResponse.objects.get()
+        self.assertEqual(migrated.participant_id, self.person.person_id)
+        answers = {a.question_key: a.value for a in SurveyAnswer.objects.filter(response=migrated)}
+        self.assertEqual(answers['fatigue'], {'value': 7})
+        self.assertEqual(answers['worst_day'], {'option': 'tuesday'})
+        self.assertEqual(answers['notes'], {'text': 'tired'})
+
+    def test_answers_it_cannot_carry_are_reported_not_guessed(self):
+        from prolog_surveys.models import SurveyAnswer
+
+        self._response({
+            'fatigue': 99,             # outside the scale
+            'worst_day': 'Sunday',     # not one of the options
+            'ghost': 'x',              # not in the template at all
+        })
+        out = io.StringIO()
+
+        call_command('migrate_surveys_to_prolog', '--apply', stdout=out)
+
+        report = out.getvalue()
+        self.assertIn('outside 1..10', report)
+        self.assertIn('is not one of its options', report)
+        self.assertIn("'ghost' is not in the template", report)
+        self.assertFalse(SurveyAnswer.objects.exists(), 'nothing is guessed at')

@@ -152,7 +152,54 @@ Python 3.12, and its ceiling excludes Django 6.
   collision case — the address already belongs to a *different* person — is open
   decision 7 in PROlog's requirements, and the answer there is that merging two
   patient records is a clinical-safety operation, not a survey side effect.
-- **PRomop's own survey feature** (`omop_core.Survey`, `PatientSurveyResponse`,
-  shipped as PHR-S FM phase 4a) is untouched. Two survey data models now exist in
-  this database. Whether PROlog replaces that feature, and what that does to the
-  PH.2.1 conformance claim, is undecided.
+- **PRomop's own survey feature is being retired**, not kept (decision 9). The
+  conversion below exists; what has not happened yet is pointing the patient
+  portal at the runner and dropping the old models, API and components. Until
+  that lands, two survey data models are live in this database.
+
+## Migrating off the old survey feature
+
+`omop_core.Survey` / `PatientSurveyResponse` are replaced by PROlog (decision 9
+in PROlog's requirements). `migrate_surveys_to_prolog` translates them:
+
+```sh
+python manage.py migrate_surveys_to_prolog            # report only
+python manage.py migrate_surveys_to_prolog --apply
+python manage.py migrate_surveys_to_prolog --survey symptom-check --apply
+```
+
+It is a translation, not a copy, and it says what it could not carry rather than
+guessing:
+
+| | |
+| --- | --- |
+| `rating` | `scale`, 1..`maxRating` |
+| `select` | `single`, with its options |
+| `textarea` | `text`, multiline |
+| `text` and anything unrecognised | `text` — which is what the old renderer showed |
+| a value outside a scale, or not one of a select's options | **reported and skipped** |
+| a `values` key that is not in the template | **reported and skipped** |
+| `percent_complete`, `values_dates`, `consent_signature` | no equivalent; not carried |
+
+Definitions land as **drafts**: review each, then activate deliberately with
+`load_definition … --activate`. Responses keep their `Person`, so nothing is
+re-parented.
+
+### The one thing a migration cannot fix
+
+A PROlog version is immutable; a `Survey` template was not. A response was
+answered against whatever `pages` said at the time, and **nothing recorded what
+that was**. Every migrated response is therefore attached to the template as it
+stands now. Where a template was edited after answers were given, that is a real
+reinterpretation of somebody's data — the failure the immutable-version design
+exists to prevent, applied retroactively. Check whether any template was edited
+after its first response before trusting migrated answers.
+
+### Still to do
+
+- Point the patient portal's Surveys tab at the runner instead of `SurveyForm`.
+- Drop the old models, viewsets, serializers and components once nothing reads
+  them — a separate, destructive change.
+- Re-verify the **PH.2.1 / PH.3.1.1** conformance criteria against the new model
+  before the claim is restated; `docs/phrs-fm-conformance-claim.md` §7 records
+  that they are in transition.

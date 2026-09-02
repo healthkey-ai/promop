@@ -107,7 +107,18 @@ profile claim. As of #318 **every Essential function of the profile is fully con
 7. **TI.4.2 versioning** is **sequential** (not concurrent live multi-version); embedded-term
    substitution (#07/#08) applies to the coded data store — promop has no template/formulary
    authoring layer.
-8. **Not HL7-validated** — self-attestation; accuracy is the vendor's responsibility.
+8. **PH.2.1 / PH.3.1.1 are in transition and must be re-verified before this claim is
+   restated.** The claim above rests on `omop_core.Survey` / `PatientSurveyResponse` and the
+   patient-mode `SurveyForm`. That feature is being **replaced** by the PROlog survey runner
+   (`docs/prolog-surveys.md`), which is a different data model — answer rows against an immutable
+   version, rather than a flat `values` map against a mutable template. Until the replacement is
+   complete and the criteria re-checked against it, **neither the old evidence nor the new
+   capability should be cited as settled** for these functions. Two specifics a re-verification has
+   to address: responses migrated from the old model are attached to their template *as it stands
+   now*, because the old model never recorded which revision an answer was given against; and
+   `percent_complete`, `values_dates` and `consent_signature` have no equivalent in the new model
+   and are not carried.
+9. **Not HL7-validated** — self-attestation; accuracy is the vendor's responsibility.
 
 ## 8. Signatory
 | | |
