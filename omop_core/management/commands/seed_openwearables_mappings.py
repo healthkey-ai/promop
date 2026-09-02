@@ -10,6 +10,7 @@ Idempotent: uses get_or_create on (source_vocabulary_id, source_code).
 import logging
 
 from django.core.management.base import BaseCommand
+from django.db import transaction
 
 from omop_core.models import Concept, SourceCodeConceptMapping
 from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE
@@ -34,7 +35,7 @@ OPENWEARABLES_METRICS = [
     ('blood_pressure_diastolic', 'Diastolic blood pressure', 'mmHg', 'Measurement', 'LOINC', '8462-4'),
     ('respiratory_rate', 'Respiratory rate', 'breaths/min', 'Measurement', 'LOINC', '9279-1'),
     ('sleeping_breathing_disturbances', 'Sleeping breathing disturbances', 'count', 'Observation', None, None),
-    ('blood_alcohol_content', 'Blood alcohol content', 'mg/dL', 'Measurement', 'LOINC', '5643-2'),
+    ('blood_alcohol_content', 'Blood alcohol content', 'mg/dL', 'Measurement', None, None),  # no wearable-appropriate LOINC
     ('peripheral_perfusion_index', 'Peripheral perfusion index', 'score', 'Measurement', None, None),
     ('forced_vital_capacity', 'Forced vital capacity (FVC)', 'L', 'Measurement', 'LOINC', '19868-9'),
     ('forced_expiratory_volume_1', 'Forced expiratory volume in 1s (FEV1)', 'L', 'Measurement', 'LOINC', '20150-9'),
@@ -62,8 +63,8 @@ OPENWEARABLES_METRICS = [
 
     # ── Activity — Basic ────────────────────────────────────────────────
     ('steps', 'Steps', 'count', 'Observation', 'LOINC', '55423-8'),
-    ('energy', 'Active energy burned', 'kcal', 'Observation', 'LOINC', '93819-1'),
-    ('basal_energy', 'Basal energy expenditure', 'kcal', 'Observation', None, None),
+    ('energy', 'Active energy burned', 'kcal', 'Measurement', 'LOINC', '93819-1'),
+    ('basal_energy', 'Basal energy expenditure', 'kcal', 'Measurement', None, None),
     ('stand_time', 'Stand time', 'min', 'Observation', None, None),
     ('exercise_time', 'Exercise time', 'min', 'Observation', 'LOINC', '55411-3'),
     ('physical_effort', 'Physical effort score', 'score', 'Observation', None, None),
@@ -170,46 +171,47 @@ class Command(BaseCommand):
                 concepts[('LOINC', c.concept_code)] = c
 
         created = existed = unresolved = 0
-        for ow_code, display, unit, domain, t_vocab, t_code in OPENWEARABLES_METRICS:
-            target = concepts.get((t_vocab, t_code)) if t_vocab else None
-            desc = f'{display} ({unit})' if unit else display
-            omop_table = DOMAIN_TO_TABLE.get(domain, '')
+        with transaction.atomic():
+            for ow_code, display, unit, domain, t_vocab, t_code in OPENWEARABLES_METRICS:
+                target = concepts.get((t_vocab, t_code)) if t_vocab else None
+                desc = f'{display} ({unit})' if unit else display
+                omop_table = DOMAIN_TO_TABLE.get(domain, '')
 
-            if t_vocab and t_code and not target:
-                logger.warning(
-                    'Concept not found: %s %s for metric %s',
-                    t_vocab, t_code, ow_code,
+                if t_vocab and t_code and not target:
+                    logger.warning(
+                        'Concept not found: %s %s for metric %s',
+                        t_vocab, t_code, ow_code,
+                    )
+
+                if dry_run:
+                    status = 'MAPPED' if target else 'UNMAPPED'
+                    self.stdout.write(f'  [{status}] {ow_code} -> {t_vocab or "-"}:{t_code or "-"}')
+                    if not target:
+                        unresolved += 1
+                    continue
+
+                _, was_created = SourceCodeConceptMapping.objects.get_or_create(
+                    source_vocabulary_id=VOCABULARY_ID,
+                    source_code=ow_code,
+                    defaults={
+                        'domain_id': domain,
+                        'source_code_description': desc[:255],
+                        'target_concept': target,
+                        'destination_vocabulary_id': target.vocabulary_id if target else '',
+                        'omop_table': omop_table,
+                        'status': 'proposed',
+                        'origin': 'import',
+                        'origin_system': 'open-wearables-seed',
+                        'source': 'HealthKey',
+                        'occurrence_count': 0,
+                    },
                 )
-
-            if dry_run:
-                status = 'MAPPED' if target else 'UNMAPPED'
-                self.stdout.write(f'  [{status}] {ow_code} -> {t_vocab or "-"}:{t_code or "-"}')
+                if was_created:
+                    created += 1
+                else:
+                    existed += 1
                 if not target:
                     unresolved += 1
-                continue
-
-            _, was_created = SourceCodeConceptMapping.objects.get_or_create(
-                source_vocabulary_id=VOCABULARY_ID,
-                source_code=ow_code,
-                defaults={
-                    'domain_id': domain,
-                    'source_code_description': desc[:255],
-                    'target_concept': target,
-                    'destination_vocabulary_id': target.vocabulary_id if target else '',
-                    'omop_table': omop_table,
-                    'status': 'proposed',
-                    'origin': 'import',
-                    'origin_system': 'open-wearables-seed',
-                    'source': 'HealthKey',
-                    'occurrence_count': 0,
-                },
-            )
-            if was_created:
-                created += 1
-            else:
-                existed += 1
-            if not target:
-                unresolved += 1
 
         total = len(OPENWEARABLES_METRICS)
         if dry_run:
