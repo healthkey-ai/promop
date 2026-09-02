@@ -228,14 +228,20 @@ matters:
 python manage.py migrate_surveys_to_prolog             # 1. see what would move
 python manage.py migrate_surveys_to_prolog --apply     # 2. move it
 #    ... check the result in the portal ...
-python manage.py migrate_surveys_to_prolog --purge-source   # 3. let go of the original
+python manage.py migrate_surveys_to_prolog --apply --purge-source  # 3. let go of the original
 python manage.py migrate                               # 4. drop the tables
 ```
 
 Steps 2 and 3 are separate on purpose: the original is still there while you
 check the conversion. Converting twice is safe — a response already in PROlog is
-not duplicated — and `--purge-source` only deletes rows that have a PROlog
-counterpart, so a partial conversion leaves the rest alone.
+not duplicated — and `--purge-source` deletes only the rows *this command*
+converted, matched on the version's recorded source rather than on the slug, so
+a partial conversion leaves the rest alone and an instrument that happens to
+share a slug is not mistaken for a counterpart. It deletes, so it needs
+`--apply` as well; a template nobody answered is never dropped.
+
+Step 3 is not optional. Conversion copies rather than moves, so the guard in
+step 4 still counts the originals until they are purged.
 
 **Migration `0201` refuses to run while anything is unconverted.** `start.sh`
 migrates on every deploy, so a deployment that skipped the steps above fails

@@ -23,6 +23,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.test import RequestFactory, TestCase, TransactionTestCase
 from django.utils import timezone
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from patient_portal.models import PatientUser
 from django.contrib.contenttypes.models import ContentType
 from rest_framework import status
@@ -16668,7 +16669,7 @@ class BackfillCommandTest(TestCase):
 
         from django.core.management import call_command
         from io import StringIO
-        out = StringIO()
+        out = io.StringIO()
         # Force stale by setting version to 0
         PatientRecord.objects.filter(pk=pr.pk).update(derivation_version=0)
         call_command('backfill_patient_records', dry_run=True, stdout=out)
@@ -16685,7 +16686,7 @@ class BackfillCommandTest(TestCase):
 
         from django.core.management import call_command
         from io import StringIO
-        out = StringIO()
+        out = io.StringIO()
         call_command('backfill_patient_records', stdout=out)
         pr.refresh_from_db()
         self.assertEqual(pr.derivation_version, DERIVATION_VERSION)
@@ -23726,3 +23727,564 @@ class OrgSurveyExportRoundTripTest(TestCase):
         other = Person.objects.create(person_id=next_pk(Person, 'person_id'))
 
         self.assertEqual(_prolog_survey_responses([other.person_id]), {})
+
+
+class PrologSurveyScopingRegressionTest(TestCase):
+    """`/survey-responses/` scoping, for the callers the first cut got wrong.
+
+    `participant_id` is an integer column and the query parameter arrives as a
+    string, and the trust scoping differs per caller — so each branch is
+    exercised here rather than only the signed-in patient's.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import Organization
+        from omop_core.services.pk import next_pk
+        from prolog_surveys.definitions.loader import load_definition
+        from prolog_surveys.models import SurveyResponse
+
+        cls.org = Organization.objects.create(name='Scoping Org', slug='scoping-org')
+        cls.identity = Identity.objects.create(issuer='urn:local', sub='scoping-patient')
+        cls.person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=cls.person, organization=cls.org)
+        PatientUser.objects.create(identity=cls.identity, person=cls.person)
+        cls.version = load_definition({
+            'schema_version': 1, 'slug': 'scoping', 'version': '1.0', 'status': 'draft',
+            'default_language': 'en', 'languages': ['en'], 'title': {'en': 'Scoping'},
+            'sections': [{'key': 's1', 'title': {'en': 'S'}, 'questions': [
+                {'key': 'mood', 'type': 'text', 'text': {'en': 'How are you?'}}]}],
+        }, activate=True).version
+        SurveyResponse.objects.create(
+            survey_version=cls.version, participant_id=cls.person.person_id, language='en'
+        )
+        cls.service_identity = Identity.objects.get_or_create(
+            issuer='urn:service', sub='scoping-service',
+        )[0]
+
+    def test_a_patient_can_filter_by_their_own_person_id(self):
+        """The parameter is a string; the column is an integer."""
+        self.client.force_login(self.identity)
+
+        body = self.client.get(
+            f'/api/v1/survey-responses/?person_id={self.person.person_id}'
+        ).json()
+
+        self.assertEqual(len(body), 1, 'their own id must not filter them out')
+
+    def test_a_non_numeric_person_id_is_empty_rather_than_an_error(self):
+        self.client.force_login(self.identity)
+
+        response = self.client.get('/api/v1/survey-responses/?person_id=abc')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), [])
+
+    def test_a_service_token_can_narrow_to_one_person(self):
+        """The parameter exists for integrations; it must not exclude them."""
+        client = APIClient()
+        client.force_authenticate(user=self.service_identity, token='service-token')
+
+        body = client.get(
+            f'/api/v1/survey-responses/?person_id={self.person.person_id}'
+        ).json()
+
+        self.assertEqual(len(body), 1)
+
+    def test_a_patient_cannot_read_another_patients_responses(self):
+        from omop_core.services.pk import next_pk
+        from prolog_surveys.models import SurveyResponse
+
+        other = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=other, organization=self.org)
+        SurveyResponse.objects.create(
+            survey_version=self.version, participant_id=other.person_id, language='en'
+        )
+        self.client.force_login(self.identity)
+
+        body = self.client.get(
+            f'/api/v1/survey-responses/?person_id={other.person_id}'
+        ).json()
+
+        self.assertEqual(body, [], 'scoping runs before the filter, so this is empty')
+
+
+class PrologSurveyStatusRegressionTest(TestCase):
+    """The tab reports where a patient stands, so the newest response decides."""
+
+    def setUp(self):
+        from omop_core.services.pk import next_pk
+        from prolog_surveys.definitions.loader import load_definition
+
+        self.identity = Identity.objects.create(issuer='urn:local', sub='status-patient')
+        self.person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=self.person)
+        PatientUser.objects.create(identity=self.identity, person=self.person)
+        self.version = load_definition({
+            'schema_version': 1, 'slug': 'status', 'version': '1.0', 'status': 'draft',
+            'default_language': 'en', 'languages': ['en'], 'title': {'en': 'Status'},
+            'sections': [{'key': 's1', 'title': {'en': 'S'}, 'questions': [
+                {'key': 'mood', 'type': 'text', 'text': {'en': 'How are you?'}}]}],
+        }, activate=True).version
+        self.client.force_login(self.identity)
+
+    def test_a_finished_survey_does_not_still_read_as_in_progress(self):
+        from django.utils import timezone
+        from prolog_surveys.models import SurveyResponse
+
+        old = SurveyResponse.objects.create(
+            survey_version=self.version, participant_id=self.person.person_id, language='en'
+        )
+        new = SurveyResponse.objects.create(
+            survey_version=self.version, participant_id=self.person.person_id,
+            language='en', status='submitted', submitted_at=timezone.now(),
+        )
+        # started_at is auto_now_add, so the ordering is set explicitly.
+        SurveyResponse.objects.filter(pk=old.pk).update(
+            started_at=timezone.now() - timedelta(days=2)
+        )
+        SurveyResponse.objects.filter(pk=new.pk).update(
+            started_at=timezone.now() - timedelta(days=1)
+        )
+
+        body = self.client.get('/api/v1/prolog-surveys/').json()
+
+        self.assertEqual(body[0]['status'], 'completed')
+
+
+class PrologSurveyDeletionTest(TestCase):
+    """Deleting a patient who has answered a survey.
+
+    `SurveyResponse.participant` is PROTECT, so every path that removes a
+    Person has to clear PROlog's rows first — including the tables that hang
+    off a response or an invitation, which the first cut missed.
+    """
+
+    def _patient_with_a_survey_history(self, org=None):
+        from django.utils import timezone
+        from omop_core.services.pk import next_pk
+        from prolog_surveys.definitions.loader import load_definition
+        from prolog_surveys.models import (
+            SurveyAnswer, SurveyConsent, SurveyInvitation, SurveyResponse,
+        )
+
+        person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=person, organization=org)
+        version = getattr(self, '_version', None)
+        if version is None:
+            version = self._version = load_definition({
+                'schema_version': 1, 'slug': 'deletion', 'version': '1.0', 'status': 'draft',
+                'default_language': 'en', 'languages': ['en'], 'title': {'en': 'Deletion'},
+                'sections': [{'key': 's1', 'title': {'en': 'S'}, 'questions': [
+                    {'key': 'mood', 'type': 'text', 'text': {'en': 'How are you?'}}]}],
+            }, activate=True).version
+        response = SurveyResponse.objects.create(
+            survey_version=version, participant_id=person.person_id, language='en'
+        )
+        SurveyAnswer.objects.create(
+            response=response, question_key='mood', value={'text': 'fine'}
+        )
+        SurveyConsent.objects.create(
+            response=response, consent_version='1.0', text_hash='x' * 8,
+            language='en', agreed_at=timezone.now(),
+        )
+        SurveyInvitation.objects.create(
+            survey=version.survey, participant_id=person.person_id
+        )
+        return person
+
+    def test_a_patient_who_answered_a_survey_can_still_be_deleted(self):
+        from omop_core.services.prolog_cleanup import delete_prolog_data_for_persons
+        from prolog_surveys.models import SurveyResponse
+
+        person = self._patient_with_a_survey_history()
+
+        delete_prolog_data_for_persons([person.person_id])
+        person.delete()
+
+        self.assertFalse(Person.objects.filter(person_id=person.person_id).exists())
+        self.assertFalse(SurveyResponse.objects.filter(participant_id=person.person_id).exists())
+
+    def test_org_cleanup_removes_a_patient_with_consent_and_invitations(self):
+        from omop_core.models import Organization
+        from omop_core.services.organization_cleanup import (
+            delete_organization_with_patient_cascade,
+        )
+        from prolog_surveys.models import SurveyConsent, SurveyInvitation, SurveyResponse
+
+        org = Organization.objects.create(name='Deletion Org', slug='deletion-org')
+        person = self._patient_with_a_survey_history(org=org)
+
+        delete_organization_with_patient_cascade(org)
+
+        self.assertFalse(Person.objects.filter(person_id=person.person_id).exists())
+        self.assertFalse(SurveyResponse.objects.filter(participant_id=person.person_id).exists())
+        self.assertFalse(SurveyInvitation.objects.filter(participant_id=person.person_id).exists())
+        self.assertFalse(SurveyConsent.objects.exists())
+
+    def test_deleting_the_clinical_rows_frees_the_person(self):
+        """The shared helper is reached through the ordinary cleanup path."""
+        from omop_core.services.patient_cleanup import delete_omop_clinical_rows
+        from prolog_surveys.models import SurveyResponse
+
+        person = self._patient_with_a_survey_history()
+
+        delete_omop_clinical_rows(person)
+        PatientRecord.objects.filter(person=person).delete()
+        person.delete()
+
+        self.assertFalse(SurveyResponse.objects.filter(participant_id=person.person_id).exists())
+
+
+class PrologSurveyConverterTest(TestCase):
+    """`migrate_surveys_to_prolog`, against the tables it is meant to read.
+
+    The legacy models are gone from this release and migration 0201 drops
+    their tables, so the upgrade window — models absent, tables present — is
+    reconstructed here with SQL. That window is the only state in which this
+    command does anything, and it is a destructive one, so it is exercised
+    rather than reasoned about.
+    """
+
+    _DDL = (
+        """create table survey (
+               id serial primary key,
+               name varchar(200) unique not null,
+               title varchar(300) not null,
+               description text not null default '',
+               pages jsonb not null default '[]'::jsonb
+           )""",
+        """create table patient_survey_response (
+               id serial primary key,
+               survey_id integer not null references survey(id),
+               person_id bigint not null,
+               values jsonb not null default '{}'::jsonb,
+               started_at timestamptz,
+               completed_at timestamptz,
+               created_at timestamptz not null default now()
+           )""",
+    )
+
+    def setUp(self):
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            for statement in self._DDL:
+                cursor.execute(statement)
+
+    def tearDown(self):
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            cursor.execute('drop table if exists patient_survey_response')
+            cursor.execute('drop table if exists survey')
+
+    def _template(self, name, title='A survey'):
+        from django.db import connection
+
+        pages = json.dumps([{
+            'name': 'page one',
+            'title': 'Page one',
+            'inputs': [{'name': 'mood', 'type': 'text', 'label': 'How are you?'}],
+        }])
+        with connection.cursor() as cursor:
+            cursor.execute(
+                'insert into survey (name, title, description, pages) '
+                'values (%s, %s, %s, %s::jsonb) returning id',
+                [name, title, '', pages],
+            )
+            return cursor.fetchone()[0]
+
+    def _response(self, survey_id, person, started_at, values=None):
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                'insert into patient_survey_response '
+                '(survey_id, person_id, values, started_at, completed_at) '
+                "values (%s, %s, %s::jsonb, %s, null)",
+                [survey_id, person.person_id, json.dumps(values or {'mood': 'fine'}), started_at],
+            )
+
+    def _person(self):
+        from omop_core.services.pk import next_pk
+
+        person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=person)
+        return person
+
+    def test_purging_without_apply_is_refused(self):
+        """--purge-source deletes, so it belongs behind the same flag writing does."""
+        self._template('symptom check')
+
+        with self.assertRaises(CommandError) as caught:
+            call_command('migrate_surveys_to_prolog', '--purge-source')
+
+        self.assertIn('--apply', str(caught.exception))
+
+    def test_two_templates_with_the_same_slug_are_refused_before_anything_is_written(self):
+        from prolog_surveys.models import Survey as PrologSurvey
+
+        self._template('symptom check')
+        self._template('Symptom-Check')
+
+        with self.assertRaises(CommandError) as caught:
+            call_command('migrate_surveys_to_prolog', '--apply', stdout=io.StringIO())
+
+        self.assertIn('same slug', str(caught.exception))
+        self.assertFalse(
+            PrologSurvey.objects.filter(slug='symptom-check').exists(),
+            'the refusal has to come before the first write, not after it',
+        )
+
+    def test_a_collision_is_caught_even_when_only_one_side_is_selected(self):
+        """Converting the pair one at a time merges them just the same."""
+        self._template('symptom check')
+        self._template('Symptom-Check')
+
+        with self.assertRaises(CommandError):
+            call_command(
+                'migrate_surveys_to_prolog', '--survey', 'symptom check', '--apply',
+                stdout=io.StringIO(),
+            )
+
+    def test_a_converted_response_keeps_the_day_it_was_answered(self):
+        from django.utils import timezone
+        from prolog_surveys.models import SurveyResponse
+
+        answered = timezone.now() - timedelta(days=90)
+        survey_id = self._template('symptom check')
+        person = self._person()
+        self._response(survey_id, person, answered)
+
+        call_command('migrate_surveys_to_prolog', '--apply', stdout=io.StringIO())
+
+        migrated = SurveyResponse.objects.get(participant_id=person.person_id)
+        self.assertAlmostEqual(
+            migrated.started_at, answered, delta=timedelta(seconds=1),
+            msg='started_at is auto_now_add; without an explicit update every '
+                'migrated response carries the time the migration ran',
+        )
+
+    def test_purging_leaves_a_response_it_did_not_convert(self):
+        """A PROlog response that came from somewhere else is not a counterpart.
+
+        An operator can load an instrument whose slug matches a legacy
+        template's. If the purge treats that as proof the legacy row was
+        converted, it deletes answers that were never carried across — so it
+        matches on what the conversion recorded as the source, not the slug.
+        """
+        from django.db import connection
+        from django.utils import timezone
+        from prolog_surveys.definitions.loader import load_definition
+        from prolog_surveys.models import SurveyResponse
+
+        # An instrument at the same slug, loaded rather than converted; the
+        # conversion below is refused because 1.0 is already active.
+        version = load_definition({
+            'schema_version': 1, 'slug': 'symptom-check', 'version': '1.0',
+            'status': 'draft', 'default_language': 'en', 'languages': ['en'],
+            'title': {'en': 'Symptom check'},
+            'sections': [{'key': 's1', 'title': {'en': 'S'}, 'questions': [
+                {'key': 'mood', 'type': 'text', 'text': {'en': 'How are you?'}}]}],
+        }, activate=True).version
+        person = self._person()
+        SurveyResponse.objects.create(
+            survey_version=version, participant_id=person.person_id, language='en'
+        )
+        survey_id = self._template('symptom check')
+        self._response(survey_id, person, timezone.now())
+
+        call_command('migrate_surveys_to_prolog', '--apply', '--purge-source', stdout=io.StringIO())
+
+        with connection.cursor() as cursor:
+            cursor.execute('select person_id from patient_survey_response')
+            remaining = [row[0] for row in cursor.fetchall()]
+            cursor.execute('select count(*) from survey')
+            templates = cursor.fetchone()[0]
+        self.assertEqual(
+            remaining, [person.person_id],
+            'this response was never converted, so purging it destroys it',
+        )
+        self.assertEqual(templates, 1, 'the template still has an unconverted response')
+
+    def test_purging_does_not_drop_a_template_nobody_answered(self):
+        from django.db import connection
+
+        self._template('symptom check')
+
+        call_command('migrate_surveys_to_prolog', '--apply', '--purge-source', stdout=io.StringIO())
+
+        with connection.cursor() as cursor:
+            cursor.execute('select count(*) from survey')
+            self.assertEqual(
+                cursor.fetchone()[0], 1,
+                'an empty template was not converted either, so purging it '
+                'would delete an instrument for being empty',
+            )
+
+
+class OrgSurveyImportRoundTripTest(TestCase):
+    """A response survives export → import, once, with the day it was answered.
+
+    The export is only half a round trip: what matters to a deployment being
+    moved is that the response comes back, that it comes back with its own
+    timestamps, and that running the import again does not give the patient a
+    second copy of it.
+    """
+
+    def setUp(self):
+        from django.utils import timezone
+        from omop_core.models import Organization
+        from omop_core.services.pk import next_pk
+        from prolog_surveys.definitions.loader import load_definition
+        from prolog_surveys.models import SurveyAnswer, SurveyResponse
+
+        self.org = Organization.objects.create(name='Round Trip', slug='round-trip')
+        self.person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=self.person, organization=self.org)
+        self.version = load_definition({
+            'schema_version': 1, 'slug': 'roundtrip', 'version': '1.0', 'status': 'draft',
+            'default_language': 'en', 'languages': ['en'], 'title': {'en': 'Round trip'},
+            'sections': [{'key': 's1', 'title': {'en': 'S'}, 'questions': [
+                {'key': 'mood', 'type': 'text', 'text': {'en': 'How are you?'}}]}],
+        }, activate=True).version
+        self.answered = timezone.now() - timedelta(days=30)
+        response = SurveyResponse.objects.create(
+            survey_version=self.version, participant_id=self.person.person_id, language='en'
+        )
+        SurveyResponse.objects.filter(pk=response.pk).update(started_at=self.answered)
+        SurveyAnswer.objects.create(
+            response=response, question_key='mood', value={'text': 'fine'}
+        )
+
+    def _export_file(self):
+        import tempfile
+        from django.core.serializers.json import DjangoJSONEncoder
+        from omop_core.management.commands.export_org_patients import (
+            _prolog_survey_responses,
+        )
+
+        responses = _prolog_survey_responses([self.person.person_id])
+        payload = {
+            'export_metadata': {'org_slug': self.org.slug},
+            'patients': [{
+                'person': {'person_id': self.person.person_id},
+                'patient_record': {},
+                'omop': {},
+                'survey_responses': responses[self.person.person_id],
+            }],
+        }
+        handle = tempfile.NamedTemporaryFile('w', suffix='.json', delete=False)
+        json.dump(payload, handle, cls=DjangoJSONEncoder)
+        handle.close()
+        return handle.name
+
+    def _remove_the_patient(self):
+        """Delete the patient, and keep their id: `delete()` clears the pk."""
+        from omop_core.services.prolog_cleanup import delete_prolog_data_for_persons
+
+        person_id = self.person.person_id
+        delete_prolog_data_for_persons([person_id])
+        PatientRecord.objects.filter(person=self.person).delete()
+        self.person.delete()
+        return person_id
+
+    def test_a_restored_response_keeps_the_day_it_was_answered(self):
+        from prolog_surveys.models import SurveyResponse
+
+        path = self._export_file()
+        person_id = self._remove_the_patient()
+
+        call_command('import_org_patients', path, '--org', self.org.slug, stdout=io.StringIO())
+
+        restored = SurveyResponse.objects.get(participant_id=person_id)
+        self.assertAlmostEqual(
+            restored.started_at, self.answered, delta=timedelta(seconds=1),
+            msg='started_at is auto_now_add, so a restore has to set it explicitly',
+        )
+        self.assertEqual(restored.answers.count(), 1)
+
+    def test_replacing_a_patient_who_answered_a_survey_leaves_one_response(self):
+        """--replace deletes the patient first, and a response protects them.
+
+        Re-importing is the way a dataset is corrected, so it has to work for
+        a patient who has answered something — and has to leave exactly one
+        copy of each response, not two and not none.
+        """
+        from prolog_surveys.models import SurveyResponse
+
+        path = self._export_file()
+        person_id = self._remove_the_patient()
+        call_command('import_org_patients', path, '--org', self.org.slug, stdout=io.StringIO())
+
+        out = io.StringIO()
+        call_command(
+            'import_org_patients', path, '--org', self.org.slug, '--replace',
+            stdout=out,
+        )
+
+        # The command counts a per-patient failure rather than raising, so a
+        # ProtectedError here is a number in the summary, not a traceback.
+        report = out.getvalue()
+        self.assertIn('Replaced          :        1', report)
+        self.assertIn('Errors            :        0', report)
+        self.assertEqual(
+            SurveyResponse.objects.filter(participant_id=person_id).count(), 1
+        )
+        self.assertEqual(
+            SurveyResponse.objects.get(participant_id=person_id).answers.count(), 1
+        )
+
+
+class AdminDeletePatientWithSurveyTest(TestCase):
+    """DELETE .../admin-delete/ for a patient who has answered a survey.
+
+    The endpoint deletes the Person directly rather than through the shared
+    cleanup helper, so it needs the survey rows removed on its own path.
+    """
+
+    def setUp(self):
+        from django.utils import timezone
+        from omop_core.services.pk import next_pk
+        from prolog_surveys.definitions.loader import load_definition
+        from prolog_surveys.models import SurveyAnswer, SurveyConsent, SurveyResponse
+
+        self.staff = Identity.objects.create(
+            issuer='urn:local', sub='admin-delete-staff', is_staff=True
+        )
+        self.person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=self.person)
+        version = load_definition({
+            'schema_version': 1, 'slug': 'admin-delete', 'version': '1.0',
+            'status': 'draft', 'default_language': 'en', 'languages': ['en'],
+            'title': {'en': 'Admin delete'},
+            'sections': [{'key': 's1', 'title': {'en': 'S'}, 'questions': [
+                {'key': 'mood', 'type': 'text', 'text': {'en': 'How are you?'}}]}],
+        }, activate=True).version
+        response = SurveyResponse.objects.create(
+            survey_version=version, participant_id=self.person.person_id, language='en'
+        )
+        SurveyAnswer.objects.create(
+            response=response, question_key='mood', value={'text': 'fine'}
+        )
+        SurveyConsent.objects.create(
+            response=response, consent_version='1.0', text_hash='x' * 8,
+            language='en', agreed_at=timezone.now(),
+        )
+
+    def test_the_endpoint_deletes_a_patient_who_answered_a_survey(self):
+        from prolog_surveys.models import SurveyResponse
+
+        person_id = self.person.person_id
+        client = APIClient()
+        client.force_authenticate(user=self.staff)
+
+        response = client.delete(
+            f'/api/v1/patient-records/{person_id}/admin-delete/',
+            {'confirm': 'DELETE'}, format='json',
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertFalse(Person.objects.filter(person_id=person_id).exists())
+        self.assertFalse(SurveyResponse.objects.filter(participant_id=person_id).exists())

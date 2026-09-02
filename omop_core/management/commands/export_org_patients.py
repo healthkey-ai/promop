@@ -124,6 +124,10 @@ def _prolog_survey_responses(person_ids):
     groups = defaultdict(list)
     for response in responses:
         groups[response.participant_id].append({
+            # The response's own id: stable, non-null, and what an import
+            # dedupes on. `started_at` cannot serve — it is auto_now_add, so a
+            # restore cannot reproduce it through create().
+            'id': str(response.id),
             'survey_slug': response.survey_version.survey.slug,
             'survey_version': response.survey_version.version,
             'language': response.language,

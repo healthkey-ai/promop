@@ -29,6 +29,7 @@ from omop_core.models import (
     VisitDetail,
     VisitOccurrence,
 )
+from omop_core.services.prolog_cleanup import prolog_delete_statements
 from omop_oncology.models import CancerModifier, Episode, EpisodeEvent, Histology, StemTable
 from patient_portal.models import Identity, PatientUser
 
@@ -91,12 +92,11 @@ def delete_organization_with_patient_cascade(org: Organization) -> None:
             # so it must go before VisitOccurrence is deleted.
             f"DELETE FROM {StemTable._meta.db_table} WHERE person_id IN ({person_subquery})",
             f"DELETE FROM {PersonLanguageSkill._meta.db_table} WHERE person_id IN ({person_subquery})",
-            # PROlog survey rows for these people. Answers cascade from the
-            # response, which is what the person is attached to.
-            f"DELETE FROM prolog_surveys_surveyanswer WHERE response_id IN "
-            f"(SELECT id FROM prolog_surveys_surveyresponse WHERE participant_id IN ({person_subquery}))",
-            f"DELETE FROM prolog_surveys_surveyresponse WHERE participant_id IN ({person_subquery})",
-            f"DELETE FROM prolog_surveys_mintedparticipant WHERE participant_id IN ({person_subquery})",
+            # PROlog survey rows for these people — every table, in the order
+            # the constraints require. See omop_core.services.prolog_cleanup;
+            # consent and invitation rows are the ones this list used to miss,
+            # which aborted the whole deletion.
+            *prolog_delete_statements(person_subquery),
             f"DELETE FROM {FhirConnection._meta.db_table} WHERE person_id IN ({person_subquery})",
             f"DELETE FROM {FhirOauthState._meta.db_table} WHERE person_id IN ({person_subquery})",
             (

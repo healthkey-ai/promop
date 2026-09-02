@@ -15,16 +15,20 @@ translation and not a copy, and the differences matter:
   Answers whose key is not in the template, or whose value does not fit the
   question type, are reported rather than guessed at.
 
-Dry run by default. `--apply` is the only path that writes.
+Dry run by default. `--apply` is the only path that writes, and
+`--purge-source` needs it too.
 
-    manage.py migrate_surveys_to_prolog                    # report only
-    manage.py migrate_surveys_to_prolog --apply
+    manage.py migrate_surveys_to_prolog                        # report only
+    manage.py migrate_surveys_to_prolog --apply                # convert
     manage.py migrate_surveys_to_prolog --survey symptom-check --apply
+    manage.py migrate_surveys_to_prolog --apply --purge-source # then let go
 
 It reads the legacy tables with SQL rather than through models, because the
 models are gone from this release and the tables are not: that gap is the
-upgrade window. Pull this release, run this command, then migrate — which drops
-the tables, and refuses to if anything is still unmigrated.
+upgrade window. Pull this release, convert, check the result, purge, and only
+then migrate — which drops the tables, and refuses to while any legacy row is
+still there. Converting alone does not clear that guard: conversion copies, and
+`--purge-source` is what removes the original.
 """
 
 from __future__ import annotations
@@ -120,6 +124,24 @@ def legacy_tables_exist() -> bool:
     )
 
 
+def slug_for(survey: dict) -> str:
+    """The PROlog slug a legacy template converts to.
+
+    One definition, shared by the conversion and the purge — the two of them
+    disagreeing about it is how a purge deletes the wrong rows.
+    """
+    return _key(survey["name"], "survey").replace("_", "-")
+
+
+def source_for(survey: dict) -> str:
+    """What `load_definition` records as the origin of a converted version.
+
+    It is what tells a version this command created apart from one an operator
+    loaded, which the purge depends on.
+    """
+    return f"legacy survey:{survey['id']}"
+
+
 def build_definition(survey: dict) -> tuple[dict, list[str]]:
     """A PROlog definition document for one template, plus what it could not carry."""
     notes: list[str] = []
@@ -144,7 +166,7 @@ def build_definition(survey: dict) -> tuple[dict, list[str]]:
         )
     doc = {
         "schema_version": 1,
-        "slug": _key(survey["name"], "survey").replace("_", "-"),
+        "slug": slug_for(survey),
         "version": "1.0",
         "status": "draft",
         "default_language": "en",
@@ -203,14 +225,20 @@ class Command(BaseCommand):
 
         apply = options["apply"]
         names = options.get("survey")
+        if options["purge_source"] and not apply:
+            raise CommandError(
+                "--purge-source deletes legacy rows, so it needs --apply too. "
+                "Dry-run first without either."
+            )
         if not legacy_tables_exist():
             self.stdout.write(
                 "the legacy survey tables are already gone; nothing to migrate"
             )
             return
-        templates = _rows(
+        all_templates = _rows(
             "select id, name, title, description, pages from survey order by name"
         )
+        templates = all_templates
         if names:
             found = {t["name"] for t in templates}
             missing = set(names) - found
@@ -220,6 +248,32 @@ class Command(BaseCommand):
         if not templates:
             self.stdout.write("no surveys to migrate")
             return
+
+        # Two template names can slugify alike ("Symptom check" and
+        # "symptom-check"). Converting both would load the second definition
+        # over the first as a new version of one survey, silently merging two
+        # instruments — so refuse before anything is written and let the
+        # operator rename one. Checked against every template, not only the
+        # selected ones: converting the pair one at a time merges them just the
+        # same.
+        collisions: dict[str, list[str]] = {}
+        for template in all_templates:
+            collisions.setdefault(slug_for(template), []).append(template["name"])
+        selected = {slug_for(t) for t in templates}
+        clashing = {
+            slug: names_
+            for slug, names_ in collisions.items()
+            if len(names_) > 1 and slug in selected
+        }
+        if clashing:
+            raise CommandError(
+                "these templates convert to the same slug: "
+                + "; ".join(
+                    f"{slug} <- {', '.join(sorted(names_))}"
+                    for slug, names_ in sorted(clashing.items())
+                )
+                + ". Rename one of each pair and re-run."
+            )
 
         totals = {"templates": 0, "responses": 0, "answers": 0, "skipped": 0}
         for survey in templates:
@@ -268,7 +322,7 @@ class Command(BaseCommand):
 
             with transaction.atomic():
                 try:
-                    result = load_definition(doc, source=f"legacy survey:{survey['id']}")
+                    result = load_definition(doc, source=source_for(survey))
                 except DefinitionError as exc:
                     self.stdout.write(self.style.ERROR(f"  refused: {exc}"))
                     continue
@@ -286,9 +340,16 @@ class Command(BaseCommand):
                         participant_id=response["person_id"],
                         language="en",
                         status="submitted" if response["completed_at"] else "in_progress",
-                        started_at=response["started_at"] or response["created_at"],
                         submitted_at=response["completed_at"],
                     )
+                    # `started_at` is auto_now_add, so create() ignores the
+                    # value and stamps now: the whole cohort would carry the
+                    # time the migration ran instead of when it was answered.
+                    started_at = response["started_at"] or response["created_at"]
+                    if started_at:
+                        SurveyResponse.objects.filter(pk=migrated.pk).update(
+                            started_at=started_at
+                        )
                     for name, raw in (_json(response["values"]) or {}).items():
                         question = questions.get(by_input.get(name, ""))
                         if question is None:
@@ -336,17 +397,20 @@ class Command(BaseCommand):
         """Delete legacy rows whose responses are already in PROlog.
 
         Kept apart from --apply so the original is still there while the
-        conversion is checked. A response is only dropped when a PROlog one
-        exists for the same person and the same instrument, so a partial or
-        refused conversion leaves its source alone.
+        conversion is checked. A row is only dropped when *this command*
+        converted it: the PROlog response has to belong to a version whose
+        source names this template. A PROlog response the same person happens
+        to have for a same-named instrument loaded some other way is not a
+        counterpart, and deleting the legacy row against it would lose the
+        answers it stands for.
         """
         from prolog_surveys.models import SurveyResponse
 
         for survey in templates:
-            slug = _key(survey["name"], "survey").replace("_", "-")
             converted = set(
                 SurveyResponse.objects.filter(
-                    survey_version__survey__slug=slug
+                    survey_version__survey__slug=slug_for(survey),
+                    survey_version__source=source_for(survey),
                 ).values_list("participant_id", flat=True)
             )
             rows = _rows(
@@ -362,12 +426,20 @@ class Command(BaseCommand):
                     )
                 )
             with connection.cursor() as cur:
-                cur.execute(
-                    "delete from patient_survey_response "
-                    "where survey_id = %s and person_id = any(%s)",
-                    [survey["id"], list(converted)],
-                )
-                deleted = cur.rowcount
-                if not unconverted:
+                if converted:
+                    cur.execute(
+                        "delete from patient_survey_response "
+                        "where survey_id = %s and person_id = any(%s)",
+                        [survey["id"], list(converted)],
+                    )
+                    deleted = cur.rowcount
+                else:
+                    deleted = 0
+                # The template goes only when it had responses and every one of
+                # them is now in PROlog. A template nobody ever answered was
+                # not converted either, and dropping it here would delete an
+                # instrument on the strength of it being empty.
+                if rows and not unconverted:
                     cur.execute("delete from survey where id = %s", [survey["id"]])
+                    self.stdout.write(f"  {survey['name']}: template deleted")
             self.stdout.write(f"  {survey['name']}: purged {deleted} legacy response(s)")

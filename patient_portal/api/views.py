@@ -59,6 +59,7 @@ from omop_core.services.patient_record_service import (
 )
 from omop_core.services.derivation_jobs import get_dispatcher
 from omop_core.services.patient_cleanup import delete_omop_clinical_rows
+from omop_core.services.prolog_cleanup import delete_prolog_data_for_persons
 from omop_core.services.lot_inference_service import infer_lot_for_person
 from omop_core.services.episode_service import upsert_therapy_line_episode
 from omop_core.services.mappings import CONCEPT_GENERIC_LAB, get_gender_concept
@@ -1260,6 +1261,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             )
             if episode_ids:
                 EpisodeEvent.objects.filter(episode_id__in=episode_ids).delete()
+            # A survey response protects its participant, so PROlog's rows go
+            # first or person.delete() raises ProtectedError.
+            delete_prolog_data_for_persons([person.person_id])
             # Person delete cascades to OMOP rows, PatientRecord(s), PatientUser.
             person.delete()
             if linked_identity is not None:
@@ -7836,6 +7840,18 @@ class PatientSurveyResponseViewSet(viewsets.ReadOnlyModelViewSet):
 
         qs = SurveyResponse.objects.select_related('survey_version__survey').order_by('-started_at')
         request = self.request
+
+        # `participant_id` is an integer column, so the filter value has to be
+        # one too: a string never matches, and a non-numeric one reaches the
+        # database as a bad cast. Same shape as _OmopFilterMixin.
+        raw_person_id = request.query_params.get('person_id')
+        person_id = None
+        if raw_person_id:
+            try:
+                person_id = int(raw_person_id)
+            except (TypeError, ValueError):
+                return qs.none()
+
         if is_service_token(request):
             pass  # a service token sees everything, as it does elsewhere
         else:
@@ -7848,15 +7864,20 @@ class PatientSurveyResponseViewSet(viewsets.ReadOnlyModelViewSet):
                 )
             else:
                 person = patient_person_for(request.user)
-                if person is None:
-                    if not getattr(request.user, 'is_staff', False):
-                        return qs.none()
-                else:
+                if person is not None:
                     qs = qs.filter(participant_id=person.person_id)
-        person_id = request.query_params.get('person_id')
-        if person_id:
-            if not can_access_patient(request.user, person_id):
-                return qs.none()
+                elif person_id is not None:
+                    # No org token and no record of their own: a provider or a
+                    # personal representative. Authorise per person, the way
+                    # the OMOP endpoints do, rather than by identity.
+                    if not can_access_patient(request.user, person_id):
+                        return qs.none()
+                elif not getattr(request.user, 'is_staff', False):
+                    return qs.none()
+
+        # Trust scoping above already bounds what this caller may see, so
+        # ?person_id= only narrows it further.
+        if person_id is not None:
             qs = qs.filter(participant_id=person_id)
         survey = request.query_params.get('survey')
         if survey:
@@ -7897,10 +7918,12 @@ class PrologSurveyListView(APIView):
             .select_related('survey')
             .order_by('survey__slug')
         )
+        # Ascending, so that where a patient has several responses to one
+        # version the newest is the one left in the map and decides the status.
         mine = {
             r.survey_version_id: r
             for r in SurveyResponse.objects.filter(participant_id=person.person_id)
-            .order_by('-started_at')
+            .order_by('started_at')
         }
 
         out = []

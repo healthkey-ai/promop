@@ -7,9 +7,16 @@ deploy — so the check below fails the deploy rather than the data.
 
 The upgrade is:
 
-    python manage.py migrate_surveys_to_prolog            # see what would move
-    python manage.py migrate_surveys_to_prolog --apply    # move it
-    python manage.py migrate                              # then this runs
+    python manage.py migrate_surveys_to_prolog                  # see what would move
+    python manage.py migrate_surveys_to_prolog --apply          # convert it
+    #   ... check the conversion in the portal ...
+    python manage.py migrate_surveys_to_prolog --apply --purge-source
+    python manage.py migrate                                    # then this runs
+
+The purge step is not optional. Conversion *copies*: it leaves the legacy rows
+in place so the original is still there while the result is checked, so the
+check below still counts them and the migration still refuses. `--purge-source`
+is what removes the rows it converted — and only those.
 
 The converter reads these tables with SQL rather than through models, so it
 still works in this release, where the models are already gone and the tables
@@ -21,12 +28,16 @@ from django.db import migrations
 _STILL_POPULATED = (
     "{count} survey response(s) are still in `patient_survey_response`.\n"
     "\n"
-    "Dropping this table now would destroy them. Convert them first:\n"
+    "Dropping this table now would destroy them. Convert them, then release\n"
+    "the originals:\n"
     "\n"
     "    python manage.py migrate_surveys_to_prolog --apply\n"
+    "    python manage.py migrate_surveys_to_prolog --apply --purge-source\n"
     "\n"
-    "then run migrate again. If they are genuinely not wanted, delete them\n"
-    "deliberately — this migration will not decide that for you."
+    "then run migrate again. Converting alone does not clear this check: it\n"
+    "copies, and leaves the original in place on purpose. If these responses\n"
+    "are genuinely not wanted, delete them deliberately — this migration will\n"
+    "not decide that for you."
 )
 
 
