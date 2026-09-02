@@ -48,11 +48,7 @@ export function Login() {
 
   useEffect(() => {
     const normalizedEmail = signupEmail.trim().toLowerCase();
-    if (!normalizedEmail.includes('@')) {
-      setEligibleSignupOrgs([]);
-      setOrgSlug('');
-      return;
-    }
+    if (!normalizedEmail.includes('@')) return;
     (async () => {
       try {
         const res = await publicApi.get(`/v1/orgs/signup-directory/?email=${encodeURIComponent(normalizedEmail)}`);
@@ -67,6 +63,12 @@ export function Login() {
       }
     })();
   }, [signupEmail]);
+
+  const handleSignupEmailChange = (value: string) => {
+    setSignupEmail(value);
+    setEligibleSignupOrgs([]);
+    setOrgSlug('');
+  };
 
   const switchMode = (next: Mode) => {
     setMode(next);
@@ -261,7 +263,7 @@ export function Login() {
                   autoComplete="email"
                   required
                   value={signupEmail}
-                  onChange={(e) => setSignupEmail(e.target.value)}
+                  onChange={(e) => handleSignupEmailChange(e.target.value)}
                   className={inputClass}
                   placeholder="Enter your email"
                 />

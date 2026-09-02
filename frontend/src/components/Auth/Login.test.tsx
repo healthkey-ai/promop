@@ -125,6 +125,7 @@ describe("Login - signup mode", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Sign Up" }));
 
     fireEvent.change(screen.getByLabelText("Email"), { target: { value: "p@example.com" } });
+    await screen.findByRole("option", { name: "Solo Clinic" });
     fireEvent.change(screen.getByLabelText("Password"), { target: { value: "short" } });
     fireEvent.change(screen.getByLabelText("Confirm password"), { target: { value: "short" } });
     fireEvent.click(screen.getByRole("button", { name: "Create account" }));
@@ -140,6 +141,7 @@ describe("Login - signup mode", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Sign Up" }));
 
     fireEvent.change(screen.getByLabelText("Email"), { target: { value: "p@example.com" } });
+    await screen.findByRole("option", { name: "Solo Clinic" });
     fireEvent.change(screen.getByLabelText("Password"), {
       target: { value: "correct-horse-battery" },
     });
@@ -209,6 +211,7 @@ describe("Login - signup mode", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Sign Up" }));
 
     fireEvent.change(screen.getByLabelText("Email"), { target: { value: "taken@example.com" } });
+    await screen.findByRole("option", { name: "Solo Clinic" });
     fireEvent.change(screen.getByLabelText("Password"), {
       target: { value: "correct-horse-battery" },
     });
@@ -229,6 +232,7 @@ describe("Login - signup mode", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Sign Up" }));
 
     fireEvent.change(screen.getByLabelText("Email"), { target: { value: "p@example.com" } });
+    await screen.findByRole("option", { name: "Solo Clinic" });
     fireEvent.change(screen.getByLabelText("Password"), { target: { value: "short" } });
     fireEvent.change(screen.getByLabelText("Confirm password"), { target: { value: "short" } });
     fireEvent.click(screen.getByRole("button", { name: "Create account" }));
