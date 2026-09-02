@@ -10975,6 +10975,49 @@ class UserSerializerOrgAdminTest(TestCase):
         data = resp.data.get('user', resp.data)
         self.assertTrue(data.get('is_org_admin'))
 
+    def test_org_accesses_include_invited_and_trusted_domain_orgs(self):
+        invited_org = _make_org('Invited Org', 'invited-org')
+        pending_org = _make_org('Pending Org', 'pending-org')
+        domain_org = _make_org('Domain Org', 'domain-org')
+        GroupAccess.objects.create(identity=self.user, org=invited_org, role='doctor')
+        OrgInvitation.objects.create(
+            org=pending_org,
+            email=self.user.email,
+            role='analyst',
+            token='a' * 64,
+            expires_at=timezone.now() + timedelta(days=7),
+        )
+        OrgTrust.objects.create(granting_org=domain_org, trusted_domain='example.com')
+
+        self.client.force_authenticate(user=self.user)
+        resp = self.client.get('/api/user/')
+
+        self.assertEqual(resp.status_code, 200)
+        accesses = resp.data['user']['org_accesses']
+        self.assertEqual(accesses, [
+            {
+                'org_name': 'Domain Org',
+                'org_slug': 'domain-org',
+                'role': None,
+                'expires_at': None,
+                'access_via': ['trusted_domain'],
+            },
+            {
+                'org_name': 'Invited Org',
+                'org_slug': 'invited-org',
+                'role': 'doctor',
+                'expires_at': None,
+                'access_via': ['invitation'],
+            },
+            {
+                'org_name': 'Pending Org',
+                'org_slug': 'pending-org',
+                'role': 'analyst',
+                'expires_at': accesses[2]['expires_at'],
+                'access_via': ['invitation_pending'],
+            },
+        ])
+
 
 # ---------------------------------------------------------------------------
 # Wearable summary field tests
@@ -16346,6 +16389,20 @@ class OrgSignupDirectoryTest(TestCase):
     def test_exposes_name_and_slug_only(self):
         resp = APIClient().get(self.URL)
         self.assertEqual(set(resp.data[0].keys()), {'name', 'slug'})
+
+    def test_email_filters_to_pending_invitations_and_trusted_domains(self):
+        invited = Organization.objects.get(slug='closed-clinic')
+        trusted = Organization.objects.get(slug='zeta-clinic')
+        OrgInvitation.objects.create(
+            org=invited, email='member@trusted.example', role='patient',
+            token='b' * 64, expires_at=timezone.now() + timedelta(days=7),
+        )
+        OrgTrust.objects.create(granting_org=trusted, trusted_domain='trusted.example')
+
+        resp = APIClient().get(f'{self.URL}?email=member@trusted.example')
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual([org['slug'] for org in resp.data], ['closed-clinic', 'zeta-clinic'])
 
     def test_empty_when_no_org_allows_signup(self):
         Organization.objects.all().update(allows_patient_signup=False)
@@ -23546,8 +23603,12 @@ class MappingHubTestBase(TestCase):
         cls.admin = Identity.objects.create_superuser(
             email='admin-mapping@test.com', password='testpass',
         )
-        cls.admin.is_org_admin = True
-        cls.admin.save()
+        cls.admin_org = Organization.objects.create(
+            name='Mapping Admin Org', slug='mapping-admin-org',
+        )
+        GroupAccess.objects.create(
+            identity=cls.admin, org=cls.admin_org, role='org_admin',
+        )
 
         cls.regular = Identity.objects.create_user(
             email='regular@test.com', password='testpass',
@@ -23588,6 +23649,19 @@ class MappingStatsTest(MappingHubTestBase):
         self.assertIn('therapy', resp.data)
         self.assertIn('unmapped', resp.data['field_mappings'])
         self.assertGreaterEqual(resp.data['therapy']['regimens'], 1)
+
+    def test_org_admin_can_see_stats(self):
+        org_admin = Identity.objects.create_user(
+            email='org-admin-mapping@test.com', password='testpass',
+        )
+        GroupAccess.objects.create(
+            identity=org_admin, org=self.admin_org, role='org_admin',
+        )
+        self.client.force_authenticate(user=org_admin)
+
+        resp = self.client.get('/api/v1/mapping-stats/')
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
     def test_regular_user_forbidden(self):
         self.client.force_authenticate(user=self.regular)
@@ -24153,19 +24227,42 @@ class CodeMappingSourceVocabTabsTest(TestCase):
         self.client = APIClient()
 
     def test_reference_includes_source_vocabulary_tabs(self):
-        """The reference endpoint returns source_vocabulary_tabs."""
-        # Seed an SCCM row so there's at least one tab.
-        SourceCodeConceptMapping.objects.create(
-            source_vocabulary_id='ICD10CM',
-            source_code='E11',
-            source_code_description='Type 2 diabetes',
-            target_concept=self.target_concept,
-            destination_vocabulary_id='SNOMED',
-            domain_id='Measurement',
-            omop_table='measurement',
-            status='proposed',
-            origin='import',
-        )
+        """The reference endpoint returns a tab for every mapped source system."""
+        mappings = [
+            SourceCodeConceptMapping(
+                source_vocabulary_id='ICD10CM',
+                source_code='E11',
+                source_code_description='Type 2 diabetes',
+                target_concept=self.target_concept,
+                destination_vocabulary_id='SNOMED',
+                domain_id='Measurement',
+                omop_table='measurement',
+                status='proposed',
+                origin='import',
+            ),
+            SourceCodeConceptMapping(
+                source_vocabulary_id='MedDRA',
+                source_code='10000001',
+                source_code_description='Ventilation pneumonitis',
+                target_concept=self.target_concept,
+                destination_vocabulary_id='SNOMED',
+                domain_id='Condition',
+                omop_table='condition',
+                status='proposed',
+                origin='import',
+            ),
+            SourceCodeConceptMapping(
+                source_vocabulary_id='PartnerCodes',
+                source_code='CUSTOM-1',
+                target_concept=self.target_concept,
+                destination_vocabulary_id='SNOMED',
+                domain_id='Condition',
+                omop_table='condition',
+                status='proposed',
+                origin='import',
+            ),
+        ]
+        SourceCodeConceptMapping.objects.bulk_create(mappings)
         self.client.force_authenticate(user=self.staff)
         resp = self.client.get('/api/v1/code-mappings/reference/')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
@@ -24176,8 +24273,12 @@ class CodeMappingSourceVocabTabsTest(TestCase):
         self.assertIsNotNone(icd_tab)
         self.assertEqual(icd_tab['label'], 'ICD-10-CM')
         self.assertFalse(icd_tab['is_standard'])
+        self.assertIn('MedDRA', [tab['vocabulary_id'] for tab in tabs])
+        self.assertIn('PartnerCodes', [tab['vocabulary_id'] for tab in tabs])
         # Clean up
-        SourceCodeConceptMapping.objects.filter(source_code='E11', source_vocabulary_id='ICD10CM').delete()
+        SourceCodeConceptMapping.objects.filter(
+            source_code__in=['E11', '10000001', 'CUSTOM-1'],
+        ).delete()
 
     def test_list_includes_mapping_origin(self):
         """GET code-mappings/ rows include mapping_origin field."""

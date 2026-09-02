@@ -190,6 +190,7 @@ export default function PatientList() {
   const isAllSelected =
     patients.length > 0 &&
     (selectAllMode || visibleSelectedCount === patients.length);
+  const canManageMappings = !!(currentUser?.is_staff || currentUser?.is_org_admin);
 
   const handleLogout = () => {
     clearTokens();
@@ -201,15 +202,6 @@ export default function PatientList() {
       <div className="mb-6 flex items-center justify-between">
         <h1 className="text-2xl font-bold text-foreground">PROMOP Admin</h1>
         <div className="flex gap-2">
-          {(currentUser?.is_staff || currentUser?.is_org_admin) && (
-            <button
-              onClick={() => navigate("/mappings")}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 border border-gray-300 rounded hover:bg-gray-50"
-            >
-              <Globe size={14} />
-              Mappings
-            </button>
-          )}
           {(selectedIds.size > 0 || selectAllMode) && (
             <button
               onClick={() => setDeleteDialogOpen(true)}
@@ -226,15 +218,25 @@ export default function PatientList() {
             <Upload size={16} />
             Upload CSV
           </button>
-          <button
-            onClick={() => navigate("/upload-fhir")}
-            className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-          >
-            <FileText size={16} />
-            Upload FHIR
-          </button>
+          {canManageMappings ? (
+            <button
+              onClick={() => navigate("/mappings")}
+              className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+            >
+              <Globe size={16} />
+              Mappings
+            </button>
+          ) : (
+            <button
+              onClick={() => navigate("/upload-fhir")}
+              className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+            >
+              <FileText size={16} />
+              Upload FHIR
+            </button>
+          )}
           <div className="ml-auto flex gap-2">
-            {(currentUser?.is_staff || currentUser?.is_org_admin) && (
+            {canManageMappings && (
               <button
                 onClick={() => navigate("/org-admin")}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 border border-gray-300 rounded hover:bg-gray-50"

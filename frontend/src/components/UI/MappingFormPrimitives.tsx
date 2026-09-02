@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 
 export const READ_ONLY_CLASS =
   "h-10 rounded-md border border-slate-200 bg-slate-100 px-3 font-mono text-sm font-normal text-slate-700";
-export const INPUT_CLASS = "h-10 rounded-md border border-slate-300 px-3 text-sm font-normal text-slate-950";
+export const INPUT_CLASS = "h-10 w-full truncate rounded-md border border-slate-300 px-3 text-sm font-normal text-slate-950";
 
 /**
  * An accessible tooltip with content rendered by the application, rather than

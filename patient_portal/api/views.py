@@ -4117,10 +4117,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         from omop_core.services.wearable_parsers import parse_garmin_fit, parse_apple_health_export
         from omop_core.services.pk import next_pk_batch as _next_pk_batch
         from omop_core.services.mappings import (
-            WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB, WEARABLE_ARTIFACT_BOUNDS,
-            WEARABLE_TYPE_CONCEPT_ID,
+            WEARABLE_ARTIFACT_BOUNDS,
+            WEARABLE_TYPE_CONCEPT_ID, resolve_wearable_mappings,
         )
-        from omop_core.services.concept_cache import concept_by_vocab as _cc_by_vocab
 
         if 'file' not in request.FILES:
             return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
@@ -4177,13 +4176,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if not samples:
             return Response({'samples_created': 0, 'duplicates_skipped': 0})
 
-        # Resolve each metric's concept, scoped by (vocabulary_id, concept_code).
-        # A bare concept_code is ambiguous — 852 codes are reused across
-        # vocabularies — and four wearable metrics live in HK-Wearable, not LOINC.
-        metric_concepts: dict[str, Concept | None] = {}
-        for metric_key, concept_code in WEARABLE_CONCEPT_CODE.items():
-            metric_concepts[metric_key] = _cc_by_vocab(
-                WEARABLE_CONCEPT_VOCAB[metric_key], concept_code)
+        # Resolve each metric's concept from approved SourceCodeConceptMapping
+        # rows for this device type, falling back to the hard-coded
+        # WEARABLE_CONCEPT_CODE dict for any metric without a DB mapping.
+        metric_concepts: dict[str, Concept | None] = resolve_wearable_mappings(device_type)
 
         unresolved = sorted(k for k, c in metric_concepts.items() if c is None)
         if unresolved:
@@ -4309,7 +4305,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             existing_keys.add(dedup_key)
 
             unit = unit_map.get(sample.metric_key)
-            source_code = WEARABLE_CONCEPT_CODE[sample.metric_key]
+            source_code = concept.concept_code
 
             if _is_observation(concept):
                 obs = Observation(
@@ -4424,8 +4420,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             permission_classes=[IsAuthenticated])
     def delete_wearable_upload(self, request, upload_id=None):
         """Delete a wearable upload and its associated Measurement/Observation rows."""
-        from omop_core.services.mappings import WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB
-        from omop_core.services.concept_cache import concept_by_vocab as _cc_by_vocab
+        from omop_core.services.mappings import resolve_wearable_mappings
 
         patient_user = getattr(request.user, 'patient_user', None)
         if not patient_user:
@@ -4437,6 +4432,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         except WearableUpload.DoesNotExist:
             return Response({'error': 'Upload not found'}, status=status.HTTP_404_NOT_FOUND)
 
+        # Resolve mappings for the device type that created this upload.
+        metric_concepts = resolve_wearable_mappings(upload.device_type)
+
         # Delete associated Measurement/Observation rows using sample_summary
         deleted_count = 0
         for entry in upload.sample_summary or []:
@@ -4446,10 +4444,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             if not metric_key or not date_str or value is None:
                 continue
 
-            concept_code = WEARABLE_CONCEPT_CODE.get(metric_key)
-            if not concept_code:
-                continue
-            concept = _cc_by_vocab(WEARABLE_CONCEPT_VOCAB[metric_key], concept_code)
+            concept = metric_concepts.get(metric_key)
             if not concept:
                 continue
 
@@ -7334,7 +7329,7 @@ def vocabulary_list(request, model_name):
 
 def _require_mapping_admin(request):
     """Return a 403 Response if the user is not staff or org_admin, else None."""
-    if not (request.user.is_staff or getattr(request.user, 'is_org_admin', False)):
+    if not has_org_admin_access(request.user):
         return Response({'detail': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
     return None
 
@@ -7545,7 +7540,7 @@ def mapping_stats(request):
     Returns counts for field mappings, code mappings, and therapy reference data.
     Restricted to staff or org_admin users.
     """
-    if not (request.user.is_staff or getattr(request.user, 'is_org_admin', False)):
+    if not has_org_admin_access(request.user):
         return Response({'detail': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldConceptMapping
@@ -9053,8 +9048,15 @@ def _source_vocabulary_tabs():
     Queries SCCM for distinct source_vocabulary_id values that have at least
     one row, then orders them: non-standard vocabularies first (the curation
     work queue), uncoded in the middle, standard vocabularies last (reference).
+
+    Apple and Garmin SCCM rows are consolidated under the OpenWearables
+    ("Wearables") tab — they share one tab to save horizontal space.
+
+    Vocabularies not in SOURCE_TAB_ORDER only appear when they have at least
+    one proposed mapping needing curation — fully-mapped vocabularies stay
+    hidden to save horizontal tab space.
     """
-    from django.db.models import Count
+    from django.db.models import Count, Q
     vocab_counts = dict(
         SourceCodeConceptMapping.objects
         .values_list('source_vocabulary_id')
@@ -9063,6 +9065,28 @@ def _source_vocabulary_tabs():
     )
     if not vocab_counts:
         return []
+
+    # Merge wearable sub-vocabularies into OpenWearables.
+    wearable_subs = source_vocabularies.WEARABLE_SOURCE_VOCABULARIES - {'OpenWearables'}
+    for sub in wearable_subs:
+        if sub in vocab_counts:
+            vocab_counts['OpenWearables'] = vocab_counts.get('OpenWearables', 0) + vocab_counts.pop(sub)
+
+    # Merge FHIR OID aliases into their canonical OMOP vocabulary.
+    for oid, canonical in source_vocabularies.VOCABULARY_OID_ALIASES.items():
+        if oid in vocab_counts:
+            vocab_counts[canonical] = vocab_counts.get(canonical, 0) + vocab_counts.pop(oid)
+
+    # Proposed counts — needed to decide whether extras qualify for a tab.
+    proposed_counts = dict(
+        SourceCodeConceptMapping.objects
+        .filter(status='proposed')
+        .values_list('source_vocabulary_id')
+        .annotate(cnt=Count('id'))
+        .order_by()
+    )
+
+    ordered_set = set(source_vocabularies.SOURCE_TAB_ORDER)
     tabs = []
     seen = set()
     # Walk the defined order first.
@@ -9074,9 +9098,12 @@ def _source_vocabulary_tabs():
                 'is_standard': vocab_id in source_vocabularies.STANDARD_SOURCE_VOCABULARIES,
             })
             seen.add(vocab_id)
-    # Any vocabulary present in data but not in the defined order.
+    # Vocabularies present in data but not in the defined order — only if
+    # they have proposed mappings that need curator attention.
     extras = sorted(set(vocab_counts) - seen, key=source_vocabularies.source_tab_sort_key)
     for vocab_id in extras:
+        if proposed_counts.get(vocab_id, 0) == 0:
+            continue
         tabs.append({
             'vocabulary_id': vocab_id,
             'label': source_vocabularies.source_tab_label(vocab_id),

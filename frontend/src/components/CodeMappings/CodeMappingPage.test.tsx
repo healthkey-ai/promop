@@ -118,6 +118,14 @@ const reference = {
     Observation: "observation",
     Procedure: "procedure",
   },
+  // The API supplies the full tab catalog, including source vocabularies whose
+  // current queue contains only approved mappings. Without it, ICD10CM is
+  // intentionally hidden as a data-only tab and these fixtures cannot open
+  // their approved rows.
+  source_vocabulary_tabs: [
+    { vocabulary_id: "", label: "Uncoded", is_standard: false },
+    { vocabulary_id: "ICD10CM", label: "ICD10CM", is_standard: true },
+  ],
 };
 
 const loincHit = {
@@ -175,14 +183,12 @@ describe("CodeMappingPage", () => {
     mockDelete.mockResolvedValue({ data: {} });
   });
 
-  it("puts the source code first and shows an uncoded source as such", async () => {
+  it("puts the source code first without repeating the selected source-system tab", async () => {
     renderPage();
     const row = (await screen.findByText("M-PROTEIN, SERUM", { selector: "td" })).closest("tr")!;
     const cells = within(row).getAllByRole("cell");
-    expect(cells[0]).toHaveTextContent("M-PROTEIN, SERUM");
-    // Not the destination's vocabulary: a mapping with no source code system
-    // genuinely has none, and borrowing the destination's is the #834 bug.
-    expect(cells[1]).toHaveTextContent("uncoded");
+    expect(cells[1]).toHaveTextContent("M-PROTEIN, SERUM");
+    expect(screen.queryByRole("columnheader", { name: "Source code system" })).not.toBeInTheDocument();
   });
 
   it("splits proposed and approved into Unmapped and Mapped sections", async () => {
@@ -192,8 +198,22 @@ describe("CodeMappingPage", () => {
     // Approved rows live under Mapped, which is collapsed by default.
     expect(screen.queryByText("C90.00")).not.toBeInTheDocument();
 
+    fireEvent.click(within(screen.getByRole("tablist", { name: "Source vocabularies" }))
+      .getByRole("tab", { name: /ICD10CM/ }));
     fireEvent.click(screen.getByText(/^Mapped/));
     expect(await screen.findByText("C90.00")).toBeInTheDocument();
+  });
+
+  it("can collapse and expand the Unmapped section", async () => {
+    renderPage();
+    const unmapped = await screen.findByRole("button", { name: /Unmapped/ });
+    expect(screen.getByText("M-PROTEIN, SERUM", { selector: "td" })).toBeInTheDocument();
+
+    fireEvent.click(unmapped);
+    expect(screen.queryByText("M-PROTEIN, SERUM", { selector: "td" })).not.toBeInTheDocument();
+
+    fireEvent.click(unmapped);
+    expect(await screen.findByText("M-PROTEIN, SERUM", { selector: "td" })).toBeInTheDocument();
   });
 
   it("offers tabs for the source vocabularies represented in the queue", async () => {
@@ -202,6 +222,32 @@ describe("CodeMappingPage", () => {
     const tabs = within(screen.getByRole("tablist", { name: "Source vocabularies" }));
     expect(tabs.getByRole("tab", { name: /Uncoded/ })).toBeInTheDocument();
     expect(tabs.getByRole("tab", { name: /ICD10CM/ })).toBeInTheDocument();
+  });
+
+  it("selects Uncoded instead of falling back to the default vocabulary", async () => {
+    const proposedIcd10Row = { ...approvedRow, status: "proposed" as const };
+    renderPage([proposedRow, proposedIcd10Row]);
+    const tabs = within(await screen.findByRole("tablist", { name: "Source vocabularies" }));
+    const uncoded = tabs.getByRole("tab", { name: /Uncoded/ });
+    const icd10cm = tabs.getByRole("tab", { name: /ICD10CM/ });
+
+    fireEvent.click(icd10cm);
+    expect(icd10cm).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByText("C90.00", { selector: "td" })).toBeInTheDocument();
+
+    fireEvent.click(uncoded);
+    expect(uncoded).toHaveAttribute("aria-selected", "true");
+    expect(icd10cm).toHaveAttribute("aria-selected", "false");
+    expect(await screen.findByText("M-PROTEIN, SERUM", { selector: "td" })).toBeInTheDocument();
+    expect(screen.queryByText("C90.00", { selector: "td" })).not.toBeInTheDocument();
+  });
+
+  it("adds a tab for a source system that arrives in SCCM data", async () => {
+    renderPage([{ ...proposedRow, source_vocabulary_id: "MedDRA", source_code: "10000001" }]);
+    const tabs = within(await screen.findByRole("tablist", { name: "Source vocabularies" }));
+    const medDra = tabs.getByRole("tab", { name: /MedDRA/ });
+    fireEvent.click(medDra);
+    expect(await screen.findByText("10000001", { selector: "td" })).toBeInTheDocument();
   });
 
   it("has no All tab", async () => {
@@ -595,6 +641,8 @@ describe("CodeMappingPage", () => {
   describe("Sign-off on the provenance line", () => {
     /** Open the dialog for a row that lives under the collapsed Mapped section. */
     const openApproved = async (code: string) => {
+      const tabs = within(await screen.findByRole("tablist", { name: "Source vocabularies" }));
+      fireEvent.click(tabs.getByRole("tab", { name: /ICD10CM/ }));
       fireEvent.click(await screen.findByText(/^Mapped/));
       const cell = await screen.findByText(code, { selector: "td" });
       fireEvent.click(cell.closest("tr")!);

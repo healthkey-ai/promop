@@ -152,9 +152,16 @@ const statusClass: Record<string, string> = {
 /**
  * Which tab a row belongs to — keyed by source vocabulary.
  * Blank source_vocabulary_id ("") means uncoded/free text.
+ * Apple and Garmin rows are consolidated under the Wearables tab.
+ * FHIR OID URIs are merged into their canonical OMOP vocabulary.
  */
+const VOCABULARY_ALIASES: Record<string, string> = {
+  Apple: "OpenWearables",
+  Garmin: "OpenWearables",
+  "urn:oid:2.16.840.1.113883.6.96": "SNOMED",
+};
 function tabForRow(row: CodeMappingRow): string {
-  return row.source_vocabulary_id;
+  return VOCABULARY_ALIASES[row.source_vocabulary_id] ?? row.source_vocabulary_id;
 }
 
 /**
@@ -298,7 +305,10 @@ export default function CodeMappingPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
-  const [activeVocabulary, setActiveVocabulary] = useState("");
+  // `null` means no choice has been made, so use the work-prioritized default.
+  // The empty string is a real vocabulary ID: it represents the Uncoded tab.
+  const [activeVocabulary, setActiveVocabulary] = useState<string | null>(null);
+  const [unmappedCollapsed, setUnmappedCollapsed] = useState(false);
   const [mappedCollapsed, setMappedCollapsed] = useState(true);
   const [athenaCollapsed, setAthenaCollapsed] = useState(true);
   const [showRejected, setShowRejected] = useState(false);
@@ -360,9 +370,12 @@ export default function CodeMappingPage() {
       ...v,
       ...(counts[v.vocabulary_id] || { proposed: 0, approved: 0, athena: 0 }),
     }));
+    // Data-only tabs (not in server list) only appear when they have
+    // proposed mappings needing curation — fully-mapped vocabularies
+    // (e.g. ATC, HemOnc, RxNorm Extension with only Athena rows) stay hidden.
     const known = new Set(sourceVocabTabs.map((v) => v.vocabulary_id));
     Object.keys(counts)
-      .filter((k) => !known.has(k))
+      .filter((k) => !known.has(k) && counts[k].proposed > 0)
       .forEach((k) => {
         result.push({
           vocabulary_id: k,
@@ -383,7 +396,7 @@ export default function CodeMappingPage() {
     return vocabularyTabs[0]?.vocabulary_id ?? "";
   }, [vocabularyTabs]);
 
-  const selectedVocabulary = activeVocabulary || defaultVocabulary;
+  const selectedVocabulary = activeVocabulary ?? defaultVocabulary;
 
   const visibleRows = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -393,7 +406,7 @@ export default function CodeMappingPage() {
       // section, cannot be re-opened to un-reject, and re-creating it trips the
       // (source_vocabulary_id, source_code) unique constraint.
       if (row.status === "rejected" && !showRejected) return false;
-      if (selectedVocabulary && tabForRow(row) !== selectedVocabulary) return false;
+      if (tabForRow(row) !== selectedVocabulary) return false;
       if (!q) return true;
       return [
         row.source_code,
@@ -418,7 +431,7 @@ export default function CodeMappingPage() {
   const rejectedCount = useMemo(
     () => rows.filter((r) => r.status === "rejected"
       && r.mapping_origin !== "athena"
-      && (!selectedVocabulary || tabForRow(r) === selectedVocabulary)).length,
+      && tabForRow(r) === selectedVocabulary).length,
     [rows, selectedVocabulary],
   );
   const mappedRows = useMemo(
@@ -725,7 +738,7 @@ export default function CodeMappingPage() {
   };
 
   const renderTable = (sectionRows: CodeMappingRow[], emptyText: string, { hideStatus = false }: { hideStatus?: boolean } = {}) => {
-    const colCount = 8 + (hideStatus ? 0 : 2);
+    const colCount = 6 + (hideStatus ? 0 : 2);
     return (
     <div className="overflow-hidden rounded-md border border-slate-200 bg-white">
       <table className="w-full border-collapse text-left text-sm">
@@ -733,7 +746,6 @@ export default function CodeMappingPage() {
           <tr>
             <th className="px-4 py-3 font-semibold">Provenance</th>
             <th className="px-4 py-3 font-semibold">Source code</th>
-            <th className="px-4 py-3 font-semibold">Source code system</th>
             <th className="px-4 py-3 font-semibold">Destination concept</th>
             <th className="px-4 py-3 font-semibold">Concept ID</th>
             <th className="px-4 py-3 font-semibold">OMOP table</th>
@@ -759,9 +771,6 @@ export default function CodeMappingPage() {
             >
               <td className="px-4 py-3 text-xs text-slate-700">{row.origin_system || "—"}</td>
               <td className="px-4 py-3 font-mono text-xs text-slate-900">{row.source_code}</td>
-              <td className="px-4 py-3 font-mono text-xs text-slate-700">
-                {row.source_vocabulary_id || <span className="italic text-slate-400">uncoded</span>}
-              </td>
               <td className="px-4 py-3">
                 <div className="font-medium text-slate-950">{row.destination_concept_name}</div>
                 <div className="font-mono text-xs text-slate-500">
@@ -946,9 +955,16 @@ export default function CodeMappingPage() {
         </div>
 
         <section className="mb-6">
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-700">
+          <button
+            type="button"
+            onClick={() => setUnmappedCollapsed((v) => !v)}
+            className="mb-2 inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-slate-700"
+          >
+            {unmappedCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
             Unmapped <span className="font-normal text-slate-500">({unmappedRows.length})</span>
-          </h2>
+          </button>
+          {!unmappedCollapsed && (
+            <>
           <div className="mb-2 flex items-center justify-between gap-3">
             <p className="text-xs text-slate-500">
               The destination concept exists — an import minted or chose it — but no curator has confirmed it.
@@ -965,6 +981,8 @@ export default function CodeMappingPage() {
             )}
           </div>
           {renderTable(unmappedRows, "Nothing awaiting review in this vocabulary.")}
+            </>
+          )}
         </section>
 
         <section className="mb-6">

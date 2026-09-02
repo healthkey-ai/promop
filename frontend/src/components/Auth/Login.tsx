@@ -25,6 +25,7 @@ export function Login() {
   // Orgs accepting patient self-signup. Empty (or an unreachable endpoint)
   // means this deployment has none, and the Sign Up tab stays hidden.
   const [signupOrgs, setSignupOrgs] = useState<SignupOrg[]>([]);
+  const [eligibleSignupOrgs, setEligibleSignupOrgs] = useState<SignupOrg[]>([]);
   const [orgSlug, setOrgSlug] = useState("");
   const [signupEmail, setSignupEmail] = useState("");
   const [signupPassword, setSignupPassword] = useState("");
@@ -44,6 +45,30 @@ export function Login() {
       }
     })();
   }, []);
+
+  useEffect(() => {
+    const normalizedEmail = signupEmail.trim().toLowerCase();
+    if (!normalizedEmail.includes('@')) return;
+    (async () => {
+      try {
+        const res = await publicApi.get(`/v1/orgs/signup-directory/?email=${encodeURIComponent(normalizedEmail)}`);
+        const orgs: SignupOrg[] = Array.isArray(res.data) ? res.data : [];
+        setEligibleSignupOrgs(orgs);
+        setOrgSlug((current) => orgs.some((org) => org.slug === current)
+          ? current
+          : (orgs.length === 1 ? orgs[0].slug : ''));
+      } catch {
+        setEligibleSignupOrgs([]);
+        setOrgSlug('');
+      }
+    })();
+  }, [signupEmail]);
+
+  const handleSignupEmailChange = (value: string) => {
+    setSignupEmail(value);
+    setEligibleSignupOrgs([]);
+    setOrgSlug('');
+  };
 
   const switchMode = (next: Mode) => {
     setMode(next);
@@ -228,6 +253,23 @@ export function Login() {
           <form className="space-y-6" onSubmit={handleSignup}>
             <div className="space-y-4">
               <div>
+                <label htmlFor="signupEmail" className="block text-sm font-medium text-foreground">
+                  Email
+                </label>
+                <input
+                  id="signupEmail"
+                  name="email"
+                  type="email"
+                  autoComplete="email"
+                  required
+                  value={signupEmail}
+                  onChange={(e) => handleSignupEmailChange(e.target.value)}
+                  className={inputClass}
+                  placeholder="Enter your email"
+                />
+              </div>
+
+              <div>
                 <label htmlFor="signupOrg" className="block text-sm font-medium text-foreground">
                   Organization
                 </label>
@@ -239,9 +281,10 @@ export function Login() {
                   value={orgSlug}
                   onChange={(e) => setOrgSlug(e.target.value)}
                   className={inputClass}
+                  disabled={!signupEmail.includes('@')}
                 >
-                  <option value="">Select your organization</option>
-                  {signupOrgs.map((org) => (
+                  <option value="">{signupEmail.includes('@') ? 'Select your organization' : 'Enter your email first'}</option>
+                  {eligibleSignupOrgs.map((org) => (
                     <option key={org.slug} value={org.slug}>
                       {org.name}
                     </option>
@@ -274,23 +317,6 @@ export function Login() {
                     className={inputClass}
                   />
                 </div>
-              </div>
-
-              <div>
-                <label htmlFor="signupEmail" className="block text-sm font-medium text-foreground">
-                  Email
-                </label>
-                <input
-                  id="signupEmail"
-                  name="email"
-                  type="email"
-                  autoComplete="email"
-                  required
-                  value={signupEmail}
-                  onChange={(e) => setSignupEmail(e.target.value)}
-                  className={inputClass}
-                  placeholder="Enter your email"
-                />
               </div>
 
               <div>

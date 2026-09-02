@@ -324,6 +324,61 @@ WEARABLE_TYPE_CONCEPT_ID = 32865
 # Minimum valid days required to emit a metric (else field stays None)
 WEARABLE_MIN_VALID_DAYS = 7
 
+
+def resolve_wearable_mappings(device_type):
+    """Build metric_key → Concept from approved SourceCodeConceptMapping rows.
+
+    For Apple uploads, the SCCM source_code is the HK identifier (e.g.,
+    HKQuantityTypeIdentifierStepCount); we reverse-map through _APPLE_TYPE_MAP
+    to get the internal metric_key.
+
+    For Garmin uploads, the SCCM source_code IS the metric_key (e.g., 'steps').
+
+    Falls back to the hard-coded WEARABLE_CONCEPT_CODE dict for any metric_key
+    that has no approved SCCM row, so the ingest continues to work during the
+    transition or if the seeder hasn't been run.
+
+    Returns:
+        dict mapping metric_key → Concept (or None if unresolvable)
+    """
+    from omop_core.models import SourceCodeConceptMapping
+    from omop_core.services.concept_cache import concept_by_vocab as _cc_by_vocab
+
+    source_vocab = 'Apple' if device_type == 'apple' else 'Garmin'
+
+    # Query all approved mappings for this device vocabulary.
+    approved = SourceCodeConceptMapping.objects.filter(
+        source_vocabulary_id=source_vocab,
+        status='approved',
+    ).select_related('target_concept')
+
+    db_mappings = {}
+    if device_type == 'apple':
+        # Build reverse map: HK identifier → metric_key
+        from omop_core.services.wearable_parsers import _APPLE_TYPE_MAP
+        hk_to_metric = {hk_id: mkey for hk_id, mkey in _APPLE_TYPE_MAP.items()}
+        # Also handle sleep (category type, not in _APPLE_TYPE_MAP quantity map)
+        hk_to_metric['HKCategoryTypeIdentifierSleepAnalysis'] = 'sleep_duration'
+
+        for row in approved:
+            metric_key = hk_to_metric.get(row.source_code)
+            if metric_key and row.target_concept:
+                db_mappings[metric_key] = row.target_concept
+    else:
+        # Garmin: source_code == metric_key
+        for row in approved:
+            if row.target_concept:
+                db_mappings[row.source_code] = row.target_concept
+
+    # Fall back to hard-coded dict for any metric not in the DB.
+    for metric_key, concept_code in WEARABLE_CONCEPT_CODE.items():
+        if metric_key not in db_mappings:
+            concept = _cc_by_vocab(WEARABLE_CONCEPT_VOCAB[metric_key], concept_code)
+            if concept:
+                db_mappings[metric_key] = concept
+
+    return db_mappings
+
 # Activity trend thresholds: % change between first-half and second-half means
 WEARABLE_TREND_IMPROVING_PCT = 10.0
 WEARABLE_TREND_DECLINING_PCT = -10.0

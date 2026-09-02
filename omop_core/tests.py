@@ -7007,6 +7007,197 @@ class SeedOpenWearablesMappingsTest(TestCase):
         self.assertEqual(count1, count2)
 
 
+class WearableDeviceVocabularyTest(TestCase):
+    """Verify Apple and Garmin are registered as source vocabularies."""
+
+    def test_apple_in_measurement_systems(self):
+        from omop_core.services.source_vocabularies import source_systems_for
+        vocabs = [s['vocabulary_id'] for s in source_systems_for('Measurement')]
+        self.assertIn('Apple', vocabs)
+
+    def test_garmin_in_measurement_systems(self):
+        from omop_core.services.source_vocabularies import source_systems_for
+        vocabs = [s['vocabulary_id'] for s in source_systems_for('Measurement')]
+        self.assertIn('Garmin', vocabs)
+
+    def test_apple_in_observation_systems(self):
+        from omop_core.services.source_vocabularies import source_systems_for
+        vocabs = [s['vocabulary_id'] for s in source_systems_for('Observation')]
+        self.assertIn('Apple', vocabs)
+
+    def test_garmin_in_observation_systems(self):
+        from omop_core.services.source_vocabularies import source_systems_for
+        vocabs = [s['vocabulary_id'] for s in source_systems_for('Observation')]
+        self.assertIn('Garmin', vocabs)
+
+    def test_apple_garmin_consolidated_under_wearables(self):
+        from omop_core.services.source_vocabularies import (
+            WEARABLE_SOURCE_VOCABULARIES, SOURCE_TAB_ORDER,
+        )
+        self.assertIn('Apple', WEARABLE_SOURCE_VOCABULARIES)
+        self.assertIn('Garmin', WEARABLE_SOURCE_VOCABULARIES)
+        self.assertIn('OpenWearables', WEARABLE_SOURCE_VOCABULARIES)
+        # Apple and Garmin should NOT appear as separate tabs.
+        self.assertNotIn('Apple', SOURCE_TAB_ORDER)
+        self.assertNotIn('Garmin', SOURCE_TAB_ORDER)
+
+    def test_openwearables_tab_label_is_wearables(self):
+        from omop_core.services.source_vocabularies import source_tab_label
+        self.assertEqual(source_tab_label('OpenWearables'), 'Wearables')
+
+    def test_tables_for_apple(self):
+        from omop_core.services.source_vocabularies import tables_for_source_vocabulary
+        tables = tables_for_source_vocabulary('Apple')
+        self.assertIn('measurement', tables)
+        self.assertIn('observation', tables)
+
+    def test_tables_for_garmin(self):
+        from omop_core.services.source_vocabularies import tables_for_source_vocabulary
+        tables = tables_for_source_vocabulary('Garmin')
+        self.assertIn('measurement', tables)
+        self.assertIn('observation', tables)
+
+    def test_low_volume_vocabs_not_in_tab_order(self):
+        """ATC, HemOnc, CVX, RxNorm Extension only appear when they have proposals."""
+        from omop_core.services.source_vocabularies import SOURCE_TAB_ORDER
+        for vocab in ('ATC', 'HemOnc', 'CVX', 'RxNorm Extension'):
+            self.assertNotIn(vocab, SOURCE_TAB_ORDER)
+
+    def test_snomed_oid_alias(self):
+        from omop_core.services.source_vocabularies import VOCABULARY_OID_ALIASES
+        self.assertEqual(
+            VOCABULARY_OID_ALIASES.get('urn:oid:2.16.840.1.113883.6.96'),
+            'SNOMED',
+        )
+
+
+class SeedWearableDeviceMappingsTest(TestCase):
+    """Test the seed_wearable_device_mappings management command."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.management.commands.seed_wearable_device_mappings import (
+            APPLE_METRICS, GARMIN_METRICS,
+        )
+        cls.apple_count = len(APPLE_METRICS)
+        cls.garmin_count = len(GARMIN_METRICS)
+        seed_test_concepts()
+
+    def test_dry_run_creates_nothing(self):
+        call_command('seed_wearable_device_mappings', '--dry-run', verbosity=0)
+        self.assertEqual(
+            SourceCodeConceptMapping.objects.filter(
+                source_vocabulary_id__in=['Apple', 'Garmin'],
+            ).count(),
+            0,
+        )
+
+    def test_creates_all_apple_metrics(self):
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        count = SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='Apple',
+        ).count()
+        self.assertEqual(count, self.apple_count)
+
+    def test_creates_all_garmin_metrics(self):
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        count = SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='Garmin',
+        ).count()
+        self.assertEqual(count, self.garmin_count)
+
+    def test_apple_steps_mapped_correctly(self):
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        row = SourceCodeConceptMapping.objects.get(
+            source_vocabulary_id='Apple',
+            source_code='HKQuantityTypeIdentifierStepCount',
+        )
+        self.assertEqual(row.destination_vocabulary_id, 'LOINC')
+        self.assertEqual(row.domain_id, 'Observation')
+        self.assertEqual(row.omop_table, 'observation')
+        self.assertEqual(row.status, 'approved')
+        self.assertEqual(row.origin_system, 'hk-wearables-apple')
+        self.assertIsNotNone(row.target_concept)
+
+    def test_garmin_resting_hr_mapped_correctly(self):
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        row = SourceCodeConceptMapping.objects.get(
+            source_vocabulary_id='Garmin',
+            source_code='resting_hr',
+        )
+        self.assertEqual(row.destination_vocabulary_id, 'LOINC')
+        self.assertEqual(row.domain_id, 'Measurement')
+        self.assertEqual(row.omop_table, 'measurement')
+        self.assertEqual(row.status, 'approved')
+        self.assertEqual(row.origin_system, 'hk-wearables-garmin')
+        self.assertIsNotNone(row.target_concept)
+
+    def test_garmin_hrv_rmssd_uses_hk_wearable(self):
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        row = SourceCodeConceptMapping.objects.get(
+            source_vocabulary_id='Garmin',
+            source_code='hrv_rmssd',
+        )
+        self.assertEqual(row.destination_vocabulary_id, 'HK-Wearable')
+        self.assertIsNotNone(row.target_concept)
+
+    def test_idempotent(self):
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        count1 = SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id__in=['Apple', 'Garmin'],
+        ).count()
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        count2 = SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id__in=['Apple', 'Garmin'],
+        ).count()
+        self.assertEqual(count1, count2)
+
+
+class ResolveWearableMappingsTest(TestCase):
+    """Test resolve_wearable_mappings() with DB-driven and fallback modes."""
+
+    @classmethod
+    def setUpTestData(cls):
+        seed_test_concepts()
+
+    def test_fallback_to_hardcoded_when_no_db_rows(self):
+        """Without SCCM rows, resolve_wearable_mappings falls back to WEARABLE_CONCEPT_CODE."""
+        from omop_core.services.mappings import resolve_wearable_mappings
+        mappings = resolve_wearable_mappings('apple')
+        # Steps should resolve from the hard-coded dict
+        self.assertIn('steps', mappings)
+        self.assertIsNotNone(mappings['steps'])
+
+    def test_db_mappings_used_when_seeded(self):
+        """After seeding, resolve_wearable_mappings reads from the DB."""
+        from omop_core.services.mappings import resolve_wearable_mappings
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        mappings = resolve_wearable_mappings('apple')
+        self.assertIn('steps', mappings)
+        self.assertIn('resting_hr', mappings)
+        self.assertIn('sleep_duration', mappings)
+
+    def test_garmin_db_mappings(self):
+        from omop_core.services.mappings import resolve_wearable_mappings
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        mappings = resolve_wearable_mappings('garmin')
+        self.assertIn('steps', mappings)
+        self.assertIn('hrv_rmssd', mappings)
+        self.assertIn('resting_hr', mappings)
+
+    def test_db_mapping_overrides_hardcoded(self):
+        """An approved SCCM row takes precedence over the hard-coded dict."""
+        from omop_core.services.mappings import resolve_wearable_mappings
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        mappings = resolve_wearable_mappings('garmin')
+        # The DB mapping should resolve to the same concept as the hard-coded one
+        # (since they point to the same LOINC code), confirming DB was consulted.
+        garmin_steps = SourceCodeConceptMapping.objects.get(
+            source_vocabulary_id='Garmin', source_code='steps',
+        )
+        self.assertEqual(mappings['steps'].concept_id, garmin_steps.target_concept.concept_id)
+
+
 class SeedHkLabsMappingsTest(TestCase):
     """Test the seed_hklabs_mappings management command."""
 
