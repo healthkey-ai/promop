@@ -4,8 +4,9 @@ import api from "@/api/axios";
 interface OrgAccess {
   org_name: string;
   org_slug: string;
-  role: string;
+  role: string | null;
   expires_at: string | null;
+  access_via?: Array<"invitation" | "trusted_domain">;
 }
 
 export interface User {

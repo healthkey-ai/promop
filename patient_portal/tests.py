@@ -10975,6 +10975,34 @@ class UserSerializerOrgAdminTest(TestCase):
         data = resp.data.get('user', resp.data)
         self.assertTrue(data.get('is_org_admin'))
 
+    def test_org_accesses_include_invited_and_trusted_domain_orgs(self):
+        invited_org = _make_org('Invited Org', 'invited-org')
+        domain_org = _make_org('Domain Org', 'domain-org')
+        GroupAccess.objects.create(identity=self.user, org=invited_org, role='doctor')
+        OrgTrust.objects.create(granting_org=domain_org, trusted_domain='example.com')
+
+        self.client.force_authenticate(user=self.user)
+        resp = self.client.get('/api/user/')
+
+        self.assertEqual(resp.status_code, 200)
+        accesses = resp.data['user']['org_accesses']
+        self.assertEqual(accesses, [
+            {
+                'org_name': 'Domain Org',
+                'org_slug': 'domain-org',
+                'role': None,
+                'expires_at': None,
+                'access_via': ['trusted_domain'],
+            },
+            {
+                'org_name': 'Invited Org',
+                'org_slug': 'invited-org',
+                'role': 'doctor',
+                'expires_at': None,
+                'access_via': ['invitation'],
+            },
+        ])
+
 
 # ---------------------------------------------------------------------------
 # Wearable summary field tests

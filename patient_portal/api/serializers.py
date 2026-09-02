@@ -57,6 +57,13 @@ class UserSerializer(serializers.ModelSerializer):
         return has_org_admin_access(obj)
 
     def get_org_accesses(self, obj):
+        """Return active org access along with the path that granted it.
+
+        Invitations create ``GroupAccess`` rows, while a trusted email domain
+        grants access without one.  Keeping both paths in this response lets
+        the profile explain why an organization appears in a user's access
+        list.
+        """
         now = timezone.now()
         from django.db.models import Q
         grants = GroupAccess.objects.filter(
@@ -64,13 +71,40 @@ class UserSerializer(serializers.ModelSerializer):
         ).filter(
             Q(expires_at__isnull=True) | Q(expires_at__gt=now)
         ).select_related('org', 'group__organization').order_by('role')
-        result = []
+        accesses = {}
         for g in grants:
-            if g.org:
-                result.append({'org_name': g.org.name, 'org_slug': g.org.slug, 'role': g.role, 'expires_at': g.expires_at})
-            elif g.group and g.group.organization:
-                result.append({'org_name': g.group.organization.name, 'org_slug': g.group.organization.slug, 'role': g.role, 'expires_at': g.expires_at})
-        return result
+            org = g.org or (g.group and g.group.organization)
+            if not org or not org.is_active:
+                continue
+            access = accesses.setdefault(org.id, {
+                'org_name': org.name,
+                'org_slug': org.slug,
+                'role': g.role,
+                'expires_at': g.expires_at,
+                'access_via': [],
+            })
+            if 'invitation' not in access['access_via']:
+                access['access_via'].append('invitation')
+
+        email = (obj.email or '').lower()
+        domain = email.rsplit('@', 1)[1] if '@' in email else ''
+        if domain:
+            trusted_orgs = Organization.objects.filter(
+                is_active=True,
+                trusts_granted__trusted_domain__iexact=domain,
+            ).distinct().order_by('name')
+            for org in trusted_orgs:
+                access = accesses.setdefault(org.id, {
+                    'org_name': org.name,
+                    'org_slug': org.slug,
+                    'role': None,
+                    'expires_at': None,
+                    'access_via': [],
+                })
+                if 'trusted_domain' not in access['access_via']:
+                    access['access_via'].append('trusted_domain')
+
+        return sorted(accesses.values(), key=lambda access: access['org_name'].lower())
 
 
 class OrganizationSerializer(serializers.ModelSerializer):
