@@ -17,7 +17,7 @@ database by this project's migrations, and every response is bound to an
 
 | | |
 | --- | --- |
-| `requirements.txt` | `prolog` pinned by commit from the public repository. A bump is deliberate — see *Upgrading* below. |
+| `requirements.txt` | `prolog` pinned by release tag from the public repository. A bump is deliberate — see *Upgrading* below. |
 | `INSTALLED_APPS` | `prolog_surveys` |
 | `ctomop/urls.py` | `api/v1/prolog/` → the runner's own tree (`health/`, `run/…`) |
 | `patient_portal.services.prolog_participant_id` | `PROLOG_PARTICIPANT_RESOLVER` — the signed-in patient's `person_id`, or `None` |
@@ -124,11 +124,13 @@ A survey is then answered at `/s/<slug>`.
 
 ## Upgrading
 
-`requirements.txt` pins PROlog by commit, so an upgrade is a deliberate step:
+`requirements.txt` pins PROlog by **release tag**, so an upgrade is a deliberate
+step. The app contributes migrations to this database and `start.sh` migrates on
+every deploy, so tracking a branch would let a schema change arrive by rebuild.
 
 ```sh
-# in a prolog checkout, on the commit you intend to take
-git rev-parse HEAD
+# the tags available
+git ls-remote --tags https://github.com/healthkey-ai/prolog
 # then edit requirements.txt, rebuild, and run:
 python manage.py migrate prolog_surveys
 python manage.py test patient_portal.tests.PrologSurveyParticipantTest \
