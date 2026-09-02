@@ -194,6 +194,18 @@ describe("CodeMappingPage", () => {
     expect(await screen.findByText("C90.00")).toBeInTheDocument();
   });
 
+  it("can collapse and expand the Unmapped section", async () => {
+    renderPage();
+    const unmapped = await screen.findByRole("button", { name: /Unmapped/ });
+    expect(screen.getByText("M-PROTEIN, SERUM", { selector: "td" })).toBeInTheDocument();
+
+    fireEvent.click(unmapped);
+    expect(screen.queryByText("M-PROTEIN, SERUM", { selector: "td" })).not.toBeInTheDocument();
+
+    fireEvent.click(unmapped);
+    expect(await screen.findByText("M-PROTEIN, SERUM", { selector: "td" })).toBeInTheDocument();
+  });
+
   it("offers tabs for the source vocabularies represented in the queue", async () => {
     renderPage();
     await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
