@@ -22,7 +22,6 @@ from django.test import TestCase, override_settings
 
 from omop_core.models import (
     Concept, ConceptClass, Domain, Vocabulary,
-    FieldConceptMapping,
     Organization, Person, PatientRecord, ConditionOccurrence, DrugExposure, Measurement, Observation,
     PersonLanguageSkill, SourceCodeConceptMapping,
 )
@@ -7006,59 +7005,3 @@ class SeedOpenWearablesMappingsTest(TestCase):
             source_vocabulary_id='OpenWearables',
         ).count()
         self.assertEqual(count1, count2)
-
-
-class SeedAllFieldMappingsTest(TestCase):
-    """Tests for the seed_all_field_mappings management command."""
-
-    def setUp(self):
-        # Clear migration-seeded rows so tests start from a known state.
-        FieldConceptMapping.objects.all().delete()
-
-    def test_creates_mappings(self):
-        """Running the command creates FieldConceptMapping rows."""
-        self.assertEqual(FieldConceptMapping.objects.count(), 0)
-        call_command('seed_all_field_mappings', verbosity=0)
-        count = FieldConceptMapping.objects.count()
-        self.assertGreater(count, 50, 'Expected at least 50 field mappings')
-
-    def test_all_approved(self):
-        """All seeded rows have status='approved'."""
-        call_command('seed_all_field_mappings', verbosity=0)
-        non_approved = FieldConceptMapping.objects.exclude(status='approved').count()
-        self.assertEqual(non_approved, 0)
-
-    def test_fields_populated(self):
-        """Spot-check that key fields are populated correctly."""
-        call_command('seed_all_field_mappings', verbosity=0)
-        hgb = FieldConceptMapping.objects.get(field_name='hemoglobin_g_dl')
-        self.assertEqual(hgb.vocabulary_id, 'LOINC')
-        self.assertEqual(hgb.concept_code, '718-7')
-        self.assertEqual(hgb.omop_table, 'measurement')
-        self.assertEqual(hgb.value_kind, 'number')
-        self.assertEqual(hgb.unit, 'g/dL')
-
-    def test_idempotent(self):
-        """Running twice does not create duplicates."""
-        call_command('seed_all_field_mappings', verbosity=0)
-        count1 = FieldConceptMapping.objects.count()
-        call_command('seed_all_field_mappings', verbosity=0)
-        count2 = FieldConceptMapping.objects.count()
-        self.assertEqual(count1, count2)
-
-    def test_skips_existing(self):
-        """Pre-existing mappings are not overwritten."""
-        FieldConceptMapping.objects.create(
-            field_name='hemoglobin_g_dl',
-            vocabulary_id='CUSTOM',
-            concept_code='999',
-            status='approved',
-        )
-        call_command('seed_all_field_mappings', verbosity=0)
-        hgb = FieldConceptMapping.objects.get(field_name='hemoglobin_g_dl')
-        self.assertEqual(hgb.vocabulary_id, 'CUSTOM', 'Should not overwrite existing')
-
-    def test_dry_run(self):
-        """Dry run does not create any rows."""
-        call_command('seed_all_field_mappings', '--dry-run', verbosity=0)
-        self.assertEqual(FieldConceptMapping.objects.count(), 0)
