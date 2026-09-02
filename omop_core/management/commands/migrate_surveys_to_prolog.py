@@ -89,6 +89,9 @@ def _question(inp: dict, index: int) -> tuple[dict, str | None]:
     return question, note
 
 
+#: The retired tables. Written as literals in every query below rather than
+#: interpolated: nothing here is dynamic, and a query built by f-string reads
+#: like an injection site to anyone auditing it later (bandit B608 agrees).
 LEGACY_TEMPLATES = "survey"
 LEGACY_RESPONSES = "patient_survey_response"
 
@@ -206,7 +209,7 @@ class Command(BaseCommand):
             )
             return
         templates = _rows(
-            f"select id, name, title, description, pages from {LEGACY_TEMPLATES} order by name"
+            "select id, name, title, description, pages from survey order by name"
         )
         if names:
             found = {t["name"] for t in templates}
@@ -229,8 +232,8 @@ class Command(BaseCommand):
                 self.stdout.write(self.style.WARNING(f"  {note}"))
 
             responses = _rows(
-                f"select person_id, values, started_at, completed_at, created_at "
-                f"from {LEGACY_RESPONSES} where survey_id = %s",
+                "select person_id, values, started_at, completed_at, created_at "
+                "from patient_survey_response where survey_id = %s",
                 [survey["id"]],
             )
             questions = {q["key"]: q for s in doc["sections"] for q in s["questions"]}
@@ -347,7 +350,8 @@ class Command(BaseCommand):
                 ).values_list("participant_id", flat=True)
             )
             rows = _rows(
-                f"select person_id from {LEGACY_RESPONSES} where survey_id = %s", [survey["id"]]
+                "select person_id from patient_survey_response where survey_id = %s",
+                [survey["id"]],
             )
             unconverted = [r["person_id"] for r in rows if r["person_id"] not in converted]
             if unconverted:
@@ -359,10 +363,11 @@ class Command(BaseCommand):
                 )
             with connection.cursor() as cur:
                 cur.execute(
-                    f"delete from {LEGACY_RESPONSES} where survey_id = %s and person_id = any(%s)",
+                    "delete from patient_survey_response "
+                    "where survey_id = %s and person_id = any(%s)",
                     [survey["id"], list(converted)],
                 )
                 deleted = cur.rowcount
                 if not unconverted:
-                    cur.execute(f"delete from {LEGACY_TEMPLATES} where id = %s", [survey["id"]])
+                    cur.execute("delete from survey where id = %s", [survey["id"]])
             self.stdout.write(f"  {survey['name']}: purged {deleted} legacy response(s)")
