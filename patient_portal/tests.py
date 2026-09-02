@@ -23603,8 +23603,12 @@ class MappingHubTestBase(TestCase):
         cls.admin = Identity.objects.create_superuser(
             email='admin-mapping@test.com', password='testpass',
         )
-        cls.admin.is_org_admin = True
-        cls.admin.save()
+        cls.admin_org = Organization.objects.create(
+            name='Mapping Admin Org', slug='mapping-admin-org',
+        )
+        GroupAccess.objects.create(
+            identity=cls.admin, org=cls.admin_org, role='org_admin',
+        )
 
         cls.regular = Identity.objects.create_user(
             email='regular@test.com', password='testpass',
@@ -23645,6 +23649,19 @@ class MappingStatsTest(MappingHubTestBase):
         self.assertIn('therapy', resp.data)
         self.assertIn('unmapped', resp.data['field_mappings'])
         self.assertGreaterEqual(resp.data['therapy']['regimens'], 1)
+
+    def test_org_admin_can_see_stats(self):
+        org_admin = Identity.objects.create_user(
+            email='org-admin-mapping@test.com', password='testpass',
+        )
+        GroupAccess.objects.create(
+            identity=org_admin, org=self.admin_org, role='org_admin',
+        )
+        self.client.force_authenticate(user=org_admin)
+
+        resp = self.client.get('/api/v1/mapping-stats/')
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
     def test_regular_user_forbidden(self):
         self.client.force_authenticate(user=self.regular)
