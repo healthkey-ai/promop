@@ -44,4 +44,4 @@ factory-boy==3.3.3
 # PROlog survey runner, installed as a Django app (prolog_surveys). Public repo,
 # pinned by commit: the app takes PRomop's Django/DRF pins, so a bump here is
 # a deliberate step, not a resolver decision. See docs/prolog-surveys.md.
-prolog @ git+https://github.com/healthkey-ai/prolog@020fe0b0b1ef5495c91fa253f3df65063f2a4ba2#subdirectory=backend
+prolog @ git+https://github.com/healthkey-ai/prolog@4e930ca3d00ced6213c8d4f521ab88d01df2cc08#subdirectory=backend
