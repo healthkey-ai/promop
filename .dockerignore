@@ -21,4 +21,5 @@ staticfiles/
 # Keep documentation out of application images, except the static artifact read
 # by import_healthtree_crossmaps at runtime.
 docs/*
-!docs/HealthTree_Code_To_Concept_Mapping.md
+!docs/ht-code-concept-mapping.md
+!docs/ht-fhir-code-concept-mapping.md
