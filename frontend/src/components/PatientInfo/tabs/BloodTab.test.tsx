@@ -35,14 +35,6 @@ const DESCRIPTORS = {
   hemoglobin_g_dl: editable('718-7'),
   anc_thousand_per_ul: editable('751-8'),
   platelet_count_thousand_per_ul: editable('777-3'),
-  psa_ng_ml: editable('2857-1'),
-  serum_calcium_mg_dl: editable('17861-6'),
-  // Not on this tab any more, but the descriptor still classifies it; kept here
-  // so the fixture mirrors what the server actually returns.
-  calcium_mg_dl: {
-    kind: 'alias', writable: false, canonical: 'serum_calcium_mg_dl',
-    reason: 'Mirrors serum_calcium_mg_dl; edit that field instead.',
-  },
 };
 
 beforeEach(() => {

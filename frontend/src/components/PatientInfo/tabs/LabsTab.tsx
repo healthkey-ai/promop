@@ -43,12 +43,15 @@ const LIVER: Array<[string, string]> = [
   ['Direct Bilirubin (mg/dL)', 'serum_bilirubin_level_direct'],
 ];
 
-// Prognostic and inflammatory. LDH and beta-2 microglobulin are tumour-burden
-// markers here — both sit in real staging systems (the ISS for myeloma, the
-// R-IPI for DLBCL) — which is why they are not filed under "cardiac" anything.
+// Prognostic and inflammatory. LDH is a tumour-burden marker here — it sits in
+// the R-IPI for DLBCL — which is why it is not filed under "cardiac" anything.
+//
+// Beta-2 microglobulin is deliberately absent: it is an ISS staging parameter
+// for myeloma, the server classifies it as a disease field, and DiseaseTab
+// renders it where that means something. Rendering it here too gave one value
+// two editable boxes and broke the tab-set invariant in field_descriptor.
 const MARKERS: Array<[string, string]> = [
   ['LDH (U/L)', 'ldh_u_l'],
-  ['Beta-2 Microglobulin (mg/L)', 'beta2_microglobulin'],
   ['C-Reactive Protein (mg/L)', 'c_reactive_protein'],
   ['ESR (mm/hr)', 'esr'],
   ['HbA1c (%)', 'hba1c_percent'],

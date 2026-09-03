@@ -310,7 +310,6 @@ _TAB_BLOOD = frozenset({
 _TAB_LABS = frozenset({
     # Moved from _TAB_BLOOD with the sections that render them (#955).
     'sodium_meq_l', 'potassium_meq_l', 'calcium_mg_dl', 'magnesium_mg_dl',
-    'serum_calcium_mg_dl',
     'troponin_ng_ml', 'bnp_pg_ml', 'glucose_mg_dl', 'hba1c_percent', 'ldh_u_l',
     'inr', 'pt_seconds', 'ptt_seconds',
     'cea_ng_ml', 'ca19_9_u_ml', 'psa_ng_ml',

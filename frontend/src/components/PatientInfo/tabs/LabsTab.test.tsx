@@ -25,6 +25,17 @@ vi.mock('@/hooks/useVocabulary', () => ({
 }));
 
 const DESCRIPTORS = {
+  // The canonical calcium column, declared writable so the alias regression
+  // test below asserts a typeable box rather than a disabled one.
+  serum_calcium_mg_dl: {
+    kind: 'editable', writable: true, target: 'measurement',
+    concept_id: 9, code: '17861-6', value_kind: 'number', unit: 'mg/dL',
+    type_concept_id: 32856, source_value: '17861-6',
+  },
+  calcium_mg_dl: {
+    kind: 'alias', writable: false, canonical: 'serum_calcium_mg_dl',
+    reason: 'Mirrors serum_calcium_mg_dl; edit that field instead.',
+  },
   hemoglobin_g_dl: {
     kind: 'editable', writable: true, target: 'measurement',
     concept_id: 1, code: '718-7', value_kind: 'number', unit: 'g/dL',
@@ -135,5 +146,8 @@ describe('LabsTab', () => {
 
     expect(screen.getByDisplayValue('9.1')).toBeInTheDocument();
     expect(screen.queryByTestId('reason-calcium_mg_dl')).not.toBeInTheDocument();
+    // getByDisplayValue matches a *disabled* input too, so without this the
+    // test passed in exactly the state its comment condemns.
+    expect(screen.queryByTestId('reason-serum_calcium_mg_dl')).toBeNull();
   });
 });

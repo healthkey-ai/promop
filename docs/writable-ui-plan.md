@@ -86,10 +86,14 @@ field as an OMOP fact is what sent profile edits to the observation endpoint
 
 ### Tab status
 
+Counts moved in #955: fourteen analytes that BloodTab and LabsTab both
+rendered now appear only on Labs, and `beta2_microglobulin` only on Disease.
+
+
 | tab | state | fields | writable |
 |---|---|---:|---:|
-| BloodTab | descriptor-driven | 23 | 23 |
-| LabsTab | descriptor-driven | 32 | 29 |
+| BloodTab | descriptor-driven | 8 | 8 |
+| LabsTab | descriptor-driven | 31 | 28 |
 | TreatmentTab | descriptor-driven | 26 | 0 — all authored |
 | GeneralTab | descriptor-driven | 30 | 16 |
 | DiseaseTab | descriptor-driven | 82 | 18 |
