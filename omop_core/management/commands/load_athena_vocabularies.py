@@ -1400,7 +1400,9 @@ class Command(BaseCommand):
             vocab_versions=vocab_versions,
             row_counts=real_counts,
             checksums=checksums,
-            umls_release=self._umls_release or {},
+            # Unit callers may publish a release directly rather than through
+            # handle(), which is where this per-run value is initialized.
+            umls_release=getattr(self, '_umls_release', None) or {},
             status='published',
             published_at=now,
         )
