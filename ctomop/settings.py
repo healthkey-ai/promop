@@ -674,6 +674,12 @@ PROLOG_PARTICIPANT_FACTORY = 'patient_portal.services.create_unidentified_person
 # that offers no surveys loads none.
 PROLOG_DEFINITION_DIRS = [d for d in os.environ.get('PROLOG_DEFINITION_DIRS', '').split(os.pathsep) if d]
 PROLOG_THEME_DIRS = [d for d in os.environ.get('PROLOG_THEME_DIRS', '').split(os.pathsep) if d]
+# The deployment's own legal pages (privacy.md and friends), served by the
+# runner inside the survey. Read through settings rather than the environment
+# once the app is installed here, so a deployment that only sets the
+# environment variable gets nothing — which is how it went unnoticed until a
+# real notice was mounted.
+PROLOG_LEGAL_DIRS = [d for d in os.environ.get('PROLOG_LEGAL_DIRS', '').split(os.pathsep) if d]
 
 # The built runner front end, when a deployment mounts one. It is a separate SPA
 # from PRomop's own, so its assets are served under their own prefix
