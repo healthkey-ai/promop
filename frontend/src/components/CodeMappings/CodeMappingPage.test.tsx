@@ -136,6 +136,8 @@ const loincHit = {
   domain_id: "Measurement",
   concept_class_id: "Lab Test",
   standard_concept: "S",
+  measurement_type: "quantitative" as const,
+  suggested_unit: "mg/dL",
 };
 
 function renderPage(rows = [proposedRow, approvedRow]) {
@@ -496,6 +498,14 @@ describe("CodeMappingPage", () => {
       });
       expect(screen.getByTestId("destination-concept-class")).toHaveValue("Lab Test");
       expect(screen.getByTestId("destination-concept-code")).toHaveValue("33358-3");
+    });
+
+    it("shows measurement type and unit in destination search results", async () => {
+      await openDialog();
+      fireEvent.change(screen.getByLabelText("Search destination concepts"), {
+        target: { value: "monoclonal" },
+      });
+      expect(await screen.findByText("Quantitative · Unit: mg/dL")).toBeInTheDocument();
     });
 
     it("scopes the concept search to the destination vocabulary", async () => {

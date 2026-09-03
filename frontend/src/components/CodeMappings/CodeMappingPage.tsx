@@ -63,6 +63,8 @@ interface ConceptResult {
   domain_id: string;
   concept_class_id: string;
   standard_concept: string | null;
+  measurement_type?: "qualitative" | "quantitative";
+  suggested_unit?: string;
 }
 
 interface VocabularyRef {
@@ -1194,11 +1196,19 @@ export default function CodeMappingPage() {
                         key={concept.concept_id}
                         type="button"
                         onClick={() => applyConcept(concept)}
-                        className="grid w-full grid-cols-[8rem_1fr_6rem] gap-2 border-b border-slate-100 px-3 py-2 text-left text-xs last:border-0 hover:bg-slate-50"
+                        className="w-full border-b border-slate-100 px-3 py-2 text-left text-xs last:border-0 hover:bg-slate-50"
                       >
-                        <span className="font-mono text-slate-700">{concept.concept_code}</span>
-                        <span className="text-slate-900">{concept.concept_name}</span>
-                        <span className="font-mono text-slate-500">{concept.vocabulary_id}</span>
+                        <span className="grid grid-cols-[8rem_1fr_6rem] gap-2">
+                          <span className="font-mono text-slate-700">{concept.concept_code}</span>
+                          <span className="text-slate-900">{concept.concept_name}</span>
+                          <span className="font-mono text-slate-500">{concept.vocabulary_id}</span>
+                        </span>
+                        {concept.measurement_type && (
+                          <span className="mt-1 block text-slate-500">
+                            {concept.measurement_type === "quantitative" ? "Quantitative" : "Qualitative"}
+                            {concept.suggested_unit && ` · Unit: ${concept.suggested_unit}`}
+                          </span>
+                        )}
                       </button>
                     ))}
                   </div>

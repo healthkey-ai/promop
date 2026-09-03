@@ -8209,6 +8209,25 @@ class ConceptSearchTest(_ConceptFixtureBase):
         self.assertNotIn(self.diabetes.concept_id, ids)
         self.assertTrue(all('creatinine' in r['concept_name'].lower() for r in results))
 
+    def test_measurement_results_identify_input_type_and_suggested_unit(self):
+        resp = self.client.get(self.URL, {'q': 'creatinine', 'page_size': 100}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = {item['concept_id']: item for item in resp.json()['results']}
+        self.assertEqual(results[self.creatinine_serum.concept_id]['measurement_type'], 'quantitative')
+        self.assertEqual(results[self.creatinine_serum.concept_id]['suggested_unit'], 'mg/dL')
+        self.assertEqual(results[self.creatinine_renal.concept_id]['measurement_type'], 'quantitative')
+        self.assertNotIn('measurement_type', results[self.creatinine_snomed.concept_id])
+
+        qualitative = Concept.objects.create(
+            concept_id=992130003, concept_name='Protein [Presence] in Urine',
+            vocabulary_id='LOINC', domain_id='Measurement', concept_class_id='Lab Test',
+            concept_code='QUAL-TEST', standard_concept='S',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        qualitative_response = self.client.get(self.URL, {'q': 'protein', 'page_size': 100}, **self._auth())
+        qualitative_results = {item['concept_id']: item for item in qualitative_response.json()['results']}
+        self.assertEqual(qualitative_results[qualitative.concept_id]['measurement_type'], 'qualitative')
+
     def test_search_tolerates_punctuation_and_spacing_differences(self):
         """Curators should not need to reproduce a concept name's hyphenation."""
         from datetime import date

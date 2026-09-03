@@ -7093,6 +7093,34 @@ def _get_loinc_to_unit() -> dict[str, str]:
     }
 
 
+_QUANTITATIVE_LOINC_NAME_MARKERS = (
+    'mass/', 'moles/', '#/', 'units/', 'volume fraction', 'catalytic activity',
+    'ratio', 'fraction', 'clearance', ' rate', ' score', ' time',
+)
+_QUALITATIVE_LOINC_NAME_MARKERS = (
+    '[presence]', '[ordinal]', '[narrative]', '[interpretation]', '[type]',
+    '[finding]', 'susceptibility',
+)
+
+
+def _measurement_input_type(concept_name, suggested_unit):
+    """Return the safe qualitative/quantitative cue available in OMOP data.
+
+    OMOP's Concept table does not retain LOINC's Scale Type. A curated unit is
+    conclusive, and common LOINC display-name markers cover unitless numeric
+    measurements (for example, renal clearance) and qualitative Presence
+    results without pretending an unknown result has a known scale.
+    """
+    if suggested_unit:
+        return 'quantitative'
+    name = (concept_name or '').casefold()
+    if any(marker in name for marker in _QUANTITATIVE_LOINC_NAME_MARKERS):
+        return 'quantitative'
+    if any(marker in name for marker in _QUALITATIVE_LOINC_NAME_MARKERS):
+        return 'qualitative'
+    return ''
+
+
 @api_view(['GET'])
 @permission_classes([ScopedTokenPermission])
 def concept_search(request):
@@ -7125,11 +7153,20 @@ def concept_search(request):
         ),
         request.query_params,
     )
-    # Annotate LOINC results with suggested units from LAB_FIELD_TO_LOINC.
+    # Show a curator what kind of input a Measurement mapping expects when the
+    # available OMOP/LOINC data lets us classify it safely.
     response = _paginated_concept_response(queryset, request)
     for item in response.data.get('results', []):
-        if item.get('vocabulary_id') == 'LOINC':
-            item['suggested_unit'] = _get_loinc_to_unit().get(item.get('concept_code'), '')
+        # The display-name conventions and curated unit map are LOINC-specific;
+        # do not infer an input type for another vocabulary from them.
+        if item.get('domain_id') != 'Measurement' or item.get('vocabulary_id') != 'LOINC':
+            continue
+        suggested_unit = _get_loinc_to_unit().get(item.get('concept_code'), '')
+        measurement_type = _measurement_input_type(item.get('concept_name'), suggested_unit)
+        if measurement_type:
+            item['measurement_type'] = measurement_type
+        if suggested_unit:
+            item['suggested_unit'] = suggested_unit
     return response
 
 
