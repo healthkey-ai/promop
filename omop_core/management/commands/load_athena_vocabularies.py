@@ -411,6 +411,11 @@ class Command(BaseCommand):
                                 'Skips concept_relationship, concept_ancestor, '
                                 'concept_synonym and drug_strength.'
                             ))
+        parser.add_argument('--skip-code-mappings', action='store_true',
+                            help=(
+                                'Do not load the bundled code-to-concept mapping artifact. '
+                                'Intended only for deliberately partial fixtures.'
+                            ))
         parser.add_argument('--umls-release-url',
                             help=(
                                 'Pin the raw UMLS Full Release URL to cache. Defaults to '
@@ -515,7 +520,10 @@ class Command(BaseCommand):
             self._load_raw_umls(options['verbosity'])
             self._record_version_history(replace)
             self._publish_release(counts)
-            self._load_code_mappings(options['verbosity'])
+            if options['skip_code_mappings']:
+                self._log('  --skip-code-mappings: skipping code mapping artifact load.')
+            else:
+                self._load_code_mappings(options['verbosity'])
         elapsed = time.monotonic() - t0
         verb = 'would load' if dry_run else 'loaded'
         total = sum(counts.values())
@@ -1393,7 +1401,9 @@ class Command(BaseCommand):
             vocab_versions=vocab_versions,
             row_counts=real_counts,
             checksums=checksums,
-            umls_release=self._umls_release or {},
+            # Unit callers may publish a release directly rather than through
+            # handle(), which is where this per-run value is initialized.
+            umls_release=getattr(self, '_umls_release', None) or {},
             status='published',
             published_at=now,
         )

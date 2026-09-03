@@ -5377,7 +5377,9 @@ class AthenaVocabularyLoadTest(TestCase):
         from django.core.management import call_command
         call_command(
             'load_athena_vocabularies', path=directory,
-            skip_clinical_vocabulary_verification=True, **options,
+            skip_clinical_vocabulary_verification=True,
+            skip_code_mappings=True,
+            **options,
         )
 
     def _write_tsv(self, directory, filename, headers, rows):
@@ -20855,6 +20857,10 @@ class CodeMappingApiTest(TestCase):
         )
 
     def setUp(self):
+        # Migration 0201 seeds production HK-Labs mappings. These endpoint
+        # tests use a deliberately tiny mapping fixture and assert its counts,
+        # so keep the production seed rows out of this isolated fixture.
+        SourceCodeConceptMapping.objects.filter(origin_system='hk-labs-seed').delete()
         self.client = APIClient()
 
     # ---------------------------------------------------------------- access
@@ -21408,6 +21414,11 @@ class CodeMappingResolutionTest(TestCase):
             standard_concept='S', concept_code='33358-4',
             valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
         )
+
+    def setUp(self):
+        # These rule tests assert exact mapping counts for their own inputs;
+        # omit the unrelated deploy-time HK-Labs seed rows from migration 0201.
+        SourceCodeConceptMapping.objects.filter(origin_system='hk-labs-seed').delete()
 
     def test_loinc_source_resolves_directly_and_mints_no_mapping(self):
         """Rule 1: the Athena concept *is* the LOINC code, so a mapping row for
