@@ -289,4 +289,3 @@ When returning after an interruption, start here:
    before (or while) local PostgreSQL migration validation.
 4. Add date, operator, candidate SHA, command output location, and result to
    the release PR/release notes after each phase.
-
