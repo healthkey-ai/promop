@@ -1408,6 +1408,18 @@ class Command(BaseCommand):
                 f'{artifact} — skipping code mapping load.'
             )
             return
+        # The artifact is tracked by Git LFS. If LFS content hasn't been
+        # pulled, the file is a tiny pointer instead of JSON — skip gracefully.
+        try:
+            head = artifact.read_bytes()[:30]
+        except OSError:
+            return
+        if head.startswith(b'version https://git-lfs'):
+            self._log(
+                '  load_mappings: artifact is a Git LFS pointer — '
+                'run "git lfs pull" to fetch the actual file. Skipping.'
+            )
+            return
         self._log('')
         self._log('  Loading approved code-to-concept mappings from artifact...')
         call_command('load_mappings', artifact=str(artifact), verbosity=verbosity)
