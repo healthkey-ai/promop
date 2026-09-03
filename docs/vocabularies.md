@@ -105,6 +105,26 @@ At minimum, deployed clinical environments must contain **LOINC**, **RxNorm**,
 **SNOMED**, and **ICD10CM**. The loader verifies those four after every normal
 non-dry-run load.
 
+### UMLS source-release cache (optional)
+
+Athena remains the authoritative UMLS-to-OMOP conversion: raw UMLS RRF files
+are never inserted into OMOP tables. To retain source-release provenance beside
+each Athena load, configure a UTS API key before running the command:
+
+```bash
+UMLS_API_KEY="..." UMLS_CACHE_DIR=/persistent/vocab-cache \
+  .venv/bin/python manage.py load_athena_vocabularies --gdrive
+```
+
+With `UMLS_API_KEY`, the loader asks the NLM UTS release API for the current
+UMLS Full Release, downloads it through the authenticated UTS endpoint, checks
+that the zip contains `META/MRCONSO.RRF`, and caches it. Its release URL,
+version, size, and SHA-256 are stored in the `VocabularyRelease` manifest. Use
+`UMLS_RELEASE_URL` or `--umls-release-url` to pin a specific release (for
+example the 2022AA URL); use `--skip-umls-cache` to bypass this optional step.
+Choose a persistent, access-controlled `UMLS_CACHE_DIR` in production. API keys
+and raw UMLS files must not be committed or served by the application.
+
 ## 2. Where vocabulary data lives
 
 Every vocabulary — external or local — lives in the **same set of OMOP tables**. There is no per-vocabulary table; `concept.vocabulary_id` is what separates them.

@@ -1,6 +1,11 @@
 import csv
+import hashlib
+import json
+import os
+import re
 import shutil
 import sys
+import tempfile
 import time
 import zipfile
 from datetime import date
@@ -12,6 +17,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.apps import apps
 from django.db import connection
 from django.db.models import Count
+import requests
 
 import logging
 
@@ -77,6 +83,9 @@ LOINC_DOMAIN_SCOPE = frozenset({
 BATCH = 100_000
 PROGRESS_EVERY = 500_000
 DEFAULT_GDRIVE_URL = 'https://drive.google.com/drive/u/0/folders/1HoRWGepqcH3pMKK03KNb1oWpaVs0Avl7'
+UMLS_RELEASES_URL = 'https://uts-ws.nlm.nih.gov/releases'
+UMLS_DOWNLOAD_URL = 'https://uts-ws.nlm.nih.gov/download'
+DEFAULT_UMLS_CACHE_DIR = '/tmp/promop-umls'
 _INCOMING_CONCEPT_TABLE = '_incoming_athena_concept_ids'
 _VOCABULARY_CONCEPT_REFERENCE_TABLES = frozenset({
     'concept_relationship', 'concept_ancestor', 'concept_synonym',
@@ -197,6 +206,143 @@ def _download_gdrive_vocabulary(url, log):
     return _extract_vocabulary_archive(archive, extract_dir, log)
 
 
+def _release_version_from_url(url):
+    """Best-effort UMLS release identifier for an operator-pinned archive URL."""
+    match = re.search(r'/([0-9]{4}(?:AA|AB))/umls-\1-full\.zip$', url)
+    return match.group(1) if match else None
+
+
+def _resolve_umls_release(release_url=None, session=requests):
+    """Return metadata for an explicit or the current UMLS Full Release."""
+    if release_url:
+        return {
+            'release_url': release_url,
+            'release_version': _release_version_from_url(release_url),
+            'release_date': None,
+        }
+    try:
+        response = session.get(
+            UMLS_RELEASES_URL,
+            params={'releaseType': 'umls-full-release', 'current': 'true'},
+            timeout=30,
+        )
+        response.raise_for_status()
+        releases = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise CommandError(
+            'Could not resolve the current UMLS Full Release from NLM UTS. '
+            'Set UMLS_RELEASE_URL to a known release URL or retry when UTS is available.'
+        ) from exc
+    if not isinstance(releases, list) or len(releases) != 1:
+        raise CommandError('NLM UTS did not return exactly one current UMLS Full Release.')
+    release = releases[0]
+    download_url = release.get('downloadUrl')
+    if not download_url:
+        raise CommandError('NLM UTS current-release response did not include downloadUrl.')
+    return {
+        'release_url': download_url,
+        'release_version': release.get('releaseVersion'),
+        'release_date': release.get('releaseDate'),
+    }
+
+
+def _validate_umls_archive(path):
+    """Validate archive structure without extracting its multi-gigabyte contents."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            if not any(name.endswith('META/MRCONSO.RRF') for name in archive.namelist()):
+                raise CommandError(
+                    f'UMLS archive {path} does not contain META/MRCONSO.RRF.'
+                )
+    except zipfile.BadZipFile as exc:
+        raise CommandError(f'UMLS archive {path} is not a valid zip file.') from exc
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _cache_umls_release(api_key, cache_dir, release_url=None, log=lambda _msg: None,
+                        session=requests):
+    """Download a raw UMLS release into a reusable local cache.
+
+    This intentionally does *not* parse RRF data into OMOP tables. Athena is
+    the governed UMLS→OMOP conversion layer; the cached archive provides source
+    provenance and a local audit artifact only.
+    """
+    release = _resolve_umls_release(release_url, session=session)
+    version = release['release_version'] or _release_version_from_url(release['release_url'])
+    if not version:
+        raise CommandError(
+            'Could not determine the UMLS release version. Use an NLM URL of the form '
+            '.../<YYYYAA-or-YYYYAB>/umls-<release>-full.zip.'
+        )
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = cache_dir / f'umls-{version}-full.zip'
+    metadata_path = cache_dir / f'umls-{version}-full.json'
+
+    if archive_path.exists():
+        _validate_umls_archive(archive_path)
+        try:
+            metadata = json.loads(metadata_path.read_text())
+        except (OSError, ValueError):
+            metadata = {}
+        metadata.update(release)
+        metadata.update({
+            'archive_name': archive_path.name,
+            'archive_bytes': archive_path.stat().st_size,
+            'sha256': metadata.get('sha256') or _sha256_file(archive_path),
+            'cached': True,
+        })
+        metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + '\n')
+        log(f'  UMLS: using validated cached {archive_path.name}.')
+        return metadata
+
+    log(f'  UMLS: downloading {version} from NLM UTS...')
+    fd, tmp_name = tempfile.mkstemp(prefix=f'.{archive_path.name}.', suffix='.part', dir=cache_dir)
+    digest = hashlib.sha256()
+    try:
+        with os.fdopen(fd, 'wb') as destination:
+            try:
+                response = session.get(
+                    UMLS_DOWNLOAD_URL,
+                    params={'url': release['release_url'], 'apiKey': api_key},
+                    stream=True,
+                    timeout=(30, 300),
+                )
+                response.raise_for_status()
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        destination.write(chunk)
+                        digest.update(chunk)
+            except requests.RequestException as exc:
+                raise CommandError(
+                    'Could not download the UMLS release from NLM UTS. '
+                    'Check UMLS_API_KEY and network access.'
+                ) from exc
+        _validate_umls_archive(tmp_name)
+        os.replace(tmp_name, archive_path)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+
+    metadata = {
+        **release,
+        'archive_name': archive_path.name,
+        'archive_bytes': archive_path.stat().st_size,
+        'sha256': digest.hexdigest(),
+        'cached': False,
+    }
+    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + '\n')
+    log(f'  UMLS: cached {archive_path.name} ({metadata["archive_bytes"]:,} bytes).')
+    return metadata
+
+
 def _header_index(header_row):
     """Build column-name → index map from a TSV header row."""
     return {col: i for i, col in enumerate(header_row)}
@@ -270,6 +416,13 @@ class Command(BaseCommand):
                                 'Do not load the bundled code-to-concept mapping artifact. '
                                 'Intended only for deliberately partial fixtures.'
                             ))
+        parser.add_argument('--umls-release-url',
+                            help=(
+                                'Pin the raw UMLS Full Release URL to cache. Defaults to '
+                                'UMLS_RELEASE_URL or the current UMLS release from NLM UTS.'
+                            ))
+        parser.add_argument('--skip-umls-cache', action='store_true',
+                            help='Skip optional UMLS archive caching even when UMLS_API_KEY is set.')
 
     def handle(self, *args, **options):
         base = options['path']
@@ -279,6 +432,7 @@ class Command(BaseCommand):
         replace = options['replace']
         dry_run = options['dry_run']
         skip_clinical_vocabulary_verification = options['skip_clinical_vocabulary_verification']
+        self._umls_release = None
 
         sources = [bool(base), bool(archive), bool(bucket_name), bool(gdrive_url)]
         if sum(sources) != 1:
@@ -298,6 +452,21 @@ class Command(BaseCommand):
 
         t0 = time.monotonic()
         self._build_start = time.time()  # wall-clock for VocabularyRelease
+
+        api_key = os.environ.get('UMLS_API_KEY')
+        if options['skip_umls_cache']:
+            self._log('  UMLS: cache step skipped by --skip-umls-cache.')
+        elif dry_run:
+            self._log('  UMLS: dry-run; would cache a UMLS release when UMLS_API_KEY is configured.')
+        elif not api_key:
+            self._log('  UMLS: UMLS_API_KEY is not configured; skipping optional raw-release cache.')
+        else:
+            self._umls_release = _cache_umls_release(
+                api_key=api_key,
+                cache_dir=os.environ.get('UMLS_CACHE_DIR', DEFAULT_UMLS_CACHE_DIR),
+                release_url=options['umls_release_url'] or os.environ.get('UMLS_RELEASE_URL'),
+                log=self._log,
+            )
 
         self._base = base
 
@@ -1231,6 +1400,7 @@ class Command(BaseCommand):
             vocab_versions=vocab_versions,
             row_counts=real_counts,
             checksums=checksums,
+            umls_release=self._umls_release or {},
             status='published',
             published_at=now,
         )
