@@ -215,7 +215,6 @@ function LymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onCha
       <Section title="Laboratory Markers">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <ClinicalField label="LDH Level (U/L)" name="ldh_level" descriptor={descriptors.ldh_level} type="number" value={formData?.ldh_level} onChange={onChange} />
-          <ClinicalField label="Beta-2 Microglobulin (mg/L)" name="beta2_microglobulin" descriptor={descriptors.beta2_microglobulin} type="number" value={formData?.beta2_microglobulin} onChange={onChange} />
           <ClinicalField label="Bone Marrow Involvement" name="bone_marrow_involvement" descriptor={descriptors.bone_marrow_involvement} type="select" value={formData?.bone_marrow_involvement} options={YES_NO_OPTIONS} onChange={onChange} />
           <ClinicalField label="Clonal Bone Marrow B Lymphocytes (%)" name="clonal_bone_marrow_b_lymphocytes" descriptor={descriptors.clonal_bone_marrow_b_lymphocytes} type="number" value={formData?.clonal_bone_marrow_b_lymphocytes} onChange={onChange} />
           <ClinicalField label="Number of Nodal Sites" name="number_of_nodal_sites" descriptor={descriptors.number_of_nodal_sites} unknownField type="number" value={formData?.number_of_nodal_sites} onChange={onChange} />
@@ -268,7 +267,6 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
           <ClinicalField label="Lambda Free Light Chains" name="lambda_flc" descriptor={descriptors.lambda_flc} type="number" value={formData?.lambda_flc} onChange={onChange} />
           <ClinicalField label="Kappa/Lambda Ratio" name="kappa_lambda_ratio" descriptor={descriptors.kappa_lambda_ratio} type="number" value={formData?.kappa_lambda_ratio} onChange={onChange} />
           <ClinicalField label="Involved/Uninvolved Ratio" name="involved_uninvolved_ratio" descriptor={descriptors.involved_uninvolved_ratio} type="number" value={formData?.involved_uninvolved_ratio} onChange={onChange} />
-          <ClinicalField label="Beta-2 Microglobulin (mg/L)" name="beta2_microglobulin" descriptor={descriptors.beta2_microglobulin} type="number" value={formData?.beta2_microglobulin} onChange={onChange} />
           <ClinicalField label="LDH Level (U/L)" name="ldh_level" descriptor={descriptors.ldh_level} type="number" value={formData?.ldh_level} onChange={onChange} />
         </div>
       </Section>
