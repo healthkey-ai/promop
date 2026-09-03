@@ -10,8 +10,7 @@ interface Props {
 }
 
 /**
- * Blood counts and chemistry, rendered against the server's writable-field
- * descriptor.
+ * Haematology, rendered against the server's writable-field descriptor.
  *
  * Every field here was already mapped server-side — the server has known the OMOP
  * fact behind `anc_thousand_per_ul` for some time. What it could not do was save:
@@ -19,22 +18,14 @@ interface Props {
  * refuses. A mapping and a write path are independent halves, and this supplies
  * the second.
  *
- * Fourteen of these analytes also appear on the Labs tab. That duplication
- * predates the descriptor — Labs used alias field names (`serum_sodium`) where
- * this tab used canonicals (`sodium_meq_l`), so the same analyte looked like two
- * different fields. Both now write the same LOINC code, which is correct but
- * means one value is editable in two places. Which tab should own them is a
- * product decision, not one to settle here.
- */
-
-/**
- * Haematology. The counts are the only thing this tab holds that Labs does not.
- *
- * It used to carry Electrolytes, Cardiac & Other, Coagulation and Tumor Markers
- * as well — all four rendered the same field keys as sections already on the
- * Labs tab, so the same value had two editable boxes on two tabs. Labs is where
- * chemistry belongs and where those sections already live; this tab is the
- * blood count.
+ * The counts are the only thing this tab holds that Labs does not. It used to
+ * carry Electrolytes, Cardiac & Other, Coagulation and Tumor Markers as well —
+ * fourteen analytes, all rendered by sections already on Labs under the same
+ * field keys, so one value had two editable boxes on two tabs (#955). That
+ * duplication predated the descriptor: Labs used alias names (`serum_sodium`)
+ * where this tab used canonicals (`sodium_meq_l`), so the same analyte looked
+ * like two fields until both resolved to one LOINC code. Labs owns the
+ * chemistry; this tab is the blood count.
  */
 const COUNTS: Array<[string, string]> = [
   ['Hemoglobin (g/dL)', 'hemoglobin_g_dl'],

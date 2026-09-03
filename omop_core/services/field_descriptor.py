@@ -291,19 +291,29 @@ _TAB_TREATMENT = frozenset({
     'last_treatment', 'prior_therapy', 'line_of_therapy',
 })
 
+# Haematology only. This has to agree with what BloodTab actually renders:
+# FieldMappingPage filters the curation list by this tab, and
+# propose-all?tab=... proposes against it, so a field filed here but shown on
+# Labs is invisible to a curator working the Labs tab and proposed for one that
+# does not display it.
+#
+# The chemistry, coagulation, cardiac and tumour-marker fields that used to sit
+# here were rendered by both tabs (#955); they live on Labs now.
 _TAB_BLOOD = frozenset({
     'hemoglobin_g_dl', 'hematocrit_percent', 'wbc_count_thousand_per_ul',
     'rbc_million_per_ul', 'platelet_count_thousand_per_ul',
     'anc_thousand_per_ul', 'alc_thousand_per_ul', 'amc_thousand_per_ul',
-    'sodium_meq_l', 'potassium_meq_l', 'calcium_mg_dl', 'magnesium_mg_dl',
-    'troponin_ng_ml', 'bnp_pg_ml', 'glucose_mg_dl', 'hba1c_percent', 'ldh_u_l',
-    'inr', 'pt_seconds', 'ptt_seconds',
-    'cea_ng_ml', 'ca19_9_u_ml', 'psa_ng_ml',
     # Legacy aliases for blood counts
     'hemoglobin_level', 'platelet_count', 'white_blood_cell_count',
 })
 
 _TAB_LABS = frozenset({
+    # Moved from _TAB_BLOOD with the sections that render them (#955).
+    'sodium_meq_l', 'potassium_meq_l', 'calcium_mg_dl', 'magnesium_mg_dl',
+    'serum_calcium_mg_dl',
+    'troponin_ng_ml', 'bnp_pg_ml', 'glucose_mg_dl', 'hba1c_percent', 'ldh_u_l',
+    'inr', 'pt_seconds', 'ptt_seconds',
+    'cea_ng_ml', 'ca19_9_u_ml', 'psa_ng_ml',
     'serum_creatinine_level', 'creatinine_clearance_rate', 'blood_urea_nitrogen',
     'egfr', 'serum_sodium', 'serum_potassium', 'serum_calcium_level',
     'magnesium', 'phosphorus', 'albumin_level', 'total_protein',
