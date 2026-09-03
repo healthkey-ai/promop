@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { AlertCircle, ClipboardList } from "lucide-react";
+import { AlertCircle } from "lucide-react";
 import type { User } from "@/hooks/useAuth";
 import api from "@/api/axios";
 
@@ -14,6 +14,10 @@ import api from "@/api/axios";
  * these are links rather than buttons: middle-click and "open in a new tab"
  * behave, and the runner keeps a respondent's place itself rather than this
  * component tracking answers it no longer owns.
+ *
+ * PatientDetail draws the tab's card, its "Surveys" heading and its
+ * description, so this renders only the list — a second heading inside a
+ * second card read as "Surveys inside Surveys".
  */
 
 interface PrologSurvey {
@@ -70,7 +74,7 @@ export default function PatientSurveys({ user }: { user: User | null }) {
 
   if (!user || user.person_id == null) {
     return (
-      <div className="rounded-2xl bg-background p-8 text-center shadow-[0_1px_3px_rgba(0,0,0,0.06),0_6px_24px_rgba(0,0,0,0.06)]">
+      <div className="py-6 text-center">
         <AlertCircle className="mx-auto mb-3 h-10 w-10 text-amber-400" />
         <p className="text-sm text-portal-text-secondary">
           No health record is linked to your account. Surveys will be available
@@ -82,39 +86,25 @@ export default function PatientSurveys({ user }: { user: User | null }) {
 
   if (loading) {
     return (
-      <div className="rounded-2xl bg-background p-8 shadow-[0_1px_3px_rgba(0,0,0,0.06),0_6px_24px_rgba(0,0,0,0.06)]">
-        <div className="flex items-center gap-3 mb-6">
-          <div className="h-5 w-5 animate-pulse rounded bg-muted" />
-          <div className="h-5 w-32 animate-pulse rounded bg-muted" />
-        </div>
-        <div className="space-y-4">
-          {[1, 2, 3].map((i) => (
-            <div
-              key={i}
-              className="flex items-center justify-between rounded-lg border border-border p-4"
-            >
-              <div className="space-y-1.5">
-                <div className="h-4 w-48 animate-pulse rounded bg-muted" />
-                <div className="h-3 w-20 animate-pulse rounded bg-muted" />
-              </div>
-              <div className="h-8 w-20 animate-pulse rounded bg-muted" />
+      <div className="space-y-4">
+        {[1, 2, 3].map((i) => (
+          <div
+            key={i}
+            className="flex items-center justify-between rounded-lg border border-border p-4"
+          >
+            <div className="space-y-1.5">
+              <div className="h-4 w-48 animate-pulse rounded bg-muted" />
+              <div className="h-3 w-20 animate-pulse rounded bg-muted" />
             </div>
-          ))}
-        </div>
+            <div className="h-8 w-20 animate-pulse rounded bg-muted" />
+          </div>
+        ))}
       </div>
     );
   }
 
   return (
-    <div className="rounded-2xl bg-background p-8 shadow-[0_1px_3px_rgba(0,0,0,0.06),0_6px_24px_rgba(0,0,0,0.06)]">
-      <div className="flex items-center gap-2 mb-1">
-        <ClipboardList className="h-5 w-5 text-portal-brand" />
-        <h2 className="text-xl font-bold text-foreground">Surveys</h2>
-      </div>
-      <p className="mb-6 text-sm text-muted-foreground">
-        Complete surveys to help your care team understand your health better.
-      </p>
-
+    <div>
       {error && (
         <div
           role="alert"
