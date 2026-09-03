@@ -191,6 +191,29 @@ describe("CodeMappingPage", () => {
     expect(screen.queryByRole("columnheader", { name: "Source code system" })).not.toBeInTheDocument();
   });
 
+  it("shows source descriptions beside source codes and removes OMOP table and Seen", async () => {
+    renderPage();
+    const row = (await screen.findByText("M-PROTEIN, SERUM", { selector: "td" })).closest("tr")!;
+    const cells = within(row).getAllByRole("cell");
+    expect(cells[2]).toHaveTextContent("M-protein, serum");
+    expect(screen.getByRole("columnheader", { name: "Source description" })).toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: "OMOP table" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: "Seen" })).not.toBeInTheDocument();
+  });
+
+  it("searches mappings across source-vocabulary tabs", async () => {
+    renderPage();
+    await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Search mappings" }), {
+      target: { value: "C90.00" },
+    });
+    // The matching ICD-10-CM row lives in the non-active tab and is approved,
+    // so expand its section after the global search has located it.
+    fireEvent.click(screen.getByRole("button", { name: /^Mapped/ }));
+    expect(await screen.findByText("C90.00", { selector: "td" })).toBeInTheDocument();
+  });
+
   it("splits proposed and approved into Unmapped and Mapped sections", async () => {
     renderPage();
     expect(await screen.findByText(/Unmapped/)).toBeInTheDocument();
@@ -313,9 +336,23 @@ describe("CodeMappingPage", () => {
       const input = screen.getByLabelText("Source Code Value") as HTMLInputElement;
       expect(input.value).toBe("M-PROTEIN, SERUM");
       expect(screen.queryByText("Source concept code")).not.toBeInTheDocument();
-      // The word "concept" never appears on the source side except on the
-      // read-only Source Concept ID, which is about the source code itself.
-      expect(screen.getByLabelText("Source Description")).toBeInTheDocument();
+      expect(screen.getByLabelText("Source Description")).toHaveValue("M-protein, serum");
+    });
+
+    it("shows a populated Source Concept ID in the dialog", async () => {
+      renderPage([{
+        ...proposedRow,
+        source_vocabulary_id: "ICD10CM",
+        source_code: "C90.20",
+        source_code_description: "Extramedullary plasmacytoma not having achieved remission",
+        source_concept_id: 45542660,
+      }]);
+      const cell = await screen.findByText("C90.20", { selector: "td" });
+      fireEvent.click(cell.closest("tr")!);
+      expect(screen.getByLabelText("Source Description")).toHaveValue(
+        "Extramedullary plasmacytoma not having achieved remission",
+      );
+      expect(screen.getByTestId("source-concept-id")).toHaveValue("45542660");
     });
 
     it("puts Domain first in the source block", async () => {
