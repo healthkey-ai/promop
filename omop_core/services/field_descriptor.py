@@ -294,6 +294,11 @@ _TAB_TREATMENT = frozenset({
     'last_treatment', 'prior_therapy', 'line_of_therapy',
 })
 
+# Aliases are the one exception to the rule below: `calcium_mg_dl` mirrors
+# `serum_calcium_mg_dl` and no tab renders it, so it follows its canonical's tab
+# rather than any tab's contents. `mappable` excludes aliases, so curation never
+# offers it either way.
+#
 # Haematology only. This has to agree with what BloodTab actually renders:
 # FieldMappingPage filters the curation list by this tab, and
 # propose-all?tab=... proposes against it, so a field filed here but shown on
