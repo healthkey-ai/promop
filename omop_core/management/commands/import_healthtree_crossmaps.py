@@ -34,6 +34,10 @@ class Command(BaseCommand):
             for concept in Concept.objects.filter(
                 vocabulary_id__in={vocabulary for vocabulary, _code in target_keys},
                 standard_concept='S',
+                # An Athena release can retire a formerly standard concept.
+                # HealthTree's historical resolver data remains useful for
+                # review, but must never seed a proposal to an invalid target.
+                invalid_reason__isnull=True,
             ).filter(concept_code__in={code for _vocabulary, code in target_keys}).only(
                 'concept_id', 'concept_code', 'vocabulary_id', 'domain_id',
             )
