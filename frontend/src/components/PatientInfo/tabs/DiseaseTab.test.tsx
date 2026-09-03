@@ -603,4 +603,20 @@ describe('DiseaseTab — field ownership (#960)', () => {
     expect(screen.getByText('Histologic Type')).toBeInTheDocument();
     expect(screen.queryByText('Disease')).toBeNull();
   });
+
+  it.each([
+    ['breast', 'Stage'],
+    ['lymphoma', 'Ann Arbor Stage'],
+    ['myeloma', 'ISS Stage'],
+    ['cll', 'Binet Stage'],
+    ['other', 'Stage'],
+  ] as const)('gives %s a way to set its stage', (diseaseType, label) => {
+    // Taking Stage off the General tab removed the only stage control breast
+    // patients had: the breast section carried T, N and M but not the group
+    // they roll up to. CLL is the one disease that never needed the generic
+    // field — it stages on Binet, and General was offering it solid-tumour
+    // stages. This is the invariant that near-miss was hiding.
+    render(<DiseaseTab {...BASE_PROPS} diseaseType={diseaseType} formData={{}} />);
+    expect(screen.getByText(label)).toBeInTheDocument();
+  });
 });

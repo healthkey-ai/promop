@@ -54,6 +54,12 @@ function BreastCancerSection({ formData, onChange, onMutationAdd, onMutationRemo
             <ClinicalField label="Histologic Type" name="histologic_type" descriptor={descriptors.histologic_type} type="select" value={formData?.histologic_type} options={histOptions} onChange={onChange} vocabSource={histologicSource} />
           </div>
           <ClinicalField label="Menopausal Status" name="menopausal_status" descriptor={descriptors.menopausal_status} type="select" value={formData?.menopausal_status} options={MENOPAUSAL_OPTIONS} onChange={onChange} />
+          {/* The AJCC stage group the T, N and M below roll up to. It used to
+              render only on the General tab, where the select was the generic
+              one for every disease; when #960 moved stage ownership here, breast
+              was the one disease section that had the components but not the
+              group, and would have been left with no way to set it. */}
+          <ClinicalField label="Stage" name="stage" descriptor={descriptors.stage} type="select" value={formData?.stage} options={STAGE_OPTIONS} onChange={onChange} />
           <ClinicalField label="Tumor Stage" name="tumor_stage" descriptor={descriptors.tumor_stage} type="select" value={formData?.tumor_stage} options={TUMOR_STAGE_OPTIONS} onChange={onChange} vocabSource={tumorStageSource} />
           <ClinicalField label="Nodes Stage" name="nodes_stage" descriptor={descriptors.nodes_stage} type="select" value={formData?.nodes_stage} options={NODES_STAGE_OPTIONS} onChange={onChange} vocabSource={nodesStageSource} />
           <ClinicalField label="Staging Modalities" name="staging_modalities" descriptor={descriptors.staging_modalities} type="select" value={formData?.staging_modalities} options={STAGING_MODALITIES_OPTIONS} onChange={onChange} vocabSource={stagingModalitySource} />
