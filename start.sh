@@ -16,19 +16,21 @@ set -e
 echo "Running production deploy checks..."
 python manage.py check --deploy --fail-level ERROR
 
-echo "Running migrations..."
-python manage.py migrate --noinput
+# Migration 0201 seeds curated HK-Labs text -> LOINC mappings. Its targets are
+# Athena concepts, so it must never run against an empty/partial vocabulary.
+# Bring the schema to the migration immediately before it, load the complete
+# Athena release, then apply 0201 and every later migration. This deliberately
+# replaces the retired seed_omop_concepts command: production must use Athena
+# as the single source of truth for standard concepts.
+echo "Preparing the schema for the Athena vocabulary load..."
+python manage.py migrate omop_core 0200 --noinput
 
-# Concepts that clinical FKs point at — gender, type concepts, the OMOP "no
-# matching concept" sentinel. No migration seeds them, so this path relied on
-# someone having run the seeder by hand; a deployment without them writes null
-# concepts and derivation silently reads nothing.
-#
-# Safe under `set -e`: idempotent via get_or_create, and where a concept_id would
-# collide with a real Athena row already holding that (vocabulary, code) it skips
-# with a warning rather than raising.
-echo "Seeding OMOP concepts..."
-python manage.py seed_omop_concepts
+: "${ATHENA_VOCABULARY_GDRIVE_URL:?ATHENA_VOCABULARY_GDRIVE_URL must point to the full Athena vocabulary folder before this service can deploy}"
+echo "Loading the full Athena vocabulary before remaining migrations..."
+python manage.py load_athena_vocabularies --gdrive "$ATHENA_VOCABULARY_GDRIVE_URL"
+
+echo "Applying migrations that require the Athena vocabulary..."
+python manage.py migrate --noinput
 
 echo "Creating/resetting admin user..."
 python manage.py setup_admin

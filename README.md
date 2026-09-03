@@ -68,24 +68,20 @@ PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U postgres -d postgres \
   -c "CREATE DATABASE promop_test OWNER postgres;"
 ```
 
-### 3. Apply migrations
+### 3. Prepare the schema for the Athena vocabulary
+
+Production and clinical environments must load the **full** Athena vocabulary
+before applying migrations after `omop_core` migration `0200`. In particular,
+migration `0201` creates approved HK-Labs-to-LOINC mappings and requires its
+LOINC destination concepts to exist. Do not use the retired
+`seed_omop_concepts` development fixture in a deployed environment.
 
 ```bash
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
-  .venv/bin/python manage.py migrate
+  .venv/bin/python manage.py migrate omop_core 0200 --noinput
 ```
 
-### 4. Create a superuser
-
-```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
-  .venv/bin/python manage.py setup_admin
-```
-
-### 5. Load the Athena vocabulary
-
-PRomop needs the Athena vocabulary tables before clinical code resolution is
-useful. The easiest path is the prepared zipped vocabulary in Google Drive:
+### 4. Load the full Athena vocabulary
 
 ```bash
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
@@ -93,12 +89,37 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
 ```
 
 `--gdrive` defaults to the shared PRomop vocabulary folder. See
-[docs/vocabularies.md](docs/vocabularies.md) for the selected vocabulary scope
-and other load options, including `--archive` for a downloaded Athena zip,
-`--path` for an extracted Athena directory, and `--bucket` for GCS-backed
-deployments.
+[docs/vocabularies.md](docs/vocabularies.md) for the required Athena selection
+scope and other load options, including `--archive` for a downloaded Athena
+zip, `--path` for an extracted Athena directory, and `--bucket` for
+GCS-backed deployments.
 
-### 6. Run the backend
+#### Render deployment requirement
+
+Set `ATHENA_VOCABULARY_GDRIVE_URL` to the folder containing the **full** Athena
+export before deploying. The production startup script fails closed when it is
+missing, migrates the schema through `0200`, loads that export, and then runs
+the remaining migrations. This ordering is required; it prevents migration
+`0201` from creating null-target HK-Labs-to-LOINC mappings.
+
+### 5. Apply the remaining migrations
+
+Only after the vocabulary load succeeds, apply the migrations that seed and
+validate mappings against those concepts:
+
+```bash
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  .venv/bin/python manage.py migrate --noinput
+```
+
+### 6. Create a superuser
+
+```bash
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  .venv/bin/python manage.py setup_admin
+```
+
+### 7. Run the backend
 
 ```bash
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
@@ -108,7 +129,7 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
 
 The API is available at `http://localhost:8000/api/v1/`.
 
-### 7. Run the frontend
+### 8. Run the frontend
 
 ```bash
 cd frontend
