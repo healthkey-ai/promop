@@ -46,12 +46,16 @@ const LIVER: Array<[string, string]> = [
 // Prognostic and inflammatory. LDH is a tumour-burden marker here — it sits in
 // the R-IPI for DLBCL — which is why it is not filed under "cardiac" anything.
 //
-// Beta-2 microglobulin is deliberately absent: it is an ISS staging parameter
-// for myeloma, the server classifies it as a disease field, and DiseaseTab
-// renders it where that means something. Rendering it here too gave one value
-// two editable boxes and broke the tab-set invariant in field_descriptor.
+// Beta-2 microglobulin lives here, not on DiseaseTab. It is an ISS staging
+// parameter, but DiseaseTab's disease sections are mutually exclusive, so
+// rendering it there left it unreachable for breast, CLL and unknown-disease
+// patients; and its always-rendered section already holds
+// serum_beta2_microglobulin_level (LOINC 32731-2), a different fact that would
+// have sat beside this one (1952-1) as two indistinguishable mg/L boxes. Labs
+// renders for every patient and is where a lab value belongs.
 const MARKERS: Array<[string, string]> = [
   ['LDH (U/L)', 'ldh_u_l'],
+  ['Beta-2 Microglobulin (mg/L)', 'beta2_microglobulin'],
   ['C-Reactive Protein (mg/L)', 'c_reactive_protein'],
   ['ESR (mm/hr)', 'esr'],
   ['HbA1c (%)', 'hba1c_percent'],

@@ -405,12 +405,6 @@ function StagingBiomarkersSection({ formData, onChange }: Pick<Props, 'formData'
         {field('Metastasis Status', 'metastasis_status', 'text')}
         {field('PD-L1 Combined Positive Score', 'pd_l1_combined_positive_score', 'number')}
         {field('PD-L1 IC (%)', 'pd_l1_ic_percentage', 'number')}
-        {/* Here rather than in the disease sections: those are mutually
-            exclusive (the switch on diseaseType below), so rendering B2M only
-            under Lymphoma and Myeloma left it on no tab at all for a breast,
-            CLL or unknown-disease patient. This section always renders, and
-            B2M is a staging parameter — it is the beta-2 in the ISS. */}
-        {field('Beta-2 Microglobulin (mg/L)', 'beta2_microglobulin', 'number')}
       </div>
     </Section>
   );

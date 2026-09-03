@@ -20,7 +20,7 @@ interface Props {
  *
  * The counts are the only thing this tab holds that Labs does not. It used to
  * carry Electrolytes, Cardiac & Other, Coagulation and Tumor Markers as well —
- * fourteen analytes, all rendered by sections already on Labs under the same
+ * fifteen analytes, all rendered by sections already on Labs under the same
  * field keys, so one value had two editable boxes on two tabs (#955). That
  * duplication predated the descriptor: Labs used alias names (`serum_sodium`)
  * where this tab used canonicals (`sodium_meq_l`), so the same analyte looked

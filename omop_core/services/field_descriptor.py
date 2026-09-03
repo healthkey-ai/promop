@@ -256,7 +256,10 @@ _TAB_DISEASE = frozenset({
     'lymphadenopathy', 'autoimmune_cytopenias_refractory_to_steroids',
     'btk_inhibitor_refractory', 'bcl2_inhibitor_refractory',
     # Shared disease markers
-    'ldh_level', 'beta2_microglobulin', 'disease_slug',
+    # beta2_microglobulin moved to _TAB_LABS with the section that renders it
+    # (#955). _TAB_DISEASE is tested first, so leaving it here would make the
+    # Labs entry dead and put the field on a tab that no longer shows it.
+    'ldh_level', 'disease_slug',
     # Reclassified from "other"
     'tumor_size', 'lymph_node_status', 'metastasis_status',
     'biopsy_grade', 'biopsy_grade_depr', 'plasma_cell_leukemia',
@@ -312,7 +315,7 @@ _TAB_LABS = frozenset({
     'sodium_meq_l', 'potassium_meq_l', 'calcium_mg_dl', 'magnesium_mg_dl',
     'troponin_ng_ml', 'bnp_pg_ml', 'glucose_mg_dl', 'hba1c_percent', 'ldh_u_l',
     'inr', 'pt_seconds', 'ptt_seconds',
-    'cea_ng_ml', 'ca19_9_u_ml', 'psa_ng_ml',
+    'cea_ng_ml', 'ca19_9_u_ml', 'psa_ng_ml', 'beta2_microglobulin',
     'serum_creatinine_level', 'creatinine_clearance_rate', 'blood_urea_nitrogen',
     'egfr', 'serum_sodium', 'serum_potassium', 'serum_calcium_level',
     'magnesium', 'phosphorus', 'albumin_level', 'total_protein',

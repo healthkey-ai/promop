@@ -144,5 +144,9 @@ describe('LabsTab', () => {
     // getByDisplayValue matches a *disabled* input too, so without this the
     // test passed in exactly the state its comment condemns.
     expect(screen.queryByTestId('reason-serum_calcium_mg_dl')).toBeNull();
+    // ...and the alias is not rendered at all. Asserting only the line above
+    // let calcium_mg_dl come back as a read-only box, which is the half the
+    // test is named for.
+    expect(screen.queryByLabelText(/^Calcium/)).toBeNull();
   });
 });
