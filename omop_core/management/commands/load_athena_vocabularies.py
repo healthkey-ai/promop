@@ -265,6 +265,11 @@ class Command(BaseCommand):
                                 'Skips concept_relationship, concept_ancestor, '
                                 'concept_synonym and drug_strength.'
                             ))
+        parser.add_argument('--skip-code-mappings', action='store_true',
+                            help=(
+                                'Do not load the bundled code-to-concept mapping artifact. '
+                                'Intended only for deliberately partial fixtures.'
+                            ))
 
     def handle(self, *args, **options):
         base = options['path']
@@ -345,7 +350,10 @@ class Command(BaseCommand):
                 self._verify_required_clinical_vocabularies()
             self._record_version_history(replace)
             self._publish_release(counts)
-            self._load_code_mappings(options['verbosity'])
+            if options['skip_code_mappings']:
+                self._log('  --skip-code-mappings: skipping code mapping artifact load.')
+            else:
+                self._load_code_mappings(options['verbosity'])
         elapsed = time.monotonic() - t0
         verb = 'would load' if dry_run else 'loaded'
         total = sum(counts.values())

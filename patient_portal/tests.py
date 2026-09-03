@@ -5377,7 +5377,9 @@ class AthenaVocabularyLoadTest(TestCase):
         from django.core.management import call_command
         call_command(
             'load_athena_vocabularies', path=directory,
-            skip_clinical_vocabulary_verification=True, **options,
+            skip_clinical_vocabulary_verification=True,
+            skip_code_mappings=True,
+            **options,
         )
 
     def _write_tsv(self, directory, filename, headers, rows):

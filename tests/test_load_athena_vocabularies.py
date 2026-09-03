@@ -53,6 +53,7 @@ def test_loader_requires_exactly_one_source():
             dry_run=True,
             skip_clinical_vocabulary_verification=False,
             concepts_only=False,
+            skip_code_mappings=False,
         )
 
 
