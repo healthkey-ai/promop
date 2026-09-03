@@ -139,6 +139,19 @@ describe('no-duplicate-tab-field', () => {
       };`]])).toEqual(['unreadableTable']);
   });
 
+  it('reports a table row whose key it cannot read', () => {
+    // The tab's other rows keep the noFields check quiet, so saying nothing
+    // here would hide the duplicate outright rather than merely under-report.
+    expect(ids([['ATab.tsx', `
+      const K = {a: 'ldh_u_l'};
+      const COUNTS: Array<[string, string]> = [['Readable', 'plain'], ['Hidden', K.a]];
+      export default () => {
+        const section = (t, fs) => <div>{fs.map(([l, name]) =>
+          <ClinicalField key={name} name={name} />)}</div>;
+        return section('Counts', COUNTS);
+      };`]])).toEqual(['unreadableRow']);
+  });
+
   it('reports a field() key it cannot read', () => {
     expect(ids([[
       'ATab.tsx',

@@ -51,8 +51,6 @@ const KNOWN_DUPLICATES = new Map([
   ['stage', ['DiseaseTab.tsx', 'GeneralTab.tsx']],
 ]);
 
-const FIELD_KEY = /^[a-z][a-z0-9_]*$/;
-
 /**
  * Drop what previous files contributed. Only the rule's own tests need this:
  * within one `eslint .` the accumulation across files is the whole mechanism.
@@ -87,6 +85,10 @@ export default {
         'Cannot read the field table section() renders here ({{expr}}), so the '
         + 'fields in it are not checked for duplicates. Pass the array literal '
         + 'itself, or a const bound directly to one.',
+      unreadableRow:
+        'Cannot read the field key in this row of a table section() renders '
+        + '({{expr}}), so that field is not checked for duplicates. Use a '
+        + 'string literal for the key.',
       unreadableFieldCall:
         "Cannot tell which field field(…, {{expr}}, …) renders, so it is not "
         + 'checked for duplicates. Pass a string literal.',
@@ -124,15 +126,26 @@ export default {
     };
 
     const addKey = (key, node) => {
-      if (FIELD_KEY.test(key) && !found.has(key)) found.set(key, node);
+      // Any non-empty string: in the three positions this rule reads from, the
+      // string *is* the field name by construction. Filtering on a snake_case
+      // pattern only ever loses fields, silently — and a false positive here is
+      // loud and one edit away, where a false negative is the whole bug.
+      if (key && !found.has(key)) found.set(key, node);
     };
 
     /** Read the `['Label', 'field_key']` rows of an array literal. */
     const readTable = (array) => {
       for (const row of array.elements) {
-        if (row?.type !== 'ArrayExpression' || row.elements.length < 2) continue;
-        const key = row.elements[1];
-        if (key?.type === 'Literal' && typeof key.value === 'string') addKey(key.value, key);
+        if (!row) continue; // a hole, `[, x]` — nothing was written there
+        const key = row.type === 'ArrayExpression' ? row.elements[1] : null;
+        if (key?.type === 'Literal' && typeof key.value === 'string') {
+          addKey(key.value, key);
+          continue;
+        }
+        // A row this rule cannot name is a field exempt from the duplicate
+        // check, and the tab's other rows keep the noFields check quiet — so
+        // saying nothing here would hide a duplicate outright.
+        reportBlind(row, 'unreadableRow', row);
       }
     };
 
