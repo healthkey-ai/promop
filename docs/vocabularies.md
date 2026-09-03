@@ -55,7 +55,7 @@ to create a vocabulary download. Select these vocabularies:
 
 | Purpose | Select in Athena |
 |---|---|
-| Core clinical terminology and mappings | **SNOMED**, **ICD10CM**, **LOINC**, **RxNorm**, **RxNorm Extension**, **UCUM** |
+| Core clinical terminology and mappings | **SNOMED**, **ICD10CM**, **CPT4**, **LOINC**, **RxNorm**, **RxNorm Extension**, **UCUM** |
 | Immunizations and visits | **CVX**, **Visit**, **Type Concept** |
 | Drug classification and oncology treatment | **ATC**, **HemOnc** |
 | Genomics and cancer registry data | **OMOP Genomic**, **ICDO3**, **NCIt**, **Cancer Modifier**, **NAACCR** |
@@ -104,6 +104,34 @@ python manage.py load_athena_vocabularies --archive /tmp/vocabulary_download_v5.
 At minimum, deployed clinical environments must contain **LOINC**, **RxNorm**,
 **SNOMED**, and **ICD10CM**. The loader verifies those four after every normal
 non-dry-run load.
+
+### UMLS source-release cache (optional)
+
+Athena remains the authoritative UMLS-to-OMOP conversion: raw UMLS RRF files
+are never inserted into OMOP tables. To retain source-release provenance beside
+each Athena load, configure a UTS API key before running the command:
+
+```bash
+UMLS_API_KEY="..." UMLS_CACHE_DIR=/persistent/vocab-cache \
+  .venv/bin/python manage.py load_athena_vocabularies --gdrive
+```
+
+With `UMLS_API_KEY`, the loader asks the NLM UTS release API for the current
+UMLS Full Release, downloads it through the authenticated UTS endpoint, checks
+that the zip contains `META/MRCONSO.RRF`, and caches it. Its release URL,
+version, size, and SHA-256 are stored in the `VocabularyRelease` manifest. Use
+`UMLS_RELEASE_URL` or `--umls-release-url` to pin a specific release (for
+example the 2022AA URL); use `--skip-umls-cache` to bypass this optional step.
+Choose a persistent, access-controlled `UMLS_CACHE_DIR` in production. API keys
+and raw UMLS files must not be committed or served by the application.
+
+To make raw UMLS CUIs and source-asserted codes queryable, use the separate
+non-OMOP import tables. This never assigns UMLS rows an OMOP concept ID:
+
+```bash
+UMLS_API_KEY="..." UMLS_CACHE_DIR=/persistent/vocab-cache \
+  .venv/bin/python manage.py sync_umls_release
+```
 
 ## 2. Where vocabulary data lives
 
@@ -243,7 +271,9 @@ around the vocabulary load:
 
 | Command | What it does |
 |---|---|
-| `load_athena_vocabularies` | Loads the full Athena release into `concept` and its support tables |
+| `load_athena_vocabularies` | Loads the full Athena release into `concept` and its support tables, then runs `load_mappings` |
+| `load_mappings` | Loads approved code-to-concept mappings from `omop_core/data/code_concept_mappings.json` into SCCM |
+| `build_crossmap_artifact` | Rebuilds the mapping artifact from upstream repos (HT-One, HT-Next, hk-labs) |
 | `seed_omop_concepts` | Seeds the minimal concept set for dev/test, using **genuine Athena `concept_id`s** so it cannot manufacture duplicates on a database that already has the vocabulary |
 | `backfill_concept_source` | Fills `source='HealthKey'` on locally-minted rows, dry-run by default |
 
@@ -263,6 +293,37 @@ For partial vocabulary repairs, rerun the normal additive load from
 [Loading vocabulary data](#1-loading-vocabulary-data). `--skip-clinical-vocabulary-verification` is reserved for
 intentionally minimal local/test bundles and must not be used for deployed
 clinical environments.
+
+### Code-to-concept mappings
+
+After loading the Athena vocabulary release, `load_athena_vocabularies`
+automatically runs `load_mappings` to populate `SourceCodeConceptMapping`
+with approved cross-vocabulary mappings from the bundled artifact
+(`omop_core/data/code_concept_mappings.json`).
+
+The artifact consolidates mappings from all provenance sources:
+
+| Origin | Mapping type | Approx. count |
+|--------|-------------|---------------|
+| HT-One | CPT4→SNOMED, ICD10→SNOMED, SNOMED→RxNorm, MedDRA→SNOMED | ~83,914 |
+| HK-Labs | Uncoded lab text→LOINC | ~147 |
+| HK-Wearable | Apple/Garmin device codes→LOINC/HK-Wearable | ~28 |
+
+Only approved (unambiguous) mappings are loaded by default. To also load
+proposed mappings, run `load_mappings --include-proposed` manually.
+
+To rebuild the artifact from upstream sources (requires access to
+HT-One, HT-Next, hk-labs repos):
+
+```bash
+.venv/bin/python manage.py build_crossmap_artifact
+```
+
+To load mappings independently of a vocabulary load:
+
+```bash
+.venv/bin/python manage.py load_mappings
+```
 
 To check what a code means:
 

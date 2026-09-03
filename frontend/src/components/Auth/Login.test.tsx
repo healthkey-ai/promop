@@ -101,7 +101,8 @@ describe("Login - signup mode", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Sign Up" }));
 
     expect(screen.getByLabelText("Organization")).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "Acme Clinic" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Email"), { target: { value: "person@example.com" } });
+    expect(await screen.findByRole("option", { name: "Acme Clinic" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "Beta Health" })).toBeInTheDocument();
     expect(screen.queryByLabelText("Username")).not.toBeInTheDocument();
   });
@@ -109,7 +110,8 @@ describe("Login - signup mode", () => {
   it("preselects the only org when exactly one qualifies", async () => {
     await renderWithOrgs([{ name: "Solo Clinic", slug: "solo" }]);
     fireEvent.click(screen.getByRole("tab", { name: "Sign Up" }));
-    expect((screen.getByLabelText("Organization") as HTMLSelectElement).value).toBe("solo");
+    fireEvent.change(screen.getByLabelText("Email"), { target: { value: "person@example.com" } });
+    await waitFor(() => expect((screen.getByLabelText("Organization") as HTMLSelectElement).value).toBe("solo"));
   });
 
   it("does not preselect when several orgs qualify", async () => {
@@ -123,6 +125,7 @@ describe("Login - signup mode", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Sign Up" }));
 
     fireEvent.change(screen.getByLabelText("Email"), { target: { value: "p@example.com" } });
+    await screen.findByRole("option", { name: "Solo Clinic" });
     fireEvent.change(screen.getByLabelText("Password"), { target: { value: "short" } });
     fireEvent.change(screen.getByLabelText("Confirm password"), { target: { value: "short" } });
     fireEvent.click(screen.getByRole("button", { name: "Create account" }));
@@ -138,6 +141,7 @@ describe("Login - signup mode", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Sign Up" }));
 
     fireEvent.change(screen.getByLabelText("Email"), { target: { value: "p@example.com" } });
+    await screen.findByRole("option", { name: "Solo Clinic" });
     fireEvent.change(screen.getByLabelText("Password"), {
       target: { value: "correct-horse-battery" },
     });
@@ -176,10 +180,11 @@ describe("Login - signup mode", () => {
     mockPost.mockResolvedValue({ data: {} });
     fireEvent.click(screen.getByRole("tab", { name: "Sign Up" }));
 
-    fireEvent.change(screen.getByLabelText("Organization"), { target: { value: "beta" } });
     fireEvent.change(screen.getByLabelText(/First name/), { target: { value: "Ada" } });
     fireEvent.change(screen.getByLabelText(/Last name/), { target: { value: "Lovelace" } });
     fireEvent.change(screen.getByLabelText("Email"), { target: { value: "ada@example.com" } });
+    await screen.findByRole("option", { name: "Beta Health" });
+    fireEvent.change(screen.getByLabelText("Organization"), { target: { value: "beta" } });
     fireEvent.change(screen.getByLabelText("Password"), {
       target: { value: "correct-horse-battery" },
     });
@@ -206,6 +211,7 @@ describe("Login - signup mode", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Sign Up" }));
 
     fireEvent.change(screen.getByLabelText("Email"), { target: { value: "taken@example.com" } });
+    await screen.findByRole("option", { name: "Solo Clinic" });
     fireEvent.change(screen.getByLabelText("Password"), {
       target: { value: "correct-horse-battery" },
     });
@@ -226,6 +232,7 @@ describe("Login - signup mode", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Sign Up" }));
 
     fireEvent.change(screen.getByLabelText("Email"), { target: { value: "p@example.com" } });
+    await screen.findByRole("option", { name: "Solo Clinic" });
     fireEvent.change(screen.getByLabelText("Password"), { target: { value: "short" } });
     fireEvent.change(screen.getByLabelText("Confirm password"), { target: { value: "short" } });
     fireEvent.click(screen.getByRole("button", { name: "Create account" }));

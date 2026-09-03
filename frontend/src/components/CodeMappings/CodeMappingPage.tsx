@@ -63,6 +63,8 @@ interface ConceptResult {
   domain_id: string;
   concept_class_id: string;
   standard_concept: string | null;
+  measurement_type?: "qualitative" | "quantitative";
+  suggested_unit?: string;
 }
 
 interface VocabularyRef {
@@ -406,7 +408,11 @@ export default function CodeMappingPage() {
       // section, cannot be re-opened to un-reject, and re-creating it trips the
       // (source_vocabulary_id, source_code) unique constraint.
       if (row.status === "rejected" && !showRejected) return false;
-      if (tabForRow(row) !== selectedVocabulary) return false;
+      // A query is an intentional escape hatch from the current tab: a
+      // curator should not have to try every code system to find an incoming
+      // code. With no query, retain the focused, one-vocabulary-at-a-time
+      // review queue.
+      if (!q && tabForRow(row) !== selectedVocabulary) return false;
       if (!q) return true;
       return [
         row.source_code,
@@ -738,7 +744,7 @@ export default function CodeMappingPage() {
   };
 
   const renderTable = (sectionRows: CodeMappingRow[], emptyText: string, { hideStatus = false }: { hideStatus?: boolean } = {}) => {
-    const colCount = 6 + (hideStatus ? 0 : 2);
+    const colCount = 5 + (hideStatus ? 0 : 2);
     return (
     <div className="overflow-hidden rounded-md border border-slate-200 bg-white">
       <table className="w-full border-collapse text-left text-sm">
@@ -746,10 +752,9 @@ export default function CodeMappingPage() {
           <tr>
             <th className="px-4 py-3 font-semibold">Provenance</th>
             <th className="px-4 py-3 font-semibold">Source code</th>
+            <th className="px-4 py-3 font-semibold">Source description</th>
             <th className="px-4 py-3 font-semibold">Destination concept</th>
             <th className="px-4 py-3 font-semibold">Concept ID</th>
-            <th className="px-4 py-3 font-semibold">OMOP table</th>
-            <th className="px-4 py-3 font-semibold">Seen</th>
             {!hideStatus && <th className="px-4 py-3 font-semibold">Status</th>}
             {!hideStatus && <th className="w-16 px-4 py-3 font-semibold" aria-label="Actions" />}
           </tr>
@@ -771,6 +776,7 @@ export default function CodeMappingPage() {
             >
               <td className="px-4 py-3 text-xs text-slate-700">{row.origin_system || "—"}</td>
               <td className="px-4 py-3 font-mono text-xs text-slate-900">{row.source_code}</td>
+              <td className="px-4 py-3 text-xs text-slate-700">{row.source_code_description || "—"}</td>
               <td className="px-4 py-3">
                 <div className="font-medium text-slate-950">{row.destination_concept_name}</div>
                 <div className="font-mono text-xs text-slate-500">
@@ -778,8 +784,6 @@ export default function CodeMappingPage() {
                 </div>
               </td>
               <td className="px-4 py-3 font-mono text-xs text-slate-900">{row.destination_concept_id}</td>
-              <td className="px-4 py-3 text-xs text-slate-700">{row.destination_omop_table}</td>
-              <td className="px-4 py-3 text-xs text-slate-700">{row.occurrence_count || "—"}</td>
               {!hideStatus && (
               <td className="px-4 py-3">
                 <div className="inline-flex items-center gap-2">
@@ -1192,11 +1196,19 @@ export default function CodeMappingPage() {
                         key={concept.concept_id}
                         type="button"
                         onClick={() => applyConcept(concept)}
-                        className="grid w-full grid-cols-[8rem_1fr_6rem] gap-2 border-b border-slate-100 px-3 py-2 text-left text-xs last:border-0 hover:bg-slate-50"
+                        className="w-full border-b border-slate-100 px-3 py-2 text-left text-xs last:border-0 hover:bg-slate-50"
                       >
-                        <span className="font-mono text-slate-700">{concept.concept_code}</span>
-                        <span className="text-slate-900">{concept.concept_name}</span>
-                        <span className="font-mono text-slate-500">{concept.vocabulary_id}</span>
+                        <span className="grid grid-cols-[8rem_1fr_6rem] gap-2">
+                          <span className="font-mono text-slate-700">{concept.concept_code}</span>
+                          <span className="text-slate-900">{concept.concept_name}</span>
+                          <span className="font-mono text-slate-500">{concept.vocabulary_id}</span>
+                        </span>
+                        {concept.measurement_type && (
+                          <span className="mt-1 block text-slate-500">
+                            {concept.measurement_type === "quantitative" ? "Quantitative" : "Qualitative"}
+                            {concept.suggested_unit && ` · Unit: ${concept.suggested_unit}`}
+                          </span>
+                        )}
                       </button>
                     ))}
                   </div>

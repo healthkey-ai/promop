@@ -7060,6 +7060,25 @@ def _apply_concept_filters(queryset, query_params):
     return queryset
 
 
+def _concept_name_search_filter(query):
+    """Match a concept name by its literal text or its meaningful tokens.
+
+    A literal ``icontains`` remains the fast path and preserves exact phrase
+    semantics.  The token fallback makes a curator's ordinary punctuation and
+    spacing variations useful too: ``Non hod`` can find ``Non-Hodgkin``.  Each
+    token is still at least part of the submitted three-character query, so we
+    avoid introducing an unbounded one-character search.
+    """
+    tokens = re.findall(r'[^\W_]+', query, flags=re.UNICODE)
+    if len(tokens) < 2:
+        return Q(concept_name__icontains=query)
+
+    token_match = Q()
+    for token in tokens:
+        token_match &= Q(concept_name__icontains=token)
+    return Q(concept_name__icontains=query) | token_match
+
+
 def _serialize_concept(concept, versions=None):
     return {
         'concept_id': concept.concept_id,
@@ -7093,6 +7112,34 @@ def _get_loinc_to_unit() -> dict[str, str]:
     }
 
 
+_QUANTITATIVE_LOINC_NAME_MARKERS = (
+    'mass/', 'moles/', '#/', 'units/', 'volume fraction', 'catalytic activity',
+    'ratio', 'fraction', 'clearance', ' rate', ' score', ' time',
+)
+_QUALITATIVE_LOINC_NAME_MARKERS = (
+    '[presence]', '[ordinal]', '[narrative]', '[interpretation]', '[type]',
+    '[finding]', 'susceptibility',
+)
+
+
+def _measurement_input_type(concept_name, suggested_unit):
+    """Return the safe qualitative/quantitative cue available in OMOP data.
+
+    OMOP's Concept table does not retain LOINC's Scale Type. A curated unit is
+    conclusive, and common LOINC display-name markers cover unitless numeric
+    measurements (for example, renal clearance) and qualitative Presence
+    results without pretending an unknown result has a known scale.
+    """
+    if suggested_unit:
+        return 'quantitative'
+    name = (concept_name or '').casefold()
+    if any(marker in name for marker in _QUANTITATIVE_LOINC_NAME_MARKERS):
+        return 'quantitative'
+    if any(marker in name for marker in _QUALITATIVE_LOINC_NAME_MARKERS):
+        return 'qualitative'
+    return ''
+
+
 @api_view(['GET'])
 @permission_classes([ScopedTokenPermission])
 def concept_search(request):
@@ -7120,14 +7167,25 @@ def concept_search(request):
         )
 
     queryset = _apply_concept_filters(
-        Concept.objects.filter(concept_name__icontains=query),
+        Concept.objects.filter(
+            _concept_name_search_filter(query) | Q(concept_code__iexact=query),
+        ),
         request.query_params,
     )
-    # Annotate LOINC results with suggested units from LAB_FIELD_TO_LOINC.
+    # Show a curator what kind of input a Measurement mapping expects when the
+    # available OMOP/LOINC data lets us classify it safely.
     response = _paginated_concept_response(queryset, request)
     for item in response.data.get('results', []):
-        if item.get('vocabulary_id') == 'LOINC':
-            item['suggested_unit'] = _get_loinc_to_unit().get(item.get('concept_code'), '')
+        # The display-name conventions and curated unit map are LOINC-specific;
+        # do not infer an input type for another vocabulary from them.
+        if item.get('domain_id') != 'Measurement' or item.get('vocabulary_id') != 'LOINC':
+            continue
+        suggested_unit = _get_loinc_to_unit().get(item.get('concept_code'), '')
+        measurement_type = _measurement_input_type(item.get('concept_name'), suggested_unit)
+        if measurement_type:
+            item['measurement_type'] = measurement_type
+        if suggested_unit:
+            item['suggested_unit'] = suggested_unit
     return response
 
 
@@ -7348,7 +7406,7 @@ def vocabulary_list(request, model_name):
 
 def _require_mapping_admin(request):
     """Return a 403 Response if the user is not staff or org_admin, else None."""
-    if not (request.user.is_staff or getattr(request.user, 'is_org_admin', False)):
+    if not has_org_admin_access(request.user):
         return Response({'detail': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
     return None
 
@@ -7559,7 +7617,7 @@ def mapping_stats(request):
     Returns counts for field mappings, code mappings, and therapy reference data.
     Restricted to staff or org_admin users.
     """
-    if not (request.user.is_staff or getattr(request.user, 'is_org_admin', False)):
+    if not has_org_admin_access(request.user):
         return Response({'detail': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldConceptMapping
@@ -8262,6 +8320,7 @@ def _serialize_vocab_release(release, include_checksums=False):
         'athena_version': release.athena_version,
         'vocab_versions': release.vocab_versions,
         'row_counts': release.row_counts,
+        'umls_release': release.umls_release,
         'status': release.status,
         'published_at': release.published_at.isoformat() if release.published_at else None,
         'notes': release.notes,

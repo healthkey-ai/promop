@@ -4,6 +4,9 @@ db.*
 !.env.example
 .venv/
 data/
+!/omop_core/data/
+/omop_core/data/*
+!/omop_core/data/code_concept_mappings.json
 # Therapy reference CSVs are force-added (git add -f) despite this rule
 
 # Node modules and frontend build

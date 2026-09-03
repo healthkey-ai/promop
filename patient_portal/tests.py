@@ -5380,7 +5380,9 @@ class AthenaVocabularyLoadTest(TestCase):
         from django.core.management import call_command
         call_command(
             'load_athena_vocabularies', path=directory,
-            skip_clinical_vocabulary_verification=True, **options,
+            skip_clinical_vocabulary_verification=True,
+            skip_code_mappings=True,
+            **options,
         )
 
     def _write_tsv(self, directory, filename, headers, rows):
@@ -5404,7 +5406,7 @@ class AthenaVocabularyLoadTest(TestCase):
             [['HemOnc', 'HemOnc Oncology', '', 'v2024', '0'],
              ['RxNorm', 'RxNorm', '', '2024AA', '0'],
              ['CDISC', 'Clinical Data Interchange Standards Consortium', '', '2024', '0'],
-             ['CPT4', 'CPT-4', '', '2024', '0']],  # out of scope — should be skipped
+             ['CPT4', 'CPT-4', '', '2024', '0']],
         )
         self._write_tsv(directory, 'DOMAIN.csv',
             ['domain_id', 'domain_name', 'domain_concept_id'],
@@ -5435,15 +5437,15 @@ class AthenaVocabularyLoadTest(TestCase):
              ['5000006', '150 ML sodium chloride 9 MG/ML Injection', 'Drug', 'RxNorm', 'Quant Clinical Drug', 'S', '1362', '19700101', '20991231', ''],
              # CDISC concept requested for PatientRecord.bone_lesions (#786).
              ['37533916', 'Number of Bone Lesions', 'Measurement', 'CDISC', 'Clinical Finding', 'S', 'C100061', '19700101', '20991231', ''],
-             # CPT4 concept — should be SKIPPED (not in vocabulary scope)
-             ['5000099', 'Out-of-scope concept', 'Drug', 'CPT4', 'Clinical Finding', 'S', '123456', '19700101', '20991231', '']],
+             # CPT4 concept — source vocabulary for billed procedures.
+             ['5000099', 'CPT4 concept', 'Drug', 'CPT4', 'Clinical Finding', 'S', '123456', '19700101', '20991231', '']],
         )
         self._write_tsv(directory, 'CONCEPT_RELATIONSHIP.csv',
             ['concept_id_1', 'concept_id_2', 'relationship_id',
              'valid_start_date', 'valid_end_date', 'invalid_reason'],
             # RxNorm bortezomib → HemOnc bortezomib (both in scope)
             [['5000003', '5000002', 'Maps to', '19700101', '20991231', ''],
-             # Edge to out-of-scope CPT4 concept — should be SKIPPED
+             # Edge to in-scope CPT4 concept.
              ['5000003', '5000099', 'Maps to', '19700101', '20991231', '']],
         )
         self._write_tsv(directory, 'CONCEPT_ANCESTOR.csv',
@@ -5451,7 +5453,7 @@ class AthenaVocabularyLoadTest(TestCase):
              'min_levels_of_separation', 'max_levels_of_separation'],
             # HemOnc: PI class is ancestor of bortezomib HemOnc concept
             [['5000001', '5000002', '1', '1'],
-             # Edge referencing out-of-scope concept — should be SKIPPED
+             # Edge referencing in-scope CPT4 concept.
              ['5000001', '5000099', '2', '2']],
         )
 
@@ -5478,7 +5480,7 @@ class AthenaVocabularyLoadTest(TestCase):
             vocabulary_id='CDISC',
             concept_name='Number of Bone Lesions',
         ).exists())
-        self.assertFalse(Concept.objects.filter(concept_id=5000099).exists())  # CPT4 — excluded
+        self.assertTrue(Concept.objects.filter(concept_id=5000099).exists())  # CPT4
 
     def test_load_filters_concept_relationships(self):
         from omop_core.models import ConceptRelationship
@@ -5489,8 +5491,8 @@ class AthenaVocabularyLoadTest(TestCase):
         self.assertTrue(ConceptRelationship.objects.filter(
             concept_1_id=5000003, concept_2_id=5000002
         ).exists())
-        # Edge to out-of-scope SNOMED concept should be skipped
-        self.assertFalse(ConceptRelationship.objects.filter(
+        # Edge to in-scope CPT4 concept should be loaded.
+        self.assertTrue(ConceptRelationship.objects.filter(
             concept_2_id=5000099
         ).exists())
 
@@ -5502,8 +5504,8 @@ class AthenaVocabularyLoadTest(TestCase):
         self.assertTrue(ConceptAncestor.objects.filter(
             ancestor_concept_id=5000001, descendant_concept_id=5000002
         ).exists())
-        # Out-of-scope ancestor edge should be skipped
-        self.assertFalse(ConceptAncestor.objects.filter(
+        # In-scope CPT4 ancestor edge should be loaded.
+        self.assertTrue(ConceptAncestor.objects.filter(
             descendant_concept_id=5000099
         ).exists())
 
@@ -7229,6 +7231,67 @@ class ConceptSearchTest(_ConceptFixtureBase):
         )
         self.assertNotIn(self.diabetes.concept_id, ids)
         self.assertTrue(all('creatinine' in r['concept_name'].lower() for r in results))
+
+    def test_measurement_results_identify_input_type_and_suggested_unit(self):
+        resp = self.client.get(self.URL, {'q': 'creatinine', 'page_size': 100}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = {item['concept_id']: item for item in resp.json()['results']}
+        self.assertEqual(results[self.creatinine_serum.concept_id]['measurement_type'], 'quantitative')
+        self.assertEqual(results[self.creatinine_serum.concept_id]['suggested_unit'], 'mg/dL')
+        self.assertEqual(results[self.creatinine_renal.concept_id]['measurement_type'], 'quantitative')
+        self.assertNotIn('measurement_type', results[self.creatinine_snomed.concept_id])
+
+        qualitative = Concept.objects.create(
+            concept_id=992130003, concept_name='Protein [Presence] in Urine',
+            vocabulary_id='LOINC', domain_id='Measurement', concept_class_id='Lab Test',
+            concept_code='QUAL-TEST', standard_concept='S',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        qualitative_response = self.client.get(self.URL, {'q': 'protein', 'page_size': 100}, **self._auth())
+        qualitative_results = {item['concept_id']: item for item in qualitative_response.json()['results']}
+        self.assertEqual(qualitative_results[qualitative.concept_id]['measurement_type'], 'qualitative')
+
+    def test_search_tolerates_punctuation_and_spacing_differences(self):
+        """Curators should not need to reproduce a concept name's hyphenation."""
+        from datetime import date
+
+        non_hodgkin = Concept.objects.create(
+            concept_id=992130001,
+            concept_name='Non-Hodgkin lymphoma',
+            vocabulary_id='SNOMED', domain_id='Condition',
+            concept_class_id='Clinical Finding', concept_code='NHL-TEST',
+            standard_concept='S', valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+        resp = self.client.get(
+            self.URL, {'q': 'Non hod', 'vocabulary_id': 'SNOMED'}, **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn(
+            non_hodgkin.concept_id,
+            {item['concept_id'] for item in resp.json()['results']},
+        )
+
+    def test_search_by_exact_concept_code(self):
+        """A curator may have an OMOP/SNOMED code rather than its display name."""
+        from datetime import date
+
+        non_hodgkin = Concept.objects.create(
+            concept_id=992130002,
+            concept_name="Non-Hodgkin's lymphoma (disorder)",
+            vocabulary_id='SNOMED', domain_id='Condition',
+            concept_class_id='Clinical Finding', concept_code='118601006',
+            standard_concept='S', valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+        resp = self.client.get(
+            self.URL, {'q': '118601006', 'vocabulary_id': 'SNOMED'}, **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn(
+            non_hodgkin.concept_id,
+            {item['concept_id'] for item in resp.json()['results']},
+        )
 
     def test_search_result_shape(self):
         resp = self.client.get(
@@ -15268,6 +15331,20 @@ class OrgSignupDirectoryTest(TestCase):
         resp = APIClient().get(self.URL)
         self.assertEqual(set(resp.data[0].keys()), {'name', 'slug'})
 
+    def test_email_filters_to_pending_invitations_and_trusted_domains(self):
+        invited = Organization.objects.get(slug='closed-clinic')
+        trusted = Organization.objects.get(slug='zeta-clinic')
+        OrgInvitation.objects.create(
+            org=invited, email='member@trusted.example', role='patient',
+            token='b' * 64, expires_at=timezone.now() + timedelta(days=7),
+        )
+        OrgTrust.objects.create(granting_org=trusted, trusted_domain='trusted.example')
+
+        resp = APIClient().get(f'{self.URL}?email=member@trusted.example')
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual([org['slug'] for org in resp.data], ['closed-clinic', 'zeta-clinic'])
+
     def test_empty_when_no_org_allows_signup(self):
         Organization.objects.all().update(allows_patient_signup=False)
         resp = APIClient().get(self.URL)
@@ -19558,6 +19635,10 @@ class CodeMappingApiTest(TestCase):
         )
 
     def setUp(self):
+        # Migration 0201 seeds production HK-Labs mappings. These endpoint
+        # tests use a deliberately tiny mapping fixture and assert its counts,
+        # so keep the production seed rows out of this isolated fixture.
+        SourceCodeConceptMapping.objects.filter(origin_system='hk-labs-seed').delete()
         self.client = APIClient()
 
     # ---------------------------------------------------------------- access
@@ -20111,6 +20192,11 @@ class CodeMappingResolutionTest(TestCase):
             standard_concept='S', concept_code='33358-4',
             valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
         )
+
+    def setUp(self):
+        # These rule tests assert exact mapping counts for their own inputs;
+        # omit the unrelated deploy-time HK-Labs seed rows from migration 0201.
+        SourceCodeConceptMapping.objects.filter(origin_system='hk-labs-seed').delete()
 
     def test_loinc_source_resolves_directly_and_mints_no_mapping(self):
         """Rule 1: the Athena concept *is* the LOINC code, so a mapping row for
@@ -22367,8 +22453,12 @@ class MappingHubTestBase(TestCase):
         cls.admin = Identity.objects.create_superuser(
             email='admin-mapping@test.com', password='testpass',
         )
-        cls.admin.is_org_admin = True
-        cls.admin.save()
+        cls.admin_org = Organization.objects.create(
+            name='Mapping Admin Org', slug='mapping-admin-org',
+        )
+        GroupAccess.objects.create(
+            identity=cls.admin, org=cls.admin_org, role='org_admin',
+        )
 
         cls.regular = Identity.objects.create_user(
             email='regular@test.com', password='testpass',
@@ -22409,6 +22499,19 @@ class MappingStatsTest(MappingHubTestBase):
         self.assertIn('therapy', resp.data)
         self.assertIn('unmapped', resp.data['field_mappings'])
         self.assertGreaterEqual(resp.data['therapy']['regimens'], 1)
+
+    def test_org_admin_can_see_stats(self):
+        org_admin = Identity.objects.create_user(
+            email='org-admin-mapping@test.com', password='testpass',
+        )
+        GroupAccess.objects.create(
+            identity=org_admin, org=self.admin_org, role='org_admin',
+        )
+        self.client.force_authenticate(user=org_admin)
+
+        resp = self.client.get('/api/v1/mapping-stats/')
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
     def test_regular_user_forbidden(self):
         self.client.force_authenticate(user=self.regular)

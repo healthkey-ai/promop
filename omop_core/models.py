@@ -4058,6 +4058,11 @@ class VocabularyRelease(models.Model):
         default=dict,
         help_text="Per-table fingerprints for drift detection.",
     )
+    umls_release = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Raw UMLS archive provenance cached alongside this Athena load.",
+    )
     status = models.CharField(
         max_length=20, choices=STATUS_CHOICES, default='staged',
         db_index=True,
@@ -4081,3 +4086,42 @@ class VocabularyRelease(models.Model):
             f"VocabularyRelease(pk={self.pk}, status={self.status}, "
             f"published_at={self.published_at})"
         )
+
+
+class UmlsRelease(models.Model):
+    """A loaded raw UMLS Metathesaurus release (not an OMOP vocabulary)."""
+    release_version = models.CharField(max_length=20, primary_key=True)
+    release_url = models.URLField(max_length=500)
+    archive_sha256 = models.CharField(max_length=64, blank=True)
+    loaded_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'umls_release'
+
+
+class UmlsConcept(models.Model):
+    """A UMLS CUI, kept separately from Athena-assigned OMOP concepts."""
+    cui = models.CharField(max_length=8, primary_key=True)
+    preferred_name = models.TextField(blank=True)
+    release = models.ForeignKey(UmlsRelease, on_delete=models.PROTECT)
+
+    class Meta:
+        db_table = 'umls_concept'
+
+
+class UmlsSourceCode(models.Model):
+    """A source-asserted terminology code from MRCONSO.RRF."""
+    concept = models.ForeignKey(UmlsConcept, on_delete=models.CASCADE, related_name='source_codes')
+    root_source = models.CharField(max_length=50)
+    code = models.CharField(max_length=255)
+    term_type = models.CharField(max_length=20)
+    name = models.TextField()
+    is_preferred = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = 'umls_source_code'
+        constraints = [models.UniqueConstraint(
+            fields=['root_source', 'code', 'concept', 'term_type', 'name'],
+            name='uq_umls_source_code_term',
+        )]
+        indexes = [models.Index(fields=['root_source', 'code'], name='umls_source_root_so_9d0e39_idx')]

@@ -39,6 +39,22 @@ def test_importer_reads_reviewable_markdown_in_batches(tmp_path):
     assert SourceCodeConceptMapping.objects.count() == 2
 
 
+def test_importer_skips_retired_standard_target_concepts(tmp_path):
+    """Historical HealthTree targets must not become curator proposals."""
+    retired = _concept(333, 'RETIRED-333', 'SNOMED', 'Condition')
+    retired.invalid_reason = 'D'
+    retired.save(update_fields=['invalid_reason'])
+    artifact = tmp_path / 'HealthTree_Code_To_Concept_Mapping.md'
+    artifact.write_text(
+        '# HealthTree Code-to-Concept Mapping\n\n'
+        '| Source system | Source code | Target OMOP vocabulary | Target OMOP code | Domain | Status | Origins | Candidate targets |\n'
+        '| --- | --- | --- | --- | --- | --- | --- | --- |\n'
+        '| ICD10 | A01 | SNOMED | RETIRED-333 | Condition | proposed | HT-One | 1 |\n'
+    )
+    call_command('import_healthtree_crossmaps', f'--artifact={artifact}', stdout=StringIO())
+    assert not SourceCodeConceptMapping.objects.filter(source_code='A01').exists()
+
+
 def test_builder_records_frequency_and_project_agreement(tmp_path):
     for name, targets in [('one', ['111', '222']), ('next', ['111'])]:
         root = tmp_path / name / 'functions/main/firestore/apps/curehub'

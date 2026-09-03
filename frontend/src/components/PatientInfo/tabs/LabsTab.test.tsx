@@ -25,6 +25,13 @@ vi.mock('@/hooks/useVocabulary', () => ({
 }));
 
 const DESCRIPTORS = {
+  // The canonical calcium column, declared writable so the alias regression
+  // test below asserts a typeable box rather than a disabled one.
+  serum_calcium_mg_dl: {
+    kind: 'editable', writable: true, target: 'measurement',
+    concept_id: 9, code: '17861-6', value_kind: 'number', unit: 'mg/dL',
+    type_concept_id: 32856, source_value: '17861-6',
+  },
   hemoglobin_g_dl: {
     kind: 'editable', writable: true, target: 'measurement',
     concept_id: 1, code: '718-7', value_kind: 'number', unit: 'g/dL',
@@ -122,5 +129,24 @@ describe('LabsTab', () => {
     expect(screen.getByTestId('reason-ast_u_l')).toHaveTextContent(
       /not editable here/i,
     );
+  });
+
+  it('shows the canonical calcium column, not its alias', async () => {
+    // Moved here with the Electrolytes section: the alias regression is
+    // still real, it just lives on the tab that renders calcium now.
+    // calcium_mg_dl is populated during derivation and owns no LOINC code, so it
+    // can never be edited. Showing it rendered a read-only box pointing at a
+    // field the user could not reach.
+    renderTab({ serum_calcium_mg_dl: 9.1 });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    expect(screen.getByDisplayValue('9.1')).toBeInTheDocument();
+    // getByDisplayValue matches a *disabled* input too, so without this the
+    // test passed in exactly the state its comment condemns.
+    expect(screen.queryByTestId('reason-serum_calcium_mg_dl')).toBeNull();
+    // ...and the alias is not rendered at all. Asserting only the line above
+    // let calcium_mg_dl come back as a read-only box, which is the half the
+    // test is named for.
+    expect(screen.queryByLabelText(/^Calcium/)).toBeNull();
   });
 });
