@@ -12,8 +12,17 @@
  * a real duplicate went unseen; a table written `[string, string][]` rather than
  * `Array<[string, string]>` was invisible; a pinned field count only moved when
  * an already-matched field stopped matching, never when a new one was never
- * matched at all. Reading the AST removes that whole failure class — there is no
- * pattern left to get subtly wrong, because the parser has already done the work.
+ * matched at all. Reading the AST removes that whole failure class: the parser
+ * has already done the work, so there is no pattern left to mis-write.
+ *
+ * What it does not remove is the rule's dependence on *names* — <ClinicalField>,
+ * and the section()/field() helpers the tabs declare their fields through.
+ * Rename one and the rule finds nothing, with nothing unreadable to complain
+ * about, and every field on that tab is silently exempt. So the rule never just
+ * skips: a computed name, a field table it cannot follow, and a field() key it
+ * cannot read are each reported, and a tab it can see no field at all on is
+ * reported too. Reporting green over what it could not read is what the guard
+ * this replaced did, five times.
  *
  * Cross-file state: ESLint lints a run in one process, so the map below
  * accumulates across files and a clash is reported on the second tab linted.
@@ -22,6 +31,8 @@
  * knowing: linting a single tab in isolation sees no other tab, so only a full
  * `eslint .` — which is what `npm run lint` and CI run — enforces this.
  */
+
+import { basename } from 'node:path';
 
 /** file -> the field keys it renders. Module scope: one entry per lint run. */
 const fieldsByFile = new Map();
@@ -72,6 +83,19 @@ export default {
         'Cannot tell which field <ClinicalField name={{{expr}}}> renders, so '
         + 'this rule cannot check it for duplicates. Give it a literal name, or '
         + "declare it in a field table the tab's section() renders.",
+      unreadableTable:
+        'Cannot read the field table section() renders here ({{expr}}), so the '
+        + 'fields in it are not checked for duplicates. Pass the array literal '
+        + 'itself, or a const bound directly to one.',
+      unreadableFieldCall:
+        "Cannot tell which field field(…, {{expr}}, …) renders, so it is not "
+        + 'checked for duplicates. Pass a string literal.',
+      noFields:
+        'This tab declares no field that the rule can see. Either it renders '
+        + 'none, or it declares them in a way the rule does not know — a helper '
+        + 'renamed from section()/field(), say — in which case every field on '
+        + 'it is silently exempt from the duplicate check. Teach the rule the '
+        + 'new shape.',
       stale:
         "'{{field}}' is listed as a known duplicate of {{other}}, but it no "
         + 'longer renders on both. Delete the KNOWN_DUPLICATES entry in '
@@ -82,15 +106,22 @@ export default {
 
   create(context) {
     const filename = context.filename ?? context.getFilename();
-    const base = filename.split('/').pop();
+    const base = basename(filename);
     if (!base.endsWith('Tab.tsx')) return {};
 
     /** field key -> the node to blame if it proves to be a duplicate. */
     const found = new Map();
     /** const name -> ArrayExpression, for tables a section() may render. */
     const tables = new Map();
-    /** const names actually handed to section(). */
-    const rendered = new Set();
+    /** Every section(title, table) call site, resolvable or not. */
+    const sectionCalls = [];
+
+    /** Reports already made about something the rule could not read. */
+    let blindSpots = 0;
+    const reportBlind = (node, messageId, expr) => {
+      blindSpots += 1;
+      context.report({ node, messageId, data: { expr: context.sourceCode.getText(expr) } });
+    };
 
     const addKey = (key, node) => {
       if (FIELD_KEY.test(key) && !found.has(key)) found.set(key, node);
@@ -125,11 +156,7 @@ export default {
           if (expr.type === 'Identifier' && expr.name === 'name') return;
           // Anything else is invisible to this rule, and silence there is what
           // let a duplicate through review. Report rather than skip.
-          context.report({
-            node: attr,
-            messageId: 'unreadable',
-            data: { expr: context.sourceCode.getText(expr) },
-          });
+          reportBlind(attr, 'unreadable', expr);
         }
       },
 
@@ -145,20 +172,37 @@ export default {
         // What makes an array a *field* table is that a section renders it. An
         // options list like [['Yes','yes'], ['No','no']] is declared
         // identically, and two tabs sharing one is not a field duplicate.
-        if (node.callee.name === 'section' && node.arguments[1]?.type === 'Identifier') {
-          rendered.add(node.arguments[1].name);
+        if (node.callee.name === 'section' && node.arguments.length > 1) {
+          // Resolved at Program:exit — a table may be declared below its use.
+          sectionCalls.push(node.arguments[1]);
         }
         // field('Label', 'field_key', type)
-        if (node.callee.name === 'field') {
+        if (node.callee.name === 'field' && node.arguments.length > 1) {
           const key = node.arguments[1];
-          if (key?.type === 'Literal' && typeof key.value === 'string') addKey(key.value, key);
+          if (key.type === 'Literal' && typeof key.value === 'string') addKey(key.value, key);
+          // Anything else is a field this rule cannot name. Reporting beats
+          // skipping: an unseen field is one the duplicate check cannot make.
+          else reportBlind(key, 'unreadableFieldCall', key);
         }
       },
 
       'Program:exit'(program) {
-        for (const name of rendered) {
-          const table = tables.get(name);
-          if (table) readTable(table);
+        for (const arg of sectionCalls) {
+          if (arg.type === 'ArrayExpression') { readTable(arg); continue; }
+          const table = arg.type === 'Identifier' ? tables.get(arg.name) : null;
+          if (table) { readTable(table); continue; }
+          // A table the rule cannot follow — an alias, an import, a call. Its
+          // fields are unchecked, and saying nothing here is precisely how the
+          // guard this replaced reported green over a duplicate it never saw.
+          reportBlind(arg, 'unreadableTable', arg);
+        }
+
+        // A tab with no visible fields is far more likely a scan that has gone
+        // blind — a renamed helper — than a tab that renders nothing.
+        // Only when nothing more specific was said: a tab whose one table is
+        // unreadable has already been told exactly what is wrong with it.
+        if (found.size === 0 && blindSpots === 0) {
+          context.report({ node: program, messageId: 'noFields' });
         }
 
         fieldsByFile.set(base, new Set(found.keys()));

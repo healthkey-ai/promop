@@ -103,10 +103,70 @@ describe('no-duplicate-tab-field', () => {
   it('ignores an array two tabs share that no section renders', () => {
     // An options list is declared exactly like a field table. Reporting one
     // would fail the build over work with nothing to do with field ownership.
-    const options = `
+    const options = (key) => `
       const YES_NO: Array<[string, string]> = [['Yes', 'yes'], ['No', 'no']];
-      export default () => <Select options={YES_NO} />;`;
-    expect(ids([['ATab.tsx', options], ['BTab.tsx', options]])).toEqual([]);
+      export default () => (<div>
+        <Select options={YES_NO} />
+        <ClinicalField name="${key}" />
+      </div>);`;
+    expect(ids([
+      ['ATab.tsx', options('a_field')],
+      ['BTab.tsx', options('b_field')],
+    ])).toEqual([]);
+  });
+
+  it('reads a table handed to section() as a literal', () => {
+    expect(ids([
+      ['ATab.tsx', `export default () => {
+        const section = (t, fs) => <div>{fs.map(([l, name]) =>
+          <ClinicalField key={name} name={name} />)}</div>;
+        return section('Counts', [['L', 'ldh_u_l']]);
+      };`],
+      ['BTab.tsx', inlineTab('ldh_u_l')],
+    ])).toEqual(['duplicate']);
+  });
+
+  it('reports a field table it cannot follow instead of skipping it', () => {
+    // An alias, an import or a call. Every field behind it would otherwise be
+    // exempt from the duplicate check in silence.
+    expect(ids([['ATab.tsx', `
+      const COUNTS: Array<[string, string]> = [['L', 'ldh_u_l']];
+      const ALIAS = COUNTS;
+      export default () => {
+        const section = (t, fs) => <div>{fs.map(([l, name]) =>
+          <ClinicalField key={name} name={name} />)}</div>;
+        return section('Counts', ALIAS);
+      };`]])).toEqual(['unreadableTable']);
+  });
+
+  it('reports a field() key it cannot read', () => {
+    expect(ids([[
+      'ATab.tsx',
+      "const K = {a: 'x'}; export default () => <div>{field('L', K.a, 'select')}</div>;",
+    ]])).toEqual(['unreadableFieldCall']);
+  });
+
+  it('reports a tab it can see no field on at all', () => {
+    // The residual hole a completeness report cannot cover: rename the helper
+    // and the rule finds nothing, with nothing unreadable to complain about.
+    // Every field on the tab would be silently exempt.
+    expect(ids([['ATab.tsx', `
+      const COUNTS: Array<[string, string]> = [['L', 'ldh_u_l']];
+      export default () => {
+        const group = (t, fs) => <div>{fs.map(([l, name]) =>
+          <ClinicalField key={name} name={name} />)}</div>;
+        return group('Counts', COUNTS);
+      };`]])).toEqual(['noFields']);
+  });
+
+  it('says one thing, not two, about a tab whose only table is unreadable', () => {
+    const reports = ids([['ATab.tsx', `
+      export default () => {
+        const section = (t, fs) => <div>{fs.map(([l, name]) =>
+          <ClinicalField key={name} name={name} />)}</div>;
+        return section('Counts', somewhereElse());
+      };`]]);
+    expect(reports).toEqual(['unreadableTable']);
   });
 
   it('allows one field twice on a single tab', () => {
