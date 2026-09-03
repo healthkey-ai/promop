@@ -7120,7 +7120,9 @@ def concept_search(request):
         )
 
     queryset = _apply_concept_filters(
-        Concept.objects.filter(_concept_name_search_filter(query)),
+        Concept.objects.filter(
+            _concept_name_search_filter(query) | Q(concept_code__iexact=query),
+        ),
         request.query_params,
     )
     # Annotate LOINC results with suggested units from LAB_FIELD_TO_LOINC.

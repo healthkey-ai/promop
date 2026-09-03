@@ -8230,6 +8230,27 @@ class ConceptSearchTest(_ConceptFixtureBase):
             {item['concept_id'] for item in resp.json()['results']},
         )
 
+    def test_search_by_exact_concept_code(self):
+        """A curator may have an OMOP/SNOMED code rather than its display name."""
+        from datetime import date
+
+        non_hodgkin = Concept.objects.create(
+            concept_id=992130002,
+            concept_name="Non-Hodgkin's lymphoma (disorder)",
+            vocabulary_id='SNOMED', domain_id='Condition',
+            concept_class_id='Clinical Finding', concept_code='118601006',
+            standard_concept='S', valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+        resp = self.client.get(
+            self.URL, {'q': '118601006', 'vocabulary_id': 'SNOMED'}, **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn(
+            non_hodgkin.concept_id,
+            {item['concept_id'] for item in resp.json()['results']},
+        )
+
     def test_search_result_shape(self):
         resp = self.client.get(
             self.URL, {'q': 'Type 2 diabetes', 'page_size': 100}, **self._auth(),
