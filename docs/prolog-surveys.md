@@ -160,6 +160,23 @@ this project's, so a PRomop dependency bump does not need a matching PROlog
 release. The reverse is not true: PROlog's floor is Django 5.2.6 / DRF 3.15.2 and
 Python 3.12, and its ceiling excludes Django 6.
 
+### What v0.2.0 added
+
+Five capabilities, all off unless configured, so nothing here behaves
+differently until a deployment asks for it:
+
+| | |
+| --- | --- |
+| `options_source_priority` | pins chosen options to the top of a built-in option source (ordering only — everything else stays answerable) |
+| `presentation.language_step` | asks which language *before* the intro, so the intro and consent notice are read in the chosen one |
+| `export_translations` | writes a definition's two languages side by side for a reviewer, CSV or Markdown |
+| `PROLOG_LEGAL_DIRS` | serves a deployment's own privacy notice at `/s/<slug>/privacy`, on this origin and under the survey's theme |
+| `PROLOG_MACHINE_LANGUAGES` | offers a machine-translated language deliberately, with the machine origin disclosed to the respondent |
+
+**A definition using the new keys is refused by 0.1.0, not ignored** — a
+question's `config` rejects properties it does not know. So the pin moves before
+the definition does, never the other way round.
+
 ## What is not done yet
 
 - **The participant foreign key is still nullable.** The runner binds every
