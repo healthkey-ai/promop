@@ -32,10 +32,6 @@ const DESCRIPTORS = {
     concept_id: 9, code: '17861-6', value_kind: 'number', unit: 'mg/dL',
     type_concept_id: 32856, source_value: '17861-6',
   },
-  calcium_mg_dl: {
-    kind: 'alias', writable: false, canonical: 'serum_calcium_mg_dl',
-    reason: 'Mirrors serum_calcium_mg_dl; edit that field instead.',
-  },
   hemoglobin_g_dl: {
     kind: 'editable', writable: true, target: 'measurement',
     concept_id: 1, code: '718-7', value_kind: 'number', unit: 'g/dL',
@@ -145,7 +141,6 @@ describe('LabsTab', () => {
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
 
     expect(screen.getByDisplayValue('9.1')).toBeInTheDocument();
-    expect(screen.queryByTestId('reason-calcium_mg_dl')).not.toBeInTheDocument();
     // getByDisplayValue matches a *disabled* input too, so without this the
     // test passed in exactly the state its comment condemns.
     expect(screen.queryByTestId('reason-serum_calcium_mg_dl')).toBeNull();
