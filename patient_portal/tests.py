@@ -5401,7 +5401,7 @@ class AthenaVocabularyLoadTest(TestCase):
             [['HemOnc', 'HemOnc Oncology', '', 'v2024', '0'],
              ['RxNorm', 'RxNorm', '', '2024AA', '0'],
              ['CDISC', 'Clinical Data Interchange Standards Consortium', '', '2024', '0'],
-             ['CPT4', 'CPT-4', '', '2024', '0']],  # out of scope — should be skipped
+             ['CPT4', 'CPT-4', '', '2024', '0']],
         )
         self._write_tsv(directory, 'DOMAIN.csv',
             ['domain_id', 'domain_name', 'domain_concept_id'],
@@ -5432,15 +5432,15 @@ class AthenaVocabularyLoadTest(TestCase):
              ['5000006', '150 ML sodium chloride 9 MG/ML Injection', 'Drug', 'RxNorm', 'Quant Clinical Drug', 'S', '1362', '19700101', '20991231', ''],
              # CDISC concept requested for PatientRecord.bone_lesions (#786).
              ['37533916', 'Number of Bone Lesions', 'Measurement', 'CDISC', 'Clinical Finding', 'S', 'C100061', '19700101', '20991231', ''],
-             # CPT4 concept — should be SKIPPED (not in vocabulary scope)
-             ['5000099', 'Out-of-scope concept', 'Drug', 'CPT4', 'Clinical Finding', 'S', '123456', '19700101', '20991231', '']],
+             # CPT4 concept — source vocabulary for billed procedures.
+             ['5000099', 'CPT4 concept', 'Drug', 'CPT4', 'Clinical Finding', 'S', '123456', '19700101', '20991231', '']],
         )
         self._write_tsv(directory, 'CONCEPT_RELATIONSHIP.csv',
             ['concept_id_1', 'concept_id_2', 'relationship_id',
              'valid_start_date', 'valid_end_date', 'invalid_reason'],
             # RxNorm bortezomib → HemOnc bortezomib (both in scope)
             [['5000003', '5000002', 'Maps to', '19700101', '20991231', ''],
-             # Edge to out-of-scope CPT4 concept — should be SKIPPED
+             # Edge to in-scope CPT4 concept.
              ['5000003', '5000099', 'Maps to', '19700101', '20991231', '']],
         )
         self._write_tsv(directory, 'CONCEPT_ANCESTOR.csv',
@@ -5448,7 +5448,7 @@ class AthenaVocabularyLoadTest(TestCase):
              'min_levels_of_separation', 'max_levels_of_separation'],
             # HemOnc: PI class is ancestor of bortezomib HemOnc concept
             [['5000001', '5000002', '1', '1'],
-             # Edge referencing out-of-scope concept — should be SKIPPED
+             # Edge referencing in-scope CPT4 concept.
              ['5000001', '5000099', '2', '2']],
         )
 
@@ -5475,7 +5475,7 @@ class AthenaVocabularyLoadTest(TestCase):
             vocabulary_id='CDISC',
             concept_name='Number of Bone Lesions',
         ).exists())
-        self.assertFalse(Concept.objects.filter(concept_id=5000099).exists())  # CPT4 — excluded
+        self.assertTrue(Concept.objects.filter(concept_id=5000099).exists())  # CPT4
 
     def test_load_filters_concept_relationships(self):
         from omop_core.models import ConceptRelationship
@@ -5486,8 +5486,8 @@ class AthenaVocabularyLoadTest(TestCase):
         self.assertTrue(ConceptRelationship.objects.filter(
             concept_1_id=5000003, concept_2_id=5000002
         ).exists())
-        # Edge to out-of-scope SNOMED concept should be skipped
-        self.assertFalse(ConceptRelationship.objects.filter(
+        # Edge to in-scope CPT4 concept should be loaded.
+        self.assertTrue(ConceptRelationship.objects.filter(
             concept_2_id=5000099
         ).exists())
 
@@ -5499,8 +5499,8 @@ class AthenaVocabularyLoadTest(TestCase):
         self.assertTrue(ConceptAncestor.objects.filter(
             ancestor_concept_id=5000001, descendant_concept_id=5000002
         ).exists())
-        # Out-of-scope ancestor edge should be skipped
-        self.assertFalse(ConceptAncestor.objects.filter(
+        # In-scope CPT4 ancestor edge should be loaded.
+        self.assertTrue(ConceptAncestor.objects.filter(
             descendant_concept_id=5000099
         ).exists())
 
