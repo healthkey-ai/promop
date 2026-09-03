@@ -123,4 +123,17 @@ describe('LabsTab', () => {
       /not editable here/i,
     );
   });
+
+  it('shows the canonical calcium column, not its alias', async () => {
+    // Moved here with the Electrolytes section: the alias regression is
+    // still real, it just lives on the tab that renders calcium now.
+    // calcium_mg_dl is populated during derivation and owns no LOINC code, so it
+    // can never be edited. Showing it rendered a read-only box pointing at a
+    // field the user could not reach.
+    renderTab({ serum_calcium_mg_dl: 9.1 });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    expect(screen.getByDisplayValue('9.1')).toBeInTheDocument();
+    expect(screen.queryByTestId('reason-calcium_mg_dl')).not.toBeInTheDocument();
+  });
 });

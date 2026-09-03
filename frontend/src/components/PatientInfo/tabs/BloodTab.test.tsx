@@ -77,17 +77,6 @@ describe('BloodTab', () => {
     );
   });
 
-  it('shows the canonical calcium column, not its alias', async () => {
-    // calcium_mg_dl is populated during derivation and owns no LOINC code, so it
-    // can never be edited. Showing it rendered a read-only box pointing at a
-    // field the user could not reach.
-    renderTab({ serum_calcium_mg_dl: 9.1 });
-    await waitFor(() => expect(mockGet).toHaveBeenCalled());
-
-    expect(screen.getByDisplayValue('9.1')).toBeInTheDocument();
-    expect(screen.queryByTestId('reason-calcium_mg_dl')).not.toBeInTheDocument();
-  });
-
   it('explains a field the descriptor does not cover', async () => {
     mockGet.mockResolvedValue({ data: {} });
     renderTab();
@@ -110,13 +99,17 @@ describe('BloodTab', () => {
     );
   });
 
-  it('keeps every section it had before the conversion', async () => {
+  it('holds the blood counts and nothing the Labs tab already has', async () => {
+    // Electrolytes, Cardiac & Other, Coagulation and Tumor Markers rendered the
+    // same field keys as sections already on Labs, so a value had two editable
+    // boxes on two tabs. The counts are what this tab is for.
     renderTab();
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
 
-    for (const title of ['Blood Counts', 'Electrolytes', 'Cardiac & Other',
-                         'Coagulation', 'Tumor Markers']) {
-      expect(screen.getByText(title)).toBeInTheDocument();
+    expect(screen.getByText('Blood Counts')).toBeInTheDocument();
+    for (const gone of ['Electrolytes', 'Cardiac & Other', 'Coagulation',
+                        'Tumor Markers']) {
+      expect(screen.queryByText(gone)).not.toBeInTheDocument();
     }
   });
 });

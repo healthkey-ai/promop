@@ -43,13 +43,14 @@ const LIVER: Array<[string, string]> = [
   ['Direct Bilirubin (mg/dL)', 'serum_bilirubin_level_direct'],
 ];
 
+// Prognostic and inflammatory. LDH and beta-2 microglobulin are tumour-burden
+// markers here — both sit in real staging systems (the ISS for myeloma, the
+// R-IPI for DLBCL) — which is why they are not filed under "cardiac" anything.
 const MARKERS: Array<[string, string]> = [
   ['LDH (U/L)', 'ldh_u_l'],
   ['Beta-2 Microglobulin (mg/L)', 'beta2_microglobulin'],
   ['C-Reactive Protein (mg/L)', 'c_reactive_protein'],
   ['ESR (mm/hr)', 'esr'],
-  ['Troponin (ng/mL)', 'troponin_ng_ml'],
-  ['BNP (pg/mL)', 'bnp_pg_ml'],
   ['HbA1c (%)', 'hba1c_percent'],
 ];
 
@@ -63,6 +64,15 @@ const TUMOR_MARKERS: Array<[string, string]> = [
   ['CEA (ng/mL)', 'cea_ng_ml'],
   ['CA 19-9 (U/mL)', 'ca19_9_u_ml'],
   ['PSA (ng/mL)', 'psa_ng_ml'],
+];
+
+// Split out of "Other Markers": these are cardiac, and grouping them with
+// tumour-burden markers said the wrong thing about why an oncology record
+// tracks them. They matter here for anthracycline and HER2-therapy
+// cardiotoxicity monitoring.
+const CARDIAC: Array<[string, string]> = [
+  ['Troponin (ng/mL)', 'troponin_ng_ml'],
+  ['BNP (pg/mL)', 'bnp_pg_ml'],
 ];
 
 const DIAGNOSTIC: Array<[string, string]> = [
@@ -114,6 +124,7 @@ export default function LabsTab({ formData, onChange }: Props) {
       {section('Liver Function', LIVER)}
       {section('Coagulation', COAGULATION)}
       {section('Other Markers', MARKERS)}
+      {section('Cardiac', CARDIAC)}
       {section('Tumor Markers', TUMOR_MARKERS)}
       {section('Diagnostic Tests', DIAGNOSTIC, 'boolean')}
     </div>
