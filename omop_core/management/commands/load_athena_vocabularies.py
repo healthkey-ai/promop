@@ -512,6 +512,7 @@ class Command(BaseCommand):
             self._sync_cdm_source_metadata()
             if not skip_clinical_vocabulary_verification:
                 self._verify_required_clinical_vocabularies()
+            self._load_raw_umls(options['verbosity'])
             self._record_version_history(replace)
             self._publish_release(counts)
             self._load_code_mappings(options['verbosity'])
@@ -1423,3 +1424,17 @@ class Command(BaseCommand):
         self._log('')
         self._log('  Loading approved code-to-concept mappings from artifact...')
         call_command('load_mappings', artifact=str(artifact), verbosity=verbosity)
+
+    def _load_raw_umls(self, verbosity):
+        """Import cached raw UMLS source codes without conflating them with OMOP."""
+        if not self._umls_release:
+            return
+        from django.core.management import call_command
+        archive = Path(os.environ.get('UMLS_CACHE_DIR', DEFAULT_UMLS_CACHE_DIR)) / self._umls_release['archive_name']
+        self._log('  Loading raw UMLS CUIs and source codes...')
+        call_command(
+            'load_umls_release', archive=str(archive),
+            release_version=self._umls_release['release_version'],
+            release_url=self._umls_release['release_url'],
+            sha256=self._umls_release.get('sha256', ''), verbosity=verbosity,
+        )
