@@ -32,6 +32,10 @@ VOCAB_SCOPE = frozenset({
     # (immunizations) is mapped in the ingest but isn't in the current Athena
     # export, so it loads once a CVX-inclusive bundle is fetched.
     'SNOMED', 'ICD10CM', 'CVX',
+    # US procedure and professional-service codes. CPT4 is used as a source
+    # vocabulary by the code-mapping and FHIR ingestion paths, so it must be
+    # retained whenever the Athena bundle includes it.
+    'CPT4',
     # Genomic + oncology coding vocabularies (#459)
     'OMOP Genomic', 'ICDO3', 'NCIt',
     # Oncology staging/grading modifiers + cancer registry
@@ -341,6 +345,7 @@ class Command(BaseCommand):
                 self._verify_required_clinical_vocabularies()
             self._record_version_history(replace)
             self._publish_release(counts)
+            self._load_code_mappings(options['verbosity'])
         elapsed = time.monotonic() - t0
         verb = 'would load' if dry_run else 'loaded'
         total = sum(counts.values())
@@ -1222,3 +1227,17 @@ class Command(BaseCommand):
             published_at=now,
         )
         self._log(f'  vocabulary_release: published release pk={release.pk}')
+
+    def _load_code_mappings(self, verbosity):
+        """Load approved code-to-concept mappings from the bundled artifact."""
+        from django.core.management import call_command
+        artifact = Path(__file__).resolve().parents[2] / 'data' / 'code_concept_mappings.json'
+        if not artifact.exists():
+            self._log(
+                '  load_mappings: artifact not found at '
+                f'{artifact} — skipping code mapping load.'
+            )
+            return
+        self._log('')
+        self._log('  Loading approved code-to-concept mappings from artifact...')
+        call_command('load_mappings', artifact=str(artifact), verbosity=verbosity)
