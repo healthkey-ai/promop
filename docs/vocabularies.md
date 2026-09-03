@@ -125,6 +125,14 @@ example the 2022AA URL); use `--skip-umls-cache` to bypass this optional step.
 Choose a persistent, access-controlled `UMLS_CACHE_DIR` in production. API keys
 and raw UMLS files must not be committed or served by the application.
 
+To make raw UMLS CUIs and source-asserted codes queryable, use the separate
+non-OMOP import tables. This never assigns UMLS rows an OMOP concept ID:
+
+```bash
+UMLS_API_KEY="..." UMLS_CACHE_DIR=/persistent/vocab-cache \
+  .venv/bin/python manage.py sync_umls_release
+```
+
 ## 2. Where vocabulary data lives
 
 Every vocabulary — external or local — lives in the **same set of OMOP tables**. There is no per-vocabulary table; `concept.vocabulary_id` is what separates them.
