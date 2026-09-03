@@ -109,7 +109,15 @@ investigating. Neither is the container's health check.
 ```sh
 PROLOG_DEFINITION_DIRS=/data/surveys   # *.json instruments, loaded as drafts
 PROLOG_THEME_DIRS=/data/themes         # one directory per theme, each with theme.json
+PROLOG_LEGAL_DIRS=/data/legal          # privacy.md — served at /s/<slug>/privacy
 ```
+
+Each is read by the app as a **Django setting**, and `ctomop/settings.py` is
+what turns the environment variable into one. A new `PROLOG_*` directory
+setting in a PROlog release therefore does nothing here until it is added
+there: setting only the environment variable looks right and has no effect,
+which is how the legal pages were mounted and served for a while without
+appearing.
 
 Definitions load as drafts and activation is a separate, deliberate step
 (`manage.py load_definition <file> --activate`), so a new instrument is never
