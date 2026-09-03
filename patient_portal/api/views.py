@@ -7041,6 +7041,25 @@ def _apply_concept_filters(queryset, query_params):
     return queryset
 
 
+def _concept_name_search_filter(query):
+    """Match a concept name by its literal text or its meaningful tokens.
+
+    A literal ``icontains`` remains the fast path and preserves exact phrase
+    semantics.  The token fallback makes a curator's ordinary punctuation and
+    spacing variations useful too: ``Non hod`` can find ``Non-Hodgkin``.  Each
+    token is still at least part of the submitted three-character query, so we
+    avoid introducing an unbounded one-character search.
+    """
+    tokens = re.findall(r'[^\W_]+', query, flags=re.UNICODE)
+    if len(tokens) < 2:
+        return Q(concept_name__icontains=query)
+
+    token_match = Q()
+    for token in tokens:
+        token_match &= Q(concept_name__icontains=token)
+    return Q(concept_name__icontains=query) | token_match
+
+
 def _serialize_concept(concept, versions=None):
     return {
         'concept_id': concept.concept_id,
@@ -7101,7 +7120,7 @@ def concept_search(request):
         )
 
     queryset = _apply_concept_filters(
-        Concept.objects.filter(concept_name__icontains=query),
+        Concept.objects.filter(_concept_name_search_filter(query)),
         request.query_params,
     )
     # Annotate LOINC results with suggested units from LAB_FIELD_TO_LOINC.
