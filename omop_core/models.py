@@ -4127,6 +4127,11 @@ class VocabularyRelease(models.Model):
         default=dict,
         help_text="Per-table fingerprints for drift detection.",
     )
+    umls_release = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Raw UMLS archive provenance cached alongside this Athena load.",
+    )
     status = models.CharField(
         max_length=20, choices=STATUS_CHOICES, default='staged',
         db_index=True,

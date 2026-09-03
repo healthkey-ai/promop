@@ -8226,6 +8226,7 @@ def _serialize_vocab_release(release, include_checksums=False):
         'athena_version': release.athena_version,
         'vocab_versions': release.vocab_versions,
         'row_counts': release.row_counts,
+        'umls_release': release.umls_release,
         'status': release.status,
         'published_at': release.published_at.isoformat() if release.published_at else None,
         'notes': release.notes,
