@@ -42,10 +42,10 @@ pytest-django==4.11.1
 factory-boy==3.3.3
 
 # PROlog survey runner, installed as a Django app (prolog_surveys). Public repo,
-# pinned by commit, which is the release tagged v0.2.0. A tag is mutable — a
+# pinned by commit, which is the release tagged v0.2.1. A tag is mutable — a
 # force-push moves it and the next rebuild installs different code, including
 # different migrations, with no diff here to show for it; the app contributes
 # migrations to this database and start.sh migrates on every deploy, so that is
 # not a risk worth carrying for readability. Bump both together.
 # See docs/prolog-surveys.md.
-prolog @ git+https://github.com/healthkey-ai/prolog@580442c8f4667f7e61e4f9fd16dc1611cc4d0ea7#subdirectory=backend  # v0.2.0
+prolog @ git+https://github.com/healthkey-ai/prolog@2fc5e5db45269da4e227a44ba3d1702a6a4fa089#subdirectory=backend  # v0.2.1

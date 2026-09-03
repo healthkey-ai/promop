@@ -177,6 +177,11 @@ differently until a deployment asks for it:
 question's `config` rejects properties it does not know. So the pin moves before
 the definition does, never the other way round.
 
+0.2.1 fixes two things in the legal pages: the notice was linked only from
+inside a consent block, so an anonymous survey never showed it, and the renderer
+could not render a table or a hard-wrapped list item — both ordinary in a legal
+document.
+
 ## What is not done yet
 
 - **The participant foreign key is still nullable.** The runner binds every
