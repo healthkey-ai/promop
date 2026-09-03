@@ -7,7 +7,7 @@ import { Input } from '@/components/shadcn/input';
 import { today } from '@/api/clinicalFacts';
 import {
   COUNTRY_OPTIONS, US_STATES,
-  DISEASE_OPTIONS, STAGE_OPTIONS, HISTOLOGIC_TYPE_OPTIONS,
+  DISEASE_OPTIONS,
   ECOG_OPTIONS, KARNOFSKY_OPTIONS,
 } from '../patientConstants';
 
@@ -17,7 +17,6 @@ interface Props {
   editedName: string;
   onNameChange: (name: string) => void;
   onZipcodeChange: (zip: string) => void;
-  diseaseType?: 'breast' | 'lymphoma' | 'myeloma' | 'cll' | 'other';
 }
 
 /**
@@ -48,7 +47,7 @@ interface Props {
  * could not code.
  */
 export default function GeneralTab({
-  formData, onChange, editedName, onNameChange, onZipcodeChange, diseaseType,
+  formData, onChange, editedName, onNameChange, onZipcodeChange,
 }: Props) {
   // Ask about *this* patient: whether a field may be edited depends on who is
   // asking and whose record it is, not only on whether the field is mapped.
@@ -59,13 +58,7 @@ export default function GeneralTab({
   const { source: ecogSource }        = useVocabulary('ecog-status', 'code');
   const { source: karnofskySource }   = useVocabulary('karnofsky-score', 'code');
   const { source: diseaseSource }     = useVocabulary('disease', 'title');
-  const { source: cancerStageSource } = useVocabulary('cancer-stage', 'title');
   const { source: ethnicitySource }   = useVocabulary('ethnicity', 'title');
-  const { options: histologicOptions, source: histologicSource } = useVocabulary('histologic-type', 'title');
-
-  const histOptions = histologicOptions.length
-    ? histologicOptions.map((o: { value: string }) => o.value)
-    : HISTOLOGIC_TYPE_OPTIONS;
 
   const age = formData?.date_of_birth
     ? calculateAge(formData.date_of_birth as string)
@@ -184,13 +177,14 @@ export default function GeneralTab({
       <Section title="Clinical Summary" description="Diagnosis and eligibility-related information.">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           {field('Disease', 'disease', 'select', { options: DISEASE_OPTIONS, vocabSource: diseaseSource })}
-          {field('Stage', 'stage', 'select', { options: STAGE_OPTIONS, vocabSource: cancerStageSource })}
 
-          {(!diseaseType || diseaseType === 'breast' || diseaseType === 'other') && (
-            <div className="sm:col-span-2">
-              {field('Histologic Type', 'histologic_type', 'select', { options: histOptions, vocabSource: histologicSource })}
-            </div>
-          )}
+          {/* Stage and Histologic Type belong to the Disease tab, which knows
+              which vocabulary applies — Ann Arbor for lymphoma, ISS for
+              myeloma, generic otherwise. A second, always-generic box here gave
+              one value two editable controls with two different valid value
+              sets, so editing on this tab could set a stage the disease section
+              rejects (#960). Disease itself stays: it is the discriminator that
+              picks the section over there. */}
 
           {field('ECOG Performance Status', 'ecog_performance_status', 'select', { options: ECOG_OPTIONS, vocabSource: ecogSource })}
           {field('ECOG Assessment Date', 'ecog_assessment_date', 'date')}

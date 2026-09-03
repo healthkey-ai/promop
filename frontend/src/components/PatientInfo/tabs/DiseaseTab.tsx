@@ -10,7 +10,6 @@ import {
   MENOPAUSAL_OPTIONS, TUMOR_STAGE_OPTIONS, NODES_STAGE_OPTIONS,
   STAGING_MODALITIES_OPTIONS, DISTANT_METASTASIS_STAGE_OPTIONS,
   YES_NO_OPTIONS, ER_OPTIONS, PR_OPTIONS, HER2_OPTIONS, HR_OPTIONS, HRD_OPTIONS,
-  DISEASE_OPTIONS,
   FLIPI_RISK_OPTIONS, FLIPI_FACTOR_OPTIONS, GELF_OPTIONS, FL_TUMOR_GRADE_OPTIONS,
   ISS_STAGE_OPTIONS, MM_PROGRESSION_OPTIONS, STEM_CELL_TRANSPLANT_OPTIONS, SCT_ELIGIBILITY_OPTIONS, MYELOMA_TYPE_OPTIONS,
   MRD_STATUS_OPTIONS, CYTOGENETIC_RISK_OPTIONS,
@@ -355,7 +354,10 @@ function OtherSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange
 
   return (
     <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-      <ClinicalField label="Disease" name="disease" descriptor={descriptors.disease} type="select" value={formData?.disease} options={DISEASE_OPTIONS} onChange={onChange} />
+      {/* Disease itself is owned by the General tab: it is the discriminator
+          that selects which section of this tab renders, so the place to set it
+          is the tab the user lands on. Rendering it here too gave one value two
+          editable boxes (#960). */}
       <ClinicalField label="Stage" name="stage" descriptor={descriptors.stage} type="select" value={formData?.stage} options={STAGE_OPTIONS} onChange={onChange} />
       <div className="sm:col-span-2">
         <ClinicalField label="Histologic Type" name="histologic_type" descriptor={descriptors.histologic_type} type="select" value={formData?.histologic_type} options={histOptions} onChange={onChange} vocabSource={histologicSource} />

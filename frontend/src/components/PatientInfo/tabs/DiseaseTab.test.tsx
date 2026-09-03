@@ -584,3 +584,23 @@ describe('DiseaseTab — shared staging and biomarkers', () => {
     expect(screen.getByDisplayValue('12')).toBeInTheDocument();
   });
 });
+
+describe('DiseaseTab — field ownership (#960)', () => {
+  it('owns Stage and Histologic Type, and leaves Disease to the General tab', () => {
+    // This tab knows which staging vocabulary applies — Ann Arbor for lymphoma,
+    // ISS for myeloma, generic here — so the editable Stage box belongs to it.
+    // `disease` is the discriminator that selects which section renders, so the
+    // General tab owns that one and this tab no longer draws a second box.
+    render(
+      <DiseaseTab
+        {...BASE_PROPS}
+        diseaseType="other"
+        formData={{ disease: 'Other', stage: 'II', histologic_type: 'Ductal' }}
+      />,
+    );
+
+    expect(screen.getByText('Stage')).toBeInTheDocument();
+    expect(screen.getByText('Histologic Type')).toBeInTheDocument();
+    expect(screen.queryByText('Disease')).toBeNull();
+  });
+});

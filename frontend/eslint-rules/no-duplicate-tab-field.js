@@ -38,24 +38,34 @@ import { basename } from 'node:path';
 const fieldsByFile = new Map();
 
 /**
- * Fields that legitimately render on two tabs today, keyed per field so the
- * exemption cannot widen. Exempting the whole tab *pair* would permanently
- * excuse the two largest tabs, and a new duplicate between them would pass.
+ * Fields that legitimately render on two tabs, keyed per field so an exemption
+ * cannot widen. Exempting a whole tab *pair* would permanently excuse both, and
+ * a new duplicate between them would pass unseen.
  *
- * These three are #960. Once that lands the rule reports them as stale, so a
- * fixed duplicate cannot leave a dead exemption behind it.
+ * Empty, and the intent is that it stays that way. It last held disease,
+ * histologic_type and stage; #960 moved stage and histology to the Disease tab
+ * and disease to General, and the stale check reported all three the moment it
+ * did — which is the check doing its job. Add an entry only with an issue
+ * number and the reason the duplicate is deliberate.
  */
-const KNOWN_DUPLICATES = new Map([
-  ['disease', ['DiseaseTab.tsx', 'GeneralTab.tsx']],
-  ['histologic_type', ['DiseaseTab.tsx', 'GeneralTab.tsx']],
-  ['stage', ['DiseaseTab.tsx', 'GeneralTab.tsx']],
-]);
+let KNOWN_DUPLICATES = new Map();
 
 /**
  * Drop what previous files contributed. Only the rule's own tests need this:
  * within one `eslint .` the accumulation across files is the whole mechanism.
  */
 export const __resetTabFieldState = () => fieldsByFile.clear();
+
+/**
+ * Install an exemption map. Only the rule's own tests use this: the exemption
+ * and stale mechanisms still need covering while the production map is empty,
+ * and a test that asserted against whatever happened to be in it would go quiet
+ * the moment the last entry was fixed — which is exactly when it was still
+ * proving something.
+ */
+export const __setKnownDuplicates = (entries) => {
+  KNOWN_DUPLICATES = new Map(entries);
+};
 
 const known = (field, a, b) => {
   const pair = KNOWN_DUPLICATES.get(field);

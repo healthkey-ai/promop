@@ -836,7 +836,6 @@ export default function PatientDetail({
                     editedName={editedName}
                     onNameChange={handleNameChange}
                     onZipcodeChange={handleZipcodeChange}
-                    diseaseType={getDiseaseType()}
                   />
                 )}
                 {activeTab === 1 && (
