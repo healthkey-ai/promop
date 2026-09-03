@@ -22,18 +22,19 @@ permissions:
 jobs:
   test:
     name: Test
+    if: github.ref_name == 'dev'
     uses: ./.github/workflows/ci.yml
 
   build-and-deploy:
     name: Build & Deploy
     needs: test
+    if: >-
+      always() &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped')
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          # Keep the runtime mapping artifact in the image, not its LFS pointer.
-          lfs: true
 
       - id: auth
         uses: google-github-actions/auth@v2

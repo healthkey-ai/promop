@@ -20767,9 +20767,6 @@ class CodeMappingApiTest(TestCase):
 
     @classmethod
     def setUpTestData(cls):
-        # Data migrations seed production mappings. These API tests assert
-        # exact counts for their own fixtures, so isolate them from seed data.
-        SourceCodeConceptMapping.objects.all().delete()
         cls.staff = Identity.objects.create_user(
             email='code_mapping_staff@t.com', password='x', is_staff=True,
         )
@@ -21387,8 +21384,6 @@ class CodeMappingResolutionTest(TestCase):
 
     @classmethod
     def setUpTestData(cls):
-        # Keep rule-level count assertions independent of migration seed data.
-        SourceCodeConceptMapping.objects.all().delete()
         cls.domain, _ = Domain.objects.get_or_create(
             domain_id='Measurement',
             defaults={'domain_name': 'Measurement', 'domain_concept_id': 21},

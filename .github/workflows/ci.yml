@@ -36,10 +36,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          # Athena loader tests consume the bundled mapping artifact, which is
-          # stored in Git LFS.  Without this, json.loads() sees the LFS pointer.
-          lfs: true
 
       - uses: actions/setup-python@v5
         with:
