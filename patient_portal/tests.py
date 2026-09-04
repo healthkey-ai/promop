@@ -5379,6 +5379,7 @@ class AthenaVocabularyLoadTest(TestCase):
             'load_athena_vocabularies', path=directory,
             skip_clinical_vocabulary_verification=True,
             skip_code_mappings=True,
+            skip_umls_cache=True,
             **options,
         )
 
