@@ -166,14 +166,24 @@ these commands at a shared development, staging, or production database.
 
   ```sql
   SELECT count(*) AS null_targets
-  FROM omop_core_sourcecodeconceptmapping
-  WHERE target_concept_id IS NULL;
+  FROM source_code_concept_mapping
+  WHERE origin_system = 'hk-labs-seed'
+    AND status = 'approved'
+    AND target_concept_id IS NULL;
 
   SELECT count(*) AS missing_or_non_loinc_targets
-  FROM omop_core_sourcecodeconceptmapping m
+  FROM source_code_concept_mapping m
   LEFT JOIN concept c ON c.concept_id = m.target_concept_id
-  WHERE m.target_concept_id IS NOT NULL
+  WHERE m.origin_system = 'hk-labs-seed'
+    AND m.status = 'approved'
+    AND m.target_concept_id IS NOT NULL
     AND (c.concept_id IS NULL OR c.vocabulary_id <> 'LOINC');
+
+  SELECT source_vocabulary_id, source_code, count(*) AS duplicates
+  FROM source_code_concept_mapping
+  WHERE origin_system = 'hk-labs-seed' AND status = 'approved'
+  GROUP BY source_vocabulary_id, source_code
+  HAVING count(*) > 1;
   ```
 
 - [ ] Repeat `migrate --noinput`; it must be a no-op. Run `manage.py check
