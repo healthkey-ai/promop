@@ -4,10 +4,14 @@ Embeds concept_name using BAAI/bge-small-en-v1.5 (384 dimensions) and stores
 the vectors in pgvector.  After the table is populated it (re)creates the
 IVFFlat index.
 
+Designed for remote databases (Render): writes in small batches (64 rows),
+auto-reconnects on connection drops, and skips concepts already embedded so
+a re-run picks up where the last one left off.
+
 Usage:
     manage.py build_concept_embeddings                     # all standard concepts
     manage.py build_concept_embeddings --vocabulary-id SNOMED  # one vocabulary
-    manage.py build_concept_embeddings --batch-size 1024   # larger batches
+    manage.py build_concept_embeddings --batch-size 1024   # larger encode batches
     manage.py build_concept_embeddings --force              # re-embed existing
 """
 import logging
@@ -21,6 +25,10 @@ from omop_core.models import Concept
 logger = logging.getLogger(__name__)
 
 DEFAULT_BATCH_SIZE = 512
+# DB write batch is deliberately smaller than encode batch — each row is 384
+# floats (~3KB as text), so 64 rows is ~200KB per INSERT, well within Render's
+# statement limits.
+DB_WRITE_BATCH = 64
 MODEL_NAME = 'BAAI/bge-small-en-v1.5'
 EMBEDDING_DIM = 384
 
@@ -59,7 +67,9 @@ class Command(BaseCommand):
         self.stdout.write(f'Loading model {MODEL_NAME}...')
         model = SentenceTransformer(MODEL_NAME)
 
-        # Build queryset of concepts to embed.
+        # Load concept IDs + names into memory so we don't hold a server-side
+        # cursor open for the entire run.  ~1.5M rows × ~60 bytes ≈ 90MB.
+        self.stdout.write('Loading concept list...')
         qs = Concept.objects.filter(
             standard_concept='S',
             invalid_reason__isnull=True,
@@ -69,47 +79,54 @@ class Command(BaseCommand):
             qs = qs.filter(vocabulary_id=vocab_id)
             self.stdout.write(f'Filtering to vocabulary_id={vocab_id}')
 
-        if not force:
-            # Exclude concepts that already have embeddings.
-            with connection.cursor() as cur:
-                cur.execute('SELECT concept_id FROM concept_embedding')
-                existing = {row[0] for row in cur.fetchall()}
-            if existing:
-                qs = qs.exclude(concept_id__in=existing)
-                self.stdout.write(f'Skipping {len(existing)} already-embedded concepts.')
+        all_concepts = list(qs.values_list('concept_id', 'concept_name'))
+        self.stdout.write(f'Loaded {len(all_concepts)} concepts.')
 
-        total = qs.count()
+        if not force:
+            existing = self._existing_ids()
+            before = len(all_concepts)
+            all_concepts = [(cid, name) for cid, name in all_concepts if cid not in existing]
+            skipped = before - len(all_concepts)
+            if skipped:
+                self.stdout.write(f'Skipping {skipped} already-embedded concepts.')
+
+        total = len(all_concepts)
+        if total == 0:
+            self.stdout.write('Nothing to embed.')
+            return
+
         self.stdout.write(f'Embedding {total} concepts in batches of {batch_size}...')
 
         t0 = time.time()
         processed = 0
-        batch_ids = []
-        batch_names = []
 
-        for concept in qs.iterator(chunk_size=batch_size):
-            batch_ids.append(concept.concept_id)
-            batch_names.append(concept.concept_name)
+        for i in range(0, total, batch_size):
+            chunk = all_concepts[i:i + batch_size]
+            ids = [c[0] for c in chunk]
+            names = [c[1] for c in chunk]
 
-            if len(batch_ids) >= batch_size:
-                processed += self._flush_batch(model, batch_ids, batch_names)
-                batch_ids.clear()
-                batch_names.clear()
-                elapsed = time.time() - t0
-                rate = processed / elapsed if elapsed > 0 else 0
-                self.stdout.write(
-                    f'  {processed}/{total} ({rate:.0f} concepts/s)',
-                    ending='\r',
-                )
+            vectors = model.encode(names, show_progress_bar=False)
 
-        # Final partial batch.
-        if batch_ids:
-            processed += self._flush_batch(model, batch_ids, batch_names)
+            # Write in smaller sub-batches to stay within statement limits.
+            pairs = list(zip(ids, vectors))
+            for j in range(0, len(pairs), DB_WRITE_BATCH):
+                sub = pairs[j:j + DB_WRITE_BATCH]
+                self._write_batch(sub)
+
+            processed += len(chunk)
+            elapsed = time.time() - t0
+            rate = processed / elapsed if elapsed > 0 else 0
+            self.stdout.write(
+                f'  {processed}/{total} ({rate:.0f} concepts/s)',
+                ending='\r',
+            )
 
         elapsed = time.time() - t0
         self.stdout.write(f'\nEmbedded {processed} concepts in {elapsed:.1f}s.')
 
         # Rebuild the IVFFlat index now that rows exist.
         self.stdout.write('Rebuilding IVFFlat index...')
+        self._ensure_connection()
         with connection.cursor() as cur:
             cur.execute('DROP INDEX IF EXISTS ix_concept_embedding_cosine')
             cur.execute("""
@@ -120,21 +137,41 @@ class Command(BaseCommand):
             """)
         self.stdout.write('Done.')
 
-    def _flush_batch(self, model, ids, names):
-        """Encode and upsert one batch. Returns count of rows written."""
-        vectors = model.encode(names, show_progress_bar=False)
+    def _existing_ids(self):
+        """Set of concept_ids that already have embeddings."""
+        self._ensure_connection()
         with connection.cursor() as cur:
-            args = [
-                (cid, vec.tolist())
-                for cid, vec in zip(ids, vectors)
-            ]
-            cur.executemany(
-                """
-                INSERT INTO concept_embedding (concept_id, embedding)
-                VALUES (%s, %s::vector)
-                ON CONFLICT (concept_id)
-                    DO UPDATE SET embedding = EXCLUDED.embedding
-                """,
-                args,
-            )
-        return len(ids)
+            cur.execute('SELECT concept_id FROM concept_embedding')
+            return {row[0] for row in cur.fetchall()}
+
+    def _write_batch(self, pairs, retries=3):
+        """Upsert a small batch of (concept_id, vector) pairs with retry."""
+        args = [(cid, vec.tolist()) for cid, vec in pairs]
+        for attempt in range(retries):
+            try:
+                self._ensure_connection()
+                with connection.cursor() as cur:
+                    cur.executemany(
+                        """
+                        INSERT INTO concept_embedding (concept_id, embedding)
+                        VALUES (%s, %s::vector)
+                        ON CONFLICT (concept_id)
+                            DO UPDATE SET embedding = EXCLUDED.embedding
+                        """,
+                        args,
+                    )
+                return
+            except Exception as exc:
+                if attempt < retries - 1:
+                    logger.warning(
+                        'DB write failed (attempt %d/%d): %s — reconnecting',
+                        attempt + 1, retries, exc,
+                    )
+                    connection.close()
+                    time.sleep(2 ** attempt)
+                else:
+                    raise
+
+    def _ensure_connection(self):
+        """Reopen the connection if it was dropped."""
+        connection.ensure_connection()
