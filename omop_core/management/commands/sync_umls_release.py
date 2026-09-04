@@ -7,7 +7,7 @@ import requests
 from stream_unzip import stream_unzip
 
 from omop_core.management.commands.load_athena_vocabularies import (
-    UMLS_DOWNLOAD_URL, _resolve_umls_release,
+    UMLS_DOWNLOAD_URL, UMLS_RELEASES_URL, _release_version_from_url,
 )
 from omop_core.models import UmlsConcept, UmlsRelease, UmlsSourceCode
 
@@ -18,7 +18,7 @@ def _find_mrconso(chunks):
     """Yield MRCONSO bytes from either a release ZIP or its nested payload ZIP."""
     for name, _, member_chunks in stream_unzip(chunks):
         filename = name.decode('utf-8')
-        if filename.endswith('META/MRCONSO.RRF'):
+        if filename.endswith('MRCONSO.RRF'):
             return member_chunks
         if filename.lower().endswith('.zip'):
             nested = _find_mrconso(member_chunks)
@@ -41,7 +41,18 @@ class Command(BaseCommand):
         api_key = os.environ.get('UMLS_API_KEY')
         if not api_key:
             raise CommandError('UMLS_API_KEY must be configured to download a UMLS release.')
-        release = _resolve_umls_release(options['release_url'] or os.environ.get('UMLS_RELEASE_URL'))
+        pinned_url = options['release_url'] or os.environ.get('UMLS_RELEASE_URL')
+        if pinned_url:
+            release = {'release_url': pinned_url, 'release_version': _release_version_from_url(pinned_url)}
+        else:
+            listing = requests.get(UMLS_RELEASES_URL, params={'releaseType': 'umls-metathesaurus-mrconso-file', 'current': 'true'}, timeout=30)
+            listing.raise_for_status()
+            releases = listing.json()
+            if not isinstance(releases, list) or len(releases) != 1 or not releases[0].get('downloadUrl'):
+                raise CommandError('NLM UTS did not return a current UMLS MRCONSO release.')
+            release = {'release_url': releases[0]['downloadUrl'], 'release_version': releases[0].get('releaseVersion')}
+        if not release['release_version']:
+            raise CommandError('Could not determine the UMLS release version.')
         release_row, _ = UmlsRelease.objects.update_or_create(release_version=release['release_version'], defaults={'release_url': release['release_url'], 'archive_sha256': ''})
         allowed = set(options['sources'].split(',')) if options['sources'] else None
         response = requests.get(UMLS_DOWNLOAD_URL, params={'url': release['release_url'], 'apiKey': api_key}, stream=True, timeout=(30, 300))
