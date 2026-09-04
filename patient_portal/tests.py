@@ -18632,6 +18632,12 @@ class WearableUploadEndpointTest(TestCase):
                 )
             cls.wearable_concepts[metric_key] = c
 
+        # Runtime ingestion is governed exclusively by SCCM.  Populate the
+        # approved device rows after the fixture target concepts exist, exactly
+        # as the production vocabulary-load path does.
+        from django.core.management import call_command
+        call_command('seed_wearable_device_mappings', verbosity=0)
+
         # Provenance type concept for wearable rows. This fixture previously
         # created 32883 under the name 'Patient self-report', mirroring the
         # same mistake the production code made — 32883 is 'Survey'; 32865 is
