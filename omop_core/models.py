@@ -4178,6 +4178,26 @@ class UmlsConcept(models.Model):
         db_table = 'umls_concept'
 
 
+class ConceptEmbedding(models.Model):
+    """Precomputed sentence-transformer embedding for concept name search.
+
+    Populated by ``manage.py build_concept_embeddings`` and queried by the
+    vector-similarity tier of the code-mapping suggest pipeline.  Uses pgvector
+    for cosine-distance indexing.
+    """
+    concept = models.OneToOneField(
+        Concept, primary_key=True, on_delete=models.CASCADE,
+        related_name='embedding',
+    )
+    embedding = models.BinaryField(
+        help_text='pgvector vector(384) stored via raw SQL; BinaryField is a placeholder for Django.',
+    )
+
+    class Meta:
+        db_table = 'concept_embedding'
+        managed = False  # table created by migration with raw SQL for pgvector types
+
+
 class UmlsSourceCode(models.Model):
     """A source-asserted terminology code from MRCONSO.RRF."""
     concept = models.ForeignKey(UmlsConcept, on_delete=models.CASCADE, related_name='source_codes')

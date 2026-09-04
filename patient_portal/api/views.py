@@ -74,6 +74,7 @@ from omop_core.services.code_mapping import (
     repoint_clinical_rows,
 )
 from omop_core.services.mapping_suggestions import (
+    ALL_STRATEGIES,
     DEFAULT_MIN_OCCURRENCES,
     suggest_mappings,
 )
@@ -9027,6 +9028,29 @@ def code_mapping_suggest(request):
 
     dry_run = bool(request.data.get('dry_run'))
 
+    # Retrieval strategies (new: multi-strategy waterfall).
+    raw_strategies = request.data.get('strategies')
+    if raw_strategies is not None:
+        if not isinstance(raw_strategies, list):
+            return Response(
+                {'strategies': 'Must be a list of strategy names.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        invalid = [s for s in raw_strategies if s not in ALL_STRATEGIES]
+        if invalid:
+            return Response(
+                {'strategies': f'Unknown strategies: {invalid}. Valid: {ALL_STRATEGIES}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not raw_strategies:
+            return Response(
+                {'strategies': 'At least one strategy must be selected.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        strategies = raw_strategies
+    else:
+        strategies = None  # suggest_mappings() defaults to all
+
     # Multi-table: scan each relevant table, merge results by occurrence.
     all_results = []
     for tbl in tables:
@@ -9034,6 +9058,7 @@ def code_mapping_suggest(request):
             tbl, min_occurrences=min_occurrences, limit=limit,
             dry_run=dry_run,
             source_vocabulary_id=source_vocab,
+            strategies=strategies,
         )
         all_results.extend(tbl_results)
 
@@ -9047,6 +9072,14 @@ def code_mapping_suggest(request):
         suggested = entry.get('suggested')
         vocab = suggested['vocabulary_id'] if suggested else (source_vocab or '')
         landed[vocab] = landed.get(vocab, 0) + 1
+
+    # Strategy breakdown: how many results each tier resolved.
+    strategy_counts = {}
+    for r in results:
+        s = r.get('strategy_used')
+        if s:
+            strategy_counts[s] = strategy_counts.get(s, 0) + 1
+
     return Response({
         'landed_in': landed,
         'source_vocabulary_id': source_vocab,
@@ -9054,6 +9087,7 @@ def code_mapping_suggest(request):
         'considered': len(results),
         'created': len(created),
         'ranked': sum(1 for r in results if r.get('suggested')),
+        'strategy_counts': strategy_counts,
         'results': results,
         'truncated': len(all_results) > limit,
     }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)

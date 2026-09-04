@@ -33,7 +33,13 @@ from django.contrib.postgres.search import TrigramSimilarity
 from django.db.models import Case, CharField, Count, F, Max, Q, Value, When
 from django.db.models.functions import Upper
 
-from omop_core.models import Concept, ConceptSynonym, SourceCodeConceptMapping
+from omop_core.models import (
+    Concept,
+    ConceptSynonym,
+    SourceCodeConceptMapping,
+    UmlsSourceCode,
+)
+
 from omop_core.services.code_mapping import (
     CLINICAL_TABLES,
     NO_MATCHING_CONCEPT_ID,
@@ -63,6 +69,168 @@ MIN_TRIGRAM_SCORE = 0.3
 # A synonym match beats a name match at equal similarity. Synonyms are what
 # clinicians write, and a source value is a clinician's words.
 SYNONYM_BONUS = 0.05
+
+# ---------------------------------------------------------------------------
+# UMLS root-source mapping
+# ---------------------------------------------------------------------------
+# Maps OMOP vocabulary_id → UMLS SAB (root_source in umls_source_code).
+# Verified against staging data (195 distinct root_source values).
+VOCAB_TO_UMLS_ROOT = {
+    'SNOMED': 'SNOMEDCT_US',
+    'ICD10CM': 'ICD10CM',
+    'ICD10PCS': 'ICD10PCS',
+    'LOINC': 'LNC',
+    'RxNorm': 'RXNORM',
+    'CPT4': 'CPT',
+    'HCPCS': 'HCPCS',
+    'NDC': 'NDC',
+    'CVX': 'CVX',
+    'ICD9CM': 'ICD9CM',
+    'MeSH': 'MSH',
+    'NDFRT': 'MED-RT',
+}
+
+# Reverse: UMLS SAB → OMOP vocabulary_id (for sibling-code lookups).
+_UMLS_ROOT_TO_VOCAB = {v: k for k, v in VOCAB_TO_UMLS_ROOT.items()}
+
+# ---------------------------------------------------------------------------
+# Strategy labels
+# ---------------------------------------------------------------------------
+STRATEGY_UMLS = 'umls'
+STRATEGY_VECTORS = 'vectors'
+STRATEGY_LEXICAL = 'lexical'
+ALL_STRATEGIES = [STRATEGY_UMLS, STRATEGY_VECTORS, STRATEGY_LEXICAL]
+
+
+def umls_candidates(source_code, source_vocabulary_id, domain_id=None):
+    """Find standard OMOP concepts via UMLS CUI bridging.
+
+    Given a source code and its vocabulary, look up the UMLS CUI, then find
+    all sibling codes across vocabularies that map to standard OMOP concepts.
+
+    Returns a list of candidate dicts (same shape as lexical_candidates) plus
+    metadata.  When a single standard concept is found the caller can skip the
+    ranker -- UMLS equivalencies are curated by NLM.
+    """
+    umls_root = VOCAB_TO_UMLS_ROOT.get(source_vocabulary_id)
+    if not umls_root:
+        return [], None
+
+    # 1. Find the CUI(s) for this source code.
+    source_rows = (
+        UmlsSourceCode.objects
+        .filter(root_source=umls_root, code=source_code)
+        .values_list('concept_id', flat=True)      # concept_id = CUI FK
+        .distinct()
+    )
+    cuis = list(source_rows)
+    if not cuis:
+        return [], None
+
+    # 2. Find sibling codes across all vocabularies sharing any of those CUIs.
+    siblings = (
+        UmlsSourceCode.objects
+        .filter(concept_id__in=cuis)
+        .exclude(root_source=umls_root, code=source_code)
+        .values_list('root_source', 'code')
+        .distinct()
+    )
+
+    # 3. For each sibling, try to find a standard OMOP concept.
+    seen = set()
+    candidates = []
+    for sab, sibling_code in siblings:
+        omop_vocab = _UMLS_ROOT_TO_VOCAB.get(sab)
+        if not omop_vocab:
+            continue
+
+        qs = Concept.objects.filter(
+            vocabulary_id=omop_vocab,
+            concept_code=sibling_code,
+            standard_concept='S',
+            invalid_reason__isnull=True,
+        )
+        if domain_id:
+            qs = qs.filter(domain_id=domain_id)
+
+        for c in qs[:10]:  # cap per sibling to avoid runaway
+            if c.concept_id in seen:
+                continue
+            seen.add(c.concept_id)
+            candidates.append({
+                'concept_id': c.concept_id,
+                'concept_name': c.concept_name,
+                'concept_code': c.concept_code,
+                'vocabulary_id': c.vocabulary_id,
+                'concept_class_id': c.concept_class_id,
+                'umls_score': 1.0,  # curated equivalency — max confidence
+            })
+
+    cui_str = ','.join(cuis) if len(cuis) <= 5 else f'{cuis[0]}...(+{len(cuis)-1})'
+    return candidates, cui_str
+
+
+def vector_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
+    """Concepts semantically similar to *source_value* via pgvector cosine search.
+
+    Requires the ``concept_embedding`` table to be populated (see
+    ``manage.py build_concept_embeddings``).  Returns an empty list if
+    sentence-transformers is not installed or the table is empty -- the caller
+    falls through to lexical.
+    """
+    query = (source_value or '').strip()
+    if len(query) < 3:
+        return []
+
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError:
+        logger.info('sentence-transformers not installed; vector search unavailable.')
+        return []
+
+    model = _get_embedding_model()
+    query_vec = model.encode(query).tolist()
+
+    from django.db import connection
+    with connection.cursor() as cursor:
+        cursor.execute("""
+            SELECT ce.concept_id, c.concept_name, c.concept_code,
+                   c.vocabulary_id, c.concept_class_id,
+                   1 - (ce.embedding <=> %s::vector) AS score
+            FROM concept_embedding ce
+            JOIN concept c ON c.concept_id = ce.concept_id
+            WHERE c.domain_id = %s
+              AND c.standard_concept = 'S'
+              AND c.invalid_reason IS NULL
+            ORDER BY ce.embedding <=> %s::vector
+            LIMIT %s
+        """, [query_vec, domain_id, query_vec, limit])
+        rows = cursor.fetchall()
+
+    return [
+        {
+            'concept_id': row[0],
+            'concept_name': row[1],
+            'concept_code': row[2],
+            'vocabulary_id': row[3],
+            'concept_class_id': row[4],
+            'vector_score': round(float(row[5]), 4),
+        }
+        for row in rows
+    ]
+
+
+# Singleton for the embedding model -- loading it is expensive (~1s).
+_embedding_model = None
+
+
+def _get_embedding_model():
+    """Return a cached SentenceTransformer instance."""
+    global _embedding_model
+    if _embedding_model is None:
+        from sentence_transformers import SentenceTransformer
+        _embedding_model = SentenceTransformer('BAAI/bge-small-en-v1.5')
+    return _embedding_model
 
 
 def unmapped_source_values(omop_table, min_occurrences=DEFAULT_MIN_OCCURRENCES,
@@ -333,7 +501,7 @@ def rank_candidates(source_value, candidates, source_description=''):
 
 def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
                      limit=None, source_system='suggest', dry_run=False,
-                     source_vocabulary_id=None):
+                     source_vocabulary_id=None, strategies=None):
     """Propose mappings for unmapped source values in one clinical table.
 
     Every proposal lands as ``proposed`` with ``origin='import'`` -- a machine
@@ -342,8 +510,21 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
     deliberately has no destination. Minting an HK-* concept named only after
     the source code would create a fake destination with no clinical meaning.
 
+    *strategies* controls which retrieval tiers run, in waterfall order:
+
+    - ``umls`` — CUI-bridge lookup (curated NLM equivalencies, highest trust)
+    - ``vectors`` — sentence-transformer cosine similarity (semantic)
+    - ``lexical`` — GIN trigram similarity (string-level)
+
+    The waterfall exits early: if UMLS finds a single standard concept the
+    other tiers are skipped for that code.  Vectors and lexical both feed
+    candidates into :func:`rank_candidates` for Claude re-ranking.
+
     Returns a list of result dicts, one per source value considered.
     """
+    if strategies is None:
+        strategies = list(ALL_STRATEGIES)
+
     target = _QUARANTINE_TARGETS.get(omop_table)
     if target is None:
         raise ValueError(f'No quarantine vocabulary for table {omop_table!r}.')
@@ -363,10 +544,57 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
             concept_code__iexact=source_value,
         ).first() if src_vocab_id else None
         source_description = source_concept.concept_name if source_concept else ''
-        candidates = lexical_candidates(source_description or source_value, domain_id)
-        chosen, note = rank_candidates(
-            source_value, candidates, source_description=source_description,
-        )
+
+        chosen = None
+        note = ''
+        candidates = []
+        strategy_used = None
+        umls_cui = None
+
+        # --- Tier 1: UMLS CUI bridging ---
+        if STRATEGY_UMLS in strategies:
+            umls_hits, cui_str = umls_candidates(source_value, src_vocab_id, domain_id)
+            if umls_hits:
+                umls_cui = cui_str
+                if len(umls_hits) == 1:
+                    # Single standard concept — high-confidence curated match.
+                    chosen = umls_hits[0]
+                    note = f'UMLS CUI bridge ({cui_str}): exact cross-vocabulary equivalency.'
+                    strategy_used = STRATEGY_UMLS
+                    candidates = umls_hits
+                else:
+                    # Multiple — let the ranker decide.
+                    candidates = umls_hits
+                    chosen, note = rank_candidates(
+                        source_value, candidates, source_description=source_description,
+                    )
+                    if chosen:
+                        strategy_used = STRATEGY_UMLS
+
+        # --- Tier 2: Vector similarity ---
+        if chosen is None and STRATEGY_VECTORS in strategies:
+            vec_hits = vector_candidates(source_description or source_value, domain_id)
+            if vec_hits:
+                candidates = vec_hits
+                chosen, note = rank_candidates(
+                    source_value, candidates, source_description=source_description,
+                )
+                if chosen:
+                    strategy_used = STRATEGY_VECTORS
+
+        # --- Tier 3: Lexical trigram ---
+        if chosen is None and STRATEGY_LEXICAL in strategies:
+            lex_hits = lexical_candidates(source_description or source_value, domain_id)
+            if lex_hits:
+                candidates = lex_hits
+                chosen, note = rank_candidates(
+                    source_value, candidates, source_description=source_description,
+                )
+                if chosen:
+                    strategy_used = STRATEGY_LEXICAL
+
+        if not strategy_used and not chosen:
+            note = note or 'No candidate concept found by any enabled strategy.'
 
         entry = {
             'source_code': source_value,
@@ -376,6 +604,8 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
             'suggested': chosen,
             'note': note,
             'candidates_considered': len(candidates),
+            'strategy_used': strategy_used,
+            'umls_cui': umls_cui,
         }
         if dry_run:
             results.append(entry)
