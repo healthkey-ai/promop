@@ -584,3 +584,39 @@ describe('DiseaseTab — shared staging and biomarkers', () => {
     expect(screen.getByDisplayValue('12')).toBeInTheDocument();
   });
 });
+
+describe('DiseaseTab — field ownership (#960)', () => {
+  it('owns Stage and Histologic Type, and leaves Disease to the General tab', () => {
+    // This tab knows which staging vocabulary applies — Ann Arbor for lymphoma,
+    // ISS for myeloma, generic here — so the editable Stage box belongs to it.
+    // `disease` is the discriminator that selects which section renders, so the
+    // General tab owns that one and this tab no longer draws a second box.
+    render(
+      <DiseaseTab
+        {...BASE_PROPS}
+        diseaseType="other"
+        formData={{ disease: 'Other', stage: 'II', histologic_type: 'Ductal' }}
+      />,
+    );
+
+    expect(screen.getByText('Stage')).toBeInTheDocument();
+    expect(screen.getByText('Histologic Type')).toBeInTheDocument();
+    expect(screen.queryByText('Disease')).toBeNull();
+  });
+
+  it.each([
+    ['breast', 'Stage'],
+    ['lymphoma', 'Ann Arbor Stage'],
+    ['myeloma', 'ISS Stage'],
+    ['cll', 'Binet Stage'],
+    ['other', 'Stage'],
+  ] as const)('gives %s a way to set its stage', (diseaseType, label) => {
+    // Taking Stage off the General tab removed the only stage control breast
+    // patients had: the breast section carried T, N and M but not the group
+    // they roll up to. CLL is the one disease that never needed the generic
+    // field — it stages on Binet, and General was offering it solid-tumour
+    // stages. This is the invariant that near-miss was hiding.
+    render(<DiseaseTab {...BASE_PROPS} diseaseType={diseaseType} formData={{}} />);
+    expect(screen.getByText(label)).toBeInTheDocument();
+  });
+});

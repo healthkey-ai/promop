@@ -10,7 +10,7 @@
 import { Linter } from 'eslint';
 import tsParser from '@typescript-eslint/parser';
 import { describe, it, expect, beforeEach } from 'vitest';
-import rule, { __resetTabFieldState } from './no-duplicate-tab-field.js';
+import rule, { __resetTabFieldState, __setKnownDuplicates } from './no-duplicate-tab-field.js';
 
 const linter = new Linter();
 const CONFIG = {
@@ -65,7 +65,15 @@ const tableTab = (...keys) => `
     return <div>{section('Counts', COUNTS)}</div>;
   }`;
 
-beforeEach(__resetTabFieldState);
+beforeEach(() => {
+  __resetTabFieldState();
+  // The production map is empty (#960 cleared the last of it), so the exemption
+  // and stale mechanisms are exercised against a fixture instead of whatever
+  // happens to be configured.
+  __setKnownDuplicates([]);
+});
+
+const EXEMPT = [['stage', ['DiseaseTab.tsx', 'GeneralTab.tsx']]];
 
 describe('no-duplicate-tab-field', () => {
   it('catches a duplicate declared inline on both tabs', () => {
@@ -201,29 +209,35 @@ describe('no-duplicate-tab-field', () => {
   });
 
   it('exempts the known duplicates it is configured with', () => {
-    // Only 'duplicate' is in question here. This fixture renders none of the
-    // other configured entries, so it also reports those stale — correctly, and
-    // the next test is what covers that.
-    const reports = ids([
+    __setKnownDuplicates(EXEMPT);
+    expect(ids([
       ['DiseaseTab.tsx', inlineTab('stage')],
       ['GeneralTab.tsx', inlineTab('stage')],
-    ]);
-    expect(reports.filter((id) => id === 'duplicate')).toEqual([]);
+    ])).toEqual([]);
+  });
+
+  it('exempts nothing by default', () => {
+    // The production map is empty. If an entry is ever added back, it must come
+    // with an issue number and a reason — not drift in unnoticed.
+    expect(ids([
+      ['DiseaseTab.tsx', inlineTab('stage')],
+      ['GeneralTab.tsx', inlineTab('stage')],
+    ])).toEqual(['duplicate']);
   });
 
   it('flags a known duplicate that no longer renders on both', () => {
     // A fixed duplicate must not leave a permanent hole behind it — whichever
-    // half drops the field, and whichever order the two are linted in. All
-    // three configured entries pair the same two tabs, so a fixture that
-    // renders none of them makes all three stale, which is the point.
+    // half drops the field, and whichever order the two are linted in. This is
+    // what fired on all three entries when #960 landed.
     const stale = (files) => {
       __resetTabFieldState();
+      __setKnownDuplicates(EXEMPT);
       const reports = lint(files);
-      expect(reports.map((r) => r.id)).toEqual(['stale', 'stale', 'stale']);
+      expect(reports.map((r) => r.id)).toEqual(['stale']);
       return reports.map((r) => /'([a-z_]+)' is listed/.exec(r.text)[1]).sort();
     };
 
-    const expected = ['disease', 'histologic_type', 'stage'];
+    const expected = ['stage'];
     expect(stale([
       ['DiseaseTab.tsx', inlineTab('stage')],
       ['GeneralTab.tsx', inlineTab('something_else')],

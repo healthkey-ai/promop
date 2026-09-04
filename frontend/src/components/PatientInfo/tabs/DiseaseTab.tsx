@@ -10,7 +10,6 @@ import {
   MENOPAUSAL_OPTIONS, TUMOR_STAGE_OPTIONS, NODES_STAGE_OPTIONS,
   STAGING_MODALITIES_OPTIONS, DISTANT_METASTASIS_STAGE_OPTIONS,
   YES_NO_OPTIONS, ER_OPTIONS, PR_OPTIONS, HER2_OPTIONS, HR_OPTIONS, HRD_OPTIONS,
-  DISEASE_OPTIONS,
   FLIPI_RISK_OPTIONS, FLIPI_FACTOR_OPTIONS, GELF_OPTIONS, FL_TUMOR_GRADE_OPTIONS,
   ISS_STAGE_OPTIONS, MM_PROGRESSION_OPTIONS, STEM_CELL_TRANSPLANT_OPTIONS, SCT_ELIGIBILITY_OPTIONS, MYELOMA_TYPE_OPTIONS,
   MRD_STATUS_OPTIONS, CYTOGENETIC_RISK_OPTIONS,
@@ -55,6 +54,12 @@ function BreastCancerSection({ formData, onChange, onMutationAdd, onMutationRemo
             <ClinicalField label="Histologic Type" name="histologic_type" descriptor={descriptors.histologic_type} type="select" value={formData?.histologic_type} options={histOptions} onChange={onChange} vocabSource={histologicSource} />
           </div>
           <ClinicalField label="Menopausal Status" name="menopausal_status" descriptor={descriptors.menopausal_status} type="select" value={formData?.menopausal_status} options={MENOPAUSAL_OPTIONS} onChange={onChange} />
+          {/* The AJCC stage group the T, N and M below roll up to. It used to
+              render only on the General tab, where the select was the generic
+              one for every disease; when #960 moved stage ownership here, breast
+              was the one disease section that had the components but not the
+              group, and would have been left with no way to set it. */}
+          <ClinicalField label="Stage" name="stage" descriptor={descriptors.stage} type="select" value={formData?.stage} options={STAGE_OPTIONS} onChange={onChange} />
           <ClinicalField label="Tumor Stage" name="tumor_stage" descriptor={descriptors.tumor_stage} type="select" value={formData?.tumor_stage} options={TUMOR_STAGE_OPTIONS} onChange={onChange} vocabSource={tumorStageSource} />
           <ClinicalField label="Nodes Stage" name="nodes_stage" descriptor={descriptors.nodes_stage} type="select" value={formData?.nodes_stage} options={NODES_STAGE_OPTIONS} onChange={onChange} vocabSource={nodesStageSource} />
           <ClinicalField label="Staging Modalities" name="staging_modalities" descriptor={descriptors.staging_modalities} type="select" value={formData?.staging_modalities} options={STAGING_MODALITIES_OPTIONS} onChange={onChange} vocabSource={stagingModalitySource} />
@@ -355,7 +360,10 @@ function OtherSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange
 
   return (
     <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-      <ClinicalField label="Disease" name="disease" descriptor={descriptors.disease} type="select" value={formData?.disease} options={DISEASE_OPTIONS} onChange={onChange} />
+      {/* Disease itself is owned by the General tab: it is the discriminator
+          that selects which section of this tab renders, so the place to set it
+          is the tab the user lands on. Rendering it here too gave one value two
+          editable boxes (#960). */}
       <ClinicalField label="Stage" name="stage" descriptor={descriptors.stage} type="select" value={formData?.stage} options={STAGE_OPTIONS} onChange={onChange} />
       <div className="sm:col-span-2">
         <ClinicalField label="Histologic Type" name="histologic_type" descriptor={descriptors.histologic_type} type="select" value={formData?.histologic_type} options={histOptions} onChange={onChange} vocabSource={histologicSource} />

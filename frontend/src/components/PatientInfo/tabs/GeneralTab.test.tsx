@@ -79,7 +79,6 @@ function renderTab(formData: Record<string, unknown> = {}) {
       editedName="Alishia Howell"
       onNameChange={vi.fn()}
       onZipcodeChange={vi.fn()}
-      diseaseType="myeloma"
     />,
   );
 }
@@ -191,6 +190,21 @@ describe('GeneralTab', () => {
                          'Infection Status', 'Physical Measurements']) {
       expect(screen.getByText(title)).toBeInTheDocument();
     }
+  });
+  it('owns Disease, and leaves Stage and Histologic Type to the Disease tab', async () => {
+    // #960. Stage's valid values are disease-specific — Ann Arbor for lymphoma,
+    // ISS for myeloma — and this tab has no disease context, so its select was
+    // always the generic one. Two editable boxes with two different valid value
+    // sets meant editing here could set a stage the Disease tab rejects.
+    // Disease itself stays: it is the discriminator that picks the section there.
+    renderTab({ disease: 'Multiple Myeloma', stage: 'II', histologic_type: 'Ductal' });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    // Whether `disease` is writable is a separate question, covered above —
+    // this is about which tab renders it at all.
+    expect(screen.getByText('Disease')).toBeInTheDocument();
+    expect(screen.queryByText('Stage')).toBeNull();
+    expect(screen.queryByText('Histologic Type')).toBeNull();
   });
 });
 
