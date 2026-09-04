@@ -26,6 +26,7 @@ python-dotenv==1.2.2
 python3-openid==3.2.0
 requests==2.34.2
 requests-oauthlib==2.0.0
+stream-unzip==0.0.99
 sqlparse==0.6.0
 urllib3==2.7.0
 whitenoise==6.7.0
