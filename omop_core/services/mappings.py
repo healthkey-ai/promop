@@ -334,15 +334,14 @@ def resolve_wearable_mappings(device_type):
 
     For Garmin uploads, the SCCM source_code IS the metric_key (e.g., 'steps').
 
-    Falls back to the hard-coded WEARABLE_CONCEPT_CODE dict for any metric_key
-    that has no approved SCCM row, so the ingest continues to work during the
-    transition or if the seeder hasn't been run.
+    There is intentionally no code-to-concept fallback. An absent SCCM row is
+    a mapping/configuration gap, not permission for the importer to revive a
+    second, invisible mapping registry in Python.
 
     Returns:
         dict mapping metric_key → Concept (or None if unresolvable)
     """
     from omop_core.models import SourceCodeConceptMapping
-    from omop_core.services.concept_cache import concept_by_vocab as _cc_by_vocab
 
     source_vocab = 'Apple' if device_type == 'apple' else 'Garmin'
 
@@ -369,13 +368,6 @@ def resolve_wearable_mappings(device_type):
         for row in approved:
             if row.target_concept:
                 db_mappings[row.source_code] = row.target_concept
-
-    # Fall back to hard-coded dict for any metric not in the DB.
-    for metric_key, concept_code in WEARABLE_CONCEPT_CODE.items():
-        if metric_key not in db_mappings:
-            concept = _cc_by_vocab(WEARABLE_CONCEPT_VOCAB[metric_key], concept_code)
-            if concept:
-                db_mappings[metric_key] = concept
 
     return db_mappings
 
