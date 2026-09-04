@@ -1415,12 +1415,18 @@ class Command(BaseCommand):
     def _load_code_mappings(self, verbosity):
         """Load approved code-to-concept mappings from the bundled artifact."""
         from django.core.management import call_command
+
+        def seed_wearable_mappings():
+            self._log('  Seeding approved Apple and Garmin source-code mappings...')
+            call_command('seed_wearable_device_mappings', verbosity=verbosity)
+
         artifact = Path(__file__).resolve().parents[2] / 'data' / 'code_concept_mappings.json'
         if not artifact.exists():
             self._log(
                 '  load_mappings: artifact not found at '
                 f'{artifact} — skipping code mapping load.'
             )
+            seed_wearable_mappings()
             return
         # The artifact is tracked by Git LFS. If LFS content hasn't been
         # pulled, the file is a tiny pointer instead of JSON — skip gracefully.
@@ -1433,10 +1439,12 @@ class Command(BaseCommand):
                 '  load_mappings: artifact is a Git LFS pointer — '
                 'run "git lfs pull" to fetch the actual file. Skipping.'
             )
+            seed_wearable_mappings()
             return
         self._log('')
         self._log('  Loading approved code-to-concept mappings from artifact...')
         call_command('load_mappings', artifact=str(artifact), verbosity=verbosity)
+        seed_wearable_mappings()
 
     def _load_raw_umls(self, verbosity):
         """Import cached raw UMLS source codes without conflating them with OMOP."""

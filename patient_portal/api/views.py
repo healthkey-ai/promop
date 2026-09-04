@@ -4176,9 +4176,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if not samples:
             return Response({'samples_created': 0, 'duplicates_skipped': 0})
 
-        # Resolve each metric's concept from approved SourceCodeConceptMapping
-        # rows for this device type, falling back to the hard-coded
-        # WEARABLE_CONCEPT_CODE dict for any metric without a DB mapping.
+        # Resolve each metric's concept exclusively from approved
+        # SourceCodeConceptMapping rows for this device type.
         metric_concepts: dict[str, Concept | None] = resolve_wearable_mappings(device_type)
 
         unresolved = sorted(k for k, c in metric_concepts.items() if c is None)

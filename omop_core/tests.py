@@ -7155,19 +7155,17 @@ class SeedWearableDeviceMappingsTest(TestCase):
 
 
 class ResolveWearableMappingsTest(TestCase):
-    """Test resolve_wearable_mappings() with DB-driven and fallback modes."""
+    """Test resolve_wearable_mappings() uses SCCM as its sole registry."""
 
     @classmethod
     def setUpTestData(cls):
         seed_test_concepts()
 
-    def test_fallback_to_hardcoded_when_no_db_rows(self):
-        """Without SCCM rows, resolve_wearable_mappings falls back to WEARABLE_CONCEPT_CODE."""
+    def test_no_mapping_without_an_approved_sccm_row(self):
+        """An unseeded device has no hidden Python mapping fallback."""
         from omop_core.services.mappings import resolve_wearable_mappings
         mappings = resolve_wearable_mappings('apple')
-        # Steps should resolve from the hard-coded dict
-        self.assertIn('steps', mappings)
-        self.assertIsNotNone(mappings['steps'])
+        self.assertEqual(mappings, {})
 
     def test_db_mappings_used_when_seeded(self):
         """After seeding, resolve_wearable_mappings reads from the DB."""
@@ -7186,13 +7184,11 @@ class ResolveWearableMappingsTest(TestCase):
         self.assertIn('hrv_rmssd', mappings)
         self.assertIn('resting_hr', mappings)
 
-    def test_db_mapping_overrides_hardcoded(self):
-        """An approved SCCM row takes precedence over the hard-coded dict."""
+    def test_db_mapping_is_the_runtime_mapping(self):
+        """An approved SCCM row is the sole source of runtime resolution."""
         from omop_core.services.mappings import resolve_wearable_mappings
         call_command('seed_wearable_device_mappings', verbosity=0)
         mappings = resolve_wearable_mappings('garmin')
-        # The DB mapping should resolve to the same concept as the hard-coded one
-        # (since they point to the same LOINC code), confirming DB was consulted.
         garmin_steps = SourceCodeConceptMapping.objects.get(
             source_vocabulary_id='Garmin', source_code='steps',
         )
