@@ -6071,6 +6071,222 @@ class LotInferenceTest(_SmartBase):
         self.assertGreaterEqual(len(lots), 2)
         cart_lots = [l for l in lots if 'CAR T-Cell' in l.phase_label]
         self.assertEqual(len(cart_lots), 1)
+# ---------------------------------------------------------------------------
+# ScopedTokenPermission role-based enforcement
+# ---------------------------------------------------------------------------
+
+class ScopedTokenPermissionTest(TestCase):
+    """Verify role-based enforcement for non-OAuth2 auth paths."""
+
+    def setUp(self):
+        from django.test import RequestFactory
+        from patient_portal.api.permissions import ScopedTokenPermission
+
+        self.factory = RequestFactory()
+        self.permission = ScopedTokenPermission()
+
+    def _user(self, **kwargs):
+        import uuid
+        return Identity.objects.create_user(
+            email=f"perm-{uuid.uuid4()}@test.com",
+            password="x",
+            **kwargs,
+        )
+
+    def _req(self, method, auth, user):
+        req = getattr(self.factory, method.lower())("/")
+        req.auth = auth
+        req.user = user
+        return req
+
+    def test_service_token_allows_delete(self):
+        req = self._req("DELETE", "service-token", self._user())
+        self.assertTrue(self.permission.has_permission(req, None))
+
+    def test_service_token_allows_post(self):
+        req = self._req("POST", "service-token", self._user())
+        self.assertTrue(self.permission.has_permission(req, None))
+
+    def test_service_token_allows_get(self):
+        req = self._req("GET", "service-token", self._user())
+        self.assertTrue(self.permission.has_permission(req, None))
+
+    def test_staff_allows_delete_via_is_staff(self):
+        req = self._req("DELETE", None, self._user(is_staff=True))
+        self.assertTrue(self.permission.has_permission(req, None))
+
+    def test_staff_allows_post(self):
+        req = self._req("POST", None, self._user(is_staff=True))
+        self.assertTrue(self.permission.has_permission(req, None))
+
+    def test_staff_allows_delete(self):
+        req = self._req("DELETE", None, self._user(is_staff=True))
+        self.assertTrue(self.permission.has_permission(req, None))
+
+    def test_patient_allows_get(self):
+        req = self._req("GET", None, self._user())
+        self.assertTrue(self.permission.has_permission(req, None))
+
+    def test_patient_allows_patch(self):
+        req = self._req("PATCH", None, self._user())
+        self.assertTrue(self.permission.has_permission(req, None))
+
+    def test_patient_denies_delete(self):
+        req = self._req("DELETE", None, self._user())
+        self.assertFalse(self.permission.has_permission(req, None))
+
+    def test_patient_denies_post(self):
+        req = self._req("POST", None, self._user())
+        self.assertFalse(self.permission.has_permission(req, None))
+
+    def test_patient_denies_put(self):
+        req = self._req("PUT", None, self._user())
+        self.assertFalse(self.permission.has_permission(req, None))
+
+    def test_unauthenticated_denies_get(self):
+        from django.contrib.auth.models import AnonymousUser
+        req = self._req("GET", None, AnonymousUser())
+        self.assertFalse(self.permission.has_permission(req, None))
+
+    def test_firebase_patient_denies_delete(self):
+        from patient_portal.api.providers.base import TokenClaims
+        claims = TokenClaims(issuer="https://securetoken.google.com/proj",
+                             sub="uid1", email="p@test.com", name="P", raw={})
+        req = self._req("DELETE", claims, self._user())
+        self.assertFalse(self.permission.has_permission(req, None))
+
+    def test_firebase_patient_denies_post(self):
+        from patient_portal.api.providers.base import TokenClaims
+        claims = TokenClaims(issuer="https://securetoken.google.com/proj",
+                             sub="uid2", email="p2@test.com", name="P2", raw={})
+        req = self._req("POST", claims, self._user())
+        self.assertFalse(self.permission.has_permission(req, None))
+
+    def test_firebase_patient_allows_patch(self):
+        from patient_portal.api.providers.base import TokenClaims
+        claims = TokenClaims(issuer="https://securetoken.google.com/proj",
+                             sub="uid3", email="p3@test.com", name="P", raw={})
+        req = self._req("PATCH", claims, self._user())
+        self.assertTrue(self.permission.has_permission(req, None))
+
+    def test_firebase_staff_allows_delete(self):
+        from patient_portal.api.providers.base import TokenClaims
+        claims = TokenClaims(issuer="https://securetoken.google.com/proj",
+                             sub="uid4", email="s@test.com", name="S", raw={})
+        req = self._req("DELETE", claims, self._user(is_staff=True))
+        self.assertTrue(self.permission.has_permission(req, None))
+
+
+# ---------------------------------------------------------------------------
+# Person ID enumeration fix — TODO #4
+# ---------------------------------------------------------------------------
+
+class PersonIdEnumerationTest(FhirUploadBase):
+    """bulk_delete error responses must not echo back submitted person IDs."""
+
+    def test_nonexistent_person_error_is_generic(self):
+        resp = self.client.delete(
+            '/api/patient-info/bulk_delete/',
+            {'person_ids': [999999987]},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        errors = resp.data.get('errors', [])
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0], 'Person not found.')
+        self.assertNotIn('999999987', str(resp.data))
+
+    def test_successful_delete_not_affected(self):
+        from omop_core.models import Person as P
+        p = P.objects.create(
+            person_id=78901,
+            given_name='Tmp',
+            family_name='Delete',
+            year_of_birth=1990,
+            gender_source_value='unknown',
+            race_source_value='unknown',
+            ethnicity_source_value='unknown',
+        )
+        resp = self.client.delete(
+            '/api/patient-info/bulk_delete/',
+            {'person_ids': [78901]},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['deleted_count'], 1)
+        self.assertEqual(resp.data['errors'], [])
+        self.assertFalse(P.objects.filter(person_id=78901).exists())
+
+
+@unittest.skip("Retired: mapped clinical PatientRecord fields are read-only")
+class FhirRxNavIntegrationTest(_SmartBase):
+    """FHIR upload for a drug unknown in local vocab → RxNav called → concept resolved."""
+
+    def _fhir_file(self, drug_name, filename='rxnav_test.json'):
+        bundle = {
+            'resourceType': 'Bundle',
+            'type': 'collection',
+            'entry': [
+                {'resource': {
+                    'resourceType': 'Patient',
+                    'id': 'rxnav-test-pt-1',
+                    'name': [{'family': 'RxNavTest', 'given': ['Patient']}],
+                    'gender': 'female',
+                    'birthDate': '1970-01-01',
+                }},
+                {'resource': {
+                    'resourceType': 'MedicationStatement',
+                    'id': 'rxnav-med-1',
+                    'status': 'completed',
+                    'subject': {'reference': 'Patient/rxnav-test-pt-1'},
+                    'medicationCodeableConcept': {'text': drug_name},
+                    'effectivePeriod': {'start': '2023-01-15', 'end': '2023-07-01'},
+                    'extension': [
+                        {'url': 'https://healthkey.ai/fhir/StructureDefinition/therapy-line',
+                         'valueInteger': 1},
+                    ],
+                }},
+            ],
+        }
+        f = io.BytesIO(json.dumps(bundle).encode('utf-8'))
+        f.name = filename
+        return f
+
+    def test_fhir_upload_uses_rxnav_for_unknown_drug(self):
+        from unittest.mock import patch
+        from omop_core.models import DrugExposure
+
+        with patch(
+            'omop_core.services.rxnav_service._rxnav_lookup',
+            return_value=('1421', 'bortezomib'),
+        ):
+            response = self.write_client.post(
+                '/api/patient-info/upload_fhir/',
+                {'file': self._fhir_file('Velcade')},
+                format='multipart',
+            )
+
+        self.assertIn(response.status_code, [200, 201])
+        de = DrugExposure.objects.filter(drug_source_value='Velcade').first()
+        self.assertIsNotNone(de, 'DrugExposure for Velcade not created')
+        self.assertNotEqual(de.drug_concept_id, 0)
+
+    def test_fhir_upload_unknown_drug_rxnav_fails_gracefully(self):
+        from unittest.mock import patch
+
+        with patch(
+            'omop_core.services.rxnav_service._rxnav_lookup',
+            return_value=(None, None),
+        ):
+            response = self.write_client.post(
+                '/api/patient-info/upload_fhir/',
+                {'file': self._fhir_file('completely-unknown-drug-xyz', 'rxnav_fallback.json')},
+                format='multipart',
+            )
+
+        self.assertIn(response.status_code, [200, 201])
+
+
 class SctEligibilityVocabTest(FhirUploadBase):
     """Verify the sct-eligibility vocabulary endpoint returns expected values."""
 
