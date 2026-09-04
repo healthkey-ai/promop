@@ -19365,7 +19365,7 @@ class BulkOmopWriteTest(TestCase):
             'PatientRecord was never refreshed after the bulk write')
         self.assertNotEqual(
             pr.derived_at, derived_before,
-            'PatientRecord.derived_at did not advance — the read model is stale')
+            'PatientRecord.derived_at did not advance, the read model is stale')
 
     def _count_refreshes(self, n, query='', start_day=0):
         """Return how many times refresh_patient_record runs for one bulk POST.
@@ -20170,9 +20170,1151 @@ class BulkOmopUpsertTest(TestCase):
             'the collapse landed without refreshing the read model')
 
 
+from unittest import mock  # noqa: E402
 from unittest.mock import patch  # noqa: E402
 from rest_framework.response import Response  # noqa: E402
 from patient_portal.models import PatientUser  # noqa: E402
+
+
+class PartialPatchValueColumnTest(TestCase):
+    """A partial write must not null the value columns it never mentioned."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.person = Person.objects.create(person_id=34001)
+        PatientRecord.objects.create(person=cls.person)
+        cls.m_concept = Concept.objects.get(concept_id=3000963)
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+        cls.service_identity = Identity.objects.get_or_create(
+            issuer='urn:service', sub='partial-patch-test',
+        )[0]
+        cls.service_identity.set_unusable_password()
+        cls.service_identity.save()
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.client = APIClient()
+        self.client.force_authenticate(
+            user=self.service_identity, token="service-token")
+
+    def _measurement(self, **extra: Any) -> Measurement:
+        from omop_core.services.pk import next_pk
+
+        return Measurement.objects.create(
+            measurement_id=next_pk(Measurement, 'measurement_id'),
+            person=self.person,
+            measurement_concept=self.m_concept,
+            measurement_date=date(2024, 1, 1),
+            measurement_type_concept=self.type_concept,
+            **extra,
+        )
+
+    def test_row_level_patch_of_another_field_keeps_the_value(self):
+        m = self._measurement(
+            value_as_number=6, measurement_source_value='KEEP-ME')
+        resp = self.client.patch(
+            f'/api/v1/measurements/{m.measurement_id}/',
+            {'unit_source_value': 'mg/dL'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        m.refresh_from_db()
+        self.assertEqual(m.value_as_number, 6)
+        self.assertEqual(m.unit_source_value, 'mg/dL')
+
+    def test_row_level_patch_still_coerces_a_boolean_assertion(self):
+        """The stored source value supplies the context a partial write omits."""
+        m = self._measurement(measurement_source_value='8659-8')
+        resp = self.client.patch(
+            f'/api/v1/measurements/{m.measurement_id}/',
+            {'value_as_string': 'yes'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        m.refresh_from_db()
+        self.assertEqual(m.value_as_string, 'True')
+        self.assertEqual(m.value_as_number, 1)
+
+    def test_row_level_patch_still_rejects_a_bad_assertion_value(self):
+        m = self._measurement(measurement_source_value='8659-8')
+        resp = self.client.patch(
+            f'/api/v1/measurements/{m.measurement_id}/',
+            {'value_as_string': 'sort of'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        m.refresh_from_db()
+        self.assertIsNone(m.value_as_string)
+
+    def test_bulk_update_coerces_a_boolean_assertion_the_same_way(self):
+        """Parity with the row level path, which reads it off the instance."""
+        m = self._measurement(measurement_source_value='8659-8')
+        resp = self.client.patch(
+            '/api/v1/measurements/bulk_update/',
+            [{'measurement_id': m.measurement_id, 'value_as_string': 'yes'}],
+            format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        m.refresh_from_db()
+        self.assertEqual(m.value_as_string, 'True')
+        self.assertEqual(m.value_as_number, 1)
+
+    def test_bulk_update_rejects_a_bad_assertion_value(self):
+        m = self._measurement(measurement_source_value='8659-8')
+        resp = self.client.patch(
+            '/api/v1/measurements/bulk_update/',
+            [{'measurement_id': m.measurement_id, 'value_as_string': 'sort of'}],
+            format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        m.refresh_from_db()
+        self.assertIsNone(m.value_as_string)
+
+    def test_creating_a_row_still_writes_both_value_columns(self):
+        """A full (non-partial) write is unchanged: both columns are assigned."""
+        resp = self.client.post('/api/v1/measurements/', {
+            'person': self.person.person_id,
+            'measurement_concept': self.m_concept.concept_id,
+            'measurement_date': '2024-02-02',
+            'measurement_type_concept': self.type_concept.concept_id,
+            'measurement_source_value': '8659-8',
+            'value_as_string': 'yes',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        m = Measurement.objects.get(measurement_id=resp.data['measurement_id'])
+        self.assertEqual(m.value_as_string, 'True')
+        self.assertEqual(m.value_as_number, 1)
+
+    def test_an_explicit_number_wins_over_the_stored_string(self):
+        """Patching an assertion from 1 to 0 must not stay true."""
+        m = self._measurement(
+            measurement_source_value='8659-8', value_as_number=1,
+            value_as_string='True')
+        resp = self.client.patch(
+            f'/api/v1/measurements/{m.measurement_id}/',
+            {'value_as_number': 0}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        m.refresh_from_db()
+        self.assertEqual(m.value_as_number, 0)
+        self.assertEqual(m.value_as_string, 'False')
+
+    def test_bulk_update_explicit_number_wins_too(self):
+        m = self._measurement(
+            measurement_source_value='8659-8', value_as_number=1,
+            value_as_string='True')
+        resp = self.client.patch(
+            '/api/v1/measurements/bulk_update/',
+            [{'measurement_id': m.measurement_id, 'value_as_number': 0}],
+            format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        m.refresh_from_db()
+        self.assertEqual(m.value_as_number, 0)
+        self.assertEqual(m.value_as_string, 'False')
+
+    def test_turning_a_row_into_an_assertion_validates_what_it_holds(self):
+        """A source-only patch has to coerce the values already stored."""
+        m = self._measurement(
+            measurement_source_value='PLAIN', value_as_string='yes')
+        resp = self.client.patch(
+            '/api/v1/measurements/bulk_update/',
+            [{'measurement_id': m.measurement_id,
+              'measurement_source_value': '8659-8'}],
+            format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        m.refresh_from_db()
+        self.assertEqual(m.value_as_string, 'True')
+        self.assertEqual(m.value_as_number, 1)
+
+    def test_turning_a_row_into_an_assertion_rejects_what_it_holds(self):
+        m = self._measurement(
+            measurement_source_value='PLAIN', value_as_string='sort of')
+        resp = self.client.patch(
+            '/api/v1/measurements/bulk_update/',
+            [{'measurement_id': m.measurement_id,
+              'measurement_source_value': '8659-8'}],
+            format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        m.refresh_from_db()
+        self.assertEqual(m.measurement_source_value, 'PLAIN')
+
+
+class BulkOmopUpdateTest(TestCase):
+    """PATCH /api/v1/<resource>/bulk_update/ with a list of partial rows."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.person = Person.objects.create(person_id=33001)
+        cls.other_person = Person.objects.create(person_id=33002)
+        PatientRecord.objects.create(person=cls.person)
+        PatientRecord.objects.create(person=cls.other_person)
+
+        cls.m_concept = Concept.objects.get(concept_id=3000963)
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+        cls.drug_concept = Concept.objects.get(concept_id=19136160)
+
+        cls.service_identity = Identity.objects.get_or_create(
+            issuer='urn:service', sub='bulk-update-test',
+        )[0]
+        cls.service_identity.set_unusable_password()
+        cls.service_identity.save()
+
+    def setUp(self):
+        from django.core.cache import cache
+        # DRF throttle state lives in the cache and leaks between tests.
+        cache.clear()
+        self.client = APIClient()
+        self.client.force_authenticate(
+            user=self.service_identity, token="service-token"
+        )
+
+    def _make_measurements(
+        self, n: int, person: Person | None = None, start_day: int = 0,
+        **extra: Any,
+    ) -> list[int]:
+        from omop_core.services.pk import next_pk_batch
+
+        person = person or self.person
+        base = date(2024, 1, 1)
+        rows = [
+            Measurement(
+                person=person,
+                measurement_concept=self.m_concept,
+                measurement_date=base + timedelta(days=start_day + i),
+                measurement_type_concept=self.type_concept,
+                value_as_number=5.0 + i,
+                measurement_source_value=f'UPD-{start_day + i}',
+                **extra,
+            )
+            for i in range(n)
+        ]
+        for row, pk in zip(rows, next_pk_batch(Measurement, 'measurement_id', n)):
+            row.measurement_id = pk
+        Measurement.objects.bulk_create(rows)
+        return [r.measurement_id for r in rows]
+
+    def _patch(
+        self, rows: Any, route: str = 'measurements', query: str = '',
+        client: APIClient | None = None,
+    ) -> Response:
+        return (client or self.client).patch(
+            f'/api/v1/{route}/bulk_update/{query}', rows, format='json')
+
+    # --- happy path -------------------------------------------------------
+
+    def test_bulk_update_applies_every_row(self):
+        ids = self._make_measurements(3)
+        resp = self._patch([
+            {'measurement_id': mid, 'value_as_number': 100 + i}
+            for i, mid in enumerate(ids)
+        ])
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data, {'updated': 3, 'missing': []})
+        for i, mid in enumerate(ids):
+            self.assertEqual(
+                Measurement.objects.get(measurement_id=mid).value_as_number,
+                100 + i)
+
+    def test_update_is_partial_and_per_row(self):
+        """Only the keys a row carries change, and rows may differ in shape."""
+        ids = self._make_measurements(2)
+        resp = self._patch([
+            {'measurement_id': ids[0], 'value_as_number': 42},
+            {'measurement_id': ids[1], 'unit_source_value': 'mg/dL'},
+        ])
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        first = Measurement.objects.get(measurement_id=ids[0])
+        second = Measurement.objects.get(measurement_id=ids[1])
+        self.assertEqual(first.value_as_number, 42)
+        self.assertEqual(first.measurement_source_value, 'UPD-0')
+        self.assertEqual(second.unit_source_value, 'mg/dL')
+        # The row that did not patch value_as_number keeps its stored value,
+        # even though bulk_update writes that column for the whole batch.
+        self.assertEqual(second.value_as_number, 6)
+
+    def test_all_five_resource_types_accept_a_batch(self):
+        from omop_core.services.pk import next_pk_batch
+
+        cases = [
+            ('conditions', ConditionOccurrence, 'condition_occurrence_id',
+             {'condition_concept': self.m_concept,
+              'condition_start_date': date(2024, 1, 1),
+              'condition_type_concept': self.type_concept},
+             'condition_source_value'),
+            ('drug-exposures', DrugExposure, 'drug_exposure_id',
+             {'drug_concept': self.drug_concept,
+              'drug_exposure_start_date': date(2024, 1, 1),
+              'drug_type_concept': self.type_concept},
+             'drug_source_value'),
+            ('measurements', Measurement, 'measurement_id',
+             {'measurement_concept': self.m_concept,
+              'measurement_date': date(2024, 1, 1),
+              'measurement_type_concept': self.type_concept},
+             'measurement_source_value'),
+            ('observations', Observation, 'observation_id',
+             {'observation_concept': self.m_concept,
+              'observation_date': date(2024, 1, 1),
+              'observation_type_concept': self.type_concept},
+             'observation_source_value'),
+            ('procedures', ProcedureOccurrence, 'procedure_occurrence_id',
+             {'procedure_concept': self.m_concept,
+              'procedure_date': date(2024, 1, 1),
+              'procedure_type_concept': self.type_concept},
+             'procedure_source_value'),
+        ]
+        for route, model, pk_field, fields, source_field in cases:
+            with self.subTest(route=route):
+                pks = list(next_pk_batch(model, pk_field, 2))
+                model.objects.bulk_create([
+                    model(person=self.person, **{pk_field: pk}, **fields)
+                    for pk in pks
+                ])
+                resp = self._patch(
+                    [{pk_field: pk, source_field: f'FIXED-{pk}'} for pk in pks],
+                    route=route)
+                self.assertEqual(
+                    resp.status_code, status.HTTP_200_OK, f'{route}: {resp.data}')
+                self.assertEqual(resp.data['updated'], 2)
+                for pk in pks:
+                    self.assertEqual(
+                        getattr(model.objects.get(**{pk_field: pk}), source_field),
+                        f'FIXED-{pk}')
+
+    def test_legacy_prefix_does_not_carry_the_action(self):
+        """New actions go on v1 only, the legacy prefix is frozen."""
+        ids = self._make_measurements(1)
+        resp = self.client.patch(
+            '/api/measurements/bulk_update/',
+            [{'measurement_id': ids[0], 'value_as_number': 9}], format='json')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(
+            Measurement.objects.get(measurement_id=ids[0]).value_as_number, 5)
+
+    def test_erroneous_rows_can_be_unflagged(self):
+        """get_queryset() hides is_erroneous rows; un-flagging one is a correction."""
+        ids = self._make_measurements(1, is_erroneous=True)
+        resp = self._patch([{'measurement_id': ids[0], 'is_erroneous': False}])
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertFalse(
+            Measurement.objects.get(measurement_id=ids[0]).is_erroneous)
+
+    def test_foreign_keys_resolve(self):
+        ids = self._make_measurements(1)
+        other_concept = Concept.objects.get(concept_id=4112853)
+        resp = self._patch([{
+            'measurement_id': ids[0],
+            'measurement_concept': other_concept.concept_id,
+        }])
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(
+            Measurement.objects.get(measurement_id=ids[0]).measurement_concept_id,
+            other_concept.concept_id)
+
+    # --- ids that name nothing --------------------------------------------
+
+    def test_unknown_ids_are_reported_missing_not_fatal(self):
+        ids = self._make_measurements(1)
+        resp = self._patch([
+            {'measurement_id': ids[0], 'value_as_number': 11},
+            {'measurement_id': 999999801, 'value_as_number': 12},
+        ])
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data, {'updated': 1, 'missing': [999999801]})
+        self.assertEqual(
+            Measurement.objects.get(measurement_id=ids[0]).value_as_number, 11)
+
+    def test_all_ids_missing_is_a_noop(self):
+        resp = self._patch([{'measurement_id': 999999802, 'value_as_number': 1}])
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data, {'updated': 0, 'missing': [999999802]})
+
+    def test_empty_list_is_a_noop(self):
+        resp = self._patch([])
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data, {'updated': 0, 'missing': []})
+
+    def test_rows_with_only_an_id_write_nothing(self):
+        ids = self._make_measurements(1)
+        resp = self._patch([{'measurement_id': ids[0]}])
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data, {'updated': 0, 'missing': []})
+
+    # --- validation -------------------------------------------------------
+
+    def test_rows_without_an_id_are_rejected_per_index(self):
+        ids = self._make_measurements(1)
+        resp = self._patch([
+            {'measurement_id': ids[0], 'value_as_number': 1},
+            {'value_as_number': 2},
+        ])
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        self.assertEqual(resp.data[0], {})
+        self.assertIn('measurement_id', resp.data[1])
+        self.assertEqual(
+            Measurement.objects.get(measurement_id=ids[0]).value_as_number, 5)
+
+    def test_non_integer_and_boolean_ids_are_rejected(self):
+        for bad in ('abc', None, 1.5, True, [1]):
+            with self.subTest(bad=bad):
+                resp = self._patch([{'measurement_id': bad, 'value_as_number': 1}])
+                self.assertEqual(
+                    resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+
+    def test_duplicate_ids_are_rejected(self):
+        """Two partial patches of one row in one batch have no defined order."""
+        ids = self._make_measurements(1)
+        resp = self._patch([
+            {'measurement_id': ids[0], 'value_as_number': 1},
+            {'measurement_id': ids[0], 'value_as_number': 2},
+        ])
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        self.assertIn('measurement_id', resp.data[1])
+        self.assertEqual(
+            Measurement.objects.get(measurement_id=ids[0]).value_as_number, 5)
+
+    def test_changing_person_is_rejected(self):
+        """A batch is authorized and refreshed as one person."""
+        ids = self._make_measurements(1)
+        resp = self._patch([
+            {'measurement_id': ids[0], 'person': self.other_person.person_id},
+        ])
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        self.assertIn('person', resp.data[0])
+        self.assertEqual(
+            Measurement.objects.get(measurement_id=ids[0]).person_id,
+            self.person.person_id)
+
+    def test_body_that_is_not_a_list_is_rejected(self):
+        resp = self.client.patch(
+            '/api/v1/measurements/bulk_update/',
+            {'measurement_id': 1}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+
+    def test_non_object_rows_are_rejected(self):
+        resp = self._patch([5])
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+
+    def test_invalid_field_values_are_rejected_per_index(self):
+        ids = self._make_measurements(2)
+        resp = self._patch([
+            {'measurement_id': ids[0], 'value_as_number': 1},
+            {'measurement_id': ids[1], 'measurement_date': 'not-a-date'},
+        ])
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        self.assertIn('measurement_date', resp.data[1])
+        # Rolled back whole: the valid row did not land either.
+        self.assertEqual(
+            Measurement.objects.get(measurement_id=ids[0]).value_as_number, 5)
+
+    def test_mixed_person_batch_is_rejected_whole(self):
+        mine = self._make_measurements(1)
+        theirs = self._make_measurements(1, person=self.other_person, start_day=60)
+        resp = self._patch([
+            {'measurement_id': mine[0], 'value_as_number': 1},
+            {'measurement_id': theirs[0], 'value_as_number': 2},
+        ])
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        self.assertIn('exactly one person', resp.data['detail'])
+        self.assertEqual(
+            Measurement.objects.get(measurement_id=mine[0]).value_as_number, 5)
+
+    def test_batch_over_the_row_cap_is_413(self):
+        from patient_portal.api.views import OMOP_BULK_MAX_ROWS
+        resp = self._patch([
+            {'measurement_id': i, 'value_as_number': 1}
+            for i in range(OMOP_BULK_MAX_ROWS + 1)
+        ])
+        self.assertEqual(
+            resp.status_code, status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, resp.data)
+        self.assertEqual(resp.data['max_rows'], OMOP_BULK_MAX_ROWS)
+
+    # --- read model -------------------------------------------------------
+
+    def _count_refreshes(
+        self, rows: list[dict[str, Any]], query: str = '',
+    ) -> list[int]:
+        from unittest import mock
+        from omop_core.services import patient_record_service as prs
+
+        real = prs.refresh_patient_record
+        calls = []
+
+        def counting(person: Any, *a: Any, **kw: Any) -> Any:
+            calls.append(getattr(person, 'person_id', person))
+            return real(person, *a, **kw)
+
+        with mock.patch('patient_portal.api.views.refresh_patient_record', counting), \
+             mock.patch.object(prs, 'refresh_patient_record', counting):
+            resp = self._patch(rows, query=query)
+            self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        return calls
+
+    def test_refresh_runs_once_per_batch_never_per_row(self):
+        for n in (1, 5, 40):
+            with self.subTest(rows=n):
+                ids = self._make_measurements(n, start_day=n * 100)
+                calls = self._count_refreshes([
+                    {'measurement_id': mid, 'value_as_number': 3} for mid in ids])
+                self.assertEqual(
+                    len(calls), 1,
+                    f'{n}-row update triggered {len(calls)} refreshes; expected '
+                    f'exactly 1. A per-row refresh has crept back in.')
+                self.assertEqual(calls, [self.person.person_id])
+
+    def test_skip_refresh_true_defers_the_derivation(self):
+        ids = self._make_measurements(2)
+        rows = [{'measurement_id': mid, 'value_as_number': 8} for mid in ids]
+        self.assertEqual(self._count_refreshes(rows, query='?skip_refresh=true'), [])
+        self.assertEqual(
+            Measurement.objects.get(measurement_id=ids[0]).value_as_number, 8)
+
+    def test_updated_values_reach_the_patient_record(self):
+        resp = self.client.post('/api/v1/measurements/', [{
+            'person': self.person.person_id,
+            'measurement_concept': self.m_concept.concept_id,
+            'measurement_date': '2024-06-01',
+            'measurement_type_concept': self.type_concept.concept_id,
+            'value_as_number': 7.5,
+            'measurement_source_value': 'UPD-PR',
+        }], format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        derived_before = PatientRecord.objects.get(person=self.person).derived_at
+
+        patched = self._patch(
+            [{'measurement_id': resp.data['ids'][0], 'value_as_number': 12.5}])
+        self.assertEqual(patched.status_code, status.HTTP_200_OK, patched.data)
+
+        pr = PatientRecord.objects.get(person=self.person)
+        self.assertNotEqual(
+            pr.derived_at, derived_before,
+            'PatientRecord.derived_at did not advance, the read model is stale')
+
+    # --- provenance -------------------------------------------------------
+
+    def test_provenance_is_recorded_for_updated_rows(self):
+        ids = self._make_measurements(2)
+        resp = self.client.patch(
+            '/api/v1/measurements/bulk_update/',
+            [{'measurement_id': mid, 'value_as_number': 4} for mid in ids],
+            format='json',
+            HTTP_X_PROVENANCE_SOURCE='EHR_SYNC',
+            HTTP_X_PROVENANCE_USER_ID='ehr-omop-001',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        ct = ContentType.objects.get_for_model(Measurement)
+        self.assertEqual(
+            ProvenanceRecord.objects.filter(
+                content_type=ct, object_id__in=ids, source='EHR_SYNC').count(), 2)
+
+    def test_no_source_header_records_no_provenance(self):
+        """Matching the row level path: inventing a source makes it unfalsifiable."""
+        ids = self._make_measurements(1)
+        self._patch([{'measurement_id': ids[0], 'value_as_number': 4}])
+        self.assertEqual(
+            ProvenanceRecord.objects.filter(
+                content_type=ContentType.objects.get_for_model(Measurement),
+                object_id__in=ids).count(), 0)
+
+    def test_repeating_a_batch_does_not_duplicate_provenance(self):
+        ids = self._make_measurements(1)
+        for value in (4, 5):
+            resp = self.client.patch(
+                '/api/v1/measurements/bulk_update/',
+                [{'measurement_id': ids[0], 'value_as_number': value}],
+                format='json',
+                HTTP_X_PROVENANCE_SOURCE='EHR_SYNC',
+                HTTP_X_PROVENANCE_USER_ID='ehr-omop-001',
+            )
+            self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(
+            ProvenanceRecord.objects.filter(
+                content_type=ContentType.objects.get_for_model(Measurement),
+                object_id__in=ids).count(), 1)
+
+    # --- cost -------------------------------------------------------------
+
+    def test_query_count_does_not_scale_with_batch_size(self):
+        """DRF resolves FKs one query per row; _prefetch_bulk_related collapses it."""
+        from django.test.utils import CaptureQueriesContext
+        from django.db import connection
+
+        def cost(n: int, start_day: int) -> int:
+            ids = self._make_measurements(n, start_day=start_day)
+            rows = [
+                {'measurement_id': mid,
+                 'measurement_concept': self.m_concept.concept_id,
+                 'measurement_type_concept': self.type_concept.concept_id,
+                 'value_as_number': 3}
+                for mid in ids
+            ]
+            with CaptureQueriesContext(connection) as ctx:
+                resp = self._patch(rows, query='?skip_refresh=true')
+                self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+                self.assertEqual(resp.data['updated'], n)
+            return len(ctx)
+
+        cost(1, 0)  # warm ContentType and other process-level caches
+        q_small = cost(5, 100)
+        q_large = cost(40, 200)
+        self.assertLess(
+            q_large - q_small, 10,
+            f'query count scaled with batch size: {q_small} queries for 5 rows, '
+            f'{q_large} for 40. The update is falling back to per-row work.')
+
+    # --- auth -------------------------------------------------------------
+
+    def test_requires_authentication(self):
+        ids = self._make_measurements(1)
+        resp = APIClient().patch(
+            '/api/v1/measurements/bulk_update/',
+            [{'measurement_id': ids[0], 'value_as_number': 1}], format='json')
+        self.assertIn(resp.status_code, [401, 403])
+        self.assertEqual(
+            Measurement.objects.get(measurement_id=ids[0]).value_as_number, 5)
+
+    def test_another_patients_rows_read_as_missing(self):
+        """Same answer as an absent id, so the batch is no existence oracle."""
+        from patient_portal.models import PatientUser
+
+        ids = self._make_measurements(1, person=self.other_person, start_day=70)
+        identity = Identity.objects.create_user(
+            email='bulk-upd-patient@test.com', password='pw')
+        PatientUser.objects.create(identity=identity, person=self.person)
+        client = APIClient()
+        client.force_authenticate(user=identity)
+
+        resp = self._patch(
+            [{'measurement_id': ids[0], 'value_as_number': 99}], client=client)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data, {'updated': 0, 'missing': ids})
+        self.assertEqual(
+            Measurement.objects.get(measurement_id=ids[0]).value_as_number, 5)
+
+    # --- review regressions ------------------------------------------------
+
+    def test_patching_one_value_column_keeps_the_other(self):
+        """The bulk path must be as partial as the row level PATCH."""
+        ids = self._make_measurements(1)
+        Measurement.objects.filter(measurement_id=ids[0]).update(
+            value_as_string='five', measurement_source_value='PLAIN')
+
+        resp = self._patch([{'measurement_id': ids[0], 'value_as_number': 7.5}])
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        row = Measurement.objects.get(measurement_id=ids[0])
+        self.assertEqual(row.value_as_number, 7.5)
+        self.assertEqual(row.value_as_string, 'five')
+
+    def test_patching_the_string_column_keeps_the_number(self):
+        ids = self._make_measurements(1)
+        Measurement.objects.filter(measurement_id=ids[0]).update(
+            measurement_source_value='PLAIN')
+
+        resp = self._patch([{'measurement_id': ids[0], 'value_as_string': 'high'}])
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        row = Measurement.objects.get(measurement_id=ids[0])
+        self.assertEqual(row.value_as_string, 'high')
+        self.assertEqual(row.value_as_number, 5)
+
+    def test_a_row_only_writes_the_columns_it_patched(self):
+        """Rows are grouped by patched column set, so shapes do not leak."""
+        ids = self._make_measurements(2)
+        Measurement.objects.filter(measurement_id=ids[1]).update(
+            unit_source_value='mg/dL')
+
+        resp = self._patch([
+            {'measurement_id': ids[0], 'unit_source_value': 'mmol/L'},
+            {'measurement_id': ids[1], 'value_as_number': 30},
+        ])
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(
+            Measurement.objects.get(measurement_id=ids[1]).unit_source_value,
+            'mg/dL')
+
+    def test_validation_errors_are_indexed_against_the_request_rows(self):
+        """An id that matched nothing must not shift the error list."""
+        ids = self._make_measurements(2)
+        resp = self._patch([
+            {'measurement_id': ids[0], 'value_as_number': 1},
+            {'measurement_id': 999999803, 'value_as_number': 2},
+            {'measurement_id': ids[1], 'measurement_date': 'not-a-date'},
+        ])
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        self.assertEqual(len(resp.data), 3)
+        self.assertEqual(resp.data[0], {})
+        self.assertEqual(resp.data[1], {})
+        self.assertIn('measurement_date', resp.data[2])
+
+    def test_id_only_rows_are_not_counted_or_attributed(self):
+        ids = self._make_measurements(2)
+        resp = self.client.patch(
+            '/api/v1/measurements/bulk_update/',
+            [{'measurement_id': ids[0], 'value_as_number': 3},
+             {'measurement_id': ids[1]}],
+            format='json',
+            HTTP_X_PROVENANCE_SOURCE='EHR_SYNC',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['updated'], 1)
+        self.assertEqual(
+            ProvenanceRecord.objects.filter(
+                content_type=ContentType.objects.get_for_model(Measurement),
+                object_id=ids[1]).count(), 0)
+
+    def test_an_org_cannot_update_rows_of_a_person_it_has_not_claimed(self):
+        from omop_core.models import Organization
+
+        org = Organization.objects.create(name='Upd Org', slug='bulk-upd-org')
+        ids = self._make_measurements(1, person=self.other_person, start_day=80)
+        identity = Identity.objects.create_user(
+            email='bulk-upd-org@test.com', password='pw')
+        client = APIClient()
+        client.force_authenticate(user=identity, token='service-token')
+
+        with mock.patch('patient_portal.api.views.is_service_token',
+                        return_value=False), \
+             mock.patch('patient_portal.api.views.get_request_org',
+                        return_value=org):
+            resp = self._patch(
+                [{'measurement_id': ids[0], 'value_as_number': 77}], client=client)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data, {'updated': 0, 'missing': ids})
+        self.assertEqual(
+            Measurement.objects.get(measurement_id=ids[0]).value_as_number, 5)
+
+    def test_a_repeat_correction_keeps_the_latest_reason(self):
+        """One record per row, actor and source, holding the newest reason."""
+        ids = self._make_measurements(1)
+        for reason, value in (('first pass', 4), ('second pass', 5)):
+            with mock.patch(
+                    'patient_portal.api.views._extract_provenance',
+                    return_value=('EHR_SYNC', 'ehr-omop-001', reason)):
+                resp = self._patch(
+                    [{'measurement_id': ids[0], 'value_as_number': value}])
+            self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        records = ProvenanceRecord.objects.filter(
+            content_type=ContentType.objects.get_for_model(Measurement),
+            object_id=ids[0])
+        self.assertEqual(records.count(), 1)
+        self.assertEqual(records.first().modification_reason, 'second pass')
+
+    def test_a_representative_may_update_the_person_they_represent(self):
+        """Scope follows every access grant, not just a direct PatientUser link."""
+        from omop_core.models import PersonalRepresentative
+
+        ids = self._make_measurements(1)
+        identity = Identity.objects.create_user(
+            email='bulk-upd-rep@test.com', password='pw')
+        PersonalRepresentative.objects.create(
+            representative=identity, person_id=self.person.person_id,
+            relationship='parent', verification_status='VERIFIED')
+        client = APIClient()
+        client.force_authenticate(user=identity)
+
+        resp = self._patch(
+            [{'measurement_id': ids[0], 'value_as_number': 21}], client=client)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['updated'], 1)
+        self.assertEqual(
+            Measurement.objects.get(measurement_id=ids[0]).value_as_number, 21)
+
+
+class BulkOmopDeleteTest(TestCase):
+    """POST /api/v1/<resource>/bulk_delete/ with a list of ids."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.person = Person.objects.create(person_id=32001)
+        cls.other_person = Person.objects.create(person_id=32002)
+        PatientRecord.objects.create(person=cls.person)
+        PatientRecord.objects.create(person=cls.other_person)
+
+        cls.m_concept = Concept.objects.get(concept_id=3000963)
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+        cls.drug_concept = Concept.objects.get(concept_id=19136160)
+
+        cls.service_identity = Identity.objects.get_or_create(
+            issuer='urn:service', sub='bulk-delete-test',
+        )[0]
+        cls.service_identity.set_unusable_password()
+        cls.service_identity.save()
+
+    def setUp(self):
+        from django.core.cache import cache
+        # DRF throttle state lives in the cache and leaks between tests.
+        cache.clear()
+        self.client = APIClient()
+        self.client.force_authenticate(
+            user=self.service_identity, token="service-token"
+        )
+
+    def _make_measurements(
+        self, n: int, person: Person | None = None, start_day: int = 0,
+        **extra: Any,
+    ) -> list[int]:
+        from omop_core.services.pk import next_pk_batch
+
+        person = person or self.person
+        base = date(2024, 1, 1)
+        rows = [
+            Measurement(
+                measurement_id=None,
+                person=person,
+                measurement_concept=self.m_concept,
+                measurement_date=base + timedelta(days=start_day + i),
+                measurement_type_concept=self.type_concept,
+                value_as_number=5.0 + i,
+                measurement_source_value=f'DEL-{start_day + i}',
+                **extra,
+            )
+            for i in range(n)
+        ]
+        for row, pk in zip(rows, next_pk_batch(Measurement, 'measurement_id', n)):
+            row.measurement_id = pk
+        Measurement.objects.bulk_create(rows)
+        return [r.measurement_id for r in rows]
+
+    def _delete(
+        self, ids: list[Any], route: str = 'measurements', query: str = '',
+        **kwargs: Any,
+    ) -> Response:
+        return self.client.post(
+            f'/api/v1/{route}/bulk_delete/{query}',
+            {'ids': ids}, format='json', **kwargs)
+
+    # --- happy path -------------------------------------------------------
+
+    def test_bulk_delete_removes_every_named_row(self):
+        ids = self._make_measurements(3)
+        resp = self._delete(ids)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data, {'deleted': 3, 'missing': []})
+        self.assertEqual(Measurement.objects.filter(person=self.person).count(), 0)
+
+    def test_rows_not_named_are_left_alone(self):
+        ids = self._make_measurements(4)
+        resp = self._delete(ids[:2])
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['deleted'], 2)
+        self.assertCountEqual(
+            list(Measurement.objects.values_list('measurement_id', flat=True)),
+            ids[2:])
+
+    def test_all_five_resource_types_accept_a_batch(self):
+        from omop_core.services.pk import next_pk_batch
+
+        cases = [
+            ('conditions', ConditionOccurrence, 'condition_occurrence_id', {
+                'condition_concept': self.m_concept,
+                'condition_start_date': date(2024, 1, 1),
+                'condition_type_concept': self.type_concept,
+            }),
+            ('drug-exposures', DrugExposure, 'drug_exposure_id', {
+                'drug_concept': self.drug_concept,
+                'drug_exposure_start_date': date(2024, 1, 1),
+                'drug_type_concept': self.type_concept,
+            }),
+            ('measurements', Measurement, 'measurement_id', {
+                'measurement_concept': self.m_concept,
+                'measurement_date': date(2024, 1, 1),
+                'measurement_type_concept': self.type_concept,
+            }),
+            ('observations', Observation, 'observation_id', {
+                'observation_concept': self.m_concept,
+                'observation_date': date(2024, 1, 1),
+                'observation_type_concept': self.type_concept,
+            }),
+            ('procedures', ProcedureOccurrence, 'procedure_occurrence_id', {
+                'procedure_concept': self.m_concept,
+                'procedure_date': date(2024, 1, 1),
+                'procedure_type_concept': self.type_concept,
+            }),
+        ]
+        for route, model, pk_field, fields in cases:
+            with self.subTest(route=route):
+                pks = list(next_pk_batch(model, pk_field, 2))
+                model.objects.bulk_create([
+                    model(person=self.person, **{pk_field: pk}, **fields)
+                    for pk in pks
+                ])
+                resp = self._delete(pks, route=route)
+                self.assertEqual(
+                    resp.status_code, status.HTTP_200_OK, f'{route}: {resp.data}')
+                self.assertEqual(resp.data['deleted'], 2)
+                self.assertEqual(
+                    model.objects.filter(**{f'{pk_field}__in': pks}).count(), 0)
+
+    def test_legacy_prefix_does_not_carry_the_action(self):
+        """New actions go on v1 only, the legacy prefix is frozen."""
+        ids = self._make_measurements(2)
+        resp = self.client.post(
+            '/api/measurements/bulk_delete/', {'ids': ids}, format='json')
+        # The legacy router resolves the path as a detail route, so the action is
+        # simply not there.
+        self.assertIn(resp.status_code, [404, 405])
+        self.assertEqual(Measurement.objects.count(), 2)
+
+    def test_erroneous_rows_are_deletable(self):
+        """get_queryset() hides them, so a delete built on it would skip them."""
+        ids = self._make_measurements(2, is_erroneous=True)
+        resp = self._delete(ids)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['deleted'], 2)
+        self.assertEqual(Measurement.objects.count(), 0)
+
+    # --- idempotence ------------------------------------------------------
+
+    def test_unknown_ids_are_reported_missing_not_fatal(self):
+        ids = self._make_measurements(2)
+        resp = self._delete(ids + [999999901, 999999902])
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['deleted'], 2)
+        self.assertEqual(resp.data['missing'], [999999901, 999999902])
+
+    def test_replaying_a_batch_converges(self):
+        """A retry after a read timeout must not fail on its own prior work."""
+        ids = self._make_measurements(3)
+        first = self._delete(ids)
+        second = self._delete(ids)
+        self.assertEqual(first.data, {'deleted': 3, 'missing': []})
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.data, {'deleted': 0, 'missing': ids})
+
+    def test_duplicate_ids_collapse(self):
+        ids = self._make_measurements(2)
+        resp = self._delete(ids + ids)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data, {'deleted': 2, 'missing': []})
+
+    def test_empty_id_list_is_a_noop(self):
+        self._make_measurements(1)
+        resp = self._delete([])
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data, {'deleted': 0, 'missing': []})
+        self.assertEqual(Measurement.objects.count(), 1)
+
+    # --- validation -------------------------------------------------------
+
+    def test_mixed_person_batch_is_rejected_whole(self):
+        mine = self._make_measurements(2)
+        theirs = self._make_measurements(1, person=self.other_person, start_day=50)
+        resp = self._delete(mine + theirs)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        self.assertIn('exactly one person', resp.data['detail'])
+        self.assertEqual(Measurement.objects.count(), 3)
+
+    def test_body_without_an_ids_list_is_rejected(self):
+        for body in ({}, {'ids': 5}, {'ids': None}, []):
+            with self.subTest(body=body):
+                resp = self.client.post(
+                    '/api/v1/measurements/bulk_delete/', body, format='json')
+                self.assertEqual(
+                    resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+
+    def test_non_integer_ids_are_rejected(self):
+        ids = self._make_measurements(1)
+        for bad in ('abc', None, 1.5, {'id': 1}, True):
+            with self.subTest(bad=bad):
+                resp = self._delete(ids + [bad])
+                self.assertEqual(
+                    resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        self.assertEqual(Measurement.objects.count(), 1)
+
+    def test_batch_over_the_id_cap_is_413(self):
+        from patient_portal.api.views import OMOP_BULK_DELETE_MAX_IDS
+        resp = self._delete(list(range(OMOP_BULK_DELETE_MAX_IDS + 1)))
+        self.assertEqual(
+            resp.status_code, status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, resp.data)
+        self.assertEqual(resp.data['max_ids'], OMOP_BULK_DELETE_MAX_IDS)
+
+    # --- read model -------------------------------------------------------
+
+    def _count_refreshes(self, ids: list[int], query: str = '') -> list[int]:
+        """How many times refresh_patient_record runs for one bulk delete.
+
+        Patched in both places, so a refresh leaking back in through post_delete
+        is counted too.
+        """
+        from unittest import mock
+        from omop_core.services import patient_record_service as prs
+
+        real = prs.refresh_patient_record
+        calls = []
+
+        def counting(person: Any, *a: Any, **kw: Any) -> Any:
+            calls.append(getattr(person, 'person_id', person))
+            return real(person, *a, **kw)
+
+        with mock.patch('patient_portal.api.views.refresh_patient_record', counting), \
+             mock.patch.object(prs, 'refresh_patient_record', counting):
+            resp = self._delete(ids, query=query)
+            self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        return calls
+
+    def test_refresh_runs_once_per_batch_never_per_row(self):
+        """queryset.delete() fires post_delete, unlike bulk_create."""
+        for n in (1, 5, 40):
+            with self.subTest(rows=n):
+                ids = self._make_measurements(n, start_day=n * 100)
+                calls = self._count_refreshes(ids)
+                self.assertEqual(
+                    len(calls), 1,
+                    f'{n}-row delete triggered {len(calls)} refreshes; expected '
+                    f'exactly 1. A per-row refresh has crept back in.')
+                self.assertEqual(calls, [self.person.person_id])
+
+    def test_skip_refresh_true_defers_the_derivation(self):
+        ids = self._make_measurements(3)
+        self.assertEqual(self._count_refreshes(ids, query='?skip_refresh=true'), [])
+        self.assertEqual(Measurement.objects.count(), 0)
+
+    def test_deleted_rows_leave_the_patient_record(self):
+        """End to end: the read model no longer reports the deleted measurement."""
+        resp = self.client.post('/api/v1/measurements/', [{
+            'person': self.person.person_id,
+            'measurement_concept': self.m_concept.concept_id,
+            'measurement_date': '2024-06-01',
+            'measurement_type_concept': self.type_concept.concept_id,
+            'value_as_number': 7.5,
+            'measurement_source_value': 'DEL-PR',
+        }], format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        derived_before = PatientRecord.objects.get(person=self.person).derived_at
+
+        self._delete(resp.data['ids'])
+
+        self.assertEqual(Measurement.objects.count(), 0)
+        pr = PatientRecord.objects.get(person=self.person)
+        self.assertNotEqual(
+            pr.derived_at, derived_before,
+            'PatientRecord.derived_at did not advance, the read model is stale')
+
+    # --- provenance -------------------------------------------------------
+
+    def test_provenance_for_deleted_rows_goes_too(self):
+        """A GenericForeignKey has no cascade, so nothing removes these for us."""
+        resp = self.client.post(
+            '/api/v1/measurements/',
+            [{
+                'person': self.person.person_id,
+                'measurement_concept': self.m_concept.concept_id,
+                'measurement_date': '2024-07-01',
+                'measurement_type_concept': self.type_concept.concept_id,
+                'measurement_source_value': 'DEL-PROV',
+            }],
+            format='json',
+            HTTP_X_PROVENANCE_SOURCE='EHR_SYNC',
+            HTTP_X_PROVENANCE_USER_ID='ehr-omop-001',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        ct = ContentType.objects.get_for_model(Measurement)
+        self.assertEqual(
+            ProvenanceRecord.objects.filter(
+                content_type=ct, object_id__in=resp.data['ids']).count(), 1)
+
+        self._delete(resp.data['ids'])
+
+        self.assertEqual(
+            ProvenanceRecord.objects.filter(
+                content_type=ct, object_id__in=resp.data['ids']).count(), 0)
+
+    # --- cost -------------------------------------------------------------
+
+    def test_query_count_does_not_scale_with_batch_size(self):
+        """Measured with skip_refresh=true, since derivation cost is not flat."""
+        from django.test.utils import CaptureQueriesContext
+        from django.db import connection
+
+        def cost(n: int, start_day: int) -> int:
+            ids = self._make_measurements(n, start_day=start_day)
+            with CaptureQueriesContext(connection) as ctx:
+                resp = self._delete(ids, query='?skip_refresh=true')
+                self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+            return len(ctx)
+
+        cost(1, 0)  # warm ContentType and other process-level caches
+        q_small = cost(5, 100)
+        q_large = cost(40, 200)
+        self.assertLess(
+            q_large - q_small, 10,
+            f'query count scaled with batch size: {q_small} queries for 5 rows, '
+            f'{q_large} for 40. The delete is falling back to per-row work.')
+
+    # --- auth -------------------------------------------------------------
+
+    def test_requires_authentication(self):
+        ids = self._make_measurements(2)
+        resp = APIClient().post(
+            '/api/v1/measurements/bulk_delete/', {'ids': ids}, format='json')
+        self.assertIn(resp.status_code, [401, 403])
+        self.assertEqual(Measurement.objects.count(), 2)
+
+    def test_session_authenticated_patient_cannot_bulk_delete(self):
+        """POST must not become a delete a patient cannot make row by row."""
+        from patient_portal.models import PatientUser
+
+        ids = self._make_measurements(2)
+        identity = Identity.objects.create_user(
+            email='bulk-del-patient@test.com', password='pw')
+        PatientUser.objects.create(identity=identity, person=self.person)
+        client = APIClient()
+        client.force_authenticate(user=identity)
+
+        resp = client.post(
+            '/api/v1/measurements/bulk_delete/', {'ids': ids}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN, resp.data)
+        self.assertEqual(Measurement.objects.count(), 2)
+
+    def test_staff_may_bulk_delete(self):
+        """Staff keep the access they have on the row level DELETE."""
+        ids = self._make_measurements(2)
+        staff = Identity.objects.create_user(
+            email='bulk-del-staff@test.com', password='pw', is_staff=True)
+        client = APIClient()
+        client.force_authenticate(user=staff)
+
+        resp = client.post(
+            '/api/v1/measurements/bulk_delete/', {'ids': ids}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(Measurement.objects.count(), 0)
+    # --- review regressions ------------------------------------------------
+
+    def test_oversized_body_is_rejected_before_parsing(self):
+        from patient_portal.api.views import OMOP_BULK_MAX_BYTES
+
+        resp = self.client.post(
+            '/api/v1/measurements/bulk_delete/', {'ids': [1]}, format='json',
+            CONTENT_LENGTH=str(OMOP_BULK_MAX_BYTES + 1))
+        self.assertEqual(
+            resp.status_code, status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, resp.data)
+        self.assertEqual(resp.data['max_bytes'], OMOP_BULK_MAX_BYTES)
+
+    def test_measurement_ownership_rows_go_with_the_measurement(self):
+        """Ownership holds a bare id, so nothing cascades it away."""
+        from omop_core.models import MeasurementOwnership
+
+        ids = self._make_measurements(1)
+        MeasurementOwnership.objects.create(
+            measurement_id=ids[0], visit_occurrence_id=99001)
+
+        resp = self._delete(ids)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(
+            MeasurementOwnership.objects.filter(measurement_id__in=ids).count(), 0)
+
+    def test_another_patients_rows_read_as_missing(self):
+        """Same answer as an absent id, so the batch is no existence oracle."""
+        from patient_portal.models import PatientUser
+
+        ids = self._make_measurements(1, person=self.other_person, start_day=80)
+        identity = Identity.objects.create_user(
+            email='bulk-del-oracle@test.com', password='pw')
+        PatientUser.objects.create(identity=identity, person=self.person)
+        client = APIClient()
+        client.force_authenticate(user=identity, token='service-token')
+
+        with mock.patch('patient_portal.api.views.is_service_token',
+                        return_value=False):
+            resp = client.post(
+                '/api/v1/measurements/bulk_delete/', {'ids': ids}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data, {'deleted': 0, 'missing': ids})
+        self.assertEqual(Measurement.objects.filter(measurement_id__in=ids).count(), 1)
 
 
 class OmopDeferRefreshTest(TestCase):

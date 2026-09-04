@@ -11,6 +11,8 @@ boolean inputs to their canonical storage form and rejects everything else,
 so an "applied" write always survives read-back.
 """
 
+from decimal import Decimal
+
 from omop_core.services.patient_record_service import _ASSERTION_FIELDS
 
 # Build a lookup from concept_code -> value_kind for boolean assertion fields.
@@ -24,6 +26,11 @@ _BOOLEAN_ASSERTION_CODES: dict[str, str] = {
 
 _TRUTHY = frozenset({'true', 'yes', '1'})
 _FALSY = frozenset({'false', 'no', '0'})
+
+
+def is_boolean_assertion_code(source_value: str | None) -> bool:
+    """Whether this source value makes the two value columns one boolean answer."""
+    return source_value in _BOOLEAN_ASSERTION_CODES
 
 
 def coerce_assertion_value(source_value, value_as_number, value_as_string):
@@ -66,7 +73,9 @@ def coerce_assertion_value(source_value, value_as_number, value_as_string):
     # Python bool is a subclass of int, so check it before numeric.
     if isinstance(raw, bool):
         canonical = raw
-    elif isinstance(raw, (int, float)):
+    # Decimal, because a DecimalField hands one back and a numeric write would
+    # otherwise be rejected as a non-boolean type.
+    elif isinstance(raw, (int, float, Decimal)):
         if raw == 1:
             canonical = True
         elif raw == 0:
