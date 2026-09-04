@@ -168,6 +168,29 @@ this project's, so a PRomop dependency bump does not need a matching PROlog
 release. The reverse is not true: PROlog's floor is Django 5.2.6 / DRF 3.15.2 and
 Python 3.12, and its ceiling excludes Django 6.
 
+### What v0.3.0 added
+
+An **administration console**, in this project's own Django admin at
+`/admin/prolog_surveys/survey/`. Everything an administrator previously needed a
+shell on a production host for:
+
+- **Add survey** verifies a definition — one the deployment mounts
+  (`PROLOG_DEFINITION_DIRS`) or an upload — and loads it as a draft. The
+  validator's own output is on the page, and nothing is written until Load.
+  Loading requires the add permission for a new survey, change for an existing
+  one; a staff session alone is not enough.
+- **Activate** and **Archive** on the version's row. Loading never activates,
+  and a survey with no active version answers respondents "not available".
+- **Publish**, which freezes a version's content. Until then it can be re-loaded
+  from a corrected file, and the responses against it are test data — a re-load
+  that would discard them asks first.
+
+**It carries a migration.** `prolog_surveys.0002_publish_a_version` renames
+`published_at` to `activated_at` and gives the old name to the new freeze
+column, so it is **one-way**: an earlier PROlog release running against a
+database that has it would stamp the freeze column on every activation. Roll
+forward, not back.
+
 ### What v0.2.0 added
 
 Five capabilities, all off unless configured, so nothing here behaves
