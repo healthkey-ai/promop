@@ -41,7 +41,6 @@ from omop_core.models import (
     PatientDocument, ProcedureOccurrence, ProvenanceRecord, SourceCodeConceptMapping,
 )
 from omop_core.services.code_mapping import (
-    SELF_RESOLVING_VOCABULARIES,
     resolve_source_code,
 )
 from omop_core.services.pk import next_pk_batch
@@ -450,10 +449,9 @@ class FhirSyncView(APIView):
         # ratifying its own guess.
         #
         # These overwrite the direct hits above rather than filling gaps behind
-        # them, because overriding a wrong automatic resolution is precisely
-        # what a curator approves a mapping to do. LOINC and SNOMED are exempt:
-        # there the code *is* the concept, so a mapping could only ever drift
-        # from Athena.
+        # them, because SCCM is the governed primary resolver. This includes
+        # LOINC and SNOMED: their direct Athena lookup is a fallback, never a
+        # way to bypass a curator-approved source-code mapping.
         # Matched case-insensitively via UPPER(): an uncoded source is a lab's
         # or a clinician's free text, and 'M-Protein, Serum' and
         # 'M-PROTEIN, SERUM' are one test, not two.
@@ -472,8 +470,6 @@ class FhirSyncView(APIView):
 
             for mapping in approved:
                 vocab = mapping.source_vocabulary_id or '*'
-                if vocab in SELF_RESOLVING_VOCABULARIES:
-                    continue
                 # Keyed by the *inbound* spelling, since that is what _lookup
                 # has in hand, not by however the curator typed it. A mapping
                 # with no source code system is written under every vocabulary
@@ -484,13 +480,6 @@ class FhirSyncView(APIView):
                     cache[(vocab, value)] = mapping.target_concept
                     if vocab == '*':
                         for other in by_vocab:
-                            # Never over a LOINC/SNOMED direct hit. There the
-                            # code *is* the concept, and resolve_source_code
-                            # returns it before consulting any mapping -- so
-                            # overriding here would make the two resolution
-                            # paths disagree about the same input.
-                            if other in SELF_RESOLVING_VOCABULARIES:
-                                continue
                             if value in by_vocab[other]:
                                 cache[(other, value)] = mapping.target_concept
         return cache

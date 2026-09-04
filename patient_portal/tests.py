@@ -21427,15 +21427,35 @@ class CodeMappingResolutionTest(TestCase):
         # omit the unrelated deploy-time HK-Labs seed rows from migration 0201.
         SourceCodeConceptMapping.objects.filter(origin_system='hk-labs-seed').delete()
 
-    def test_loinc_source_resolves_directly_and_mints_no_mapping(self):
-        """Rule 1: the Athena concept *is* the LOINC code, so a mapping row for
-        it could only ever drift from Athena."""
+    def test_loinc_source_resolves_directly_when_sccm_has_no_approval(self):
+        """LOINC is the direct fallback, not a bypass of SCCM."""
         concept, mapping = resolve_source_code(
             source_code='33358-4', source_vocabulary_id='LOINC', omop_table='measurement',
         )
         self.assertEqual(concept.concept_id, self.loinc_concept.concept_id)
         self.assertIsNone(mapping)
         self.assertEqual(SourceCodeConceptMapping.objects.count(), 0)
+
+    def test_approved_loinc_mapping_overrides_direct_concept(self):
+        """SCCM is primary even when the inbound code has an Athena concept."""
+        target = Concept.objects.create(
+            concept_id=3046304, concept_name='Curator-chosen LOINC target',
+            domain=self.domain, vocabulary=self.loinc_vocab,
+            concept_class=self.concept_class, standard_concept='S',
+            concept_code='99998-8', valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='LOINC', source_code='33358-4',
+            target_concept=target, destination_vocabulary_id='LOINC',
+            omop_table='measurement', status='approved',
+        )
+        concept, mapping = resolve_source_code(
+            source_code='33358-4', source_vocabulary_id='LOINC',
+            omop_table='measurement',
+        )
+        self.assertEqual(concept.concept_id, target.concept_id)
+        self.assertEqual(mapping.status, 'approved')
 
     def test_unresolvable_code_mints_and_proposes(self):
         """Rule 3: never drop a code, never block on a curator."""

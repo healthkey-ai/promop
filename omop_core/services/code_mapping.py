@@ -7,14 +7,13 @@ where that decision is made and recorded.
 
 Resolution order — ``resolve_source_code``:
 
-1. A **LOINC or SNOMED** source code resolves directly to its Athena concept.
-   No mapping row: the Athena concept *is* the code, which is the whole design
-   of the vocabulary, so curating a row for it would be busywork that could
-   only ever drift from Athena.
-2. Otherwise an **approved** mapping wins, over everything, including a direct
-   concept lookup.  An approved row is a curator's deliberate decision, and
-   overriding a wrong automatic resolution is exactly what it is for.
-3. With no approved mapping, resolve as before (direct lookup on the source
+1. An **approved** mapping wins, over everything, including a direct concept
+   lookup. SCCM is the governed source of source-code resolution, and an
+   approved row is a curator's deliberate decision.
+2. With no approved mapping, resolve a **LOINC or SNOMED** code directly to
+   its Athena concept. These vocabularies retain their useful natural-key
+   fallback, but never bypass SCCM.
+3. With no approved mapping or direct concept, resolve as before (direct lookup on the source
    vocabulary), and if that fails **mint** a concept under an ``HK-*``
    quarantine vocabulary and record a **proposed** mapping beside it.
 4. A **proposed** mapping never overrides anything.  It is a review item, and
@@ -236,8 +235,14 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
         return None, None
     table = normalize_omop_table(omop_table)
 
-    # Rule 1 — a LOINC/SNOMED code is its own concept, so it never needs a
-    # curated mapping and never gets one minted.
+    # Rule 1 — SCCM is the primary resolver for every source vocabulary,
+    # including LOINC and SNOMED. A curator-approved exception must not lose
+    # to an automatic natural-key lookup.
+    approved = approved_mapping_for(source_vocabulary_id, source_code)
+    if approved is not None:
+        return approved.target_concept, approved
+
+    # Rule 2 — LOINC/SNOMED retain direct Athena lookup only as a fallback.
     if source_vocabulary_id in SELF_RESOLVING_VOCABULARIES:
         concept = _direct_concept(source_vocabulary_id, source_code)
         if concept is not None:
@@ -259,11 +264,6 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
             source_system=source_system,
         )
         return None, gap
-
-    # Rule 2 — an approved mapping beats everything else.
-    approved = approved_mapping_for(source_vocabulary_id, source_code)
-    if approved is not None:
-        return approved.target_concept, approved
 
     # Rule 3a — resolve against Athena as before.
     concept = _direct_concept(source_vocabulary_id, source_code)

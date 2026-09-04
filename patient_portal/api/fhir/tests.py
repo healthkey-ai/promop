@@ -939,6 +939,23 @@ class CuratedMappingResolutionTest(TestCase):
         row = Measurement.objects.get(person_id=resp.json()['person_id'])
         self.assertEqual(row.measurement_concept_id, target.concept_id)
 
+    def test_approved_loinc_mapping_overrides_the_direct_cache_hit(self):
+        """The batched FHIR cache must preserve SCCM-first resolution."""
+        from omop_core.models import SourceCodeConceptMapping
+        direct = self._concept(3046314, '33358-6', 'LOINC', 'Direct LOINC concept')
+        target = self._concept(3046315, '33358-7', 'LOINC', 'Curator-chosen concept')
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='LOINC', source_code=direct.concept_code,
+            target_concept=target, destination_vocabulary_id='LOINC',
+            omop_table='measurement', status='approved',
+        )
+        resp = self.client.post('/api/fhir/sync/', {
+            'bundle': self._bundle('http://loinc.org', direct.concept_code),
+        }, format='json')
+        self.assertEqual(resp.status_code, 201, resp.content)
+        row = Measurement.objects.get(person_id=resp.json()['person_id'])
+        self.assertEqual(row.measurement_concept_id, target.concept_id)
+
     def test_proposed_mapping_does_not_steer_the_import(self):
         """A draft an import wrote must not change what the next import
         resolves to, or the machine quietly ratifies its own guess."""
