@@ -62,20 +62,24 @@ from omop_core.models import (
     Organization,
     PatientDocument,
     PatientRecord,
-    PatientSurveyResponse,
     PatientTrialEnrollment,
     Person,
     PersonLanguageSkill,
     SKILL_LEVEL_CHOICES,
     ProcedureOccurrence,
     Specimen,
-    Survey,
     VisitDetail,
     VisitOccurrence,
     Vocabulary,
 )
 from omop_core.services.pk import next_pk_batch
+from omop_core.services.prolog_cleanup import delete_prolog_data_for_persons
 from omop_core.services.patient_record_service import refresh_patient_record
+from prolog_surveys.models import (
+    SurveyAnswer as PrologSurveyAnswer,
+    SurveyResponse as PrologSurveyResponse,
+    SurveyVersion as PrologSurveyVersion,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -290,6 +294,12 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+
+        # Instruments this deployment does not have; reported once at the end.
+
+        self._survey_versions_missing = set()
+        # Responses that would not restore; reported rather than swallowed.
+        self._survey_responses_failed = []
         input_path = options['input'] or options['input_flag']
         if not input_path:
             raise CommandError(
@@ -459,6 +469,19 @@ class Command(BaseCommand):
         self.stdout.write(f'  Replaced          : {counts["replaced"]:>8,}')
         self.stdout.write(f'  Skipped (exists)  : {counts["skipped"]:>8,}')
         self.stdout.write(f'  Errors            : {counts["errors"]:>8,}')
+        if self._survey_versions_missing:
+            self.stdout.write(self.style.WARNING(
+                '  Survey responses skipped: this deployment has no '
+                + ', '.join(sorted(self._survey_versions_missing))
+                + '. Load those instruments and re-run to restore them.'
+            ))
+        if self._survey_responses_failed:
+            self.stdout.write(self.style.WARNING(
+                f'  Survey responses that would not restore: '
+                f'{len(self._survey_responses_failed)}'
+            ))
+            for failure in self._survey_responses_failed:
+                self.stdout.write(f'    {failure}')
 
     # ------------------------------------------------------------------
     # Per-patient import (runs inside its own transaction)
@@ -479,6 +502,9 @@ class Command(BaseCommand):
         if existing is not None:
             if not replace:
                 return None, False
+            # PROlog responses PROTECT their participant, so they have to go
+            # before the Person does — see omop_core.services.prolog_cleanup.
+            delete_prolog_data_for_persons([old_pid])
             existing.delete()   # cascade: OMOP rows + PatientRecord
             was_replaced = True
 
@@ -575,21 +601,88 @@ class Command(BaseCommand):
             except Exception:
                 pass
 
-        # ---- PatientSurveyResponse ----
+        # ---- PROlog survey responses ----
+        # A response belongs to an immutable version, so it is restored only
+        # where this deployment has the same instrument at the same version.
+        # Anything else is skipped rather than attached to a different set of
+        # questions — which is the whole reason versions exist.
         for resp in patient.get('survey_responses') or []:
             if not isinstance(resp, dict):
                 continue
-            survey_id = resp.get('survey_id')
-            if not survey_id or not Survey.objects.filter(id=survey_id).exists():
-                continue  # skip if survey definition is absent
-            fields = {
-                k: v for k, v in resp.items()
-                if k not in ('id', 'person_id')
-            }
+            slug, version_label = resp.get('survey_slug'), resp.get('survey_version')
+            if not slug or not version_label:
+                continue  # an export written before survey_responses carried them
+            version = PrologSurveyVersion.objects.filter(
+                survey__slug=slug, version=version_label
+            ).first()
+            if version is None:
+                self._survey_versions_missing.add(f'{slug}@{version_label}')
+                continue
+            # Dedupe on the response's own id. `started_at` is auto_now_add,
+            # so a restored row never carries the exported value at insert
+            # time and a key built from it never matches — which made every
+            # re-import duplicate every response.
+            response_id = resp.get('id')
+            if response_id:
+                # Scoped to this person: an id that belongs to somebody else is
+                # not a reason to drop these answers, and the insert below will
+                # say so rather than this passing over it in silence.
+                duplicate = PrologSurveyResponse.objects.filter(
+                    pk=response_id, participant_id=person.person_id
+                ).exists()
+            elif resp.get('submitted_at'):
+                # An export from before the id was carried. A finished response
+                # is identified by when it was finished; an unfinished one has
+                # nothing stable to match on, so it is restored rather than
+                # matched against a row that may not be it.
+                duplicate = PrologSurveyResponse.objects.filter(
+                    survey_version=version,
+                    participant_id=person.person_id,
+                    submitted_at=resp['submitted_at'],
+                ).exists()
+            else:
+                duplicate = False
+            if duplicate:
+                continue  # re-running an import must not duplicate a response
             try:
-                PatientSurveyResponse.objects.create(person=person, **fields)
-            except Exception:
-                pass
+                # A savepoint: a response that will not restore must not take
+                # the rest of the patient down with it, and without one the
+                # failed statement poisons the enclosing transaction.
+                with transaction.atomic():
+                    fields = {
+                        'survey_version': version,
+                        'participant_id': person.person_id,
+                        'language': resp.get('language') or version.definition.get(
+                            'default_language', 'en'
+                        ),
+                        'status': resp.get('status') or 'in_progress',
+                        'submitted_at': resp.get('submitted_at'),
+                        'last_question_key': resp.get('last_question_key') or '',
+                    }
+                    if response_id:
+                        fields['id'] = response_id
+                    restored = PrologSurveyResponse.objects.create(**fields)
+                    # auto_now_add ignores a supplied value, so the real start
+                    # time goes back on with an UPDATE.
+                    started_at = resp.get('started_at')
+                    if started_at:
+                        PrologSurveyResponse.objects.filter(pk=restored.pk).update(
+                            started_at=started_at
+                        )
+                    PrologSurveyAnswer.objects.bulk_create([
+                        PrologSurveyAnswer(
+                            response=restored,
+                            question_key=a['question_key'],
+                            value=a['value'],
+                            option_keys=a.get('option_keys') or [],
+                        )
+                        for a in (resp.get('answers') or [])
+                        if isinstance(a, dict) and a.get('question_key')
+                    ])
+            except Exception as exc:
+                self._survey_responses_failed.append(
+                    f'{slug}@{version_label} for person {person.person_id}: {exc}'
+                )
 
         # ---- PatientRecord ----
         # Derived by default: the OMOP rows above are the facts, and every other

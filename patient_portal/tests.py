@@ -14,14 +14,18 @@ import json
 from typing import Any
 import os
 import tempfile
+from pathlib import Path
 import unittest
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from patient_portal.models import Identity
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.test import TestCase, TransactionTestCase
+from django.test import RequestFactory, TestCase, TransactionTestCase
 from django.utils import timezone
+from django.core.management import call_command
+from django.core.management.base import CommandError
+from patient_portal.models import PatientUser
 from django.contrib.contenttypes.models import ContentType
 from rest_framework import status
 from rest_framework.test import APIClient
@@ -35,8 +39,7 @@ from omop_core.models import (
     Relationship, ConceptRelationship, ConceptAncestor,
     SctEligibility,
     FhirConnection, FhirOauthState, Institution,
-    ObservationPeriod, PatientSurveyResponse, PersonLanguageSkill, Survey,
-    VisitOccurrence,
+    ObservationPeriod, PersonLanguageSkill, VisitOccurrence,
     Organization, GroupAccess, CustomPatientField, FieldFormula,
 )
 from omop_core.services.code_mapping import CLINICAL_TABLES, resolve_source_code
@@ -6069,8 +6072,6 @@ class LotInferenceTest(_SmartBase):
         self.assertGreaterEqual(len(lots), 2)
         cart_lots = [l for l in lots if 'CAR T-Cell' in l.phase_label]
         self.assertEqual(len(cart_lots), 1)
-
-
 # ---------------------------------------------------------------------------
 # ScopedTokenPermission role-based enforcement
 # ---------------------------------------------------------------------------
@@ -6099,8 +6100,6 @@ class ScopedTokenPermissionTest(TestCase):
         req.user = user
         return req
 
-    # --- service-token ---
-
     def test_service_token_allows_delete(self):
         req = self._req("DELETE", "service-token", self._user())
         self.assertTrue(self.permission.has_permission(req, None))
@@ -6113,8 +6112,6 @@ class ScopedTokenPermissionTest(TestCase):
         req = self._req("GET", "service-token", self._user())
         self.assertTrue(self.permission.has_permission(req, None))
 
-    # --- staff ---
-
     def test_staff_allows_delete_via_is_staff(self):
         req = self._req("DELETE", None, self._user(is_staff=True))
         self.assertTrue(self.permission.has_permission(req, None))
@@ -6126,8 +6123,6 @@ class ScopedTokenPermissionTest(TestCase):
     def test_staff_allows_delete(self):
         req = self._req("DELETE", None, self._user(is_staff=True))
         self.assertTrue(self.permission.has_permission(req, None))
-
-    # --- patient (session auth, non-staff) ---
 
     def test_patient_allows_get(self):
         req = self._req("GET", None, self._user())
@@ -6149,14 +6144,10 @@ class ScopedTokenPermissionTest(TestCase):
         req = self._req("PUT", None, self._user())
         self.assertFalse(self.permission.has_permission(req, None))
 
-    # --- unauthenticated ---
-
     def test_unauthenticated_denies_get(self):
         from django.contrib.auth.models import AnonymousUser
         req = self._req("GET", None, AnonymousUser())
         self.assertFalse(self.permission.has_permission(req, None))
-
-    # --- Firebase / partner auth (TokenClaims) ---
 
     def test_firebase_patient_denies_delete(self):
         from patient_portal.api.providers.base import TokenClaims
@@ -6175,7 +6166,7 @@ class ScopedTokenPermissionTest(TestCase):
     def test_firebase_patient_allows_patch(self):
         from patient_portal.api.providers.base import TokenClaims
         claims = TokenClaims(issuer="https://securetoken.google.com/proj",
-                             sub="uid3", email="p3@test.com", name="P3", raw={})
+                             sub="uid3", email="p3@test.com", name="P", raw={})
         req = self._req("PATCH", claims, self._user())
         self.assertTrue(self.permission.has_permission(req, None))
 
@@ -6192,14 +6183,9 @@ class ScopedTokenPermissionTest(TestCase):
 # ---------------------------------------------------------------------------
 
 class PersonIdEnumerationTest(FhirUploadBase):
-    """bulk_delete error responses must not echo back submitted person IDs.
-
-    Returning f'Person {person_id} not found' lets an attacker confirm whether
-    a given person_id exists in the system.  Error strings must be generic.
-    """
+    """bulk_delete error responses must not echo back submitted person IDs."""
 
     def test_nonexistent_person_error_is_generic(self):
-        """DELETE bulk_delete with an unknown ID returns generic 'Person not found.'."""
         resp = self.client.delete(
             '/api/patient-info/bulk_delete/',
             {'person_ids': [999999987]},
@@ -6209,11 +6195,9 @@ class PersonIdEnumerationTest(FhirUploadBase):
         errors = resp.data.get('errors', [])
         self.assertEqual(len(errors), 1)
         self.assertEqual(errors[0], 'Person not found.')
-        # The numeric ID must not appear anywhere in the response body
         self.assertNotIn('999999987', str(resp.data))
 
     def test_successful_delete_not_affected(self):
-        """Deleting an existing person still works correctly after the fix."""
         from omop_core.models import Person as P
         p = P.objects.create(
             person_id=78901,
@@ -6235,143 +6219,11 @@ class PersonIdEnumerationTest(FhirUploadBase):
         self.assertFalse(P.objects.filter(person_id=78901).exists())
 
 
-# ---------------------------------------------------------------------------
-# Disease persistence tests — issues #110 / #113
-# ---------------------------------------------------------------------------
-
 @unittest.skip("Retired: mapped clinical PatientRecord fields are read-only")
-class DiseasePersistenceTest(_SmartBase):
-    """PATCH /api/patient-info/{person_id}/ must preserve PatientRecord.disease.
-
-    When the user saves a disease selection the serializer writes it directly to
-    PatientRecord.  _sync_condition then creates a ConditionOccurrence to mirror
-    that change in the OMOP tables.  That post_save would normally trigger
-    refresh_patient_record → _clear_derived_fields → disease wiped.
-
-    The fix sets _skip_patient_record_refresh = True on the new ConditionOccurrence
-    so the user's selection survives the round-trip.
-    """
-
-    PERSON_ID = 95001
-
-    @classmethod
-    def setUpTestData(cls):
-        super().setUpTestData()
-        # Fresh person and empty PatientRecord for this class
-        cls.dp_person = Person.objects.create(
-            person_id=cls.PERSON_ID,
-            given_name='Disease',
-            family_name='PersistTest',
-            year_of_birth=1975,
-            gender_source_value='female',
-            race_source_value='unknown',
-            ethnicity_source_value='unknown',
-        )
-        PatientRecord.objects.get_or_create(
-            person=cls.dp_person,
-            defaults={'organization': cls.organization},
-        )
-
-    # ------------------------------------------------------------------ #
-    # Issue #110: disease persists across a PATCH + DB re-fetch cycle     #
-    # ------------------------------------------------------------------ #
-
-    def test_disease_survives_patch_for_follicular_lymphoma(self):
-        """PATCH disease='Follicular Lymphoma' stays in DB after sync_to_omop."""
-        resp = self.write_client.patch(
-            f'/api/patient-info/{self.PERSON_ID}/',
-            {'disease': 'Follicular Lymphoma'},
-            format='json',
-        )
-        self.assertEqual(resp.status_code, 200, resp.data)
-
-        pi = PatientRecord.objects.get(person=self.dp_person)
-        self.assertEqual(
-            pi.disease, 'Follicular Lymphoma',
-            'PatientRecord.disease was overwritten after PATCH — refresh_patient_record '
-            'must not run from _sync_condition (issue #110)',
-        )
-
-    def test_disease_survives_patch_for_cll(self):
-        """PATCH disease='Chronic Lymphocytic Leukemia (CLL)' stays in DB."""
-        resp = self.write_client.patch(
-            f'/api/patient-info/{self.PERSON_ID}/',
-            {'disease': 'Chronic Lymphocytic Leukemia (CLL)'},
-            format='json',
-        )
-        self.assertEqual(resp.status_code, 200, resp.data)
-
-        pi = PatientRecord.objects.get(person=self.dp_person)
-        self.assertEqual(
-            pi.disease, 'Chronic Lymphocytic Leukemia (CLL)',
-            'PatientRecord.disease was overwritten after PATCH — '
-            'CLL selection must persist (issue #110)',
-        )
-
-    def test_disease_survives_patch_for_multiple_myeloma(self):
-        """PATCH disease='Multiple Myeloma' stays in DB."""
-        resp = self.write_client.patch(
-            f'/api/patient-info/{self.PERSON_ID}/',
-            {'disease': 'Multiple Myeloma'},
-            format='json',
-        )
-        self.assertEqual(resp.status_code, 200, resp.data)
-
-        pi = PatientRecord.objects.get(person=self.dp_person)
-        self.assertEqual(pi.disease, 'Multiple Myeloma')
-
-    def test_get_after_patch_returns_saved_disease(self):
-        """GET /api/patient-info/{id}/ after PATCH returns the saved disease value.
-
-        Simulates the navigation-away-and-back scenario from issue #110.
-        """
-        self.write_client.patch(
-            f'/api/patient-info/{self.PERSON_ID}/',
-            {'disease': 'Follicular Lymphoma'},
-            format='json',
-        )
-
-        get_resp = self.read_client.get(f'/api/patient-info/{self.PERSON_ID}/')
-        self.assertEqual(get_resp.status_code, 200)
-        self.assertEqual(
-            get_resp.data['patient_info']['disease'], 'Follicular Lymphoma',
-            'GET after PATCH returned wrong disease — field was overwritten server-side '
-            '(issue #110)',
-        )
-
-    # ------------------------------------------------------------------ #
-    # Issue #113: _skip_patient_record_refresh flag prevents OMOP overwrite #
-    # ------------------------------------------------------------------ #
-
-    def test_disease_survives_sync_to_omop(self):
-        """disease persists after sync_to_omop runs _sync_condition directly.
-
-        We verify this by checking that PatientRecord.disease is unchanged
-        immediately after sync_to_omop runs (no extra DB write occurred).
-        """
-        from omop_core.services.omop_write_service import sync_to_omop
-        from datetime import date
-
-        pi = PatientRecord.objects.get(person=self.dp_person)
-        pi.disease = 'Follicular Lymphoma'
-        pi.save(update_fields=['disease'])
-
-        # Call sync_to_omop directly — this runs _sync_condition internally
-        sync_to_omop(pi, {'disease'}, changed_data={'disease': 'Follicular Lymphoma'})
-
-        pi.refresh_from_db()
-        self.assertEqual(
-            pi.disease, 'Follicular Lymphoma',
-            'sync_to_omop wiped PatientRecord.disease — _skip_patient_record_refresh '
-            'not set on ConditionOccurrence (issue #113)',
-        )
-
-
 class FhirRxNavIntegrationTest(_SmartBase):
     """FHIR upload for a drug unknown in local vocab → RxNav called → concept resolved."""
 
     def _fhir_file(self, drug_name, filename='rxnav_test.json'):
-        """Build a multipart-upload file object for the given drug name."""
         bundle = {
             'resourceType': 'Bundle',
             'type': 'collection',
@@ -6402,7 +6254,6 @@ class FhirRxNavIntegrationTest(_SmartBase):
         return f
 
     def test_fhir_upload_uses_rxnav_for_unknown_drug(self):
-        """FHIR bundle with unknown drug name → RxNav resolves it → DrugExposure concept set."""
         from unittest.mock import patch
         from omop_core.models import DrugExposure
 
@@ -6419,15 +6270,10 @@ class FhirRxNavIntegrationTest(_SmartBase):
         self.assertIn(response.status_code, [200, 201])
         de = DrugExposure.objects.filter(drug_source_value='Velcade').first()
         self.assertIsNotNone(de, 'DrugExposure for Velcade not created')
-        self.assertNotEqual(
-            de.drug_concept_id, 0,
-            'drug_concept_id should be set via RxNav; got 0',
-        )
+        self.assertNotEqual(de.drug_concept_id, 0)
 
     def test_fhir_upload_unknown_drug_rxnav_fails_gracefully(self):
-        """RxNav returns nothing → FHIR upload still succeeds, uses fallback concept."""
         from unittest.mock import patch
-        from omop_core.models import DrugExposure
 
         with patch(
             'omop_core.services.rxnav_service._rxnav_lookup',
@@ -6441,615 +6287,6 @@ class FhirRxNavIntegrationTest(_SmartBase):
 
         self.assertIn(response.status_code, [200, 201])
 
-
-# =============================================================================
-# Survey models and API tests
-# =============================================================================
-
-class SurveyModelTest(_SmartBase):
-    """Survey and PatientSurveyResponse model-level tests."""
-
-    @classmethod
-    def setUpTestData(cls):
-        super().setUpTestData()
-        from omop_core.models import Survey, PatientSurveyResponse
-        cls.survey = Survey.objects.create(
-            name='mm-quality-of-life',
-            title='Multiple Myeloma Quality of Life',
-            description='Patient-reported outcomes for MM patients.',
-            status=Survey.STATUS_ACTIVE,
-            disease='Multiple Myeloma',
-            pages=[
-                {
-                    'name': 'page1',
-                    'title': 'Symptoms',
-                    'inputs': [
-                        {'name': 'fatigue', 'label': 'Fatigue level', 'type': 'rating',
-                         'data': {'maxRating': 10}},
-                        {'name': 'pain', 'label': 'Pain level', 'type': 'rating',
-                         'data': {'maxRating': 10}},
-                        {'name': 'notes', 'label': 'Additional notes', 'type': 'textarea'},
-                    ],
-                }
-            ],
-            estimated_minutes=5,
-        )
-        cls.response = PatientSurveyResponse.objects.create(
-            person=cls.person,
-            survey=cls.survey,
-            values={'fatigue': 7, 'pain': 4, 'notes': 'Feeling tired'},
-            values_dates={'fatigue': '2024-03-01T10:00:00Z', 'pain': '2024-03-01T10:01:00Z'},
-            percent_complete=66,
-        )
-
-    def test_survey_saved_to_db(self):
-        from omop_core.models import Survey
-        s = Survey.objects.get(name='mm-quality-of-life')
-        self.assertEqual(s.title, 'Multiple Myeloma Quality of Life')
-        self.assertEqual(s.status, Survey.STATUS_ACTIVE)
-        self.assertEqual(s.disease, 'Multiple Myeloma')
-        self.assertEqual(len(s.pages), 1)
-        self.assertEqual(len(s.pages[0]['inputs']), 3)
-
-    def test_survey_pages_json_roundtrip(self):
-        from omop_core.models import Survey
-        s = Survey.objects.get(name='mm-quality-of-life')
-        self.assertEqual(s.pages[0]['inputs'][0]['name'], 'fatigue')
-        self.assertEqual(s.pages[0]['inputs'][0]['data']['maxRating'], 10)
-
-    def test_response_saved_to_db(self):
-        from omop_core.models import PatientSurveyResponse
-        r = PatientSurveyResponse.objects.get(person=self.person, survey=self.survey)
-        self.assertEqual(r.values['fatigue'], 7)
-        self.assertEqual(r.values['pain'], 4)
-        self.assertEqual(r.percent_complete, 66)
-
-    def test_response_person_survey_unique(self):
-        from omop_core.models import PatientSurveyResponse
-        from django.db import IntegrityError
-        with self.assertRaises(IntegrityError):
-            PatientSurveyResponse.objects.create(
-                person=self.person,
-                survey=self.survey,
-                values={},
-            )
-
-    def test_survey_external_id_nullable(self):
-        from omop_core.models import Survey
-        s = Survey.objects.get(name='mm-quality-of-life')
-        self.assertIsNone(s.external_id)
-
-    def test_survey_str(self):
-        self.assertEqual(str(self.survey), 'Multiple Myeloma Quality of Life')
-
-    def test_response_str(self):
-        self.assertIn(str(self.person.person_id), str(self.response))
-        self.assertIn('mm-quality-of-life', str(self.response))
-
-
-class SurveyAPITest(_SmartBase):
-    """REST API tests for /api/surveys/ and /api/survey-responses/."""
-
-    @classmethod
-    def setUpTestData(cls):
-        super().setUpTestData()
-        from oauth2_provider.models import Application, AccessToken
-        from django.utils import timezone as tz
-        import datetime
-        # Internal app (no org) — survey template writes require no org-scoping.
-        cls._internal_app = Application.objects.create(
-            name='Internal Survey Service',
-            client_id='internal-survey-client-id',
-            client_type=Application.CLIENT_CONFIDENTIAL,
-            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
-            user=cls.foundation_user,
-        )
-        cls._internal_write_token = AccessToken.objects.create(
-            user=cls.foundation_user,
-            application=cls._internal_app,
-            token='internal-survey-write-token-s1',
-            expires=tz.now() + datetime.timedelta(hours=1),
-            scope='patient/*.read patient/*.write openid launch/patient',
-        )
-        from omop_core.models import Survey, PatientSurveyResponse
-        cls.survey = Survey.objects.create(
-            name='cll-proms',
-            title='CLL Patient-Reported Outcomes',
-            status=Survey.STATUS_ACTIVE,
-            disease='Chronic Lymphocytic Leukemia (CLL)',
-            pages=[{'name': 'p1', 'inputs': [
-                {'name': 'fatigue', 'label': 'Fatigue', 'type': 'rating'}
-            ]}],
-        )
-        cls.response = PatientSurveyResponse.objects.create(
-            person=cls.person,
-            survey=cls.survey,
-            values={'fatigue': 3},
-            percent_complete=100,
-        )
-
-    @property
-    def survey_write_client(self):
-        """Internal (no-org) client for mutating shared survey templates."""
-        return self._bearer(self._internal_write_token.token)
-
-    # --- Survey CRUD ---
-
-    def test_list_surveys_requires_auth(self):
-        res = APIClient().get('/api/surveys/')
-        self.assertEqual(res.status_code, 401)
-
-    def test_list_surveys(self):
-        res = self.read_client.get('/api/surveys/')
-        self.assertEqual(res.status_code, 200)
-        data = res.data if isinstance(res.data, list) else res.data.get('results', [])
-        names = [s['name'] for s in data]
-        self.assertIn('cll-proms', names)
-
-    def test_filter_surveys_by_disease(self):
-        res = self.read_client.get('/api/surveys/?disease=Chronic+Lymphocytic+Leukemia+%28CLL%29')
-        self.assertEqual(res.status_code, 200)
-        data = res.data if isinstance(res.data, list) else res.data.get('results', [])
-        self.assertTrue(all(s['disease'] == 'Chronic Lymphocytic Leukemia (CLL)' for s in data))
-
-    def test_filter_surveys_by_status(self):
-        res = self.read_client.get('/api/surveys/?status=ACTIVE')
-        self.assertEqual(res.status_code, 200)
-        data = res.data if isinstance(res.data, list) else res.data.get('results', [])
-        self.assertTrue(all(s['status'] == 'ACTIVE' for s in data))
-
-    def test_create_survey_requires_write_scope(self):
-        payload = {
-            'name': 'new-survey', 'title': 'New Survey',
-            'status': 'DRAFT', 'disease': 'Breast Cancer', 'pages': [],
-        }
-        res = self.read_client.post('/api/surveys/', payload, format='json')
-        self.assertEqual(res.status_code, 403)
-
-    def test_create_survey(self):
-        payload = {
-            'name': 'breast-cancer-proms', 'title': 'Breast Cancer PROMs',
-            'status': 'ACTIVE', 'disease': 'Breast Cancer',
-            'pages': [{'name': 'p1', 'inputs': [
-                {'name': 'q1', 'label': 'How are you?', 'type': 'radioGroup',
-                 'data': {'options': [{'value': 'good', 'label': 'Good'},
-                                      {'value': 'poor', 'label': 'Poor'}]}}
-            ]}],
-        }
-        res = self.survey_write_client.post('/api/surveys/', payload, format='json')
-        self.assertEqual(res.status_code, 201)
-        self.assertEqual(res.data['name'], 'breast-cancer-proms')
-        self.assertEqual(len(res.data['pages'][0]['inputs']), 1)
-
-    def test_retrieve_survey(self):
-        res = self.read_client.get(f'/api/surveys/{self.survey.id}/')
-        self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.data['name'], 'cll-proms')
-        self.assertIn('pages', res.data)
-
-    def test_update_survey_status(self):
-        from omop_core.models import Survey
-        s = Survey.objects.create(
-            name='to-archive', title='To Archive',
-            status=Survey.STATUS_ACTIVE, pages=[],
-        )
-        res = self.survey_write_client.patch(f'/api/surveys/{s.id}/', {'status': 'ARCHIVED'}, format='json')
-        self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.data['status'], 'ARCHIVED')
-
-    # --- Survey response CRUD ---
-
-    def test_list_responses_requires_auth(self):
-        res = APIClient().get('/api/survey-responses/')
-        self.assertEqual(res.status_code, 401)
-
-    def test_list_responses_filtered_by_person(self):
-        res = self.read_client.get(f'/api/survey-responses/?person_id={self.person.person_id}')
-        self.assertEqual(res.status_code, 200)
-        data = res.data if isinstance(res.data, list) else res.data.get('results', [])
-        self.assertEqual(len(data), 1)
-        self.assertEqual(data[0]['values']['fatigue'], 3)
-
-    def test_list_responses_includes_survey_title(self):
-        res = self.read_client.get(f'/api/survey-responses/?person_id={self.person.person_id}')
-        data = res.data if isinstance(res.data, list) else res.data.get('results', [])
-        self.assertEqual(data[0]['survey_title'], 'CLL Patient-Reported Outcomes')
-
-    def test_create_response(self):
-        from omop_core.models import Survey
-        s2 = Survey.objects.create(
-            name='mm-proms-2', title='MM PROMs v2',
-            status=Survey.STATUS_ACTIVE, pages=[],
-        )
-        payload = {
-            'person': self.person.person_id,
-            'survey': s2.id,
-            'values': {'pain': 5, 'fatigue': 8},
-            'percent_complete': 50,
-        }
-        res = self.write_client.post('/api/survey-responses/', payload, format='json')
-        self.assertEqual(res.status_code, 201)
-        self.assertEqual(res.data['values']['pain'], 5)
-        self.assertEqual(res.data['percent_complete'], 50)
-
-    def test_patch_response_autosave(self):
-        """PATCH merges new answers without overwriting existing ones."""
-        from omop_core.models import PatientSurveyResponse
-        # Seed two fields so we can verify the pre-existing one survives the PATCH.
-        self.response.values = {'fatigue': 3, 'pain': 5}
-        self.response.save()
-        res = self.write_client.patch(
-            f'/api/survey-responses/{self.response.id}/',
-            {'values': {'fatigue': 9}, 'percent_complete': 100},
-            format='json',
-        )
-        self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.data['values']['fatigue'], 9)
-        self.assertEqual(res.data['values']['pain'], 5, 'pre-existing key should survive merge')
-        self.assertEqual(res.data['percent_complete'], 100)
-
-    def test_response_not_writable_with_read_token(self):
-        payload = {
-            'person': self.person.person_id,
-            'survey': self.survey.id,
-            'values': {'fatigue': 1},
-        }
-        res = self.read_client.post('/api/survey-responses/', payload, format='json')
-        self.assertEqual(res.status_code, 403)
-
-
-class SurveyModelExtendedTest(_SmartBase):
-    """Additional model-level tests for Survey and PatientSurveyResponse."""
-
-    @classmethod
-    def setUpTestData(cls):
-        super().setUpTestData()
-        from omop_core.models import Survey
-        cls.survey = Survey.objects.create(
-            name='fl-proms',
-            title='FL Quality of Life',
-            status=Survey.STATUS_ACTIVE,
-            disease='Follicular Lymphoma',
-            pages=[],
-        )
-
-    def test_survey_estimated_minutes_nullable(self):
-        from omop_core.models import Survey
-        s = Survey.objects.get(name='fl-proms')
-        self.assertIsNone(s.estimated_minutes)
-
-    def test_survey_without_disease_allowed(self):
-        from omop_core.models import Survey
-        s = Survey.objects.create(
-            name='no-disease-survey',
-            title='General Survey',
-            status=Survey.STATUS_DRAFT,
-            pages=[],
-        )
-        self.assertEqual('', s.disease)
-
-    def test_response_values_dates_roundtrip(self):
-        from omop_core.models import PatientSurveyResponse
-        r = PatientSurveyResponse.objects.create(
-            person=self.person,
-            survey=self.survey,
-            values={'q1': 'yes'},
-            values_dates={'q1': '2025-01-15T09:30:00Z'},
-        )
-        r.refresh_from_db()
-        self.assertEqual(r.values_dates['q1'], '2025-01-15T09:30:00Z')
-
-    def test_response_consent_fields_nullable(self):
-        from omop_core.models import PatientSurveyResponse
-        r = PatientSurveyResponse.objects.create(
-            person=self.person,
-            survey=self.survey,
-            values={},
-        )
-        self.assertIsNone(r.consent_date)
-        self.assertIsNone(r.consent_signature)
-        self.assertIsNone(r.completed_at)
-
-    def test_response_timestamps_auto_set(self):
-        from omop_core.models import PatientSurveyResponse
-        r = PatientSurveyResponse.objects.create(
-            person=self.person,
-            survey=self.survey,
-            values={},
-        )
-        self.assertIsNotNone(r.created_at)
-        self.assertIsNotNone(r.updated_at)
-
-    def test_survey_timestamps_auto_set(self):
-        s = self.survey
-        self.assertIsNotNone(s.created_at)
-        self.assertIsNotNone(s.updated_at)
-
-
-class SurveyAPIExtendedTest(_SmartBase):
-    """Additional API tests for edge cases and merge behaviour."""
-
-    @classmethod
-    def setUpTestData(cls):
-        super().setUpTestData()
-        from oauth2_provider.models import Application, AccessToken
-        from django.utils import timezone as tz
-        import datetime
-        # Internal app (no org) — survey template writes require no org-scoping.
-        cls._internal_app = Application.objects.create(
-            name='Internal Survey Service (Ext)',
-            client_id='internal-survey-client-id-ext',
-            client_type=Application.CLIENT_CONFIDENTIAL,
-            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
-            user=cls.foundation_user,
-        )
-        cls._internal_write_token = AccessToken.objects.create(
-            user=cls.foundation_user,
-            application=cls._internal_app,
-            token='internal-survey-write-token-s2',
-            expires=tz.now() + datetime.timedelta(hours=1),
-            scope='patient/*.read patient/*.write openid launch/patient',
-        )
-        from omop_core.models import Survey, PatientSurveyResponse
-        cls.survey = Survey.objects.create(
-            name='mm-ext-test',
-            title='MM Extended Test Survey',
-            status=Survey.STATUS_ACTIVE,
-            disease='Multiple Myeloma',
-            pages=[{'name': 'p1', 'inputs': [
-                {'name': 'fatigue', 'label': 'Fatigue', 'type': 'rating'},
-                {'name': 'pain', 'label': 'Pain', 'type': 'rating'},
-            ]}],
-        )
-        cls.response = PatientSurveyResponse.objects.create(
-            person=cls.person,
-            survey=cls.survey,
-            values={'fatigue': 5, 'pain': 3},
-            values_dates={
-                'fatigue': '2025-01-01T10:00:00Z',
-                'pain': '2025-01-01T10:00:00Z',
-            },
-            percent_complete=50,
-        )
-
-    @property
-    def survey_write_client(self):
-        """Internal (no-org) client for mutating shared survey templates."""
-        return self._bearer(self._internal_write_token.token)
-
-    def test_retrieve_survey_404(self):
-        res = self.read_client.get('/api/surveys/999999/')
-        self.assertEqual(res.status_code, 404)
-
-    def test_retrieve_response_404(self):
-        res = self.read_client.get('/api/survey-responses/999999/')
-        self.assertEqual(res.status_code, 404)
-
-    def test_patch_response_merges_without_overwriting(self):
-        """PATCH with one key must not erase the other existing key."""
-        res = self.write_client.patch(
-            f'/api/survey-responses/{self.response.id}/',
-            {'values': {'fatigue': 9}},
-            format='json',
-        )
-        self.assertEqual(res.status_code, 200)
-        # fatigue updated
-        self.assertEqual(res.data['values']['fatigue'], 9)
-        # pain must still be present
-        self.assertIn('pain', res.data['values'])
-        self.assertEqual(res.data['values']['pain'], 3)
-
-    def test_patch_response_updates_values_dates(self):
-        """PATCH with values_dates merges timestamps."""
-        res = self.write_client.patch(
-            f'/api/survey-responses/{self.response.id}/',
-            {
-                'values': {'fatigue': 8},
-                'values_dates': {'fatigue': '2025-06-01T12:00:00Z'},
-            },
-            format='json',
-        )
-        self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.data['values_dates']['fatigue'], '2025-06-01T12:00:00Z')
-        # pain timestamp preserved
-        self.assertIn('pain', res.data['values_dates'])
-
-    def test_patch_response_sets_completed_at(self):
-        from omop_core.models import Survey, PatientSurveyResponse
-        s = Survey.objects.create(
-            name='completion-test', title='Completion Test',
-            status=Survey.STATUS_ACTIVE, pages=[],
-        )
-        r = PatientSurveyResponse.objects.create(
-            person=self.person, survey=s, values={},
-        )
-        res = self.write_client.patch(
-            f'/api/survey-responses/{r.id}/',
-            {'completed_at': '2025-06-03T14:00:00Z', 'percent_complete': 100},
-            format='json',
-        )
-        self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.data['percent_complete'], 100)
-        self.assertIsNotNone(res.data['completed_at'])
-
-    def test_create_response_duplicate_returns_400(self):
-        """Creating a second response for (person, survey) must fail with 400."""
-        payload = {
-            'person': self.person.person_id,
-            'survey': self.survey.id,
-            'values': {'fatigue': 1},
-        }
-        res = self.write_client.post('/api/survey-responses/', payload, format='json')
-        self.assertEqual(res.status_code, 400)
-
-    def test_list_responses_filtered_by_survey(self):
-        res = self.read_client.get(f'/api/survey-responses/?survey={self.survey.id}')
-        self.assertEqual(res.status_code, 200)
-        data = res.data if isinstance(res.data, list) else res.data.get('results', [])
-        self.assertTrue(all(r['survey'] == self.survey.id for r in data))
-
-    def test_response_includes_survey_name(self):
-        res = self.read_client.get(f'/api/survey-responses/?person_id={self.person.person_id}')
-        data = res.data if isinstance(res.data, list) else res.data.get('results', [])
-        matching = [r for r in data if r['survey'] == self.survey.id]
-        self.assertTrue(len(matching) > 0)
-        self.assertEqual(matching[0]['survey_name'], 'mm-ext-test')
-
-    def test_filter_surveys_unknown_disease_returns_empty(self):
-        res = self.read_client.get('/api/surveys/?disease=UnknownDiseaseXYZ')
-        self.assertEqual(res.status_code, 200)
-        data = res.data if isinstance(res.data, list) else res.data.get('results', [])
-        self.assertEqual(len(data), 0)
-
-    def test_create_survey_missing_name_returns_400(self):
-        payload = {'title': 'No Name Survey', 'status': 'ACTIVE', 'pages': []}
-        res = self.survey_write_client.post('/api/surveys/', payload, format='json')
-        self.assertEqual(res.status_code, 400)
-
-    def test_create_survey_with_external_id(self):
-        payload = {
-            'name': 'ext-id-survey',
-            'title': 'External ID Survey',
-            'status': 'DRAFT',
-            'pages': [],
-            'external_id': 'firestore-doc-abc123',
-        }
-        res = self.survey_write_client.post('/api/surveys/', payload, format='json')
-        self.assertEqual(res.status_code, 201)
-        self.assertEqual(res.data['external_id'], 'firestore-doc-abc123')
-
-    def test_update_survey_blocked_with_read_token(self):
-        res = self.read_client.patch(
-            f'/api/surveys/{self.survey.id}/',
-            {'status': 'ARCHIVED'},
-            format='json',
-        )
-        self.assertEqual(res.status_code, 403)
-
-    def test_delete_survey_returns_405(self):
-        res = self.write_client.delete(f'/api/surveys/{self.survey.id}/')
-        self.assertEqual(res.status_code, 405)
-
-    def test_duplicate_survey_name_returns_400(self):
-        payload = {
-            'name': 'mm-ext-test',  # same as cls.survey
-            'title': 'Duplicate Name Survey',
-            'status': 'DRAFT',
-            'pages': [],
-        }
-        res = self.survey_write_client.post('/api/surveys/', payload, format='json')
-        self.assertEqual(res.status_code, 400)
-
-
-# ---------------------------------------------------------------------------
-# Cross-org isolation for survey responses
-# ---------------------------------------------------------------------------
-
-class SurveyCrossOrgTest(MultiTenantIsolationTest):
-    """Org-scoped tokens must not read or write another org's survey responses."""
-
-    @classmethod
-    def setUpTestData(cls):
-        super().setUpTestData()
-        from omop_core.models import Survey, PatientSurveyResponse
-        from oauth2_provider.models import AccessToken
-        from django.utils import timezone as tz
-        import datetime
-
-        cls.survey = Survey.objects.create(
-            name='cross-org-survey',
-            title='Cross Org Survey',
-            status=Survey.STATUS_ACTIVE,
-            pages=[],
-        )
-        cls.response_a = PatientSurveyResponse.objects.create(
-            person=cls.person_a,
-            survey=cls.survey,
-            values={'pain': 3},
-        )
-
-        # Write token for org A
-        cls.write_token_a = AccessToken.objects.create(
-            user=cls.user_a,
-            application=cls.app_a,
-            token='org-a-write-token',
-            expires=tz.now() + datetime.timedelta(hours=1),
-            scope='patient/*.write',
-        )
-
-    def test_org_a_cannot_list_org_b_responses(self):
-        """Org A token listing responses filtered by org-B person gets empty result."""
-        resp = self._client(self.token_a.token).get(
-            f'/api/survey-responses/?person_id={self.person_b.person_id}'
-        )
-        self.assertEqual(resp.status_code, 200)
-        data = resp.data if isinstance(resp.data, list) else resp.data.get('results', [])
-        self.assertEqual(len(data), 0, 'Org A must not see Org B survey responses')
-
-    def test_org_a_cannot_create_response_for_org_b_patient(self):
-        """Org A write token must be denied when posting a response for Org B's patient."""
-        from omop_core.models import Survey
-        payload = {
-            'person': self.person_b.person_id,
-            'survey': self.survey.id,
-            'values': {'pain': 9},
-        }
-        resp = self._client(self.write_token_a.token).post(
-            '/api/survey-responses/', payload, format='json'
-        )
-        self.assertIn(resp.status_code, [403, 404],
-                      'Org A must not create a response for Org B patient')
-
-    def test_org_a_sees_own_responses(self):
-        """Org A token can list its own survey responses."""
-        resp = self._client(self.token_a.token).get(
-            f'/api/survey-responses/?person_id={self.person_a.person_id}'
-        )
-        self.assertEqual(resp.status_code, 200)
-        data = resp.data if isinstance(resp.data, list) else resp.data.get('results', [])
-        self.assertEqual(len(data), 1)
-        self.assertEqual(data[0]['values']['pain'], 3)
-
-    def test_org_a_cannot_patch_org_b_response(self):
-        """Org A write token must be denied when patching a response owned by Org B's patient."""
-        from omop_core.models import PatientSurveyResponse
-        response_b = PatientSurveyResponse.objects.create(
-            person=self.person_b,
-            survey=self.survey,
-            values={'fatigue': 2},
-        )
-        resp = self._client(self.write_token_a.token).patch(
-            f'/api/survey-responses/{response_b.id}/',
-            {'values': {'fatigue': 9}},
-            format='json',
-        )
-        self.assertIn(resp.status_code, [403, 404],
-                      'Org A must not patch a response for Org B patient')
-
-    def test_org_token_cannot_write_survey_template(self):
-        """An org-linked write token must not be able to mutate shared survey templates."""
-        resp = self._client(self.write_token_a.token).patch(
-            f'/api/surveys/{self.survey.id}/',
-            {'status': 'ARCHIVED'},
-            format='json',
-        )
-        self.assertEqual(resp.status_code, 403,
-                         'Partner org token must not archive shared survey templates')
-
-    def test_put_on_survey_response_is_not_allowed(self):
-        """PUT is disabled on survey responses — use PATCH for incremental autosave."""
-        resp = self._client(self.write_token_a.token).put(
-            f'/api/survey-responses/{self.response_a.id}/',
-            {'person': self.person_a.person_id, 'survey': self.survey.id, 'values': {'pain': 9}},
-            format='json',
-        )
-        self.assertEqual(resp.status_code, 405,
-                         'PUT must be disabled on survey responses')
-
-
-# ---------------------------------------------------------------------------
-# SCT fields tests (PR #115)
-# ---------------------------------------------------------------------------
 
 class SctEligibilityVocabTest(FhirUploadBase):
     """Verify the sct-eligibility vocabulary endpoint returns expected values."""
@@ -10202,8 +9439,19 @@ class OrganizationCleanupServiceTest(TestCase):
             language_concept=_make_test_concept(9400004, 'Cleanup Language', 'CLANG', 'Language'),
             skill_level='speak',
         )
-        survey = Survey.objects.create(name='cleanup-survey', title='Cleanup Survey')
-        PatientSurveyResponse.objects.create(person=person, survey=survey)
+        from prolog_surveys.definitions.loader import load_definition
+        from prolog_surveys.models import SurveyResponse as PrologResponse
+
+        cleanup_version = load_definition({
+            'schema_version': 1, 'slug': 'cleanup-survey', 'version': '1.0',
+            'status': 'draft', 'default_language': 'en', 'languages': ['en'],
+            'title': {'en': 'Cleanup Survey'},
+            'sections': [{'key': 's1', 'title': {'en': 'S'},
+                          'questions': [{'key': 'q1', 'type': 'text', 'text': {'en': 'Q'}}]}],
+        }).version
+        PrologResponse.objects.create(
+            survey_version=cleanup_version, participant_id=person.person_id, language='en'
+        )
         institution = Institution.objects.create(
             slug='cleanup-ehr', display_name='Cleanup EHR', fhir_base='https://ehr.example.com/fhir',
         )
@@ -10234,7 +9482,10 @@ class OrganizationCleanupServiceTest(TestCase):
         self.assertFalse(Histology.objects.filter(person_id=person.person_id).exists())
         self.assertFalse(StemTable.objects.filter(person_id=person.person_id).exists())
         self.assertFalse(PersonLanguageSkill.objects.filter(person_id=person.person_id).exists())
-        self.assertFalse(PatientSurveyResponse.objects.filter(person_id=person.person_id).exists())
+        self.assertFalse(
+            PrologResponse.objects.filter(participant_id=person.person_id).exists(),
+            'an org purge must take the PROlog survey rows too',
+        )
         self.assertFalse(FhirOauthState.objects.filter(person_id=person.person_id).exists())
         self.assertFalse(FhirConnection.objects.filter(person_id=person.person_id).exists())
         self.assertTrue(PatientRecord.objects.filter(pk=other_patient.pk).exists())
@@ -14309,163 +13560,6 @@ class PatientConsentViewSetTest(TestCase):
         self.assertIn(resp.status_code, [
             status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN,
         ])
-
-
-# ---------------------------------------------------------------------------
-# Patient Survey — session-auth patient tests (PHR-S FM Phase 4a)
-# ---------------------------------------------------------------------------
-
-class PatientSurveySessionAuthTest(TestCase):
-    """Test that session-auth patients can list surveys, create responses,
-    autosave via PATCH, and are self-scoped (cannot see other patients' data).
-    """
-
-    @classmethod
-    def setUpTestData(cls):
-        from patient_portal.models import PatientUser
-
-        _make_vocab_fixtures()
-
-        # Patient A
-        cls.person_a = Person.objects.create(person_id=97001, family_name='SurvAlpha', given_name='Alice')
-        cls.patient_a_rec = PatientRecord.objects.create(person=cls.person_a)
-        cls.identity_a = Identity.objects.create_user(email='survey-a@test.com', password='pw')
-        PatientUser.objects.create(identity=cls.identity_a, person=cls.person_a)
-
-        # Patient B
-        cls.person_b = Person.objects.create(person_id=97002, family_name='SurvBravo', given_name='Bob')
-        cls.patient_b_rec = PatientRecord.objects.create(person=cls.person_b)
-        cls.identity_b = Identity.objects.create_user(email='survey-b@test.com', password='pw')
-        PatientUser.objects.create(identity=cls.identity_b, person=cls.person_b)
-
-        # Survey
-        cls.survey = Survey.objects.create(
-            name='test-survey-phase4a',
-            title='Test Survey',
-            description='A test survey for Phase 4a',
-            status=Survey.STATUS_ACTIVE,
-            pages=[
-                {
-                    'name': 'page1',
-                    'title': 'Page 1',
-                    'inputs': [
-                        {'name': 'q1', 'type': 'text', 'label': 'Question 1'},
-                        {'name': 'q2', 'type': 'text', 'label': 'Question 2'},
-                    ],
-                }
-            ],
-        )
-
-    def _client_as(self, identity):
-        c = APIClient()
-        c.force_authenticate(user=identity)
-        return c
-
-    def test_patient_can_list_surveys(self):
-        """GET /api/v1/surveys/ returns available surveys for a patient."""
-        resp = self._client_as(self.identity_a).get('/api/v1/surveys/')
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        data = resp.json()
-        # Should contain at least the survey we created
-        names = [s['name'] for s in data]
-        self.assertIn('test-survey-phase4a', names)
-
-    def test_patient_can_create_survey_response(self):
-        """POST /api/v1/survey-responses/ creates a new response (201)."""
-        resp = self._client_as(self.identity_a).post(
-            '/api/v1/survey-responses/',
-            {
-                'person': self.person_a.person_id,
-                'survey': self.survey.pk,
-            },
-            format='json',
-        )
-        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
-        data = resp.json()
-        self.assertEqual(data['survey'], self.survey.pk)
-        self.assertEqual(data['person'], self.person_a.person_id)
-        self.assertEqual(data['values'], {})
-        self.assertEqual(data['percent_complete'], 0)
-
-    def test_patient_can_patch_own_response(self):
-        """PATCH /api/v1/survey-responses/{id}/ merges values (autosave)."""
-        client = self._client_as(self.identity_a)
-        # Create
-        resp = client.post(
-            '/api/v1/survey-responses/',
-            {'person': self.person_a.person_id, 'survey': self.survey.pk},
-            format='json',
-        )
-        response_id = resp.json()['id']
-
-        # Autosave first answer
-        resp = client.patch(
-            f'/api/v1/survey-responses/{response_id}/',
-            {'values': {'q1': 'answer-one'}, 'percent_complete': 50},
-            format='json',
-        )
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        data = resp.json()
-        self.assertEqual(data['values']['q1'], 'answer-one')
-        self.assertEqual(data['percent_complete'], 50)
-
-    def test_patient_cannot_access_other_patients_response(self):
-        """Patient A cannot GET patient B's survey response — returns 404."""
-        # Create a response for patient B
-        client_b = self._client_as(self.identity_b)
-        resp = client_b.post(
-            '/api/v1/survey-responses/',
-            {'person': self.person_b.person_id, 'survey': self.survey.pk},
-            format='json',
-        )
-        response_b_id = resp.json()['id']
-
-        # Patient A tries to access it
-        client_a = self._client_as(self.identity_a)
-        resp = client_a.get(f'/api/v1/survey-responses/{response_b_id}/')
-        self.assertIn(resp.status_code, [
-            status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND,
-        ])
-
-    def test_patient_list_is_self_scoped(self):
-        """GET /api/v1/survey-responses/?person_id={own} returns only own responses."""
-        client_a = self._client_as(self.identity_a)
-        client_b = self._client_as(self.identity_b)
-
-        # Ensure both patients have responses
-        client_a.post(
-            '/api/v1/survey-responses/',
-            {'person': self.person_a.person_id, 'survey': self.survey.pk},
-            format='json',
-        )
-        client_b.post(
-            '/api/v1/survey-responses/',
-            {'person': self.person_b.person_id, 'survey': self.survey.pk},
-            format='json',
-        )
-
-        # Patient A lists their own
-        resp = client_a.get(f'/api/v1/survey-responses/?person_id={self.person_a.person_id}')
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        data = resp.json()
-        # All returned responses belong to patient A
-        for entry in data:
-            self.assertEqual(entry['person'], self.person_a.person_id)
-
-    def test_patient_cannot_create_response_for_other_patient(self):
-        """POST with person=other patient's person_id is rejected (403)."""
-        resp = self._client_as(self.identity_a).post(
-            '/api/v1/survey-responses/',
-            {'person': self.person_b.person_id, 'survey': self.survey.pk},
-            format='json',
-        )
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
-
-
-# ---------------------------------------------------------------------------
-# Patient messaging — bidirectional messaging (PHR-S FM Phase 4b)
-# ---------------------------------------------------------------------------
-
 class PatientMessageViewSetTest(TestCase):
     """Test PatientMessageViewSet — threading, mark-read, and self-scoping."""
 
@@ -17282,106 +16376,6 @@ class CsvCreateForNonOrgCallerTest(TestCase):
         )
         self.stranger.refresh_from_db()
         self.assertEqual(self.stranger.given_name, 'Stranger')
-
-
-class SurveyTemplateOrgWriteGuardTest(TestCase):
-    """Org-linked apps stay blocked from shared survey templates (issue #745).
-
-    ``_require_admin_for_writes`` is the one call site where *no* org means
-    allowed, so it reads ``org_profile`` off the application directly. Routing
-    it through ``get_request_org`` would let an org-linked non client-credentials
-    app read as "internal" once that helper began restricting itself to the
-    client_credentials grant.
-    """
-
-    @classmethod
-    def setUpTestData(cls):
-        from oauth2_provider.models import AccessToken, Application
-        from omop_core.models import ApplicationOrganization
-        import datetime as _dt
-        from django.utils import timezone as tz
-
-        cls.org = Organization.objects.create(
-            name='Survey Guard Org', slug='survey-guard-org',
-        )
-        cls.owner = Identity.objects.create_user(
-            email='survey-guard@example.com', password='pw',
-        )
-
-        def _token(slug, grant, org):
-            app = Application.objects.create(
-                name=f'Survey Guard {slug}',
-                client_id=f'survey-guard-{slug}',
-                client_type=(
-                    Application.CLIENT_PUBLIC
-                    if grant == Application.GRANT_AUTHORIZATION_CODE
-                    else Application.CLIENT_CONFIDENTIAL
-                ),
-                authorization_grant_type=grant,
-                user=cls.owner,
-                redirect_uris=(
-                    'https://survey.example.invalid/cb'
-                    if grant == Application.GRANT_AUTHORIZATION_CODE else ''
-                ),
-            )
-            if org is not None:
-                ApplicationOrganization.objects.create(
-                    application=app, organization=org,
-                )
-            return AccessToken.objects.create(
-                user=cls.owner,
-                application=app,
-                token=f'survey-guard-{slug}-token',
-                expires=tz.now() + _dt.timedelta(hours=1),
-                scope='patient/*.read patient/*.write',
-            ).token
-
-        cls.internal_token = _token(
-            'internal', Application.GRANT_CLIENT_CREDENTIALS, None,
-        )
-        cls.org_service_token = _token(
-            'org-service', Application.GRANT_CLIENT_CREDENTIALS, cls.org,
-        )
-        cls.org_human_token = _token(
-            'org-human', Application.GRANT_AUTHORIZATION_CODE, cls.org,
-        )
-
-    def _post_template(self, token):
-        client = APIClient()
-        client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
-        return client.post(
-            '/api/surveys/',
-            {
-                'name': 'survey-guard-probe',
-                'title': 'Survey Guard Probe',
-                'status': 'ACTIVE',
-                'disease': 'Breast Cancer',
-                'pages': [],
-            },
-            format='json',
-        )
-
-    def test_org_linked_service_app_is_blocked(self):
-        self.assertEqual(
-            self._post_template(self.org_service_token).status_code,
-            status.HTTP_403_FORBIDDEN,
-        )
-
-    def test_org_linked_human_facing_app_is_blocked(self):
-        """The case the grant-type restriction would otherwise have let through."""
-        self.assertEqual(
-            self._post_template(self.org_human_token).status_code,
-            status.HTTP_403_FORBIDDEN,
-        )
-
-    def test_internal_service_app_is_not_blocked_by_this_guard(self):
-        """An app with no org is still treated as internal."""
-        self.assertNotEqual(
-            self._post_template(self.internal_token).status_code,
-            status.HTTP_403_FORBIDDEN,
-        )
-
-
 class TokenCacheExpiryTest(TestCase):
     """The verified-token cache must not extend a token's life (issue #759, F21).
 
@@ -17970,7 +16964,7 @@ class BackfillCommandTest(TestCase):
 
         from django.core.management import call_command
         from io import StringIO
-        out = StringIO()
+        out = io.StringIO()
         # Force stale by setting version to 0
         PatientRecord.objects.filter(pk=pr.pk).update(derivation_version=0)
         call_command('backfill_patient_records', dry_run=True, stdout=out)
@@ -17987,7 +16981,7 @@ class BackfillCommandTest(TestCase):
 
         from django.core.management import call_command
         from io import StringIO
-        out = StringIO()
+        out = io.StringIO()
         call_command('backfill_patient_records', stdout=out)
         pr.refresh_from_db()
         self.assertEqual(pr.derivation_version, DERIVATION_VERSION)
@@ -24683,3 +23677,1259 @@ class CodeMappingLookupTest(TestCase):
             'codes': [{'source_vocabulary_id': 'CPT4', 'source_code': '99213'}],
         }, format='json')
         self.assertIn(resp.status_code, [401, 403])
+
+
+class PrologSurveyParticipantTest(TestCase):
+    """The host primitives the PROlog survey runner binds responses to.
+
+    PROlog binds every response to a Person (its DEP-2/RUN-2). A signed-in
+    patient gets their own; anyone else gets one minted with no identity and no
+    demographics. See docs/prolog-surveys.md.
+    """
+
+    def test_minted_person_has_no_identity_and_no_demographics(self):
+        from patient_portal.services import create_unidentified_person
+
+        person = create_unidentified_person(source='test')
+
+        self.assertIsNone(
+            PatientUser.objects.filter(person=person).first(),
+            'a respondent who is not signed in must not get an account',
+        )
+        for field in (
+            'year_of_birth', 'month_of_birth', 'day_of_birth', 'birth_datetime',
+            'gender_source_value', 'race_source_value', 'ethnicity_source_value',
+            'email', 'phone_number', 'given_name', 'family_name',
+        ):
+            self.assertIsNone(
+                getattr(person, field),
+                f'{field} would be an identifying attribute on an unidentified person',
+            )
+
+    def test_minted_person_has_a_patient_record(self):
+        """Issue #883: a Person without one is underivable and unfixable by API."""
+        from patient_portal.services import create_unidentified_person
+
+        person = create_unidentified_person(source='test')
+
+        self.assertTrue(
+            PatientRecord.objects.filter(person=person).exists(),
+            'without a PatientRecord, refresh answers 404 for the rest of this row\'s life',
+        )
+
+    def test_each_response_gets_its_own_person(self):
+        from patient_portal.services import create_unidentified_person
+
+        first = create_unidentified_person(source='test')
+        second = create_unidentified_person(source='test')
+
+        self.assertNotEqual(first.person_id, second.person_id)
+
+    def test_resolver_returns_the_person_of_a_patient(self):
+        from omop_core.services.pk import next_pk
+        from patient_portal.services import prolog_participant_id
+
+        identity = Identity.objects.create(issuer='urn:local', sub='prolog-patient')
+        person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientUser.objects.create(identity=identity, person=person)
+        request = RequestFactory().get('/')
+        request.user = identity
+
+        self.assertEqual(prolog_participant_id(request), person.person_id)
+
+    def test_resolver_returns_none_for_staff_and_for_anonymous(self):
+        """A provider trying a survey must not have it recorded against a patient."""
+        from django.contrib.auth.models import AnonymousUser
+        from omop_core.services.pk import next_pk
+        from patient_portal.services import prolog_participant_id
+
+        staff = Identity.objects.create(issuer='urn:local', sub='prolog-staff', is_staff=True)
+        person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientUser.objects.create(identity=staff, person=person)
+        request = RequestFactory().get('/')
+        request.user = staff
+        self.assertIsNone(prolog_participant_id(request))
+
+        anonymous = RequestFactory().get('/')
+        anonymous.user = AnonymousUser()
+        self.assertIsNone(prolog_participant_id(anonymous))
+
+
+class PrologSurveyInstallationTest(TestCase):
+    """The app is installed in this project, not deployed beside it."""
+
+    def test_response_participant_points_at_an_omop_person(self):
+        from prolog_surveys.models import SurveyResponse
+
+        field = SurveyResponse._meta.get_field('participant')
+
+        self.assertIs(field.related_model, Person)
+
+    def test_runner_is_mounted_and_does_not_shadow_promop_health(self):
+        from django.urls import reverse
+
+        self.assertEqual(reverse('health'), '/api/v1/prolog/health/')
+        self.assertEqual(reverse('health_check'), '/api/health/')
+
+
+class PrologSurveyMigrationTest(TestCase):
+    """Translating the retired survey feature into PROlog (decision 9).
+
+    The tables this reads are dropped by migration 0201, so a test database has
+    none: an operator runs the converter *before* migrating, against a database
+    where they still exist. What is worth testing is the translation itself,
+    which is pure, and that the command says so rather than inventing a schema.
+    """
+
+    template = {
+        'id': 1,
+        'name': 'symptom-check',
+        'title': 'Weekly symptom check',
+        'description': '',
+        'pages': [{
+            'name': 'page1',
+            'title': 'Symptoms',
+            'inputs': [
+                {'name': 'fatigue', 'label': 'Fatigue level', 'type': 'rating',
+                 'data': {'maxRating': 10}},
+                {'name': 'worst_day', 'label': 'Worst day', 'type': 'select',
+                 'data': {'options': ['Monday', 'Tuesday']}},
+                {'name': 'notes', 'label': 'Notes', 'type': 'textarea'},
+            ],
+        }],
+    }
+
+    def _questions(self):
+        from omop_core.management.commands.migrate_surveys_to_prolog import build_definition
+
+        doc, _ = build_definition(self.template)
+        return doc, {q['key']: q for s in doc['sections'] for q in s['questions']}
+
+    def test_a_template_becomes_a_draft_definition_with_mapped_types(self):
+        doc, questions = self._questions()
+
+        self.assertEqual(doc['status'], 'draft', 'activation stays a deliberate step')
+        self.assertEqual(doc['slug'], 'symptom-check')
+        self.assertEqual(questions['fatigue']['type'], 'scale')
+        self.assertEqual(questions['fatigue']['config']['scale'], {'min': 1, 'max': 10})
+        self.assertEqual(questions['worst_day']['type'], 'single')
+        self.assertEqual(questions['notes']['type'], 'text')
+        # Nothing was ever required: the old Complete button did not check.
+        self.assertFalse(any(q.get('required') for q in questions.values()))
+
+    def test_answers_are_translated_into_canonical_values(self):
+        from omop_core.management.commands.migrate_surveys_to_prolog import _answer_value
+
+        _, questions = self._questions()
+
+        self.assertEqual(_answer_value(questions['fatigue'], 7), ({'value': 7}, None))
+        self.assertEqual(_answer_value(questions['fatigue'], '3'), ({'value': 3}, None))
+        self.assertEqual(
+            _answer_value(questions['worst_day'], 'Tuesday'), ({'option': 'tuesday'}, None)
+        )
+        self.assertEqual(_answer_value(questions['notes'], 'tired'), ({'text': 'tired'}, None))
+
+    def test_what_it_cannot_carry_is_reported_not_guessed(self):
+        from omop_core.management.commands.migrate_surveys_to_prolog import _answer_value
+
+        _, questions = self._questions()
+
+        value, why = _answer_value(questions['fatigue'], 99)
+        self.assertIsNone(value)
+        self.assertIn('outside 1..10', why)
+
+        value, why = _answer_value(questions['worst_day'], 'Sunday')
+        self.assertIsNone(value)
+        self.assertIn('is not one of its options', why)
+
+    def test_an_unknown_input_type_becomes_the_text_box_it_actually_was(self):
+        from omop_core.management.commands.migrate_surveys_to_prolog import build_definition
+
+        doc, notes = build_definition({
+            **self.template,
+            'pages': [{'name': 'p', 'title': 'P', 'inputs': [
+                {'name': 'mystery', 'label': 'Mystery', 'type': 'slider'},
+            ]}],
+        })
+
+        question = doc['sections'][0]['questions'][0]
+        self.assertEqual(question['type'], 'text')
+        self.assertTrue(any('carried over as text' in n for n in notes))
+
+    def test_the_command_says_so_when_the_tables_are_already_gone(self):
+        out = io.StringIO()
+
+        call_command('migrate_surveys_to_prolog', stdout=out)
+
+        self.assertIn('already gone', out.getvalue())
+
+class PrologSurveyListTest(TestCase):
+    """The Surveys tab's index: what the runner is serving, and where I stand.
+
+    Answering happens in the runner at /s/<slug>; this only lists.
+    """
+
+    def setUp(self):
+        from omop_core.services.pk import next_pk
+        from prolog_surveys.definitions.loader import load_definition
+
+        self.identity = Identity.objects.create(issuer='urn:local', sub='surveys-tab')
+        self.person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=self.person)
+        PatientUser.objects.create(identity=self.identity, person=self.person)
+        self.version = load_definition({
+            'schema_version': 1,
+            'slug': 'symptom-check',
+            'version': '1.0',
+            'status': 'draft',
+            'default_language': 'en',
+            'languages': ['en'],
+            'title': {'en': 'Weekly symptom check'},
+            'sections': [{
+                'key': 's1',
+                'title': {'en': 'Symptoms'},
+                'questions': [{'key': 'fatigue', 'type': 'text', 'text': {'en': 'How tired?'}}],
+            }],
+        }, activate=True).version
+        self.client.force_login(self.identity)
+
+    def test_a_patient_sees_an_active_survey_and_where_to_answer_it(self):
+        body = self.client.get('/api/v1/prolog-surveys/').json()
+
+        self.assertEqual(len(body), 1)
+        self.assertEqual(body[0]['slug'], 'symptom-check')
+        self.assertEqual(body[0]['title'], 'Weekly symptom check')
+        self.assertEqual(body[0]['url'], '/s/symptom-check', 'the runner, not this API')
+        self.assertEqual(body[0]['status'], 'not_started')
+
+    def test_status_follows_the_patients_own_response(self):
+        from prolog_surveys.models import SurveyResponse
+
+        SurveyResponse.objects.create(
+            survey_version=self.version,
+            participant_id=self.person.person_id,
+            language='en',
+        )
+
+        body = self.client.get('/api/v1/prolog-surveys/').json()
+
+        self.assertEqual(body[0]['status'], 'in_progress')
+
+    def test_another_patients_response_does_not_change_my_status(self):
+        from omop_core.services.pk import next_pk
+        from prolog_surveys.models import SurveyResponse
+
+        someone_else = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        SurveyResponse.objects.create(
+            survey_version=self.version,
+            participant_id=someone_else.person_id,
+            language='en',
+        )
+
+        body = self.client.get('/api/v1/prolog-surveys/').json()
+
+        self.assertEqual(body[0]['status'], 'not_started')
+
+    def test_a_survey_outside_its_effective_window_is_not_offered(self):
+        from datetime import date, timedelta
+
+        survey = self.version.survey
+        survey.effective_to = date.today() - timedelta(days=1)
+        survey.save(update_fields=['effective_to'])
+
+        self.assertEqual(self.client.get('/api/v1/prolog-surveys/').json(), [])
+
+    def test_staff_have_no_surveys_of_their_own(self):
+        staff = Identity.objects.create(issuer='urn:local', sub='surveys-tab-staff', is_staff=True)
+        self.client.force_login(staff)
+
+        self.assertEqual(self.client.get('/api/v1/prolog-surveys/').json(), [])
+
+
+class RestoredSurveyEndpointsTest(TestCase):
+    """`/surveys/` and `/survey-responses/` still answer, backed by PROlog.
+
+    The paths are part of the v1 contract, so they survive the model change;
+    what changed is that they are read-only, because a PROlog instrument is a
+    loaded definition and answering goes through the runner.
+    """
+
+    def setUp(self):
+        from omop_core.services.pk import next_pk
+        from prolog_surveys.definitions.loader import load_definition
+        from prolog_surveys.models import SurveyAnswer, SurveyResponse
+
+        self.identity = Identity.objects.create(issuer='urn:local', sub='restored-endpoints')
+        self.person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=self.person)
+        PatientUser.objects.create(identity=self.identity, person=self.person)
+        self.version = load_definition({
+            'schema_version': 1, 'slug': 'checkin', 'version': '1.0', 'status': 'draft',
+            'default_language': 'en', 'languages': ['en'], 'title': {'en': 'Check-in'},
+            'sections': [{'key': 's1', 'title': {'en': 'S'}, 'questions': [
+                {'key': 'mood', 'type': 'text', 'text': {'en': 'How are you?'}}]}],
+        }, activate=True).version
+        self.response = SurveyResponse.objects.create(
+            survey_version=self.version, participant_id=self.person.person_id, language='en'
+        )
+        SurveyAnswer.objects.create(
+            response=self.response, question_key='mood', value={'text': 'fine'}
+        )
+        self.client.force_login(self.identity)
+
+    def test_surveys_answers_on_both_prefixes(self):
+        for path in ('/api/v1/surveys/', '/api/surveys/'):
+            body = self.client.get(path).json()
+            rows = body if isinstance(body, list) else body['results']
+            self.assertEqual([r['name'] for r in rows], ['checkin'], path)
+            self.assertEqual(rows[0]['title'], 'Check-in')
+
+    def test_a_patient_sees_their_own_responses_with_answers_as_values(self):
+        body = self.client.get('/api/v1/survey-responses/').json()
+        rows = body if isinstance(body, list) else body['results']
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['person'], self.person.person_id)
+        self.assertEqual(rows[0]['survey'], 'checkin')
+        # The shape the retired endpoint returned, derived rather than stored.
+        self.assertEqual(rows[0]['values'], {'mood': {'text': 'fine'}})
+
+    def test_another_patients_response_is_not_visible(self):
+        from omop_core.services.pk import next_pk
+        from prolog_surveys.models import SurveyResponse
+
+        other = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        SurveyResponse.objects.create(
+            survey_version=self.version, participant_id=other.person_id, language='en'
+        )
+
+        body = self.client.get('/api/v1/survey-responses/').json()
+        rows = body if isinstance(body, list) else body['results']
+
+        self.assertEqual([r['person'] for r in rows], [self.person.person_id])
+
+    def test_writing_is_refused_because_the_runner_owns_it(self):
+        """Answering goes through /api/v1/prolog/run/, which validates."""
+        created = self.client.post(
+            '/api/v1/survey-responses/', {'survey': 'checkin'}, content_type='application/json'
+        )
+        self.assertIn(created.status_code, (403, 405))
+
+        patched = self.client.patch(
+            f'/api/v1/survey-responses/{self.response.id}/',
+            {'values': {'mood': {'text': 'changed'}}},
+            content_type='application/json',
+        )
+        self.assertIn(patched.status_code, (403, 405))
+
+
+class OrgSurveyExportRoundTripTest(TestCase):
+    """Survey responses survive an org export and import, sourced from PROlog.
+
+    A response belongs to an immutable version, so the export names the
+    instrument by slug and version and the import attaches to the same one — or
+    skips, rather than hanging answers off a different set of questions.
+    """
+
+    def _definition(self, slug):
+        return {
+            'schema_version': 1, 'slug': slug, 'version': '1.0', 'status': 'draft',
+            'default_language': 'en', 'languages': ['en'], 'title': {'en': slug},
+            'sections': [{'key': 's1', 'title': {'en': 'S'}, 'questions': [
+                {'key': 'mood', 'type': 'text', 'text': {'en': 'How are you?'}}]}],
+        }
+
+    def setUp(self):
+        from omop_core.services.pk import next_pk
+        from prolog_surveys.definitions.loader import load_definition
+        from prolog_surveys.models import SurveyAnswer, SurveyResponse
+
+        self.person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=self.person)
+        self.version = load_definition(self._definition('checkin'), activate=True).version
+        response = SurveyResponse.objects.create(
+            survey_version=self.version, participant_id=self.person.person_id, language='en'
+        )
+        SurveyAnswer.objects.create(
+            response=response, question_key='mood', value={'text': 'fine'}
+        )
+
+    def test_the_export_carries_the_instrument_and_the_answers(self):
+        from omop_core.management.commands.export_org_patients import _prolog_survey_responses
+
+        exported = _prolog_survey_responses([self.person.person_id])
+
+        rows = exported[self.person.person_id]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['survey_slug'], 'checkin')
+        self.assertEqual(rows[0]['survey_version'], '1.0', 'the version is what makes it restorable')
+        self.assertEqual(rows[0]['answers'], [
+            {'question_key': 'mood', 'value': {'text': 'fine'}, 'option_keys': []},
+        ])
+
+    def test_an_export_of_someone_with_no_responses_is_empty(self):
+        from omop_core.management.commands.export_org_patients import _prolog_survey_responses
+        from omop_core.services.pk import next_pk
+
+        other = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+
+        self.assertEqual(_prolog_survey_responses([other.person_id]), {})
+
+
+class PrologSurveyScopingRegressionTest(TestCase):
+    """`/survey-responses/` scoping, for the callers the first cut got wrong.
+
+    `participant_id` is an integer column and the query parameter arrives as a
+    string, and the trust scoping differs per caller — so each branch is
+    exercised here rather than only the signed-in patient's.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import Organization
+        from omop_core.services.pk import next_pk
+        from prolog_surveys.definitions.loader import load_definition
+        from prolog_surveys.models import SurveyResponse
+
+        cls.org = Organization.objects.create(name='Scoping Org', slug='scoping-org')
+        cls.identity = Identity.objects.create(issuer='urn:local', sub='scoping-patient')
+        cls.person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=cls.person, organization=cls.org)
+        PatientUser.objects.create(identity=cls.identity, person=cls.person)
+        cls.version = load_definition({
+            'schema_version': 1, 'slug': 'scoping', 'version': '1.0', 'status': 'draft',
+            'default_language': 'en', 'languages': ['en'], 'title': {'en': 'Scoping'},
+            'sections': [{'key': 's1', 'title': {'en': 'S'}, 'questions': [
+                {'key': 'mood', 'type': 'text', 'text': {'en': 'How are you?'}}]}],
+        }, activate=True).version
+        SurveyResponse.objects.create(
+            survey_version=cls.version, participant_id=cls.person.person_id, language='en'
+        )
+        cls.service_identity = Identity.objects.get_or_create(
+            issuer='urn:service', sub='scoping-service',
+        )[0]
+
+    def test_a_patient_can_filter_by_their_own_person_id(self):
+        """The parameter is a string; the column is an integer."""
+        self.client.force_login(self.identity)
+
+        body = self.client.get(
+            f'/api/v1/survey-responses/?person_id={self.person.person_id}'
+        ).json()
+
+        self.assertEqual(len(body), 1, 'their own id must not filter them out')
+
+    def test_a_non_numeric_person_id_is_empty_rather_than_an_error(self):
+        self.client.force_login(self.identity)
+
+        response = self.client.get('/api/v1/survey-responses/?person_id=abc')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), [])
+
+    def test_a_service_token_can_narrow_to_one_person(self):
+        """The parameter exists for integrations; it must not exclude them."""
+        client = APIClient()
+        client.force_authenticate(user=self.service_identity, token='service-token')
+
+        body = client.get(
+            f'/api/v1/survey-responses/?person_id={self.person.person_id}'
+        ).json()
+
+        self.assertEqual(len(body), 1)
+
+    def test_a_patient_cannot_read_another_patients_responses(self):
+        from omop_core.services.pk import next_pk
+        from prolog_surveys.models import SurveyResponse
+
+        other = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=other, organization=self.org)
+        SurveyResponse.objects.create(
+            survey_version=self.version, participant_id=other.person_id, language='en'
+        )
+        self.client.force_login(self.identity)
+
+        body = self.client.get(
+            f'/api/v1/survey-responses/?person_id={other.person_id}'
+        ).json()
+
+        self.assertEqual(body, [], 'scoping runs before the filter, so this is empty')
+
+
+class PrologSurveyStatusRegressionTest(TestCase):
+    """The tab reports where a patient stands, so the newest response decides."""
+
+    def setUp(self):
+        from omop_core.services.pk import next_pk
+        from prolog_surveys.definitions.loader import load_definition
+
+        self.identity = Identity.objects.create(issuer='urn:local', sub='status-patient')
+        self.person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=self.person)
+        PatientUser.objects.create(identity=self.identity, person=self.person)
+        self.version = load_definition({
+            'schema_version': 1, 'slug': 'status', 'version': '1.0', 'status': 'draft',
+            'default_language': 'en', 'languages': ['en'], 'title': {'en': 'Status'},
+            'sections': [{'key': 's1', 'title': {'en': 'S'}, 'questions': [
+                {'key': 'mood', 'type': 'text', 'text': {'en': 'How are you?'}}]}],
+        }, activate=True).version
+        self.client.force_login(self.identity)
+
+    def test_a_finished_survey_does_not_still_read_as_in_progress(self):
+        from django.utils import timezone
+        from prolog_surveys.models import SurveyResponse
+
+        old = SurveyResponse.objects.create(
+            survey_version=self.version, participant_id=self.person.person_id, language='en'
+        )
+        new = SurveyResponse.objects.create(
+            survey_version=self.version, participant_id=self.person.person_id,
+            language='en', status='submitted', submitted_at=timezone.now(),
+        )
+        # started_at is auto_now_add, so the ordering is set explicitly.
+        SurveyResponse.objects.filter(pk=old.pk).update(
+            started_at=timezone.now() - timedelta(days=2)
+        )
+        SurveyResponse.objects.filter(pk=new.pk).update(
+            started_at=timezone.now() - timedelta(days=1)
+        )
+
+        body = self.client.get('/api/v1/prolog-surveys/').json()
+
+        self.assertEqual(body[0]['status'], 'completed')
+
+
+class PrologSurveyDeletionTest(TestCase):
+    """Deleting a patient who has answered a survey.
+
+    `SurveyResponse.participant` is PROTECT, so every path that removes a
+    Person has to clear PROlog's rows first — including the tables that hang
+    off a response or an invitation, which the first cut missed.
+    """
+
+    def _patient_with_a_survey_history(self, org=None):
+        from django.utils import timezone
+        from omop_core.services.pk import next_pk
+        from prolog_surveys.definitions.loader import load_definition
+        from prolog_surveys.models import (
+            SurveyAnswer, SurveyConsent, SurveyInvitation, SurveyResponse,
+        )
+
+        person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=person, organization=org)
+        version = getattr(self, '_version', None)
+        if version is None:
+            version = self._version = load_definition({
+                'schema_version': 1, 'slug': 'deletion', 'version': '1.0', 'status': 'draft',
+                'default_language': 'en', 'languages': ['en'], 'title': {'en': 'Deletion'},
+                'sections': [{'key': 's1', 'title': {'en': 'S'}, 'questions': [
+                    {'key': 'mood', 'type': 'text', 'text': {'en': 'How are you?'}}]}],
+            }, activate=True).version
+        response = SurveyResponse.objects.create(
+            survey_version=version, participant_id=person.person_id, language='en'
+        )
+        SurveyAnswer.objects.create(
+            response=response, question_key='mood', value={'text': 'fine'}
+        )
+        SurveyConsent.objects.create(
+            response=response, consent_version='1.0', text_hash='x' * 8,
+            language='en', agreed_at=timezone.now(),
+        )
+        SurveyInvitation.objects.create(
+            survey=version.survey, participant_id=person.person_id
+        )
+        return person
+
+    def test_a_patient_who_answered_a_survey_can_still_be_deleted(self):
+        from omop_core.services.prolog_cleanup import delete_prolog_data_for_persons
+        from prolog_surveys.models import SurveyResponse
+
+        person = self._patient_with_a_survey_history()
+
+        delete_prolog_data_for_persons([person.person_id])
+        person.delete()
+
+        self.assertFalse(Person.objects.filter(person_id=person.person_id).exists())
+        self.assertFalse(SurveyResponse.objects.filter(participant_id=person.person_id).exists())
+
+    def test_org_cleanup_removes_a_patient_with_consent_and_invitations(self):
+        from omop_core.models import Organization
+        from omop_core.services.organization_cleanup import (
+            delete_organization_with_patient_cascade,
+        )
+        from prolog_surveys.models import SurveyConsent, SurveyInvitation, SurveyResponse
+
+        org = Organization.objects.create(name='Deletion Org', slug='deletion-org')
+        person = self._patient_with_a_survey_history(org=org)
+
+        delete_organization_with_patient_cascade(org)
+
+        self.assertFalse(Person.objects.filter(person_id=person.person_id).exists())
+        self.assertFalse(SurveyResponse.objects.filter(participant_id=person.person_id).exists())
+        self.assertFalse(SurveyInvitation.objects.filter(participant_id=person.person_id).exists())
+        self.assertFalse(SurveyConsent.objects.exists())
+
+    def test_deleting_the_clinical_rows_frees_the_person(self):
+        """The shared helper is reached through the ordinary cleanup path."""
+        from omop_core.services.patient_cleanup import delete_omop_clinical_rows
+        from prolog_surveys.models import SurveyResponse
+
+        person = self._patient_with_a_survey_history()
+
+        delete_omop_clinical_rows(person)
+        PatientRecord.objects.filter(person=person).delete()
+        person.delete()
+
+        self.assertFalse(SurveyResponse.objects.filter(participant_id=person.person_id).exists())
+
+
+class PrologSurveyConverterTest(TestCase):
+    """`migrate_surveys_to_prolog`, against the tables it is meant to read.
+
+    The legacy models are gone from this release and migration 0201 drops
+    their tables, so the upgrade window — models absent, tables present — is
+    reconstructed here with SQL. That window is the only state in which this
+    command does anything, and it is a destructive one, so it is exercised
+    rather than reasoned about.
+    """
+
+    _DDL = (
+        """create table survey (
+               id serial primary key,
+               name varchar(200) unique not null,
+               title varchar(300) not null,
+               description text not null default '',
+               pages jsonb not null default '[]'::jsonb
+           )""",
+        """create table patient_survey_response (
+               id serial primary key,
+               survey_id integer not null references survey(id),
+               person_id bigint not null,
+               values jsonb not null default '{}'::jsonb,
+               started_at timestamptz,
+               completed_at timestamptz,
+               created_at timestamptz not null default now()
+           )""",
+    )
+
+    def setUp(self):
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            for statement in self._DDL:
+                cursor.execute(statement)
+
+    def tearDown(self):
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            cursor.execute('drop table if exists patient_survey_response')
+            cursor.execute('drop table if exists survey')
+
+    def _template(self, name, title='A survey'):
+        from django.db import connection
+
+        pages = json.dumps([{
+            'name': 'page one',
+            'title': 'Page one',
+            'inputs': [{'name': 'mood', 'type': 'text', 'label': 'How are you?'}],
+        }])
+        with connection.cursor() as cursor:
+            cursor.execute(
+                'insert into survey (name, title, description, pages) '
+                'values (%s, %s, %s, %s::jsonb) returning id',
+                [name, title, '', pages],
+            )
+            return cursor.fetchone()[0]
+
+    def _response(self, survey_id, person, started_at, values=None):
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                'insert into patient_survey_response '
+                '(survey_id, person_id, values, started_at, completed_at) '
+                "values (%s, %s, %s::jsonb, %s, null)",
+                [survey_id, person.person_id, json.dumps(values or {'mood': 'fine'}), started_at],
+            )
+
+    def _person(self):
+        from omop_core.services.pk import next_pk
+
+        person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=person)
+        return person
+
+    def test_purging_without_apply_is_refused(self):
+        """--purge-source deletes, so it belongs behind the same flag writing does."""
+        self._template('symptom check')
+
+        with self.assertRaises(CommandError) as caught:
+            call_command('migrate_surveys_to_prolog', '--purge-source')
+
+        self.assertIn('--apply', str(caught.exception))
+
+    def test_two_templates_with_the_same_slug_are_refused_before_anything_is_written(self):
+        from prolog_surveys.models import Survey as PrologSurvey
+
+        self._template('symptom check')
+        self._template('Symptom-Check')
+
+        with self.assertRaises(CommandError) as caught:
+            call_command('migrate_surveys_to_prolog', '--apply', stdout=io.StringIO())
+
+        self.assertIn('same slug', str(caught.exception))
+        self.assertFalse(
+            PrologSurvey.objects.filter(slug='symptom-check').exists(),
+            'the refusal has to come before the first write, not after it',
+        )
+
+    def test_a_collision_is_caught_even_when_only_one_side_is_selected(self):
+        """Converting the pair one at a time merges them just the same."""
+        self._template('symptom check')
+        self._template('Symptom-Check')
+
+        with self.assertRaises(CommandError):
+            call_command(
+                'migrate_surveys_to_prolog', '--survey', 'symptom check', '--apply',
+                stdout=io.StringIO(),
+            )
+
+    def test_a_converted_response_keeps_the_day_it_was_answered(self):
+        from django.utils import timezone
+        from prolog_surveys.models import SurveyResponse
+
+        answered = timezone.now() - timedelta(days=90)
+        survey_id = self._template('symptom check')
+        person = self._person()
+        self._response(survey_id, person, answered)
+
+        call_command('migrate_surveys_to_prolog', '--apply', stdout=io.StringIO())
+
+        migrated = SurveyResponse.objects.get(participant_id=person.person_id)
+        self.assertAlmostEqual(
+            migrated.started_at, answered, delta=timedelta(seconds=1),
+            msg='started_at is auto_now_add; without an explicit update every '
+                'migrated response carries the time the migration ran',
+        )
+
+    def test_purging_leaves_a_response_it_did_not_convert(self):
+        """A PROlog response that came from somewhere else is not a counterpart.
+
+        An operator can load an instrument whose slug matches a legacy
+        template's. If the purge treats that as proof the legacy row was
+        converted, it deletes answers that were never carried across — so it
+        matches on what the conversion recorded as the source, not the slug.
+        """
+        from django.db import connection
+        from django.utils import timezone
+        from prolog_surveys.definitions.loader import load_definition
+        from prolog_surveys.models import SurveyResponse
+
+        # An instrument at the same slug, loaded rather than converted; the
+        # conversion below is refused because 1.0 is already active.
+        version = load_definition({
+            'schema_version': 1, 'slug': 'symptom-check', 'version': '1.0',
+            'status': 'draft', 'default_language': 'en', 'languages': ['en'],
+            'title': {'en': 'Symptom check'},
+            'sections': [{'key': 's1', 'title': {'en': 'S'}, 'questions': [
+                {'key': 'mood', 'type': 'text', 'text': {'en': 'How are you?'}}]}],
+        }, activate=True).version
+        person = self._person()
+        SurveyResponse.objects.create(
+            survey_version=version, participant_id=person.person_id, language='en'
+        )
+        survey_id = self._template('symptom check')
+        self._response(survey_id, person, timezone.now())
+
+        call_command('migrate_surveys_to_prolog', '--apply', '--purge-source', stdout=io.StringIO())
+
+        with connection.cursor() as cursor:
+            cursor.execute('select person_id from patient_survey_response')
+            remaining = [row[0] for row in cursor.fetchall()]
+            cursor.execute('select count(*) from survey')
+            templates = cursor.fetchone()[0]
+        self.assertEqual(
+            remaining, [person.person_id],
+            'this response was never converted, so purging it destroys it',
+        )
+        self.assertEqual(templates, 1, 'the template still has an unconverted response')
+
+    def test_purging_does_not_drop_a_template_nobody_answered(self):
+        from django.db import connection
+
+        self._template('symptom check')
+
+        call_command('migrate_surveys_to_prolog', '--apply', '--purge-source', stdout=io.StringIO())
+
+        with connection.cursor() as cursor:
+            cursor.execute('select count(*) from survey')
+            self.assertEqual(
+                cursor.fetchone()[0], 1,
+                'an empty template was not converted either, so purging it '
+                'would delete an instrument for being empty',
+            )
+
+
+class OrgSurveyImportRoundTripTest(TestCase):
+    """A response survives export → import, once, with the day it was answered.
+
+    The export is only half a round trip: what matters to a deployment being
+    moved is that the response comes back, that it comes back with its own
+    timestamps, and that running the import again does not give the patient a
+    second copy of it.
+    """
+
+    def setUp(self):
+        from django.utils import timezone
+        from omop_core.models import Organization
+        from omop_core.services.pk import next_pk
+        from prolog_surveys.definitions.loader import load_definition
+        from prolog_surveys.models import SurveyAnswer, SurveyResponse
+
+        self.org = Organization.objects.create(name='Round Trip', slug='round-trip')
+        self.person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=self.person, organization=self.org)
+        self.version = load_definition({
+            'schema_version': 1, 'slug': 'roundtrip', 'version': '1.0', 'status': 'draft',
+            'default_language': 'en', 'languages': ['en'], 'title': {'en': 'Round trip'},
+            'sections': [{'key': 's1', 'title': {'en': 'S'}, 'questions': [
+                {'key': 'mood', 'type': 'text', 'text': {'en': 'How are you?'}}]}],
+        }, activate=True).version
+        self.answered = timezone.now() - timedelta(days=30)
+        response = SurveyResponse.objects.create(
+            survey_version=self.version, participant_id=self.person.person_id, language='en'
+        )
+        SurveyResponse.objects.filter(pk=response.pk).update(started_at=self.answered)
+        SurveyAnswer.objects.create(
+            response=response, question_key='mood', value={'text': 'fine'}
+        )
+
+    def _export_file(self):
+        import tempfile
+        from django.core.serializers.json import DjangoJSONEncoder
+        from omop_core.management.commands.export_org_patients import (
+            _prolog_survey_responses,
+        )
+
+        responses = _prolog_survey_responses([self.person.person_id])
+        payload = {
+            'export_metadata': {'org_slug': self.org.slug},
+            'patients': [{
+                'person': {'person_id': self.person.person_id},
+                'patient_record': {},
+                'omop': {},
+                'survey_responses': responses[self.person.person_id],
+            }],
+        }
+        handle = tempfile.NamedTemporaryFile('w', suffix='.json', delete=False)
+        json.dump(payload, handle, cls=DjangoJSONEncoder)
+        handle.close()
+        return handle.name
+
+    def _remove_the_patient(self):
+        """Delete the patient, and keep their id: `delete()` clears the pk."""
+        from omop_core.services.prolog_cleanup import delete_prolog_data_for_persons
+
+        person_id = self.person.person_id
+        delete_prolog_data_for_persons([person_id])
+        PatientRecord.objects.filter(person=self.person).delete()
+        self.person.delete()
+        return person_id
+
+    def test_a_restored_response_keeps_the_day_it_was_answered(self):
+        from prolog_surveys.models import SurveyResponse
+
+        path = self._export_file()
+        person_id = self._remove_the_patient()
+
+        call_command('import_org_patients', path, '--org', self.org.slug, stdout=io.StringIO())
+
+        restored = SurveyResponse.objects.get(participant_id=person_id)
+        self.assertAlmostEqual(
+            restored.started_at, self.answered, delta=timedelta(seconds=1),
+            msg='started_at is auto_now_add, so a restore has to set it explicitly',
+        )
+        self.assertEqual(restored.answers.count(), 1)
+
+    def test_replacing_a_patient_who_answered_a_survey_leaves_one_response(self):
+        """--replace deletes the patient first, and a response protects them.
+
+        Re-importing is the way a dataset is corrected, so it has to work for
+        a patient who has answered something — and has to leave exactly one
+        copy of each response, not two and not none.
+        """
+        from prolog_surveys.models import SurveyResponse
+
+        path = self._export_file()
+        person_id = self._remove_the_patient()
+        call_command('import_org_patients', path, '--org', self.org.slug, stdout=io.StringIO())
+
+        out = io.StringIO()
+        call_command(
+            'import_org_patients', path, '--org', self.org.slug, '--replace',
+            stdout=out,
+        )
+
+        # The command counts a per-patient failure rather than raising, so a
+        # ProtectedError here is a number in the summary, not a traceback.
+        report = out.getvalue()
+        self.assertIn('Replaced          :        1', report)
+        self.assertIn('Errors            :        0', report)
+        self.assertEqual(
+            SurveyResponse.objects.filter(participant_id=person_id).count(), 1
+        )
+        self.assertEqual(
+            SurveyResponse.objects.get(participant_id=person_id).answers.count(), 1
+        )
+
+
+class AdminDeletePatientWithSurveyTest(TestCase):
+    """DELETE .../admin-delete/ for a patient who has answered a survey.
+
+    The endpoint deletes the Person directly rather than through the shared
+    cleanup helper, so it needs the survey rows removed on its own path.
+    """
+
+    def setUp(self):
+        from django.utils import timezone
+        from omop_core.services.pk import next_pk
+        from prolog_surveys.definitions.loader import load_definition
+        from prolog_surveys.models import SurveyAnswer, SurveyConsent, SurveyResponse
+
+        self.staff = Identity.objects.create(
+            issuer='urn:local', sub='admin-delete-staff', is_staff=True
+        )
+        self.person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=self.person)
+        version = load_definition({
+            'schema_version': 1, 'slug': 'admin-delete', 'version': '1.0',
+            'status': 'draft', 'default_language': 'en', 'languages': ['en'],
+            'title': {'en': 'Admin delete'},
+            'sections': [{'key': 's1', 'title': {'en': 'S'}, 'questions': [
+                {'key': 'mood', 'type': 'text', 'text': {'en': 'How are you?'}}]}],
+        }, activate=True).version
+        response = SurveyResponse.objects.create(
+            survey_version=version, participant_id=self.person.person_id, language='en'
+        )
+        SurveyAnswer.objects.create(
+            response=response, question_key='mood', value={'text': 'fine'}
+        )
+        SurveyConsent.objects.create(
+            response=response, consent_version='1.0', text_hash='x' * 8,
+            language='en', agreed_at=timezone.now(),
+        )
+
+    def test_the_endpoint_deletes_a_patient_who_answered_a_survey(self):
+        from prolog_surveys.models import SurveyResponse
+
+        person_id = self.person.person_id
+        client = APIClient()
+        client.force_authenticate(user=self.staff)
+
+        response = client.delete(
+            f'/api/v1/patient-records/{person_id}/admin-delete/',
+            {'confirm': 'DELETE'}, format='json',
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertFalse(Person.objects.filter(person_id=person_id).exists())
+        self.assertFalse(SurveyResponse.objects.filter(participant_id=person_id).exists())
+
+
+class PrologSurveyApiContractTest(TestCase):
+    """The restored endpoints keep the list behaviour of the ones they replace.
+
+    They scope differently from the OMOP viewsets, but a caller cannot see
+    that: it still expects ?page to paginate, a misspelt filter to be refused,
+    and an unpublished instrument to stay unpublished.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.services.pk import next_pk
+        from prolog_surveys.definitions.loader import load_definition
+        from prolog_surveys.models import SurveyAnswer, SurveyResponse
+
+        cls.identity = Identity.objects.create(issuer='urn:local', sub='contract-patient')
+        cls.person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=cls.person)
+        PatientUser.objects.create(identity=cls.identity, person=cls.person)
+        cls.staff = Identity.objects.create(
+            issuer='urn:local', sub='contract-staff', is_staff=True
+        )
+
+        def definition(slug, title):
+            return {
+                'schema_version': 1, 'slug': slug, 'version': '1.0', 'status': 'draft',
+                'default_language': 'en', 'languages': ['en'], 'title': {'en': title},
+                'sections': [{'key': 's1', 'title': {'en': 'S'}, 'questions': [
+                    {'key': 'mood', 'type': 'text', 'text': {'en': 'How are you?'}}]}],
+            }
+
+        cls.active = load_definition(definition('published', 'Published'), activate=True).version
+        # Loaded but never activated: an instrument still being written.
+        cls.draft = load_definition(definition('unpublished', 'Unpublished')).version
+        for _ in range(3):
+            response = SurveyResponse.objects.create(
+                survey_version=cls.active, participant_id=cls.person.person_id, language='en'
+            )
+            SurveyAnswer.objects.create(
+                response=response, question_key='mood', value={'text': 'fine'}
+            )
+
+    def test_a_patient_cannot_read_an_unpublished_instrument(self):
+        self.client.force_login(self.identity)
+
+        body = self.client.get('/api/v1/surveys/?status=draft').json()
+
+        self.assertEqual(
+            [row['slug'] for row in body], ['published'],
+            'the definition of an unpublished instrument is not a patient-facing document',
+        )
+
+    def test_staff_can_read_an_unpublished_instrument(self):
+        self.client.force_login(self.staff)
+
+        body = self.client.get('/api/v1/surveys/?status=draft').json()
+
+        self.assertEqual([row['slug'] for row in body], ['unpublished'])
+
+    def test_an_unknown_status_is_refused(self):
+        self.client.force_login(self.staff)
+
+        response = self.client.get('/api/v1/surveys/?status=nonsense')
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_page_paginates_rather_than_being_ignored(self):
+        self.client.force_login(self.identity)
+
+        body = self.client.get('/api/v1/survey-responses/?page=1&page_size=2').json()
+
+        self.assertEqual(body['count'], 3)
+        self.assertEqual(len(body['results']), 2)
+
+    def test_a_misspelt_filter_is_refused_rather_than_ignored(self):
+        self.client.force_login(self.identity)
+
+        response = self.client.get('/api/v1/survey-responses/?persn_id=1')
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('persn_id', response.json()['unsupported_params'])
+
+    def test_a_numeric_survey_filter_says_what_it_wants(self):
+        """The retired endpoint took an id here; an empty list would look like an answer."""
+        self.client.force_login(self.identity)
+
+        response = self.client.get('/api/v1/survey-responses/?survey=3')
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('slug', str(response.json()['survey']))
+
+    def test_the_values_map_costs_no_query_per_row(self):
+        """Doubling the rows must not double the queries.
+
+        Asserted as a comparison rather than a fixed count, so it measures the
+        thing that matters — that `values` reads a prefetch — without pinning
+        the unrelated per-request queries.
+        """
+        from django.test.utils import CaptureQueriesContext
+        from django.db import connection
+        from prolog_surveys.models import SurveyAnswer, SurveyResponse
+
+        self.client.force_login(self.identity)
+        with CaptureQueriesContext(connection) as first:
+            body = self.client.get('/api/v1/survey-responses/').json()
+        self.assertEqual(len(body), 3)
+        self.assertEqual(body[0]['values'], {'mood': {'text': 'fine'}})
+
+        for _ in range(3):
+            response = SurveyResponse.objects.create(
+                survey_version=self.active, participant_id=self.person.person_id,
+                language='en',
+            )
+            SurveyAnswer.objects.create(
+                response=response, question_key='mood', value={'text': 'fine'}
+            )
+        with CaptureQueriesContext(connection) as second:
+            self.assertEqual(len(self.client.get('/api/v1/survey-responses/').json()), 6)
+
+        self.assertEqual(
+            len(second), len(first),
+            'the answers are prefetched, so row count must not move the query count',
+        )
+
+
+class PrologRunnerMountTest(TestCase):
+    """Mounting the runner: the routes, the asset caching, and the checks.
+
+    The mount is conditional on a directory existing at startup, and the
+    Surveys tab links to /s/<slug> whether or not it is there — so the failure
+    mode is a patient clicking Start and landing on the dashboard. These cover
+    the pieces that make that visible.
+    """
+
+    def test_no_dist_means_no_routes(self):
+        from ctomop.urls import runner_urlpatterns
+
+        self.assertEqual(runner_urlpatterns(None), [])
+        self.assertEqual(runner_urlpatterns(Path('/no/such/runner')), [])
+
+    def test_a_dist_is_matched_before_the_spa_catch_all(self):
+        from ctomop.urls import runner_urlpatterns, urlpatterns
+
+        with tempfile.TemporaryDirectory() as tmp:
+            patterns = runner_urlpatterns(Path(tmp))
+
+        self.assertEqual(len(patterns), 1)
+        self.assertTrue(patterns[0].pattern.match('s/my-survey'))
+        # The order that matters: inserted at -1, so before the catch-all.
+        assembled = urlpatterns[:-1] + patterns + urlpatterns[-1:]
+        self.assertTrue(
+            assembled.index(patterns[0]) < len(assembled) - 1,
+            'the runner must be tried before the pattern that returns the portal shell',
+        )
+        self.assertTrue(assembled[-1].pattern.match('anything/at/all'))
+
+    def test_hashed_runner_assets_are_cacheable_and_the_page_is_not(self):
+        from ctomop.whitenoise import PromopWhiteNoise
+
+        test = PromopWhiteNoise.immutable_file_test
+        instance = PromopWhiteNoise.__new__(PromopWhiteNoise)
+
+        self.assertTrue(test(instance, '', '/prolog-static/assets/index-CvVEhs4B.js'))
+        self.assertFalse(test(instance, '', '/prolog-static/index.html'))
+
+    def test_a_runner_path_that_does_not_exist_fails_the_check(self):
+        from patient_portal.checks import prolog_runner_mount_check
+
+        with self.settings(RUNNER_DIST=Path('/no/such/runner')):
+            issues = prolog_runner_mount_check(None)
+
+        self.assertEqual([i.id for i in issues], ['patient_portal.E004'])
+
+    def test_a_dist_without_an_index_fails_the_check(self):
+        from patient_portal.checks import prolog_runner_mount_check
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.settings(RUNNER_DIST=Path(tmp)):
+                issues = prolog_runner_mount_check(None)
+
+        self.assertEqual([i.id for i in issues], ['patient_portal.E004'])
+
+    def test_surveys_configured_with_no_runner_warns(self):
+        from patient_portal.checks import prolog_runner_mount_check
+
+        with self.settings(RUNNER_DIST=None, PROLOG_DEFINITION_DIRS=['/data/surveys']):
+            issues = prolog_runner_mount_check(None)
+
+        self.assertEqual([i.id for i in issues], ['patient_portal.W004'])
+
+    def test_a_per_process_throttle_counter_is_reported_in_production(self):
+        from patient_portal.checks import throttle_cache_is_shared_check
+
+        locmem = {'default': {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache'}}
+        with self.settings(DEBUG=False, CACHES=locmem):
+            issues = throttle_cache_is_shared_check(None)
+        self.assertEqual([i.id for i in issues], ['patient_portal.W005'])
+
+        redis = {'default': {'BACKEND': 'django.core.cache.backends.redis.RedisCache'}}
+        with self.settings(DEBUG=False, CACHES=redis):
+            self.assertEqual(throttle_cache_is_shared_check(None), [])
+
+
+class RetireLegacySurveysGuardTest(TestCase):
+    """The guard in migration 0201, run directly against its own SQL.
+
+    The migration is already applied in the test database and its tables are
+    gone, so what is exercised here is the check function against tables built
+    for the purpose — which is the state a deployment is in when it runs.
+    """
+
+    _DDL = (
+        """create table survey (
+               id serial primary key,
+               name varchar(200) unique not null
+           )""",
+        """create table patient_survey_response (
+               id serial primary key,
+               survey_id integer not null references survey(id),
+               person_id bigint not null
+           )""",
+    )
+
+    def setUp(self):
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            for statement in self._DDL:
+                cursor.execute(statement)
+
+    def tearDown(self):
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            cursor.execute('drop table if exists patient_survey_response')
+            cursor.execute('drop table if exists survey')
+
+    def _run_guard(self):
+        from django.db import connection
+        from importlib import import_module
+
+        module = import_module('omop_core.migrations.0201_retire_legacy_surveys')
+
+        class _SchemaEditor:
+            def __init__(self, conn):
+                self.connection = conn
+
+        module.refuse_if_unmigrated(None, _SchemaEditor(connection))
+
+    def test_an_unconverted_template_stops_the_drop(self):
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            cursor.execute("insert into survey (name) values ('symptom check')")
+
+        with self.assertRaises(RuntimeError) as caught:
+            self._run_guard()
+
+        self.assertIn('symptom check', str(caught.exception))
+        self.assertIn('--purge-source', str(caught.exception))
+
+    def test_a_converted_template_passes(self):
+        from django.db import connection
+        from prolog_surveys.definitions.loader import load_definition
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "insert into survey (name) values ('symptom check') returning id"
+            )
+            (legacy_id,) = cursor.fetchone()
+        load_definition({
+            'schema_version': 1, 'slug': 'symptom-check', 'version': '1.0',
+            'status': 'draft', 'default_language': 'en', 'languages': ['en'],
+            'title': {'en': 'Symptom check'},
+            'sections': [{'key': 's1', 'title': {'en': 'S'}, 'questions': [
+                {'key': 'mood', 'type': 'text', 'text': {'en': 'How are you?'}}]}],
+        }, source=f'legacy survey:{legacy_id}')
+
+        self._run_guard()  # does not raise
+
+    def test_a_response_still_present_stops_the_drop(self):
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "insert into survey (name) values ('symptom check') returning id"
+            )
+            (legacy_id,) = cursor.fetchone()
+            cursor.execute(
+                'insert into patient_survey_response (survey_id, person_id) values (%s, %s)',
+                [legacy_id, 1],
+            )
+
+        with self.assertRaises(RuntimeError) as caught:
+            self._run_guard()
+
+        self.assertIn('still in `patient_survey_response`', str(caught.exception))

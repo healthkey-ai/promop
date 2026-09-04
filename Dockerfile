@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     gnupg \
     gcc \
+    git \
     postgresql-client \
     libpq-dev \
     && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \

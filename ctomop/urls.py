@@ -14,12 +14,15 @@ Including another URLconf
     1. Import the include() function: from django.urls import include, path
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
+from pathlib import Path
+
 from django.contrib import admin
 from django.urls import path, include, re_path
 from django.views.generic import TemplateView
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 from rest_framework.permissions import AllowAny
 from patient_portal.api import views
+from django.conf import settings
 
 # Versioned API URL patterns (v1) — the canonical contract.
 # INVARIANT: every sub-app URL module included here must also appear in the
@@ -56,6 +59,10 @@ urlpatterns = [
     path('api/fhir/', include('patient_portal.api.fhir.urls')),
     path('api/health/', views.health_check, name='health_check'),
 
+    # PROlog survey runner. Its own URL tree (health + /run/), mounted under the
+    # versioned prefix; /api/v1/prolog/run/... is what the runner front end calls.
+    path('api/v1/prolog/', include('prolog_surveys.urls')),
+
     # OAuth2 / SMART on FHIR authorization server endpoints
     path('o/', include('oauth2_provider.urls', namespace='oauth2_provider')),
     # SMART on FHIR discovery
@@ -63,3 +70,26 @@ urlpatterns = [
     # Serve React app for all other routes
     re_path(r'^.*$', TemplateView.as_view(template_name='index.html'), name='home'),
 ]
+
+def runner_urlpatterns(dist):
+    """The PROlog runner's routes, for a deployment that mounts a build.
+
+    A function rather than a conditional block so that it can be tested: the
+    thing that matters is that `/s/...` is matched before the catch-all that
+    returns PRomop's shell, and a module-level `if` evaluated once at import
+    is not something a test can exercise.
+
+    Only the page: the runner's assets are served by WhiteNoise, which is
+    given the same directory in ctomop/whitenoise.py.
+    """
+    if not dist or not Path(dist).exists():
+        return []
+    from prolog_surveys.views import runner_index
+
+    return [re_path(r'^s/', runner_index, name='prolog_runner')]
+
+
+# Inserted before the catch-all above, so the runner's routes reach it rather
+# than PRomop's shell.
+for _pattern in runner_urlpatterns(getattr(settings, 'RUNNER_DIST', None)):
+    urlpatterns.insert(-1, _pattern)

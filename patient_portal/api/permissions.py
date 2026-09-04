@@ -219,7 +219,7 @@ def _resolve_person_id(obj):
     Handles three patterns:
     - Direct FK: obj.person_id (covers Person, PatientRecord, ConditionOccurrence,
       DrugExposure, Measurement, Observation, ProcedureOccurrence, Episode,
-      PatientDocument, PatientTrialEnrollment, PatientSurveyResponse)
+      PatientDocument, PatientTrialEnrollment)
     - PatientConsent/PatientMessage: has patient_user_id FK. Resolves via
       PatientUser.objects.values_list('person_id', ...).
     - EpisodeEvent: has a bare episode_id (BigIntegerField, not a FK). Resolves

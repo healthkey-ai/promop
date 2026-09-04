@@ -102,11 +102,16 @@ INSTALLED_APPS = [
     'omop_oncology',
     'patient_portal',
     'anymail',
+    # PROlog survey runner. Contributes its own tables to this database and
+    # binds every response to an omop_core.Person; see docs/prolog-surveys.md.
+    'prolog_surveys',
 ]
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
-    'whitenoise.middleware.WhiteNoiseMiddleware',
+    # WhiteNoise, plus the PROlog runner's build when one is mounted — see
+    # ctomop/whitenoise.py.
+    'ctomop.whitenoise.PromopWhiteNoise',
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -417,6 +422,15 @@ REST_FRAMEWORK = {
         # Patient self-service ingest (/api/fhir/patient-sync/) — per-patient, so
         # a more generous bucket than the shared service-token /sync/ endpoint.
         'patient_sync': os.environ.get('PATIENT_SYNC_THROTTLE_RATE', '120/minute'),
+        # PROlog runner scopes (prolog_surveys). Per hashed client key, never a raw
+        # IP. A survey is answered in bursts, so these are per hour rather than per
+        # minute; creation and contact capture stay tight because they are the
+        # abuse-facing ones.
+        'run.read': os.environ.get('PROLOG_THROTTLE_READ', '1200/hour'),
+        'run.create': os.environ.get('PROLOG_THROTTLE_CREATE', '30/hour'),
+        'run.capture': os.environ.get('PROLOG_THROTTLE_CAPTURE', '30/hour'),
+        'run.answer': os.environ.get('PROLOG_THROTTLE_ANSWER', '600/hour'),
+        'run.write': os.environ.get('PROLOG_THROTTLE_WRITE', '3000/hour'),
         'patient_signup': '10/hour',
         # OMOP clinical-row CRUD (conditions / drug-exposures / measurements /
         # observations / procedures). These viewsets set throttle_scope='omop_write'
@@ -522,6 +536,37 @@ for host in ALLOWED_HOSTS:
 CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(csrf_origins))
 
 
+# ── Caches ────────────────────────────────────────────────────────────────
+# DRF's throttles count in caches['default'], so this is what makes a rate
+# limit a limit. Without a shared backend the counter is per worker process,
+# and every rate in DEFAULT_THROTTLE_RATES is silently multiplied by the worker
+# count — which matters most for `run.create`, the only bound on how fast an
+# anonymous survey respondent can create Person rows.
+#
+# CACHE_URL, else the Celery broker if it is Redis (the same instance is fine —
+# separate keyspace), else per-process memory, which is correct for a developer
+# machine and is what the deploy check warns about anywhere else.
+_CACHE_URL = os.environ.get('CACHE_URL') or (
+    os.environ.get('CELERY_BROKER_URL', '')
+    if os.environ.get('CELERY_BROKER_URL', '').startswith(('redis://', 'rediss://'))
+    else ''
+)
+if _CACHE_URL:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            'LOCATION': _CACHE_URL,
+            'KEY_PREFIX': 'promop',
+        }
+    }
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'promop-locmem',
+        }
+    }
+
 # ── Celery ────────────────────────────────────────────────────────────────
 # An empty broker means no queue, so the derivation runs inline in the request.
 # That is what a developer machine with no Redis gets, and it is the switch the
@@ -604,3 +649,47 @@ def _init_firebase_admin():
 
 
 _init_firebase_admin()
+
+
+# ---------------------------------------------------------------------------
+# PROlog survey runner (prolog_surveys)
+#
+# PRomop is the system of record: the app's tables live in this database and
+# every response is bound to an omop_core.Person. Nothing here writes to OMOP
+# clinical tables — answers stay in the survey tables until a governed mapping
+# exists (PROlog DEP-7). See docs/prolog-surveys.md.
+# ---------------------------------------------------------------------------
+
+PROLOG_PROFILE = 'integrated'
+
+# The participant a response is bound to (PROlog DEP-2).
+PROLOG_PARTICIPANT_MODEL = 'omop_core.Person'
+
+# Resolves the signed-in participant; returns None for anyone who is not a
+# patient, so their response is bound to a fresh unidentified person instead.
+PROLOG_PARTICIPANT_RESOLVER = 'patient_portal.services.prolog_participant_id'
+
+# Mints the person for a respondent who is not signed in (PROlog RUN-2). The
+# counterpart to resolve_or_create_person, which needs an Identity.
+PROLOG_PARTICIPANT_FACTORY = 'patient_portal.services.create_unidentified_person'
+
+# Deployment-supplied content, mounted read-only. Empty by default: a PRomop
+# that offers no surveys loads none.
+PROLOG_DEFINITION_DIRS = [d for d in os.environ.get('PROLOG_DEFINITION_DIRS', '').split(os.pathsep) if d]
+PROLOG_THEME_DIRS = [d for d in os.environ.get('PROLOG_THEME_DIRS', '').split(os.pathsep) if d]
+# The deployment's own legal pages (privacy.md and friends), served by the
+# runner inside the survey. Read through settings rather than the environment
+# once the app is installed here, so a deployment that only sets the
+# environment variable gets nothing — which is how it went unnoticed until a
+# real notice was mounted.
+PROLOG_LEGAL_DIRS = [d for d in os.environ.get('PROLOG_LEGAL_DIRS', '').split(os.pathsep) if d]
+
+# The built runner front end, when a deployment mounts one. It is a separate SPA
+# from PRomop's own, so its assets are served under their own prefix
+# (/prolog-static/) — PRomop's build already owns /assets/. Unset means the API
+# is mounted but no page is served, which is the default.
+# prolog_surveys.views.runner_index reads settings.RUNNER_DIST directly.
+RUNNER_DIST = Path(os.environ['PROLOG_RUNNER_DIST']) if os.environ.get('PROLOG_RUNNER_DIST') else None
+
+PROLOG_PUBLIC_URL = os.environ.get('PROLOG_PUBLIC_URL', APP_BASE_URL)
+PROLOG_EMAIL_FROM = os.environ.get('PROLOG_EMAIL_FROM', DEFAULT_FROM_EMAIL)

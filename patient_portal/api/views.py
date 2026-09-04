@@ -3,6 +3,7 @@ from typing import Any, Callable, ContextManager
 
 from rest_framework import serializers, viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -28,7 +29,7 @@ from omop_core.models import (
     SourceCodeConceptMapping,
     ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
     Observation, ProcedureOccurrence, VisitOccurrence, VisitDetail, Location, Death,
-    PatientDocument, PatientTrialEnrollment, PatientGroupMembership, Survey, PatientSurveyResponse,
+    PatientDocument, PatientTrialEnrollment, PatientGroupMembership,
     Relationship, ConceptRelationship, ConceptAncestor, ConceptSynonym,
     # Controlled vocabulary lookup models
     Ethnicity, StemCellTransplant, SctEligibility, HistologicType, EstrogenReceptorStatus,
@@ -59,6 +60,7 @@ from omop_core.services.patient_record_service import (
 )
 from omop_core.services.derivation_jobs import get_dispatcher
 from omop_core.services.patient_cleanup import delete_omop_clinical_rows
+from omop_core.services.prolog_cleanup import delete_prolog_data_for_persons
 from omop_core.services.lot_inference_service import infer_lot_for_person
 from omop_core.services.episode_service import upsert_therapy_line_episode
 from omop_core.services.mappings import CONCEPT_GENERIC_LAB, get_gender_concept
@@ -103,12 +105,12 @@ from io import StringIO
 from .permissions import ScopedTokenPermission, VocabReadPermission, PatientCrudPermission, PatientSelfScopePermission, PatientDeletePermission, get_request_org, is_service_token
 from .providers.base import TokenClaims
 from .serializers import (
+    PrologSurveySerializer, PrologSurveyResponseSerializer,
     UserSerializer, PatientRecordSerializer, PatientListSerializer, ProvenanceRecordSerializer,
     ConditionOccurrenceSerializer, DrugExposureSerializer, MeasurementSerializer,
     ObservationSerializer, ProcedureOccurrenceSerializer,
     EpisodeSerializer, EpisodeEventSerializer,
     PatientDocumentSerializer, PatientTrialEnrollmentSerializer,
-    SurveySerializer, PatientSurveyResponseSerializer,
     PatientConsentSerializer,
     PatientMessageSerializer,
     ImmunizationSerializer, AllergySerializer,
@@ -1260,6 +1262,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             )
             if episode_ids:
                 EpisodeEvent.objects.filter(episode_id__in=episode_ids).delete()
+            # A survey response protects its participant, so PROlog's rows go
+            # first or person.delete() raises ProtectedError.
+            delete_prolog_data_for_persons([person.person_id])
             # Person delete cascades to OMOP rows, PatientRecord(s), PatientUser.
             person.delete()
             if linked_identity is not None:
@@ -5420,30 +5425,20 @@ _MODEL_PK_MAP = {
 }
 
 
-class _OmopFilterMixin:
-    """Filter by person_id query param and restrict to the requesting org's patients."""
+class _ListQueryParamsMixin:
+    """Paginated list responses, and a 400 for a query parameter nobody reads.
+
+    Split out of _OmopFilterMixin so that an endpoint which does its own
+    scoping still answers ?page/?limit and still refuses a misspelt filter,
+    rather than silently returning everything — which is what a caller
+    experiences as a filter that stopped working.
+    """
     pagination_query_params = frozenset({'page', 'page_size', 'limit'})
-    allowed_list_query_params = (
-        frozenset({'person_id', 'include_erroneous', 'format'})
-        | pagination_query_params
-    )
-    clinical_filter_fields = None
+    allowed_list_query_params = frozenset({'format'}) | pagination_query_params
     pagination_class = ClinicalOmopPagination
 
     def get_allowed_list_query_params(self):
-        allowed = set(self.allowed_list_query_params)
-        config = self.clinical_filter_fields
-        if config:
-            allowed.update({
-                config['concept_param'],
-                config['source_concept_param'],
-                'concept_code',
-                f"{config['date_field']}__gte",
-                f"{config['date_field']}__lte",
-            })
-            if config.get('visit_filter', True):
-                allowed.add('visit_occurrence_id')
-        return allowed
+        return set(self.allowed_list_query_params)
 
     def _pagination_requested(self):
         return bool(set(self.request.query_params) & self.pagination_query_params)
@@ -5482,6 +5477,30 @@ class _OmopFilterMixin:
         queryset = self.filter_queryset(self.get_queryset())
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
+
+
+class _OmopFilterMixin(_ListQueryParamsMixin):
+    """Filter by person_id query param and restrict to the requesting org's patients."""
+    allowed_list_query_params = (
+        frozenset({'person_id', 'include_erroneous', 'format'})
+        | _ListQueryParamsMixin.pagination_query_params
+    )
+    clinical_filter_fields = None
+
+    def get_allowed_list_query_params(self):
+        allowed = super().get_allowed_list_query_params()
+        config = self.clinical_filter_fields
+        if config:
+            allowed.update({
+                config['concept_param'],
+                config['source_concept_param'],
+                'concept_code',
+                f"{config['date_field']}__gte",
+                f"{config['date_field']}__lte",
+            })
+            if config.get('visit_filter', True):
+                allowed.add('visit_occurrence_id')
+        return allowed
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -7845,126 +7864,201 @@ class PatientTrialEnrollmentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     queryset = PatientTrialEnrollment.objects.all()
 
 
-class SurveyViewSet(viewsets.ModelViewSet):
-    """Survey definitions — create/read/update/archive surveys.
+class SurveyViewSet(_ListQueryParamsMixin, viewsets.ReadOnlyModelViewSet):
+    """`/surveys/` — the instruments this deployment serves.
 
-    Surveys are global templates (no org FK). Reads are available to any
-    authenticated token. Writes (create/update/archive) require service-token
-    or staff — arbitrary write-scope patient tokens must not mutate the shared
-    template library.
+    Backed by PROlog. Read-only, and that is a real change from the retired
+    feature, which let staff and service tokens POST a template: a PROlog
+    instrument is a validated, versioned definition loaded with
+    `manage.py load_definition`, not a row somebody can create over HTTP.
 
-    Filter by disease: GET /api/surveys/?disease=Multiple+Myeloma
-    Filter by status:  GET /api/surveys/?status=ACTIVE
-    Surveys are archived via PATCH {status: ARCHIVED}; DELETE is not allowed.
+    Kept at the original path so existing readers keep working.
     """
-    serializer_class = SurveySerializer
+
     permission_classes = [ScopedTokenPermission]
-    queryset = Survey.objects.all()
+    serializer_class = PrologSurveySerializer
+    http_method_names = ['get', 'head', 'options']
+    allowed_list_query_params = (
+        frozenset({'status', 'format'}) | _ListQueryParamsMixin.pagination_query_params
+    )
 
-    def _require_admin_for_writes(self, request):
-        """Block non-service callers from mutating shared survey templates.
+    #: ACTIVE / DRAFT / ARCHIVED, as the retired feature spelled them.
+    _STATUSES = ('active', 'draft', 'archived')
 
-        Allowed:
-          - service-token (trusted backend string)
-          - OAuth2 tokens from internal service apps (no org_profile)
-          - Staff / superuser session users
+    def get_queryset(self):
+        from prolog_surveys.models import LifecycleStatus, SurveyVersion
 
-        Blocked:
-          - OAuth2 tokens from partner/EHR org apps (have an org_profile)
-          - Session / Firebase / SAML non-staff users (patients)
-        """
-        if request.method in ('GET', 'HEAD', 'OPTIONS'):
-            return
-        token = getattr(request, 'auth', None)
+        qs = SurveyVersion.objects.select_related('survey').order_by('survey__slug', '-created_at')
+        status_filter = (self.request.query_params.get('status') or '').lower()
+        if status_filter and status_filter not in self._STATUSES:
+            raise ValidationError({
+                'status': f"Must be one of: {', '.join(self._STATUSES)}.",
+            })
+        # A draft or archived version is an instrument that is deliberately not
+        # being offered, and this serializer exposes the whole definition —
+        # every question, its logic and its unpublished wording. Only a caller
+        # who administers instruments sees those.
+        privileged = is_service_token(self.request) or getattr(
+            self.request.user, 'is_staff', False
+        )
+        if status_filter and privileged:
+            qs = qs.filter(status=status_filter)
+        else:
+            qs = qs.filter(status=LifecycleStatus.ACTIVE)
+        return qs
+
+
+class PatientSurveyResponseViewSet(_ListQueryParamsMixin, viewsets.ReadOnlyModelViewSet):
+    """`/survey-responses/` — responses, scoped to who is asking.
+
+    Backed by PROlog. Read-only: answering goes through the runner at
+    `/api/v1/prolog/run/…`, which owns visibility, validation and cascade
+    invalidation. A second write path here would be a second engine, which is
+    what replacing the old feature was meant to avoid.
+    """
+
+    permission_classes = [ScopedTokenPermission]
+    serializer_class = PrologSurveyResponseSerializer
+    http_method_names = ['get', 'head', 'options']
+    allowed_list_query_params = (
+        frozenset({'person_id', 'survey', 'format'})
+        | _ListQueryParamsMixin.pagination_query_params
+    )
+
+    def get_queryset(self):
+        from omop_core.authorization import can_access_patient
+        from patient_portal.services import patient_person_for
+        from prolog_surveys.models import SurveyResponse
+
+        # `answers` is prefetched because the serializer derives `values` from
+        # it: without this each row in a list response costs its own query.
+        qs = (
+            SurveyResponse.objects
+            .select_related('survey_version__survey')
+            .prefetch_related('answers')
+            .order_by('-started_at')
+        )
+        request = self.request
+
+        # `participant_id` is an integer column, so the filter value has to be
+        # one too: a string never matches, and a non-numeric one reaches the
+        # database as a bad cast. Same shape as _OmopFilterMixin.
+        raw_person_id = request.query_params.get('person_id')
+        person_id = None
+        if raw_person_id:
+            try:
+                person_id = int(raw_person_id)
+            except (TypeError, ValueError):
+                return qs.none()
+
         if is_service_token(request):
-            return
-        if token is not None and not isinstance(token, TokenClaims):
-            # OAuth2: allow only internal service apps (no org).
-            # Partner org apps have an org_profile and must not touch shared
-            # templates. Read org_profile off the application directly rather
-            # than through get_request_org(), which also returns None for any
-            # non client_credentials grant — that would read an org-linked
-            # human-facing app as "internal" and let it through here, since
-            # this is the one call site where no org means allowed.
-            if getattr(getattr(token, 'application', None), 'org_profile', None) is None:
-                return
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied('Survey templates can only be modified by staff or service tokens.')
-        # Session / Firebase / SAML: require staff.
-        user = request.user
-        if not (user and getattr(user, 'is_staff', False)):
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied('Survey templates can only be modified by staff or service tokens.')
+            pass  # a service token sees everything, as it does elsewhere
+        else:
+            org = get_request_org(request)
+            if org is not None:
+                qs = qs.filter(
+                    participant_id__in=PatientRecord.objects.filter(
+                        organization=org
+                    ).values('person_id')
+                )
+            else:
+                person = patient_person_for(request.user)
+                if person is not None:
+                    qs = qs.filter(participant_id=person.person_id)
+                elif person_id is not None:
+                    # No org token and no record of their own: a provider or a
+                    # personal representative. Authorise per person, the way
+                    # the OMOP endpoints do, rather than by identity.
+                    if not can_access_patient(request.user, person_id):
+                        return qs.none()
+                elif not getattr(request.user, 'is_staff', False):
+                    return qs.none()
 
-    def create(self, request, *args, **kwargs):
-        self._require_admin_for_writes(request)
-        return super().create(request, *args, **kwargs)
+        # Trust scoping above already bounds what this caller may see, so
+        # ?person_id= only narrows it further.
+        if person_id is not None:
+            qs = qs.filter(participant_id=person_id)
+        survey = request.query_params.get('survey')
+        if survey:
+            # The retired endpoint took the Survey primary key here. PROlog
+            # identifies an instrument by slug, and a stale numeric id would
+            # match nothing and read as "this survey has no responses", so it
+            # is refused rather than answered with an empty list.
+            if survey.isdigit():
+                raise ValidationError({
+                    'survey': (
+                        'Takes an instrument slug, not a numeric id. The slug '
+                        'is the `slug` field of /surveys/.'
+                    ),
+                })
+            qs = qs.filter(survey_version__survey__slug=survey)
+        return qs
 
-    def update(self, request, *args, **kwargs):
-        self._require_admin_for_writes(request)
-        return super().update(request, *args, **kwargs)
 
-    def partial_update(self, request, *args, **kwargs):
-        self._require_admin_for_writes(request)
-        return super().partial_update(request, *args, **kwargs)
+class PrologSurveyListView(APIView):
+    """The surveys the PROlog runner is serving, and where this patient stands.
 
-    def destroy(self, request, *args, **kwargs):
-        return Response(
-            {'detail': 'Surveys cannot be deleted. Set status to ARCHIVED instead.'},
-            status=405,
+    The runner is entered by link, so it has no list endpoint of its own — and
+    it does not need one: its tables are in this database, so the portal reads
+    them directly rather than calling itself over HTTP.
+
+    Answering happens in the runner at /s/<slug>, not here. This is only the
+    index the Surveys tab shows.
+    """
+
+    permission_classes = [PatientCrudPermission]
+    http_method_names = ['get', 'head', 'options']
+
+    def get(self, request):
+        from patient_portal.services import patient_person_for
+        from prolog_surveys.models import (
+            LifecycleStatus,
+            ResponseStatus,
+            SurveyResponse,
+            SurveyVersion,
         )
 
-    def get_queryset(self):
-        qs = Survey.objects.all()
-        disease = self.request.query_params.get('disease')
-        if disease is not None:
-            qs = qs.filter(disease=disease)
-        status_filter = self.request.query_params.get('status')
-        if status_filter is not None:
-            qs = qs.filter(status=status_filter)
-        return qs
+        person = patient_person_for(request.user)
+        if person is None:
+            # Staff and providers have no surveys of their own to answer.
+            return Response([])
 
+        versions = (
+            SurveyVersion.objects.filter(status=LifecycleStatus.ACTIVE)
+            .select_related('survey')
+            .order_by('survey__slug')
+        )
+        # Ascending, so that where a patient has several responses to one
+        # version the newest is the one left in the map and decides the status.
+        mine = {
+            r.survey_version_id: r
+            for r in SurveyResponse.objects.filter(participant_id=person.person_id)
+            .order_by('started_at')
+        }
 
-class PatientSurveyResponseViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
-    """Patient survey responses — one record per (person, survey) pair.
+        out = []
+        for version in versions:
+            if version.survey.closed_reason():
+                continue
+            definition = version.cached_definition
+            default = definition.get('default_language', 'en')
+            title = definition.get('title') or {}
+            response = mine.get(version.id)
+            out.append({
+                'slug': version.survey.slug,
+                'version': version.version,
+                'title': title.get(default) or version.survey.slug,
+                'url': f'/s/{version.survey.slug}',
+                'status': (
+                    'not_started' if response is None
+                    else 'completed' if response.status == ResponseStatus.SUBMITTED
+                    else 'in_progress'
+                ),
+                'started_at': response.started_at if response else None,
+                'completed_at': response.submitted_at if response else None,
+            })
+        return Response(out)
 
-    Filter by person: GET /api/survey-responses/?person_id=42
-    Filter by survey: GET /api/survey-responses/?survey=3
-    Supports partial update (PATCH) for incremental autosave of individual answers.
-    PUT is disabled: values/values_dates are append-only dicts; use PATCH.
-    """
-    serializer_class = PatientSurveyResponseSerializer
-    permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
-    queryset = PatientSurveyResponse.objects.select_related('survey').all()
-    http_method_names = ['get', 'post', 'patch', 'head', 'options']
-    allowed_list_query_params = _OmopFilterMixin.allowed_list_query_params | frozenset({
-        'survey',
-    })
-
-    def get_queryset(self):
-        qs = super().get_queryset()
-        survey_id = self.request.query_params.get('survey')
-        if survey_id:
-            qs = qs.filter(survey_id=survey_id)
-        # Guard: unfiltered list leaks all responses when no org context.
-        # Require ?person_id= or staff/superuser for list actions.
-        if self.action == 'list':
-            org = get_request_org(self.request)
-            person_id = self.request.query_params.get('person_id')
-            user = self.request.user
-            is_privileged = user and getattr(user, 'is_staff', False)
-            if org is None and not person_id and not is_privileged:
-                return qs.none()
-        return qs
-
-    def partial_update(self, request, *args, **kwargs):
-        kwargs['partial'] = True
-        return self.update(request, *args, **kwargs)
-
-
-# ---------------------------------------------------------------------------
-# Patient Consent management (PHR-S FM Phase 3)
-# ---------------------------------------------------------------------------
 
 class PatientConsentViewSet(viewsets.ModelViewSet):
     """Patient consent grants — auto-created for each consent type.

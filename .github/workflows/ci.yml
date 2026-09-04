@@ -184,7 +184,11 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          # The version the application actually runs on, as the other jobs use.
+          # pip-audit resolves requirements.txt in a throwaway environment, so a
+          # dependency that declares a floor above this one cannot be audited at
+          # all — it fails to install before any advisory is checked.
+          python-version: '3.12'
 
       # Pinned: the bandit baseline matches findings by issue TEXT, so a release
       # that rewords a message invalidates every baseline entry at once and turns

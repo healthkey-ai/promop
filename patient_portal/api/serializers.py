@@ -4,7 +4,6 @@ from omop_core.models import (
     PatientRecord, Concept, FieldConceptMapping, FieldSynonym, Person,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
     PatientDocument, PatientTrialEnrollment, ProvenanceRecord,
-    Survey, PatientSurveyResponse,
     StemCellTransplant, SctEligibility, PostTransformationOutcome,
     Organization, OrgTrust, OrgInvitation, GroupAccess,
     InterchangeAgreement,
@@ -947,67 +946,6 @@ class ProvenanceRecordSerializer(serializers.ModelSerializer):
                   'modification_reason', 'created_at', 'record_type', 'object_id', 'organization']
 
 
-class SurveySerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Survey
-        fields = ['id', 'external_id', 'name', 'title', 'description',
-                  'status', 'disease', 'pages', 'estimated_minutes', 'created_at', 'updated_at']
-        read_only_fields = ['created_at', 'updated_at']
-
-    def validate_pages(self, value):
-        if not isinstance(value, list):
-            raise serializers.ValidationError('pages must be a list.')
-        return value
-
-
-class PatientSurveyResponseSerializer(serializers.ModelSerializer):
-    survey_title = serializers.CharField(source='survey.title', read_only=True)
-    survey_name = serializers.CharField(source='survey.name', read_only=True)
-
-    class Meta:
-        model = PatientSurveyResponse
-        fields = ['id', 'person', 'survey', 'survey_title', 'survey_name',
-                  'values', 'values_dates', 'percent_complete',
-                  'started_at', 'completed_at', 'consent_date', 'consent_signature',
-                  'created_at', 'updated_at']
-        read_only_fields = ['created_at', 'updated_at']
-
-    def validate_percent_complete(self, value):
-        if not (0 <= value <= 100):
-            raise serializers.ValidationError('percent_complete must be between 0 and 100.')
-        return value
-
-    def validate_values(self, value):
-        if not isinstance(value, dict):
-            raise serializers.ValidationError('values must be a dict.')
-        return value
-
-    def validate_values_dates(self, value):
-        if not isinstance(value, dict):
-            raise serializers.ValidationError('values_dates must be a dict.')
-        return value
-
-    def validate_completed_at(self, value):
-        if self.instance and self.instance.completed_at is not None and value is None:
-            raise serializers.ValidationError('Cannot re-open a completed survey.')
-        return value
-
-    def update(self, instance, validated_data):
-        # Strip immutable identity fields — person and survey are set on create only.
-        validated_data.pop('person', None)
-        validated_data.pop('survey', None)
-        # Merge incoming values/values_dates into existing dicts (autosave support).
-        for field in ('values', 'values_dates'):
-            if field in validated_data:
-                current = getattr(instance, field) or {}
-                validated_data[field] = {**current, **validated_data[field]}
-        return super().update(instance, validated_data)
-
-
-# ---------------------------------------------------------------------------
-# Patient consent serializer
-# ---------------------------------------------------------------------------
-
 class PatientConsentSerializer(serializers.ModelSerializer):
     class Meta:
         model = PatientConsent
@@ -1493,3 +1431,51 @@ class FieldFormulaSerializer(serializers.ModelSerializer):
         if not result.valid:
             raise serializers.ValidationError(result.errors)
         return value
+
+
+class PrologSurveySerializer(serializers.Serializer):
+    """A PROlog instrument, in the shape `/surveys/` used to return.
+
+    `id` is the version's primary key and `name` its slug, so a reader keyed on
+    those keeps working; `pages` is gone, because a PROlog definition is a
+    validated document rather than a bag of inputs, and `definition` carries it
+    whole for anyone who wants it.
+    """
+
+    id = serializers.IntegerField(read_only=True)
+    name = serializers.CharField(source='survey.slug', read_only=True)
+    slug = serializers.CharField(source='survey.slug', read_only=True)
+    version = serializers.CharField(read_only=True)
+    status = serializers.CharField(read_only=True)
+    title = serializers.SerializerMethodField()
+    definition = serializers.JSONField(read_only=True)
+
+    def get_title(self, obj):
+        definition = obj.definition or {}
+        titles = definition.get('title') or {}
+        return titles.get(definition.get('default_language', 'en')) or obj.survey.slug
+
+
+class PrologSurveyResponseSerializer(serializers.Serializer):
+    """One PROlog response and its answers.
+
+    `person` is the participant it is bound to, so a reader that filtered the
+    retired endpoint by person still recognises it. `values` is the answers as a
+    question-key map, which is the shape the retired feature returned — it is
+    derived here, not stored.
+    """
+
+    id = serializers.UUIDField(read_only=True)
+    person = serializers.IntegerField(source='participant_id', read_only=True)
+    survey = serializers.CharField(source='survey_version.survey.slug', read_only=True)
+    survey_version = serializers.CharField(source='survey_version.version', read_only=True)
+    language = serializers.CharField(read_only=True)
+    status = serializers.CharField(read_only=True)
+    started_at = serializers.DateTimeField(read_only=True)
+    completed_at = serializers.DateTimeField(source='submitted_at', read_only=True)
+    values = serializers.SerializerMethodField()
+
+    def get_values(self, obj):
+        # `.all()` on purpose: it reads the viewset's prefetch cache, where a
+        # filtered queryset would issue a query per row.
+        return {a.question_key: a.value for a in obj.answers.all()}

@@ -2,6 +2,8 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from .views import (
+    SurveyViewSet, PatientSurveyResponseViewSet,
+    PrologSurveyListView,
     CurrentUserViewSet, PatientRecordViewSet,
     PatientRecordV1ViewSet, login_view, logout_view, auth_test,
     change_password,
@@ -13,7 +15,6 @@ from .views import (
     PatientDocumentViewSet,
     PatientTrialEnrollmentViewSet,
     ImmunizationListViewSet, AllergyListViewSet,
-    SurveyViewSet, PatientSurveyResponseViewSet,
     PatientConsentViewSet,
     PatientMessageViewSet,
     vocabulary_list, concept_lookup, concept_search, concept_list,
@@ -72,8 +73,6 @@ router.register(r'episode-events', EpisodeEventViewSet, basename='v1-episode-eve
 router.register(r'therapy-lines', TherapyLineViewSet, basename='v1-therapy-lines')
 router.register(r'documents', PatientDocumentViewSet, basename='v1-documents')
 router.register(r'trial-enrollments', PatientTrialEnrollmentViewSet, basename='v1-trial-enrollments')
-router.register(r'surveys', SurveyViewSet, basename='v1-surveys')
-router.register(r'survey-responses', PatientSurveyResponseViewSet, basename='v1-survey-responses')
 router.register(r'consents', PatientConsentViewSet, basename='v1-consents')
 router.register(r'messages', PatientMessageViewSet, basename='v1-messages')
 router.register(r'immunizations', ImmunizationListViewSet, basename='v1-immunizations')
@@ -81,8 +80,12 @@ router.register(r'allergies', AllergyListViewSet, basename='v1-allergies')
 router.register(r'audit-events', AuditEventViewSet, basename='v1-audit-events')
 router.register(r'personal-representatives', PersonalRepresentativeViewSet, basename='v1-personal-representatives')
 router.register(r'interchange-agreements', InterchangeAgreementViewSet, basename='v1-interchange-agreements')
+router.register(r'surveys', SurveyViewSet, basename='v1-surveys')
+router.register(r'survey-responses', PatientSurveyResponseViewSet, basename='v1-survey-responses')
 
 urlpatterns = [
+    # The surveys the PROlog runner serves, for the portal's Surveys tab.
+    path('prolog-surveys/', PrologSurveyListView.as_view(), name='v1-prolog-surveys'),
     path('', include(router.urls)),
     path('auth/login/', login_view, name='v1-login'),
     path('auth/logout/', logout_view, name='v1-logout'),
