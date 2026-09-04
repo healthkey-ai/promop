@@ -27,10 +27,13 @@ from omop_core.services.mapping_suggestions import (
     umls_candidates,
     vector_candidates,
 )
+from omop_core.services.mapping_suggestions import suggest_mappings
 from tests.factories import (
     ConceptClassFactory,
     ConceptFactory,
     DomainFactory,
+    MeasurementFactory,
+    PersonFactory,
     VocabularyFactory,
 )
 
@@ -324,3 +327,163 @@ class TestSuggestAPIStrategies:
         )
         # 200 = no mappings created (expected with high threshold), not 400.
         assert resp.status_code in (200, 201)
+
+
+# ---------------------------------------------------------------------------
+# Waterfall integration tests
+# ---------------------------------------------------------------------------
+
+class TestWaterfallIntegration:
+    """End-to-end: unmapped rows → suggest_mappings → correct strategy chosen."""
+
+    @pytest.fixture()
+    def measurement_domain(self):
+        return DomainFactory(domain_id='Measurement', domain_name='Measurement')
+
+    @pytest.fixture()
+    def loinc_vocab(self):
+        return VocabularyFactory(vocabulary_id='LOINC', vocabulary_name='LOINC')
+
+    @pytest.fixture()
+    def lab_class(self):
+        return ConceptClassFactory(concept_class_id='Lab Test')
+
+    @pytest.fixture()
+    def zero_concept(self, measurement_domain, lab_class):
+        """The concept_id=0 placeholder for unmapped rows."""
+        return ConceptFactory(
+            concept_id=0,
+            concept_name='No matching concept',
+            concept_code='0',
+            vocabulary=VocabularyFactory(vocabulary_id='None', vocabulary_name='None'),
+            domain=measurement_domain,
+            concept_class=lab_class,
+            standard_concept=None,
+        )
+
+    @pytest.fixture()
+    def unmapped_measurements(self, zero_concept, loinc_vocab):
+        """Create 10+ measurement rows at concept_id=0 with the same source value.
+
+        The source_vocabulary_id comes from the source_concept FK; when that
+        FK is 0, unmapped_source_values infers vocabulary_id=''.
+        We set measurement_source_concept to a LOINC concept so the pipeline
+        knows the vocabulary.
+        """
+        person = PersonFactory()
+        loinc_source_concept = ConceptFactory(
+            concept_name='Glucose [Mass/volume] in Serum',
+            concept_code='2345-7',
+            vocabulary=loinc_vocab,
+            standard_concept=None,  # source concept, not standard
+        )
+        for _ in range(12):
+            MeasurementFactory(
+                person=person,
+                measurement_concept=zero_concept,
+                measurement_source_value='2345-7',
+                measurement_source_concept=loinc_source_concept,
+            )
+
+    def test_umls_strategy_resolves_and_skips_lexical(
+        self, unmapped_measurements, umls_release,
+        measurement_domain, loinc_vocab, lab_class,
+    ):
+        """When UMLS finds a single standard concept, lexical is never needed."""
+        # Set up UMLS bridge: LOINC 2345-7 → CUI → LOINC standard concept
+        cui = UmlsConcept.objects.create(
+            cui='C0017725', preferred_name='Glucose measurement',
+            release=umls_release,
+        )
+        UmlsSourceCode.objects.create(
+            concept=cui, root_source='LNC', code='2345-7',
+            term_type='PT', name='Glucose [Mass/volume] in Serum or Plasma',
+        )
+        # Sibling in SNOMED
+        snomed_vocab = VocabularyFactory(vocabulary_id='SNOMED', vocabulary_name='SNOMED')
+        snomed_concept = ConceptFactory(
+            concept_id=4144235,
+            concept_name='Glucose measurement',
+            concept_code='33747003',
+            vocabulary=snomed_vocab,
+            domain=measurement_domain,
+            concept_class=lab_class,
+            standard_concept='S',
+        )
+        UmlsSourceCode.objects.create(
+            concept=cui, root_source='SNOMEDCT_US', code='33747003',
+            term_type='PT', name='Glucose measurement',
+        )
+
+        results = suggest_mappings(
+            'measurement',
+            min_occurrences=10,
+            strategies=['umls'],
+            dry_run=True,
+        )
+
+        assert len(results) >= 1
+        r = results[0]
+        assert r['strategy_used'] == 'umls'
+        assert r['umls_cui'] is not None
+        assert r['suggested'] is not None
+        assert r['suggested']['concept_id'] == 4144235
+
+    def test_lexical_only_when_umls_disabled(
+        self, unmapped_measurements, umls_release,
+        measurement_domain, loinc_vocab, lab_class,
+    ):
+        """With UMLS unchecked, even if UMLS data exists, lexical is used."""
+        # Set up the same UMLS bridge data.
+        cui = UmlsConcept.objects.create(
+            cui='C0017726', preferred_name='Glucose',
+            release=umls_release,
+        )
+        UmlsSourceCode.objects.create(
+            concept=cui, root_source='LNC', code='2345-7',
+            term_type='PT', name='Glucose',
+        )
+        snomed_vocab = VocabularyFactory(vocabulary_id='SNOMED', vocabulary_name='SNOMED')
+        ConceptFactory(
+            concept_id=4144236,
+            concept_name='Glucose measurement serum',
+            concept_code='33747004',
+            vocabulary=snomed_vocab,
+            domain=measurement_domain,
+            concept_class=lab_class,
+            standard_concept='S',
+        )
+        UmlsSourceCode.objects.create(
+            concept=cui, root_source='SNOMEDCT_US', code='33747004',
+            term_type='PT', name='Glucose measurement serum',
+        )
+
+        # Run with only lexical — UMLS data exists but won't be consulted.
+        results = suggest_mappings(
+            'measurement',
+            min_occurrences=10,
+            strategies=['lexical'],
+            dry_run=True,
+        )
+
+        assert len(results) >= 1
+        r = results[0]
+        # strategy_used will be 'lexical' or None (if no lexical match).
+        # Crucially it will NOT be 'umls'.
+        assert r['strategy_used'] != 'umls'
+
+    def test_no_strategies_selected_returns_no_suggestion(
+        self, unmapped_measurements, measurement_domain,
+    ):
+        """With an empty strategy list, nothing is suggested."""
+        results = suggest_mappings(
+            'measurement',
+            min_occurrences=10,
+            strategies=[],
+            dry_run=True,
+        )
+
+        assert len(results) >= 1
+        for r in results:
+            assert r['suggested'] is None
+            assert r['strategy_used'] is None
