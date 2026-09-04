@@ -41,7 +41,12 @@ recruiting trials.
 - Audit log middleware — structured JSON log for every mutating API request
 - 640+ backend tests; CI on GitHub Actions (PostgreSQL 16)
 
-## [1.2.0] — unreleased
+## [1.2.0] — 2026-09-04
+
+501 commits since 1.1.0. The defining changes are vocabulary governance and a writable
+clinical surface: Athena becomes a first-class dependency, source-code-to-concept
+mappings gain a reviewable approval pipeline, and the UI can write clinical facts back
+into OMOP — not just display a derived projection.
 
 ### Upgrade requirement — load the Athena vocabularies before deploying
 
@@ -67,23 +72,170 @@ simply never loaded:
   `EpisodeEvent`). Both were hand-seeded; Athena supplies them with identical ids,
   names and codes.
 
-**`seed_omop_concepts` is removed.** It maintained 99 concepts by hand, 97 of
-which Athena already supplies. Offering it as an operator command made it a
-competing source of truth for concepts, which is how a locally invented concept
-ends up occupying an id the vocabulary owns — what happened with `3000963`,
-turning every unmapped lab into a haemoglobin result and leaving 19 staging
-patients with a haemoglobin of 1.0 g/dL.
+### Removed
 
-The data survives as `omop_core/concept_fixtures.py`, imported only by tests,
-which need concepts without a 4.6 GB Athena bundle. There is no management
-command and no deploy step.
+- **`seed_omop_concepts` is removed.** It maintained 99 concepts by hand, 97 of
+  which Athena already supplies. Offering it as an operator command made it a
+  competing source of truth for concepts, which is how a locally invented concept
+  ends up occupying an id the vocabulary owns — what happened with `3000963`,
+  turning every unmapped lab into a haemoglobin result and leaving 19 staging
+  patients with a haemoglobin of 1.0 g/dL. The data survives as
+  `omop_core/concept_fixtures.py`, imported only by tests that need concepts
+  without a 4.6 GB Athena bundle. Locally-minted `HK-Wearable` concepts arrive
+  via migration 0143.
 
-Locally-minted `HK-Wearable` concepts — the one thing Athena cannot supply —
-arrive via migration 0143, which runs on every deploy.
+### Added
 
----
+- **Source code concept mapping (SCCM) framework** — a reviewable, approvable
+  pipeline for mapping source codes to standard OMOP concepts. Doctors and
+  analysts propose mappings; administrators approve them. Unapproved mappings do
+  not enter the clinical record (#820, #830, #834, #848, #849, #856, #872, #875).
+- **Code mapping administration hub** — visual interface with approval queues,
+  role-based gates, source vocabulary tabs (Athena sync, CR mirroring), batch
+  ETL crossmap import, and mapping coverage statistics (#894, #896, #898).
+- **Multiple source vocabulary imports** — UMLS/MRCONSO direct import with
+  streaming loads (#983), HK-Labs curated LOINC mappings auto-approved on deploy
+  (#941), HealthTree FHIR crossmaps (#891, #912), CureHub FHIR crossmaps (#924),
+  and OpenWearables vocabulary (#909).
+- **Batch concept lookup** — `GET /api/concepts/lookup/` resolves vocabulary + code
+  pairs in bulk, so an ETL pipeline does not need one round-trip per code.
+- **Auto-suggest mappings** — unmapped fields get suggested mappings based on name
+  similarity, concept domain, and vocabulary context (#682, #856).
+- **Field mapping transfer** — `copy_field_mappings` management command copies
+  curated mappings between PRomop instances. Matching is by natural key, concept
+  FKs are re-resolved by `(vocabulary_id, concept_code)`, and reviewer attribution
+  is cleared (#981).
+- **UMLS and vocabulary release management** — release caching and pinning (#980),
+  direct vocabulary release publishing, nested archive support, and streaming UMLS
+  imports without full-archive caching.
+- **Writable-field descriptor endpoint** — clients query which fields are writable,
+  what concepts they accept, and how to write them as OMOP facts (#605).
+- **Writable demographics** — Gender, Race, and Ethnicity are now correctable with
+  coded OMOP concepts, not free text. Six location fields updatable through the
+  Person endpoint (#608, #609).
+- **Labs tab writes OMOP Measurement facts** directly, with concept resolution and
+  unit normalization, driven by the writable-field descriptor (#602).
+- **Blood tab writes OMOP facts** for hematology values through the same
+  descriptor-driven pipeline (#622, #955).
+- **Disease, Behavior, and Wearable tabs** rendered from the field descriptor, so
+  new fields appear in the UI without frontend changes (#645, #647, #649, #651).
+- **Treatment tab** — clinicians author lines of therapy through the API with
+  structured regimen references, drug class categorization, and a disease-filtered
+  regimen picker (#637, #639, #641, #672).
+- **Therapy reference tables** — curated CSV-seeded therapy and component reference
+  data, regimen picker filtered by disease, drug class categorization, and
+  line-of-therapy metadata (#763–#767, #775, #776).
+- **Custom patient fields** — foundation for organization-specific patient
+  attributes, so each deployment can extend the record without forking the
+  schema (#727).
+- **Field mapping enhancements** — concept mapping interface for PatientRecord
+  fields (#595, #616), tabbed layout with synonym management (#624), compound
+  field mappings (#674), curated field mapping units (#689, #704), field formulas
+  with derivation (#675).
+- **Async derivation with Celery** — `?skip_refresh=true` suppresses PatientRecord
+  rebuild on bulk POST and row-level PATCH/DELETE; `POST
+  /api/v1/patient-records/{person_id}/refresh/` queues derivation on Celery,
+  returns `202 Accepted` with a task ID. Inline dispatcher for dev without Redis.
+  25-second statement timeout on both paths. Signed inline task IDs. Status
+  polling at `/api/v1/derivation-status/{task_id}/` (#678).
+- **FHIR DocumentReference ingestion** — clinical documents attached to a patient
+  record are captured in OMOP (#569).
+- **FHIR observation ranges and interpretation** — reference ranges and abnormal
+  flags from the source system are mapped and stored (#562).
+- **FHIR observation deduplication by concept** — duplicate observations from
+  multi-provider patients are collapsed rather than stacked (#561).
+- **Skipped FHIR resource reporting** — resources that cannot be ingested are
+  logged with the reason, creating an audit trail for data completeness (#570).
+- **Clinical OMOP list pagination** on the five clinical endpoints (#564).
+- **Clinical list filters** for conditions, measurements, observations, drug
+  exposures, and procedures (#565).
+- **Single-POST upsert** — row-level clinical POSTs now upsert on event identity,
+  matching the bulk path (#567).
+- **Clinical provenance idempotency** — re-synced clinical writes do not duplicate
+  provenance records (#558).
+- **Apple/Garmin wearable code mappings** — curated mappings managed through the
+  SCCM approval workflow, with database-driven ingest configuration (#923, #951).
+- **Language skills** — a patient's language capabilities (speak, read, write, sign)
+  are settable from the API and UI, coded with HK-Language concepts, and flattened
+  for matching (#808, #813, #821).
+- **Organization-scoped signup** — patients can self-register and associate with an
+  organization through an email-filtered invitation flow (#572, signup filters).
+- **Pending organization invitations** visible on user profile.
+- **Sign Up tab** on the homepage login page (#572).
+- **Vocabulary load from Google Drive** — `load_athena_vocabularies --gdrive` for
+  deployments that store the Athena bundle on GDrive (#631).
+- **Validation fields modelled as person equivalences** (#783).
+- **`load_mappings` command** — integrated with `load_athena_vocabularies` for
+  deploying mapping artifacts alongside vocabulary loads (#977).
+- **HK-Labs SCCM seed migration** — migration `0201` seeds approved HK-Labs-to-LOINC
+  mappings; deployment gate in `start.sh` enforces Athena load before applying (#972).
+- **Tab-field overlap ESLint rule** — prevents a field from rendering an editable
+  box on two tabs; replaces the runtime test (#955).
 
-## [Unreleased]
+### Changed
+
+- **Value concepts coded, not just questions** — observation and measurement
+  answers resolve to coded concepts, not just source text (#774, #723).
+- **Refresh prefetch** — OMOP rows prefetched to eliminate 504s on large patients
+  during PatientRecord derivation (#541).
+- **Refresh snapshot reuse** — LOT inference reuses the refresh snapshot instead of
+  re-querying (#617).
+- **Concept-zero repointing** — unambiguous concept-zero clinical rows safely
+  repointed to the correct concept, gated on source provenance (#846).
+- **Destructive vocabulary replacement blocked** when patient data references
+  the vocabulary (#681).
+- React pinned to 19.2.6 (#pin-react-19.2.6).
+- DRF bumped from 3.15.2 to 3.17.2 for CVE fixes.
+- Tailwind preflight scoped to stop leaking into the federation host document.
+- Theme vars no longer written as inline styles on the root element.
+- Docker stack made configurable and able to start with `DEBUG` off (#553).
+- Fixed database-name portability: removed hardcoded `ctomop` assumptions (#551).
+
+### Fixed
+
+- **Unmapped-lab concept collision** — stopped the unmapped-lab fallback from
+  occupying a real concept's id, which turned every unmapped lab into a false
+  haemoglobin result (#599).
+- **BMI derivation** for metre-height inputs (#769).
+- **Regimen naming** — stopped a combination from being named after one of its
+  drugs (#642).
+- **Upsert timezone normalization** — upsert key datetimes normalized to avoid
+  timezone-aware/naive mismatches creating duplicates (#531, #533).
+- **Superseded-row upsert match** — a superseded row is no longer matched by a
+  later identical write (#649 followup).
+- **Projection patch** — sending an edit no longer drops derived fields from the
+  save payload (#627).
+- **Domain box overflow** — domain box value no longer bleeds into adjacent fields
+  in the code mapping UI (#928).
+- **Org cascade** — `manage_language_skills` stopped minting concepts and matching
+  by name (#812).
+- **Audit log** — deprecation warnings use a separate logger to avoid polluting
+  the structured audit log (#879).
+- **Clinical session auth** enforced by role (#555).
+- **Clinical query filter validation** — unknown filters rejected with 400 (#563).
+- **CORS provenance headers** — `X-Provenance-Source` and `X-Provenance-User-Id`
+  allowed through CORS (#554).
+- **M-Protein type values** updated (#811).
+- **CLL/DLBCL disease string variants** handled in the regimen picker (#798).
+- **Frontend lint regressions** — `set-state-in-effect` violations fixed in the
+  field-mapping load (#630) and synonym dialog (#638).
+- **P0 security audit findings** closed (#756): token cache expiry (#759),
+  signing-key work (#749).
+- **Boolean assertion coercion** wired into Measurement/Observation serializers
+  (#881).
+- Multiple migration graph conflicts resolved: merged migration heads at 0154,
+  0176, 0177, 0178, 0179, 0184, 0185, 0200.
+
+### Migration notes
+
+| Item | Details |
+|------|---------|
+| Migration endpoint | `omop_core.0201_seed_hklabs_sccm` |
+| Total migrations | 202 (up from 201 in v1.1.0) |
+| Order requirement | Migrate through 0200, load Athena vocabularies, then apply 0201 |
+| Vocabulary load time | ~11 seconds (`--concepts-only`) |
+| Deployment gate | `start.sh` enforces Athena load before applying 0201 |
+| Breaking changes | 1 — `seed_omop_concepts` removed, replaced by Athena vocabulary load |
 
 ---
 
