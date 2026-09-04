@@ -1393,7 +1393,7 @@ class Command(BaseCommand):
             vocab_versions=vocab_versions,
             row_counts=real_counts,
             checksums=checksums,
-            umls_release=self._umls_release or {},
+            umls_release=getattr(self, '_umls_release', {}) or {},
             status='published',
             published_at=now,
         )
