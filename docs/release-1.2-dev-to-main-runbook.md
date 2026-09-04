@@ -1,9 +1,9 @@
 # Release 1.2: dev-to-main promotion runbook
 
-**Status:** in progress — resume at **Phase 0: establish and inspect the
-refreshed candidate**.  Phase 2 local PostgreSQL migration validation is the
-next substantive release gate.  Do not promote, tag, or deploy until every required gate below
-has passed.
+**Status:** in progress — resume at **Phase 4: release PR and staging
+validation**. Local Phase 2 migration validation and Phase 3 automated gates
+are complete for the candidate recorded below. Do not promote, tag, or deploy
+until every required gate below has passed.
 
 This is the release runbook for promoting the current `dev` integration branch
 to `main`, then creating the annotated tag `v1.2.0` (release name: **Release
@@ -53,6 +53,30 @@ preserved separately; do not use it to prepare or tag the release.
 
 Before merging, verify `git status --short` is clean in this release worktree.
 Do not accidentally include any unrelated work in the release commit or tag.
+
+### Validation record — 2026-09-04
+
+On the refreshed Release 1.2 candidate, an isolated local PostgreSQL database
+was migrated through `0200`, loaded from the full local Athena export, then
+migrated through `0203`. A second `migrate --noinput` was a no-op. The completed
+vocabulary load recorded 4,388,766 concepts (287,814 LOINC), 31,939,861 concept
+ancestors, 3,281,969 synonyms, and 2,966,568 drug-strength rows.
+
+The approved `hk-labs-seed` rows validated cleanly: 145 LOINC targets, zero
+null/non-LOINC targets, and zero duplicate source keys. The two intentionally
+unresolved proposed rows are excluded from this deploy-seed check.
+
+Completed local automated gates:
+
+- Django: 1,929 passed, 42 skipped (`omop_core` and `patient_portal`);
+- pytest: 674 passed, 1 skipped, 1 deselected;
+- frontend: ESLint completed with 3 existing warnings, Vitest 447 passed / 4
+  skipped, production build passed;
+- real Celery worker plus temporary Redis: 1 e2e test passed.
+
+`manage.py check --deploy --fail-level ERROR` passed with non-production
+placeholder secrets. It emitted existing OpenAPI/schema and SSL-redirect
+warnings, but no error-level findings.
 
 ## Phase 0 — establish a clean, current candidate
 
