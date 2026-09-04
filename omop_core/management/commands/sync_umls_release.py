@@ -14,6 +14,22 @@ from omop_core.models import UmlsConcept, UmlsRelease, UmlsSourceCode
 BATCH = 10_000
 
 
+def _find_mrconso(chunks):
+    """Yield MRCONSO bytes from either a release ZIP or its nested payload ZIP."""
+    for name, _, member_chunks in stream_unzip(chunks):
+        filename = name.decode('utf-8')
+        if filename.endswith('META/MRCONSO.RRF'):
+            return member_chunks
+        if filename.lower().endswith('.zip'):
+            nested = _find_mrconso(member_chunks)
+            if nested is not None:
+                return nested
+        else:
+            for _ in member_chunks:
+                pass
+    return None
+
+
 class Command(BaseCommand):
     help = 'Stream/import raw UMLS RRF codes without writing the archive to disk.'
 
@@ -30,13 +46,12 @@ class Command(BaseCommand):
         allowed = set(options['sources'].split(',')) if options['sources'] else None
         response = requests.get(UMLS_DOWNLOAD_URL, params={'url': release['release_url'], 'apiKey': api_key}, stream=True, timeout=(30, 300))
         response.raise_for_status()
-        concepts, codes, remainder, total, found = [], [], '', 0, False
-        for name, _, chunks in stream_unzip(response.iter_content(1024 * 1024)):
-            if not name.decode('utf-8').endswith('META/MRCONSO.RRF'):
-                for _ in chunks: pass
-                continue
-            found = True; decoder = codecs.getincrementaldecoder('utf-8')('replace')
-            for chunk in chunks:
+        concepts, codes, remainder, total = [], [], '', 0
+        chunks = _find_mrconso(response.iter_content(1024 * 1024))
+        if chunks is None:
+            raise CommandError('UMLS archive did not contain META/MRCONSO.RRF.')
+        decoder = codecs.getincrementaldecoder('utf-8')('replace')
+        for chunk in chunks:
                 lines = (remainder + decoder.decode(chunk)).split('\n'); remainder = lines.pop()
                 for line in lines:
                     row = line.rstrip('\r').split('|')
@@ -44,8 +59,6 @@ class Command(BaseCommand):
                     cui, pref, sab, tty, code, label = row[0], row[6] == 'Y', row[11], row[12], row[13], row[14]
                     concepts.append(UmlsConcept(cui=cui, preferred_name=label if pref else '', release=release_row)); codes.append(UmlsSourceCode(concept_id=cui, root_source=sab, code=code, term_type=tty, name=label, is_preferred=pref))
                     if len(codes) >= BATCH: self._flush(concepts, codes); total += len(codes); concepts, codes = [], []
-            break
-        if not found: raise CommandError('UMLS archive did not contain META/MRCONSO.RRF.')
         if codes: self._flush(concepts, codes); total += len(codes)
         self.stdout.write(self.style.SUCCESS(f'Loaded {total:,} source-code rows without archive caching.'))
 
