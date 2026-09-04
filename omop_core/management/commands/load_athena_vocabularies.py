@@ -32,6 +32,9 @@ logger = logging.getLogger(__name__)
 
 VOCAB_SCOPE = frozenset({
     'HemOnc', 'RxNorm', 'RxNorm Extension', 'ATC', 'LOINC', 'UCUM',
+    # Curated measurement concepts used by field mappings.  In particular,
+    # OMOP Extension 718584 is the PD-L1 by Immune stain measurement (#989).
+    'OMOP Extension',
     'Visit', 'Type Concept',
     # Clinical-record vocabularies (FHIR sync B3): SNOMED covers conditions,
     # procedures, and allergies; ICD10CM covers EHR-sourced diagnoses. CVX

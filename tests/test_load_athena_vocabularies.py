@@ -8,7 +8,9 @@ from omop_core.management.commands.load_athena_vocabularies import (
     Command,
     DEFAULT_GDRIVE_URL,
     REQUIRED_CLINICAL_VOCABULARIES,
+    VOCAB_SCOPE,
     _cache_umls_release,
+    _concept_in_scope,
     _resolve_umls_release,
 )
 from tests.factories import (
@@ -22,6 +24,14 @@ def test_gdrive_option_defaults_to_shared_vocabulary_folder():
     options = parser.parse_args(['--gdrive'])
 
     assert options.gdrive == DEFAULT_GDRIVE_URL
+
+
+def test_omop_extension_pdl1_measurement_is_in_vocabulary_load_scope():
+    """#989: Athena concept 718584 must be available to field curators."""
+    assert 'OMOP Extension' in VOCAB_SCOPE
+    assert _concept_in_scope(
+        'OMOP Extension', '718584', 'Measurement', 'Measurement',
+    )
 
 
 def test_umls_options_default_to_automatic_opt_in():
