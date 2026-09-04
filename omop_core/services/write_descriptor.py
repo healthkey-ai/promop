@@ -71,6 +71,17 @@ _THERAPY_PREFIXES = (
     'treatment_refractory', 'reason_for_disc', 'washout', 'last_treatment',
 )
 
+# Line projections are not writable PatientRecord facts.  ARTEMIS (or another
+# episode producer) writes the Episode/EpisodeEvent evidence; refresh reads it
+# back.  This list deliberately includes every current first/second/later line
+# column, rather than only the therapy name, so the UI cannot offer a stale
+# direct editor for a date, intent, outcome, or derived concept id.
+_EPISODE_COMPUTED_FIELDS = frozenset(
+    field.name
+    for field in PatientRecord._meta.concrete_fields
+    if field.name.startswith(('first_line_', 'second_line_', 'later_'))
+)
+
 # How a therapy line is authored. Not a missing mapping — the write path exists
 # and works; it is simply not a single fact, so no concept could describe it. A
 # line is an Episode grouping the DrugExposures given during it, and derivation
@@ -430,6 +441,20 @@ def build_writable_field_descriptor():
 
     descriptor = {}
     for field in sorted(PATIENT_RECORD_OMOP_MAPPED_FIELDS - _LIFECYCLE_FIELDS):
+        if field in _EPISODE_COMPUTED_FIELDS:
+            descriptor[field] = {
+                'kind': KIND_COMPUTED,
+                'writable': False,
+                'inputs': ['Episode', 'EpisodeEvent'],
+                'source_tables': ['Episode', 'EpisodeEvent'],
+                'authored_via': _THERAPY_RECIPE,
+                'reason': (
+                    'Code-computed from persisted Episode and EpisodeEvent '
+                    'records. Author a therapy line as an Episode grouping its '
+                    'events and this field follows.'
+                ),
+            }
+            continue
         if field in _ALIAS_TO_CANONICAL:
             canonical = _ALIAS_TO_CANONICAL[field]
             descriptor[field] = {

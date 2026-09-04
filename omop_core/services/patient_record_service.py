@@ -1244,7 +1244,10 @@ def _get_treatment_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     if current_meds:
         data['concomitant_medications'] = ', '.join(current_meds)
 
-    # Try Episode-based therapy line grouping first
+    # Therapy-line projections have one durable source of truth: persisted
+    # Episode/EpisodeEvent groups.  Refresh must not invent an in-memory line
+    # from DrugExposure rows; ARTEMIS (or another episode producer) owns that
+    # transformation and persists it before this read model is refreshed.
     try:
         from omop_oncology.models import Episode
         episodes = Episode.objects.filter(person=person).select_related(
@@ -1254,24 +1257,9 @@ def _get_treatment_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     except Exception:
         pass
 
-    # No Episodes persisted yet — derive from the single LOT inference engine in
-    # read-only (dry_run) mode, so the same grouping algorithm the enrich/import
-    # steps use to *persist* Episodes also drives derivation. No OMOP rows are
-    # written here; refresh_patient_record stays read-only.
-    if not drug_exposures:
-        return data
-
-    from omop_core.services.lot_inference_service import infer_lot_for_person
-    # The snapshot already has the rows LOT inference needs. Reuse them rather
-    # than querying DrugExposure and ProcedureOccurrence a second time.
-    lots = infer_lot_for_person(
-        person,
-        force=True,
-        dry_run=True,
-        exposures=drug_exposures,
-        procedures=snapshot.procedures,
-    )
-    _apply_inferred_lots(data, lots, drug_exposures=drug_exposures)
+    # Deliberately leave all first-/second-/later-line fields absent when no
+    # persisted episode exists.  refresh_patient_record clears those fields
+    # first, so this also removes stale projections after an Episode is deleted.
     return data
 
 
@@ -1638,6 +1626,10 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
 
     for episode in episodes:
         event_ids = ee_by_episode.get(episode.episode_id, [])
+        # An Episode only represents a therapy line once its backing events are
+        # persisted.  Do not project a dangling header row into PatientRecord.
+        if not event_ids:
+            continue
         drugs_in_episode = [de_by_id[eid] for eid in event_ids if eid in de_by_id]
 
         drug_name_set = {

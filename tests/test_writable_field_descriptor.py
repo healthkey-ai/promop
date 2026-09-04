@@ -360,10 +360,15 @@ class TestEveryFieldIsCategorised:
                 assert entry.get('group'), field
                 assert entry.get('reason'), field
 
-    def test_therapy_fields_are_grouped_as_inference_not_missing_concepts(self):
-        """They need a different design, not a code — #595 must not count them."""
+    def test_therapy_line_fields_are_computed_from_persisted_episode_events(self):
+        """Per-line columns are projections, not direct PatientRecord inputs."""
         d = build_writable_field_descriptor()
-        for field in ('first_line_outcome', 'relapse_count', 'line_of_therapy'):
+        for field in ('first_line_outcome', 'second_line_start_date', 'later_end_date'):
+            assert d[field]['kind'] == 'computed', field
+            assert d[field]['source_tables'] == ['Episode', 'EpisodeEvent']
+        # Other treatment summaries retain their existing episode-authoring
+        # guidance; they are not individual first/second/later-line columns.
+        for field in ('relapse_count', 'line_of_therapy'):
             assert d[field]['group'] == 'therapy-inference', field
 
     def test_location_fields_are_writable_not_grouped_as_missing(self):
