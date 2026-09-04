@@ -20,6 +20,6 @@
     }
   },
   "include": ["src"],
-  "exclude": ["**/*.test.ts", "**/*.test.tsx", "**/*.spec.ts", "**/*.spec.tsx", "src/test"],
+  "exclude": ["**/*.test.ts", "**/*.test.tsx", "**/*.itest.ts", "**/*.itest.tsx", "**/*.spec.ts", "**/*.spec.tsx", "src/test"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

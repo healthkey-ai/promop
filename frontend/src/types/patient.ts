@@ -10,6 +10,9 @@ export interface User {
 export interface PatientInfo {
   id?: number;
   person?: number;
+  /** The Person this record derives from. Present in every API response; the
+   *  therapy-line write needs it. */
+  person_id?: number;
   email?: string;
   
   // General
@@ -20,6 +23,19 @@ export interface PatientInfo {
   bmi?: number;
   race?: string | null;
   ethnicity?: string | null;
+
+  // Flattened language capabilities, derived from PersonLanguageSkill (#827).
+  // Three-valued: undefined/null means nobody asked about that language, false
+  // means the patient was asked and does not have the capability. Collapsing
+  // the two would make every unasked patient look incapable to a trial filter.
+  english_speak?: boolean | null;
+  english_read?: boolean | null;
+  english_write?: boolean | null;
+  english_understand?: boolean | null;
+  spanish_speak?: boolean | null;
+  spanish_read?: boolean | null;
+  spanish_write?: boolean | null;
+  spanish_understand?: boolean | null;
   systolic_bp?: number;
   diastolic_bp?: number;
   location?: string;
@@ -122,6 +138,9 @@ export interface PatientInfo {
   
   // Planned Therapies
   planned_therapies?: string;
+
+  // Remission
+  remission_duration?: string;
   
   // Blood Markers
   hemoglobin_g_dl?: number;

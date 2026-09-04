@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { Upload, FileText, Trash2, LogOut, Settings } from "lucide-react";
+import { Upload, FileText, Trash2, LogOut, Settings, Globe } from "lucide-react";
 import api from "@/api/axios";
 import { clearTokens } from "@/utils/oauth";
 import { useAuth } from "@/hooks/useAuth";
@@ -190,6 +190,7 @@ export default function PatientList() {
   const isAllSelected =
     patients.length > 0 &&
     (selectAllMode || visibleSelectedCount === patients.length);
+  const canManageMappings = !!(currentUser?.is_staff || currentUser?.is_org_admin);
 
   const handleLogout = () => {
     clearTokens();
@@ -210,15 +211,6 @@ export default function PatientList() {
               Delete ({selectAllMode ? `All ${patientCount}` : selectedIds.size})
             </button>
           )}
-          {(currentUser?.is_staff || currentUser?.is_org_admin) && (
-            <button
-              onClick={() => navigate("/org-admin")}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 border border-gray-300 rounded hover:bg-gray-50"
-            >
-              <Settings size={14} />
-              Org Admin
-            </button>
-          )}
           <button
             onClick={() => navigate("/upload-csv")}
             className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-foreground hover:bg-accent"
@@ -226,21 +218,42 @@ export default function PatientList() {
             <Upload size={16} />
             Upload CSV
           </button>
-          <button
-            onClick={() => navigate("/upload-fhir")}
-            className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-          >
-            <FileText size={16} />
-            Upload FHIR
-          </button>
-          {currentUser?.email && (
+          {canManageMappings ? (
             <button
-              onClick={() => navigate("/profile")}
-              className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-muted-foreground hover:bg-accent"
+              onClick={() => navigate("/mappings")}
+              className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
             >
-              {currentUser.email}
+              <Globe size={16} />
+              Mappings
+            </button>
+          ) : (
+            <button
+              onClick={() => navigate("/upload-fhir")}
+              className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+            >
+              <FileText size={16} />
+              Upload FHIR
             </button>
           )}
+          <div className="ml-auto flex gap-2">
+            {canManageMappings && (
+              <button
+                onClick={() => navigate("/org-admin")}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 border border-gray-300 rounded hover:bg-gray-50"
+              >
+                <Settings size={14} />
+                Org Admin
+              </button>
+            )}
+            {currentUser?.email && (
+              <button
+                onClick={() => navigate("/profile")}
+                className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-muted-foreground hover:bg-accent"
+              >
+                {currentUser.email}
+              </button>
+            )}
+          </div>
           <button
             onClick={handleLogout}
             className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-muted-foreground hover:bg-accent"

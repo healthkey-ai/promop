@@ -6,10 +6,12 @@ from omop_core.models import Concept, Measurement, Person
 from omop_core.services.patient_record_service import (
     _get_laboratory_data,
     _get_mm_specific_data,
+    refresh_patient_record,
 )
 from tests.factories import (
     ConceptFactory,
     MeasurementFactory,
+    PatientRecordFactory,
     PersonFactory,
     VocabularyFactory,
 )
@@ -80,11 +82,22 @@ def test_seeded_kappa_and_real_lambda_codes_are_not_confused():
 
 
 @pytest.mark.parametrize('code', ['48378-4', '80517-6', '104546-7'])
-def test_free_light_chain_ratio_codes_project(code):
+def test_kappa_lambda_ratio_codes_project(code):
     person = PersonFactory()
     _measure(person, code, 2.034)
 
-    assert float(_get_laboratory_data(person)['free_light_chain_ratio']) == pytest.approx(2.034)
+    assert float(_get_laboratory_data(person)['kappa_lambda_ratio']) == pytest.approx(2.034)
+
+
+def test_involved_uninvolved_ratio_is_computed_from_light_chains():
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    _measure(person, '36916-5', 2.0)
+    _measure(person, '33944-0', 10.0)
+
+    record = refresh_patient_record(person)
+
+    assert float(record.involved_uninvolved_ratio) == pytest.approx(5.0)
 
 
 def test_marrow_plasma_cells_use_the_real_marrow_code():
@@ -260,13 +273,14 @@ def test_slim_still_reads_generator_display_names():
     assert _get_mm_specific_data(person)['meets_slim'] is True
 
 
-def test_mm_measurement_lookups_are_filtered_in_sql():
-    """No measurement lookup here may select on person alone.
+def test_mm_measurement_lookups_use_shared_prefetch():
+    """After the snapshot refactor (#541), _get_mm_specific_data builds its own
+    OmopSnapshot when called without one.  The snapshot fetches all non-erroneous
+    measurements for the person in a single query and filters in Python.
 
-    Resolving codes through _measurement_code invites fetching every row and
-    filtering in Python, on a refresh path where a bulk loaded patient holds
-    tens of thousands of measurements. Asserted on query shape because
-    parameter interpolation into the logged SQL is backend dependent.
+    This test verifies:
+      1. The function issues exactly one measurement SELECT (the snapshot query).
+      2. The query count stays bounded regardless of how many codes are involved.
     """
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
@@ -284,42 +298,31 @@ def test_mm_measurement_lookups_are_filtered_in_sql():
     ]
     assert measurement_queries, 'expected _get_mm_specific_data to read measurements'
 
-    unfiltered = [
-        sql for sql in measurement_queries
-        if 'measurement_source_value" IN' not in sql and 'concept_code" IN' not in sql
-    ]
-    assert not unfiltered, (
-        'measurement lookup restricted by person alone, so it walks every row '
-        f'the person owns: {unfiltered}'
+    # The snapshot prefetches all measurements in one query; no per-code queries.
+    assert len(measurement_queries) == 1, (
+        f'expected exactly 1 measurement query (snapshot), got {len(measurement_queries)}'
     )
-
-    # The SLiM lookup specifically: the only one that resolves the code through
-    # the joined concept as well as source_value.
-    assert any(
-        'INNER JOIN "concept"' in sql and 'concept_code" IN' in sql
-        for sql in measurement_queries
-    ), 'expected the SLiM lookup to match concept_code in SQL, not in Python'
 
 
 # ---------------------------------------------------------------------------
 # Derived-field contract
 # ---------------------------------------------------------------------------
 
-def test_free_light_chain_ratio_is_registered_as_omop_derived():
+def test_kappa_lambda_ratio_is_registered_as_omop_derived():
     """Otherwise it never clears on delete and stays writable through the API."""
     from omop_core.services.patient_record_service import (
         PATIENT_RECORD_OMOP_MAPPED_FIELDS,
         _OMOP_DERIVED_FIELDS,
     )
 
-    assert 'free_light_chain_ratio' in _OMOP_DERIVED_FIELDS
-    assert 'free_light_chain_ratio' in PATIENT_RECORD_OMOP_MAPPED_FIELDS
+    assert 'kappa_lambda_ratio' in _OMOP_DERIVED_FIELDS
+    assert 'kappa_lambda_ratio' in PATIENT_RECORD_OMOP_MAPPED_FIELDS
 
 
-def test_free_light_chain_ratio_has_provenance():
+def test_kappa_lambda_ratio_has_provenance():
     from omop_core.services.provenance_registry import get_registry
 
-    entry = get_registry()['free_light_chain_ratio']
+    entry = get_registry()['kappa_lambda_ratio']
 
     assert entry.omop_table == 'Measurement'
     assert '48378-4' in entry.concept_codes

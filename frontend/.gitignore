@@ -6,5 +6,8 @@ dist
 !src/**/*.d.ts
 *.js
 !src/**/*.js
+# The local ESLint plugin. ESLint loads rules as real modules, so these are
+# source, not the compiler output the blanket *.js above is aimed at.
+!eslint-rules/*.js
 .DS_Store
 .nvmrc

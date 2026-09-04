@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import dj_database_url
 from dotenv import load_dotenv
+from corsheaders.defaults import default_headers
 
 from ctomop.frontend_paths import resolve_frontend_root
 
@@ -40,8 +41,14 @@ if not DEBUG:
     # app server is fully initialised (migrate, test, collectstatic, check, etc.)
     # so that Render deploys (which call `migrate` in start.sh) and CI test runs
     # are not broken when DATABASE_URL is absent at import time.
-    _management_commands = {'migrate', 'test', 'collectstatic', 'check', 'makemigrations'}
+    _management_commands = {
+        'migrate', 'test', 'collectstatic', 'check', 'makemigrations',
+        'copy_field_mappings',
+    }
     _running_mgmt = len(_sys.argv) > 1 and _sys.argv[1] in _management_commands
+    # A Celery worker serves no HTTP, so the host and origin checks below would
+    # only stop it from booting. Its secret and database still have to be real.
+    _running_worker = os.path.basename(_sys.argv[0] if _sys.argv else '') == 'celery'
     if not _running_mgmt:
         from django.core.exceptions import ImproperlyConfigured
         _config_errors = []
@@ -53,11 +60,11 @@ if not DEBUG:
             _config_errors.append(
                 'DATABASE_URL must be set (SQLite is not supported in production)'
             )
-        if not os.environ.get('ALLOWED_HOSTS'):
+        if not _running_worker and not os.environ.get('ALLOWED_HOSTS'):
             _config_errors.append(
                 'ALLOWED_HOSTS must be set to your domain(s), e.g. "app.example.com"'
             )
-        if not os.environ.get('CORS_ALLOWED_ORIGINS'):
+        if not _running_worker and not os.environ.get('CORS_ALLOWED_ORIGINS'):
             _config_errors.append(
                 'CORS_ALLOWED_ORIGINS must be set to your frontend origin(s), '
                 'e.g. "https://app.example.com"'
@@ -241,6 +248,7 @@ PASSWORD_REUSE_DAYS = int(os.environ.get('PASSWORD_REUSE_DAYS', '180'))       # 
 # Audit tamper-evidence (TI.2.2.1) and break-glass (TI.2.3#04).
 AUDIT_HMAC_KEY = os.environ.get('AUDIT_HMAC_KEY', '')                          # falls back to SECRET_KEY when empty
 BREAK_GLASS_TTL_SECONDS = int(os.environ.get('BREAK_GLASS_TTL_SECONDS', '3600'))  # emergency-access window (1h)
+BREAK_GLASS_ALLOW_SERVICE = os.environ.get('BREAK_GLASS_ALLOW_SERVICE', 'false').lower() in ('1', 'true', 'yes')
 # Hash-chain audit rows so row deletion/insertion is detectable (TI.2.2.1). Serializes
 # audit writes via an advisory lock; can be disabled under extreme write load.
 AUDIT_HASH_CHAIN_ENABLED = os.environ.get('AUDIT_HASH_CHAIN_ENABLED', 'true').lower() in ('1', 'true', 'yes')
@@ -311,6 +319,11 @@ else:
         if origin.strip()
     ]
 CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_HEADERS = (
+    *default_headers,
+    'x-provenance-source',
+    'x-provenance-user-id',
+)
 
 # ── Pluggable partner auth providers ──────────────────────────────────────
 # PartnerAuthentication iterates these in order; the first provider that
@@ -335,6 +348,14 @@ PHR_INTROSPECT_URL = os.environ.get(
     f"{PHR_BASE_URL}/api/v1/auth/introspect/" if PHR_BASE_URL else "",
 )
 PHR_JWKS_CACHE_TTL = int(os.environ.get("PHR_JWKS_CACHE_TTL", "3600"))
+# Expected `aud` claim on incoming PHR tokens (audit findings PROMOP F10/F16/F17).
+# Both verification paths in patient_portal/api/providers/phr.py treat an unset
+# value as "not configured" and reject every PHR token — fail CLOSED, not open.
+# This is deliberate: a wrong or missing audience must never be silently
+# accepted. Operational consequence: PHR_AUDIENCE must be set in the Render and
+# GCP environments before this change reaches those environments, or every PHR
+# federation login will fail with no other code change required to break it.
+PHR_AUDIENCE = os.environ.get("PHR_AUDIENCE", "promop-api" if DEBUG else "")
 
 FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "promop-test" if DEBUG else "")
 FIREBASE_SKIP_REVOCATION_CHECK = os.environ.get(
@@ -345,6 +366,12 @@ AUTH_TOKEN_CACHE_TTL = int(os.environ.get("AUTH_TOKEN_CACHE_TTL", "60"))
 
 # REST Framework
 SERVICE_AUTH_TOKEN = os.environ.get("SERVICE_AUTH_TOKEN", "")
+
+# Ranking key for Code Mapping suggestions (#856). Deliberately optional: with
+# no key the suggester falls back to lexical order and says so on the proposal,
+# because a Suggest button that returns nothing when a third party is down is
+# worse than one that returns a guess a curator can correct.
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 _auth_classes = [
     'patient_portal.api.authentication.ServiceTokenAuthentication',
@@ -380,7 +407,10 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_THROTTLE_RATES': {
         'anon': '60/minute',
-        'user': '300/minute',
+        # Env-tunable like the sync buckets below. The default protects the
+        # deployment; a local sweep that exercises every writable field fires
+        # several hundred requests in a minute and is not what the limit is for.
+        'user': os.environ.get('USER_THROTTLE_RATE', '300/minute'),
         # Wearable sync re-uploads daily rollups and fires on each HealthKit
         # change; 10/min was too tight. Env-tunable (set higher in dev).
         'sync': os.environ.get('SYNC_THROTTLE_RATE', '60/minute'),
@@ -490,6 +520,51 @@ for host in ALLOWED_HOSTS:
         csrf_origins.append(f'https://{host}')
 
 CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(csrf_origins))
+
+
+# ── Celery ────────────────────────────────────────────────────────────────
+# An empty broker means no queue, so the derivation runs inline in the request.
+# That is what a developer machine with no Redis gets, and it is the switch the
+# dispatcher reads — see omop_core/services/derivation_jobs.py.
+CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', '')
+CELERY_RESULT_BACKEND = os.environ.get('CELERY_RESULT_BACKEND', CELERY_BROKER_URL)
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_ACCEPT_CONTENT = ['json']
+
+# Each worker process holds its own DB connection, so concurrency x instances
+# has to stay under the database's connection cap.
+CELERY_WORKER_CONCURRENCY = int(os.environ.get('CELERY_WORKER_CONCURRENCY', '4'))
+# Default is 4, which lets one worker reserve four slow patients while its
+# siblings idle. Derivation is minutes-long, so reserve one at a time.
+CELERY_WORKER_PREFETCH_MULTIPLIER = int(
+    os.environ.get('CELERY_WORKER_PREFETCH_MULTIPLIER', '1'))
+
+CELERY_TASK_TIME_LIMIT = int(os.environ.get('CELERY_TASK_TIME_LIMIT', '900'))
+# Acknowledge after the task finishes, so a worker killed mid-derivation
+# releases the job instead of dropping it. Safe because deriving twice is
+# the same as deriving once.
+CELERY_TASK_ACKS_LATE = True
+# acks_late on its own still drops the task when the worker *process* dies —
+# an OOM kill or a hard time limit acknowledges it rather than redelivering.
+# Idempotent, so redelivery is the better failure mode.
+CELERY_TASK_REJECT_ON_WORKER_LOST = True
+# Off by default, which would leave a 15-25s derivation reading PENDING for its
+# whole run. The status endpoint publishes STARTED, so it has to be tracked.
+CELERY_TASK_TRACK_STARTED = True
+CELERY_BROKER_TRANSPORT_OPTIONS = {
+    # Must exceed CELERY_TASK_TIME_LIMIT. Below it, Redis decides a still
+    # running task was lost and hands the same job to a second worker.
+    'visibility_timeout': int(
+        os.environ.get('CELERY_BROKER_VISIBILITY_TIMEOUT', '1800')),
+    # The refresh endpoint enqueues inside the request, so an unreachable
+    # broker has to fail fast. Unset, kombu waits on the connect indefinitely
+    # and the caller sits there until gunicorn kills the worker.
+    'socket_connect_timeout': 5,
+    'socket_timeout': 5,
+}
+# How long a caller can still poll a finished task id.
+CELERY_RESULT_EXPIRES = int(os.environ.get('CELERY_RESULT_EXPIRES', '86400'))
 
 
 # ── Firebase Admin SDK ────────────────────────────────────────────────────

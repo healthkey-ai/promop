@@ -114,6 +114,31 @@ _MANUAL_ENTRIES: dict[str, FieldProvenance] = {
         selection_rule="latest",
         description="URL slug derived from disease name",
     ),
+    "active_infection_status": FieldProvenance(
+        omop_table="ConditionOccurrence",
+        lookup_strategy="snomed",
+        concept_codes=["40733004"],
+        extractor="_get_active_condition_data",
+        selection_rule="boolean",
+        description=(
+            "True when a current ConditionOccurrence is a descendant of SNOMED "
+            "40733004 (Infectious disease). Current means started, not ended, "
+            "and not resolved, inactive, history-of, or rule-out."
+        ),
+    ),
+    "active_malignancies": FieldProvenance(
+        omop_table="ConditionOccurrence",
+        lookup_strategy="snomed",
+        concept_codes=["363346000"],
+        extractor="_get_active_condition_data",
+        selection_rule="all",
+        description=(
+            "Deduplicated names of current ConditionOccurrence rows that are "
+            "descendants of SNOMED 363346000 (Malignant neoplastic disease). "
+            "Current means started, not ended, and not resolved, inactive, "
+            "history-of, or rule-out."
+        ),
+    ),
 
     # --- Vitals ---
     "systolic_blood_pressure": FieldProvenance(
@@ -518,7 +543,8 @@ _MANUAL_ENTRIES: dict[str, FieldProvenance] = {
         description="Composite SLiM criteria: sixty% plasma cells, light chain ratio, MRI lesions",
         constituent_fields=[
             "clonal_plasma_cells", "kappa_flc", "lambda_flc",
-            "free_light_chain_ratio",
+            "kappa_lambda_ratio",
+            "involved_uninvolved_ratio",
         ],
     ),
 }

@@ -18,4 +18,8 @@ frontend/dist
 staticfiles/
 .claude/
 .github/
-docs/
+# Keep documentation out of application images, except the static artifact read
+# by import_healthtree_crossmaps at runtime.
+docs/*
+!docs/ht-code-concept-mapping.md
+!docs/ht-fhir-code-concept-mapping.md

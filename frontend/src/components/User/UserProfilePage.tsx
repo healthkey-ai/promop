@@ -8,6 +8,12 @@ const ROLE_LABELS: Record<string, string> = {
   analyst: 'Analyst',
 };
 
+const ACCESS_LABELS: Record<string, string> = {
+  invitation: 'Invited',
+  invitation_pending: 'Invitation pending',
+  trusted_domain: 'Trusted domain',
+};
+
 export default function UserProfilePage() {
   const navigate = useNavigate();
   const { currentUser } = useAuth();
@@ -35,6 +41,50 @@ export default function UserProfilePage() {
         </div>
 
         <div className="px-6 py-4">
+          <p className="text-xs text-gray-500 uppercase tracking-wide mb-3">Org Access</p>
+          {(!currentUser.org_accesses || currentUser.org_accesses.length === 0) ? (
+            currentUser.is_staff ? (
+              <p className="text-sm text-gray-500">Staff — full access to all organizations.</p>
+            ) : (
+              <p className="text-sm text-gray-500">No organization access.</p>
+            )
+          ) : (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs text-gray-500 uppercase tracking-wide">
+                  <th className="pb-2 pr-4 font-medium">Organization</th>
+                  <th className="pb-2 pr-4 font-medium">Access via</th>
+                  <th className="pb-2 pr-4 font-medium">Role</th>
+                  <th className="pb-2 font-medium">Expires</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {currentUser.org_accesses.map((a, i) => (
+                  <tr key={i}>
+                    <td className="py-2 pr-4 text-gray-900">{a.org_name}</td>
+                    <td className="py-2 pr-4 text-gray-500">
+                      {(a.access_via ?? ['invitation']).map((access) => ACCESS_LABELS[access] ?? access).join(', ')}
+                    </td>
+                    <td className="py-2 pr-4">
+                      {a.role ? (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-700">
+                          {ROLE_LABELS[a.role] ?? a.role}
+                        </span>
+                      ) : '—'}
+                    </td>
+                    <td className="py-2 text-gray-500">
+                      {a.expires_at
+                        ? new Date(a.expires_at).toLocaleDateString()
+                        : 'Never'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        <div className="px-6 py-4">
           <p className="text-xs text-gray-500 uppercase tracking-wide mb-2">System Rights</p>
           <div className="flex gap-2 flex-wrap">
             {currentUser.is_staff && (
@@ -48,44 +98,6 @@ export default function UserProfilePage() {
               </span>
             )}
           </div>
-        </div>
-
-        <div className="px-6 py-4">
-          <p className="text-xs text-gray-500 uppercase tracking-wide mb-3">Org Access</p>
-          {(!currentUser.org_accesses || currentUser.org_accesses.length === 0) ? (
-            currentUser.is_staff ? (
-              <p className="text-sm text-gray-500">Staff — full access to all organizations.</p>
-            ) : (
-              <p className="text-sm text-gray-500">No explicit org grants. Access may be via domain trust.</p>
-            )
-          ) : (
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-xs text-gray-500 uppercase tracking-wide">
-                  <th className="pb-2 pr-4 font-medium">Organization</th>
-                  <th className="pb-2 pr-4 font-medium">Role</th>
-                  <th className="pb-2 font-medium">Expires</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {currentUser.org_accesses.map((a, i) => (
-                  <tr key={i}>
-                    <td className="py-2 pr-4 text-gray-900">{a.org_name}</td>
-                    <td className="py-2 pr-4">
-                      <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-700">
-                        {ROLE_LABELS[a.role] ?? a.role}
-                      </span>
-                    </td>
-                    <td className="py-2 text-gray-500">
-                      {a.expires_at
-                        ? new Date(a.expires_at).toLocaleDateString()
-                        : 'Never'}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
         </div>
       </div>
     </div>

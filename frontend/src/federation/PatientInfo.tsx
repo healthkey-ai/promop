@@ -4,6 +4,8 @@ import { Check, AlertCircle } from "lucide-react";
 import { PatientInfoProvider } from "./PatientInfoProvider";
 import { usePatientInfoMe, usePatchPatientInfo } from "./patientInfoHooks";
 import type { PatientInfoProps } from "./patientInfoTypes";
+import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
+import { writeFieldValues } from "@/api/clinicalFacts";
 import GeneralTab from "@/components/PatientInfo/tabs/GeneralTab";
 import DiseaseTab from "@/components/PatientInfo/tabs/DiseaseTab";
 import TreatmentTab from "@/components/PatientInfo/tabs/TreatmentTab";
@@ -11,6 +13,7 @@ import BloodTab from "@/components/PatientInfo/tabs/BloodTab";
 import LabsTab from "@/components/PatientInfo/tabs/LabsTab";
 import BehaviorTab from "@/components/PatientInfo/tabs/BehaviorTab";
 import WearableTab from "@/components/PatientInfo/tabs/WearableTab";
+import { CustomPatientFields } from "@/components/PatientInfo/CustomPatientFields";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
@@ -83,9 +86,9 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
     if (d.ecog_performance_status != null)
       d.ecog_performance_status = String(d.ecog_performance_status);
     if (d.estrogen_receptor_status && d.progesterone_receptor_status && d.her2_status) {
-      const erNeg = ["Negative", "ER-"].includes(String(d.estrogen_receptor_status));
-      const prNeg = ["Negative", "PR-"].includes(String(d.progesterone_receptor_status));
-      const her2Neg = ["Negative", "HER2-"].includes(String(d.her2_status));
+      const erNeg = String(d.estrogen_receptor_status) === "Negative";
+      const prNeg = String(d.progesterone_receptor_status) === "Negative";
+      const her2Neg = String(d.her2_status) === "Negative";
       d.tnbc_status = erNeg && prNeg && her2Neg;
     }
     return d;
@@ -117,19 +120,102 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
   useEffect(() => { editedNameRef.current = editedName; }, [editedName]);
   useEffect(() => () => { if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current); }, []);
 
-  const doSave = useCallback(() => {
+  // The last state the server confirmed, so an edit can be told from a value that
+  // merely came back in the payload. Advanced as each write lands.
+  const serverInfoRef = useRef<Record<string, unknown>>({});
+  useEffect(() => { serverInfoRef.current = { ...initialInfo }; }, [initialInfo]);
+
+  /**
+   * PatientRecord is a derived read model with no writable clinical columns, so
+   * this cannot be "PATCH whatever changed" — it used to send the whole record,
+   * which meant any edit on the Blood or Labs tab was a write to an OMOP-mapped
+   * column and came back 405:
+   *
+   *   OMOP-mapped PatientRecord fields are read-only. Write a complete clinical
+   *   fact to the appropriate OMOP resource, then rederive the record.
+   *
+   * Same split as the provider editor: clinical values leave as OMOP facts and
+   * derivation follows; only what the projection genuinely owns rides in the
+   * PATCH. This view renders the very same tab components, so it needs the very
+   * same write path.
+   */
+  const doSave = useCallback(async () => {
     const info = pendingDataRef.current;
     if (!info || readOnly) return;
     setSaveStatus("saving");
-    patchMutation.mutate(info, {
-      onSuccess: (result) => {
+    try {
+      // Fail closed, over the whole save. An empty descriptor stops the OMOP
+      // writes correctly, but it also makes the projection filter below match
+      // everything — and PATCHing the lot is exactly the 405 above.
+      let descriptors: FieldDescriptors;
+      try {
+        descriptors = await fetchWritableFields();
+      } catch {
+        throw new Error(
+          "Could not load the writable-field descriptor, so the save was not "
+          + "attempted. Retry once the connection is back.",
+        );
+      }
+
+      const baseline = serverInfoRef.current;
+      const personId = baseline.person_id ?? data?.patient_info?.person_id;
+
+      const clinicalEdits = personId
+        ? Object.keys(info).filter(
+            (f) => descriptors[f]?.writable && info[f] !== baseline[f],
+          )
+        : [];
+      // As a set: the Person fields travel in one request, because some are
+      // only valid together (latitude and longitude are a pair).
+      if (clinicalEdits.length) {
+        await writeFieldValues(
+          personId as number,
+          clinicalEdits.map((field) => ({
+            field, descriptor: descriptors[field], value: info[field],
+          })),
+        );
+        for (const field of clinicalEdits) {
+          serverInfoRef.current[field] = info[field];
+        }
+      }
+
+      // patient_name is handled by the server against Person, so it stays. Every
+      // descriptor-known field is OMOP-mapped and never belongs here, whatever
+      // its kind; lifecycle columns go stale on any write; and an unchanged value
+      // has nothing to say.
+      const projectionInfo = Object.fromEntries(
+        Object.entries(info).filter(
+          ([f, v]) =>
+            f !== "patient_name"
+            && !(f in descriptors)
+            && !LIFECYCLE.has(f)
+            && v !== baseline[f],
+        ),
+      );
+      const renamed = typeof info.patient_name === "string";
+      const payload = renamed
+        ? { ...projectionInfo, patient_name: info.patient_name }
+        : projectionInfo;
+
+      // Nothing left to say is not a reason to say it: the OMOP writes above have
+      // already done the work, and an empty PATCH can only fail.
+      if (Object.keys(payload).length === 0) {
         setSaveStatus("saved");
-        onPatientUpdated?.(result);
         setTimeout(() => setSaveStatus((s) => (s === "saved" ? "idle" : s)), 1200);
-      },
-      onError: () => setSaveStatus("error"),
-    });
-  }, [patchMutation, readOnly, onPatientUpdated]);
+        return;
+      }
+
+      const result = await patchMutation.mutateAsync(payload);
+      for (const f of Object.keys(projectionInfo)) {
+        serverInfoRef.current[f] = info[f];
+      }
+      setSaveStatus("saved");
+      onPatientUpdated?.(result);
+      setTimeout(() => setSaveStatus((s) => (s === "saved" ? "idle" : s)), 1200);
+    } catch {
+      setSaveStatus("error");
+    }
+  }, [patchMutation, readOnly, onPatientUpdated, data]);
 
   const scheduleAutoSave = useCallback((info: Record<string, unknown>) => {
     pendingDataRef.current = info;
@@ -150,7 +236,7 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
       const er = String(field === "estrogen_receptor_status" ? value : updated.estrogen_receptor_status ?? "");
       const pr = String(field === "progesterone_receptor_status" ? value : updated.progesterone_receptor_status ?? "");
       const her2 = String(field === "her2_status" ? value : updated.her2_status ?? "");
-      const neg = (v: string) => ["Negative", "ER-", "PR-", "HER2-"].includes(v);
+      const neg = (v: string) => v === "Negative";
       if (neg(er) && neg(pr) && neg(her2)) updated.tnbc_status = true;
       else if (er || pr || her2) updated.tnbc_status = false;
     }
@@ -246,8 +332,8 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
     0: "Keep patient details up to date for accurate personalisation.",
     1: "Disease-specific clinical information and genetic details.",
     2: "Therapy history, treatment lines, and planned therapies.",
-    3: "Blood counts, electrolytes, coagulation, and cardiac markers.",
-    4: "Chemistry panel, liver function tests, and other lab markers.",
+    3: "Blood counts and differential.",
+    4: "Chemistry, liver function, coagulation, cardiac and tumour markers.",
     5: "Lifestyle, socioeconomic, and behavioural health factors.",
     6: "Apple wearable 30-day summaries derived from synced OMOP data.",
   };
@@ -304,11 +390,28 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
               diseaseType={getDiseaseType()}
             />
           )}
-          {activeTab === 2 && <TreatmentTab formData={editedInfo} onChange={handleFieldChange} diseaseType={getDiseaseType()} />}
+          {activeTab === 2 && (
+            <TreatmentTab
+              formData={editedInfo}
+              onChange={handleFieldChange}
+              diseaseType={getDiseaseType()}
+              onRecordRefreshed={(info) => {
+                // Same reason as the provider editor: the derived values have
+                // moved, so the save baseline has to move with them or the next
+                // autosave sends them back as edits.
+                setEditedInfo(info);
+                serverInfoRef.current = { ...info };
+              }}
+            />
+          )}
           {activeTab === 3 && <BloodTab formData={editedInfo} onChange={handleFieldChange} />}
           {activeTab === 4 && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
           {activeTab === 5 && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} />}
           {activeTab === 6 && <WearableTab formData={editedInfo} onChange={handleFieldChange} />}
+          <CustomPatientFields
+            tab={["general", "disease", "treatment", "blood", "labs", "behavior", "wearable"][activeTab]}
+            formData={editedInfo}
+          />
         </div>
       </div>
     </div>

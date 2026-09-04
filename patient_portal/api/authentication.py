@@ -5,13 +5,23 @@ in PARTNER_AUTH_PROVIDERS.  Each provider first gets a lightweight
 can_handle() check (unverified JWT payload inspection — no secrets,
 no external calls) before the real verify() is invoked.
 
-Verified tokens are cached for up to 60 seconds so repeated requests
-with the same Bearer token skip provider.verify() and DB lookups.
+Verified tokens are cached for up to AUTH_TOKEN_CACHE_TTL seconds (default 60)
+so repeated requests with the same Bearer token skip provider.verify() and DB
+lookups.  A cache hit honours the token's own ``exp`` where the provider gives
+one, and such an entry never outlives the token it came from — see issue #759 /
+audit finding F21.  The TTL bounds the window in which a provider-side
+revocation is not yet visible; that window cannot be closed without a round-trip
+to the provider.
+
+Where a provider returns no ``exp`` the cache falls back to the TTL alone, and
+F21 is mitigated rather than closed for those tokens.  RFC 7662 makes ``exp``
+optional in an introspection response, so the PHR non-RS256 path can land here.
 """
 from __future__ import annotations
 
 import hashlib
 import logging
+import time
 
 from django.conf import settings
 from django.core.cache import cache as django_cache
@@ -79,21 +89,62 @@ class PartnerAuthentication(BaseAuthentication):
         return None
 
     @staticmethod
-    def _from_cache(token: str):
+    def _token_expiry(claims_raw) -> int | None:
+        """Return the token's ``exp`` as a unix timestamp, or None if absent.
+
+        Providers hand back the decoded claim set as ``raw``. JWT issuers carry
+        ``exp`` there, but an RFC 7662 introspection response need not — ``exp``
+        is optional in that spec — so this returns None for those and the caller
+        falls back to the cache TTL alone.
+        """
+        if not isinstance(claims_raw, dict):
+            return None
+        exp = claims_raw.get("exp")
+        if isinstance(exp, bool) or not isinstance(exp, (int, float)):
+            return None
+        return int(exp)
+
+    @classmethod
+    def _from_cache(cls, token: str):
         data = django_cache.get(_token_cache_key(token))
         if data is None:
             return None
+
+        claim_data = dict(data["claims"])
+        claim_data.setdefault("email_verified", False)
+
+        # A cache hit is not a licence to skip expiry (audit finding F21, #759).
+        # Verification happened when the entry was written; the token has been
+        # ageing since. Without this an expired — or provider-revoked — token
+        # keeps authenticating for the rest of the TTL window.
+        expiry = cls._token_expiry(claim_data.get("raw"))
+        if expiry is not None and time.time() >= expiry:
+            django_cache.delete(_token_cache_key(token))
+            return None
+
         try:
             identity = Identity.objects.get(pk=data["pk"])
         except Identity.DoesNotExist:
             return None
         if not identity.is_active:
             raise AuthenticationFailed("Account is disabled.")
-        claims = TokenClaims(**data["claims"])
+        claims = TokenClaims(**claim_data)
         return (identity, claims)
 
-    @staticmethod
-    def _to_cache(token: str, identity_pk: int, claims: TokenClaims):
+    @classmethod
+    def _to_cache(cls, token: str, identity_pk: int, claims: TokenClaims):
+        # Never let the entry outlive the token. The configured TTL bounds the
+        # revocation window — which cannot be closed without asking the provider
+        # — but a token expiring sooner than that must take its cache entry with
+        # it, so the two windows cannot compound.
+        timeout = settings.AUTH_TOKEN_CACHE_TTL
+        expiry = cls._token_expiry(claims.raw)
+        if expiry is not None:
+            remaining = expiry - int(time.time())
+            if remaining <= 0:
+                return
+            timeout = min(timeout, remaining)
+
         django_cache.set(
             _token_cache_key(token),
             {
@@ -104,9 +155,10 @@ class PartnerAuthentication(BaseAuthentication):
                     "email": claims.email,
                     "name": claims.name,
                     "raw": claims.raw,
+                    "email_verified": claims.email_verified,
                 },
             },
-            timeout=settings.AUTH_TOKEN_CACHE_TTL,
+            timeout=timeout,
         )
 
     def authenticate_header(self, request):
@@ -116,27 +168,27 @@ class PartnerAuthentication(BaseAuthentication):
     def _get_or_create_identity(claims: TokenClaims) -> Identity:
         identity, created = Identity.objects.get_or_create_from_claims(claims)
         if created:
-            if claims.email:
+            if claims.email and claims.email_verified:
                 identity.email = claims.email
             if claims.name:
                 identity.name = claims.name
             identity.set_unusable_password()
             identity.save(update_fields=["email", "name", "password"])
-            _claim_placeholder_access(identity, claims.email)
+            _claim_placeholder_access(identity, claims.email, claims.email_verified)
             logger.info(
                 "partner_auth: provisioned identity %d (%s|%s)",
                 identity.pk, claims.issuer, claims.sub,
             )
-        elif claims.email and not identity.email:
+        elif claims.email and claims.email_verified and not identity.email:
             identity.email = claims.email
             if claims.name and identity.name != claims.name:
                 identity.name = claims.name
                 identity.save(update_fields=["email", "name"])
             else:
                 identity.save(update_fields=["email"])
-            _claim_placeholder_access(identity, claims.email)
-        elif claims.email:
-            _claim_placeholder_access(identity, claims.email)
+            _claim_placeholder_access(identity, claims.email, claims.email_verified)
+        elif claims.email and claims.email_verified:
+            _claim_placeholder_access(identity, claims.email, claims.email_verified)
             if claims.name and identity.name != claims.name:
                 identity.name = claims.name
                 identity.save(update_fields=["name"])
@@ -150,15 +202,23 @@ def _ensure_person(identity, claims=None):
     email = ""
     if claims:
         email = claims.email or ""
+        email_verified = claims.email_verified
     elif identity.email:
         email = identity.email
+        email_verified = identity.is_local
+    else:
+        email_verified = False
 
-    resolve_or_create_person(identity, email=email)
+    resolve_or_create_person(identity, email=email, email_verified=email_verified)
 
 
-def _claim_placeholder_access(identity: Identity, email: str | None) -> None:
+def _claim_placeholder_access(
+    identity: Identity,
+    email: str | None,
+    email_verified: bool = False,
+) -> None:
     """Move invite grants from an unusable local placeholder to a real login identity."""
-    if not email or identity.issuer == "urn:local":
+    if not email or not email_verified or identity.issuer == "urn:local":
         return
 
     from omop_core.models import GroupAccess

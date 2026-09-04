@@ -3,7 +3,7 @@
 Maps HL7 **Personal Health Record System Functional Model R2**
 (PHR-S FM, <https://build.fhir.org/ig/HL7/phrsfm-ig/en/>) functions to promop's
 as-built capabilities. This is the conformance-posture map referenced as the
-"FM traceability" cross-cutting item in [`phrs-fm-roadmap.md`](phrs-fm-roadmap.md);
+"FM traceability" cross-cutting item in [`phrs-fm-architecture.md`](phrs-fm-architecture.md);
 update it whenever a capability lands so a future formal conformance pass has a
 starting point.
 

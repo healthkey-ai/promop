@@ -1,6 +1,7 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import WearableTab from './WearableTab';
+import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -22,9 +23,8 @@ vi.mock('../Section', () => ({
   ),
 }));
 
-vi.mock('../Field', () => ({
-  default: ({ label }: { label: string }) => <div data-testid={`field-${label}`} />,
-}));
+// The tab renders ClinicalField now, and no test asserted on the old Field stub,
+// so it is gone rather than left as a mock of something nothing imports.
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -70,9 +70,29 @@ function createDragEnterEvent(): Partial<React.DragEvent> {
 beforeEach(() => {
   mockPost.mockReset();
   mockGet.mockReset();
-  // Default: empty upload history
-  mockGet.mockResolvedValue({ data: [] });
+  __resetWritableFieldsCache();
+  // Upload history is empty; the writable-field descriptor is served separately
+  // because the tab now asks what may be written before rendering a box.
+  mockGet.mockImplementation((url: string) =>
+    Promise.resolve({
+      data: url.includes('writable-fields') ? DESCRIPTORS : [],
+    }),
+  );
 });
+
+/** Every wearable field is a 30-day aggregate over device readings. */
+const aggregate = (metric: string) => ({
+  kind: 'computed', writable: false, inputs: [metric], window_days: 30,
+  reason: `A 30-day aggregate of ${metric} readings. Upload device data rather `
+    + 'than entering a summary value.',
+});
+
+const DESCRIPTORS: Record<string, unknown> = {
+  median_daily_steps_30d: aggregate('steps'),
+  resting_heart_rate_avg_30d: aggregate('resting_hr'),
+  vo2_max_avg_30d: aggregate('vo2_max'),
+  body_mass_avg_30d: aggregate('body_mass'),
+};
 
 describe('WearableTab', () => {
   it('renders the Upload button', () => {
@@ -284,6 +304,66 @@ describe('WearableTab — drag and drop', () => {
 
     await waitFor(() => {
       expect(screen.getByText(/cannot be read directly by the browser/i)).toBeInTheDocument();
+    });
+  });
+});
+
+/**
+ * Rendered from the descriptor (plan step 4).
+ *
+ * Nothing here is writable and nothing ever was — every field is a 30-day
+ * aggregate over device readings, and a clinician does not type a median. The
+ * boxes were already `disabled`, so this conversion is not about locking them;
+ * it is about saying *why*, from the server, and pointing at the upload control
+ * that is the actual way to change these numbers.
+ */
+describe('WearableTab — descriptor-driven', () => {
+  it('offers no editable control', async () => {
+    renderTab({ formData: { median_daily_steps_30d: 8000, vo2_max_avg_30d: 42 } });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    // Number fields carry role spinbutton, not textbox.
+    const inputs = [...screen.queryAllByRole('textbox'),
+                    ...screen.queryAllByRole('spinbutton')];
+    expect(inputs.length).toBeGreaterThan(0);
+    for (const input of inputs) expect(input).toBeDisabled();
+  });
+
+  it('explains once that these follow from uploaded readings', async () => {
+    // Twenty near-identical reasons differing only by metric name — which the
+    // label already carries — would bury the one thing worth reading.
+    renderTab();
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    expect(screen.getByText(/a clinician does not enter a median/i)).toBeInTheDocument();
+    expect(screen.queryByTestId('reason-median_daily_steps_30d')).not.toBeInTheDocument();
+  });
+
+  it('still shows the aggregated values', async () => {
+    // Read-only is not hidden: reading these back is the whole purpose of the tab.
+    renderTab({ formData: { median_daily_steps_30d: 8000 } });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    expect(screen.getByDisplayValue('8000')).toBeInTheDocument();
+  });
+
+  it('keeps the upload control, which is how these values actually change', async () => {
+    renderTab();
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    expect(screen.getByRole('button', { name: /upload/i })).toBeInTheDocument();
+  });
+
+  it('stays read-only when the descriptor cannot be fetched', async () => {
+    mockGet.mockRejectedValue(new Error('offline'));
+    renderTab({ formData: { median_daily_steps_30d: 8000 } });
+
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+    await waitFor(() => {
+      const inputs = [...screen.queryAllByRole('textbox'),
+                      ...screen.queryAllByRole('spinbutton')];
+      expect(inputs.length).toBeGreaterThan(0);
+      for (const input of inputs) expect(input).toBeDisabled();
     });
   });
 });

@@ -547,6 +547,175 @@ class VisitDeleteViewTest(TestCase):
         self.assertEqual(Measurement.objects.filter(visit_occurrence_id=500).count(), 3)
 
 
+class LabResultsMutationAuthorizationTest(TestCase):
+    def setUp(self):
+        from omop_core.models import (
+            GroupAccess, Organization, PatientGroup, PatientGroupMembership,
+        )
+        _setup_vocab()
+
+        self.org = Organization.objects.create(name='Auth Org', slug='lab-auth-org')
+        self.person = Person.objects.create(person_id=5101)
+        PatientRecord.objects.create(person=self.person, organization=self.org)
+        self.group = PatientGroup.objects.create(
+            organization=self.org, name='Auth Group', slug='lab-auth-group',
+        )
+        PatientGroupMembership.objects.create(
+            group=self.group, person_id=self.person.person_id,
+        )
+
+        self.analyst = Identity.objects.create_user(
+            email='lab-analyst@test.com', password='test',
+        )
+        GroupAccess.objects.create(
+            identity=self.analyst, group=self.group, role='analyst',
+        )
+
+        type_concept = Concept.objects.get(concept_id=32883)
+        visit_concept = Concept.objects.get(concept_id=9202)
+        hgb_concept = Concept.objects.get(concept_id=3000963)
+
+        self.visit = VisitOccurrence.objects.create(
+            visit_occurrence_id=510,
+            person=self.person,
+            visit_concept=visit_concept,
+            visit_start_date=date(2026, 5, 15),
+            visit_end_date=date(2026, 5, 15),
+            visit_type_concept=type_concept,
+            visit_source_value='authz.pdf',
+        )
+        self.measurement = Measurement.objects.create(
+            measurement_id=510,
+            person=self.person,
+            measurement_concept=hgb_concept,
+            measurement_date=date(2026, 5, 15),
+            measurement_type_concept=type_concept,
+            value_as_number=Decimal('13.5'),
+            visit_occurrence=self.visit,
+        )
+        MeasurementOwnership.objects.create(
+            measurement_id=self.measurement.measurement_id,
+            visit_occurrence_id=self.visit.visit_occurrence_id,
+        )
+
+        self.client = APIClient()
+
+    def _oauth_token(self, *, user=None, scope='patient/*.write', org=None):
+        from datetime import timedelta
+        from django.utils import timezone
+        from oauth2_provider.models import AccessToken, Application
+        from omop_core.models import ApplicationOrganization
+
+        app = Application.objects.create(
+            name=f'Lab Auth App {AccessToken.objects.count()}',
+            user=user,
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+        )
+        if org is not None:
+            ApplicationOrganization.objects.create(
+                application=app, organization=org,
+            )
+        return AccessToken.objects.create(
+            user=user,
+            application=app,
+            token=f'lab-auth-token-{AccessToken.objects.count()}',
+            expires=timezone.now() + timedelta(hours=1),
+            scope=scope,
+        )
+
+    def test_read_only_analyst_can_get_but_cannot_patch_or_delete_measurement(self):
+        self.client.force_authenticate(user=self.analyst)
+
+        get_resp = self.client.get('/api/lab-results/measurements/510/')
+        patch_resp = self.client.patch(
+            '/api/lab-results/measurements/510/',
+            {'value': '11.0'},
+            format='json',
+        )
+        delete_resp = self.client.delete('/api/lab-results/measurements/510/')
+
+        self.assertEqual(get_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(patch_resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(delete_resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.measurement.refresh_from_db()
+        self.assertEqual(self.measurement.value_as_number, Decimal('13.5'))
+
+    def test_read_only_analyst_cannot_delete_visit(self):
+        self.client.force_authenticate(user=self.analyst)
+
+        resp = self.client.delete('/api/lab-results/visits/510/')
+
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(VisitOccurrence.objects.filter(visit_occurrence_id=510).exists())
+        self.assertTrue(Measurement.objects.filter(measurement_id=510).exists())
+
+    def test_userless_oauth_token_fails_closed_for_measurement_detail(self):
+        read_token = self._oauth_token(user=None, scope='patient/*.read')
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {read_token.token}')
+        get_resp = self.client.get('/api/lab-results/measurements/510/')
+
+        write_token = self._oauth_token(user=None, scope='patient/*.write')
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {write_token.token}')
+        patch_resp = self.client.patch(
+            '/api/lab-results/measurements/510/',
+            {'value': '11.0'},
+            format='json',
+        )
+        delete_resp = self.client.delete('/api/lab-results/measurements/510/')
+
+        self.assertEqual(get_resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(patch_resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(delete_resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.measurement.refresh_from_db()
+        self.assertEqual(self.measurement.value_as_number, Decimal('13.5'))
+
+    def test_userless_oauth_token_fails_closed_for_visit_delete(self):
+        token = self._oauth_token(user=None, scope='patient/*.write')
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
+
+        resp = self.client.delete('/api/lab-results/visits/510/')
+
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertTrue(VisitOccurrence.objects.filter(visit_occurrence_id=510).exists())
+        self.assertTrue(Measurement.objects.filter(measurement_id=510).exists())
+
+    def test_org_scoped_read_only_token_cannot_patch_measurement(self):
+        """Issue #747: a read-only SMART scope cannot mutate a lab result.
+
+        The token is org-scoped and the measurement belongs to that org, so the
+        only thing standing between the caller and a write is the SMART scope
+        check in ScopedTokenPermission.has_permission — PATCH requires
+        patient/*.write or user/*.write, and patient/*.read alone must 403.
+        """
+        token = self._oauth_token(user=None, scope='patient/*.read', org=self.org)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
+
+        resp = self.client.patch(
+            '/api/lab-results/measurements/510/',
+            {'value': '11.0'},
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.measurement.refresh_from_db()
+        self.assertEqual(self.measurement.value_as_number, Decimal('13.5'))
+
+    def test_org_scoped_write_token_can_patch_own_org_measurement(self):
+        token = self._oauth_token(user=None, scope='patient/*.write', org=self.org)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
+
+        resp = self.client.patch(
+            '/api/lab-results/measurements/510/',
+            {'value': '11.0'},
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.measurement.refresh_from_db()
+        self.assertEqual(self.measurement.value_as_number, Decimal('11.0'))
+
+
 class SyncOnBehalfOfTest(TestCase):
     """Tests for actor_iss/actor_sub on-behalf-of sync flow.
 
@@ -607,7 +776,24 @@ class SyncOnBehalfOfTest(TestCase):
             actor_sub=no_access_actor.sub,
         ), format='json')
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
-        self.assertIn('does not have access', resp.data['detail'])
+        self.assertIn('does not have write access', resp.data['detail'])
+
+    def test_on_behalf_of_read_only_actor_rejected(self):
+        from omop_core.models import Organization, GroupAccess
+
+        org = Organization.objects.create(name='Lab Analyst Org', slug='lab-analyst-org')
+        PatientRecord.objects.create(person=self.person, organization=org)
+        analyst = Identity.objects.create_user(email='lab-analyst@test.com', password='test')
+        GroupAccess.objects.create(identity=analyst, org=org, role='analyst')
+
+        resp = self.client.post('/api/lab-results/sync/', self._sync_payload(
+            actor_iss=analyst.issuer,
+            actor_sub=analyst.sub,
+        ), format='json')
+
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn('does not have write access', resp.data['detail'])
+        self.assertFalse(Measurement.objects.filter(person=self.person).exists())
 
     def test_on_behalf_of_without_actor_fields_non_superuser(self):
         non_su = Identity.objects.create_user(email='nonsu@test.com', password='test')
@@ -911,12 +1097,12 @@ class OrgScopedSyncRejectionTest(TestCase):
 
         self.client = APIClient()
 
-    def _make_token(self, suffix):
+    def _make_token(self, suffix, *, user='default'):
         from oauth2_provider.models import AccessToken
         from django.utils import timezone
         from datetime import timedelta
         return AccessToken.objects.create(
-            user=self.user,
+            user=self.user if user == 'default' else user,
             application=self.app,
             token=f'test-token-{suffix}',
             expires=timezone.now() + timedelta(hours=1),
@@ -957,6 +1143,25 @@ class OrgScopedSyncRejectionTest(TestCase):
         resp = self.client.post('/api/lab-results/sync/', self._sync_payload(7002), format='json')
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
         self.assertIn('Person not in your organization', resp.data['detail'])
+
+    def test_userless_org_token_ignores_body_actor_and_writes_org_patient(self):
+        spoofed_actor = Identity.objects.create_user(email='spoofed-lab@test.com', password='test')
+        token = self._make_token('userless-in-org', user=None)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
+        payload = self._sync_payload(7001)
+        payload['actor_iss'] = spoofed_actor.issuer
+        payload['actor_sub'] = spoofed_actor.sub
+
+        resp = self.client.post('/api/lab-results/sync/', payload, format='json')
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        measurement_id = resp.data['measurement_ids'][0]
+        provenance = ProvenanceRecord.objects.get(object_id=measurement_id)
+        self.assertEqual(provenance.source_user_id, '')
+        self.assertNotEqual(
+            provenance.source_user_id,
+            f'{spoofed_actor.issuer}|{spoofed_actor.sub}',
+        )
 
 
 class FirebaseAuthedSyncTest(TestCase):
@@ -1063,17 +1268,65 @@ class FirebaseAuthedSyncTest(TestCase):
             status.HTTP_403_FORBIDDEN,
         ])
 
-    def test_firebase_authed_existing_user_no_patientuser_links_via_email(self):
-        new_user = Identity.objects.get_or_create(
+    def _email_match_fixture(self, sub, email='emailmatch@example.com'):
+        """Build an unlinked Identity plus an existing Person carrying *email*."""
+        user = Identity.objects.get_or_create(
             issuer='https://securetoken.google.com/promop-test',
-            sub='firebase-uid-brand-new',
-            defaults={'email': 'emailmatch@example.com'},
+            sub=sub,
+            defaults={'email': email},
         )[0]
-        new_user.set_unusable_password()
-        new_user.is_staff = True  # privileged caller; see setUp note
-        new_user.save()
-        person2 = Person.objects.create(person_id=9002)
-        PatientRecord.objects.create(person=person2, email='emailmatch@example.com')
+        user.set_unusable_password()
+        user.is_staff = True  # privileged caller; see setUp note
+        user.save()
+        person = Person.objects.create(person_id=9002)
+        PatientRecord.objects.create(person=person, email=email)
+        return user, person
+
+    def test_firebase_authed_unverified_email_does_not_claim_existing_person(self):
+        """Issue #746: an unverified email must never claim an existing Person.
+
+        The Identity carries an ``email`` that matches an existing patient, but
+        no verified-email evidence was ever presented (no ``email_verified``
+        claim, and the Firebase issuer means ``is_local`` is False). Account
+        takeover by asserting someone else's address is therefore refused and a
+        fresh Person is auto-provisioned instead.
+        """
+        new_user, person2 = self._email_match_fixture('firebase-uid-unverified')
+        self.client.force_authenticate(user=new_user)
+
+        resp = self.client.post(
+            '/api/lab-results/sync/', self._sync_payload(), format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        pu = PatientUser.objects.get(identity=new_user)
+        self.assertNotEqual(pu.person_id, person2.person_id)
+        self.assertFalse(
+            PatientUser.objects.filter(person=person2).exists(),
+            'existing person must not be claimed by an unverified email',
+        )
+        m = Measurement.objects.get(measurement_id=resp.data['measurement_ids'][0])
+        self.assertEqual(m.person_id, pu.person_id)
+
+    def test_firebase_authed_verified_email_links_to_existing_person(self):
+        """Issue #746: a *verified* email claim still links to the existing Person.
+
+        Locks down the permitted half of the boundary — the security fix must
+        not break legitimate account linking. ``_ensure_person`` is called with
+        ``email_verified=True`` exactly as ``PartnerAuthentication.authenticate``
+        does on every real Firebase request, so the matching Person is claimed.
+        """
+        from patient_portal.api.authentication import _ensure_person
+        from patient_portal.api.providers.base import TokenClaims
+
+        new_user, person2 = self._email_match_fixture('firebase-uid-verified')
+        _ensure_person(new_user, TokenClaims(
+            issuer=new_user.issuer,
+            sub=new_user.sub,
+            email='emailmatch@example.com',
+            name=None,
+            raw={},
+            email_verified=True,
+        ))
         self.client.force_authenticate(user=new_user)
 
         resp = self.client.post(

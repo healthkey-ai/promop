@@ -12,12 +12,99 @@ services:
         value: 3.11.0
       - key: SECRET_KEY
         generateValue: true
+      # Required by patient_portal.E001/E002/E003, which start.sh enforces
+      # before migrate. Without these a service created from this blueprint —
+      # a DR rebuild, a second environment, a preview — hard-fails at boot.
+      # Independent values: audit tamper-evidence and export signatures are
+      # separate controls, and must not share a key with each other or with
+      # SECRET_KEY. Rotation procedure: docs/signing-key-rotation.md.
+      - key: AUDIT_HMAC_KEY
+        generateValue: true
+      - key: EXPORT_SIGNING_KEY
+        generateValue: true
       - key: DEBUG
         value: False
       - key: DATABASE_URL
         fromDatabase:
           name: promop-db
           property: connectionString
+      # Deliberately dashboard-managed, not wired from the blueprint. Setting
+      # it here would make production the first place the queued path ever
+      # runs. Paste the redis connection string in once the path has been
+      # exercised somewhere else; clearing it is the rollback.
+      - key: CELERY_BROKER_URL
+        sync: false
+
+      # A full Athena release is a deployment prerequisite. start.sh applies
+      # the schema through 0200, loads this archive, then applies the remaining
+      # migrations (including the HK-Labs LOINC mapping seed at 0201).
+      - key: ATHENA_VOCABULARY_GDRIVE_URL
+        sync: false
+
+      # Required because DEBUG is False above.
+      - key: ALLOWED_HOSTS
+        sync: false
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+
+      # Application configuration.
+      - key: APP_BASE_URL
+        sync: false
+      - key: ADMIN_EMAIL
+        sync: false
+
+      # Secrets — never values in a blueprint.
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: SERVICE_AUTH_TOKEN
+        sync: false
+      - key: MAILGUN_API_KEY
+        sync: false
+      - key: MAILGUN_SENDER_DOMAIN
+        sync: false
+
+      # PHR federation.
+      - key: PHR_AUDIENCE
+        value: promop-api
+      - key: PHR_BASE_URL
+        sync: false
+
+  - type: worker
+    name: promop-worker
+    runtime: python
+    repo: https://github.com/healthkey-ai/promop
+    branch: main
+    autoDeploy: true
+    # No frontend build: the worker serves nothing.
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "celery -A ctomop worker --loglevel=info"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      # Taken from the web service rather than generated: two different keys
+      # would be two different signing secrets for the same data.
+      - key: SECRET_KEY
+        fromService:
+          name: promop
+          type: web
+          envVarKey: SECRET_KEY
+      - key: DEBUG
+        value: False
+      - key: DATABASE_URL
+        fromDatabase:
+          name: promop-db
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService:
+          name: promop-redis
+          type: redis
+          property: connectionString
+
+  - type: redis
+    name: promop-redis
+    plan: starter
+    # Reachable from the other services in this blueprint only.
+    ipAllowList: []
 
 databases:
   - name: promop-db

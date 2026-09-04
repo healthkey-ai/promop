@@ -243,12 +243,15 @@ def _build_drug_eras(exposures) -> list[_DrugEra]:
 
 # ── Phase 2: Build combination windows (with procedures) ──────────────────
 
-def _build_procedure_events(person) -> list[_ProcedureEvent]:
+def _build_procedure_events(person=None, procedures=None) -> list[_ProcedureEvent]:
     events = []
-    procs = ProcedureOccurrence.objects.filter(
-        person=person,
-        procedure_concept__concept_code__in=list(PROCEDURE_SNOMED_MAP.keys()),
-    ).select_related('procedure_concept')
+    if procedures is None:
+        procs = ProcedureOccurrence.objects.filter(
+            person=person,
+            procedure_concept__concept_code__in=list(PROCEDURE_SNOMED_MAP.keys()),
+        ).select_related('procedure_concept')
+    else:
+        procs = procedures
     for proc in procs:
         code = proc.procedure_concept.concept_code if proc.procedure_concept else ''
         subtype = PROCEDURE_SNOMED_MAP.get(code)
@@ -494,7 +497,13 @@ def _persist_lots(person, lots: list[_LineOfTherapy]) -> None:
 
 # ── Public entry point ─────────────────────────────────────────────────────
 
-def infer_lot_for_person(person, force: bool = False, dry_run: bool = False) -> list[_LineOfTherapy]:
+def infer_lot_for_person(
+    person,
+    force: bool = False,
+    dry_run: bool = False,
+    exposures=None,
+    procedures=None,
+) -> list[_LineOfTherapy]:
     """
     Infer lines of therapy for a person from DrugExposure + ProcedureOccurrence rows.
 
@@ -506,12 +515,15 @@ def infer_lot_for_person(person, force: bool = False, dry_run: bool = False) -> 
         if not force and Episode.objects.filter(person=person).exists():
             return []
 
-        exposures = list(
-            DrugExposure.objects.filter(person=person)
-            .select_related('drug_concept')
-            .order_by('drug_exposure_start_date')
-        )
-        proc_events = _build_procedure_events(person)
+        if exposures is None:
+            exposures = list(
+                DrugExposure.objects.filter(person=person)
+                .select_related('drug_concept')
+                .order_by('drug_exposure_start_date')
+            )
+        else:
+            exposures = list(exposures)
+        proc_events = _build_procedure_events(person, procedures=procedures)
 
         if not exposures and not proc_events:
             return []

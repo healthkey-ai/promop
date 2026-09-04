@@ -76,7 +76,7 @@ version of this map resolved to BMI and body-fat-percentage concepts, and three 
 LOINC at all. That defect is fixed; the section below explains the rules that keep it fixed.
 
 `spo2` (59408-5 / 40762499) and `body_mass` (29463-7 / 3025315) are seeded in the **vitals** block
-of `seed_omop_concepts`, not the wearable block. They must not be seeded twice — a second row for
+of `omop_core/concept_fixtures.py`, not the wearable block. They must not be seeded twice — a second row for
 the same `(vocabulary_id, concept_code)` is exactly the duplication the seeding rules exist to
 prevent.
 
@@ -110,14 +110,14 @@ domain routed it to.
 Where a metric has no LOINC, the local mint **must** follow the project's quarantine convention
 (`omop_core/models.py:566`) — and all five wearable mints do:
 
-- `vocabulary_id='HK-Wearable'` (declared in `seed_omop_concepts._VOCABULARIES`)
+- `vocabulary_id='HK-Wearable'` (declared in `concept_fixtures._VOCABULARIES`, and by migration 0143 for real deployments)
 - `source='HealthKey'`
 - an `HK-*`-shaped `concept_code`
 - `concept_id >= 2,000,000,000` — OHDSI reserves that range for locally-authored concepts, and
   Athena never allocates there
 
 The four ids are allocated contiguously from `_HK_WEARABLE_ID_BASE = 2_029_606_350`
-(`seed_omop_concepts.py:140`), continuing the existing `HK-Labs` block. New wearable mints should
+(`omop_core/concept_fixtures.py`), continuing the existing `HK-Labs` block. New wearable mints should
 continue upward from there.
 
 **Never mint a real LOINC code under `vocabulary_id='LOINC'`.** Doing so creates a duplicate
@@ -259,14 +259,14 @@ history.
 
 ## Gaps and proposed work
 
-> **Environments.** Concept resolution claims here were verified against **staging**
-> (`ctomop_dev`, `promop-staging.onrender.com`, full Athena load: 1,979,424 concepts /
-> 277,790 LOINC rows) and against local `promop_dev` (partial `seed_omop_concepts` set only).
-> Staging is the reference environment for this work.
+> **Environments.** Concept resolution claims here were verified against a
+> captured staging vocabulary snapshot (1,979,424 concepts / 277,790 LOINC rows)
+> and against local `promop_dev` (partial `seed_omop_concepts` set only).
+> Staging is the reference environment for this work; the PostgreSQL database
+> name and hostname are deployment-specific and come from `DATABASE_URL`.
 >
-> Note that CLAUDE.md's Database Selection table is stale: it references a `STAGING_DATABASE_URL`
-> that is not defined in `.env`, and a production host that does not match the one `DATABASE_URL`
-> actually points at — which is staging (`ctomop_dev`).
+> Do not infer a database name or host from this document. Use the deployment's
+> configured `DATABASE_URL` for migrations and validation.
 
 ### Gap A — Garmin has no adapter for six metrics (#444)
 

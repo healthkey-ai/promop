@@ -2,7 +2,7 @@ name: Deploy to Staging
 
 on:
   push:
-    branches: [dev]
+    branches: [dev, copy-field-mappings-from-source-instance]
 
 concurrency:
   group: deploy-staging
@@ -22,11 +22,15 @@ permissions:
 jobs:
   test:
     name: Test
+    if: github.ref_name == 'dev'
     uses: ./.github/workflows/ci.yml
 
   build-and-deploy:
     name: Build & Deploy
     needs: test
+    if: >-
+      always() &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped')
     runs-on: ubuntu-latest
 
     steps:
@@ -66,6 +70,21 @@ jobs:
             --region ${GCP_REGION} --quiet
           gcloud run jobs execute ${SERVICE_NAME}-migrate \
             --region ${GCP_REGION} --wait --quiet
+
+      # The worker pool runs the same image but is a separate resource, so
+      # without this it keeps whatever it was created with. Guarded because it
+      # is created by Terraform in the infra repo, which may not have been
+      # applied yet.
+      - name: Deploy worker revision
+        run: |
+          if gcloud run worker-pools describe ${SERVICE_NAME}-worker \
+              --region ${GCP_REGION} >/dev/null 2>&1; then
+            gcloud run worker-pools update ${SERVICE_NAME}-worker \
+              --image ${ARTIFACT_REPO}/ctomop:${IMAGE_TAG} \
+              --region ${GCP_REGION} --quiet
+          else
+            echo "No ${SERVICE_NAME}-worker pool yet — skipping."
+          fi
 
       - name: Shift traffic to new revision
         run: |

@@ -11,16 +11,19 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.core.management import call_command
+from omop_core.concept_fixtures import seed_test_concepts
 from django.core.management.base import CommandError
 from django.db import IntegrityError, ProgrammingError, connection, transaction
-from django.test import TestCase
+from django.test import TestCase, override_settings
 
 from omop_core.models import (
     Concept, ConceptClass, Domain, Vocabulary,
     Organization, Person, PatientRecord, ConditionOccurrence, DrugExposure, Measurement, Observation,
+    PersonLanguageSkill, SourceCodeConceptMapping,
 )
 from omop_core.services.patient_record_service import refresh_patient_record
 
@@ -79,7 +82,7 @@ class _AllowsDuplicateConceptCodes(TestCase):
             raise NotImplementedError('PERSON_ID is required')
         _allow_duplicate_concept_codes()
         from omop_core.models import Person
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
         cls.person = Person.objects.create(person_id=cls.PERSON_ID, year_of_birth=1970)
 
 
@@ -187,6 +190,17 @@ class PatientRecordModelTest(_OmopBase):
         self.assertAlmostEqual(float(pi.hemoglobin_g_dl), 12.3, places=1)
         self.assertAlmostEqual(float(pi.platelet_count_thousand_per_ul), 250.5, places=1)
         self.assertAlmostEqual(float(pi.anc_thousand_per_ul), 3.7, places=1)
+
+    def test_bmi_accepts_legacy_height_in_metres(self):
+        """Direct legacy metre values must not be interpreted as centimetres."""
+        pi = PatientRecord.objects.create(
+            person=self.person,
+            weight=122,
+            weight_units='kg',
+            height=1.829,
+            height_units='m',
+        )
+        self.assertAlmostEqual(pi.bmi, 36.47, places=2)
 
     def test_lft_integer_fields_persist(self):
         """LFT integer fields (alt_u_l, ast_u_l, etc.) store correctly."""
@@ -414,6 +428,38 @@ class RefreshPatientRecordLabsFromMeasurementTest(_OmopBase):
         self.assertIsNone(pi.hemoglobin_g_dl)
 
 
+class RefreshPatientRecordVitalsUnitsTest(_OmopBase):
+    """Vital measurements retain the meaning of their recorded units."""
+
+    PERSON_ID = 90235
+
+    def _measurement(self, measurement_id, code, value, unit):
+        concept = _concept(
+            measurement_id + 10_000, f'Vital {code}', self.dom_meas,
+            self.vocab, self.cc, code=code,
+        )
+        return Measurement.objects.create(
+            measurement_id=measurement_id,
+            person=self.person,
+            measurement_concept=concept,
+            measurement_date=date(2023, 5, 1),
+            measurement_type_concept=self.type_concept,
+            value_as_number=value,
+            unit_source_value=unit,
+            measurement_source_value=code,
+        )
+
+    def test_height_in_metres_is_normalised_to_cm_before_bmi(self):
+        self._measurement(92360, '8302-2', 1.829, 'm')
+        self._measurement(92361, '29463-7', 122, 'kg')
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertAlmostEqual(pi.height, 182.9, places=1)
+        self.assertEqual(pi.height_units, 'cm')
+        self.assertAlmostEqual(pi.bmi, 36.5, places=1)
+
+
 class LegacyLaboratoryProjectionTest(_OmopBase):
     """Historic lab columns must not infer an analyte from a name substring (#475)."""
 
@@ -564,24 +610,24 @@ class RefreshPatientRecordReceptorStatusTest(_OmopBase):
     def test_her2_positive(self):
         self._make_her2(92401, value_as_string='Positive')
         pi = refresh_patient_record(self.person)
-        self.assertEqual(pi.her2_status, 'POSITIVE')
+        self.assertEqual(pi.her2_status, 'Positive')
 
     def test_her2_negative(self):
         self._make_her2(92402, value_as_string='Negative')
         pi = refresh_patient_record(self.person)
-        self.assertEqual(pi.her2_status, 'NEGATIVE')
+        self.assertEqual(pi.her2_status, 'Negative')
 
     def test_her2_equivocal_is_preserved_not_dropped(self):
         """Regression for #220: an 'Equivocal' HER2 result must not be dropped."""
         self._make_her2(92403, value_as_string='Equivocal')
         pi = refresh_patient_record(self.person)
-        self.assertEqual(pi.her2_status, 'EQUIVOCAL')
+        self.assertEqual(pi.her2_status, 'Equivocal')
 
     def test_her2_value_in_source_value_is_read(self):
         """HER2 result stored only in value_source_value is still derived."""
         self._make_her2(92404, value_source_value='Equivocal')
         pi = refresh_patient_record(self.person)
-        self.assertEqual(pi.her2_status, 'EQUIVOCAL')
+        self.assertEqual(pi.her2_status, 'Equivocal')
 
     def test_her2_missing_value_yields_none(self):
         """No value at all still yields None (no spurious status)."""
@@ -594,13 +640,123 @@ class RefreshPatientRecordReceptorStatusTest(_OmopBase):
         pos_concept = _concept(9000201, 'Positive', self.dom_meas, self.vocab, self.cc)
         self._make_her2(92406, value_as_concept=pos_concept)
         pi = refresh_patient_record(self.person)
-        self.assertEqual(pi.her2_status, 'POSITIVE')
+        self.assertEqual(pi.her2_status, 'Positive')
 
     def test_her2_nonstandard_value_preserved(self):
-        """A non-standard receptor value is preserved (upper-cased), not dropped."""
+        """A non-standard receptor value is preserved (title-cased), not dropped."""
         self._make_her2(92407, value_as_string='Indeterminate')
         pi = refresh_patient_record(self.person)
-        self.assertEqual(pi.her2_status, 'INDETERMINATE')
+        self.assertEqual(pi.her2_status, 'Indeterminate')
+
+
+class ERStatusLoincMappingTest(_OmopBase):
+    """ER status derivation produces LOINC answer display names (#847)."""
+
+    PERSON_ID = 90241
+
+    def _make_er(self, mid, *, value_as_string=None, value_source_value=None,
+                 value_as_concept=None):
+        er_concept = _concept(
+            9016112, 'Estrogen receptor [Interpretation] in Tissue',
+            self.dom_meas, self.vocab, self.cc, code='16112-5',
+        )
+        return Measurement.objects.create(
+            measurement_id=mid,
+            person=self.person,
+            measurement_concept=er_concept,
+            measurement_date=date(2023, 6, 1),
+            measurement_type_concept=self.type_concept,
+            value_as_string=value_as_string,
+            value_source_value=value_source_value,
+            value_as_concept=value_as_concept,
+            measurement_source_value='16112-5',
+        )
+
+    def test_er_positive_produces_title_case(self):
+        """ER Positive result uses LOINC answer display name."""
+        self._make_er(92501, value_as_string='Positive')
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.estrogen_receptor_status, 'Positive')
+
+    def test_er_negative_produces_title_case(self):
+        """ER Negative result uses LOINC answer display name."""
+        self._make_er(92502, value_as_string='Negative')
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.estrogen_receptor_status, 'Negative')
+
+    def test_er_equivocal_produces_title_case(self):
+        """ER Equivocal result uses LOINC answer display name."""
+        self._make_er(92503, value_as_string='Equivocal')
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.estrogen_receptor_status, 'Equivocal')
+
+    def test_er_uppercase_input_normalized_to_title_case(self):
+        """Legacy UPPERCASE inputs are normalized to LOINC display names."""
+        self._make_er(92504, value_as_string='POSITIVE')
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.estrogen_receptor_status, 'Positive')
+
+    def test_er_status_from_value_as_concept(self):
+        """ER status carried in value_as_concept is derived correctly."""
+        neg_concept = _concept(9000301, 'Negative', self.dom_meas, self.vocab, self.cc)
+        self._make_er(92505, value_as_concept=neg_concept)
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.estrogen_receptor_status, 'Negative')
+
+    def test_tnbc_derivation_uses_new_format(self):
+        """TNBC status uses title-case Negative for comparison."""
+        # Create ER, PR, HER2 all Negative
+        self._make_er(92506, value_as_string='Negative')
+        pr_concept = _concept(
+            9016113, 'Progesterone receptor [Interpretation] in Tissue',
+            self.dom_meas, self.vocab, self.cc, code='16113-3',
+        )
+        Measurement.objects.create(
+            measurement_id=92507, person=self.person,
+            measurement_concept=pr_concept,
+            measurement_date=date(2023, 6, 1),
+            measurement_type_concept=self.type_concept,
+            value_as_string='Negative',
+            measurement_source_value='16113-3',
+        )
+        her2_concept = _concept(
+            9048677, 'HER2 [Interpretation] in Tissue',
+            self.dom_meas, self.vocab, self.cc, code='48676-1',
+        )
+        Measurement.objects.create(
+            measurement_id=92508, person=self.person,
+            measurement_concept=her2_concept,
+            measurement_date=date(2023, 6, 1),
+            measurement_type_concept=self.type_concept,
+            value_as_string='Negative',
+            measurement_source_value='48676-1',
+        )
+        pi = refresh_patient_record(self.person)
+        self.assertTrue(pi.tnbc_status)
+
+    def test_hr_status_derivation_uses_new_format(self):
+        """HR status correctly derives from title-case receptor values."""
+        self._make_er(92509, value_as_string='Positive')
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.hr_status, 'HR+')
+
+    def test_hr_negative_from_both_receptors_negative(self):
+        """HR- when both ER and PR are Negative (title-case)."""
+        self._make_er(92510, value_as_string='Negative')
+        pr_concept = _concept(
+            9016114, 'Progesterone receptor [Interpretation] in Tissue',
+            self.dom_meas, self.vocab, self.cc, code='16113-3',
+        )
+        Measurement.objects.create(
+            measurement_id=92511, person=self.person,
+            measurement_concept=pr_concept,
+            measurement_date=date(2023, 6, 1),
+            measurement_type_concept=self.type_concept,
+            value_as_string='Negative',
+            measurement_source_value='16113-3',
+        )
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.hr_status, 'HR-')
 
 
 class CdmComplianceTablesTest(_OmopBase):
@@ -784,9 +940,9 @@ class AthenaVocabularyReplaceScopeTest(_OmopBase):
         from io import StringIO
         from omop_core.management.commands.load_athena_vocabularies import Command
 
-        self._loinc_concept(902814, 'Specimen')
+        self._loinc_concept(902814, 'Geography')
 
-        with self.assertRaisesRegex(CommandError, 'Specimen'):
+        with self.assertRaisesRegex(CommandError, 'Geography'):
             Command(stdout=StringIO())._validate_replace_loinc_scope()
 
 
@@ -1377,7 +1533,7 @@ class SeedOmopConceptsTest(TestCase):
     @classmethod
     def setUpTestData(cls):
         from django.core.management import call_command
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
 
     def _concept(self, concept_id):
         return Concept.objects.filter(concept_id=concept_id).first()
@@ -1416,7 +1572,7 @@ class SeedOmopConceptsTest(TestCase):
 
     def test_seed_is_idempotent(self):
         from django.core.management import call_command
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
         self.assertEqual(Concept.objects.filter(concept_id=8532).count(), 1,
                          'Duplicate concept created on second seed_omop_concepts run')
 
@@ -2097,6 +2253,7 @@ class PublishReleaseTest(_OmopBase):
         cmd = Command(stdout=StringIO())
         cmd._build_start = _time.time()
         cmd._cdm_vocab_version = 'v5.0 2024-07-01'
+        cmd._umls_release = None
         counts = {'concept': 100, 'vocabulary': 5}
         cmd._publish_release(counts)
 
@@ -2338,7 +2495,7 @@ class WearableConceptMappingTest(TestCase):
     """
 
     def _seed_rows(self):
-        from omop_core.management.commands.seed_omop_concepts import _CONCEPTS
+        from omop_core.concept_fixtures import _CONCEPTS
         return _CONCEPTS
 
     def test_every_wearable_metric_is_seeded(self):
@@ -2408,6 +2565,77 @@ class WearableConceptMappingTest(TestCase):
                 f'{expected_terms[metric]}',
             )
 
+    def test_clinical_source_concepts_match_seed_definitions(self):
+        """Migration 0180 duplicates its rows into the fixture; no drift (#785).
+
+        Same trade as 0143: the migration hard-codes definitions so it stays
+        frozen against the code as written, and this test is what stops the two
+        copies diverging.
+        """
+        from importlib import import_module
+
+        mig = import_module(
+            'omop_core.migrations.0180_seed_clinical_field_source_concepts')
+        seed_by_key = {
+            (r['vocabulary_id'], r['concept_code']): r for r in self._seed_rows()
+        }
+
+        for concept_id, concept_code, concept_name in mig._CONCEPTS:
+            key = ('HK-Observation', concept_code)
+            self.assertIn(
+                key, seed_by_key,
+                f'migration 0180 seeds {key}, which the fixture does not')
+            seeded = seed_by_key[key]
+            self.assertEqual(seeded['concept_id'], concept_id,
+                             f'{concept_code} concept_id differs')
+            self.assertEqual(seeded['concept_name'], concept_name,
+                             f'{concept_code} concept_name differs')
+            self.assertEqual(seeded['domain_id'], 'Observation')
+            self.assertEqual(seeded['source'], 'HealthKey')
+
+    def test_language_capability_concepts_match_seed_definitions(self):
+        """Migration 0187 duplicates its rows into the fixture; no drift (#827).
+
+        Same trade as 0180: the migration hard-codes definitions so it stays
+        frozen against the code as written, and this test is what stops the two
+        copies diverging.
+        """
+        from importlib import import_module
+
+        mig = import_module(
+            'omop_core.migrations.0187_seed_language_capability_concepts')
+        seed_by_key = {
+            (r['vocabulary_id'], r['concept_code']): r for r in self._seed_rows()
+        }
+
+        for concept_id, concept_code, concept_name in mig._CONCEPTS:
+            key = ('HK-Language', concept_code)
+            self.assertIn(
+                key, seed_by_key,
+                f'migration 0187 seeds {key}, which the fixture does not')
+            seeded = seed_by_key[key]
+            self.assertEqual(seeded['concept_id'], concept_id,
+                             f'{concept_code} concept_id differs')
+            self.assertEqual(seeded['concept_name'], concept_name,
+                             f'{concept_code} concept_name differs')
+            self.assertEqual(seeded['domain_id'], 'Meas Value')
+            self.assertEqual(seeded['source'], 'HealthKey')
+            self.assertIsNone(seeded['standard_concept'])
+
+    def test_every_skill_level_has_a_capability_concept(self):
+        """The mint must cover the vocabulary, not a subset of it.
+
+        A capability with no concept would be silently unmatchable in trial
+        criteria while looking present in the enum.
+        """
+        from importlib import import_module
+        from omop_core.models import SKILL_LEVEL_CHOICES
+
+        mig = import_module(
+            'omop_core.migrations.0187_seed_language_capability_concepts')
+        minted = {code.split(':', 1)[1] for _cid, code, _name in mig._CONCEPTS}
+        self.assertEqual(minted, {v for v, _label in SKILL_LEVEL_CHOICES})
+
     def test_runtime_migration_matches_seed_definitions(self):
         """Migration 0143 duplicates concept rows; the copies must not drift.
 
@@ -2444,9 +2672,10 @@ class WearableConceptMappingTest(TestCase):
     def test_locally_minted_wearable_concepts_are_installed_by_migration(self):
         """Athena can never supply a local mint, so a migration must.
 
-        start.sh runs only `migrate`; seed_omop_concepts is manual. A metric
-        whose concept is locally minted is silently discarded on any deployment
-        that never ran the seed command.
+        A migration is the only step guaranteed to run everywhere. start.sh now
+        also runs seed_omop_concepts, but that is belt and braces, not the
+        guarantee: a metric whose concept is locally minted would be silently
+        discarded on any deployment reached by some other path.
         """
         from importlib import import_module
         from omop_core.services.mappings import (
@@ -2480,7 +2709,7 @@ class WearableConceptMappingTest(TestCase):
 
     def test_local_mints_are_quarantined(self):
         """source='HealthKey' <-> HK-* vocabulary <-> concept_id >= 2e9."""
-        from omop_core.management.commands.seed_omop_concepts import (
+        from omop_core.concept_fixtures import (
             _assert_local_mint_convention, LOCAL_CONCEPT_ID_MIN,
         )
         _assert_local_mint_convention()  # raises CommandError on violation
@@ -2541,7 +2770,7 @@ class PurgeBrokenWearableRowsCommandTest(TestCase):
     @classmethod
     def setUpTestData(cls):
         from omop_core.models import Person
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
         cls.person = Person.objects.create(person_id=770001, year_of_birth=1970)
 
     def setUp(self):
@@ -2721,7 +2950,7 @@ class ConceptZeroTest(TestCase):
 
     @classmethod
     def setUpTestData(cls):
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
 
     def test_seeded_with_omop_specified_metadata(self):
         from omop_core.models import Concept
@@ -2794,7 +3023,7 @@ class BackfillConceptSourceCommandTest(TestCase):
 
     @classmethod
     def setUpTestData(cls):
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
 
     def _concept(self, concept_id, code, vocabulary_id='LOINC', source=None):
         from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
@@ -2892,7 +3121,7 @@ class RemapLocalDrugConceptsCommandTest(TestCase):
     @classmethod
     def setUpTestData(cls):
         from omop_core.models import Person
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
         cls.person = Person.objects.create(person_id=780001, year_of_birth=1970)
 
     def _concept(self, concept_id, code, name, vocabulary_id, standard=None):
@@ -3636,7 +3865,7 @@ class ConceptIdIsNotAConceptCodeTest(TestCase):
     """
 
     def test_no_seeded_concept_uses_its_code_as_its_id(self):
-        from omop_core.management.commands.seed_omop_concepts import _CONCEPTS
+        from omop_core.concept_fixtures import _CONCEPTS
 
         offenders = [
             (r['concept_id'], r['concept_code']) for r in _CONCEPTS
@@ -3691,7 +3920,7 @@ class ConceptIdIsNotAConceptCodeTest(TestCase):
         """The database constraint now blocks the shadow rows #415 cleaned up."""
         from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
 
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
         vocab = Vocabulary.objects.get(vocabulary_id='SNOMED')
         domain = Domain.objects.get(domain_id='Observation')
         cc = ConceptClass.objects.get(concept_class_id='Clinical Finding')
@@ -3708,7 +3937,7 @@ class ConceptIdIsNotAConceptCodeTest(TestCase):
         """Invalid/retired duplicates cannot share the same vocabulary code."""
         from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
 
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
         vocab = Vocabulary.objects.get(vocabulary_id='SNOMED')
         domain = Domain.objects.get(domain_id='Observation')
         cc = ConceptClass.objects.get(concept_class_id='Clinical Finding')
@@ -3764,7 +3993,7 @@ class RemapLocalDrugConceptsCommandTest(TestCase):
     @classmethod
     def setUpTestData(cls):
         from omop_core.models import Person
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
         cls.person = Person.objects.create(person_id=780001, year_of_birth=1970)
 
     def _concept(self, concept_id, code, name, vocabulary_id, standard=None):
@@ -4803,7 +5032,16 @@ class HealthKeyConceptSurvivesReloadTest(TestCase):
         saved_ids = {r[0] for r in saved}
         self.assertIn(2_000_000_001, saved_ids)
 
-        # Simulate TRUNCATE — delete all concepts
+        # Simulate TRUNCATE — delete all concepts.
+        #
+        # FieldConceptMapping.concept is on_delete=PROTECT, so the curated
+        # mappings migration 0181 seeds block a bulk concept delete. Clear them
+        # first: a real TRUNCATE ... CASCADE would take dependents with it, and
+        # the loader never issues one anyway — it sets _direct=False precisely
+        # because concept is referenced by patient data. The PROTECT is doing
+        # its job; it is this simulation that is blunter than production.
+        from omop_core.models import FieldConceptMapping
+        FieldConceptMapping.objects.all().delete()
         Concept.objects.all().delete()
         self.assertFalse(Concept.objects.filter(concept_id=2_000_000_001).exists())
 
@@ -4865,3 +5103,2219 @@ class HealthKeyConceptSurvivesReloadTest(TestCase):
         self.assertEqual(len(saved), pre_existing)
         saved_ids = {r[0] for r in saved}
         self.assertNotIn(100, saved_ids)
+
+
+# ---------------------------------------------------------------------------
+# TEST — _get_social_data field mapping (#524)
+# ---------------------------------------------------------------------------
+
+class SocialDataFieldMappingTest(TestCase):
+    """Verify _get_social_data writes to the correct PatientRecord fields."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.test_utils import ensure_test_concept_zero
+        ensure_test_concept_zero()
+        vocab, dom_cond, dom_meas, dom_drug, dom_type, dom_obs, cc = _make_vocab()
+        cls.person = Person.objects.create(person_id=88524, year_of_birth=1980)
+        # SNOMED employment concept
+        cls.employment_concept = _concept(
+            900524, 'Employed', dom_obs, vocab, cc, code='224362002',
+        )
+        # SNOMED insurance concept
+        cls.insurance_concept = _concept(
+            900525, 'Health insurance', dom_obs, vocab, cc, code='408729009',
+        )
+
+    def test_employment_maps_to_employment_status(self):
+        """Employment observations must write to employment_status, not no_pre_existing_conditions."""
+        Observation.objects.create(
+            observation_id=880001,
+            person=self.person,
+            observation_concept=self.employment_concept,
+            observation_date=date(2025, 1, 1),
+            observation_type_concept_id=0,
+            value_as_string='Full-time',
+        )
+        from omop_core.services.patient_record_service import _get_social_data
+        data = _get_social_data(self.person)
+        self.assertEqual(data.get('employment_status'), 'Full-time')
+        self.assertNotIn('no_pre_existing_conditions', data)
+
+    def test_insurance_maps_to_insurance_type(self):
+        """Insurance observations must write to insurance_type, not concomitant_medication_details."""
+        Observation.objects.create(
+            observation_id=880002,
+            person=self.person,
+            observation_concept=self.insurance_concept,
+            observation_date=date(2025, 1, 1),
+            observation_type_concept_id=0,
+            value_as_string='Private',
+        )
+        from omop_core.services.patient_record_service import _get_social_data
+        data = _get_social_data(self.person)
+        self.assertEqual(data.get('insurance_type'), 'Private')
+
+
+# ---------------------------------------------------------------------------
+# TEST: refresh_patient_record query count regression (#541)
+# ---------------------------------------------------------------------------
+
+class RefreshQueryCountTest(TestCase):
+    """Ensure refresh_patient_record stays within a bounded query budget.
+
+    The prefetch refactor (issue #541) reduced queries from ~80 to ~10.
+    This test catches regressions by asserting the total stays under 20.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.test_utils import ensure_test_concept_zero
+        ensure_test_concept_zero()
+
+        vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='QC_TEST',
+            defaults={'vocabulary_name': 'QC Test', 'vocabulary_concept_id': 0},
+        )
+        dom, _ = Domain.objects.get_or_create(
+            domain_id='Measurement',
+            defaults={'domain_name': 'Measurement', 'domain_concept_id': 21},
+        )
+        cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Test',
+            defaults={'concept_class_name': 'Test', 'concept_class_concept_id': 0},
+        )
+        concept, _ = Concept.objects.get_or_create(
+            concept_id=990541,
+            defaults={
+                'concept_name': 'QC Test Concept',
+                'domain': dom,
+                'vocabulary': vocab,
+                'concept_class': cc,
+                'concept_code': '99999-0',
+                'valid_start_date': date(2020, 1, 1),
+                'valid_end_date': date(2099, 12, 31),
+            },
+        )
+        cls.person = Person.objects.create(person_id=990541)
+        # Seed a handful of measurement rows so the snapshot has work to do
+        for i in range(5):
+            Measurement.objects.create(
+                measurement_id=990541_00 + i,
+                person=cls.person,
+                measurement_concept=concept,
+                measurement_date=date(2025, 1, 1),
+                measurement_type_concept_id=0,
+                value_as_number=float(i),
+            )
+
+    def test_query_count_under_budget(self):
+        """refresh_patient_record must not exceed 20 SQL queries."""
+        from django.test.utils import CaptureQueriesContext
+        with CaptureQueriesContext(connection) as ctx:
+            refresh_patient_record(self.person)
+        # Budget: ~6 snapshot queries + PatientRecord SELECT FOR UPDATE + save
+        # + a few ancillary lookups (Episode, concept cache, etc.)
+        self.assertLessEqual(
+            len(ctx.captured_queries), 20,
+            f'Expected ≤20 queries, got {len(ctx.captured_queries)}. '
+            f'Query breakdown:\n'
+            + '\n'.join(
+                f'  [{i}] {q["sql"][:120]}'
+                for i, q in enumerate(ctx.captured_queries)
+            ),
+        )
+
+    def test_direct_lot_assertions_keep_the_newest_value(self):
+        """Newest direct LOT assertion must win despite snapshot's sort order."""
+        from omop_core.services.patient_record_service import (
+            OmopSnapshot, _apply_treatment_assertions,
+        )
+
+        older = SimpleNamespace(
+            observation_id=1,
+            observation_date=date(2024, 1, 1),
+            observation_source_value='LOT-1-intent',
+            value_as_concept=None,
+            value_as_string='Palliative',
+            value_source_value=None,
+        )
+        newer = SimpleNamespace(
+            observation_id=2,
+            observation_date=date(2024, 2, 1),
+            observation_source_value='LOT-1-intent',
+            value_as_concept=None,
+            value_as_string='Curative',
+            value_source_value=None,
+        )
+        snapshot = OmopSnapshot(
+            measurements=[], observations=[newer, older], conditions=[],
+            drug_exposures=[], procedures=[], death=None,
+            meas_by_code={}, obs_by_code={}, meas_by_source={}, obs_by_source={},
+        )
+        episode = SimpleNamespace(
+            episode_number=1,
+            episode_start_date=date(2024, 1, 1),
+            episode_end_date=date(2024, 12, 31),
+        )
+
+        data = {}
+        _apply_treatment_assertions(data, self.person, [episode], snapshot)
+
+        self.assertEqual(data['first_line_intent'], 'Curative')
+
+    def test_lot_inference_accepts_prefetched_empty_rows(self):
+        """The no-Episode path can avoid re-querying snapshot tables entirely."""
+        from django.test.utils import CaptureQueriesContext
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+
+        with CaptureQueriesContext(connection) as ctx:
+            lots = infer_lot_for_person(
+                self.person, force=True, dry_run=True,
+                exposures=[], procedures=[],
+            )
+
+        self.assertEqual(lots, [])
+        self.assertEqual(len(ctx), 0)
+
+
+class SeededSctFieldMappingsTest(TestCase):
+    """The three SCT fields are writable, via the mappings migration 0156 seeds.
+
+    They always derived from dated Observations keyed on `mm-sct-date`,
+    `mm-sct-history` and `mm-sct-eligibility` — the FHIR upload has written them
+    that way since PR #115 — but no mapping row said so, so the editor fell back
+    to patching the projection and got a 405 on three documented fields.
+
+    This lives in the Django suite rather than the pytest one because pytest runs
+    with --no-migrations, so a data migration's rows are not there to assert on.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        """Seed the concepts, then run the migration's own seed against them.
+
+        Django builds the test database from migrations, and 0156 runs before any
+        concept exists — it guards on the EHR type concept and skips rather than
+        seeding a mapping that points at nothing. So the ordering that is right in
+        a real deployment (load vocabularies, then migrate) has to be reproduced
+        here. Calling the migration's function rather than restating its rows
+        keeps this honest if the seed changes.
+        """
+        import importlib
+
+        from django.apps import apps as global_apps
+        from omop_core.concept_fixtures import seed_test_concepts
+
+        seed_test_concepts()
+        migration = importlib.import_module(
+            'omop_core.migrations.0156_seed_sct_field_mappings',
+        )
+        migration.seed(global_apps, None)
+
+    def test_each_sct_field_is_writable_against_the_source_value_derivation_reads(self):
+        from omop_core.services.write_descriptor import build_writable_field_descriptor
+
+        descriptor = build_writable_field_descriptor()
+        for field, source_value in [
+            ('sct_date', 'mm-sct-date'),
+            ('stem_cell_transplant_history', 'mm-sct-history'),
+            ('sct_eligibility', 'mm-sct-eligibility'),
+        ]:
+            with self.subTest(field=field):
+                entry = descriptor[field]
+                self.assertTrue(entry['writable'], f'{field} is not writable')
+                self.assertEqual(entry['target'], 'observation')
+                # Derivation matches on this exact value; a mismatch would store
+                # a row that never comes back.
+                self.assertEqual(entry['source_value'], source_value)
+
+    def test_the_list_fields_offer_their_bounded_vocabulary(self):
+        from omop_core.services.write_descriptor import build_writable_field_descriptor
+
+        entry = build_writable_field_descriptor()['stem_cell_transplant_history']
+        self.assertTrue(entry.get('multiple'))
+        self.assertEqual(
+            {o['value'] for o in entry.get('options', [])},
+            {'autologous SCT', 'allogeneic SCT', 'tandem SCT'},
+        )
+
+    def test_the_seeded_mappings_are_approved_and_complete(self):
+        from omop_core.models import FieldConceptMapping
+
+        rows = FieldConceptMapping.objects.filter(
+            field_name__in=['sct_date', 'stem_cell_transplant_history',
+                            'sct_eligibility'],
+        )
+        self.assertEqual(rows.count(), 3)
+        for row in rows:
+            with self.subTest(field=row.field_name):
+                self.assertEqual(row.status, 'approved')
+                self.assertIsNotNone(row.concept_id)
+                self.assertTrue(row.source_value)
+
+class SeededEmploymentStatusMappingTest(TestCase):
+    """employment_status is writable, and what is written derives back.
+
+    _get_social_data has always read this field from an Observation whose concept
+    is SNOMED 224362002, taking the answer from value_as_string. The read path and
+    the write path both existed; nothing connected them, so the descriptor called
+    the field unmapped and the editor's PATCH was refused.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        import importlib
+
+        from django.apps import apps as global_apps
+        from omop_core.concept_fixtures import seed_test_concepts
+
+        seed_test_concepts()
+        importlib.import_module(
+            'omop_core.migrations.0157_seed_employment_status_mapping',
+        ).seed(global_apps, None)
+
+    def test_the_field_is_writable_against_the_concept_derivation_reads(self):
+        from omop_core.services.write_descriptor import build_writable_field_descriptor
+
+        entry = build_writable_field_descriptor()['employment_status']
+
+        self.assertTrue(entry['writable'])
+        self.assertEqual(entry['target'], 'observation')
+        # _get_social_data matches on this concept code.
+        self.assertEqual(entry['source_value'], '224362002')
+
+    def test_writing_the_prescribed_fact_derives_back(self):
+        """The round trip, not just the recipe.
+
+        A mapping that produces a row derivation cannot read would look complete
+        and lose the value, which is the failure the mapping bar exists to catch.
+        """
+        from omop_core.models import Concept, Observation, Person
+        from omop_core.services.patient_record_service import refresh_patient_record
+        from omop_core.services.pk import next_pk
+        from omop_core.services.write_descriptor import build_writable_field_descriptor
+
+        entry = build_writable_field_descriptor()['employment_status']
+        person = Person.objects.create(person_id=880011, year_of_birth=1970)
+        PatientRecord.objects.get_or_create(person=person)
+
+        Observation.objects.create(
+            observation_id=next_pk(Observation, 'observation_id'),
+            person=person,
+            observation_concept=Concept.objects.get(concept_id=entry['concept_id']),
+            observation_date=date(2025, 4, 1),
+            observation_type_concept=Concept.objects.get(
+                concept_id=entry['type_concept_id'],
+            ),
+            observation_source_value=entry['source_value'],
+            value_as_string='Employed full-time',
+        )
+
+        person.refresh_from_db()
+        record = refresh_patient_record(person)
+
+        self.assertEqual(record.employment_status, 'Employed full-time')
+
+
+# ---------------------------------------------------------------------------
+# Async derivation — dispatchers and the Celery task
+# ---------------------------------------------------------------------------
+
+class DerivationDispatcherTest(TestCase):
+    """The DI seam the refresh endpoint runs the derivation through."""
+
+    def setUp(self):
+        self.person = Person.objects.create(person_id=990101, year_of_birth=1970)
+        PatientRecord.objects.create(person=self.person)
+
+    def test_no_broker_selects_the_inline_dispatcher(self):
+        from omop_core.services.derivation_jobs import InlineDispatcher, get_dispatcher
+
+        with self.settings(CELERY_BROKER_URL=''):
+            self.assertIsInstance(get_dispatcher(), InlineDispatcher)
+
+    def test_a_configured_broker_selects_the_celery_dispatcher(self):
+        from omop_core.services.derivation_jobs import CeleryDispatcher, get_dispatcher
+
+        with self.settings(CELERY_BROKER_URL='redis://localhost:6379/0'):
+            self.assertIsInstance(get_dispatcher(), CeleryDispatcher)
+
+    def test_use_dispatcher_overrides_and_restores(self):
+        from omop_core.services.derivation_jobs import (
+            FakeDispatcher, get_dispatcher, use_dispatcher,
+        )
+
+        fake = FakeDispatcher()
+        with use_dispatcher(fake):
+            self.assertIs(get_dispatcher(), fake)
+        self.assertIsNot(get_dispatcher(), fake)
+
+    def test_inline_dispatcher_derives_and_reports_success(self):
+        from omop_core.services.derivation_jobs import SUCCESS, InlineDispatcher
+
+        dispatcher = InlineDispatcher()
+        with patch('omop_core.services.patient_record_service.refresh_patient_record') as refresh:
+            task_id = dispatcher.dispatch(self.person)
+
+        refresh.assert_called_once_with(self.person)
+        self.assertEqual(dispatcher.status(task_id).state, SUCCESS)
+
+    def test_inline_dispatcher_bounds_the_derivation(self):
+        """It runs in the request, so it needs the bound the worker gets from Celery."""
+        from django.db import connection
+
+        from omop_core.services.derivation_jobs import InlineDispatcher
+
+        seen = []
+
+        def record(person):
+            with connection.cursor() as cur:
+                cur.execute('SHOW statement_timeout')
+                seen.append(cur.fetchone()[0])
+
+        with patch('omop_core.services.patient_record_service.refresh_patient_record',
+                   side_effect=record):
+            InlineDispatcher().dispatch(self.person)
+
+        self.assertEqual(seen, ['25s'])
+
+    def test_inline_dispatcher_reports_a_foreign_id_as_pending(self):
+        from omop_core.services.derivation_jobs import PENDING, InlineDispatcher
+
+        self.assertEqual(InlineDispatcher().status('never-seen').state, PENDING)
+
+    def test_inline_dispatcher_rejects_an_id_it_never_issued(self):
+        """The id is the completion record, so an invented one must not read SUCCESS."""
+        from omop_core.services.derivation_jobs import PENDING, InlineDispatcher
+
+        dispatcher = InlineDispatcher()
+
+        for forged in ('inline-typo', 'inline-', 'inline-' + 'a' * 32):
+            with self.subTest(forged=forged):
+                self.assertEqual(dispatcher.status(forged).state, PENDING)
+
+    def test_inline_dispatcher_lets_a_failure_propagate(self):
+        """The caller is still holding the request, so it can be told directly."""
+        from omop_core.services.derivation_jobs import InlineDispatcher
+
+        with patch('omop_core.services.patient_record_service.refresh_patient_record',
+                   side_effect=ValueError('boom')):
+            with self.assertRaises(ValueError):
+                InlineDispatcher().dispatch(self.person)
+
+    def test_an_inline_id_reads_success_on_a_process_that_never_saw_the_post(self):
+        """Several gunicorn workers, so the poll rarely lands where the POST did."""
+        from omop_core.services.derivation_jobs import SUCCESS, InlineDispatcher
+
+        with patch('omop_core.services.patient_record_service.refresh_patient_record'):
+            task_id = InlineDispatcher().dispatch(self.person)
+
+        other_process = InlineDispatcher()
+
+        self.assertEqual(other_process.status(task_id).state, SUCCESS)
+
+    def test_celery_dispatcher_enqueues_only_on_commit(self):
+        """A worker starting inside the open transaction derives the old state."""
+        from omop_core.services.derivation_jobs import CeleryDispatcher
+
+        with patch('omop_core.tasks.refresh_patient_record_task.apply_async') as enqueue:
+            with self.captureOnCommitCallbacks(execute=True):
+                task_id = CeleryDispatcher().dispatch(self.person)
+                enqueue.assert_not_called()
+
+        enqueue.assert_called_once_with(
+            args=[self.person.person_id], task_id=task_id)
+
+    def test_celery_dispatcher_returns_the_id_it_enqueues_under(self):
+        from omop_core.services.derivation_jobs import CeleryDispatcher
+
+        with patch('omop_core.tasks.refresh_patient_record_task.apply_async') as enqueue:
+            with self.captureOnCommitCallbacks(execute=True):
+                task_id = CeleryDispatcher().dispatch(self.person)
+
+        self.assertEqual(enqueue.call_args.kwargs['task_id'], task_id)
+
+
+class RefreshPatientRecordTaskTest(TestCase):
+    """The task body, called directly — no broker involved."""
+
+    def setUp(self):
+        self.person = Person.objects.create(person_id=990102, year_of_birth=1970)
+        PatientRecord.objects.create(person=self.person)
+
+    def test_task_derives_the_person_and_returns_json_safe_values(self):
+        from omop_core.tasks import refresh_patient_record_task
+
+        result = refresh_patient_record_task(self.person.person_id)
+
+        self.assertEqual(result['person_id'], self.person.person_id)
+        # Serialized here rather than left as a datetime, which the JSON result
+        # backend cannot carry.
+        self.assertIsInstance(result['derived_at'], str)
+
+    def test_task_raises_for_an_unknown_person(self):
+        from omop_core.tasks import refresh_patient_record_task
+
+        with self.assertRaises(Person.DoesNotExist):
+            refresh_patient_record_task(99999999)
+
+    def test_task_does_not_swallow_a_failing_derivation(self):
+        from omop_core.tasks import refresh_patient_record_task
+
+        with patch('omop_core.services.patient_record_service.refresh_patient_record',
+                   side_effect=RuntimeError('derivation exploded')):
+            with self.assertRaises(RuntimeError):
+                refresh_patient_record_task(self.person.person_id)
+
+
+class PersonLanguageSkillConstraintTest(TestCase):
+    """#809 — person_language_skill enforces its rules in the database.
+
+    Every rule here was previously Python-only or absent, so a management
+    command, a raw insert, or any future write path could break it silently.
+    These run under the Django runner rather than pytest on purpose: pytest
+    builds its database with --no-migrations, so the RunSQL trigger below never
+    exists there and the domain tests would pass without a trigger present.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import ConceptClass, Domain, Vocabulary
+
+        cls.person = Person.objects.create(person_id=880001)
+        cls.other_person = Person.objects.create(person_id=880002)
+
+        snomed, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='SNOMED',
+            defaults={'vocabulary_name': 'SNOMED', 'vocabulary_concept_id': 0},
+        )
+        qualifier, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Qualifier Value',
+            defaults={'concept_class_name': 'Qualifier Value',
+                      'concept_class_concept_id': 0},
+        )
+        language_domain, _ = Domain.objects.get_or_create(
+            domain_id='Language',
+            defaults={'domain_name': 'Language', 'domain_concept_id': 0},
+        )
+        condition_domain, _ = Domain.objects.get_or_create(
+            domain_id='Condition',
+            defaults={'domain_name': 'Condition', 'domain_concept_id': 19},
+        )
+
+        def _concept(concept_id, name, domain, code):
+            return Concept.objects.create(
+                concept_id=concept_id, concept_name=name, domain=domain,
+                vocabulary=snomed, concept_class=qualifier,
+                standard_concept='S', concept_code=code,
+                valid_start_date=date(1970, 1, 1),
+                valid_end_date=date(2099, 12, 31),
+            )
+
+        # The two concepts #774 named, plus a non-language one to reject.
+        cls.english = _concept(4180186, 'English language', language_domain,
+                               '297487008')
+        cls.spanish = _concept(4182511, 'Spanish language', language_domain,
+                               '297510001')
+        cls.french = _concept(4181534, 'French language', language_domain,
+                              '297504001')
+        cls.heart_disease = _concept(4057432, 'Heart disease', condition_domain,
+                                     '56265001')
+
+    # -- one primary per person --------------------------------------------
+
+    def test_a_person_cannot_have_two_primary_languages(self):
+        PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='speak', is_primary=True)
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                PersonLanguageSkill.objects.create(
+                    person=self.person, language_concept=self.spanish,
+                    skill_level='speak', is_primary=True)
+
+    def test_a_person_may_have_many_non_primary_rows(self):
+        """The constraint is partial: only is_primary=True rows collide.
+
+        The first row becomes primary on its own (see the save() tests below),
+        so the additional ones are what this exercises.
+        """
+        for concept in (self.english, self.spanish, self.french):
+            PersonLanguageSkill.objects.create(
+                person=self.person, language_concept=concept,
+                skill_level='speak')
+        self.assertEqual(
+            PersonLanguageSkill.objects.filter(person=self.person).count(), 3)
+        self.assertEqual(
+            PersonLanguageSkill.objects.filter(
+                person=self.person, is_primary=True).count(), 1)
+
+    # -- one row per capability --------------------------------------------
+
+    def test_a_person_may_hold_every_capability_for_one_language(self):
+        """The four capabilities are independent, so they are separate rows.
+
+        Understanding a language without reading it is ordinary, and so is
+        reading without speaking; a single combined level cannot say either.
+        """
+        for value, _label in PersonLanguageSkill.SKILL_LEVEL_CHOICES:
+            PersonLanguageSkill.objects.create(
+                person=self.person, language_concept=self.english,
+                skill_level=value)
+        self.assertEqual(
+            PersonLanguageSkill.objects.filter(
+                person=self.person, language_concept=self.english).count(),
+            len(PersonLanguageSkill.SKILL_LEVEL_CHOICES))
+
+    def test_the_same_capability_twice_for_one_language_is_rejected(self):
+        """Uniqueness moved to (person, language, skill), not (person, language)."""
+        PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='read')
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                PersonLanguageSkill.objects.create(
+                    person=self.person, language_concept=self.english,
+                    skill_level='read')
+
+    # -- first language becomes primary ------------------------------------
+
+    def test_the_first_language_a_person_gets_becomes_primary(self):
+        """Otherwise a person can hold several languages and no primary.
+
+        The derived languages_skills string has no way to express "no primary",
+        so the column default alone leaves the read model ambiguous.
+        """
+        skill = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='speak')
+        self.assertTrue(skill.is_primary)
+
+    def test_a_later_language_does_not_displace_the_primary(self):
+        first = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='speak')
+        second = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.spanish,
+            skill_level='speak')
+        first.refresh_from_db()
+        self.assertTrue(first.is_primary)
+        self.assertFalse(second.is_primary)
+
+    def test_an_explicit_primary_on_the_first_row_is_kept(self):
+        skill = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='speak', is_primary=True)
+        self.assertTrue(skill.is_primary)
+
+    def test_the_next_language_takes_over_when_no_primary_remains(self):
+        """Keyed on "no primary exists", not "no rows exist", so it self-heals.
+
+        Deleting the primary row would otherwise leave the person with
+        languages and no primary, and nothing would ever restore one.
+        """
+        first = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='speak')
+        first.delete()
+        second = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.spanish,
+            skill_level='speak')
+        self.assertTrue(second.is_primary)
+
+    def test_one_persons_primary_does_not_suppress_anothers(self):
+        PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='speak')
+        other = PersonLanguageSkill.objects.create(
+            person=self.other_person, language_concept=self.english,
+            skill_level='speak')
+        self.assertTrue(other.is_primary)
+
+    def test_different_people_each_keep_their_own_primary(self):
+        PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='speak', is_primary=True)
+        PersonLanguageSkill.objects.create(
+            person=self.other_person, language_concept=self.english,
+            skill_level='speak', is_primary=True)
+        self.assertEqual(
+            PersonLanguageSkill.objects.filter(is_primary=True).count(), 2)
+
+    def test_promoting_a_second_language_to_primary_is_rejected(self):
+        """UPDATE must be caught too, not just INSERT."""
+        PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='speak', is_primary=True)
+        second = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.spanish,
+            skill_level='speak', is_primary=False)
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                second.is_primary = True
+                second.save(update_fields=['is_primary'])
+
+    # -- skill_level -------------------------------------------------------
+
+    def test_skill_level_outside_the_vocabulary_is_rejected(self):
+        """choices is validation, not a constraint; .create() bypasses it."""
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                PersonLanguageSkill.objects.create(
+                    person=self.person, language_concept=self.english,
+                    skill_level='fluent')
+
+    def test_every_declared_skill_level_is_accepted(self):
+        """Guards against the CHECK drifting from SKILL_LEVEL_CHOICES."""
+        for i, (value, _label) in enumerate(
+                PersonLanguageSkill.SKILL_LEVEL_CHOICES):
+            person = Person.objects.create(person_id=880100 + i)
+            PersonLanguageSkill.objects.create(
+                person=person, language_concept=self.english,
+                skill_level=value)
+        self.assertEqual(
+            PersonLanguageSkill.objects.count(),
+            len(PersonLanguageSkill.SKILL_LEVEL_CHOICES))
+
+    def test_deleting_the_primary_row_promotes_a_survivor(self):
+        """The database enforces at most one primary, not at least one.
+
+        save() only fires on insert, so without this a person whose flagged row
+        was deleted would keep their remaining languages and never regain a
+        primary.
+        """
+        first = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='speak')
+        second = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='read')
+        self.assertTrue(first.is_primary)
+
+        first.delete()
+
+        second.refresh_from_db()
+        self.assertTrue(second.is_primary)
+
+    def test_deleting_a_non_primary_row_promotes_nothing(self):
+        first = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='speak')
+        second = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='read')
+        second.delete()
+        first.refresh_from_db()
+        self.assertTrue(first.is_primary)
+        self.assertEqual(
+            PersonLanguageSkill.objects.filter(
+                person=self.person, is_primary=True).count(), 1)
+
+    def test_deleting_the_last_row_leaves_nothing_to_promote(self):
+        only = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='speak')
+        only.delete()
+        self.assertFalse(
+            PersonLanguageSkill.objects.filter(person=self.person).exists())
+
+    # -- language domain ---------------------------------------------------
+
+    def test_a_non_language_concept_is_rejected(self):
+        """The FK accepts any of 2.4M concepts; the trigger narrows it.
+
+        This is the exact failure manage_language_skills can produce today via
+        its unqualified concept_name__iexact fallback (#808).
+        """
+        with self.assertRaises(Exception) as ctx:
+            with transaction.atomic():
+                PersonLanguageSkill.objects.create(
+                    person=self.person, language_concept=self.heart_disease,
+                    skill_level='speak')
+        self.assertIn('not Language', str(ctx.exception))
+
+    def test_a_language_concept_is_accepted(self):
+        skill = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='speak')
+        self.assertEqual(skill.language_concept.domain_id, 'Language')
+
+    def test_repointing_a_row_at_a_non_language_concept_is_rejected(self):
+        """The trigger fires on UPDATE OF language_concept_id, not only INSERT."""
+        skill = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='speak')
+        with self.assertRaises(Exception) as ctx:
+            with transaction.atomic():
+                skill.language_concept = self.heart_disease
+                skill.save(update_fields=['language_concept'])
+        self.assertIn('not Language', str(ctx.exception))
+
+    # -- database-level default --------------------------------------------
+
+    def test_is_primary_defaults_at_the_database_not_only_in_django(self):
+        """A writer that bypasses the ORM must still get a valid row.
+
+        Before db_default, the column carried no DEFAULT, so an insert omitting
+        is_primary failed on NOT NULL instead of defaulting to false.
+
+        This also pins the boundary of the first-language-becomes-primary rule:
+        it lives in save(), so a raw insert — or bulk_create, which does not
+        call save() — gets the column default and no primary. The database
+        guarantees at most one primary; it does not guarantee there is one.
+        """
+        with connection.cursor() as cursor:
+            cursor.execute(
+                'INSERT INTO person_language_skill '
+                '(person_id, language_concept_id, skill_level, '
+                ' created_date, updated_date) '
+                'VALUES (%s, %s, %s, NOW(), NOW())',
+                [self.person.person_id, self.english.concept_id, 'speak'],
+            )
+        self.assertFalse(
+            PersonLanguageSkill.objects.get(person=self.person).is_primary)
+
+
+class LanguageHelperMethodTest(TestCase):
+    """#817 — the PatientRecord/Person language helpers actually run.
+
+    All three raised AttributeError from ed52738 (2026-01-28) until this, because
+    that commit removed the Person methods they call and left the callers behind.
+    Seven months passed unnoticed: no test covered any of them. The absence of
+    coverage was the defect; the AttributeError was only what it let through.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import ConceptClass, Domain, Vocabulary
+
+        cls.person = Person.objects.create(person_id=881001)
+        cls.record = PatientRecord.objects.create(person=cls.person)
+
+        snomed, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='SNOMED',
+            defaults={'vocabulary_name': 'SNOMED', 'vocabulary_concept_id': 0},
+        )
+        qualifier, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Qualifier Value',
+            defaults={'concept_class_name': 'Qualifier Value',
+                      'concept_class_concept_id': 0},
+        )
+        language_domain, _ = Domain.objects.get_or_create(
+            domain_id='Language',
+            defaults={'domain_name': 'Language', 'domain_concept_id': 0},
+        )
+
+        def _language(concept_id, name, code):
+            return Concept.objects.create(
+                concept_id=concept_id, concept_name=name,
+                domain=language_domain, vocabulary=snomed,
+                concept_class=qualifier, standard_concept='S',
+                concept_code=code, valid_start_date=date(1970, 1, 1),
+                valid_end_date=date(2099, 12, 31),
+            )
+
+        cls.english = _language(4180186, 'English language', '297487008')
+        cls.spanish = _language(4182511, 'Spanish language', '297510001')
+
+    def _skill(self, concept, level):
+        return PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=concept, skill_level=level)
+
+    # -- the methods run at all --------------------------------------------
+
+    def test_the_helpers_do_not_raise_on_a_person_with_no_languages(self):
+        self.assertEqual(self.record.get_languages(), {})
+        self.assertEqual(self.record.get_languages_display(),
+                         'No languages recorded')
+        self.assertIsNone(self.record.get_primary_language())
+
+    # -- capabilities are not collapsed ------------------------------------
+
+    def test_every_capability_survives_the_summary(self):
+        """The original returned one entry per language and lost the rest.
+
+        Restoring it verbatim would drop three of these four silently.
+        """
+        for level, _label in PersonLanguageSkill.SKILL_LEVEL_CHOICES:
+            self._skill(self.english, level)
+        self.assertEqual(
+            self.record.get_languages(),
+            {'English language': ['read', 'speak', 'understand', 'write']},
+        )
+
+    def test_several_languages_are_kept_apart(self):
+        self._skill(self.english, 'speak')
+        self._skill(self.english, 'read')
+        self._skill(self.spanish, 'speak')
+        self.assertEqual(
+            self.record.get_languages(),
+            {'English language': ['read', 'speak'],
+             'Spanish language': ['speak']},
+        )
+
+    def test_the_summary_is_ordered_not_insertion_ordered(self):
+        """Stable output across calls, so a display string cannot flap."""
+        self._skill(self.spanish, 'write')
+        self._skill(self.english, 'speak')
+        self._skill(self.english, 'read')
+        self.assertEqual(list(self.record.get_languages()),
+                         ['English language', 'Spanish language'])
+        self.assertEqual(self.record.get_languages()['English language'],
+                         ['read', 'speak'])
+
+    # -- display -----------------------------------------------------------
+
+    def test_display_separates_languages_from_capabilities(self):
+        """A comma alone cannot do both jobs once a language has several.
+
+        'English: speak, read, Spanish: speak' gives no way to see where one
+        language's capabilities end.
+        """
+        self._skill(self.english, 'speak')
+        self._skill(self.english, 'read')
+        self._skill(self.spanish, 'speak')
+        self.assertEqual(
+            self.record.get_languages_display(),
+            'English language: read, speak; Spanish language: speak',
+        )
+
+    # -- primary language --------------------------------------------------
+
+    def test_primary_language_reads_the_flag(self):
+        self._skill(self.english, 'speak')          # first row -> primary
+        self._skill(self.spanish, 'speak')
+        self.assertEqual(self.record.get_primary_language(), 'English language')
+
+    def test_primary_language_is_the_flagged_row_not_the_first_language(self):
+        """The flag is the source of truth, not row order.
+
+        A person can hold many rows for the primary language; only the flagged
+        one identifies it.
+        """
+        self._skill(self.english, 'speak')
+        spanish = self._skill(self.spanish, 'speak')
+        PersonLanguageSkill.objects.filter(person=self.person).update(
+            is_primary=False)
+        PersonLanguageSkill.objects.filter(pk=spanish.pk).update(is_primary=True)
+        self.assertEqual(self.record.get_primary_language(), 'Spanish language')
+
+    # -- the derived field agrees with the display -------------------------
+
+    def test_the_derived_field_uses_the_same_formatter(self):
+        """Two formatters over one person could disagree; there is now one.
+
+        languages_skills previously joined per row, repeating the language name
+        once per capability: 'English language: speak, English language: read'.
+        """
+        from omop_core.services.patient_record_service import refresh_patient_record
+
+        self._skill(self.english, 'speak')
+        self._skill(self.english, 'read')
+        self._skill(self.spanish, 'speak')
+
+        refresh_patient_record(self.person)
+        self.record.refresh_from_db()
+        self.assertEqual(self.record.languages_skills,
+                         self.record.get_languages_display())
+        self.assertEqual(
+            self.record.languages_skills,
+            'English language: read, speak; Spanish language: speak')
+
+
+class LanguageSkillConceptAndFlatColumnTest(TestCase):
+    """#827 — capabilities are coded, and flattened for matching.
+
+    Two halves: skill_concept carries the HK-Language code for a row, and the
+    eight PatientRecord booleans unroll the same facts into columns a query can
+    filter on without parsing the display string.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import ConceptClass, Domain, Vocabulary
+
+        cls.person = Person.objects.create(person_id=882001)
+        cls.record = PatientRecord.objects.create(person=cls.person)
+
+        snomed, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='SNOMED',
+            defaults={'vocabulary_name': 'SNOMED', 'vocabulary_concept_id': 0})
+        qualifier, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Qualifier Value',
+            defaults={'concept_class_name': 'Qualifier Value',
+                      'concept_class_concept_id': 0})
+        language_domain, _ = Domain.objects.get_or_create(
+            domain_id='Language',
+            defaults={'domain_name': 'Language', 'domain_concept_id': 0})
+
+        def _language(concept_id, name, code):
+            return Concept.objects.create(
+                concept_id=concept_id, concept_name=name, domain=language_domain,
+                vocabulary=snomed, concept_class=qualifier, standard_concept='S',
+                concept_code=code, valid_start_date=date(1970, 1, 1),
+                valid_end_date=date(2099, 12, 31))
+
+        cls.english = _language(4180186, 'English language', '297487008')
+        cls.spanish = _language(4182511, 'Spanish language', '297510001')
+
+    def _skill(self, concept, level):
+        return PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=concept, skill_level=level)
+
+    def _refresh(self):
+        from omop_core.services.patient_record_service import refresh_patient_record
+        refresh_patient_record(self.person)
+        self.record.refresh_from_db()
+
+    # -- skill_concept -----------------------------------------------------
+
+    def test_skill_concept_is_resolved_on_save(self):
+        """Every write path gets the code, not just callers that remember to.
+
+        Migration 0186 seeds the HK-Language mint, so it is present here.
+        """
+        skill = self._skill(self.english, 'read')
+        self.assertIsNotNone(skill.skill_concept_id)
+        self.assertEqual(skill.skill_concept.concept_code, 'hkl:read')
+        self.assertEqual(skill.skill_concept.vocabulary_id, 'HK-Language')
+
+    def test_each_capability_resolves_to_its_own_concept(self):
+        concepts = {}
+        for level, _label in PersonLanguageSkill.SKILL_LEVEL_CHOICES:
+            concepts[level] = self._skill(self.english, level).skill_concept_id
+        self.assertEqual(len(set(concepts.values())), len(concepts))
+
+    def test_a_row_still_saves_when_the_mint_is_absent(self):
+        """The mint must not become a hard dependency of storing a language.
+
+        A fresh database can reach a write before the seed migration has run.
+        """
+        Concept.objects.filter(vocabulary_id='HK-Language').delete()
+        skill = self._skill(self.english, 'speak')
+        self.assertIsNone(skill.skill_concept_id)
+
+    def test_an_explicitly_set_concept_is_not_overwritten(self):
+        other = Concept.objects.get(concept_code='hkl:write')
+        skill = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='read', skill_concept=other)
+        self.assertEqual(skill.skill_concept_id, other.concept_id)
+
+    # -- flattened columns -------------------------------------------------
+
+    def test_capabilities_present_become_true(self):
+        self._skill(self.english, 'speak')
+        self._skill(self.english, 'read')
+        self._refresh()
+        self.assertTrue(self.record.english_speak)
+        self.assertTrue(self.record.english_read)
+
+    def test_capabilities_absent_for_a_known_language_become_false(self):
+        """Asked about English, so the unlisted English capabilities are known."""
+        self._skill(self.english, 'speak')
+        self._refresh()
+        self.assertFalse(self.record.english_read)
+        self.assertFalse(self.record.english_write)
+        self.assertFalse(self.record.english_understand)
+
+    def test_an_unasked_language_stays_null_not_false(self):
+        """The distinction the whole three-valued design exists for.
+
+        Knowing somebody speaks English says nothing about whether anyone asked
+        them about Spanish. Recording False would manufacture a negative that a
+        trial filter then acts on.
+        """
+        self._skill(self.english, 'speak')
+        self._refresh()
+        for capability in ('speak', 'read', 'write', 'understand'):
+            self.assertIsNone(getattr(self.record, f'spanish_{capability}'),
+                              f'spanish_{capability} should be unknown')
+
+    def test_a_person_with_no_languages_has_all_eight_null(self):
+        self._refresh()
+        for language in ('english', 'spanish'):
+            for capability in ('speak', 'read', 'write', 'understand'):
+                self.assertIsNone(
+                    getattr(self.record, f'{language}_{capability}'))
+
+    def test_both_languages_are_flattened_independently(self):
+        self._skill(self.english, 'read')
+        self._skill(self.spanish, 'speak')
+        self._refresh()
+        self.assertTrue(self.record.english_read)
+        self.assertFalse(self.record.english_speak)
+        self.assertTrue(self.record.spanish_speak)
+        self.assertFalse(self.record.spanish_read)
+
+    def test_removing_a_language_clears_its_columns(self):
+        """Derivation must reset, not only ever set.
+
+        Emitting only the keys it knows about would leave a stale True behind
+        after the underlying row is deleted.
+        """
+        skill = self._skill(self.spanish, 'speak')
+        self._refresh()
+        self.assertTrue(self.record.spanish_speak)
+
+        skill.delete()
+        self._refresh()
+        self.assertIsNone(self.record.spanish_speak)
+
+    def test_the_flat_columns_agree_with_the_display_string(self):
+        """Two views of one person must not contradict each other."""
+        self._skill(self.english, 'speak')
+        self._skill(self.english, 'understand')
+        self._refresh()
+        self.assertEqual(self.record.languages_skills,
+                         'English language: speak, understand')
+        self.assertTrue(self.record.english_speak)
+        self.assertTrue(self.record.english_understand)
+        self.assertFalse(self.record.english_write)
+
+    def test_the_flat_columns_are_not_editable(self):
+        """They are derived; an edit here would be overwritten by the refresh."""
+        from omop_core.services.field_descriptor import _classify_field
+
+        for language in ('english', 'spanish'):
+            for capability in ('speak', 'read', 'write', 'understand'):
+                self.assertEqual(
+                    _classify_field(f'{language}_{capability}'), 'computed')
+
+
+class LanguageSkillReviewFindingsTest(TestCase):
+    """Defects found reviewing the merged language work (#827).
+
+    All four shipped. Each is pinned here rather than only fixed, because each
+    is the kind that stays quiet: three produce a wrong value or a half-done
+    write without raising anything a caller would notice.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import ConceptClass, Domain, Vocabulary
+
+        cls.person = Person.objects.create(person_id=883001)
+        cls.record = PatientRecord.objects.create(person=cls.person)
+
+        snomed, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='SNOMED',
+            defaults={'vocabulary_name': 'SNOMED', 'vocabulary_concept_id': 0})
+        qualifier, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Qualifier Value',
+            defaults={'concept_class_name': 'Qualifier Value',
+                      'concept_class_concept_id': 0})
+        language_domain, _ = Domain.objects.get_or_create(
+            domain_id='Language',
+            defaults={'domain_name': 'Language', 'domain_concept_id': 0})
+
+        for concept_id, name, code in ((4180186, 'English language', '297487008'),
+                                       (4182511, 'Spanish language', '297510001')):
+            Concept.objects.get_or_create(
+                concept_id=concept_id,
+                defaults=dict(concept_name=name, domain=language_domain,
+                              vocabulary=snomed, concept_class=qualifier,
+                              standard_concept='S', concept_code=code,
+                              valid_start_date=date(1970, 1, 1),
+                              valid_end_date=date(2099, 12, 31)))
+
+    def _refresh(self):
+        from omop_core.services.patient_record_service import refresh_patient_record
+        refresh_patient_record(self.person)
+        self.record.refresh_from_db()
+
+    # -- 1. flattening must not depend on the concept's display name -------
+
+    def test_a_renamed_language_concept_still_flattens(self):
+        """Keying on concept_name let a SNOMED rename blank four columns.
+
+        Silently, and in the direction that makes a patient look unasked rather
+        than raising -- so a trial filter would drop them with nothing logged.
+        """
+        from omop_core.services.patient_record_service import set_language_skills
+
+        set_language_skills(self.person, {'english': ['speak']})
+        Concept.objects.filter(concept_id=4180186).update(concept_name='English')
+
+        self._refresh()
+        self.assertTrue(self.record.english_speak)
+
+    def test_flattening_ignores_a_language_that_shares_a_name(self):
+        """The code is the identity, so a same-named concept is not English."""
+        from omop_core.models import ConceptClass, Domain, Vocabulary
+        from omop_core.services.patient_record_service import set_language_skills
+
+        impostor = Concept.objects.create(
+            concept_id=4999001, concept_name='English language',
+            domain=Domain.objects.get(domain_id='Language'),
+            vocabulary=Vocabulary.objects.get(vocabulary_id='SNOMED'),
+            concept_class=ConceptClass.objects.get(concept_class_id='Qualifier Value'),
+            standard_concept='S', concept_code='999999999',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31))
+        PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=impostor, skill_level='speak')
+
+        self._refresh()
+        self.assertIsNone(self.record.english_speak)
+
+    # -- 2. the replace must be all-or-nothing ------------------------------
+
+    def test_a_rejected_payload_writes_nothing(self):
+        """A 400 used to describe a write that had half happened.
+
+        The loop validated and wrote one language at a time, so a bad second
+        language left the first already stored.
+        """
+        from omop_core.services.patient_record_service import (
+            LanguageSkillError, set_language_skills)
+
+        with self.assertRaises(LanguageSkillError):
+            set_language_skills(
+                self.person, {'english': ['speak'], 'spanish': ['fluent']})
+
+        self.assertFalse(
+            PersonLanguageSkill.objects.filter(person=self.person).exists())
+
+    def test_a_rejected_payload_does_not_strip_existing_rows(self):
+        """Replace is delete-then-create; a failure between the two lost data."""
+        from omop_core.services.patient_record_service import (
+            LanguageSkillError, set_language_skills)
+
+        set_language_skills(self.person, {'english': ['speak', 'read']})
+        with self.assertRaises(LanguageSkillError):
+            set_language_skills(
+                self.person, {'english': ['write'], 'spanish': ['fluent']})
+
+        self.assertEqual(
+            set(PersonLanguageSkill.objects.filter(person=self.person)
+                .values_list('skill_level', flat=True)),
+            {'speak', 'read'})
+
+    # -- 3 & 4. the management command --------------------------------------
+
+    def test_the_command_refreshes_the_projection(self):
+        """Nothing on PersonLanguageSkill triggers a refresh.
+
+        A command that only wrote the row left the read model disagreeing with
+        the database until something else happened to re-derive it.
+        """
+        from django.core.management import call_command
+        from io import StringIO
+
+        call_command('manage_language_skills',
+                     person_id=self.person.person_id,
+                     set_language='297487008:speak', stdout=StringIO())
+
+        self.record.refresh_from_db()
+        self.assertTrue(self.record.english_speak)
+
+    def test_set_primary_survives_a_language_with_several_capabilities(self):
+        """.get(person, language) raised once a language had two rows.
+
+        Which is now the normal case, not an edge one.
+        """
+        from django.core.management import call_command
+        from io import StringIO
+
+        from omop_core.services.patient_record_service import set_language_skills
+        # English deliberately has two rows: with one, .get() succeeds and the
+        # test proves nothing. The defect only appears once a language carries
+        # more than one capability, which is now the normal case.
+        set_language_skills(self.person, {'english': ['speak', 'read'],
+                                          'spanish': ['write']})
+        PersonLanguageSkill.objects.filter(person=self.person).update(is_primary=False)
+
+        out = StringIO()
+        call_command('manage_language_skills',
+                     person_id=self.person.person_id,
+                     set_primary='297487008', stdout=out, stderr=out)
+
+        self.assertEqual(
+            PersonLanguageSkill.objects.filter(
+                person=self.person, is_primary=True).count(), 1)
+        self.assertEqual(self.person.get_primary_language(), 'English language')
+
+
+class ManageLanguageSkillsCommandTest(TestCase):
+    """#812 — the command mints nothing and resolves nothing by name.
+
+    What it replaced created ten concepts at 40000001-40000010 in a fabricated
+    'LANGUAGE' vocabulary flagged standard_concept='S', then looked them up by
+    concept_name with a fallback across every loaded vocabulary. Each of those
+    is pinned here, because none of them fails loudly: a bad concept looks
+    standard to every consumer, and a name match returns the wrong row rather
+    than no row.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import ConceptClass, Domain, Vocabulary
+
+        cls.person = Person.objects.create(person_id=884001)
+        cls.record = PatientRecord.objects.create(person=cls.person)
+
+        snomed, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='SNOMED',
+            defaults={'vocabulary_name': 'SNOMED', 'vocabulary_concept_id': 0})
+        cls.qualifier, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Qualifier Value',
+            defaults={'concept_class_name': 'Qualifier Value',
+                      'concept_class_concept_id': 0})
+        cls.language_domain, _ = Domain.objects.get_or_create(
+            domain_id='Language',
+            defaults={'domain_name': 'Language', 'domain_concept_id': 0})
+        cls.condition_domain, _ = Domain.objects.get_or_create(
+            domain_id='Condition',
+            defaults={'domain_name': 'Condition', 'domain_concept_id': 19})
+        cls.snomed = snomed
+
+        for concept_id, name, code in ((4180186, 'English language', '297487008'),
+                                       (4182511, 'Spanish language', '297510001')):
+            Concept.objects.get_or_create(
+                concept_id=concept_id,
+                defaults=dict(concept_name=name, domain=cls.language_domain,
+                              vocabulary=snomed, concept_class=cls.qualifier,
+                              standard_concept='S', concept_code=code,
+                              valid_start_date=date(1970, 1, 1),
+                              valid_end_date=date(2099, 12, 31)))
+
+    def _run(self, **kwargs):
+        from django.core.management import call_command
+        from io import StringIO
+        out = StringIO()
+        call_command('manage_language_skills', stdout=out, stderr=out, **kwargs)
+        return out.getvalue()
+
+    # -- it mints nothing --------------------------------------------------
+
+    def test_the_command_creates_no_concepts(self):
+        """The whole defect in #812 was that it created concepts at all."""
+        before = Concept.objects.count()
+        self._run(person_id=self.person.person_id,
+                  set_language='297487008:speak,read')
+        self.assertEqual(Concept.objects.count(), before)
+
+    def test_no_fabricated_language_vocabulary_is_created(self):
+        self._run(person_id=self.person.person_id, set_language='297487008:speak')
+        self.assertFalse(
+            Concept.objects.filter(vocabulary_id='LANGUAGE').exists())
+
+    def test_nothing_lands_in_the_ohdsi_concept_id_range(self):
+        """Local mints must sit at >= LOCAL_CONCEPT_ID_MIN; these sat at 4e7."""
+        from omop_core.concept_fixtures import LOCAL_CONCEPT_ID_MIN
+
+        self._run(person_id=self.person.person_id, set_language='297487008:speak')
+        self.assertFalse(
+            Concept.objects.filter(source='HealthKey',
+                                   concept_id__lt=LOCAL_CONCEPT_ID_MIN).exists())
+
+    # -- it resolves by code, not name -------------------------------------
+
+    def test_a_language_is_addressed_by_code(self):
+        self._run(person_id=self.person.person_id,
+                  set_language='297487008:speak,read')
+        self.assertEqual(
+            set(PersonLanguageSkill.objects.filter(person=self.person)
+                .values_list('skill_level', flat=True)),
+            {'speak', 'read'})
+
+    def test_a_name_is_not_accepted_as_a_code(self):
+        out = self._run(person_id=self.person.person_id,
+                        set_language='English language:speak')
+        self.assertIn('not a loaded Language-domain concept', out)
+        self.assertFalse(
+            PersonLanguageSkill.objects.filter(person=self.person).exists())
+
+    def test_a_same_named_concept_in_another_domain_is_refused(self):
+        """The old fallback searched every vocabulary by name.
+
+        A Condition concept called 'English language' would have matched and
+        been stored as somebody's language.
+        """
+        Concept.objects.create(
+            concept_id=4999002, concept_name='English language',
+            domain=self.condition_domain, vocabulary=self.snomed,
+            concept_class=self.qualifier, standard_concept='S',
+            concept_code='999999998', valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31))
+
+        out = self._run(person_id=self.person.person_id,
+                        set_language='999999998:speak')
+        self.assertIn('not a loaded Language-domain concept', out)
+        self.assertFalse(
+            PersonLanguageSkill.objects.filter(person=self.person).exists())
+
+    # -- replace semantics and derivation ----------------------------------
+
+    def test_setting_a_language_replaces_its_capabilities(self):
+        self._run(person_id=self.person.person_id,
+                  set_language='297487008:speak,read')
+        self._run(person_id=self.person.person_id, set_language='297487008:write')
+        self.assertEqual(
+            set(PersonLanguageSkill.objects.filter(person=self.person)
+                .values_list('skill_level', flat=True)),
+            {'write'})
+
+    def test_an_empty_capability_list_clears_the_language(self):
+        self._run(person_id=self.person.person_id, set_language='297487008:speak')
+        self._run(person_id=self.person.person_id, set_language='297487008:')
+        self.assertFalse(
+            PersonLanguageSkill.objects.filter(person=self.person).exists())
+
+    def test_an_unknown_capability_is_refused(self):
+        out = self._run(person_id=self.person.person_id,
+                        set_language='297487008:fluent')
+        self.assertIn('fluent', out)
+        self.assertFalse(
+            PersonLanguageSkill.objects.filter(person=self.person).exists())
+
+    # -- the lookup helper -------------------------------------------------
+
+    def test_find_language_prints_codes_to_use(self):
+        """Searching by name is safe; writing by name is not.
+
+        The helper exists so the operator sees the ambiguity and picks, rather
+        than the command resolving it silently.
+        """
+        out = self._run(find_language='English')
+        self.assertIn('297487008', out)
+        self.assertIn('English language', out)
+
+    def test_find_language_ignores_other_domains(self):
+        Concept.objects.create(
+            concept_id=4999003, concept_name='English speaking difficulty',
+            domain=self.condition_domain, vocabulary=self.snomed,
+            concept_class=self.qualifier, standard_concept='S',
+            concept_code='999999997', valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31))
+        out = self._run(find_language='English')
+        self.assertNotIn('999999997', out)
+
+    def test_find_language_says_so_when_nothing_matches(self):
+        out = self._run(find_language='Klingon')
+        self.assertIn('No loaded SNOMED Language concept', out)
+
+
+class MappingSuggestionsTest(_OmopBase):
+    """Suggest fills the curation queue for codes nobody has mapped.
+
+    Staging carries 10,483 distinct source values at concept 0 and 43% of them
+    appear exactly once, so the threshold is what makes the queue reviewable.
+    """
+
+    PERSON_ID = 90600
+
+    def setUp(self):
+        from omop_core.models import SourceCodeConceptMapping
+        SourceCodeConceptMapping.objects.all().delete()
+        self.creatinine = _concept(
+            4100000, 'Creatinine [Mass/volume] in Blood', self.dom_meas,
+            self.vocab, self.cc, code='38483-4')
+
+    def _measurement(self, mid, source_value, day=1, source_concept_id=None):
+        return Measurement.objects.create(
+            measurement_id=mid, person=self.person,
+            measurement_concept_id=0,
+            measurement_date=date(2024, 3, day),
+            measurement_type_concept=self.type_concept,
+            measurement_source_value=source_value,
+            measurement_source_concept_id=source_concept_id,
+        )
+
+    def _seed(self, source_value, times, start=95000):
+        for i in range(times):
+            self._measurement(start + i, source_value, day=(i % 28) + 1)
+
+    # -- the threshold ----------------------------------------------------
+
+    def test_a_code_below_the_threshold_is_not_proposed(self):
+        """43% of staging's unmapped values appear once. Proposing for them
+        buries the codes that carry the traffic."""
+        from omop_core.services.mapping_suggestions import unmapped_source_values
+        self._seed('SEEN ONCE', 1, start=95000)
+        self._seed('SEEN OFTEN', 12, start=95100)
+
+        values = unmapped_source_values('measurement', min_occurrences=10)
+        self.assertIn(('SEEN OFTEN', '', 12), values)
+        self.assertFalse(any(value == 'SEEN ONCE' for value, _vocabulary, _count in values))
+
+    def test_lowering_the_threshold_reaches_the_tail(self):
+        from omop_core.services.mapping_suggestions import unmapped_source_values
+        self._seed('SEEN ONCE', 1, start=95000)
+        values = unmapped_source_values('measurement', min_occurrences=1)
+        self.assertTrue(any(value == 'SEEN ONCE' for value, _vocabulary, _count in values))
+
+    def test_the_busiest_code_comes_first(self):
+        from omop_core.services.mapping_suggestions import unmapped_source_values
+        self._seed('QUIET', 10, start=95000)
+        self._seed('BUSY', 30, start=95200)
+        values = unmapped_source_values('measurement', min_occurrences=10)
+        self.assertEqual(values[0][0], 'BUSY')
+
+    def test_a_code_already_in_the_queue_is_not_proposed_again(self):
+        from omop_core.models import SourceCodeConceptMapping
+        from omop_core.services.mapping_suggestions import unmapped_source_values
+        self._seed('ALREADY MAPPED', 12, start=95000)
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='', source_code='already mapped',   # case differs
+            target_concept=self.creatinine, omop_table='measurement',
+            domain_id='Measurement', status='proposed',
+        )
+        values = unmapped_source_values('measurement', min_occurrences=10)
+        self.assertFalse(any(value == 'ALREADY MAPPED' for value, _vocabulary, _count in values))
+
+    # -- retrieval --------------------------------------------------------
+
+    def test_retrieval_is_scoped_to_the_domain(self):
+        """A lab name must not retrieve a drug."""
+        from omop_core.services.mapping_suggestions import lexical_candidates
+        _concept(4100001, 'Creatinine clearance drug', self.dom_drug,
+                 self.vocab, self.cc, code='D-CREAT')
+        hits = lexical_candidates('Creatinine', 'Measurement')
+        self.assertTrue(all(h['concept_id'] != 4100001 for h in hits))
+
+    def test_retrieval_ignores_non_standard_concepts(self):
+        from omop_core.services.mapping_suggestions import lexical_candidates
+        weak = _concept(4100002, 'Creatinine non standard', self.dom_meas,
+                        self.vocab, self.cc, code='NS-CREAT')
+        weak.standard_concept = None
+        weak.save(update_fields=['standard_concept'])
+        hits = lexical_candidates('Creatinine', 'Measurement')
+        self.assertTrue(all(h['concept_id'] != 4100002 for h in hits))
+
+    # -- ranking ----------------------------------------------------------
+
+    def test_without_a_key_the_lexical_order_stands_and_says_so(self):
+        """A Suggest that returns nothing because a third party is down is
+        worse than one that returns a guess a curator can correct."""
+        from omop_core.services.mapping_suggestions import rank_candidates
+        candidates = [
+            {'concept_id': 1, 'concept_name': 'A', 'concept_code': 'a',
+             'vocabulary_id': 'LOINC', 'concept_class_id': 'Lab Test',
+             'lexical_score': 0.7},
+            {'concept_id': 2, 'concept_name': 'B', 'concept_code': 'b',
+             'vocabulary_id': 'LOINC', 'concept_class_id': 'Lab Test',
+             'lexical_score': 0.6},
+        ]
+        with override_settings(ANTHROPIC_API_KEY=''):
+            chosen, note = rank_candidates('anything', candidates)
+        self.assertEqual(chosen['concept_id'], 1)
+        self.assertIn('Ranking model unavailable', note)
+
+    def test_the_ranker_can_overturn_the_lexical_order(self):
+        """The reason this exists: for SERUM FREE LIGHT CHAIN KAPPA trigram's
+        top hit is a *ratio*, clinically the wrong quantity."""
+        from unittest.mock import MagicMock, patch
+        from omop_core.services.mapping_suggestions import rank_candidates
+        candidates = [
+            {'concept_id': 37172937, 'concept_name': 'Free kappa/lambda ratio',
+             'concept_code': 'r', 'vocabulary_id': 'LOINC',
+             'concept_class_id': 'Lab Test', 'lexical_score': 0.674},
+            {'concept_id': 3034860, 'concept_name': 'Kappa light chains.free [Mass/volume]',
+             'concept_code': 'c', 'vocabulary_id': 'LOINC',
+             'concept_class_id': 'Lab Test', 'lexical_score': 0.645},
+        ]
+        block = MagicMock(type='text')
+        block.text = ('{"concept_id": 3034860, "confidence": "high",'
+                      ' "reason": "A ratio is not the analyte."}')
+        client = MagicMock()
+        client.messages.create.return_value = MagicMock(content=[block])
+        with override_settings(ANTHROPIC_API_KEY='test-key'), \
+                patch('anthropic.Anthropic', return_value=client):
+            chosen, note = rank_candidates('SERUM FREE LIGHT CHAIN KAPPA', candidates)
+        self.assertEqual(chosen['concept_id'], 3034860, 'the ratio was not demoted')
+        self.assertIn('A ratio is not the analyte', note)
+        self.assertEqual(client.messages.create.call_args.kwargs['model'], 'claude-opus-5')
+
+    def test_a_concept_outside_the_shortlist_is_refused(self):
+        """The candidates were domain-scoped and validated; an arbitrary id is
+        not, and writing one would put a concept nobody vetted into a record."""
+        from unittest.mock import MagicMock, patch
+        from omop_core.services.mapping_suggestions import rank_candidates
+        candidates = [{'concept_id': 1, 'concept_name': 'A', 'concept_code': 'a',
+                       'vocabulary_id': 'LOINC', 'concept_class_id': 'Lab Test',
+                       'lexical_score': 0.7}]
+        block = MagicMock(type='text')
+        block.text = '{"concept_id": 999999, "confidence": "high", "reason": "x"}'
+        client = MagicMock()
+        client.messages.create.return_value = MagicMock(content=[block])
+        with override_settings(ANTHROPIC_API_KEY='k'), \
+                patch('anthropic.Anthropic', return_value=client):
+            chosen, note = rank_candidates('x', candidates)
+        self.assertEqual(chosen['concept_id'], 1)
+        self.assertIn('Ranking model unavailable', note)
+
+    def test_a_ranker_failure_degrades_rather_than_raising(self):
+        from unittest.mock import patch
+        from omop_core.services.mapping_suggestions import rank_candidates
+        candidates = [{'concept_id': 1, 'concept_name': 'A', 'concept_code': 'a',
+                       'vocabulary_id': 'LOINC', 'concept_class_id': 'Lab Test',
+                       'lexical_score': 0.7}]
+        with override_settings(ANTHROPIC_API_KEY='k'), \
+                patch('anthropic.Anthropic', side_effect=RuntimeError('network down')):
+            chosen, note = rank_candidates('x', candidates)
+        self.assertEqual(chosen['concept_id'], 1)
+        self.assertIn('Ranking model unavailable', note)
+
+    def test_the_model_may_decline_to_choose(self):
+        from unittest.mock import MagicMock, patch
+        from omop_core.services.mapping_suggestions import rank_candidates
+        candidates = [{'concept_id': 1, 'concept_name': 'A', 'concept_code': 'a',
+                       'vocabulary_id': 'LOINC', 'concept_class_id': 'Lab Test',
+                       'lexical_score': 0.4}]
+        block = MagicMock(type='text')
+        block.text = '{"concept_id": null, "confidence": "low", "reason": "none match"}'
+        client = MagicMock()
+        client.messages.create.return_value = MagicMock(content=[block])
+        with override_settings(ANTHROPIC_API_KEY='k'), \
+                patch('anthropic.Anthropic', return_value=client):
+            chosen, note = rank_candidates('x', candidates)
+        self.assertIsNone(chosen, 'a wrong mapping is written into patient records')
+        self.assertIn('none match', note)
+
+    # -- creating the proposals -------------------------------------------
+
+    def test_suggest_creates_proposed_mappings_marked_as_a_machine_guess(self):
+        from omop_core.models import SourceCodeConceptMapping
+        from omop_core.services.mapping_suggestions import suggest_mappings
+        self._seed('Creatinine', 12, start=95000)
+        with override_settings(ANTHROPIC_API_KEY=''):
+            results = suggest_mappings('measurement', min_occurrences=10)
+
+        self.assertEqual(len(results), 1)
+        mapping = SourceCodeConceptMapping.objects.get(source_code='Creatinine')
+        self.assertEqual(mapping.status, 'proposed')
+        self.assertEqual(mapping.origin, 'import')
+        self.assertEqual(mapping.origin_system, 'suggest')
+        self.assertEqual(mapping.occurrence_count, 12)
+        self.assertEqual(mapping.omop_table, 'measurement')
+        self.assertTrue(mapping.notes, 'the curator needs to know why')
+
+    def test_suggest_preserves_source_vocabulary_and_separates_colliding_codes(self):
+        """Destination vocabulary must never be substituted for FHIR provenance."""
+        from omop_core.models import SourceCodeConceptMapping
+        from omop_core.services.mapping_suggestions import suggest_mappings
+        rxnorm, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='RxNorm', defaults={'vocabulary_name': 'RxNorm', 'vocabulary_concept_id': 0},
+        )
+        loinc, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='LOINC', defaults={'vocabulary_name': 'LOINC', 'vocabulary_concept_id': 0},
+        )
+        rxnorm_source = _concept(
+            4100003, 'RxNorm source', self.dom_meas, rxnorm, self.cc, code='SAME-CODE',
+        )
+        loinc_source = _concept(
+            4100004, 'LOINC source', self.dom_meas, loinc, self.cc, code='SAME-CODE',
+        )
+        for i in range(10):
+            self._measurement(95400 + i, 'SAME-CODE', day=(i % 28) + 1,
+                              source_concept_id=rxnorm_source.concept_id)
+            self._measurement(95500 + i, 'SAME-CODE', day=(i % 28) + 1,
+                              source_concept_id=loinc_source.concept_id)
+
+        with override_settings(ANTHROPIC_API_KEY=''):
+            results = suggest_mappings('measurement', min_occurrences=10)
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(
+            set(SourceCodeConceptMapping.objects.filter(source_code='SAME-CODE').values_list(
+                'source_vocabulary_id', 'occurrence_count',
+            )),
+            {('LOINC', 10), ('RxNorm', 10)},
+        )
+
+    def test_an_unmatchable_code_reaches_the_queue_without_a_fake_destination(self):
+        """A raw code is evidence, not a meaningful HK-* concept name."""
+        from omop_core.models import SourceCodeConceptMapping
+        from omop_core.services.mapping_suggestions import suggest_mappings
+        self._seed('ZZQQ NOTHING LIKE THIS', 11, start=95000)
+        with override_settings(ANTHROPIC_API_KEY=''):
+            suggest_mappings('measurement', min_occurrences=10)
+        mapping = SourceCodeConceptMapping.objects.get(
+            source_code='ZZQQ NOTHING LIKE THIS')
+        self.assertIsNone(mapping.target_concept_id)
+        self.assertEqual(mapping.destination_vocabulary_id, '')
+        self.assertEqual(mapping.source_code_description, '')
+        self.assertEqual(mapping.status, 'proposed')
+        self.assertFalse(Concept.objects.filter(
+            vocabulary_id='HK-Labs', concept_name='ZZQQ NOTHING LIKE THIS',
+        ).exists())
+
+    def test_dry_run_writes_nothing(self):
+        from omop_core.models import SourceCodeConceptMapping
+        from omop_core.services.mapping_suggestions import suggest_mappings
+        self._seed('Creatinine', 12, start=95000)
+        with override_settings(ANTHROPIC_API_KEY=''):
+            results = suggest_mappings('measurement', min_occurrences=10, dry_run=True)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(SourceCodeConceptMapping.objects.count(), 0)
+
+    def test_a_rejected_code_is_not_proposed_again(self):
+        """Rejected is decided. Re-proposing put it back at the front of the
+        queue every run, where it spent a model call and created nothing."""
+        from omop_core.models import SourceCodeConceptMapping
+        from omop_core.services.mapping_suggestions import unmapped_source_values
+        self._seed('REJECTED CODE', 12, start=95000)
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='', source_code='REJECTED CODE',
+            target_concept=self.creatinine, omop_table='measurement',
+            domain_id='Measurement', status='rejected',
+        )
+        values = unmapped_source_values('measurement', min_occurrences=10)
+        self.assertFalse(any(value == 'REJECTED CODE' for value, _vocabulary, _count in values))
+
+    def test_a_non_object_ranking_response_degrades(self):
+        """The system prompt asks for null, so a bare `null` is the shape a
+        model most plausibly returns -- it parses fine and has no .get."""
+        from unittest.mock import MagicMock, patch
+        from omop_core.services.mapping_suggestions import rank_candidates
+        candidates = [{'concept_id': 1, 'concept_name': 'A', 'concept_code': 'a',
+                       'vocabulary_id': 'LOINC', 'concept_class_id': 'Lab Test',
+                       'lexical_score': 0.7}]
+        for payload in ('null', '[1, 2]', '"text"'):
+            block = MagicMock(type='text')
+            block.text = payload
+            client = MagicMock()
+            client.messages.create.return_value = MagicMock(content=[block])
+            with override_settings(ANTHROPIC_API_KEY='k'), \
+                    patch('anthropic.Anthropic', return_value=client):
+                chosen, note = rank_candidates('x', candidates)
+            self.assertEqual(chosen['concept_id'], 1, f'{payload!r} was not handled')
+            self.assertIn('Ranking model unavailable', note)
+
+    def test_the_ranking_call_leaves_room_for_thinking(self):
+        """Thinking tokens count against max_tokens. At 1024 the response
+        stopped at the cap with no text and the ranker silently never ran."""
+        from unittest.mock import MagicMock, patch
+        from omop_core.services.mapping_suggestions import rank_candidates
+        candidates = [{'concept_id': 1, 'concept_name': 'A', 'concept_code': 'a',
+                       'vocabulary_id': 'LOINC', 'concept_class_id': 'Lab Test',
+                       'lexical_score': 0.7}]
+        block = MagicMock(type='text')
+        block.text = '{"concept_id": 1, "confidence": "high", "reason": "ok"}'
+        client = MagicMock()
+        client.messages.create.return_value = MagicMock(content=[block])
+        with override_settings(ANTHROPIC_API_KEY='k'), \
+                patch('anthropic.Anthropic', return_value=client):
+            rank_candidates('x', candidates)
+        kwargs = client.messages.create.call_args.kwargs
+        self.assertGreaterEqual(kwargs['max_tokens'], 8000)
+        self.assertEqual(kwargs['thinking'], {'type': 'adaptive'})
+
+    def test_a_gap_proposal_carries_its_domain(self):
+        """Without it the UI has nothing to place the row by, and it appeared
+        in no tab at all."""
+        from omop_core.services.code_mapping import resolve_source_code
+        _, mapping = resolve_source_code(
+            source_code='99999-9', source_vocabulary_id='LOINC',
+            source_text='Not loaded here', omop_table='measurement',
+        )
+        self.assertEqual(mapping.domain_id, 'Measurement')
+        self.assertIsNone(mapping.target_concept_id)
+class RepointResolvableZerosCommandTest(_AllowsDuplicateConceptCodes):
+    """Safety contract for #846/#854: an automated repair never guesses."""
+
+    PERSON_ID = 846001
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.vocab, cls.condition_domain, cls.measurement_domain, cls.drug_domain, _type, cls.observation_domain, cls.concept_class = _make_vocab()
+        cls.measurement_target = Concept.objects.create(
+            concept_id=8461001, concept_name='Safe measurement', domain=cls.measurement_domain,
+            vocabulary=cls.vocab, concept_class=cls.concept_class, standard_concept='S',
+            concept_code='SAFE-846', valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        cls.wrong_domain_target = Concept.objects.create(
+            concept_id=8461002, concept_name='Wrong-domain observation', domain=cls.observation_domain,
+            vocabulary=cls.vocab, concept_class=cls.concept_class, standard_concept='S',
+            concept_code='WRONG-846', valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+
+    def _measurement(self, pk, source_value, value, source_concept_id=None):
+        return Measurement.objects.create(
+            measurement_id=pk, person=self.person, measurement_concept_id=0,
+            measurement_date=date(2024, 1, 1), measurement_type_concept_id=32817,
+            measurement_source_value=source_value, measurement_source_concept_id=source_concept_id,
+            value_as_number=value,
+        )
+
+    def test_apply_moves_all_distinct_same_day_measurements_without_deleting(self):
+        self.measurement_target.concept_code = 'GLU-846'
+        self.measurement_target.save(update_fields=['concept_code'])
+        self._measurement(84601, 'GLU-846', 1, self.measurement_target.concept_id)
+        self._measurement(84602, 'GLU-846', 2, self.measurement_target.concept_id)
+
+        call_command('repoint_resolvable_zeros', '--apply', '--table', 'measurement', verbosity=0)
+
+        rows = Measurement.objects.filter(measurement_id__in=[84601, 84602]).order_by('measurement_id')
+        self.assertEqual(rows.count(), 2)
+        self.assertEqual({row.measurement_concept_id for row in rows}, {self.measurement_target.concept_id})
+
+    def test_apply_skips_a_code_that_only_resolves_in_the_wrong_domain(self):
+        self._measurement(84603, 'WRONG-846', 1)
+
+        call_command('repoint_resolvable_zeros', '--apply', '--table', 'measurement', verbosity=0)
+
+        self.assertEqual(Measurement.objects.get(measurement_id=84603).measurement_concept_id, 0)
+
+    def test_apply_skips_a_non_standard_destination(self):
+        Concept.objects.create(
+            concept_id=8461004, concept_name='Non-standard measurement', domain=self.measurement_domain,
+            vocabulary=self.vocab, concept_class=self.concept_class, standard_concept=None,
+            concept_code='NONSTANDARD-846', valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        self._measurement(84605, 'NONSTANDARD-846', 1)
+
+        call_command('repoint_resolvable_zeros', '--apply', '--table', 'measurement', verbosity=0)
+
+        self.assertEqual(Measurement.objects.get(measurement_id=84605).measurement_concept_id, 0)
+
+    def test_approved_mapping_requires_matching_source_system_provenance(self):
+        from omop_core.models import SourceCodeConceptMapping
+        icd10cm, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='ICD10CM', defaults={'vocabulary_name': 'ICD10CM', 'vocabulary_concept_id': 0},
+        )
+        loinc, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='LOINC', defaults={'vocabulary_name': 'LOINC', 'vocabulary_concept_id': 0},
+        )
+        icd10cm_source = Concept.objects.create(
+            concept_id=8461006, concept_name='ICD-10-CM source code', domain=self.measurement_domain,
+            vocabulary=icd10cm, concept_class=self.concept_class, standard_concept=None,
+            concept_code='MAP-846', valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        loinc_source = Concept.objects.create(
+            concept_id=8461005, concept_name='LOINC source code', domain=self.measurement_domain,
+            vocabulary=loinc, concept_class=self.concept_class, standard_concept=None,
+            concept_code='MAP-846', valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        direct = Concept.objects.create(
+            concept_id=8461003, concept_name='Direct measurement', domain=self.measurement_domain,
+            vocabulary=self.vocab, concept_class=self.concept_class, standard_concept='S',
+            concept_code='MAP-846', valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='LOINC', source_code='MAP-846', target_concept=self.measurement_target,
+            destination_vocabulary_id=self.vocab.vocabulary_id, omop_table='measurement', status='approved',
+        )
+        self._measurement(84604, 'MAP-846', 1)
+        self._measurement(84606, 'MAP-846', 2, loinc_source.concept_id)
+        self._measurement(84607, 'MAP-846', 3, icd10cm_source.concept_id)
+
+        call_command('repoint_resolvable_zeros', '--apply', '--table', 'measurement', verbosity=0)
+
+        self.assertEqual(Measurement.objects.get(measurement_id=84604).measurement_concept_id, 0)
+        self.assertEqual(Measurement.objects.get(measurement_id=84606).measurement_concept_id, self.measurement_target.concept_id)
+        self.assertEqual(Measurement.objects.get(measurement_id=84607).measurement_concept_id, 0)
+        self.assertNotEqual(self.measurement_target.concept_id, direct.concept_id)
+
+
+# ── TEST: OpenWearables Source Vocabulary ────────────────────────────
+
+
+class OpenWearablesVocabularyTest(TestCase):
+    """Verify OpenWearables is registered as a source vocabulary."""
+
+    def test_openwearables_in_measurement_systems(self):
+        from omop_core.services.source_vocabularies import source_systems_for
+        vocabs = [s['vocabulary_id'] for s in source_systems_for('Measurement')]
+        self.assertIn('OpenWearables', vocabs)
+
+    def test_openwearables_in_observation_systems(self):
+        from omop_core.services.source_vocabularies import source_systems_for
+        vocabs = [s['vocabulary_id'] for s in source_systems_for('Observation')]
+        self.assertIn('OpenWearables', vocabs)
+
+    def test_tab_ordering_before_uncoded_and_standard(self):
+        from omop_core.services.source_vocabularies import source_tab_sort_key
+        ow_key = source_tab_sort_key('OpenWearables')
+        uncoded_key = source_tab_sort_key('')
+        loinc_key = source_tab_sort_key('LOINC')
+        self.assertLess(ow_key, uncoded_key)
+        self.assertLess(ow_key, loinc_key)
+
+    def test_tables_for_openwearables(self):
+        from omop_core.services.source_vocabularies import tables_for_source_vocabulary
+        tables = tables_for_source_vocabulary('OpenWearables')
+        self.assertIn('measurement', tables)
+        self.assertIn('observation', tables)
+
+
+class SeedOpenWearablesMappingsTest(TestCase):
+    """Test the seed_openwearables_mappings management command."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.management.commands.seed_openwearables_mappings import (
+            OPENWEARABLES_METRICS,
+        )
+        cls.metric_count = len(OPENWEARABLES_METRICS)
+
+        # seed_test_concepts creates LOINC vocabulary, domains, concept classes,
+        # and concepts including heart rate (8867-4 / concept_id 3027018).
+        seed_test_concepts()
+        cls.hr_concept = Concept.objects.get(concept_id=3027018)
+
+    def test_dry_run_creates_nothing(self):
+        call_command('seed_openwearables_mappings', '--dry-run', verbosity=0)
+        self.assertEqual(
+            SourceCodeConceptMapping.objects.filter(
+                source_vocabulary_id='OpenWearables',
+            ).count(),
+            0,
+        )
+
+    def test_creates_all_metrics(self):
+        call_command('seed_openwearables_mappings', verbosity=0)
+        count = SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='OpenWearables',
+        ).count()
+        self.assertEqual(count, self.metric_count)
+
+    def test_heart_rate_mapped_to_loinc(self):
+        call_command('seed_openwearables_mappings', verbosity=0)
+        row = SourceCodeConceptMapping.objects.get(
+            source_vocabulary_id='OpenWearables',
+            source_code='heart_rate',
+        )
+        self.assertEqual(row.target_concept_id, self.hr_concept.concept_id)
+        self.assertEqual(row.destination_vocabulary_id, 'LOINC')
+        self.assertEqual(row.domain_id, 'Measurement')
+        self.assertEqual(row.omop_table, 'measurement')
+        self.assertEqual(row.status, 'proposed')
+        self.assertEqual(row.origin, 'import')
+        self.assertEqual(row.origin_system, 'open-wearables-seed')
+
+    def test_unmapped_metric_has_no_target(self):
+        call_command('seed_openwearables_mappings', verbosity=0)
+        row = SourceCodeConceptMapping.objects.get(
+            source_vocabulary_id='OpenWearables',
+            source_code='running_power',
+        )
+        self.assertIsNone(row.target_concept)
+        self.assertEqual(row.destination_vocabulary_id, '')
+
+    def test_idempotent(self):
+        call_command('seed_openwearables_mappings', verbosity=0)
+        count1 = SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='OpenWearables',
+        ).count()
+        call_command('seed_openwearables_mappings', verbosity=0)
+        count2 = SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='OpenWearables',
+        ).count()
+        self.assertEqual(count1, count2)
+
+
+class WearableDeviceVocabularyTest(TestCase):
+    """Verify Apple and Garmin are registered as source vocabularies."""
+
+    def test_apple_in_measurement_systems(self):
+        from omop_core.services.source_vocabularies import source_systems_for
+        vocabs = [s['vocabulary_id'] for s in source_systems_for('Measurement')]
+        self.assertIn('Apple', vocabs)
+
+    def test_garmin_in_measurement_systems(self):
+        from omop_core.services.source_vocabularies import source_systems_for
+        vocabs = [s['vocabulary_id'] for s in source_systems_for('Measurement')]
+        self.assertIn('Garmin', vocabs)
+
+    def test_apple_in_observation_systems(self):
+        from omop_core.services.source_vocabularies import source_systems_for
+        vocabs = [s['vocabulary_id'] for s in source_systems_for('Observation')]
+        self.assertIn('Apple', vocabs)
+
+    def test_garmin_in_observation_systems(self):
+        from omop_core.services.source_vocabularies import source_systems_for
+        vocabs = [s['vocabulary_id'] for s in source_systems_for('Observation')]
+        self.assertIn('Garmin', vocabs)
+
+    def test_apple_garmin_consolidated_under_wearables(self):
+        from omop_core.services.source_vocabularies import (
+            WEARABLE_SOURCE_VOCABULARIES, SOURCE_TAB_ORDER,
+        )
+        self.assertIn('Apple', WEARABLE_SOURCE_VOCABULARIES)
+        self.assertIn('Garmin', WEARABLE_SOURCE_VOCABULARIES)
+        self.assertIn('OpenWearables', WEARABLE_SOURCE_VOCABULARIES)
+        # Apple and Garmin should NOT appear as separate tabs.
+        self.assertNotIn('Apple', SOURCE_TAB_ORDER)
+        self.assertNotIn('Garmin', SOURCE_TAB_ORDER)
+
+    def test_openwearables_tab_label_is_wearables(self):
+        from omop_core.services.source_vocabularies import source_tab_label
+        self.assertEqual(source_tab_label('OpenWearables'), 'Wearables')
+
+    def test_tables_for_apple(self):
+        from omop_core.services.source_vocabularies import tables_for_source_vocabulary
+        tables = tables_for_source_vocabulary('Apple')
+        self.assertIn('measurement', tables)
+        self.assertIn('observation', tables)
+
+    def test_tables_for_garmin(self):
+        from omop_core.services.source_vocabularies import tables_for_source_vocabulary
+        tables = tables_for_source_vocabulary('Garmin')
+        self.assertIn('measurement', tables)
+        self.assertIn('observation', tables)
+
+    def test_low_volume_vocabs_not_in_tab_order(self):
+        """ATC, HemOnc, CVX, RxNorm Extension only appear when they have proposals."""
+        from omop_core.services.source_vocabularies import SOURCE_TAB_ORDER
+        for vocab in ('ATC', 'HemOnc', 'CVX', 'RxNorm Extension'):
+            self.assertNotIn(vocab, SOURCE_TAB_ORDER)
+
+    def test_snomed_oid_alias(self):
+        from omop_core.services.source_vocabularies import VOCABULARY_OID_ALIASES
+        self.assertEqual(
+            VOCABULARY_OID_ALIASES.get('urn:oid:2.16.840.1.113883.6.96'),
+            'SNOMED',
+        )
+
+
+class SeedWearableDeviceMappingsTest(TestCase):
+    """Test the seed_wearable_device_mappings management command."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.management.commands.seed_wearable_device_mappings import (
+            APPLE_METRICS, GARMIN_METRICS,
+        )
+        cls.apple_count = len(APPLE_METRICS)
+        cls.garmin_count = len(GARMIN_METRICS)
+        seed_test_concepts()
+
+    def test_dry_run_creates_nothing(self):
+        call_command('seed_wearable_device_mappings', '--dry-run', verbosity=0)
+        self.assertEqual(
+            SourceCodeConceptMapping.objects.filter(
+                source_vocabulary_id__in=['Apple', 'Garmin'],
+            ).count(),
+            0,
+        )
+
+    def test_creates_all_apple_metrics(self):
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        count = SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='Apple',
+        ).count()
+        self.assertEqual(count, self.apple_count)
+
+    def test_creates_all_garmin_metrics(self):
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        count = SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='Garmin',
+        ).count()
+        self.assertEqual(count, self.garmin_count)
+
+    def test_apple_steps_mapped_correctly(self):
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        row = SourceCodeConceptMapping.objects.get(
+            source_vocabulary_id='Apple',
+            source_code='HKQuantityTypeIdentifierStepCount',
+        )
+        self.assertEqual(row.destination_vocabulary_id, 'LOINC')
+        self.assertEqual(row.domain_id, 'Observation')
+        self.assertEqual(row.omop_table, 'observation')
+        self.assertEqual(row.status, 'approved')
+        self.assertEqual(row.origin_system, 'hk-wearables-apple')
+        self.assertIsNotNone(row.target_concept)
+
+    def test_garmin_resting_hr_mapped_correctly(self):
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        row = SourceCodeConceptMapping.objects.get(
+            source_vocabulary_id='Garmin',
+            source_code='resting_hr',
+        )
+        self.assertEqual(row.destination_vocabulary_id, 'LOINC')
+        self.assertEqual(row.domain_id, 'Measurement')
+        self.assertEqual(row.omop_table, 'measurement')
+        self.assertEqual(row.status, 'approved')
+        self.assertEqual(row.origin_system, 'hk-wearables-garmin')
+        self.assertIsNotNone(row.target_concept)
+
+    def test_garmin_hrv_rmssd_uses_hk_wearable(self):
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        row = SourceCodeConceptMapping.objects.get(
+            source_vocabulary_id='Garmin',
+            source_code='hrv_rmssd',
+        )
+        self.assertEqual(row.destination_vocabulary_id, 'HK-Wearable')
+        self.assertIsNotNone(row.target_concept)
+
+    def test_idempotent(self):
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        count1 = SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id__in=['Apple', 'Garmin'],
+        ).count()
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        count2 = SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id__in=['Apple', 'Garmin'],
+        ).count()
+        self.assertEqual(count1, count2)
+
+
+class ResolveWearableMappingsTest(TestCase):
+    """Test resolve_wearable_mappings() with DB-driven and fallback modes."""
+
+    @classmethod
+    def setUpTestData(cls):
+        seed_test_concepts()
+
+    def test_fallback_to_hardcoded_when_no_db_rows(self):
+        """Without SCCM rows, resolve_wearable_mappings falls back to WEARABLE_CONCEPT_CODE."""
+        from omop_core.services.mappings import resolve_wearable_mappings
+        mappings = resolve_wearable_mappings('apple')
+        # Steps should resolve from the hard-coded dict
+        self.assertIn('steps', mappings)
+        self.assertIsNotNone(mappings['steps'])
+
+    def test_db_mappings_used_when_seeded(self):
+        """After seeding, resolve_wearable_mappings reads from the DB."""
+        from omop_core.services.mappings import resolve_wearable_mappings
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        mappings = resolve_wearable_mappings('apple')
+        self.assertIn('steps', mappings)
+        self.assertIn('resting_hr', mappings)
+        self.assertIn('sleep_duration', mappings)
+
+    def test_garmin_db_mappings(self):
+        from omop_core.services.mappings import resolve_wearable_mappings
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        mappings = resolve_wearable_mappings('garmin')
+        self.assertIn('steps', mappings)
+        self.assertIn('hrv_rmssd', mappings)
+        self.assertIn('resting_hr', mappings)
+
+    def test_db_mapping_overrides_hardcoded(self):
+        """An approved SCCM row takes precedence over the hard-coded dict."""
+        from omop_core.services.mappings import resolve_wearable_mappings
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        mappings = resolve_wearable_mappings('garmin')
+        # The DB mapping should resolve to the same concept as the hard-coded one
+        # (since they point to the same LOINC code), confirming DB was consulted.
+        garmin_steps = SourceCodeConceptMapping.objects.get(
+            source_vocabulary_id='Garmin', source_code='steps',
+        )
+        self.assertEqual(mappings['steps'].concept_id, garmin_steps.target_concept.concept_id)
+
+
+class SeedHkLabsMappingsTest(TestCase):
+    """Test the seed_hklabs_mappings management command."""
+
+    @classmethod
+    def setUpTestData(cls):
+        seed_test_concepts()
+        # The fixture has LOINC 6690-2 (WBC) and 718-7 (Hemoglobin).
+        cls.wbc_concept = Concept.objects.get(concept_code='6690-2', vocabulary_id='LOINC')
+        cls.hgb_concept = Concept.objects.get(concept_code='718-7', vocabulary_id='LOINC')
+
+    def setUp(self):
+        import json
+        import tempfile
+        self.tmpdir = tempfile.mkdtemp()
+        data_dir = Path(self.tmpdir) / 'data'
+        fixtures_dir = Path(self.tmpdir) / 'fixtures'
+        data_dir.mkdir()
+        fixtures_dir.mkdir()
+
+        # Minimal loinc_common.json with two entries
+        (data_dir / 'loinc_common.json').write_text(json.dumps({
+            'codes': [
+                {'loinc_code': '6690-2', 'loinc_short_name': 'WBC',
+                 'loinc_default_unit': '10^3/uL', 'value_type': 'numeric'},
+                {'loinc_code': '718-7', 'loinc_short_name': 'Hemoglobin',
+                 'loinc_default_unit': 'g/dL', 'value_type': 'numeric'},
+                {'loinc_code': '99999-9', 'loinc_short_name': 'Fake Test',
+                 'loinc_default_unit': 'mg/dL', 'value_type': 'numeric'},
+            ],
+        }))
+
+        # Minimal lab_catalog.json — one entry that maps via _CATALOG_LOINC
+        (fixtures_dir / 'lab_catalog.json').write_text(json.dumps([{
+            'model': 'labs.labtestentry', 'pk': 1,
+            'fields': {
+                'abbreviation': 'wbc',
+                'name': 'White blood cell count',
+                'name_normalized': 'white blood cell count',
+            },
+        }]))
+
+        # Minimal curated_aliases_manual.json
+        (fixtures_dir / 'curated_aliases_manual.json').write_text(json.dumps([
+            {'loinc_num': '718-7', 'alias': 'Hgb', 'note': 'test alias'},
+        ]))
+
+        # Clean up any prior SCCM rows from this origin
+        SourceCodeConceptMapping.objects.filter(origin_system='hk-labs-seed').delete()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_dry_run_creates_nothing(self):
+        call_command('seed_hklabs_mappings', '--dry-run',
+                     '--hklabs-root', self.tmpdir, verbosity=0)
+        self.assertEqual(
+            SourceCodeConceptMapping.objects.filter(
+                origin_system='hk-labs-seed',
+            ).count(),
+            0,
+        )
+
+    def test_creates_mappings(self):
+        call_command('seed_hklabs_mappings',
+                     '--hklabs-root', self.tmpdir, verbosity=0)
+        rows = SourceCodeConceptMapping.objects.filter(
+            origin_system='hk-labs-seed',
+        )
+        # 3 from loinc_common (wbc, hemoglobin, fake test)
+        # + 1 from catalog (white blood cell count — distinct from "wbc")
+        # + 1 from aliases (hgb)
+        # = 5 unique normalized source codes
+        self.assertEqual(rows.count(), 5)
+
+    def test_all_entries_are_uncoded_text(self):
+        call_command('seed_hklabs_mappings',
+                     '--hklabs-root', self.tmpdir, verbosity=0)
+        rows = SourceCodeConceptMapping.objects.filter(
+            origin_system='hk-labs-seed',
+        )
+        for row in rows:
+            self.assertEqual(row.source_vocabulary_id, '',
+                             f'{row.source_code} has non-empty source_vocabulary_id')
+
+    def test_resolved_concept_linked(self):
+        call_command('seed_hklabs_mappings',
+                     '--hklabs-root', self.tmpdir, verbosity=0)
+        row = SourceCodeConceptMapping.objects.get(
+            source_vocabulary_id='', source_code='wbc',
+        )
+        self.assertEqual(row.target_concept_id, self.wbc_concept.concept_id)
+        self.assertEqual(row.destination_vocabulary_id, 'LOINC')
+        self.assertEqual(row.domain_id, 'Measurement')
+        self.assertEqual(row.omop_table, 'measurement')
+        self.assertEqual(row.status, 'approved')
+        self.assertEqual(row.origin, 'import')
+
+    def test_unresolved_concept_is_null(self):
+        call_command('seed_hklabs_mappings',
+                     '--hklabs-root', self.tmpdir, verbosity=0)
+        row = SourceCodeConceptMapping.objects.get(
+            source_vocabulary_id='', source_code='fake test',
+        )
+        self.assertIsNone(row.target_concept)
+        self.assertEqual(row.destination_vocabulary_id, '')
+        self.assertEqual(row.status, 'proposed')
+
+    def test_idempotent(self):
+        call_command('seed_hklabs_mappings',
+                     '--hklabs-root', self.tmpdir, verbosity=0)
+        count1 = SourceCodeConceptMapping.objects.filter(
+            origin_system='hk-labs-seed',
+        ).count()
+        call_command('seed_hklabs_mappings',
+                     '--hklabs-root', self.tmpdir, verbosity=0)
+        count2 = SourceCodeConceptMapping.objects.filter(
+            origin_system='hk-labs-seed',
+        ).count()
+        self.assertEqual(count1, count2)

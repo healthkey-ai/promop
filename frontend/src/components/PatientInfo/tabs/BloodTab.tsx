@@ -1,61 +1,80 @@
-import Field from '../Field';
+import { useState } from 'react';
+import ClinicalField from '../ClinicalField';
 import Section from '../Section';
+import { useWritableFields } from '@/hooks/useWritableFields';
+import { today } from '@/api/clinicalFacts';
 
 interface Props {
   formData: Record<string, unknown>;
   onChange: (field: string, value: unknown) => void;
 }
 
+/**
+ * Haematology, rendered against the server's writable-field descriptor.
+ *
+ * Every field here was already mapped server-side — the server has known the OMOP
+ * fact behind `anc_thousand_per_ul` for some time. What it could not do was save:
+ * the tab PATCHed `PatientRecord`, which owns no writable clinical column and
+ * refuses. A mapping and a write path are independent halves, and this supplies
+ * the second.
+ *
+ * The counts are the only thing this tab holds that Labs does not. It used to
+ * carry Electrolytes, Cardiac & Other, Coagulation and Tumor Markers as well —
+ * fifteen analytes, all rendered by sections already on Labs under the same
+ * field keys, so one value had two editable boxes on two tabs (#955). That
+ * duplication predated the descriptor: Labs used alias names (`serum_sodium`)
+ * where this tab used canonicals (`sodium_meq_l`), so the same analyte looked
+ * like two fields until both resolved to one LOINC code. Labs owns the
+ * chemistry; this tab is the blood count.
+ */
+const COUNTS: Array<[string, string]> = [
+  ['Hemoglobin (g/dL)', 'hemoglobin_g_dl'],
+  ['Hematocrit (%)', 'hematocrit_percent'],
+  ['WBC Count (10³/µL)', 'wbc_count_thousand_per_ul'],
+  ['RBC Count (10⁶/µL)', 'rbc_million_per_ul'],
+  ['Platelet Count (10³/µL)', 'platelet_count_thousand_per_ul'],
+  ['ANC (10³/µL)', 'anc_thousand_per_ul'],
+  ['ALC (10³/µL)', 'alc_thousand_per_ul'],
+  ['AMC (10³/µL)', 'amc_thousand_per_ul'],
+];
+
 export default function BloodTab({ formData, onChange }: Props) {
+  // Ask about *this* patient: whether a field may be edited depends on who is
+  // asking and whose record it is, not only on whether the field is mapped.
+  const personId = (formData?.person_id ?? formData?.person) as number | undefined;
+  const { descriptors, loading } = useWritableFields(personId);
+  const [date, setDate] = useState(today());
+
+  const section = (title: string, fields: Array<[string, string]>) => (
+    <Section title={title}>
+      <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
+        {fields.map(([label, name]) => (
+          <ClinicalField
+            key={name}
+            label={label}
+            name={name}
+            type="number"
+            value={formData?.[name]}
+            descriptor={descriptors[name]}
+            onChange={onChange}
+            date={date}
+            onDateChange={setDate}
+          />
+        ))}
+      </div>
+    </Section>
+  );
+
   return (
     <div>
-      <Section title="Blood Counts">
-        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field label="Hemoglobin (g/dL)" name="hemoglobin_g_dl" type="number" value={formData?.hemoglobin_g_dl} onChange={onChange} />
-          <Field label="Hematocrit (%)" name="hematocrit_percent" type="number" value={formData?.hematocrit_percent} onChange={onChange} />
-          <Field label="WBC Count (10³/µL)" name="wbc_count_thousand_per_ul" type="number" value={formData?.wbc_count_thousand_per_ul} onChange={onChange} />
-          <Field label="RBC Count (10⁶/µL)" name="rbc_million_per_ul" type="number" value={formData?.rbc_million_per_ul} onChange={onChange} />
-          <Field label="Platelet Count (10³/µL)" name="platelet_count_thousand_per_ul" type="number" value={formData?.platelet_count_thousand_per_ul} onChange={onChange} />
-          <Field label="ANC (10³/µL)" name="anc_thousand_per_ul" type="number" value={formData?.anc_thousand_per_ul} onChange={onChange} />
-          <Field label="ALC (10³/µL)" name="alc_thousand_per_ul" type="number" value={formData?.alc_thousand_per_ul} onChange={onChange} />
-          <Field label="AMC (10³/µL)" name="amc_thousand_per_ul" type="number" value={formData?.amc_thousand_per_ul} onChange={onChange} />
-        </div>
-      </Section>
-
-      <Section title="Electrolytes">
-        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field label="Sodium (mEq/L)" name="sodium_meq_l" type="number" value={formData?.sodium_meq_l} onChange={onChange} />
-          <Field label="Potassium (mEq/L)" name="potassium_meq_l" type="number" value={formData?.potassium_meq_l} onChange={onChange} />
-          <Field label="Calcium (mg/dL)" name="calcium_mg_dl" type="number" value={formData?.calcium_mg_dl} onChange={onChange} />
-          <Field label="Magnesium (mg/dL)" name="magnesium_mg_dl" type="number" value={formData?.magnesium_mg_dl} onChange={onChange} />
-        </div>
-      </Section>
-
-      <Section title="Cardiac &amp; Other">
-        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field label="Troponin (ng/mL)" name="troponin_ng_ml" type="number" value={formData?.troponin_ng_ml} onChange={onChange} />
-          <Field label="BNP (pg/mL)" name="bnp_pg_ml" type="number" value={formData?.bnp_pg_ml} onChange={onChange} />
-          <Field label="Glucose (mg/dL)" name="glucose_mg_dl" type="number" value={formData?.glucose_mg_dl} onChange={onChange} />
-          <Field label="HbA1c (%)" name="hba1c_percent" type="number" value={formData?.hba1c_percent} onChange={onChange} />
-          <Field label="LDH (U/L)" name="ldh_u_l" type="number" value={formData?.ldh_u_l} onChange={onChange} />
-        </div>
-      </Section>
-
-      <Section title="Coagulation">
-        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field label="INR" name="inr" type="number" value={formData?.inr} onChange={onChange} />
-          <Field label="PT (seconds)" name="pt_seconds" type="number" value={formData?.pt_seconds} onChange={onChange} />
-          <Field label="PTT (seconds)" name="ptt_seconds" type="number" value={formData?.ptt_seconds} onChange={onChange} />
-        </div>
-      </Section>
-
-      <Section title="Tumor Markers">
-        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field label="CEA (ng/mL)" name="cea_ng_ml" type="number" value={formData?.cea_ng_ml} onChange={onChange} />
-          <Field label="CA 19-9 (U/mL)" name="ca19_9_u_ml" type="number" value={formData?.ca19_9_u_ml} onChange={onChange} />
-          <Field label="PSA (ng/mL)" name="psa_ng_ml" type="number" value={formData?.psa_ng_ml} onChange={onChange} />
-        </div>
-      </Section>
+      {!loading && (
+        <p className="mb-4 text-xs text-muted-foreground">
+          These values are stored as OMOP measurements. Editing one records a new
+          result dated below and re-derives the record; a field without an editable
+          box explains why underneath it.
+        </p>
+      )}
+      {section('Blood Counts', COUNTS)}
     </div>
   );
 }

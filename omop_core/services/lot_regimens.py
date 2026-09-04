@@ -12,7 +12,11 @@ DRUG_SUBTYPE_MAP: Maps lowercased drug name → subtype (myeloma / cart / steroi
 
 PROCEDURE_SNOMED_MAP: Maps SNOMED concept code string → event subtype (transplant / cart).
 """
+import json
+import logging
 import re
+
+logger = logging.getLogger('audit')
 
 # ---------------------------------------------------------------------------
 # Drug subtype classification
@@ -369,6 +373,51 @@ def _normalize_regimen_key(drug_names) -> frozenset:
     return frozenset(normalize_drug_name(d) for d in drug_names if d)
 
 
+def _best_subset_match(key: frozenset, table: dict):
+    """Return the value for the most specific entry contained in ``key``.
+
+    The fallback used to return the first subset it met while walking the
+    lookup tables, which made the answer depend on where an entry happened to
+    sit in the literals: ``{daratumumab, lenalidomide}`` contains both
+    ``{daratumumab}`` and ``{lenalidomide}``, and whichever came first won.
+    Reordering the tables would silently change what a clinician reads.
+
+    Preferring the largest subset makes the choice specific rather than
+    incidental -- a triplet entry beats a doublet, a doublet beats a single --
+    and ties are resolved by refusing to guess: several entries of the same size
+    all contained in the drug set are genuinely ambiguous, and inventing an
+    order over them is what this is fixing.
+
+    A single-drug entry never answers for a combination, however. That is not a
+    less specific match, it is a wrong one: a line of bortezomib and
+    lenalidomide is not lenalidomide monotherapy, and the word says the opposite
+    of what happened. Nothing is better than that, because the caller can render
+    the component drugs, which are recorded exactly.
+    """
+    best = None
+    best_size = 0
+    tied = False
+    multi_drug = len(key) > 1
+    for lookup_key, value in table.items():
+        if not lookup_key.issubset(key):
+            continue
+        size = len(lookup_key)
+        if size == 1 and multi_drug:
+            # Would label a combination as a single-agent regimen.
+            continue
+        if size > best_size:
+            best, best_size, tied = value, size, False
+        elif size == best_size and value != best:
+            tied = True
+    if tied:
+        logger.info(
+            '{"event": "regimen_match_ambiguous", "drugs": %s, "size": %d}',
+            json.dumps(sorted(key)), best_size,
+        )
+        return None
+    return best
+
+
 def get_regimen_name(drug_names) -> str | None:
     """Return a canonical regimen display name for a set of drug names, if known."""
     key = _normalize_regimen_key(drug_names)
@@ -376,10 +425,7 @@ def get_regimen_name(drug_names) -> str | None:
         return MYELOMA_REGIMEN_LOOKUP[key]
     if key in REGIMEN_LOOKUP:
         return REGIMEN_LOOKUP[key]
-    for lookup_key, name in {**MYELOMA_REGIMEN_LOOKUP, **REGIMEN_LOOKUP}.items():
-        if lookup_key.issubset(key):
-            return name
-    return None
+    return _best_subset_match(key, {**MYELOMA_REGIMEN_LOOKUP, **REGIMEN_LOOKUP})
 
 
 def get_regimen_concept_id(drug_names) -> int | None:
@@ -389,11 +435,9 @@ def get_regimen_concept_id(drug_names) -> int | None:
         return MYELOMA_REGIMEN_CONCEPT_IDS[key]
     if key in REGIMEN_CONCEPT_IDS:
         return REGIMEN_CONCEPT_IDS[key]
-    merged = {**MYELOMA_REGIMEN_CONCEPT_IDS, **REGIMEN_CONCEPT_IDS}
-    for lookup_key, concept_id in merged.items():
-        if concept_id and lookup_key.issubset(key):
-            return concept_id
-    return None
+    merged = {k: v for k, v in {**MYELOMA_REGIMEN_CONCEPT_IDS,
+                                **REGIMEN_CONCEPT_IDS}.items() if v}
+    return _best_subset_match(key, merged)
 
 
 # ---------------------------------------------------------------------------

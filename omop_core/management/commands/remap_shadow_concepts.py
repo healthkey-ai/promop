@@ -28,7 +28,7 @@ confirm the block has not returned.
 
 Resolution is by (vocabulary_id, concept_code), which is OMOP's natural key and
 therefore genuine identity — NOT by concept_name. Name matching is what produced
-Troponin T for a Troponin I code in seed_omop_concepts, and it is why the drug
+Troponin T for a Troponin I code in the retired concept seeder, and it is why the drug
 remap in #427 used a hard-coded constant. Code matching within a vocabulary
 carries no such risk, and every shadow here was verified to resolve to exactly
 one target.

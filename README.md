@@ -31,6 +31,7 @@ Not on a Mac? See the [Linux setup guide](docs/linux-setup.md). Prefer Docker? S
 - OpenAPI schema: `GET /api/v1/schema/`
 - Full API surface reference: **[API_SURFACE.md](API_SURFACE.md)**
 - LOINC / SNOMED / HemOnc concept mapping: **[docs/concept-mapping.md](docs/concept-mapping.md)**
+- Required Athena vocabulary download and selection scope: **[docs/vocabularies.md](docs/vocabularies.md)**
 
 ---
 
@@ -67,21 +68,58 @@ PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U postgres -d postgres \
   -c "CREATE DATABASE promop_test OWNER postgres;"
 ```
 
-### 3. Apply migrations
+### 3. Prepare the schema for the Athena vocabulary
+
+Production and clinical environments must load the **full** Athena vocabulary
+before applying migrations after `omop_core` migration `0200`. In particular,
+migration `0201` creates approved HK-Labs-to-LOINC mappings and requires its
+LOINC destination concepts to exist. Do not use the retired
+`seed_omop_concepts` development fixture in a deployed environment.
 
 ```bash
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
-  .venv/bin/python manage.py migrate
+  .venv/bin/python manage.py migrate omop_core 0200 --noinput
 ```
 
-### 4. Create a superuser
+### 4. Load the full Athena vocabulary
+
+```bash
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  .venv/bin/python manage.py load_athena_vocabularies --gdrive
+```
+
+`--gdrive` defaults to the shared PRomop vocabulary folder. See
+[docs/vocabularies.md](docs/vocabularies.md) for the required Athena selection
+scope and other load options, including `--archive` for a downloaded Athena
+zip, `--path` for an extracted Athena directory, and `--bucket` for
+GCS-backed deployments.
+
+#### Render deployment requirement
+
+Set `ATHENA_VOCABULARY_GDRIVE_URL` to the folder containing the **full** Athena
+export before deploying. The production startup script fails closed when it is
+missing, migrates the schema through `0200`, loads that export, and then runs
+the remaining migrations. This ordering is required; it prevents migration
+`0201` from creating null-target HK-Labs-to-LOINC mappings.
+
+### 5. Apply the remaining migrations
+
+Only after the vocabulary load succeeds, apply the migrations that seed and
+validate mappings against those concepts:
+
+```bash
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  .venv/bin/python manage.py migrate --noinput
+```
+
+### 6. Create a superuser
 
 ```bash
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
   .venv/bin/python manage.py setup_admin
 ```
 
-### 5. Run the backend
+### 7. Run the backend
 
 ```bash
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
@@ -91,7 +129,7 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
 
 The API is available at `http://localhost:8000/api/v1/`.
 
-### 6. Run the frontend
+### 8. Run the frontend
 
 ```bash
 cd frontend
@@ -117,13 +155,32 @@ docker compose up --build
 
 ## Running Tests
 
+There are **three** suites. The backend is split across two runners: Django's runner discovers
+only `omop_core.tests` and `patient_portal.tests`, while the `tests/` package is pytest-based and
+invisible to it. Run both.
+
 ```bash
-# Backend
+# Backend — Django runner (omop_core + patient_portal)
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
   .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput
 
+# Backend — pytest (the tests/ package)
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" DEBUG=True \
+  .venv/bin/python -m pytest -q
+
 # Frontend
 cd frontend && npm test -- --run
+```
+
+The pytest suite runs with `--no-migrations`, so its database is built by reflecting model state.
+That recreates `concept`'s GIN trigram index during `CREATE TABLE`, before any fixture could
+enable the extension — so `pg_trgm` must already exist on `template1`, which every new test
+database is cloned from. Without this, every pytest test errors with
+`operator class "gin_trgm_ops" does not exist`:
+
+```bash
+PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U postgres -d template1 \
+  -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
 ```
 
 ---
@@ -136,7 +193,7 @@ See [docs/sample-patient-data.md](docs/sample-patient-data.md) for instructions 
 
 ## Reproducing Benchmark Results
 
-See **[docs/reproducing-benchmark-results.md](docs/reproducing-benchmark-results.md)** for step-by-step instructions to reproduce the trial-eligibility and full PatientRecord benchmarks from the paper using the `synthea-bc.json` Zenodo data bundle. Includes a complete reference table of every OMOP source (LOINC code, concept name filter, source-value alias) that feeds each PatientRecord column.
+See **[docs/reproducing-benchmark-results.md](docs/reproducing-benchmark-results.md)** for step-by-step instructions to reproduce the trial-eligibility and full PatientRecord benchmarks from the paper. Two routes: import the published 1,000-patient cohort from Zenodo ([10.5281/zenodo.21430170](https://doi.org/10.5281/zenodo.21430170)), or generate an equivalent one locally with Synthea. Both cohorts are fully synthetic. Includes a complete reference table of every OMOP source (LOINC code, concept name filter, source-value alias) that feeds each PatientRecord column.
 
 ---
 
@@ -161,9 +218,16 @@ See **[docs/reproducing-benchmark-results.md](docs/reproducing-benchmark-results
 
 ---
 
-## Contributing
+## Contributing and Support
 
-Please open an issue or pull request on GitHub. The `dev` branch is the integration target; `main` is the production branch.
+- **Contribute** — see **[CONTRIBUTING.md](CONTRIBUTING.md)** for branch, test, and pull request
+  conventions. The `dev` branch is the integration target; `main` is the production branch.
+- **Report a bug or request a feature** — open an issue at
+  [github.com/healthkey-ai/promop/issues](https://github.com/healthkey-ai/promop/issues).
+  Security vulnerabilities go to **support@healthkey.ai** instead of a public issue.
+- **Get help** — email **support@healthkey.ai**.
+
+This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md).
 
 ---
 

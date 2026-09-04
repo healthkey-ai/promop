@@ -85,9 +85,9 @@ export const STAGING_MODALITIES_OPTIONS = [
   'yp → Pathological after neoadjuvant therapy',
 ];
 
-export const ER_OPTIONS = ['ER+', 'ER-', 'ER+ with low expression', 'ER+ with high expression', 'Unknown'];
-export const PR_OPTIONS = ['PR+', 'PR-', 'PR+ with low expression', 'PR+ with high expression', 'Unknown'];
-export const HER2_OPTIONS = ['HER2+', 'HER2-', 'HER2 low', 'Unknown'];
+export const ER_OPTIONS = ['Positive', 'Negative', 'Equivocal', 'Unknown'];
+export const PR_OPTIONS = ['Positive', 'Negative', 'Equivocal', 'Unknown'];
+export const HER2_OPTIONS = ['Positive', 'Negative', 'Equivocal', 'Unknown'];
 export const HR_OPTIONS = ['HR+', 'HR-', 'HR+ with low expression', 'HR+ with high expression', 'Unknown'];
 export const HRD_OPTIONS = ['HRD+', 'HRD-', 'Unknown'];
 export const MENOPAUSAL_OPTIONS = ['Pre-menopausal', 'Peri-menopausal', 'Post-menopausal', 'Unknown'];
@@ -101,11 +101,10 @@ export const FL_TUMOR_GRADE_OPTIONS = [
   'Grade 3b (solid sheets of centroblasts)',
 ];
 export const MYELOMA_TYPE_OPTIONS = [
-  'IgG Kappa', 'IgG Lambda', 'IgA Kappa', 'IgA Lambda',
-  'IgD Kappa', 'IgD Lambda', 'IgE Kappa', 'IgE Lambda',
-  'IgM Kappa', 'IgM Lambda',
-  'Light Chain Only (Kappa)', 'Light Chain Only (Lambda)',
-  'Non-secretory', 'Biclonal',
+  'IgG kappa', 'IgG lambda', 'IgA kappa', 'IgA lambda',
+  'IgD kappa', 'IgD lambda', 'IgE kappa', 'IgE lambda',
+  'IgM kappa', 'IgM lambda',
+  'Light-chain kappa', 'Light-chain lambda',
 ];
 export const ISS_STAGE_OPTIONS = ['Stage I', 'Stage II', 'Stage III'];
 export const MRD_STATUS_OPTIONS = [

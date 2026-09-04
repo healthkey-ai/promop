@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import Field from '../Field';
+import { useWritableFields } from '@/hooks/useWritableFields';
+import ClinicalField from '../ClinicalField';
 import Section from '../Section';
 import api from '@/api/axios';
 
@@ -84,6 +85,10 @@ function formatMetricValue(metric: string, value: number): string {
 }
 
 export default function WearableTab({ formData, onRefresh }: Props) {
+  // Ask about *this* patient: whether a field may be edited depends on who is
+  // asking and whose record it is, not only on whether the field is mapped.
+  const personId = (formData?.person_id ?? formData?.person) as number | undefined;
+  const { descriptors } = useWritableFields(personId);
   const noData = !formData?.wearable_last_sync_at;
   const [uploading, setUploading] = useState(false);
   const [uploadResult, setUploadResult] = useState<string | null>(null);
@@ -457,201 +462,229 @@ export default function WearableTab({ formData, onRefresh }: Props) {
         </div>
       </Section>
 
+      <div className="mb-5 rounded-md border border-border bg-muted/40 px-4 py-3">
+        <p className="text-xs text-muted-foreground">
+          Every value below is a 30-day aggregate over device readings, so none of
+          them is typed in: a clinician does not enter a median. Upload device
+          data above and these follow.
+        </p>
+      </div>
+
       <Section title="Activity (30-Day)">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field
+          <ClinicalField
             label="Median Daily Steps"
             name="median_daily_steps_30d"
+            descriptor={descriptors.median_daily_steps_30d}
+            showReason={false}
             type="number"
             value={formData?.median_daily_steps_30d}
             onChange={() => {}}
-            disabled
           />
-          <Field
+          <ClinicalField
             label="Active Minutes / Day"
             name="active_minutes_per_day_30d"
+            descriptor={descriptors.active_minutes_per_day_30d}
+            showReason={false}
             type="number"
             value={formData?.active_minutes_per_day_30d}
             onChange={() => {}}
-            disabled
           />
-          <Field
+          <ClinicalField
             label="Activity Trend"
             name="activity_trend_30d"
+            descriptor={descriptors.activity_trend_30d}
+            showReason={false}
             type="select"
             value={formData?.activity_trend_30d}
             options={ACTIVITY_TREND_OPTIONS}
             onChange={() => {}}
-            disabled
           />
         </div>
       </Section>
 
       <Section title="Cardiovascular (30-Day)">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field
+          <ClinicalField
             label="Resting Heart Rate (bpm)"
             name="resting_heart_rate_avg_30d"
+            descriptor={descriptors.resting_heart_rate_avg_30d}
+            showReason={false}
             type="number"
             value={formData?.resting_heart_rate_avg_30d}
             onChange={() => {}}
-            disabled
           />
           {/* SDNN and RMSSD are distinct statistics and are shown as
               distinct fields. A patient normally has one or the other
               depending on their device, not both. */}
-          <Field
+          <ClinicalField
             label="HRV SDNN (ms)"
             name="hrv_sdnn_avg_30d"
+            descriptor={descriptors.hrv_sdnn_avg_30d}
+            showReason={false}
             type="number"
             value={formData?.hrv_sdnn_avg_30d}
             onChange={() => {}}
-            disabled
           />
-          <Field
+          <ClinicalField
             label="HRV RMSSD (ms)"
             name="hrv_rmssd_avg_30d"
+            descriptor={descriptors.hrv_rmssd_avg_30d}
+            showReason={false}
             type="number"
             value={formData?.hrv_rmssd_avg_30d}
             onChange={() => {}}
-            disabled
           />
         </div>
       </Section>
 
       <Section title="Respiratory (30-Day)">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field
+          <ClinicalField
             label="Min SpO&#8322; (%)"
             name="oxygen_saturation_min_30d"
+            descriptor={descriptors.oxygen_saturation_min_30d}
+            showReason={false}
             type="number"
             value={formData?.oxygen_saturation_min_30d}
             onChange={() => {}}
-            disabled
           />
-          <Field
+          <ClinicalField
             label="Avg SpO&#8322; (%)"
             name="oxygen_saturation_avg_30d"
+            descriptor={descriptors.oxygen_saturation_avg_30d}
+            showReason={false}
             type="number"
             value={formData?.oxygen_saturation_avg_30d}
             onChange={() => {}}
-            disabled
           />
-          <Field
+          <ClinicalField
             label="Respiratory Rate (breaths/min)"
             name="respiratory_rate_avg_30d"
+            descriptor={descriptors.respiratory_rate_avg_30d}
+            showReason={false}
             type="number"
             value={formData?.respiratory_rate_avg_30d}
             onChange={() => {}}
-            disabled
           />
         </div>
       </Section>
 
       <Section title="Sleep (30-Day)">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field
+          <ClinicalField
             label="Avg Sleep Duration (hours)"
             name="sleep_duration_hours_avg_30d"
+            descriptor={descriptors.sleep_duration_hours_avg_30d}
+            showReason={false}
             type="number"
             value={formData?.sleep_duration_hours_avg_30d}
             onChange={() => {}}
-            disabled
           />
         </div>
       </Section>
 
       <Section title="Fitness (30-Day)">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field
+          <ClinicalField
             label="VO&#8322; Max (mL/kg/min)"
             name="vo2_max_avg_30d"
+            descriptor={descriptors.vo2_max_avg_30d}
+            showReason={false}
             type="number"
             value={formData?.vo2_max_avg_30d}
             onChange={() => {}}
-            disabled
           />
-          <Field
+          <ClinicalField
             label="Distance (km/day)"
             name="distance_km_per_day_30d"
+            descriptor={descriptors.distance_km_per_day_30d}
+            showReason={false}
             type="number"
             value={formData?.distance_km_per_day_30d}
             onChange={() => {}}
-            disabled
           />
-          <Field
+          <ClinicalField
             label="Flights Climbed / Day"
             name="flights_climbed_per_day_30d"
+            descriptor={descriptors.flights_climbed_per_day_30d}
+            showReason={false}
             type="number"
             value={formData?.flights_climbed_per_day_30d}
             onChange={() => {}}
-            disabled
           />
         </div>
       </Section>
 
       <Section title="Gait & Mobility (30-Day)">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field
+          <ClinicalField
             label="Walking Speed (km/hr)"
             name="walking_speed_avg_30d"
+            descriptor={descriptors.walking_speed_avg_30d}
+            showReason={false}
             type="number"
             value={formData?.walking_speed_avg_30d}
             onChange={() => {}}
-            disabled
           />
-          <Field
+          <ClinicalField
             label="Step Length (cm)"
             name="walking_step_length_avg_30d"
+            descriptor={descriptors.walking_step_length_avg_30d}
+            showReason={false}
             type="number"
             value={formData?.walking_step_length_avg_30d}
             onChange={() => {}}
-            disabled
           />
-          <Field
+          <ClinicalField
             label="Double Support (%)"
             name="walking_double_support_pct_avg_30d"
+            descriptor={descriptors.walking_double_support_pct_avg_30d}
+            showReason={false}
             type="number"
             value={formData?.walking_double_support_pct_avg_30d}
             onChange={() => {}}
-            disabled
           />
-          <Field
+          <ClinicalField
             label="Walking Heart Rate (bpm)"
             name="walking_hr_avg_30d"
+            descriptor={descriptors.walking_hr_avg_30d}
+            showReason={false}
             type="number"
             value={formData?.walking_hr_avg_30d}
             onChange={() => {}}
-            disabled
           />
         </div>
       </Section>
 
       <Section title="Energy & Body (30-Day)">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field
+          <ClinicalField
             label="Active Energy (kcal/day)"
             name="active_energy_per_day_30d"
+            descriptor={descriptors.active_energy_per_day_30d}
+            showReason={false}
             type="number"
             value={formData?.active_energy_per_day_30d}
             onChange={() => {}}
-            disabled
           />
-          <Field
+          <ClinicalField
             label="Basal Energy (kcal/day)"
             name="basal_energy_per_day_30d"
+            descriptor={descriptors.basal_energy_per_day_30d}
+            showReason={false}
             type="number"
             value={formData?.basal_energy_per_day_30d}
             onChange={() => {}}
-            disabled
           />
-          <Field
+          <ClinicalField
             label="Body Mass (kg)"
             name="body_mass_avg_30d"
+            descriptor={descriptors.body_mass_avg_30d}
+            showReason={false}
             type="number"
             value={formData?.body_mass_avg_30d}
             onChange={() => {}}
-            disabled
           />
         </div>
       </Section>

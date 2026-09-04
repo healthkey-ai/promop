@@ -18,6 +18,10 @@ import PatientHome from "@/components/Patient/PatientHome";
 import UploadFHIR from "@/components/Patient/UploadFHIR";
 import UploadCSV from "@/components/Patient/UploadCSV";
 import OrgAdminPage from "@/components/OrgAdmin/OrgAdminPage";
+import FieldMappingPage from "@/components/FieldMappings/FieldMappingPage";
+import CodeMappingPage from "@/components/CodeMappings/CodeMappingPage";
+import MappingHubPage from "@/components/MappingHub/MappingHubPage";
+import TherapyMappingPage from "@/components/TherapyMappings/TherapyMappingPage";
 import OrgLogin from "@/components/Auth/OrgLogin";
 import OrgSignup from "@/components/Auth/OrgSignup";
 import ForgotPassword from "@/components/Auth/ForgotPassword";
@@ -101,6 +105,17 @@ function AppRoutes() {
     return element;
   };
 
+  // Mapping curation is available to any professional role (staff, org_admin,
+  // doctor, analyst).  Doctors and analysts can propose; only staff and
+  // org_admin can approve.  The API independently enforces the same policy.
+  const hasProfessionalRole = currentUser?.is_staff || currentUser?.is_org_admin
+    || currentUser?.org_accesses?.some(a => ['org_admin', 'doctor', 'analyst'].includes(a.role ?? ''));
+  const mappingAdminRoute = (element: ReactNode) => {
+    if (!currentUser) return <Navigate to="/login" replace />;
+    if (!hasProfessionalRole) return <Navigate to="/" replace />;
+    return element;
+  };
+
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
@@ -137,6 +152,10 @@ function AppRoutes() {
       <Route path="/upload-csv" element={providerRoute(<UploadCSV />)} />
       <Route path="/stats" element={<Navigate to="/org-admin" replace />} />
       <Route path="/org-admin" element={providerRoute(<OrgAdminPage />)} />
+      <Route path="/mappings" element={mappingAdminRoute(<MappingHubPage />)} />
+      <Route path="/field-mappings" element={mappingAdminRoute(<FieldMappingPage />)} />
+      <Route path="/code-mappings" element={mappingAdminRoute(<CodeMappingPage />)} />
+      <Route path="/therapy-mappings" element={mappingAdminRoute(<TherapyMappingPage />)} />
       <Route
         path="/profile"
         element={

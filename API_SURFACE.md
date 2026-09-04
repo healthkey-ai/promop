@@ -216,6 +216,55 @@ Returns the PatientRecord for the authenticated patient. Only available to patie
 
 ---
 
+### POST /api/v1/patient-records/{person_id}/refresh/
+
+Queues a re-derivation of the record from the person's OMOP rows. Admin or
+service-token only. Needed after any write made with `?skip_refresh=true`.
+
+**Response 202**
+
+```json
+{ "person_id": 123, "task_id": "3f2b1c8e-..." }
+```
+
+The record is **not** rebuilt yet when this returns — derivation runs on a
+Celery worker and costs 15-25s on a bulk-loaded patient. Poll the status
+endpoint below with the returned `task_id`.
+
+**Response 403** — caller is not an administrator.
+**Response 404** — no such person, or no PatientRecord for them.
+
+---
+
+### GET /api/v1/derivation-status/{task_id}/
+
+The outcome of a queued derivation. Admin or service-token only; a task id
+carries no person, so there is no narrower ownership check.
+
+**Response 200**
+
+```json
+{ "task_id": "3f2b1c8e-...", "state": "SUCCESS", "error": null }
+```
+
+| `state` | Meaning |
+|---|---|
+| `PENDING` | queued, or an id this deployment has no record of |
+| `STARTED` | a worker is deriving |
+| `SUCCESS` | the record was rebuilt; `derived_at` has advanced |
+| `FAILURE` | derivation raised; `error` carries the message |
+
+`FAILURE` is reported rather than swallowed — a `SUCCESS` over a record that
+did not re-derive would be worse than an error. Results expire from the backend
+after `CELERY_RESULT_EXPIRES` (default 24h), after which the id reads `PENDING`
+again, so poll to a conclusion rather than parking an id for later.
+
+When the deployment has no broker configured, derivation runs inline before the
+`202` is sent and the first poll already reports `SUCCESS`. The contract is the
+same, so a client needs one code path.
+
+---
+
 ### PatientRecord mutation policy
 
 `PATCH /api/v1/patient-records/{person_id}/` returns **405 Method Not Allowed** for every
@@ -984,9 +1033,9 @@ kappa_flc                          36916-5    mg/dL           Kappa light chains
 kappa_flc                          80515-0    mg/dL           Kappa light chains.free [Mass/volume] in Serum by nephelometry
 lambda_flc                         33944-0    mg/dL           Lambda light chains.free [Mass/volume] in Serum
 lambda_flc                         80516-8    mg/dL           Lambda light chains.free [Mass/volume] in Serum by nephelometry
-free_light_chain_ratio             48378-4    {ratio}         Kappa/Lambda light chains.free [Mass Ratio] in Serum
-free_light_chain_ratio             80517-6    {ratio}         Kappa/Lambda light chains.free ratio by nephelometry
-free_light_chain_ratio             104546-7   {ratio}         Kappa/Lambda light chains.free [Mass Ratio] in Serum
+kappa_lambda_ratio                 48378-4    {ratio}         Kappa/Lambda light chains.free [Mass Ratio] in Serum
+kappa_lambda_ratio                 80517-6    {ratio}         Kappa/Lambda light chains.free ratio by nephelometry
+kappa_lambda_ratio                 104546-7   {ratio}         Kappa/Lambda light chains.free [Mass Ratio] in Serum
 clonal_plasma_cells                11118-7    %               Plasma cells/100 cells in Bone marrow
 
 # 33944-8 (kappa) and 33945-5 (lambda) also project, but they are NOT real LOINC
