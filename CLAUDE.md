@@ -692,6 +692,63 @@ If `remoteEntry.js` returns 500 on staging, check that `WHITENOISE_ROOT` points 
 
 ---
 
+## Copying Field Mappings Between Instances
+
+`copy_field_mappings` moves the field-mapping curation from another PRomop
+instance into this one. The curation is manual reviewer work, so it is copied
+rather than redone.
+
+```bash
+SOURCE_DATABASE_URL="postgresql://..." \
+  .venv/bin/python manage.py copy_field_mappings --dry-run
+SOURCE_DATABASE_URL="postgresql://..." \
+  .venv/bin/python manage.py copy_field_mappings
+```
+
+Destination is `DATABASE_URL`. The source is opened as a second connection
+registered at runtime (not in `settings.DATABASES`, so the test runner does not
+try to build a test database for it) and, on PostgreSQL, in a
+`default_transaction_read_only` session — the command never writes to the source.
+
+By default the command copies the two datasets loaded by the field-mapping
+screen: `FieldConceptMapping` and `FieldSynonym`. Existing rows with the same
+natural key are always overwritten. Related field-curation tables can be
+included explicitly with `--tables`:
+
+| Table | Natural key |
+|---|---|
+| `FieldConceptMapping` | `field_name` |
+| `CustomPatientField` | `field_name` (its mapping is `PROTECT`, so mappings are written first) |
+| `FieldChoice` + `FieldChoiceCode` | `(field_name, display)`; codes are replaced wholesale |
+| `FieldFormula` | `field_name` |
+| `FieldSynonym` | `(field_name, synonym_text)` |
+
+`--dry-run` rolls back, and `--prune` also deletes local rows the source lacks
+(off by default, so a copy is additive). Everything runs in one transaction
+against the local database. To migrate the entire related curation set, pass
+`--tables mappings custom_fields choices formulas synonyms`.
+
+Two things deliberately do not survive the trip:
+
+- **Row IDs.** Matching is on the natural key — the two instances number rows
+  independently.
+- **`reviewer` / `created_by`.** These point at `Identity` rows whose IDs mean a
+  different person on each instance, so they are cleared. A wrong attribution is
+  worse than none.
+
+The concept FK is **re-resolved by `(vocabulary_id, concept_code)`**, not copied
+as an id. Athena concept ids are stable across instances, but locally minted
+concepts (`Concept.source == 'HealthKey'`) are numbered per instance, so the
+same id can name a different concept on the target. A concept the target has
+not loaded leaves the mapping's concept null and logs a warning; the rest of the
+mapping still lands.
+
+Logic lives in `omop_core/services/field_curation_transfer.py`, split into
+`read_payload(using)` and `apply_payload(payload)` so the round trip is testable
+without a second test database (`tests/test_copy_field_mappings.py`).
+
+---
+
 ## Deployment
 
 - **`start.sh`** runs `python manage.py migrate` on every deploy — so migrations pushed to `main` are auto-applied on next Render deploy.

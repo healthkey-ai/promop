@@ -41,7 +41,10 @@ if not DEBUG:
     # app server is fully initialised (migrate, test, collectstatic, check, etc.)
     # so that Render deploys (which call `migrate` in start.sh) and CI test runs
     # are not broken when DATABASE_URL is absent at import time.
-    _management_commands = {'migrate', 'test', 'collectstatic', 'check', 'makemigrations'}
+    _management_commands = {
+        'migrate', 'test', 'collectstatic', 'check', 'makemigrations',
+        'copy_field_mappings',
+    }
     _running_mgmt = len(_sys.argv) > 1 and _sys.argv[1] in _management_commands
     # A Celery worker serves no HTTP, so the host and origin checks below would
     # only stop it from booting. Its secret and database still have to be real.
