@@ -21004,8 +21004,15 @@ class CodeMappingApiTest(TestCase):
             target_concept=self.standard,
             omop_table='measurement',
         )
+        # Scoped to the two codes at issue -- setUp's 'M-PROTEIN, SERUM' and the
+        # one above. The HK-Labs seed migration (#972) puts ~147 blank-vocabulary
+        # rows in every test database, and this test is about whether two uncoded
+        # codes collide, not about the size of the table.
         self.assertEqual(
-            SourceCodeConceptMapping.objects.filter(source_vocabulary_id='').count(), 2,
+            SourceCodeConceptMapping.objects.filter(
+                source_vocabulary_id='',
+                source_code__in=['M PROTEIN', 'M-PROTEIN, SERUM'],
+            ).count(), 2,
         )
 
     # ------------------------------------------------------------- domain
@@ -21434,7 +21441,9 @@ class CodeMappingResolutionTest(TestCase):
         )
         self.assertEqual(concept.concept_id, self.loinc_concept.concept_id)
         self.assertIsNone(mapping)
-        self.assertEqual(SourceCodeConceptMapping.objects.count(), 0)
+        self.assertEqual(
+            SourceCodeConceptMapping.objects.filter(source_code='33358-4').count(), 0,
+        )
 
     def test_approved_loinc_mapping_overrides_direct_concept(self):
         """SCCM is primary even when the inbound code has an Athena concept."""
@@ -21480,8 +21489,10 @@ class CodeMappingResolutionTest(TestCase):
                 source_code='MPS', source_text='M-PROTEIN, SERUM',
                 omop_table='measurement', source_system='hk-labs',
             )
-        self.assertEqual(SourceCodeConceptMapping.objects.count(), 1)
-        self.assertEqual(SourceCodeConceptMapping.objects.get().occurrence_count, 3)
+        self.assertEqual(SourceCodeConceptMapping.objects.filter(source_code='MPS').count(), 1)
+        self.assertEqual(
+            SourceCodeConceptMapping.objects.get(source_code='MPS').occurrence_count, 3,
+        )
         self.assertEqual(Concept.objects.filter(vocabulary_id='HK-Labs').count(), 1)
 
     def test_approved_mapping_overrides_a_direct_concept_hit(self):
@@ -21530,7 +21541,9 @@ class CodeMappingResolutionTest(TestCase):
         resolve_source_code(
             source_code='MPS', source_text='M-PROTEIN, SERUM', omop_table='measurement',
         )
-        self.assertEqual(SourceCodeConceptMapping.objects.get().status, 'approved')
+        self.assertEqual(
+            SourceCodeConceptMapping.objects.get(source_code='MPS').status, 'approved',
+        )
 
 
 class FieldConceptMappingTest(TestCase):
