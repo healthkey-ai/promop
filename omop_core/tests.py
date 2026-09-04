@@ -2253,6 +2253,7 @@ class PublishReleaseTest(_OmopBase):
         cmd = Command(stdout=StringIO())
         cmd._build_start = _time.time()
         cmd._cdm_vocab_version = 'v5.0 2024-07-01'
+        cmd._umls_release = None
         counts = {'concept': 100, 'vocabulary': 5}
         cmd._publish_release(counts)
 

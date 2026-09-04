@@ -2,7 +2,7 @@ name: Deploy to Staging
 
 on:
   push:
-    branches: [dev]
+    branches: [dev, copy-field-mappings-from-source-instance]
 
 concurrency:
   group: deploy-staging
@@ -22,11 +22,15 @@ permissions:
 jobs:
   test:
     name: Test
+    if: github.ref_name == 'dev'
     uses: ./.github/workflows/ci.yml
 
   build-and-deploy:
     name: Build & Deploy
     needs: test
+    if: >-
+      always() &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped')
     runs-on: ubuntu-latest
 
     steps:
