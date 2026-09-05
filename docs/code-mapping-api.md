@@ -97,7 +97,7 @@ The lookup lifecycle is:
    effective `athena-direct` cache row, so future calls hit SCCM first. It never
    overwrites a pre-existing curator row.
 5. If direct resolution fails, call
-   `omop_core.services.mapping_suggestions.suggest_source_code`. That service
+   `omop_core.mapping.suggestions.suggest_source_code`. That service
    owns all candidate retrieval and ranking strategies, including the
    multi-strategy UMLS/vector/lexical work. Its highest-ranked candidate becomes
    the target of a `proposed` SCCM row only.
