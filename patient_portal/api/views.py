@@ -8466,6 +8466,8 @@ def _serialize_code_mapping_row(concept, mapping=None):
             'notes': mapping.notes if mapping else '',
             'origin': mapping.origin if mapping else '',
             'origin_system': mapping.origin_system if mapping else '',
+            'suggest_strategy': mapping.suggest_strategy if mapping else '',
+            'umls_cui': mapping.umls_cui if mapping else '',
             'created_by': _mapping_author(mapping),
             # Who signed it off, which survives every later edit -- unlike
             # created_by/updated_by, which say only who last touched the row.
@@ -8519,6 +8521,8 @@ def _serialize_code_mapping_row(concept, mapping=None):
         'notes': mapping.notes if mapping else '',
         'origin': mapping.origin if mapping else '',
         'origin_system': mapping.origin_system if mapping else '',
+        'suggest_strategy': mapping.suggest_strategy if mapping else '',
+        'umls_cui': mapping.umls_cui if mapping else '',
         'created_by': _mapping_author(mapping),
         # Who signed it off, which survives every later edit -- unlike
         # created_by/updated_by, which say only who last touched the row.

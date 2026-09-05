@@ -1,12 +1,12 @@
 """Add concept_embedding table for vector-similarity search.
 
 Uses pgvector's vector(384) type and an IVFFlat index for cosine distance.
-The table is ``managed = False`` in the Django model because Django's ORM has
-no native pgvector field type -- we use raw SQL here and in queries.
+Migration 0206 transitions the model to managed=True with a proper VectorField;
+this migration uses raw SQL because the model was initially managed=False.
 
-The migration is a no-op on PostgreSQL instances where pgvector is not
-installed (e.g. local dev with postgresql@14 via Homebrew). The suggest
-pipeline gracefully falls through to lexical search when the table is absent.
+The RunPython still checks pg_available_extensions defensively, but pgvector is
+expected on all target databases (Render staging/production and local dev on
+PostgreSQL 18).
 """
 import logging
 

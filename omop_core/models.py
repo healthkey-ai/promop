@@ -9,6 +9,8 @@ from django.contrib.postgres.indexes import GinIndex, OpClass
 from django.db.models.functions import Upper
 import re
 
+from pgvector.django import VectorField
+
 from omop_core.services import source_vocabularies
 
 
@@ -1898,6 +1900,18 @@ class SourceCodeConceptMapping(models.Model):
     origin_system = models.CharField(
         max_length=50, blank=True, default='',
         help_text="Ingest channel that raised it, e.g. 'fhir-upload', 'hk-labs'.",
+    )
+    suggest_strategy = models.CharField(
+        max_length=10, blank=True, default='',
+        help_text=(
+            'Which retrieval tier proposed this mapping: umls, vectors, or '
+            'lexical. Blank for curator-created rows or rows from before this '
+            'field existed.'
+        ),
+    )
+    umls_cui = models.CharField(
+        max_length=20, blank=True, default='',
+        help_text='UMLS CUI used to bridge this mapping, when suggest_strategy is umls.',
     )
     occurrence_count = models.IntegerField(default=0)
     first_seen = models.DateTimeField(null=True, blank=True)
@@ -4189,13 +4203,10 @@ class ConceptEmbedding(models.Model):
         Concept, primary_key=True, on_delete=models.CASCADE,
         related_name='embedding',
     )
-    embedding = models.BinaryField(
-        help_text='pgvector vector(384) stored via raw SQL; BinaryField is a placeholder for Django.',
-    )
+    embedding = VectorField(dimensions=384)
 
     class Meta:
         db_table = 'concept_embedding'
-        managed = False  # table created by migration with raw SQL for pgvector types
 
 
 class UmlsSourceCode(models.Model):

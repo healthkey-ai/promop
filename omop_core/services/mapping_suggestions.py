@@ -27,6 +27,7 @@ guess a curator can correct.
 """
 import json
 import logging
+import threading
 
 from django.conf import settings
 from django.contrib.postgres.search import TrigramSimilarity
@@ -136,27 +137,24 @@ def umls_candidates(source_code, source_vocabulary_id, domain_id=None):
         .distinct()
     )
 
-    # 3. For each sibling, try to find a standard OMOP concept.
-    seen = set()
-    candidates = []
+    # 3. Batch-lookup standard OMOP concepts for all siblings at once.
+    lookup_pairs = []
     for sab, sibling_code in siblings:
         omop_vocab = _UMLS_ROOT_TO_VOCAB.get(sab)
-        if not omop_vocab:
-            continue
+        if omop_vocab:
+            lookup_pairs.append(Q(vocabulary_id=omop_vocab, concept_code=sibling_code))
 
+    candidates = []
+    if lookup_pairs:
+        q = lookup_pairs[0]
+        for p in lookup_pairs[1:]:
+            q |= p
         qs = Concept.objects.filter(
-            vocabulary_id=omop_vocab,
-            concept_code=sibling_code,
-            standard_concept='S',
-            invalid_reason__isnull=True,
+            q, standard_concept='S', invalid_reason__isnull=True,
         )
         if domain_id:
             qs = qs.filter(domain_id=domain_id)
-
-        for c in qs[:10]:  # cap per sibling to avoid runaway
-            if c.concept_id in seen:
-                continue
-            seen.add(c.concept_id)
+        for c in qs[:CANDIDATE_LIMIT]:
             candidates.append({
                 'concept_id': c.concept_id,
                 'concept_name': c.concept_name,
@@ -192,20 +190,24 @@ def vector_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
     query_vec = model.encode(query).tolist()
 
     from django.db import connection
-    with connection.cursor() as cursor:
-        cursor.execute("""
-            SELECT ce.concept_id, c.concept_name, c.concept_code,
-                   c.vocabulary_id, c.concept_class_id,
-                   1 - (ce.embedding <=> %s::vector) AS score
-            FROM concept_embedding ce
-            JOIN concept c ON c.concept_id = ce.concept_id
-            WHERE c.domain_id = %s
-              AND c.standard_concept = 'S'
-              AND c.invalid_reason IS NULL
-            ORDER BY ce.embedding <=> %s::vector
-            LIMIT %s
-        """, [query_vec, domain_id, query_vec, limit])
-        rows = cursor.fetchall()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT ce.concept_id, c.concept_name, c.concept_code,
+                       c.vocabulary_id, c.concept_class_id,
+                       1 - (ce.embedding <=> %s::vector) AS score
+                FROM concept_embedding ce
+                JOIN concept c ON c.concept_id = ce.concept_id
+                WHERE c.domain_id = %s
+                  AND c.standard_concept = 'S'
+                  AND c.invalid_reason IS NULL
+                ORDER BY ce.embedding <=> %s::vector
+                LIMIT %s
+            """, [query_vec, domain_id, query_vec, limit])
+            rows = cursor.fetchall()
+    except Exception:
+        logger.info('Vector search unavailable (pgvector extension or concept_embedding table missing).')
+        return []
 
     return [
         {
@@ -220,16 +222,20 @@ def vector_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
     ]
 
 
-# Singleton for the embedding model -- loading it is expensive (~1s).
+# Singleton for the embedding model -- loading it is expensive (~1s) and ~130MB
+# in memory, so concurrent workers must not duplicate the load.
 _embedding_model = None
+_embedding_lock = threading.Lock()
 
 
 def _get_embedding_model():
-    """Return a cached SentenceTransformer instance."""
+    """Return a cached SentenceTransformer instance (thread-safe)."""
     global _embedding_model
     if _embedding_model is None:
-        from sentence_transformers import SentenceTransformer
-        _embedding_model = SentenceTransformer('BAAI/bge-small-en-v1.5')
+        with _embedding_lock:
+            if _embedding_model is None:  # double-check after acquiring lock
+                from sentence_transformers import SentenceTransformer
+                _embedding_model = SentenceTransformer('BAAI/bge-small-en-v1.5')
     return _embedding_model
 
 
@@ -415,20 +421,26 @@ def rank_candidates(source_value, candidates, source_description=''):
         return None, 'No candidate concept scored above the similarity threshold.'
 
     top = candidates[0]
-    lexical_note = (
-        f'Lexical match only (score {top["lexical_score"]}). '
-        f'Ranking model unavailable, so this is the highest string similarity, '
+    top_score = (
+        top.get('lexical_score')
+        or top.get('vector_score')
+        or top.get('umls_score')
+        or '?'
+    )
+    fallback_note = (
+        f'Best-match fallback (score {top_score}). '
+        f'Ranking model unavailable, so this is the highest retrieval score, '
         f'which is frequently not the closest clinical match — review carefully.'
     )
 
     if not getattr(settings, 'ANTHROPIC_API_KEY', ''):
-        return top, lexical_note
+        return top, fallback_note
 
     try:
         import anthropic
     except ImportError:
         logger.warning('anthropic SDK not installed; falling back to lexical order.')
-        return top, lexical_note
+        return top, fallback_note
 
     listing = '\n'.join(
         f'{c["concept_id"]}\t{c["vocabulary_id"]}:{c["concept_code"]}\t'
@@ -463,7 +475,7 @@ def rank_candidates(source_value, candidates, source_description=''):
         # A Suggest button that returns nothing because a third party is down is
         # worse than one that returns a decent guess a curator can correct.
         logger.warning('Concept ranking failed for %r: %s', source_value, exc)
-        return top, lexical_note
+        return top, fallback_note
 
     payload = next(
         (block.text for block in response.content if block.type == 'text'), ''
@@ -477,7 +489,7 @@ def rank_candidates(source_value, candidates, source_description=''):
     # wrong. Degrading is the contract; 500ing the request is not.
     if not isinstance(verdict, dict):
         logger.warning('Concept ranking returned unusable output for %r.', source_value)
-        return top, lexical_note
+        return top, fallback_note
 
     chosen_id = verdict.get('concept_id')
     if chosen_id is None:
@@ -491,7 +503,7 @@ def rank_candidates(source_value, candidates, source_description=''):
             'Concept ranking chose %s, which was not among the candidates for %r.',
             chosen_id, source_value,
         )
-        return top, lexical_note
+        return top, fallback_note
 
     return chosen, (
         f'{verdict.get("confidence", "unknown")} confidence: '
@@ -627,6 +639,8 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
                 'origin_system': source_system,
                 'occurrence_count': occurrences,
                 'notes': note,
+                'suggest_strategy': strategy_used or '',
+                'umls_cui': umls_cui or '',
             },
         )
         entry['created'] = created

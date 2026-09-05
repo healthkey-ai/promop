@@ -44,6 +44,8 @@ interface CodeMappingRow {
   notes: string;
   origin: string;
   origin_system: string;
+  suggest_strategy: string;
+  umls_cui: string;
   created_by: string;
   // Who signed the mapping off, and when. Distinct from created_by: approval
   // is the transition that rewrites stored patient data, and it survives every
@@ -149,6 +151,12 @@ const statusClass: Record<string, string> = {
   approved: "bg-green-100 text-green-800",
   rejected: "bg-red-100 text-red-800",
   unmapped: "bg-amber-100 text-amber-800",
+};
+
+const strategyLabel: Record<string, string> = {
+  umls: "UMLS",
+  vectors: "Vector",
+  lexical: "Lexical",
 };
 
 /**
@@ -817,6 +825,11 @@ export default function CodeMappingPage() {
                   <span className={`inline-flex rounded px-2 py-1 text-xs font-medium ${statusClass[row.status]}`}>
                     {row.status}
                   </span>
+                  {row.suggest_strategy && (
+                    <span className="inline-flex rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700" title={`Suggested via ${strategyLabel[row.suggest_strategy] || row.suggest_strategy}`}>
+                      {strategyLabel[row.suggest_strategy] || row.suggest_strategy}
+                    </span>
+                  )}
                 </div>
               </td>
               )}
@@ -1327,6 +1340,13 @@ export default function CodeMappingPage() {
                       rewrites patient data, so a reviewer looking at an
                       approved mapping needs to see whose decision it was. */}
                   {approvalNote(selectedRow)}
+                  {selectedRow.suggest_strategy ? (
+                    <>
+                      {" · suggested via "}
+                      <span className="font-medium">{strategyLabel[selectedRow.suggest_strategy] || selectedRow.suggest_strategy}</span>
+                      {selectedRow.umls_cui ? ` (CUI ${selectedRow.umls_cui})` : ""}
+                    </>
+                  ) : null}
                   {selectedRow.occurrence_count ? ` · seen ${selectedRow.occurrence_count} time(s)` : ""}
                 </p>
               )}
