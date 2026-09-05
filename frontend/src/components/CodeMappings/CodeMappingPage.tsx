@@ -44,6 +44,8 @@ interface CodeMappingRow {
   notes: string;
   origin: string;
   origin_system: string;
+  suggest_strategy: string;
+  umls_cui: string;
   created_by: string;
   // Who signed the mapping off, and when. Distinct from created_by: approval
   // is the transition that rewrites stored patient data, and it survives every
@@ -167,6 +169,12 @@ const statusClass: Record<string, string> = {
   approved: "bg-green-100 text-green-800",
   rejected: "bg-red-100 text-red-800",
   unmapped: "bg-amber-100 text-amber-800",
+};
+
+const strategyLabel: Record<string, string> = {
+  umls: "UMLS",
+  vectors: "Vector",
+  lexical: "Lexical",
 };
 
 /**
@@ -338,6 +346,9 @@ export default function CodeMappingPage() {
   // "" while the field is mid-edit; coerced when sent. Coercing on every
   // keystroke snapped the box to 1 the moment a curator cleared it.
   const [minOccurrences, setMinOccurrences] = useState<number | "">(10);
+  const [strategies, setStrategies] = useState({
+    umls: true, vectors: true, lexical: true,
+  });
   const [dialogMode, setDialogMode] = useState<"new" | "edit" | null>(null);
   const [selectedRow, setSelectedRow] = useState<CodeMappingRow | null>(null);
   const [form, setForm] = useState<MappingForm>(emptyForm);
@@ -689,12 +700,17 @@ export default function CodeMappingPage() {
     setError("");
     setBanner(null);
     try {
+      const activeStrategies = Object.entries(strategies)
+        .filter(([, v]) => v)
+        .map(([k]) => k);
       const resp = await api.post("/v1/code-mappings/suggest/", {
         source_vocabulary_id: selectedVocabulary,
         min_occurrences: Number(minOccurrences) || 1,
+        strategies: activeStrategies,
       });
       const { created = 0, considered = 0, ranked = 0, truncated,
-              landed_in: landed = {} } = resp.data || {};
+              landed_in: landed = {},
+              strategy_counts: stratCounts = {} } = resp.data || {};
       await fetchAll();
       // Say which tabs the new rows are in. A ranked suggestion's destination
       // is a standard concept, so its mapping belongs to the LOINC or SNOMED
@@ -704,10 +720,15 @@ export default function CodeMappingPage() {
         .sort((a, b) => b[1] - a[1])
         .map(([vocab, n]) => `${n} in ${vocab}`)
         .join(", ");
+      const byStrategy = Object.entries(stratCounts as Record<string, number>)
+        .filter(([, n]) => n > 0)
+        .map(([s, n]) => `${n} via ${s}`)
+        .join(", ");
       setBanner(
         created
           ? `Proposed ${created} mapping(s) from ${considered} unmapped code(s), `
             + `${ranked} with a suggested destination`
+            + (byStrategy ? ` (${byStrategy})` : "")
             + (where ? ` — ${where}.` : ".")
             + (truncated ? " More remain — run Suggest again." : "")
           : `No unmapped codes seen ${Number(minOccurrences) || 1}+ times in this vocabulary.`,
@@ -837,6 +858,11 @@ export default function CodeMappingPage() {
                   <span className={`inline-flex rounded px-2 py-1 text-xs font-medium ${statusClass[row.status]}`}>
                     {row.status}
                   </span>
+                  {row.suggest_strategy && (
+                    <span className="inline-flex rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700" title={`Suggested via ${strategyLabel[row.suggest_strategy] || row.suggest_strategy}`}>
+                      {strategyLabel[row.suggest_strategy] || row.suggest_strategy}
+                    </span>
+                  )}
                 </div>
               </td>
               )}
@@ -986,10 +1012,23 @@ export default function CodeMappingPage() {
             className="h-8 w-16 rounded-md border border-slate-300 px-2 text-xs"
           />
           <span className="text-xs text-slate-600">times</span>
+          {(["umls", "vectors", "lexical"] as const).map((key) => (
+            <label key={key} className="inline-flex items-center gap-1 text-xs text-slate-600">
+              <input
+                type="checkbox"
+                checked={strategies[key]}
+                onChange={(e) =>
+                  setStrategies((prev) => ({ ...prev, [key]: e.target.checked }))
+                }
+                className="h-3.5 w-3.5 rounded border-slate-300"
+              />
+              {key === "umls" ? "UMLS" : key === "vectors" ? "Vectors" : "Lexical"}
+            </label>
+          ))}
           <button
             type="button"
             onClick={() => void runSuggest()}
-            disabled={suggesting}
+            disabled={suggesting || !Object.values(strategies).some(Boolean)}
             title="Propose mappings for unmapped source codes in this vocabulary."
             className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
           >
@@ -1352,6 +1391,13 @@ export default function CodeMappingPage() {
                       rewrites patient data, so a reviewer looking at an
                       approved mapping needs to see whose decision it was. */}
                   {approvalNote(selectedRow)}
+                  {selectedRow.suggest_strategy ? (
+                    <>
+                      {" · suggested via "}
+                      <span className="font-medium">{strategyLabel[selectedRow.suggest_strategy] || selectedRow.suggest_strategy}</span>
+                      {selectedRow.umls_cui ? ` (CUI ${selectedRow.umls_cui})` : ""}
+                    </>
+                  ) : null}
                   {selectedRow.occurrence_count ? ` · seen ${selectedRow.occurrence_count} time(s)` : ""}
                 </p>
               )}
