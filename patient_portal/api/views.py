@@ -68,7 +68,7 @@ from omop_core.services.demographics import resolve_concept as resolve_demograph
 from omop_core.services.pk import next_pk, next_pk_batch
 from omop_core.signals import suppress_patient_record_refresh
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
-from omop_core.services.code_mapping import (
+from omop_core.mapping.code_resolution import (
     CLINICAL_TABLES,
     _QUARANTINE_TARGETS,
     NO_MATCHING_CONCEPT_ID,
@@ -76,14 +76,14 @@ from omop_core.services.code_mapping import (
     repoint_clinical_rows,
     resolve_source_code,
 )
-from omop_core.services.mapping_suggestions import (
+from omop_core.mapping.suggestions import (
     ALL_STRATEGIES,
     DEFAULT_MIN_OCCURRENCES,
     suggest_mappings,
 )
 from omop_core.services.write_descriptor import mapping_table_is_writable
 from omop_core.services import source_vocabularies
-from omop_core.services.regimen_resolution import (
+from omop_core.mapping.therapy import (
     get_or_create_quarantine_drug,
     get_or_create_quarantine_observation,
     get_or_create_quarantine_procedure,
@@ -9571,7 +9571,7 @@ def field_mapping_list(request):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == 'GET':
-        from omop_core.services.field_descriptor import get_all_field_descriptors
+        from omop_core.mapping.field import get_all_field_descriptors
         descriptors = get_all_field_descriptors()
         # Optional filters.
         category = request.query_params.get('category')
@@ -9660,7 +9660,7 @@ def propose_all_mappings(request):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldConceptMapping, Concept
-    from omop_core.services.field_descriptor import get_all_field_descriptors
+    from omop_core.mapping.field import get_all_field_descriptors
 
     descriptors = get_all_field_descriptors()
     tab_filter = str(request.data.get('tab') or request.query_params.get('tab') or '').strip()

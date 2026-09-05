@@ -29,7 +29,7 @@ from django.db import transaction
 from django.db.models import Count
 
 from omop_core.models import RegimenMappingGap, SourceCodeConceptMapping
-from omop_core.services.code_mapping import (
+from omop_core.mapping.code_resolution import (
     CLINICAL_TABLES,
     _direct_concept,
     approved_mapping_for,
