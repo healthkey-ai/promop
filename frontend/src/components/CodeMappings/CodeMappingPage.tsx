@@ -103,6 +103,24 @@ interface RepointResult {
   rows_collapsed: number;
 }
 
+interface SuggestionAccuracy {
+  accepted: number;
+  overridden: number;
+  rejected: number;
+  reviewed: number;
+  precision: number | null;
+  recall: number | null;
+  f1: number | null;
+}
+
+interface AccuracyResponse {
+  overall: SuggestionAccuracy;
+  by_source_vocabulary: Record<string, SuggestionAccuracy>;
+}
+
+const OVERALL_TAB = "__overall__";
+const metric = (value: number | null) => value === null ? "—" : `${(value * 100).toFixed(1)}%`;
+
 interface MappingForm {
   domain_id: string;
   source_vocabulary_id: string;
@@ -303,6 +321,7 @@ export default function CodeMappingPage() {
   const canApprove = !!(currentUser?.is_staff || currentUser?.is_org_admin);
   const [rows, setRows] = useState<CodeMappingRow[]>([]);
   const [reference, setReference] = useState<Reference>(emptyReference);
+  const [accuracy, setAccuracy] = useState<AccuracyResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -333,12 +352,14 @@ export default function CodeMappingPage() {
     setLoading(true);
     setError("");
     try {
-      const [rowResp, refResp] = await Promise.all([
+      const [rowResp, refResp, accuracyResp] = await Promise.all([
         api.get<CodeMappingRow[]>("/v1/code-mappings/"),
         api.get<Reference>("/v1/code-mappings/reference/"),
+        api.get<AccuracyResponse>("/v1/code-mappings/accuracy/"),
       ]);
       setRows(rowResp.data);
       setReference({ ...emptyReference, ...(refResp.data || {}) });
+      setAccuracy(accuracyResp.data);
     } catch {
       setError("Failed to load code mappings.");
     } finally {
@@ -386,19 +407,31 @@ export default function CodeMappingPage() {
           ...counts[k],
         });
       });
+    result.push({
+      vocabulary_id: OVERALL_TAB,
+      label: "Overall",
+      is_standard: false,
+      proposed: counts ? rows.filter((r) => r.status === "proposed").length : 0,
+      approved: rows.filter((r) => r.status === "approved").length,
+      athena: rows.filter((r) => r.mapping_origin === "athena").length,
+    });
     return result;
   }, [rows, reference]);
 
   // Land on work, not on the alphabetically-first tab.
   const defaultVocabulary = useMemo(() => {
-    const withWork = vocabularyTabs.find((t) => t.proposed > 0);
+    const withWork = vocabularyTabs.find((t) => t.vocabulary_id !== OVERALL_TAB && t.proposed > 0);
     if (withWork) return withWork.vocabulary_id;
-    const withAny = vocabularyTabs.find((t) => t.proposed + t.approved + t.athena > 0);
+    const withAny = vocabularyTabs.find((t) => t.vocabulary_id !== OVERALL_TAB && t.proposed + t.approved + t.athena > 0);
     if (withAny) return withAny.vocabulary_id;
     return vocabularyTabs[0]?.vocabulary_id ?? "";
   }, [vocabularyTabs]);
 
   const selectedVocabulary = activeVocabulary ?? defaultVocabulary;
+  const overallTab = selectedVocabulary === OVERALL_TAB;
+  const selectedAccuracy = overallTab
+    ? accuracy?.overall
+    : accuracy?.by_source_vocabulary?.[selectedVocabulary];
 
   const visibleRows = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -412,7 +445,7 @@ export default function CodeMappingPage() {
       // curator should not have to try every code system to find an incoming
       // code. With no query, retain the focused, one-vocabulary-at-a-time
       // review queue.
-      if (!q && tabForRow(row) !== selectedVocabulary) return false;
+      if (!q && selectedVocabulary !== OVERALL_TAB && tabForRow(row) !== selectedVocabulary) return false;
       if (!q) return true;
       return [
         row.source_code,
@@ -909,7 +942,14 @@ export default function CodeMappingPage() {
                 type="button"
                 role="tab"
                 aria-selected={selected}
-                onClick={() => setActiveVocabulary(tab.vocabulary_id)}
+                onClick={() => {
+                  setActiveVocabulary(tab.vocabulary_id);
+                  if (tab.vocabulary_id === OVERALL_TAB) {
+                    setUnmappedCollapsed(true);
+                    setMappedCollapsed(true);
+                    setAthenaCollapsed(true);
+                  }
+                }}
                 title={`Source vocabulary: ${tab.label}`}
                 className={`whitespace-nowrap border-b-2 px-3 py-2 text-sm font-medium ${
                   selected
@@ -956,6 +996,17 @@ export default function CodeMappingPage() {
             <Sparkles size={13} />
             {suggesting ? "Suggesting…" : "Suggest"}
           </button>
+        </div>
+
+        <div className="mb-4 flex justify-end">
+          <section aria-label="Suggestion accuracy" className="flex divide-x rounded-md border border-slate-200 bg-slate-50 text-right text-xs">
+            {([['Precision', selectedAccuracy?.precision], ['Recall', selectedAccuracy?.recall], ['F1', selectedAccuracy?.f1]] as const).map(([label, value]) => (
+              <div key={label} className="px-3 py-2">
+                <div className="font-medium text-slate-500">{label}</div>
+                <div className="text-sm font-semibold text-slate-900">{metric(value ?? null)}</div>
+              </div>
+            ))}
+          </section>
         </div>
 
         <section className="mb-6">

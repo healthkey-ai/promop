@@ -14,7 +14,7 @@ from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
 from django.db import IntegrityError, models, transaction
-from django.db.models import Q, F, Prefetch
+from django.db.models import Count, Q, F, Prefetch
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
@@ -8826,6 +8826,7 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     # Captured before the save: whether this is the first sign-off, and
     # where the mapping pointed beforehand.
     was_approved = mapping is not None and mapping.status == 'approved'
+    was_proposed = mapping is not None and mapping.status == 'proposed'
     previous_concept_id = mapping.target_concept_id if mapping else None
 
     # Only fields the caller actually sent. A PATCH that approves by sending
@@ -8859,6 +8860,21 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
         values['source'] = str(data.get('source') or '').strip()
     if mapping is None or 'status' in data:
         values['status'] = status_value
+    # Preserve the first curator disposition of a machine suggestion.  The
+    # proposed target is immutable evidence; target_concept may later be edited
+    # as part of normal curation and must not rewrite model-quality history.
+    if (
+        was_proposed
+        and mapping.suggested_target_concept_id
+        and not mapping.suggestion_outcome
+    ):
+        if status_value == 'approved':
+            values['suggestion_outcome'] = (
+                'accepted' if concept and concept.concept_id == mapping.suggested_target_concept_id
+                else 'overridden'
+            )
+        elif status_value == 'rejected':
+            values['suggestion_outcome'] = 'rejected'
     # The sign-off. It records the *live* approval: who authorised the state
     # the mapping is in now, not an archaeological first-ever approval.
     #
@@ -9173,6 +9189,52 @@ def code_mapping_reference(request):
     if not _can_manage_field_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     return Response(_code_mapping_reference_payload())
+
+
+def _suggestion_accuracy_payload(queryset):
+    """Compute review-based precision/recall for rows with suggestion evidence."""
+    counts = dict(queryset.values_list('suggestion_outcome').annotate(total=Count('id')))
+    accepted = counts.get('accepted', 0)
+    overridden = counts.get('overridden', 0)
+    rejected = counts.get('rejected', 0)
+    approved = accepted + overridden
+    precision_denominator = approved + rejected
+    recall_denominator = accepted + overridden
+    precision = approved / precision_denominator if precision_denominator else None
+    recall = accepted / recall_denominator if recall_denominator else None
+    f1 = (
+        2 * precision * recall / (precision + recall)
+        if precision is not None and recall is not None and precision + recall else None
+    )
+    return {
+        'accepted': accepted,
+        'overridden': overridden,
+        'rejected': rejected,
+        'reviewed': precision_denominator,
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+    }
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def code_mapping_accuracy(request):
+    """Suggestion quality, grouped by incoming source vocabulary and overall."""
+    if not _can_manage_field_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    base = SourceCodeConceptMapping.objects.filter(
+        suggested_target_concept__isnull=False,
+        suggestion_outcome__in=('accepted', 'overridden', 'rejected'),
+    )
+    by_source_vocabulary = {
+        vocabulary_id or '': _suggestion_accuracy_payload(base.filter(source_vocabulary_id=vocabulary_id))
+        for vocabulary_id in base.values_list('source_vocabulary_id', flat=True).distinct()
+    }
+    return Response({
+        'overall': _suggestion_accuracy_payload(base),
+        'by_source_vocabulary': by_source_vocabulary,
+    })
 
 
 # HK-* vocabulary -> the clinical table whose concept-0 rows it curates. The
