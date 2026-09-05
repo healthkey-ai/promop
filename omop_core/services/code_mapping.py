@@ -160,7 +160,7 @@ def _direct_concept(source_vocabulary_id, source_code):
 
 
 def _record_proposal(*, source_vocabulary_id, source_code, source_text,
-                     concept, omop_table, source_system, notes=''):
+                     concept, omop_table, source_system, notes='', is_suggestion=False):
     """Create or bump the proposed mapping for a code an import had to invent.
 
     Idempotent: the first sighting creates the row, later sightings bump
@@ -193,6 +193,7 @@ def _record_proposal(*, source_vocabulary_id, source_code, source_text,
                     # nothing to place it by -- it appeared in no tab at all.
                     domain_id=_DOMAIN_FOR_TABLE.get(omop_table, ''),
                     target_concept=concept,
+                    suggested_target_concept=concept if is_suggestion else None,
                     destination_vocabulary_id=(concept.vocabulary_id or '') if concept else '',
                     omop_table=omop_table,
                     source=SOURCE_HEALTHKEY,
@@ -352,6 +353,7 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
             omop_table=table,
             source_system=source_system,
             notes=note,
+            is_suggestion=True,
         )
         return None, mapping
 

@@ -1789,6 +1789,22 @@ class SourceToConceptMap(models.Model):
         Concept, on_delete=models.DO_NOTHING, related_name='stcm_as_target',
         db_column='target_concept_id',
     )
+    # Immutable evidence for suggestion-quality measurement.  target_concept
+    # changes when a curator corrects a proposal; this field preserves what the
+    # model actually suggested so Recall can measure those overrides.
+    suggested_target_concept = models.ForeignKey(
+        Concept, on_delete=models.DO_NOTHING, null=True, blank=True,
+        related_name='source_code_mapping_suggestions', db_constraint=False,
+    )
+    SUGGESTION_OUTCOME_CHOICES = [
+        ('accepted', 'Accepted'),
+        ('overridden', 'Overridden'),
+        ('rejected', 'Rejected'),
+    ]
+    suggestion_outcome = models.CharField(
+        max_length=12, choices=SUGGESTION_OUTCOME_CHOICES, blank=True, default='', db_index=True,
+        help_text='Immutable first curator disposition of a machine suggestion.',
+    )
     target_vocabulary_id = models.CharField(max_length=20)
     valid_start_date = models.DateField()
     valid_end_date = models.DateField()
