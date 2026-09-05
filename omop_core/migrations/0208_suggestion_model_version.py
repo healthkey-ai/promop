@@ -4,7 +4,7 @@ from django.db.models import F
 
 def mark_legacy_suggestions(apps, schema_editor):
     Mapping = apps.get_model('omop_core', 'SourceCodeConceptMapping')
-    legacy = Mapping.objects.filter(origin_system='suggest')
+    legacy = Mapping.objects.filter(origin_system__iexact='suggest')
     legacy.update(origin_system='suggest v0.1', suggestion_model_version='v0.1')
     legacy.filter(suggested_target_concept__isnull=True, target_concept__isnull=False).update(
         suggested_target_concept_id=F('target_concept_id')
