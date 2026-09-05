@@ -487,3 +487,158 @@ class TestWaterfallIntegration:
         for r in results:
             assert r['suggested'] is None
             assert r['strategy_used'] is None
+
+
+# ---------------------------------------------------------------------------
+# Source enrichment: source_concept and umls_source_name persistence
+# ---------------------------------------------------------------------------
+
+class TestSourceEnrichment:
+    """Verify suggest_mappings persists source-side metadata on SCCM rows."""
+
+    @pytest.fixture()
+    def measurement_domain(self):
+        return DomainFactory(domain_id='Measurement')
+
+    @pytest.fixture()
+    def loinc_vocab(self):
+        return VocabularyFactory(vocabulary_id='LOINC', vocabulary_name='LOINC')
+
+    @pytest.fixture()
+    def lab_class(self):
+        return ConceptClassFactory(concept_class_id='Lab Test')
+
+    @pytest.fixture()
+    def zero_concept(self, measurement_domain, loinc_vocab, lab_class):
+        return ConceptFactory(
+            concept_id=0, concept_name='No matching concept',
+            concept_code='0', vocabulary=loinc_vocab,
+            domain=measurement_domain, concept_class=lab_class,
+        )
+
+    @pytest.fixture()
+    def unmapped_glucose(self, zero_concept, loinc_vocab, measurement_domain, lab_class):
+        """12 unmapped measurement rows with LOINC source concept."""
+        person = PersonFactory()
+        loinc_source_concept = ConceptFactory(
+            concept_name='Glucose [Mass/volume] in Serum',
+            concept_code='2345-7',
+            vocabulary=loinc_vocab,
+            standard_concept=None,
+        )
+        for _ in range(12):
+            MeasurementFactory(
+                person=person,
+                measurement_concept=zero_concept,
+                measurement_source_value='2345-7',
+                measurement_source_concept=loinc_source_concept,
+            )
+        return loinc_source_concept
+
+    def test_persists_source_concept_and_umls_name(
+        self, unmapped_glucose, measurement_domain, loinc_vocab, lab_class,
+    ):
+        """Non-dry-run stores source_concept and umls_source_name on SCCM."""
+        umls_release = UmlsRelease.objects.create(release_version='2024AB')
+        cui = UmlsConcept.objects.create(
+            cui='C0017725', preferred_name='Glucose measurement',
+            release=umls_release,
+        )
+        UmlsSourceCode.objects.create(
+            concept=cui, root_source='LNC', code='2345-7',
+            term_type='PT', name='Glucose [Mass/volume] in Serum or Plasma',
+            is_preferred=True,
+        )
+        snomed_vocab = VocabularyFactory(vocabulary_id='SNOMED', vocabulary_name='SNOMED')
+        snomed_concept = ConceptFactory(
+            concept_id=4144237,
+            concept_name='Glucose measurement',
+            concept_code='33747005',
+            vocabulary=snomed_vocab,
+            domain=measurement_domain,
+            concept_class=lab_class,
+            standard_concept='S',
+        )
+        UmlsSourceCode.objects.create(
+            concept=cui, root_source='SNOMEDCT_US', code='33747005',
+            term_type='PT', name='Glucose measurement',
+        )
+
+        results = suggest_mappings(
+            'measurement',
+            min_occurrences=10,
+            strategies=['umls'],
+            dry_run=False,
+        )
+
+        assert len(results) >= 1
+        r = results[0]
+        assert r['created'] is True
+
+        mapping = SourceCodeConceptMapping.objects.get(id=r['mapping_id'])
+        # source_concept should be the LOINC concept for 2345-7
+        assert mapping.source_concept == unmapped_glucose
+        assert mapping.umls_source_name == 'Glucose [Mass/volume] in Serum or Plasma'
+
+    def test_umls_name_used_as_description_fallback(
+        self, zero_concept, measurement_domain, loinc_vocab, lab_class,
+    ):
+        """When OMOP concept has no name but UMLS does, UMLS name fills description."""
+        # Create a source concept with an empty name — the vocabulary is needed
+        # for unmapped_source_values to resolve src_vocab_id, but the concept
+        # name is blank so source_description starts empty.
+        nameless_source = ConceptFactory(
+            concept_name='',
+            concept_code='99999-9',
+            vocabulary=loinc_vocab,
+            domain=measurement_domain,
+            concept_class=lab_class,
+            standard_concept=None,
+        )
+        person = PersonFactory()
+        for _ in range(12):
+            MeasurementFactory(
+                person=person,
+                measurement_concept=zero_concept,
+                measurement_source_value='99999-9',
+                measurement_source_concept=nameless_source,
+            )
+
+        umls_release = UmlsRelease.objects.create(release_version='2024AC')
+        cui = UmlsConcept.objects.create(
+            cui='C9999999', preferred_name='Fictional analyte',
+            release=umls_release,
+        )
+        UmlsSourceCode.objects.create(
+            concept=cui, root_source='LNC', code='99999-9',
+            term_type='PT', name='Fictional Analyte Level in Serum',
+            is_preferred=True,
+        )
+        snomed_vocab = VocabularyFactory(vocabulary_id='SNOMED', vocabulary_name='SNOMED')
+        ConceptFactory(
+            concept_id=9999998,
+            concept_name='Fictional analyte measurement',
+            concept_code='99999998',
+            vocabulary=snomed_vocab,
+            domain=measurement_domain,
+            concept_class=lab_class,
+            standard_concept='S',
+        )
+        UmlsSourceCode.objects.create(
+            concept=cui, root_source='SNOMEDCT_US', code='99999998',
+            term_type='PT', name='Fictional analyte measurement',
+        )
+
+        results = suggest_mappings(
+            'measurement',
+            min_occurrences=10,
+            strategies=['umls'],
+            dry_run=False,
+        )
+
+        hit = next((r for r in results if r['source_code'] == '99999-9'), None)
+        assert hit is not None
+        mapping = SourceCodeConceptMapping.objects.get(id=hit['mapping_id'])
+        # UMLS name should be used as the description fallback
+        assert mapping.source_code_description == 'Fictional Analyte Level in Serum'[:255]
+        assert mapping.umls_source_name == 'Fictional Analyte Level in Serum'

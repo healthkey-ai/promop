@@ -32,6 +32,7 @@ interface CodeMappingRow {
   source_code: string;
   source_code_description: string;
   source_concept_id?: number | null;
+  umls_source_name?: string;
   destination_concept_id: number;
   destination_concept_name: string;
   destination_concept_code: string;
@@ -1201,6 +1202,16 @@ export default function CodeMappingPage() {
                     value={form.source_concept_id}
                     testId="source-concept-id"
                   />
+
+                  {editingRow?.umls_source_name && (
+                    <ReadOnlyField
+                      id="umls_source_name"
+                      label="UMLS Name"
+                      tip="Canonical UMLS preferred name for this source code. Read-only — edit Source Description instead."
+                      value={editingRow.umls_source_name}
+                      testId="umls-source-name"
+                    />
+                  )}
                 </div>
               </fieldset>
 
