@@ -29,7 +29,7 @@ import dj_database_url
 from django.core.management.base import BaseCommand, CommandError
 from django.db import connections
 
-from omop_core.services.field_curation_transfer import (
+from omop_core.mapping.field import (
     DEFAULT_TABLES,
     TABLES,
     apply_payload,

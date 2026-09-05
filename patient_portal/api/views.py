@@ -9571,7 +9571,7 @@ def field_mapping_list(request):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == 'GET':
-        from omop_core.services.field_descriptor import get_all_field_descriptors
+        from omop_core.mapping.field import get_all_field_descriptors
         descriptors = get_all_field_descriptors()
         # Optional filters.
         category = request.query_params.get('category')
@@ -9660,7 +9660,7 @@ def propose_all_mappings(request):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldConceptMapping, Concept
-    from omop_core.services.field_descriptor import get_all_field_descriptors
+    from omop_core.mapping.field import get_all_field_descriptors
 
     descriptors = get_all_field_descriptors()
     tab_filter = str(request.data.get('tab') or request.query_params.get('tab') or '').strip()
