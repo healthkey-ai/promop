@@ -74,6 +74,7 @@ from omop_core.services.code_mapping import (
     NO_MATCHING_CONCEPT_ID,
     normalize_omop_table,
     repoint_clinical_rows,
+    resolve_source_code,
 )
 from omop_core.services.mapping_suggestions import (
     DEFAULT_MIN_OCCURRENCES,
@@ -9327,16 +9328,18 @@ def code_mapping_vocabularies(request):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@permission_classes([ScopedTokenPermission])
 def code_mapping_lookup(request):
-    """Batch lookup of approved code mappings by (source_vocabulary_id, source_code).
+    """Resolve a batch of source-code encounters through SCCM.
 
     Request body::
 
         {
           "codes": [
-            {"source_vocabulary_id": "CPT4", "source_code": "99213"},
-            {"source_vocabulary_id": "SNOMED", "source_code": "386789000"}
+            {"source_vocabulary_id": "CPT4", "source_code": "99213",
+             "omop_table": "procedure"},
+            {"source_vocabulary_id": "SNOMED", "source_code": "386789000",
+             "omop_table": "condition"}
           ]
         }
 
@@ -9344,8 +9347,8 @@ def code_mapping_lookup(request):
 
         {
           "mappings": {
-            "CPT4|99213": { ... },
-            "SNOMED|386789000": null
+            "CPT4|99213": {"status": "approved", "resolved": true, ...},
+            "SNOMED|386789000": {"status": "proposed", "resolved": false, ...}
           },
           "resolved": 1,
           "unresolved": 1
@@ -9365,60 +9368,72 @@ def code_mapping_lookup(request):
             status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
         )
 
-    # Validate and collect lookup keys.
-    lookup_keys = []
+    # This is an ingest operation, not the UI's list/browse read path.  The
+    # canonical resolver records an encounter for a proposed code, so prevent
+    # intermediaries from caching a response whose Seen count is stateful.
+    # The source system is server-owned: a client must not be able to forge a
+    # different importer name in SCCM provenance.
+    source_system = 'code-mapping-api'
+    lookup_entries = []
     for entry in codes:
-        vocab = entry.get('source_vocabulary_id', '').strip()
-        code = entry.get('source_code', '').strip()
-        if not vocab or not code:
+        if not isinstance(entry, dict):
+            return Response({'detail': 'Each code entry must be an object.'}, status=status.HTTP_400_BAD_REQUEST)
+        vocab = str(entry.get('source_vocabulary_id') or '').strip()
+        code = str(entry.get('source_code') or '').strip()
+        table = normalize_omop_table(entry.get('omop_table'))
+        if not vocab or not code or table not in CLINICAL_TABLES:
             return Response(
-                {'detail': 'Each entry must have source_vocabulary_id and source_code.'},
+                {'detail': 'Each entry needs source_vocabulary_id, source_code, and a supported omop_table.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        lookup_keys.append((vocab, code))
-
-    # Single query for all approved mappings matching any of the requested pairs.
-    q = Q()
-    for vocab, code in lookup_keys:
-        q |= Q(source_vocabulary_id=vocab, source_code=code)
-
-    mappings_qs = (
-        SourceCodeConceptMapping.objects
-        .filter(q, status='approved')
-        .select_related('target_concept')
-    )
-
-    # Index by composite key.
-    mapping_index = {}
-    for m in mappings_qs:
-        key = f'{m.source_vocabulary_id}|{m.source_code}'
-        mapping_index[key] = {
-            'target_concept_id': m.target_concept_id,
-            'target_concept_code': m.target_concept.concept_code if m.target_concept else None,
-            'target_concept_name': m.target_concept.concept_name if m.target_concept else None,
-            'destination_vocabulary_id': m.destination_vocabulary_id,
-            'domain_id': m.domain_id,
-            'omop_table': m.omop_table,
-        }
+        lookup_entries.append((vocab, code, table, str(entry.get('source_text') or '').strip()))
 
     # Build response preserving request order.
     result = {}
     resolved = 0
     unresolved = 0
-    for vocab, code in lookup_keys:
+    for vocab, code, table, source_text in lookup_entries:
         key = f'{vocab}|{code}'
-        hit = mapping_index.get(key)
-        result[key] = hit
-        if hit:
+        concept, mapping = resolve_source_code(
+            source_vocabulary_id=vocab,
+            source_code=code,
+            source_text=source_text,
+            omop_table=table,
+            source_system=source_system,
+        )
+        if concept is not None:
+            result[key] = {
+                'status': mapping.status if mapping else 'direct',
+                'resolved': True,
+                'target_concept_id': concept.concept_id,
+                'target_concept_code': concept.concept_code,
+                'target_concept_name': concept.concept_name,
+                'destination_vocabulary_id': concept.vocabulary_id,
+                'domain_id': mapping.domain_id if mapping else concept.domain_id,
+                'omop_table': mapping.omop_table if mapping else table,
+                'mapping_id': mapping.id if mapping else None,
+            }
             resolved += 1
         else:
+            result[key] = {
+                'status': mapping.status if mapping else 'unresolved',
+                'resolved': False,
+                'mapping_id': mapping.id if mapping else None,
+                'occurrence_count': mapping.occurrence_count if mapping else 0,
+                'first_seen': mapping.first_seen if mapping else None,
+                'last_seen': mapping.last_seen if mapping else None,
+                # This is evidence for a curator only; consumers must use the
+                # resolved flag, never a provisional target, to write OMOP.
+                'proposed_target_concept_id': mapping.target_concept_id if mapping else None,
+            }
             unresolved += 1
-
-    return Response({
+    response = Response({
         'mappings': result,
         'resolved': resolved,
         'unresolved': unresolved,
     })
+    response['Cache-Control'] = 'no-store'
+    return response
 
 
 @api_view(['GET', 'POST'])

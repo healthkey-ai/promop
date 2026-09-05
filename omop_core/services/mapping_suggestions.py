@@ -331,6 +331,36 @@ def rank_candidates(source_value, candidates, source_description=''):
     )
 
 
+def suggest_source_code(*, source_vocabulary_id, source_code, source_text, omop_table):
+    """Return the best proposed destination for one unresolved source code.
+
+    This is the single-code entry point for the canonical lookup API.  It owns
+    the choice of retrieval/ranking strategies; callers only receive a
+    standard Concept suitable for a *proposed* SCCM row, never an approved
+    resolution.  The multi-strategy implementation extends this function, so
+    import adapters do not need to know whether the service used UMLS, vectors,
+    lexical retrieval, or the ranker.
+    """
+    target = _QUARANTINE_TARGETS.get(omop_table)
+    if target is None:
+        return None, ''
+    _hk_vocabulary, domain_id, _concept_class_id, _slug_prefix = target
+    source_concept = Concept.objects.filter(
+        vocabulary_id=source_vocabulary_id,
+        concept_code__iexact=source_code,
+    ).first() if source_vocabulary_id else None
+    description = source_text or (source_concept.concept_name if source_concept else '')
+    candidates = lexical_candidates(description or source_code, domain_id)
+    chosen, note = rank_candidates(
+        description or source_code,
+        candidates,
+        source_description=description,
+    )
+    if chosen is None:
+        return None, note
+    return Concept.objects.filter(concept_id=chosen['concept_id']).first(), note
+
+
 def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
                      limit=None, source_system='suggest', dry_run=False,
                      source_vocabulary_id=None):
