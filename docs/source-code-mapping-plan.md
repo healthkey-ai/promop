@@ -1,5 +1,13 @@
 # Source Data Code to Concept Mapping Plan
 
+**Status:** Historical plan, superseded by the implemented
+[Code Mapping architecture](superpowers/plans/2026-08-30-code-mapping-direction.md) and the
+[Code Mapping API](code-mapping-api.md).
+
+This document is retained for original scope and terminology only. Its
+concept-centric API, HK-* source-vocabulary examples, and direct-minting flow
+do not describe the current SCCM implementation.
+
 ## Goal
 
 PROMOP already has field mapping: OMOP concepts are mapped to displayable and editable fields on `PatientRecord`. This plan covers the opposite direction for ingest: incoming FHIR and wearable codes must resolve to OMOP concepts before clinical rows are written.

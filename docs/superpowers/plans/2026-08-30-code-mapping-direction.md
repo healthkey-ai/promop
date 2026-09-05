@@ -1,12 +1,16 @@
-# Code Mapping: source code → destination OMOP concept
+# Code Mapping architecture: source code → destination OMOP concept
 
 **Date:** 2026-08-30
-**Status:** Implemented on `feat/834-code-mapping-direction`
-**Deviations from plan:** see §8
-**Issue:** [#834](https://github.com/healthkey-ai/promop/issues/834) (reopened; PR #835 did not fix it)
-**Executes in parallel with:** the Field Concept Mapping dialog work (separate surface; the two
-feature areas sit ~250 lines apart in `patient_portal/api/views.py` and ~1500 apart in
-`omop_core/models.py`, so the hunks do not overlap)
+**Status:** As-built architecture
+**Operational contract:** [Code Mapping API](../../code-mapping-api.md)
+
+This started as an implementation plan. The completed work and later SCCM
+resolver changes make it more useful as an architecture record: it explains the
+source/destination model, the curator UI, and the decisions that led there.
+
+Sections headed “What is wrong today” and “Work items” are retained as
+historical rationale. They are not a description of the running system. Where
+they conflict with the operational contract, `code-mapping-api.md` wins.
 
 ---
 
@@ -32,27 +36,25 @@ Every one of them has to end up as an **OMOP concept**, and the direction never 
    (no code system)
 ```
 
-### 1.1 Resolution rule (governing)
+### 1.1 Resolution rule (as built)
 
 This is the rule the whole feature hangs off. It settles both questions left open in the first
 draft of this plan.
 
-1. **A LOINC or SNOMED source code needs no mapping.** That is Athena's design: the Athena
-   concept *is* the LOINC/SNOMED code. Resolve it directly and stop. These two never generate
-   mapping rows, which is why they get no tab (§3.3).
-2. **For any other source code** — ICD-10-CM, ICD-O-3, NDC, CPT-4, or no code system at all —
-   an **approved** mapping wins, over everything, including a direct concept lookup. An
-   approved mapping is a curator's deliberate decision and is the mechanism for correcting a
-   resolution that is wrong.
-3. **If no approved mapping exists for the code**, the import mints: it selects an existing
-   `HK-*` concept for that source code if one is already there, otherwise it mints a new one
-   (`source='HealthKey'`, `standard_concept=NULL`, `concept_id >= 2_000_000_000`) — and records
-   a **proposed** `SourceCodeConceptMapping` alongside it.
-4. A **proposed** mapping never overrides anything. It is a review item, and an
-   admin/curator/SME approves, edits, or rejects it later in this UI.
+1. **SCCM is primary for every source vocabulary.** An effective curator mapping wins over
+   every fallback, including direct Athena lookup.
+2. **A proposed row is unresolved.** It records an encounter and supplies curator evidence, but
+   its provisional target is never a destination an importer may write.
+3. **A direct Athena hit is cached in SCCM.** This applies to CPT4 as well as LOINC, SNOMED, and
+   any other loaded source vocabulary. The cache entry is tagged `athena-direct`, not presented
+   as a human sign-off.
+4. **A direct miss invokes the suggestion service.** Its highest-ranked candidate becomes the
+   target of a proposed row only.
+5. **Minting is the last fallback.** An HK-* quarantine concept is created only when neither a
+   direct match nor a suitable suggestion exists; its mapping remains proposed until curation.
 
-So imports are self-feeding: they never block on a curator, they never silently drop a code,
-and everything they invent lands in a queue with the evidence attached.
+The full external importer contract, including response shapes and Seen semantics, is maintained
+in [Code Mapping API](../../code-mapping-api.md), rather than duplicated here.
 
 ---
 
