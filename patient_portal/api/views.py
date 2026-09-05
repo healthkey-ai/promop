@@ -8560,6 +8560,7 @@ def _serialize_code_mapping_row(concept, mapping=None):
             'notes': mapping.notes if mapping else '',
             'origin': mapping.origin if mapping else '',
             'origin_system': mapping.origin_system if mapping else '',
+            'suggestion_model_version': mapping.suggestion_model_version if mapping else '',
             'suggest_strategy': mapping.suggest_strategy if mapping else '',
             'umls_cui': mapping.umls_cui if mapping else '',
             'created_by': _mapping_author(mapping),
@@ -8615,6 +8616,7 @@ def _serialize_code_mapping_row(concept, mapping=None):
         'notes': mapping.notes if mapping else '',
         'origin': mapping.origin if mapping else '',
         'origin_system': mapping.origin_system if mapping else '',
+        'suggestion_model_version': mapping.suggestion_model_version if mapping else '',
         'suggest_strategy': mapping.suggest_strategy if mapping else '',
         'umls_cui': mapping.umls_cui if mapping else '',
         'created_by': _mapping_author(mapping),
@@ -9229,16 +9231,17 @@ def code_mapping_reference(request):
     return Response(_code_mapping_reference_payload())
 
 
-def _suggestion_accuracy_payload(queryset):
-    """Compute review-based precision/recall for rows with suggestion evidence."""
+def _suggestion_accuracy_payload(queryset, model_version=None):
+    """Compute review-based accuracy for one immutable suggestion model."""
+    if model_version:
+        queryset = queryset.filter(suggestion_model_version=model_version)
     counts = dict(queryset.values_list('suggestion_outcome').annotate(total=Count('id')))
     accepted = counts.get('accepted', 0)
     overridden = counts.get('overridden', 0)
     rejected = counts.get('rejected', 0)
-    approved = accepted + overridden
-    precision_denominator = approved + rejected
+    precision_denominator = accepted + overridden + rejected
     recall_denominator = accepted + overridden
-    precision = approved / precision_denominator if precision_denominator else None
+    precision = accepted / precision_denominator if precision_denominator else None
     recall = accepted / recall_denominator if recall_denominator else None
     f1 = (
         2 * precision * recall / (precision + recall)
@@ -9246,13 +9249,25 @@ def _suggestion_accuracy_payload(queryset):
     )
     return {
         'accepted': accepted,
+        'approved': accepted,
         'overridden': overridden,
         'rejected': rejected,
+        'suggestions': queryset.count(),
         'reviewed': precision_denominator,
         'precision': precision,
         'recall': recall,
         'f1': f1,
     }
+
+
+def _suggestion_versions(queryset):
+    def key(version):
+        try:
+            return tuple(int(part) for part in version.removeprefix('v').split('.'))
+        except ValueError:
+            return (0,)
+    return sorted(queryset.exclude(suggestion_model_version='').values_list(
+        'suggestion_model_version', flat=True).distinct(), key=key, reverse=True)
 
 
 @api_view(['GET'])
@@ -9261,18 +9276,33 @@ def code_mapping_accuracy(request):
     """Suggestion quality, grouped by incoming source vocabulary and overall."""
     if not _can_manage_field_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
-    base = SourceCodeConceptMapping.objects.filter(
-        suggested_target_concept__isnull=False,
-        suggestion_outcome__in=('accepted', 'overridden', 'rejected'),
-    )
-    by_source_vocabulary = {
-        vocabulary_id or '': _suggestion_accuracy_payload(base.filter(source_vocabulary_id=vocabulary_id))
-        for vocabulary_id in base.values_list('source_vocabulary_id', flat=True).distinct()
-    }
+    base = SourceCodeConceptMapping.objects.filter(suggestion_model_version__gt='')
+    latest = (_suggestion_versions(base) or [None])[0]
+    by_source_vocabulary = {}
+    for vocabulary_id in base.values_list('source_vocabulary_id', flat=True).distinct():
+        scoped = base.filter(source_vocabulary_id=vocabulary_id)
+        version = (_suggestion_versions(scoped) or [None])[0]
+        payload = _suggestion_accuracy_payload(scoped, version)
+        payload['model_version'] = version
+        by_source_vocabulary[vocabulary_id or ''] = payload
+    overall = _suggestion_accuracy_payload(base, latest)
+    overall['model_version'] = latest
     return Response({
-        'overall': _suggestion_accuracy_payload(base),
+        'overall': overall,
         'by_source_vocabulary': by_source_vocabulary,
     })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def code_mapping_accuracy_dashboard(request):
+    if not _can_manage_field_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    base = SourceCodeConceptMapping.objects.filter(suggestion_model_version__gt='')
+    return Response({'models': [
+        {'model_version': version, **_suggestion_accuracy_payload(base, version)}
+        for version in _suggestion_versions(base)
+    ]})
 
 
 # HK-* vocabulary -> the clinical table whose concept-0 rows it curates. The
