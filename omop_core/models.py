@@ -1847,6 +1847,15 @@ class SourceCodeConceptMapping(models.Model):
     )
     source_code = models.CharField(max_length=100, db_index=True)
     source_code_description = models.CharField(max_length=255, blank=True, default='')
+    umls_source_name = models.TextField(
+        blank=True, default='',
+        help_text=(
+            'Canonical UMLS preferred name for this source code, looked up '
+            'from UmlsSourceCode during suggestion or backfill. Read-only '
+            'complement to source_code_description: curators edit the '
+            'description, UMLS name is preserved as-is for reference.'
+        ),
+    )
     source_concept = models.ForeignKey(
         Concept, on_delete=models.DO_NOTHING, null=True, blank=True,
         related_name='source_code_mappings_as_source', db_constraint=False,

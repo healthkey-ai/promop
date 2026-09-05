@@ -591,6 +591,20 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
         ).first() if src_vocab_id else None
         source_description = source_concept.concept_name if source_concept else ''
 
+        # UMLS preferred name for the source code — canonical, read-only.
+        umls_root = VOCAB_TO_UMLS_ROOT.get(src_vocab_id or '')
+        umls_pref = (
+            UmlsSourceCode.objects
+            .filter(root_source=umls_root, code=source_value, is_preferred=True)
+            .values_list('name', flat=True)
+            .first()
+        ) if umls_root else None
+        umls_source_name = umls_pref or ''
+
+        # If no OMOP source_concept but UMLS has a name, use it as the description.
+        if not source_description and umls_source_name:
+            source_description = umls_source_name
+
         chosen = None
         note = ''
         candidates = []
@@ -665,6 +679,8 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
             defaults={
                 'domain_id': domain_id,
                 'source_code_description': source_description[:255],
+                'source_concept': source_concept,
+                'umls_source_name': umls_source_name,
                 'target_concept': concept,
                 'suggested_target_concept': concept,
                 'destination_vocabulary_id': concept.vocabulary_id if concept else '',

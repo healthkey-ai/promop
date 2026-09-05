@@ -8555,6 +8555,7 @@ def _serialize_code_mapping_row(concept, mapping=None):
             'source_code': mapping.source_code if mapping else '',
             'source_code_description': mapping.source_code_description if mapping else '',
             'source_concept_id': mapping.source_concept_id if mapping else None,
+            'umls_source_name': mapping.umls_source_name if mapping else '',
             'source': mapping.source if mapping else '',
             'status': mapping.status if mapping else 'unmapped',
             'notes': mapping.notes if mapping else '',
@@ -8610,6 +8611,7 @@ def _serialize_code_mapping_row(concept, mapping=None):
         # The concept for the source code itself, when that vocabulary is
         # loaded. Null is the normal case and means nothing is wrong.
         'source_concept_id': mapping.source_concept_id if mapping else None,
+        'umls_source_name': mapping.umls_source_name if mapping else '',
         'source': mapping.source if mapping else '',
         # Review state and provenance
         'status': mapping.status if mapping else 'unmapped',
