@@ -55,7 +55,7 @@ from omop_core.services.mappings import (
 from omop_core.services.pk import next_pk, next_pk_batch
 from omop_core.services.patient_record_service import refresh_patient_record
 from omop_core.services.lot_regimens import REGIMEN_CONCEPT_IDS, get_regimen_name
-from omop_core.services.regimen_resolution import (
+from omop_core.mapping.therapy import (
     match_hemonc_regimen_by_name,
     get_or_create_quarantine_regimen,
 )

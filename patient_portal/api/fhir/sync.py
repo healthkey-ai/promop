@@ -40,7 +40,7 @@ from omop_core.models import (
     Concept, ConditionOccurrence, DrugExposure, Measurement, Observation, Person,
     PatientDocument, ProcedureOccurrence, ProvenanceRecord, SourceCodeConceptMapping,
 )
-from omop_core.services.code_mapping import (
+from omop_core.mapping.code_resolution import (
     resolve_source_code,
 )
 from omop_core.services.pk import next_pk_batch
