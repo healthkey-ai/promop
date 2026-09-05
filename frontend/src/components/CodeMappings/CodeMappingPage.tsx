@@ -106,6 +106,7 @@ interface RepointResult {
 }
 
 interface SuggestionAccuracy {
+  model_version?: string | null;
   accepted: number;
   overridden: number;
   rejected: number;
@@ -1045,6 +1046,9 @@ export default function CodeMappingPage() {
                 <div className="text-sm font-semibold text-slate-900">{metric(value ?? null)}</div>
               </div>
             ))}
+            <a href="/code-mappings/accuracy" className="px-3 py-2 text-left font-medium text-slate-700 underline hover:text-slate-950">
+              {selectedAccuracy?.model_version ? `Model ${selectedAccuracy.model_version}` : "Accuracy history"}
+            </a>
           </section>
         </div>
 

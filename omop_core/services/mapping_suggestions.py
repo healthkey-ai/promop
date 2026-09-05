@@ -57,6 +57,11 @@ logger = logging.getLogger(__name__)
 # for ten sightings and the caller can lower it once the queue is drained.
 DEFAULT_MIN_OCCURRENCES = 10
 
+# Increment this whenever a material suggestion-algorithm change is released.
+# The value is stored with every proposal, never inferred after a review.
+SUGGESTION_MODEL_VERSION = 'v0.2'
+SUGGESTION_PROVENANCE = f'suggest {SUGGESTION_MODEL_VERSION}'
+
 # How many candidates retrieval hands the ranker. Enough that the right concept
 # is in the list (it was third in the motivating example), few enough to rank
 # cheaply.
@@ -667,13 +672,32 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
                 'omop_table': omop_table,
                 'status': 'proposed',
                 'origin': 'import',
-                'origin_system': source_system,
+                'origin_system': SUGGESTION_PROVENANCE,
                 'occurrence_count': occurrences,
                 'notes': note,
                 'suggest_strategy': strategy_used or '',
                 'umls_cui': umls_cui or '',
+                'suggestion_model_version': SUGGESTION_MODEL_VERSION,
             },
         )
+        # A later model may replace an unreviewed machine proposal, but never a
+        # curator decision or an import/manual proposal.  One source-code row
+        # remains the canonical queue item.
+        if (not created and mapping.status == 'proposed'
+                and mapping.origin_system.startswith('suggest v')):
+            mapping.target_concept = concept
+            mapping.suggested_target_concept = concept
+            mapping.destination_vocabulary_id = concept.vocabulary_id if concept else ''
+            mapping.origin_system = SUGGESTION_PROVENANCE
+            mapping.suggestion_model_version = SUGGESTION_MODEL_VERSION
+            mapping.notes = note
+            mapping.suggest_strategy = strategy_used or ''
+            mapping.umls_cui = umls_cui or ''
+            mapping.save(update_fields=[
+                'target_concept', 'suggested_target_concept', 'destination_vocabulary_id',
+                'origin_system', 'suggestion_model_version', 'notes', 'suggest_strategy',
+                'umls_cui', 'updated_at',
+            ])
         entry['created'] = created
         entry['mapping_id'] = mapping.id
         results.append(entry)

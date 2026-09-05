@@ -1890,6 +1890,10 @@ class SourceCodeConceptMapping(models.Model):
         max_length=12, choices=SUGGESTION_OUTCOME_CHOICES, blank=True, default='', db_index=True,
         help_text='Immutable first curator disposition of a machine suggestion.',
     )
+    suggestion_model_version = models.CharField(
+        max_length=20, blank=True, default='', db_index=True,
+        help_text='Immutable version of the suggestion model that produced this proposal (for example v0.2).',
+    )
     destination_vocabulary_id = models.CharField(
         max_length=20, blank=True, default='', db_index=True,
         help_text=(
