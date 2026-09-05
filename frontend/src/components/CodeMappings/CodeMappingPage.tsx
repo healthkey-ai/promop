@@ -1015,10 +1015,10 @@ export default function CodeMappingPage() {
             onClick={() => setUnmappedCollapsed((v) => !v)}
             className="mb-2 inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-slate-700"
           >
-            {unmappedCollapsed || overallTab ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+            {unmappedCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
             Unmapped <span className="font-normal text-slate-500">({unmappedRows.length})</span>
           </button>
-          {!unmappedCollapsed && !overallTab && (
+          {!unmappedCollapsed && (
             <>
           <div className="mb-2 flex items-center justify-between gap-3">
             <p className="text-xs text-slate-500">
@@ -1046,10 +1046,10 @@ export default function CodeMappingPage() {
             onClick={() => setMappedCollapsed((v) => !v)}
             className="mb-2 inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-slate-700"
           >
-            {mappedCollapsed || overallTab ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+            {mappedCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
             Mapped <span className="font-normal text-slate-500">({mappedRows.length})</span>
           </button>
-          {!mappedCollapsed && !overallTab && renderTable(mappedRows, "No approved mappings in this vocabulary.")}
+          {!mappedCollapsed && renderTable(mappedRows, "No approved mappings in this vocabulary.")}
         </section>
 
         {athenaRows.length > 0 && (
@@ -1059,10 +1059,10 @@ export default function CodeMappingPage() {
               onClick={() => setAthenaCollapsed((v) => !v)}
               className="mb-2 inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-slate-700"
             >
-              {athenaCollapsed || overallTab ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+              {athenaCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
               Athena Mapped <span className="font-normal text-slate-500">({athenaRows.length})</span>
             </button>
-            {!athenaCollapsed && !overallTab && renderTable(athenaRows, "No Athena mappings in this vocabulary.", { hideStatus: true })}
+            {!athenaCollapsed && renderTable(athenaRows, "No Athena mappings in this vocabulary.", { hideStatus: true })}
           </section>
         )}
       </div>
