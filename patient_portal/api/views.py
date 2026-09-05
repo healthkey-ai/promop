@@ -68,7 +68,7 @@ from omop_core.services.demographics import resolve_concept as resolve_demograph
 from omop_core.services.pk import next_pk, next_pk_batch
 from omop_core.signals import suppress_patient_record_refresh
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
-from omop_core.services.code_mapping import (
+from omop_core.mapping.code_resolution import (
     CLINICAL_TABLES,
     _QUARANTINE_TARGETS,
     NO_MATCHING_CONCEPT_ID,
@@ -76,14 +76,14 @@ from omop_core.services.code_mapping import (
     repoint_clinical_rows,
     resolve_source_code,
 )
-from omop_core.services.mapping_suggestions import (
+from omop_core.mapping.suggestions import (
     ALL_STRATEGIES,
     DEFAULT_MIN_OCCURRENCES,
     suggest_mappings,
 )
 from omop_core.services.write_descriptor import mapping_table_is_writable
 from omop_core.services import source_vocabularies
-from omop_core.services.regimen_resolution import (
+from omop_core.mapping.therapy import (
     get_or_create_quarantine_drug,
     get_or_create_quarantine_observation,
     get_or_create_quarantine_procedure,

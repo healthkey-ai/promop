@@ -20457,7 +20457,7 @@ class CodeMappingResolutionTest(TestCase):
         from unittest.mock import patch
 
         with patch(
-            'omop_core.services.mapping_suggestions.suggest_source_code',
+            'omop_core.mapping.suggestions.suggest_source_code',
             return_value=(None, 'No suitable candidate.'),
         ):
             concept, mapping = resolve_source_code(
@@ -20479,7 +20479,7 @@ class CodeMappingResolutionTest(TestCase):
         from unittest.mock import patch
 
         with patch(
-            'omop_core.services.mapping_suggestions.suggest_source_code',
+            'omop_core.mapping.suggestions.suggest_source_code',
             return_value=(None, 'No suitable candidate.'),
         ):
             for _ in range(3):
