@@ -16,7 +16,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_DB: promop_test
           POSTGRES_USER: postgres
@@ -55,10 +55,12 @@ jobs:
       # fixture override could enable the extension. Enabling it on template1
       # instead means every database cloned from it already has pg_trgm, which
       # is what conftest.py prescribes as the required environment setup.
-      - name: Enable pg_trgm on template1 (required by the pytest suite)
+      - name: Enable database extensions on template1 (required by the pytest suite)
         env:
           PGPASSWORD: postgres
-        run: psql -h localhost -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
+        run: |
+          psql -h localhost -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
+          psql -h localhost -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS vector"
 
       - name: Run migrations
         run: python manage.py migrate --noinput
@@ -91,7 +93,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_DB: promop_test
           POSTGRES_USER: postgres
@@ -130,10 +132,12 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Enable pg_trgm on template1 (required by the pytest suite)
+      - name: Enable database extensions on template1 (required by the pytest suite)
         env:
           PGPASSWORD: postgres
-        run: psql -h localhost -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
+        run: |
+          psql -h localhost -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
+          psql -h localhost -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS vector"
 
       # Its own job rather than a step in `backend`: both suites there build a
       # database called test_promop_test, so a third suite sharing the runner
