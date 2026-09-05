@@ -30,7 +30,7 @@ import logging
 
 from django.contrib.contenttypes.models import ContentType
 from django.db import IntegrityError, transaction
-from django.db.models import Case, IntegerField, Q, When
+from django.db.models import Case, F, IntegerField, Q, When
 from django.utils import timezone
 
 from omop_core.models import (
@@ -160,7 +160,7 @@ def _direct_concept(source_vocabulary_id, source_code):
 
 
 def _record_proposal(*, source_vocabulary_id, source_code, source_text,
-                     concept, omop_table, source_system):
+                     concept, omop_table, source_system, notes=''):
     """Create or bump the proposed mapping for a code an import had to invent.
 
     Idempotent: the first sighting creates the row, later sightings bump
@@ -202,6 +202,7 @@ def _record_proposal(*, source_vocabulary_id, source_code, source_text,
                     occurrence_count=1,
                     first_seen=now,
                     last_seen=now,
+                    notes=notes,
                 )
         except IntegrityError:
             mapping = SourceCodeConceptMapping.objects.filter(
@@ -214,12 +215,51 @@ def _record_proposal(*, source_vocabulary_id, source_code, source_text,
     if mapping.status == 'approved':
         return mapping
 
-    mapping.occurrence_count = (mapping.occurrence_count or 0) + 1
-    mapping.last_seen = now
+    # This is called by concurrent import workers.  Reading, adding one in
+    # Python, and saving loses sightings under load; keep Seen a real counter.
+    updates = {
+        'occurrence_count': F('occurrence_count') + 1,
+        'last_seen': now,
+    }
     if mapping.first_seen is None:
-        mapping.first_seen = now
-    mapping.save(update_fields=['occurrence_count', 'last_seen', 'first_seen'])
+        updates['first_seen'] = now
+    SourceCodeConceptMapping.objects.filter(pk=mapping.pk).update(**updates)
+    mapping.refresh_from_db(fields=['occurrence_count', 'first_seen', 'last_seen'])
     return mapping
+
+
+def _effective_direct_mapping(*, source_vocabulary_id, source_code, concept, omop_table):
+    """Cache an authoritative direct vocabulary hit in SCCM.
+
+    ``approved`` remains the effective state for backwards compatibility, but
+    ``origin_system`` makes this a refreshable Athena-derived cache entry, not
+    a curator sign-off.  A concurrent creator, or any existing curator row,
+    always wins rather than being overwritten.
+    """
+    source_code = source_code[:SOURCE_CODE_MAX]
+    existing = SourceCodeConceptMapping.objects.filter(
+        source_vocabulary_id=source_vocabulary_id or '', source_code__iexact=source_code,
+    ).select_related('target_concept').first()
+    if existing is not None:
+        return existing
+    try:
+        with transaction.atomic():
+            return SourceCodeConceptMapping.objects.create(
+                source_vocabulary_id=source_vocabulary_id or '',
+                source_code=source_code,
+                source_code_description=(concept.concept_name or '')[:255],
+                source_concept=concept,
+                target_concept=concept,
+                destination_vocabulary_id=concept.vocabulary_id or '',
+                domain_id=concept.domain_id or _DOMAIN_FOR_TABLE.get(omop_table, ''),
+                omop_table=omop_table,
+                source='Athena', status='approved', origin='import',
+                origin_system='athena-direct', occurrence_count=0,
+            )
+    except IntegrityError:
+        return SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id=source_vocabulary_id or '', source_code__iexact=source_code,
+        ).select_related('target_concept').get()
 
 
 def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
@@ -236,17 +276,37 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
     table = normalize_omop_table(omop_table)
 
     # Rule 1 — SCCM is the primary resolver for every source vocabulary,
-    # including LOINC and SNOMED. A curator-approved exception must not lose
-    # to an automatic natural-key lookup.
+    # including LOINC, SNOMED, and CPT4. A curator-approved exception must not
+    # lose to an automatic natural-key lookup.
     approved = approved_mapping_for(source_vocabulary_id, source_code)
     if approved is not None:
         return approved.target_concept, approved
+
+    # A proposed target is a review aid, never an effective mapping.  Once a
+    # code is in the queue, every ingest caller receives the same unresolved
+    # answer and the proposal's Seen count records that encounter.
+    pending = SourceCodeConceptMapping.objects.filter(
+        source_vocabulary_id=source_vocabulary_id or '',
+        source_code__iexact=source_code[:SOURCE_CODE_MAX], status='proposed',
+    ).first()
+    if pending is not None:
+        return None, _record_proposal(
+            source_vocabulary_id=source_vocabulary_id,
+            source_code=source_code,
+            source_text=source_text,
+            concept=pending.target_concept,
+            omop_table=table,
+            source_system=source_system,
+        )
 
     # Rule 2 — LOINC/SNOMED retain direct Athena lookup only as a fallback.
     if source_vocabulary_id in SELF_RESOLVING_VOCABULARIES:
         concept = _direct_concept(source_vocabulary_id, source_code)
         if concept is not None:
-            return concept, None
+            return concept, _effective_direct_mapping(
+                source_vocabulary_id=source_vocabulary_id,
+                source_code=source_code, concept=concept, omop_table=table,
+            )
         # ...unless that concept is not loaded on this deploy. Returning None
         # here would drop the code to concept 0 with nothing in the review
         # queue, and LOINC is the dominant source system for the labs this
@@ -268,9 +328,34 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
     # Rule 3a — resolve against Athena as before.
     concept = _direct_concept(source_vocabulary_id, source_code)
     if concept is not None:
-        return concept, None
+        return concept, _effective_direct_mapping(
+            source_vocabulary_id=source_vocabulary_id,
+            source_code=source_code, concept=concept, omop_table=table,
+        )
 
-    # Rule 3b — mint, and propose the mapping for review.
+    # Rule 4 — the suggestion service owns every retrieval/ranking strategy.
+    # Its returned target is useful evidence for a curator but never an answer
+    # an importer may use before approval.
+    from omop_core.services.mapping_suggestions import suggest_source_code
+    suggested, note = suggest_source_code(
+        source_vocabulary_id=source_vocabulary_id,
+        source_code=source_code,
+        source_text=source_text,
+        omop_table=table,
+    )
+    if suggested is not None:
+        mapping = _record_proposal(
+            source_vocabulary_id=source_vocabulary_id,
+            source_code=source_code,
+            source_text=source_text,
+            concept=suggested,
+            omop_table=table,
+            source_system=source_system,
+            notes=note,
+        )
+        return None, mapping
+
+    # Rule 5 — mint only after direct resolution and suggestion both fail.
     target = _QUARANTINE_TARGETS.get(table)
     if target is None:
         logger.warning(
@@ -294,8 +379,9 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
         concept=concept,
         omop_table=table,
         source_system=source_system,
+        notes=note,
     )
-    return concept, mapping
+    return None, mapping
 
 
 # --------------------------------------------------------------------------

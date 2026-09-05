@@ -20421,14 +20421,15 @@ class CodeMappingResolutionTest(TestCase):
         # omit the unrelated deploy-time HK-Labs seed rows from migration 0201.
         SourceCodeConceptMapping.objects.filter(origin_system='hk-labs-seed').delete()
 
-    def test_loinc_source_resolves_directly_when_sccm_has_no_approval(self):
-        """LOINC is the direct fallback, not a bypass of SCCM."""
+    def test_loinc_source_direct_fallback_is_materialized_in_sccm(self):
+        """A direct hit populates the effective SCCM cache for later callers."""
         concept, mapping = resolve_source_code(
             source_code='33358-4', source_vocabulary_id='LOINC', omop_table='measurement',
         )
         self.assertEqual(concept.concept_id, self.loinc_concept.concept_id)
-        self.assertIsNone(mapping)
-        self.assertEqual(SourceCodeConceptMapping.objects.count(), 0)
+        self.assertEqual(mapping.status, 'approved')
+        self.assertEqual(mapping.origin_system, 'athena-direct')
+        self.assertEqual(mapping.target_concept_id, self.loinc_concept.concept_id)
 
     def test_approved_loinc_mapping_overrides_direct_concept(self):
         """SCCM is primary even when the inbound code has an Athena concept."""
@@ -20452,16 +20453,22 @@ class CodeMappingResolutionTest(TestCase):
         self.assertEqual(mapping.status, 'approved')
 
     def test_unresolvable_code_mints_and_proposes(self):
-        """Rule 3: never drop a code, never block on a curator."""
-        concept, mapping = resolve_source_code(
-            source_code='MPS', source_vocabulary_id='', source_text='M-PROTEIN, SERUM',
-            omop_table='measurement', source_system='hk-labs',
-        )
-        self.assertIsNotNone(concept)
-        self.assertEqual(concept.vocabulary_id, 'HK-Labs')
-        self.assertEqual(concept.source, 'HealthKey')
-        self.assertIsNone(concept.standard_concept)
-        self.assertGreaterEqual(concept.concept_id, 2_000_000_000)
+        """Minting is the final fallback, after the suggestion service declines."""
+        from unittest.mock import patch
+
+        with patch(
+            'omop_core.services.mapping_suggestions.suggest_source_code',
+            return_value=(None, 'No suitable candidate.'),
+        ):
+            concept, mapping = resolve_source_code(
+                source_code='MPS', source_vocabulary_id='', source_text='M-PROTEIN, SERUM',
+                omop_table='measurement', source_system='hk-labs',
+            )
+        self.assertIsNone(concept)
+        self.assertEqual(mapping.target_concept.vocabulary_id, 'HK-Labs')
+        self.assertEqual(mapping.target_concept.source, 'HealthKey')
+        self.assertIsNone(mapping.target_concept.standard_concept)
+        self.assertGreaterEqual(mapping.target_concept.concept_id, 2_000_000_000)
 
         self.assertEqual(mapping.status, 'proposed')
         self.assertEqual(mapping.origin, 'import')
@@ -20469,11 +20476,17 @@ class CodeMappingResolutionTest(TestCase):
         self.assertEqual(mapping.occurrence_count, 1)
 
     def test_repeat_sighting_mints_once_and_counts(self):
-        for _ in range(3):
-            resolve_source_code(
-                source_code='MPS', source_text='M-PROTEIN, SERUM',
-                omop_table='measurement', source_system='hk-labs',
-            )
+        from unittest.mock import patch
+
+        with patch(
+            'omop_core.services.mapping_suggestions.suggest_source_code',
+            return_value=(None, 'No suitable candidate.'),
+        ):
+            for _ in range(3):
+                resolve_source_code(
+                    source_code='MPS', source_text='M-PROTEIN, SERUM',
+                    omop_table='measurement', source_system='hk-labs',
+                )
         self.assertEqual(SourceCodeConceptMapping.objects.count(), 1)
         self.assertEqual(SourceCodeConceptMapping.objects.get().occurrence_count, 3)
         self.assertEqual(Concept.objects.filter(vocabulary_id='HK-Labs').count(), 1)
@@ -20498,9 +20511,8 @@ class CodeMappingResolutionTest(TestCase):
         self.assertEqual(concept.concept_id, other.concept_id)
         self.assertEqual(mapping.status, 'approved')
 
-    def test_proposed_mapping_does_not_override(self):
-        """Rule 4: a draft an import wrote must not steer the next import, or
-        the machine ratifies its own guess."""
+    def test_proposed_mapping_is_unresolved_and_counts_the_encounter(self):
+        """A proposal is evidence, not a destination an importer may use."""
         other = Concept.objects.create(
             concept_id=3046303, concept_name='Not yet approved',
             domain=self.domain, vocabulary=self.loinc_vocab, concept_class=self.concept_class,
@@ -20511,10 +20523,12 @@ class CodeMappingResolutionTest(TestCase):
             source_vocabulary_id='ICD10CM', source_code='33358-4',
             target_concept=other, omop_table='measurement', status='proposed',
         )
-        concept, _ = resolve_source_code(
+        concept, mapping = resolve_source_code(
             source_code='33358-4', source_vocabulary_id='ICD10CM', omop_table='measurement',
         )
-        self.assertNotEqual(concept.concept_id, other.concept_id)
+        self.assertIsNone(concept)
+        self.assertEqual(mapping.id, SourceCodeConceptMapping.objects.get().id)
+        self.assertEqual(mapping.occurrence_count, 1)
 
     def test_import_does_not_bump_an_approved_mapping_back_to_proposed(self):
         SourceCodeConceptMapping.objects.create(
@@ -23613,7 +23627,7 @@ class CodeMappingLookupTest(TestCase):
 
     def test_lookup_returns_approved_mapping(self):
         resp = self.client.post(self.url, {
-            'codes': [{'source_vocabulary_id': 'CPT4', 'source_code': '99213'}],
+            'codes': [{'source_vocabulary_id': 'CPT4', 'source_code': '99213', 'omop_table': 'procedure'}],
         }, format='json')
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
@@ -23625,28 +23639,31 @@ class CodeMappingLookupTest(TestCase):
         self.assertEqual(hit['destination_vocabulary_id'], 'SNOMED')
         self.assertEqual(hit['domain_id'], 'Procedure')
 
-    def test_lookup_excludes_proposed_mappings(self):
+    def test_lookup_reports_proposed_mapping_and_increments_seen(self):
         resp = self.client.post(self.url, {
-            'codes': [{'source_vocabulary_id': 'CPT4', 'source_code': '99214'}],
+            'codes': [{'source_vocabulary_id': 'CPT4', 'source_code': '99214', 'omop_table': 'procedure'}],
         }, format='json')
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
-        self.assertIsNone(data['mappings']['CPT4|99214'])
+        hit = data['mappings']['CPT4|99214']
+        self.assertFalse(hit['resolved'])
+        self.assertEqual(hit['status'], 'proposed')
+        self.assertEqual(hit['occurrence_count'], 1)
         self.assertEqual(data['resolved'], 0)
         self.assertEqual(data['unresolved'], 1)
 
     def test_lookup_returns_null_for_unknown_code(self):
         resp = self.client.post(self.url, {
-            'codes': [{'source_vocabulary_id': 'CPT4', 'source_code': 'XXXXX'}],
+            'codes': [{'source_vocabulary_id': 'CPT4', 'source_code': 'XXXXX', 'omop_table': 'procedure'}],
         }, format='json')
         self.assertEqual(resp.status_code, 200)
-        self.assertIsNone(resp.json()['mappings']['CPT4|XXXXX'])
+        self.assertFalse(resp.json()['mappings']['CPT4|XXXXX']['resolved'])
 
     def test_lookup_mixed_resolved_and_unresolved(self):
         resp = self.client.post(self.url, {
             'codes': [
-                {'source_vocabulary_id': 'CPT4', 'source_code': '99213'},
-                {'source_vocabulary_id': 'CPT4', 'source_code': 'XXXXX'},
+                {'source_vocabulary_id': 'CPT4', 'source_code': '99213', 'omop_table': 'procedure'},
+                {'source_vocabulary_id': 'CPT4', 'source_code': 'XXXXX', 'omop_table': 'procedure'},
             ],
         }, format='json')
         data = resp.json()
@@ -23659,13 +23676,13 @@ class CodeMappingLookupTest(TestCase):
 
     def test_lookup_rejects_missing_fields(self):
         resp = self.client.post(self.url, {
-            'codes': [{'source_vocabulary_id': 'CPT4'}],
+            'codes': [{'source_vocabulary_id': 'CPT4', 'omop_table': 'procedure'}],
         }, format='json')
         self.assertEqual(resp.status_code, 400)
 
     def test_lookup_rejects_too_many_codes(self):
         codes = [
-            {'source_vocabulary_id': 'CPT4', 'source_code': str(i)}
+            {'source_vocabulary_id': 'CPT4', 'source_code': str(i), 'omop_table': 'procedure'}
             for i in range(1001)
         ]
         resp = self.client.post(self.url, {'codes': codes}, format='json')
@@ -23674,7 +23691,7 @@ class CodeMappingLookupTest(TestCase):
     def test_lookup_requires_authentication(self):
         self.client.force_authenticate(user=None)
         resp = self.client.post(self.url, {
-            'codes': [{'source_vocabulary_id': 'CPT4', 'source_code': '99213'}],
+            'codes': [{'source_vocabulary_id': 'CPT4', 'source_code': '99213', 'omop_table': 'procedure'}],
         }, format='json')
         self.assertIn(resp.status_code, [401, 403])
 
