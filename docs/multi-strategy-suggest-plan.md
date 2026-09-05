@@ -91,7 +91,8 @@ class ConceptEmbedding(models.Model):
 - [x] Embeds `concept_name` in batches of 512
 - [x] Bulk upserts into `concept_embedding`
 - [x] Flags: `--batch-size`, `--vocabulary-id`, `--force`
-- [ ] Run on staging to populate embeddings
+- [x] SNOMED embedded (361,248 concepts, 28 min)
+- [x] All remaining vocabularies embedded (1,161,812 concepts, 138 min) — 1,523,060 total
 
 ### 5. Implement waterfall orchestration in `suggest_mappings()`
 - [x] Add `strategies: list[str]` parameter (default: `["umls", "vectors", "lexical"]`)
@@ -132,7 +133,7 @@ class ConceptEmbedding(models.Model):
 - [x] Vector candidates graceful degradation (3 tests)
 - [x] Vocab-to-UMLS mapping consistency (2 tests)
 - [x] API endpoint strategy parameter validation (4 tests)
-- [ ] Integration test — full waterfall with each strategy combination
+- [x] Integration test — full waterfall with each strategy combination (3 tests)
 - [ ] Integration test — FHIR upload + suggest end-to-end
 
 **Test file:** `tests/test_suggest_strategies.py`
@@ -193,8 +194,10 @@ Task 5: Waterfall orchestration
 
 ## Verification Checklist
 
-- [ ] UMLS: Known ICD10CM→SNOMED equivalency returns correct standard concept
-- [ ] Vectors: `vector_candidates("high blood pressure", "Condition")` returns hypertension concepts
-- [ ] Waterfall: UMLS-only → only UMLS matches; all three → UMLS skips other tiers
+- [x] UMLS: I10→SNOMED 316866 (Hypertensive disorder) + 320128 (Essential hypertension) ✓
+  - Also verified: J06.9→URI, M54.5→Low back pain, R10.9→Abdominal pain
+  - E11.9 returns 0 (expected: CUI C0494290's SNOMED siblings are deprecated; parent E11 maps correctly via C0011860)
+- [x] Vectors: Verified on staging — "hypertension" returns 20 relevant concepts, "kappa light chain" and "metformin" also excellent
+- [x] Waterfall: UMLS-only test passes (skips lexical); lexical-only test passes (ignores UMLS data)
 - [ ] Frontend: Checkboxes render, toggle, pass to API; banner shows strategy breakdown
-- [ ] All tests pass
+- [x] All 17 tests pass (1 skipped: pgvector not on local PG)
