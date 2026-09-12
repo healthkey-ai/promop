@@ -106,7 +106,7 @@ branches are included explicitly, in addition to the default-branch selector.
 Code-owner-specific approval remains disabled for the ownership bootstrap
 explained above; independent write-access review is enforced now.
 
-Completion still requires an independently approved PR. A self-review comment
+Completion evidence includes an independently approved PR. A self-review comment
 does not satisfy the approval control. Retain its review and merge records with
 these snapshots; applying the rule is not evidence that a particular PR was
 independently reviewed.

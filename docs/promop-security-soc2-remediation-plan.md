@@ -85,7 +85,7 @@ evidence work rather than code.
 | P1 11 — login response for non-portal accounts | #755 | **Done** |
 | P1 12 — break-glass scope | #755 | **Done** |
 | SOC2 1 — CI security gates | #754 | **Done** — `check --deploy`, `pip-audit`, bandit (baselined), gitleaks |
-| SOC2 2 — change-management evidence | #752 | **Enforced; PR approval pending** — required independent review/CI and no direct pushes verified on `dev` and `main`; ownership, deploy approvals and dated API evidence at [CC8.1 change management](soc2/change-management.md) |
+| SOC2 2 — change-management evidence | #752 | **Enforced** — required independent review/CI and no direct pushes verified on `dev` and `main`; ownership, deploy approvals and dated API evidence at [CC8.1 change management](soc2/change-management.md) |
 | SOC2 3 — audit-key evidence | #749 | **Done** in code and procedure; retaining `verify_audit_integrity` output is the recurring operator step |
 | Operator evidence | #753 | **Not started** |
 
