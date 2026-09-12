@@ -1,13 +1,14 @@
 # Code owners for healthkey-ai/promop.
 #
-# Purpose is SOC2 CC8.1 change management: an auditor asks who reviews changes to
-# security-relevant code, and this file is the answer that GitHub enforces rather
-# than a convention people remember. Paths below are ordered least- to
+# Purpose is SOC2 CC8.1 change management: declare who should review changes to
+# security-relevant code. Required independent approval is enforced by the
+# repository ruleset. Paths below are ordered least- to
 # most-specific; the LAST matching pattern wins, so the security paths at the
 # bottom override the catch-all at the top.
 #
-# This file only requests review. It becomes a control once branch protection on
-# `dev` and `main` requires review from code owners — see issue #752.
+# This file routes review; it does not itself enforce approval. The target
+# branch's copy is authoritative, and authors cannot approve their own PRs.
+# Enforcement, ownership bootstrap, and evidence: docs/soc2/change-management.md.
 
 # Default owner for everything not matched below.
 *                                   @adamblum
@@ -37,3 +38,9 @@
 /.bandit-baseline.json              @adamblum
 
 /ctomop/settings.py                 @adamblum
+
+# ── Ownership, Render infrastructure, and change-management evidence ──────────
+/CODEOWNERS                         @adamblum
+/render.yaml                        @adamblum
+/docs/soc2/                         @adamblum
+/scripts/capture_change_management_evidence.py  @adamblum

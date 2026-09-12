@@ -1,0 +1,66 @@
+{
+  "name": "main-protection",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "exclude": [],
+      "include": [
+        "~DEFAULT_BRANCH",
+        "refs/heads/main",
+        "refs/heads/dev"
+      ]
+    }
+  },
+  "rules": [
+    {
+      "type": "non_fast_forward"
+    },
+    {
+      "parameters": {
+        "allowed_merge_methods": [
+          "merge",
+          "squash",
+          "rebase"
+        ],
+        "dismiss_stale_reviews_on_push": true,
+        "dismissal_restriction": {
+          "allowed_actors": [],
+          "enabled": false
+        },
+        "require_code_owner_review": false,
+        "require_extra_approval_for_unattributed_changes": false,
+        "require_last_push_approval": true,
+        "required_approving_review_count": 1,
+        "required_review_thread_resolution": true,
+        "required_reviewers": []
+      },
+      "type": "pull_request"
+    },
+    {
+      "type": "required_signatures"
+    },
+    {
+      "type": "required_linear_history"
+    },
+    {
+      "parameters": {
+        "do_not_enforce_on_create": true,
+        "required_status_checks": [
+          {
+            "context": "Backend tests"
+          },
+          {
+            "context": "Frontend lint & build"
+          },
+          {
+            "context": "Security gates"
+          }
+        ],
+        "strict_required_status_checks_policy": false
+      },
+      "type": "required_status_checks"
+    }
+  ],
+  "bypass_actors": []
+}
