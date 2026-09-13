@@ -1,5 +1,6 @@
 const SECURITY_LABEL = /^security(?:$|[- :])/i;
 const CONTEXT = 'Security review';
+const REQUIRED_REVIEWER = { login: 'larsburgess', id: 23724 };
 const SECURITY_PATHS = [
   'omop_core/authorization.py', 'patient_portal/services.py',
   'patient_portal/api/break_glass.py', 'patient_portal/checks.py', 'start.sh',
@@ -48,7 +49,9 @@ function reviewDecision(pr, reviews, allowedReviewers) {
   }
   const eligible = [...latest.values()].filter(review => allowedReviewers.has(review.user.login) && review.user.login !== pr.user.login && review.user.type !== 'Bot');
   if (eligible.some(review => review.state === 'CHANGES_REQUESTED')) return false;
-  return eligible.some(review => review.state === 'APPROVED' && review.commit_id === pr.head.sha);
+  return eligible.some(review => review.user.id === REQUIRED_REVIEWER.id
+    && review.user.login.toLowerCase() === REQUIRED_REVIEWER.login
+    && review.state === 'APPROVED' && review.commit_id === pr.head.sha);
 }
 
 async function evaluate(github, owner, repo, pr) {
@@ -84,8 +87,8 @@ async function evaluate(github, owner, repo, pr) {
     if (['admin', 'maintain', 'write'].includes(data.permission) || data.user?.permissions?.push) allowed.add(login);
   }
   return reviewDecision(pr, reviews, allowed)
-    ? { state: 'success', description: 'Independent security approval covers the current commit' }
-    : { state: 'failure', description: 'Security change requires independent approval of the current commit' };
+    ? { state: 'success', description: 'Approval from @larsburgess covers the current commit' }
+    : { state: 'failure', description: 'Security change requires @larsburgess approval of the current commit' };
 }
 
 async function run({ github, context, core }) {
@@ -101,7 +104,7 @@ async function run({ github, context, core }) {
       owner, repo, sha, context: CONTEXT, state, description,
       target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
     });
-    await status('pending', 'Checking security files, labels, and independent approvals');
+    await status('pending', 'Checking security scope and @larsburgess approval');
     try {
       const results = [];
       for (const pr of group) {

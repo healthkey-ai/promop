@@ -18,11 +18,11 @@ security-sensitive files, or PRs with a security label or linked security-labell
 issue. Copy an issue's security-related label to its PR. Ordinary PRs may merge without
 an approving review once the other required checks pass.
 
-One approving review of the current head from **any other developer with repository
-write access** satisfies the security review requirement. Maintain and admin access also
-qualify. The author, bots, read-only collaborators, stale approvals and dismissed
-approvals do not qualify. An outstanding request for changes from another writer blocks
-approval. Membership in a particular GitHub team is not required.
+One approving review of the current head from **@larsburgess** (GitHub user ID
+`23724`), with repository write, maintain or admin access, satisfies the security
+review requirement. The author, other developers, bots, read-only collaborators,
+stale approvals and dismissed approvals do not qualify. An outstanding request for
+changes from another writer blocks approval. No GitHub team membership is required.
 
 The `Security review` status implements this conditional requirement in [the policy
 script](../../.github/scripts/security-review.cjs). It checks PR labels, closing issues
@@ -39,7 +39,7 @@ signed commits, linear history, force-push restrictions, and no ruleset bypass a
 
 `CODEOWNERS` routes review requests using the target branch's copy. A review request
 alone is not a mandatory approval; the catch-all owner does not impose review on
-ordinary PRs or limit eligible security reviewers.
+ordinary PRs. Security paths route to @larsburgess; the status independently verifies his identity and current-head approval.
 
 ## Rollout and current enforcement
 
@@ -47,23 +47,23 @@ The [2026-09-13 capture](evidence/2026-09-13-change-management-security-review.j
 shows the existing partial rollout: global approvals are already zero, but native
 security file rules still require the `healthkey` team and no `Security review` status
 is required. Issue labels alone currently have no automatic review gate. This does
-**not** satisfy the any-other-developer policy yet. The older proposal
+**not** satisfy the named-reviewer policy yet. The older proposal
 [#1219](https://github.com/healthkey-ai/promop/pull/1219) was closed without merging;
-this PR includes the replacement workflows and tests.
+this PR includes the replacement workflows and tests. The repository owner subsequently selected @larsburgess as the required reviewer, replacing the earlier any-other-developer proposal. Native file-specific `required_reviewers` support teams only, so the trusted named-reviewer status replaces that mechanism after bootstrap.
 
-1. Obtain independent approval for this security-related PR and merge the policy
+1. Obtain @larsburgess approval for this security-related PR and merge the policy
    workflows/script into the trusted default branch. The existing native rule
    remains in effect during bootstrap.
 2. Dispatch `security-review.yml` and retain successful workflow execution plus
    statuses for open PRs. Confirm an ordinary PR passes without review and a
-   security PR needs current approval from another writer.
+   security PR needs current approval from @larsburgess. An approval from any other writer must fail.
 3. Re-read the live ruleset and apply
    [the proposed payload](evidence/change-management-ruleset.json), preserving any
    unrelated changes since capture. In the same update, remove team-specific
    `required_reviewers` and require `Security review` with GitHub Actions as its
    expected source (integration ID `15368`). Do not require an unavailable status.
 4. Re-capture with `--require-enforced` and retain the new dated evidence. Verify
-   both `dev` and `main`, including approval by a writer outside `healthkey`.
+   both `dev` and `main`, including rejection of another writer’s approval and acceptance of Lars’s current approval without a team-membership lookup.
 
 The status writer executes only trusted default-branch code with metadata read and
 status-write permissions. It never checks out PR code. A separate unprivileged
@@ -155,7 +155,7 @@ ruleset configuration, not the correctness of workflow code or approvals on indi
 PRs. Retain workflow, test, status and review records as well.
 
 This control-change PR is security-related (issue #752 is labelled `security` and the PR
-changes CODEOWNERS), so it still needs independent approval. Retain its review and merge
+changes CODEOWNERS), so it needs approval from @larsburgess. Retain its review and merge
 records with these snapshots; author self-review does not satisfy that requirement.
 
 ## References

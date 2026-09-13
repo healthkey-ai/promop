@@ -2,8 +2,8 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { securityLabels, issueReferences, reviewDecision } = require('./security-review.cjs');
 const pr = { user: { login: 'author' }, head: { sha: 'current' } };
-const review = (state, commit_id = 'current', login = 'reviewer', id = 1) => ({ id, state, commit_id, user: { login } });
-const allowed = new Set(['author', 'reviewer', 'second']);
+const review = (state, commit_id = 'current', login = 'larsburgess', id = 1) => ({ id, state, commit_id, user: { login, id: login === 'larsburgess' ? 23724 : 98765 } });
+const allowed = new Set(['author', 'larsburgess', 'second']);
 
 test('security labels are explicit and case insensitive', () => {
   for (const label of ['security', 'Security', 'security:critical', 'security-fix']) assert.equal(securityLabels([{ name: label }]), true);
@@ -20,20 +20,20 @@ test('finds local, qualified, and URL issue references without duplicates', () =
   ]);
 });
 
-test('requires current independent approval by a writer', () => {
+test('requires current independent approval by Lars', () => {
   assert.equal(reviewDecision(pr, [], allowed), false);
   assert.equal(reviewDecision(pr, [review('APPROVED')], allowed), true);
   assert.equal(reviewDecision(pr, [review('APPROVED', 'old')], allowed), false);
   assert.equal(reviewDecision(pr, [review('APPROVED', 'current', 'author')], allowed), false);
   assert.equal(reviewDecision(pr, [review('APPROVED', 'current', 'reader')], allowed), false);
-  assert.equal(reviewDecision(pr, [{ ...review('APPROVED'), user: { login: 'reviewer', type: 'Bot' } }], allowed), false);
+  assert.equal(reviewDecision(pr, [{ ...review('APPROVED'), user: { login: 'larsburgess', id: 23724, type: 'Bot' } }], allowed), false);
 });
 
 test('dismissal and requested changes invalidate approval; comments do not', () => {
-  assert.equal(reviewDecision(pr, [review('APPROVED'), review('DISMISSED', 'current', 'reviewer', 2)], allowed), false);
-  assert.equal(reviewDecision(pr, [review('APPROVED'), review('COMMENTED', 'current', 'reviewer', 2)], allowed), true);
+  assert.equal(reviewDecision(pr, [review('APPROVED'), review('DISMISSED', 'current', 'larsburgess', 2)], allowed), false);
+  assert.equal(reviewDecision(pr, [review('APPROVED'), review('COMMENTED', 'current', 'larsburgess', 2)], allowed), true);
   assert.equal(reviewDecision(pr, [review('APPROVED'), review('CHANGES_REQUESTED', 'old', 'second', 2)], allowed), false);
-  assert.equal(reviewDecision(pr, [review('CHANGES_REQUESTED'), review('APPROVED', 'current', 'reviewer', 2)], allowed), true);
+  assert.equal(reviewDecision(pr, [review('CHANGES_REQUESTED'), review('APPROVED', 'current', 'larsburgess', 2)], allowed), true);
 });
 
 const { securityFiles, evaluate, run } = require('./security-review.cjs');
@@ -112,9 +112,9 @@ test('a PR changed during evaluation cannot receive a passing status', async () 
 });
 
 
-test('any other repository writer can approve without team membership', async () => {
+test('only Lars can approve security changes with write access and no team requirement', async () => {
   for (const permission of ['write', 'maintain', 'admin']) {
-    const { github, current } = fixture({ issueLabels: [{ name: 'security' }], reviews: [review('APPROVED', 'current', 'another-developer')] });
+    const { github, current } = fixture({ issueLabels: [{ name: 'security' }], reviews: [review('APPROVED', 'current', 'larsburgess')] });
     github.rest.repos.getCollaboratorPermissionLevel = async () => ({ data: { permission } });
     assert.equal((await evaluate(github, 'healthkey-ai', 'promop', current)).state, 'success');
   }
@@ -129,4 +129,18 @@ test('security control and existing protected paths require review', () => {
   for (const filename of ['omop_core/authorization.py', 'patient_portal/services.py', 'patient_portal/api/break_glass.py', 'patient_portal/checks.py', 'start.sh', 'CODEOWNERS', '.github/CODEOWNERS', 'docs/soc2/change-management.md', 'scripts/capture_change_management_evidence.py']) {
     assert.equal(securityFiles([{ filename }]), true, filename);
   }
+});
+
+
+test('another admin cannot substitute for the named reviewer', async () => {
+  const { github, current } = fixture({ labels: [{ name: 'security' }], reviews: [review('APPROVED', 'current', 'another-developer')] });
+  github.rest.repos.getCollaboratorPermissionLevel = async () => ({ data: { permission: 'admin' } });
+  assert.equal((await evaluate(github, 'healthkey-ai', 'promop', current)).state, 'failure');
+});
+
+test('reviewer identity and independent authorship are required', () => {
+  const wrongIdentity = { ...review('APPROVED'), user: { login: 'larsburgess', id: 98765 } };
+  assert.equal(reviewDecision(pr, [wrongIdentity], allowed), false);
+  const larsAsAuthor = { ...pr, user: { login: 'larsburgess', id: 23724 } };
+  assert.equal(reviewDecision(larsAsAuthor, [review('APPROVED')], allowed), false);
 });

@@ -62,8 +62,8 @@ def evaluate_branch(effective_rules, rulesets):
         and not rule.get('require_code_owner_review', False)
         for rule in pr_rules
     )
-    # Team-specific file reviewers would prevent any other writer's approval
-    # from satisfying the security policy, even with the status gate enabled.
+    # Team-specific file reviewers would impose an additional membership
+    # requirement beyond Lars's approval, even with the status gate enabled.
     no_team_reviewer_restriction = all(
         not rule.get('required_reviewers') for rule in pr_rules
     )
@@ -129,7 +129,7 @@ def capture(repository):
         'workflows': workflows,
         'scope': {
             'github_settings': 'Observed through authenticated read-only GitHub API calls.',
-            'security_review': 'Assesses required status configuration, not workflow correctness or individual PR approvals. Retain trusted workflow and status-run evidence.',
+            'security_review': 'Assesses required status configuration; the trusted policy must require @larsburgess (23724). Does not certify workflow correctness or individual PR approvals. Retain trusted workflow and status-run evidence.',
             'render_settings': 'Not captured. GitHub environments do not prove Render approval gates.',
             'historical_operation': 'Not established by this configuration snapshot; retain PR and deployment records.',
         },
