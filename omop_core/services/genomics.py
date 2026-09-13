@@ -12,30 +12,18 @@ from django.utils.dateparse import parse_date
 from django.utils.timezone import localdate
 from rest_framework.exceptions import NotFound, ValidationError
 
-from omop_core.models import Concept, ConceptRelationship, FieldConceptMapping, Measurement, Note, Observation, PatientRecord
-from omop_core.services.genomics_catalog import catalog, marker_for_variant, patient_fields
+from omop_core.models import Concept, ConceptRelationship, FieldConceptMapping, Measurement, Observation, PatientRecord
+from omop_core.services.genomics_catalog import marker_for_variant, patient_fields
+from omop_core.services.genomics_components import components
 from omop_core.services.pk import next_pk
+from omop_core.services.clinical_text import OwnedTextReader, store_text
 from omop_core.signals import suppress_patient_record_refresh
 
 PREFIX = 'genomics:'
 PARENT_CODE = '81252-9'
-_CDM_TEXT_WIDTH = 60  # CDM conformant column width for value_as_string.
-# field: (source code, fallback OMOP domain). LOINCs from the discrete
-# genetic variant panel; local narrative fields explicitly remain unmapped.
-FIELDS = {a['key']: (a['code'], a['table'].title()) for a in catalog()['attributes']}
-# Correct catalog domains that disagree with LOINC (the catalog is frozen).
-# The seed migration resolves without domain filtering, so the mapping's
-# omop_table is correct; these fix the FIELDS fallback domain.
-FIELDS['genomic_dna_change'] = ('81290-9', 'Observation')
-FIELDS['variant_analysis_method_type'] = ('81304-8', 'Observation')
-FIELDS['variant_category'] = ('83005-9', 'Observation')
-# Components added after the frozen v1 catalog; seeded by later migrations.
-# Fallback domains match LOINC's standard domain where a LOINC exists.
-FIELDS['status'] = ('genomics:status', 'Measurement')          # LOINC 69548-6 → Measurement
-FIELDS['clone_fraction'] = ('genomics:clone_fraction', 'Measurement')  # no LOINC
-FIELDS['transcript_dna_change'] = ('genomics:transcript_dna_change', 'Measurement')  # LOINC 48004-6 → Measurement
-FIELDS['coverage_depth'] = ('genomics:coverage_depth', 'Observation')  # LOINC 82121-5 → Observation
-FIELDS['amino_acid_change_type'] = ('genomics:amino_acid_change_type', 'Measurement')  # LOINC 48006-1 → Measurement
+# Persisted approved mappings govern writes; this effective registry also
+# supplies discovery and serializer validation without rewriting seed history.
+FIELDS = {a['key']: (a['code'], a['table'].title()) for a in components()}
 
 # Variant-level components that do not apply to absent findings.
 _VARIANT_LEVEL_FIELDS = frozenset({
@@ -208,39 +196,25 @@ def _event_concept():
     return concept.pk
 
 
-def _store_text(value, person, date, type_concept_id, parent_pk):
-    """Store text, overflow to a linked NOTE row if it exceeds CDM width.
-
-    Returns the string to store in value_as_string (truncated with note
-    reference if overflow) and the created Note pk (or None).
-    """
-    if not value or len(value) <= _CDM_TEXT_WIDTH:
-        return value, None
-    note = Note.objects.create(
-        note_id=next_pk(Note, 'note_id'),
-        person=person,
-        note_date=date,
-        note_type_concept_id=0,
-        note_text=value,
-        note_source_value=f'genomics:overflow:{parent_pk}',
-    )
-    reference = f'[note:{note.pk}]'
-    return value[:_CDM_TEXT_WIDTH - len(reference)] + reference, note.pk
+def _note_context(parent_id):
+    return f'genomics:overflow:{parent_id}'
 
 
-def _read_note_text(value):
-    """Retrieve full text from a linked NOTE if the value contains a note reference."""
-    if not value or '[note:' not in value:
-        return value
-    import re
-    match = re.search(r'\[note:(\d+)\]$', value)
-    if not match:
-        return value
-    try:
-        note = Note.objects.get(pk=int(match.group(1)))
-        return note.note_text
-    except Note.DoesNotExist:
-        return value
+def _store_text(value, row, parent_id):
+    return store_text(row, value, namespace='genomics', context=_note_context(parent_id))
+
+
+def _note_reader(snapshot, person_id):
+    if 'notes' not in snapshot.genomics_cache:
+        snapshot.genomics_cache['notes'] = OwnedTextReader(
+            person_id, [*snapshot.measurements, *snapshot.observations],
+        )
+    return snapshot.genomics_cache['notes']
+
+
+def _read_note_text(row, parent_id, reader):
+    return reader.read(row, namespace='genomics', context=_note_context(parent_id),
+                       legacy_source=_note_context(parent_id))
 
 
 def _components(person, parent_id):
@@ -284,7 +258,7 @@ def enrich_variants(variants, snapshot):
             elif field == 'coverage_depth':
                 target[field] = float(row.value_as_number) if row.value_as_number is not None else None
             elif field:
-                value = _read_note_text(row.value_as_string)
+                value = _read_note_text(row, target['id'], _note_reader(snapshot, row.person_id))
                 if value is None and row.value_as_concept_id:
                     value = row.value_as_concept.concept_name
                 target[field] = value
@@ -344,8 +318,7 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_r
     parent.measurement_date = data['test_date']
     parent.qualifier_source_value = data['gene']
     raw_variant = data['variant'] or data['variant_name'] or data['genomic_dna_change'] or data['amino_acid_change']
-    stored, _ = _store_text(raw_variant, person, data['test_date'], type_concept_id, parent.measurement_id)
-    parent.value_as_string = stored
+    parent.value_as_string = _store_text(raw_variant, parent, parent.pk)
     # Origin and interpretation are separate facts. Do not leave stale legacy
     # qualifiers after the corresponding component has been cleared.
     parent.qualifier_concept_id = None
@@ -400,8 +373,7 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_r
         elif key == 'coverage_depth':
             attrs['value_as_number'] = value
         else:
-            stored_text, _ = _store_text(str(value), person, data['test_date'], type_concept_id, parent.pk)
-            attrs['value_as_string'] = stored_text
+            attrs['value_as_string'] = _store_text(str(value), model(**attrs), parent.pk)
         model.objects.create(**attrs)
     if not skip_refresh:
         from omop_core.services.patient_record_service import refresh_patient_record

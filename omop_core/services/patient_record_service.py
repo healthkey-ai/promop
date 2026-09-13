@@ -3475,11 +3475,11 @@ def _get_genetic_mutations(person: Person, snapshot: OmopSnapshot = None) -> dic
         if not gene and code not in ('36908-2', '81252-9') and not marker:
             continue
 
-        from omop_core.services.genomics import _read_note_text
+        from omop_core.services.genomics import _note_reader, _read_note_text
         mutation_data = {
             'id': measurement.measurement_id,
             'gene': (gene or '').lower(),
-            'variant': _read_note_text(measurement.value_as_string),
+            'variant': _read_note_text(measurement, measurement.pk, _note_reader(snapshot, person.pk)),
             'test_date': measurement.measurement_date.isoformat() if measurement.measurement_date else None,
         }
         if marker:
