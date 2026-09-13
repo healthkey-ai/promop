@@ -1,6 +1,6 @@
 # PRomop Genomics: Implemented Architecture
 
-As implemented in PRomop. Reviewed against `dev` at `de4c164` on 2026-09-13 and updated with the changes described below. Remaining work and issue tracking are in [the implementation plan](genomics_implementation.md).
+As implemented on `dev` through `b8d0ef8` ([#1249](https://github.com/healthkey-ai/promop/pull/1249), [#1259](https://github.com/healthkey-ai/promop/pull/1259)), updated 2026-09-13 with the read-only schema audit below. Remaining requirements and deployment work are in [the implementation plan](genomics_implementation.md).
 
 ## Storage decision
 
@@ -97,7 +97,28 @@ The field-provenance registry describes the general list and all 42 named lists 
 
 ## Long text and schema
 
-Both model value_as_string fields are CharField(max_length=60). 0222_genomics_text_values is now a no-op; it no longer widens columns on a fresh installation. There is no forward migration here that moves overflow or narrows an already-widened database. Deployment history must be checked before claiming every environment has the same schema.
+Both model `value_as_string` fields are `CharField(max_length=60)`. `0222_genomics_text_values` is a no-op on fresh installations. No implemented migration/backfill narrows a formerly widened database. A recorded migration name cannot reveal which historical contents of that edited migration ran.
+
+The [schema audit command](../omop_core/management/commands/audit_genomics_schema.py) reads the actual PostgreSQL column types, limits, total rows, counts exceeding 60 characters, maximum lengths and the recorded migration timestamp. It resolves the same tables as the application's search path and counts all shared facts, including non-genomics and erroneous rows. It does not retrieve patient IDs or source strings. One database-enforced read-only, repeatable-read transaction provides a consistent snapshot; each statement defaults to a 30-second timeout.
+
+In the intended deployment's configured shell, run:
+
+```sh
+python manage.py audit_genomics_schema --environment render-staging --check > genomics-schema-audit.json
+```
+
+`--environment` is an evidence label, not a connection selector. `--database` selects a configured Django alias (default: `default`). For local operational access, explicitly select the documented `STAGING_DATABASE_URL` as `DATABASE_URL`; never let an unspecified `.env` URL select the target. Credentials and connection URLs are not included in the report.
+
+The report uses `report_version: 1`. `columns_match` means both selected columns are exactly `varchar(60)`. With `--check`, a missing, unsupported, narrower or wider column exits nonzero after writing the diagnostic JSON. Without `--check`, completed mismatch reports return normally for inventory collection. Database failures/timeouts exit nonzero without a partial report; the error includes only the exception class. Operators can set `--statement-timeout-ms` from 1 to 300000 and rerun safely. The audit performs no schema repair or NOTE rewriting. Width verification does not certify NOTE ownership, vocabulary or historical migration operations; the report marks those limits explicitly.
+
+Observed Render staging evidence from [2026-09-13 16:00 UTC](https://github.com/healthkey-ai/promop/issues/1237#issuecomment-5654380575):
+
+| Column | Actual type | Rows inspected | Values over 60 characters | Maximum length |
+| --- | --- | ---: | ---: | ---: |
+| Measurement.value_as_string | varchar(60) | 320,262 | 0 | 36 |
+| Observation.value_as_string | varchar(60) | 314,262 | 0 | 60 |
+
+Those observed columns require no narrowing. Other deployment inventories and any evidenced backfill remain #1237. A future shared-column conversion must first support every affected reader, including non-genomics consumers; changing their values to NOTE references without compatible readback would lose usable text.
 
 [clinical_text.py](../omop_core/services/clinical_text.py) provides the shared owned-NOTE encoding used by the genomics adapter. Values longer than 60 characters, and literal source text ending in `[note:<digits>]`, are stored in an immutable NOTE. The fact contains only `[note:<id>]`, which fits even a 19-digit ID. Notes bind the patient, exact fact table/ID (`note_source_value = genomics:<table>:<id>`) and finding context (`note_title = genomics:overflow:<parent_id>`). Reads require all three; narrative text is returned once and never interpreted recursively. Missing, malformed, wrong-owner or wrong-context references remain literal source text. Edits create new owned notes as needed; superseded and deleted findings retain their historical notes.
 
@@ -136,6 +157,7 @@ Reconciliation is source-preserving and manual: compare original legacy evidence
 | /api/v1/patient-records/{person_id}/genomics/ | GET finding list; POST finding |
 | /api/v1/patient-records/{person_id}/genomics/{variant_id}/ | GET, PATCH, DELETE finding |
 | /api/v1/patient-records/{person_id}/genomics-catalog/?disease=BC | GET disease catalog and marker writability |
+| /api/v1/patient-records/{person_id}/genomics-legacy-cytogenetics/?cursor=... | GET original legacy cytogenetic history, 50 rows per page |
 | /api/v1/patient-records/{person_id}/ | PATCH general list or named marker lists |
 
 Named-list PATCH replaces only the named marker. An empty list clears its findings and leaves it unknown. Explicit absence requires an entry:
@@ -159,7 +181,7 @@ manage.py seed_genomics_catalog seeds all 73 recipes idempotently and promotes e
 
 After loading vocabulary, run the audit on that deployment. For each proposed repair, review the field in the field-mapping curation interface, set the installed standard concept and matching OMOP table, retain the source key and independent value/unit settings, and record the decision before approving it. Rerun the audit and retain its output with the vocabulary version. Curation applies to future writes; migrating existing facts between tables requires a separately reviewed data repair. Passing fixture tests does not certify a deployment vocabulary.
 
-Existing coverage is in test_genomics_crud.py, test_genomics_catalog.py, test_genetic_mutation_roundtrip.py, the domain tests and shared frontend component tests. It covers CRUD, status, numeric components, NOTE round trips, approval, repeated findings, marker isolation and projection stubs. Local verification for this update is recorded in the implementation plan. Deployed schemas and vocabulary completeness have not been certified by this change.
+Existing coverage is in test_genomics_crud.py, test_genomics_catalog.py, test_genetic_mutation_roundtrip.py, the domain tests and shared frontend component tests. It covers CRUD, status, numeric components, NOTE round trips, approval, repeated findings, marker isolation and projection stubs. Merged validation is linked from the implementation plan. The schema audit has dedicated PostgreSQL tests for narrow and widened columns, missing/unsupported types, source preservation, database-enforced read-only access and sanitized failures. Only the recorded staging observation above is deployment-schema evidence; installed-vocabulary completeness remains a separate operational audit.
 
 Interactive CRUD is implemented. A published versioned import contract, source-finding idempotency/reconciliation, extraction provenance and a missing source-date policy are not implemented by this writer. Specimen/report identifiers are per-finding text, not linked test/specimen resources. No test scope, scope-derived absence, whole-test import or full-sequencing projection policy is implemented. Those delivery boundaries and the remaining findings work are in the plan.
 
