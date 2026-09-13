@@ -21,6 +21,7 @@ from django.core.management.base import BaseCommand
 
 from omop_core.models import PatientRecord
 from omop_core.services.sample_patient_stage import ensure_sample_patient_stage
+from omop_core.services.sample_patient_disease_status import ensure_sample_patient_disease_status
 from omop_core.services.patient_record_service import refresh_patient_record
 from omop_core.signals import suppress_patient_record_refresh
 
@@ -70,6 +71,7 @@ class Command(BaseCommand):
             for idx, rec in enumerate(records, 1):
                 try:
                     ensure_sample_patient_stage(rec, disease='FL')
+                    ensure_sample_patient_disease_status(rec)
                     refreshed.append(refresh_patient_record(rec.person))
                 except Exception as exc:
                     failed += 1

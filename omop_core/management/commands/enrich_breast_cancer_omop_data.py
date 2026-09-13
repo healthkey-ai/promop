@@ -42,6 +42,7 @@ from datetime import date, timedelta
 
 from django.core.management.base import BaseCommand, CommandError
 from omop_core.services.sample_patient_stage import ensure_sample_patient_stage
+from omop_core.services.sample_patient_disease_status import ensure_sample_patient_disease_status
 from django.db import close_old_connections, transaction
 from django.db.models import Exists, OuterRef, Q
 from django.db.utils import InterfaceError, OperationalError
@@ -608,6 +609,7 @@ class Command(BaseCommand):
                     with transaction.atomic():
                         if record:
                             record.stage, _ = ensure_sample_patient_stage(record, disease='BC', dry_run=dry_run)
+                            ensure_sample_patient_disease_status(record, dry_run=dry_run)
                         perf_backfilled = self._backfill_performance_and_stage(
                             person, record, dry_run,
                         )

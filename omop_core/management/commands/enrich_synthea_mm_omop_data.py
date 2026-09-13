@@ -26,6 +26,7 @@ from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError
 from omop_core.services.sample_patient_stage import ensure_sample_patient_stage
+from omop_core.services.sample_patient_disease_status import ensure_sample_patient_disease_status
 from django.db import close_old_connections, connection, transaction
 
 from omop_core.models import (
@@ -565,6 +566,7 @@ class Command(BaseCommand):
                 source = bundle_by_key.get(bundle_key)
                 if source is None:
                     ensure_sample_patient_stage(record, disease='MM', dry_run=dry_run)
+                    ensure_sample_patient_disease_status(record, dry_run=dry_run)
                     if not dry_run:
                         touched_person_ids.append(person.person_id)
                     self.stdout.write(
@@ -738,6 +740,7 @@ class Command(BaseCommand):
                     person, therapy_lines, ehr_type, dry_run=dry_run,
                 )
 
+                ensure_sample_patient_disease_status(record, dry_run=dry_run)
                 touched_person_ids.append(person.person_id)
                 self.stdout.write(
                     f'  [{idx}/{len(cohort)}] person_id={person.person_id} '
