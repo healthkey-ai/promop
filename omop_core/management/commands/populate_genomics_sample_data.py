@@ -8,6 +8,7 @@ GenomicsTab all populate correctly.
 Usage:
     DATABASE_URL="..." python manage.py populate_genomics_sample_data [--count 5] [--dry-run]
 """
+import json
 import random
 from datetime import date, timedelta
 from decimal import Decimal
@@ -16,7 +17,9 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from omop_core.models import Concept, FieldConceptMapping, PatientRecord
-from omop_core.services.genomics import delete_variant, list_variants, save_variant
+from omop_core.services.genomics import (
+    _measurement_event_concepts, delete_variant, list_variants, save_variant,
+)
 from omop_core.services.genomics_catalog import disease_code
 
 
@@ -24,7 +27,7 @@ from omop_core.services.genomics_catalog import disease_code
 
 _HGVS_VARIANTS = {
     'brca1':  ['c.68_69delAG', 'c.5266dupC', 'c.181T>G'],
-    'brca2':  ['c.5946delT', 'c.6174delT'],
+    'brca2':  ['c.5946delT'],
     'pik3ca': ['c.3140A>G', 'c.1633G>A'],
     'tp53':   ['c.743G>A', 'c.818G>A'],
     'esr1':   ['c.1610A>G', 'c.1613A>G'],
@@ -45,10 +48,10 @@ _HGVS_VARIANTS = {
 
 _AMINO_ACID_CHANGES = {
     'brca1':  ['p.Glu23ValfsTer17', 'p.Gln1756ProfsTer74', 'p.Cys61Gly'],
-    'brca2':  ['p.Ser1982ArgfsTer22', 'p.Ala2058GlyfsTer3'],
+    'brca2':  ['p.Ser1982ArgfsTer22'],
     'pik3ca': ['p.His1047Arg', 'p.Glu545Lys'],
     'tp53':   ['p.Arg248Gln', 'p.Arg273His'],
-    'esr1':   ['p.Tyr537Ser', 'p.Asp538Gly'],
+    'esr1':   ['p.Tyr537Cys', 'p.Asp538Gly'],
     'kras':   ['p.Gly12Val', 'p.Gly12Asp', 'p.Gly12Cys'],
     'nras':   ['p.Gln61Lys', 'p.Gln61Arg'],
     'braf':   ['p.Val600Glu'],
@@ -120,9 +123,36 @@ _SLUG_MAP = {
 }
 _SLUG_TO_CODE = {v: k for k, v in _SLUG_MAP.items()}
 
-_INTERPRETATIONS = ['Pathogenic', 'Likely pathogenic', 'VUS', 'Likely benign', 'Benign']
-_ORIGINS = ['Germline', 'Somatic']
-_METHODS = ['NGS', 'Sanger sequencing', 'PCR']
+# Reference annotations for the paired examples above. Coordinates are only
+# supplied where checked; do not invent a genomic position from a c.HGVS.
+# See docs/genomics.md for reference sources and the legacy PALB1 limitation.
+_GENE_ANNOTATIONS = {
+    'brca1': ('17', '17q21.31', 'NM_007294.4', 'NC_000017.11'),
+    'brca2': ('13', '13q13.1', 'NM_000059.4', 'NC_000013.11'),
+    'pik3ca': ('3', '3q26.32', 'NM_006218.4', 'NC_000003.12'),
+    'tp53': ('17', '17p13.1', 'NM_000546.6', 'NC_000017.11'),
+    'esr1': ('6', '6q25.1', 'NM_000125.4', 'NC_000006.12'),
+    'kras': ('12', '12p12.1', 'NM_004985.5', 'NC_000012.12'),
+    'nras': ('1', '1p13.2', 'NM_002524.5', 'NC_000001.11'),
+    'braf': ('7', '7q34', 'NM_004333.6', 'NC_000007.14'),
+}
+_GENOMIC_CHANGES = {
+    ('braf', 'c.1799T>A'): 'NC_000007.14:g.140753336A>T',
+    ('tp53', 'c.743G>A'): 'NC_000017.11:g.7674220C>T',
+}
+_ABNORMALITY_DETAILS = {
+    'del17p': ('17', '17p13.1', 'FISH'),
+    't414': ('4;14', '4p16.3;14q32.33', 'FISH'),
+    't1114': ('11;14', '11q13.3;14q32.33', 'FISH'),
+    't1416': ('14;16', '14q32.33;16q23.2', 'FISH'),
+    'gain1q': ('1', '1q21', 'FISH'),
+    'bcl6': ('3', '3q27.3', 'FISH'),
+    'del11q': ('11', '11q22.3', 'FISH'),
+    'del13q': ('13', '13q14', 'FISH'),
+    'trisomy12': ('12', '', 'FISH'),
+    'hyperdiploidy': ('', '', 'Karyotyping'),
+    'complex_karyotype': ('', '', 'Karyotyping'),
+}
 
 
 def _random_test_date():
@@ -131,39 +161,104 @@ def _random_test_date():
     return (date.today() - timedelta(days=days_ago)).isoformat()
 
 
-def _build_gene_payload(entry):
-    """Build a full clinical detail payload for a gene marker."""
-    key = entry['marker_key']
-    hgvs = _HGVS_VARIANTS.get(key)
-    payload = {
-        'gene': entry['gene'],
-        'marker_key': key,
-        'variant': random.choice(hgvs) if hgvs else '',
-        'interpretation': random.choice(_INTERPRETATIONS),
-        'origin': random.choice(_ORIGINS),
-        'status': 'present',
-        'test_date': _random_test_date(),
-        'genome_assembly': 'GRCh38',
-        'variant_analysis_method_type': random.choice(_METHODS),
-    }
-    aa = _AMINO_ACID_CHANGES.get(key)
-    if aa:
-        payload['amino_acid_change'] = random.choice(aa)
-    if random.random() < 0.6:
-        payload['allelic_frequency'] = Decimal(str(round(random.uniform(0.5, 85.0), 1)))
-        payload['allelic_frequency_unit'] = '%'
-    return payload
-
-
-def _build_abnormality_payload(entry):
-    """Build a status-only payload for an abnormality marker."""
+def _report_payload(entry, *, person_id=None, disease=None, origin='Somatic'):
+    """Synthetic report context, with collection preceding test/report dates."""
+    test_date = _random_test_date()
+    identifier = f'SAMPLE-{person_id or "DEMO"}-{entry["marker_key"]}-{test_date}'
+    specimen = ('Peripheral blood' if origin == 'Germline' else
+                'Breast tumour tissue' if disease == 'BC' else
+                'Lymph node tissue' if disease in ('FL', 'MCL') else
+                'Peripheral blood' if disease == 'CLL' else 'Bone marrow aspirate')
     return {
         'gene': entry['gene'],
         'marker_key': entry['marker_key'],
-        'variant_name': _ABNORMALITY_LABELS.get(entry['marker_key'], entry['marker_key']),
-        'status': random.choice(['present', 'absent']),
-        'test_date': _random_test_date(),
+        'origin': origin,
+        'genomic_source_class': origin,
+        'test_date': test_date,
+        'collection_date': (date.fromisoformat(test_date) - timedelta(days=7)).isoformat(),
+        'interpretation_date': test_date,
+        'specimen_id': identifier + '-SP',
+        'specimen_type': specimen,
+        'report_id': identifier + '-RPT',
+        'laboratory': 'Synthetic demonstration laboratory',
+        'classification_framework': 'Synthetic demonstration classification; not clinically assessed',
+        'evidence_source': 'Synthetic sample data; not a patient laboratory result',
     }
+
+
+def _build_gene_payload(entry, *, person_id=None, disease=None):
+    """Build coherent sequence annotations and complete synthetic report context."""
+    key = entry['marker_key']
+    hgvs = _HGVS_VARIANTS[key]
+    index = random.randrange(len(hgvs))
+    variant = hgvs[index]
+    origin = 'Germline' if key in ('brca1', 'brca2') else 'Somatic'
+    payload = _report_payload(entry, person_id=person_id, disease=disease, origin=origin)
+    payload.update({
+        'variant': variant,
+        'transcript_dna_change': variant,
+        'variant_name': f'{entry["gene"]} {variant}',
+        'variant_description': (
+            f'Synthetic {entry["gene"]} sequence finding for demonstration. '
+            'Annotations are sample fixtures, not an interpretation of patient sequencing.'
+        ),
+        'interpretation': 'Uncertain',
+        'status': 'present',
+        'assessment': 'present',
+        'genome_assembly': 'GRCh38',
+        'variant_category': 'Simple variant',
+        'variant_analysis_method_type': 'Next generation sequencing',
+        'zygosity': 'Heterozygous' if origin == 'Germline' else 'Unknown',
+        'allelic_frequency': Decimal(str(round(random.uniform(
+            40.0 if origin == 'Germline' else 5.0,
+            60.0 if origin == 'Germline' else 75.0,
+        ), 1))),
+        'allelic_frequency_unit': '%',
+        'coverage_depth': random.randint(250, 1500),
+    })
+    aa = _AMINO_ACID_CHANGES.get(key)
+    if aa:
+        # DNA and protein describe the same example, never independent draws.
+        protein = aa[index]
+        payload['amino_acid_change'] = protein
+        payload['amino_acid_change_type'] = 'Frameshift' if 'fs' in protein else 'Missense'
+    annotation = _GENE_ANNOTATIONS.get(key)
+    if annotation:
+        payload.update(zip((
+            'chromosome', 'cytogenetic_location', 'transcript_reference_sequence_id',
+            'genomic_reference_sequence_id',
+        ), annotation))
+    if (key, variant) in _GENOMIC_CHANGES:
+        payload['genomic_dna_change'] = _GENOMIC_CHANGES[key, variant]
+    if key == 'palb1':
+        payload['variant_description'] += ' PALB1 is an unresolved legacy catalog label; no reference annotation assigned.'
+    return payload
+
+
+def _build_abnormality_payload(entry, *, person_id=None, disease=None):
+    """Cytogenetic context; clone fraction is distinct from sequence VAF."""
+    key = entry['marker_key']
+    label = _ABNORMALITY_LABELS[key]
+    chromosome, location, method = _ABNORMALITY_DETAILS[key]
+    status = random.choice(['present', 'absent'])
+    payload = _report_payload(entry, person_id=person_id, disease=disease)
+    payload.update({
+        'variant_name': label,
+        'variant_description': f'Synthetic cytogenetic report: {label} {status}. Not a patient laboratory result.',
+        'status': status,
+        'assessment': status,
+        'interpretation': 'Uncertain',
+        'variant_category': 'Structural variant',
+        'variant_analysis_method_type': method,
+    })
+    if chromosome:
+        payload['chromosome'] = chromosome
+    if location:
+        payload['cytogenetic_location'] = location
+    if method == 'FISH':
+        payload['clone_fraction'] = random.randint(10, 90) if status == 'present' else 0
+        payload['clone_fraction_unit'] = '%'
+    return payload
 
 
 def _select_markers(pool, min_count=1, max_count=6):
@@ -177,7 +272,7 @@ def _select_markers(pool, min_count=1, max_count=6):
 
 
 class Command(BaseCommand):
-    help = 'Seed plausible genomic variant data onto patients'
+    help = 'Seed detailed synthetic genomic findings and laboratory report context onto patients'
 
     def add_arguments(self, parser):
         parser.add_argument('--org', type=str, help='Filter patients by organization slug')
@@ -191,6 +286,8 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         dry_run = options['dry_run']
         overwrite = options['overwrite']
+        if options['count'] is not None and options['count'] < 1:
+            raise CommandError('--count must be a positive integer.')
 
         # Precondition: required OMOP concepts and genomics field mappings must exist.
         if not dry_run:
@@ -199,13 +296,7 @@ class Command(BaseCommand):
                 missing.append('Concept(pk=0)')
             if not Concept.objects.filter(pk=32817).exists():
                 missing.append('Concept(pk=32817)')
-            if not Concept.objects.filter(
-                vocabulary_id='CDM', concept_code='measurement.measurement_id',
-                invalid_reason__isnull=True,
-            ).exists() and not Concept.objects.filter(
-                vocabulary_id='CDM', concept_name='measurement.measurement_id',
-                standard_concept='S', invalid_reason__isnull=True,
-            ).exists():
+            if not _measurement_event_concepts().filter(invalid_reason__isnull=True).exists():
                 missing.append("CDM concept 'measurement.measurement_id'")
             if missing:
                 raise CommandError(f'Required OMOP concepts missing: {", ".join(missing)}. Load vocabularies first.')
@@ -273,6 +364,7 @@ class Command(BaseCommand):
         seeded_persons = []
         seeded = 0
         total_variants = 0
+        failed = 0
         for pr in patients:
             code = _SLUG_TO_CODE.get(pr.disease_slug)
             if code is None:
@@ -282,10 +374,19 @@ class Command(BaseCommand):
                 continue
 
             markers = _select_markers(pool)
+            payloads = [
+                (_build_gene_payload if entry['kind'] == 'gene' else _build_abnormality_payload)(
+                    entry, person_id=pr.person_id, disease=code,
+                )
+                for entry in markers
+            ]
             if dry_run:
                 marker_names = ', '.join(m['marker_key'] for m in markers)
                 self.stdout.write(f'  [DRY RUN] person_id={pr.person_id} ({code}): '
                                   f'{len(markers)} variants — {marker_names}')
+                if options['verbosity'] >= 2:
+                    for payload in payloads:
+                        self.stdout.write(json.dumps(payload, default=str, sort_keys=True))
                 seeded += 1
                 total_variants += len(markers)
                 continue
@@ -297,17 +398,14 @@ class Command(BaseCommand):
                         for v in existing:
                             delete_variant(pr.person, v['id'], skip_refresh=True)
 
-                    for entry in markers:
-                        if entry['kind'] == 'gene':
-                            payload = _build_gene_payload(entry)
-                        else:
-                            payload = _build_abnormality_payload(entry)
+                    for payload in payloads:
                         save_variant(pr.person, payload, skip_refresh=True)
-                        total_variants += 1
             except Exception as e:
                 self.stderr.write(f'  ERROR person_id={pr.person_id}: {e}')
+                failed += 1
                 continue
 
+            total_variants += len(payloads)
             seeded_persons.append(pr.person)
             seeded += 1
             self.stdout.write(f'  person_id={pr.person_id} ({code}): {len(markers)} variants written')
@@ -324,6 +422,11 @@ class Command(BaseCommand):
         for i, person in enumerate(seeded_persons, 1):
             refresh_patient_record(person)
             self.stdout.write(f'  refreshed {i}/{len(seeded_persons)} (person_id={person.person_id})')
+
+        if failed:
+            raise CommandError(
+                f'{failed} patient(s) failed; seeded {total_variants} variants across {seeded} patients.'
+            )
 
         self.stdout.write(self.style.SUCCESS(
             f'Done. Seeded {total_variants} variants across {seeded} patients.'

@@ -16327,6 +16327,26 @@ class VocabSnapshotStreamTransactionTest(TransactionTestCase):
             'stream must end with the __done sentinel',
         )
 
+    def test_publication_and_stream_share_bytes_without_ambient_transaction(self):
+        import hashlib
+        import time
+        from io import StringIO
+        from omop_core.management.commands.load_athena_vocabularies import Command
+        from omop_core.models import VocabularyRelease
+
+        command = Command(stdout=StringIO())
+        command._build_start = time.time()
+        command._publish_release({'vocabulary': 999999})
+        release = VocabularyRelease.objects.latest('pk')
+        response = self.client.get(
+            f'/api/v1/vocab-releases/{release.pk}/snapshot/vocabulary/')
+        lines = b''.join(response.streaming_content).splitlines(keepends=True)
+        self.assertEqual(
+            hashlib.sha256(b''.join(lines[:-1])).hexdigest(),
+            release.checksums['vocabulary']['digest'],
+        )
+
+
 
 class VocabSystemScopeTest(_SmartBase):
     """#344 — vocabulary release/snapshot endpoints are reference (system) data,
@@ -26581,3 +26601,45 @@ class RecordAttestationTest(TestCase):
         self.record.refresh_from_db()
         # Date should be updated to today
         self.assertNotEqual(self.record.validation_date, date_type(2026, 1, 1))
+
+
+class FhirConditionStagePersistenceTest(FhirUploadBase):
+    """Condition-only stages survive upload and later OMOP projection refresh."""
+
+    def _upload_condition_stage(self, disease, stages):
+        bundle = _make_fl_bundle()
+        condition = bundle['entry'][1]['resource']
+        condition['code'] = disease if isinstance(disease, dict) else {'text': disease}
+        condition['stage'] = [{'summary': {'text': stage}} for stage in stages]
+        # Keep the later unstaged condition: it must not steal the stage date.
+        fhir_file = io.BytesIO(json.dumps(bundle).encode())
+        fhir_file.name = 'condition-stage.json'
+        response = self.client.post('/api/patient-info/upload_fhir/', {'file': fhir_file}, format='multipart')
+        self.assertIn(response.status_code, [200, 201], response.data)
+        return Person.objects.get(given_name='Larry', family_name='Follic')
+
+    def test_fl_stage_survives_refresh_with_transformation_condition(self):
+        from omop_core.services.patient_record_service import refresh_patient_record
+        person = self._upload_condition_stage('Follicular Lymphoma', ['Follicular Lymphoma Ann Arbor Stage IIIB'])
+        self.assertEqual(refresh_patient_record(person).stage, 'IIIB')
+        fact = Observation.objects.get(person=person, observation_source_value='FHIR-condition-stage')
+        self.assertEqual(fact.observation_date, date(2020, 6, 1))
+
+    def test_mm_condition_only_prefers_riss_and_survives_refresh(self):
+        from omop_core.services.patient_record_service import refresh_patient_record
+        person = self._upload_condition_stage('Multiple Myeloma', ['ISS Stage II', 'R-ISS Stage III'])
+        self.assertEqual(refresh_patient_record(person).stage, 'R-ISS III')
+
+    def test_bare_condition_stage_text_is_retained(self):
+        from omop_core.services.patient_record_service import refresh_patient_record
+        person = self._upload_condition_stage('Follicular Lymphoma', ['IVB'])
+        self.assertEqual(refresh_patient_record(person).stage, 'IVB')
+
+
+    def test_coded_breast_condition_without_display_retains_stage(self):
+        from omop_core.services.patient_record_service import refresh_patient_record
+        person = self._upload_condition_stage(
+            {'coding': [{'system': 'http://snomed.info/sct', 'code': '254837009'}]},
+            ['Stage IIA'],
+        )
+        self.assertEqual(refresh_patient_record(person).stage, 'IIA')

@@ -27,11 +27,15 @@ def test_genomic_overflow_reference_fits_cdm_width_with_large_note_ids(monkeypat
     assert _read_note_text(stored) == value
 
 
-@pytest.fixture
-def setup():
+@pytest.fixture(params=['legacy', 'athena'])
+def setup(request):
     person = PersonFactory()
     record = PatientRecordFactory(person=person)
-    ConceptFactory(vocabulary__vocabulary_id='CDM', concept_code='measurement.measurement_id')
+    ConceptFactory(
+        vocabulary__vocabulary_id='CDM',
+        concept_code='measurement.measurement_id' if request.param == 'legacy' else 'CDM126',
+        concept_name='measurement.measurement_id',
+    )
     for field, (code, domain) in FIELDS.items():
         if not code.startswith('genomics:'):
             ConceptFactory(concept_code=code, domain__domain_id=domain)
@@ -192,7 +196,7 @@ def test_missing_loinc_keeps_source_code_and_unmapped_concept(setup):
 def test_linked_imported_gene_and_component_without_source_code(setup):
     person, _, staff = setup
     parent = MeasurementFactory(person=person, measurement_source_value='81252-9', value_as_string='c.123A>G')
-    link = Concept.objects.get(vocabulary_id='CDM', concept_code='measurement.measurement_id')
+    link = Concept.objects.get(vocabulary_id='CDM', concept_name='measurement.measurement_id')
     ObservationFactory(person=person, observation_concept=Concept.objects.get(concept_code='48018-6'),
         observation_event_id=parent.pk, obs_event_field_concept=link, value_as_string='BRCA2')
     amino = MeasurementFactory(person=person, measurement_concept=Concept.objects.get(concept_code='48005-3'),
@@ -204,6 +208,39 @@ def test_linked_imported_gene_and_component_without_source_code(setup):
     assert result.data.get('amino_acid_change') in (None, '')
     amino.refresh_from_db()
     assert amino.is_erroneous
+
+
+def test_component_links_preserve_patient_vocabulary_and_event_type_isolation(setup):
+    from omop_core.services.genomics import delete_variant
+
+    person, _, _ = setup
+    saved = save_variant(person, {'gene': 'TP53', 'laboratory': 'Correct laboratory'})
+    link = Concept.objects.get(vocabulary_id='CDM', concept_name='measurement.measurement_id')
+    wrong_table = ConceptFactory(vocabulary__vocabulary_id='CDM', concept_code='CDM999',
+                                 concept_name='observation.observation_id')
+    wrong_vocabulary = ConceptFactory(vocabulary__vocabulary_id='Local',
+                                      concept_code='measurement.measurement_id',
+                                      concept_name='measurement.measurement_id')
+    nonstandard = ConceptFactory(vocabulary__vocabulary_id='CDM', concept_code='LOCAL-MEAS',
+                                 concept_name='measurement.measurement_id', standard_concept=None)
+    unrelated = []
+    for event, owner in [(wrong_table, person), (wrong_vocabulary, person),
+                         (nonstandard, person), (link, PersonFactory())]:
+        unrelated.append(ObservationFactory(
+            person=owner, observation_event_id=saved['id'], obs_event_field_concept=event,
+            observation_source_value=FIELDS['laboratory'][0], value_as_string='Unrelated laboratory',
+        ))
+        unrelated.append(MeasurementFactory(
+            person=owner, measurement_event_id=saved['id'], meas_event_field_concept=event,
+            measurement_source_value=FIELDS['laboratory'][0], value_as_string='Unrelated laboratory',
+        ))
+    assert list_variants(person)[0]['laboratory'] == 'Correct laboratory'
+    edited = save_variant(person, {'laboratory': 'Updated laboratory'}, saved['id'])
+    assert edited['laboratory'] == 'Updated laboratory'
+    delete_variant(person, saved['id'])
+    for row in unrelated:
+        row.refresh_from_db()
+        assert not row.is_erroneous
 
 
 def test_legacy_list_patch_rolls_back_and_handles_empty_list(setup):

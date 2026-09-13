@@ -192,17 +192,17 @@ def _resolve(code, domain):
     return (standard.pk if standard else 0), (source.pk if source else None), domain
 
 
+def _measurement_event_concepts():
+    # Athena uses CDM### codes; older imports use table.column as the code.
+    # Share this identity rule across writes, reads, edits and deletes.
+    return Concept.objects.filter(vocabulary_id='CDM').filter(
+        Q(concept_code='measurement.measurement_id')
+        | Q(concept_name='measurement.measurement_id', standard_concept='S')
+    )
+
+
 def _event_concept():
-    concept = Concept.objects.filter(
-        vocabulary_id='CDM', concept_code='measurement.measurement_id',
-        invalid_reason__isnull=True,
-    ).first()
-    if concept is None:
-        # Athena CDM vocabulary uses CDM### codes with the table.column as the name.
-        concept = Concept.objects.filter(
-            vocabulary_id='CDM', concept_name='measurement.measurement_id',
-            standard_concept='S', invalid_reason__isnull=True,
-        ).first()
+    concept = _measurement_event_concepts().filter(invalid_reason__isnull=True).first()
     if concept is None:
         raise ValidationError({'variant': 'Load the OMOP CDM vocabulary (measurement.measurement_id) before saving variants.'})
     return concept.pk
@@ -247,11 +247,9 @@ def _components(person, parent_id):
     # Event type is essential: IDs can coincide across different OMOP tables.
     return (
         Measurement.objects.filter(person=person, measurement_event_id=parent_id,
-            meas_event_field_concept__concept_code='measurement.measurement_id',
-            meas_event_field_concept__vocabulary_id='CDM', is_erroneous=False),
+            meas_event_field_concept__in=_measurement_event_concepts(), is_erroneous=False),
         Observation.objects.filter(person=person, observation_event_id=parent_id,
-            obs_event_field_concept__concept_code='measurement.measurement_id',
-            obs_event_field_concept__vocabulary_id='CDM', is_erroneous=False),
+            obs_event_field_concept__in=_measurement_event_concepts(), is_erroneous=False),
     )
 
 
@@ -268,8 +266,7 @@ def enrich_variants(variants, snapshot):
     ):
         # Resolve metadata in bulk; never mistake another table's ID for ours.
         field_ids = {getattr(row, event_field) for row in rows if getattr(row, event_field)}
-        valid_ids = set(Concept.objects.filter(pk__in=field_ids, vocabulary_id='CDM',
-            concept_code='measurement.measurement_id').values_list('pk', flat=True))
+        valid_ids = set(_measurement_event_concepts().filter(pk__in=field_ids).values_list('pk', flat=True))
         for row in reversed(rows):  # snapshot is newest-first: newest wins
             target = by_id.get(getattr(row, f'{prefix}_event_id'))
             if target is None or getattr(row, event_field) not in valid_ids or row.is_erroneous:

@@ -15,6 +15,8 @@ interface Patient {
   organization_slug?: string | null;
   disease: string;
   stage: string;
+  genomics_summary?: string;
+  therapy_lines_count?: number | null;
   updated_at: string;
 }
 
@@ -359,7 +361,7 @@ export default function PatientList() {
         </div>
       )}
 
-      <div className="overflow-hidden rounded-lg border border-border bg-background shadow-sm">
+      <div className="overflow-x-auto rounded-lg border border-border bg-background shadow-sm">
         <table className="w-full text-left text-sm">
           <thead className="border-b border-border bg-muted/50">
             <tr>
@@ -372,17 +374,19 @@ export default function PatientList() {
                 />
               </th>
               <th className="px-4 py-3 font-medium text-muted-foreground">ID</th>
-              <th className="px-4 py-3 font-medium text-muted-foreground">Name</th>
+              <th className="w-36 px-4 py-3 font-medium text-muted-foreground">Name</th>
               <th className="px-4 py-3 font-medium text-muted-foreground">Age</th>
               <th className="px-4 py-3 font-medium text-muted-foreground">Disease</th>
               <th className="px-4 py-3 font-medium text-muted-foreground">Stage</th>
+              <th className="px-4 py-3 font-medium text-muted-foreground">Genomics</th>
+              <th className="whitespace-nowrap px-4 py-3 text-center font-medium text-muted-foreground">Num Lines</th>
               <th className="px-4 py-3 font-medium text-muted-foreground">Last Updated</th>
             </tr>
           </thead>
           <tbody>
             {patients.length === 0 ? (
               <tr>
-                <td colSpan={7} className="py-12 text-center text-muted-foreground">
+                <td colSpan={9} className="py-12 text-center text-muted-foreground">
                   {error
                     ? "Unable to load patients."
                     : patientCount === 0 &&
@@ -412,7 +416,7 @@ export default function PatientList() {
                     {patient.person_id}
                   </td>
                   <td className="px-4 py-3 font-medium" onClick={() => navigate(`/patient/${patient.person_id}`)}>
-                    {patient.patient_name}
+                    <span className="block w-28 truncate" title={patient.patient_name}>{patient.patient_name}</span>
                   </td>
                   <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
                     {patient.age ?? "N/A"}
@@ -422,6 +426,14 @@ export default function PatientList() {
                   </td>
                   <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
                     {patient.stage || "N/A"}
+                  </td>
+                  <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
+                    <span className="block max-w-72 truncate" title={patient.genomics_summary || undefined}>
+                      {patient.genomics_summary || "No genomic data"}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-center tabular-nums" onClick={() => navigate(`/patient/${patient.person_id}`)}>
+                    {patient.therapy_lines_count ?? "N/A"}
                   </td>
                   <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
                     {formatDate(patient.updated_at)}

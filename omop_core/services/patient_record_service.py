@@ -2672,6 +2672,8 @@ def _get_genomics_pathology_data(person: Person, snapshot: OmopSnapshot = None) 
 # 21908-9-riss is a non-standard code the MM generator uses for R-ISS stage
 # (it mis-resolves to an unrelated concept on import, so it is matched by
 # source_value only).
+SAMPLE_STAGE_SOURCE_VALUE = 'sample-patient-stage'
+
 _STAGING_LOINCS = frozenset({'21908-9', '21908-9-riss', '21905-5', '21906-3', '21901-4'})
 
 
@@ -2685,28 +2687,43 @@ def _get_staging_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     snapshot = snapshot or _build_snapshot(person)
     data = {}
 
+    _BOOLEAN_EXCLUSIONS = {'true', 'false', 'yes', 'no', 'unknown'}
+
     def _stage_row_value(row):
-        """Extract the string value from a staging row."""
-        return row.value_as_string or (str(int(row.value_as_number)) if row.value_as_number is not None else None)
+        """Extract and validate a staging value from a row.
+
+        Ignores empty rows and legacy boolean RECIST results incorrectly coded
+        as stage. A blank Measurement must not hide a populated Observation.
+        """
+        value = row.value_as_string
+        if not value and getattr(row, 'value_as_concept', None):
+            value = row.value_as_concept.concept_name
+        if not value and row.value_as_number is not None:
+            value = str(int(row.value_as_number))
+        if value and value.strip().lower() not in _BOOLEAN_EXCLUSIONS:
+            return value.strip()
+        return None
 
     def _stage_value(loinc_code):
         """Return the best string value for a staging LOINC code (Measurement then Observation)."""
-        # Primary: concept code match (O(1) index lookup)
-        m = _first_by_code(snapshot, loinc_code)
-        if m:
-            return _stage_row_value(m)
-        # Secondary: LOINC stored as source_value (FHIR upload path)
-        m = _first_by_source(snapshot, loinc_code)
-        if m:
-            return _stage_row_value(m)
-        # Tertiary: Observation by concept code, then by source_value.
-        obs = _first_by_code(snapshot, loinc_code, table='observation')
-        if obs is None:
-            obs = _first_by_source(snapshot, loinc_code, table='observation')
-        if obs:
-            return obs.value_as_string or (
-                str(int(obs.value_as_number)) if obs.value_as_number is not None else None
-            )
+        # Try measurement by concept code, then by source_value
+        for m in snapshot.meas_by_code.get(loinc_code, ()):
+            val = _stage_row_value(m)
+            if val:
+                return val
+        for m in snapshot.meas_by_source.get(loinc_code, ()):
+            val = _stage_row_value(m)
+            if val:
+                return val
+        # Then observation by concept code, then by source_value
+        for o in snapshot.obs_by_code.get(loinc_code, ()):
+            val = _stage_row_value(o)
+            if val:
+                return val
+        for o in snapshot.obs_by_source.get(loinc_code, ()):
+            val = _stage_row_value(o)
+            if val:
+                return val
         return None
 
     # Overall stage group. For MM both ISS (21908-9) and R-ISS (21908-9-riss)
@@ -2721,6 +2738,10 @@ def _get_staging_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             (obs.value_as_string for obs in fhir_stage_rows if obs.value_as_string),
             None,
         )
+    if not stage_val:
+        sample_stage_rows = snapshot.obs_by_source.get(SAMPLE_STAGE_SOURCE_VALUE, ())
+        stage_val = next((o.value_as_string for o in sample_stage_rows
+                          if o.value_as_string), None)
     if stage_val:
         data['stage'] = stage_val
 
