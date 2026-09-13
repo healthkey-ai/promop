@@ -2582,7 +2582,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 else:
                                     stage = stage_display or _sc.get('code', '')
 
-                        if disease_from_code and stage:
+                        if (is_breast_cancer or disease_from_code) and stage:
                             _condition_stage = stage
 
                         # Get condition onset date (handles both 'YYYY-MM-DD' and ISO datetime)

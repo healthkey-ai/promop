@@ -26589,7 +26589,7 @@ class FhirConditionStagePersistenceTest(FhirUploadBase):
     def _upload_condition_stage(self, disease, stages):
         bundle = _make_fl_bundle()
         condition = bundle['entry'][1]['resource']
-        condition['code'] = {'text': disease}
+        condition['code'] = disease if isinstance(disease, dict) else {'text': disease}
         condition['stage'] = [{'summary': {'text': stage}} for stage in stages]
         # Keep the later unstaged condition: it must not steal the stage date.
         fhir_file = io.BytesIO(json.dumps(bundle).encode())
@@ -26614,3 +26614,12 @@ class FhirConditionStagePersistenceTest(FhirUploadBase):
         from omop_core.services.patient_record_service import refresh_patient_record
         person = self._upload_condition_stage('Follicular Lymphoma', ['IVB'])
         self.assertEqual(refresh_patient_record(person).stage, 'IVB')
+
+
+    def test_coded_breast_condition_without_display_retains_stage(self):
+        from omop_core.services.patient_record_service import refresh_patient_record
+        person = self._upload_condition_stage(
+            {'coding': [{'system': 'http://snomed.info/sct', 'code': '254837009'}]},
+            ['Stage IIA'],
+        )
+        self.assertEqual(refresh_patient_record(person).stage, 'IIA')
