@@ -11,13 +11,15 @@ RULESET = {
     'bypass_actors': [],
     'rules': [
         {'type': 'pull_request', 'parameters': {
-            'required_approving_review_count': 1,
-            'require_code_owner_review': True,
+            'required_approving_review_count': 0,
+            'require_code_owner_review': False,
+            'require_last_push_approval': False,
+            'required_reviewers': [],
         }},
         {'type': 'required_status_checks', 'parameters': {
             'required_status_checks': [{'context': name} for name in (
                 'Backend tests', 'Frontend lint & build', 'Security gates',
-            )],
+            )] + [{'context': 'Security review', 'integration_id': 15368}],
         }},
     ],
 }
@@ -30,7 +32,9 @@ def assess(ruleset):
 
 def test_required_review_ci_and_no_direct_pushes_are_reported():
     result = assess(RULESET)
-    assert result['independent_review_enforced']
+    assert result['security_review_status_required']
+    assert result['ordinary_prs_need_no_approval']
+    assert result['no_team_reviewer_restriction']
     assert result['required_ci_enforced']
     assert result['direct_pushes_blocked']
 
@@ -39,7 +43,7 @@ def test_admin_always_bypass_is_not_reported_as_enforcement():
     ruleset = deepcopy(RULESET)
     ruleset['bypass_actors'] = [{'actor_type': 'RepositoryRole', 'actor_id': 5, 'bypass_mode': 'always'}]
     result = assess(ruleset)
-    assert not result['independent_review_enforced']
+    assert not result['security_review_status_required']
     assert not result['required_ci_enforced']
     assert not result['direct_pushes_blocked']
 
@@ -49,19 +53,19 @@ def test_pr_only_bypass_blocks_direct_push_but_can_skip_review_and_ci():
     ruleset['bypass_actors'] = [{'actor_type': 'RepositoryRole', 'actor_id': 5, 'bypass_mode': 'pull_request'}]
     result = assess(ruleset)
     assert result['direct_pushes_blocked']
-    assert not result['independent_review_enforced']
+    assert not result['security_review_status_required']
     assert not result['required_ci_enforced']
 
 
-def test_zero_approvals_does_not_count_as_required_review():
+def test_missing_review_status_does_not_count_as_required_review():
     ruleset = deepcopy(RULESET)
-    ruleset['rules'][0]['parameters']['required_approving_review_count'] = 0
-    assert not assess(ruleset)['independent_review_enforced']
+    ruleset['rules'][1]['parameters']['required_status_checks'].pop()
+    assert not assess(ruleset)['security_review_status_required']
 
 
 def test_missing_security_gate_is_reported():
     ruleset = deepcopy(RULESET)
-    ruleset['rules'][1]['parameters']['required_status_checks'].pop()
+    ruleset['rules'][1]['parameters']['required_status_checks'].pop(2)
     assert not assess(ruleset)['required_ci_enforced']
 
 
@@ -69,7 +73,7 @@ def test_uncaptured_inherited_rule_sources_fail_closed():
     effective = [{**rule, 'ruleset_id': 99} for rule in RULESET['rules']]
     result = evaluate_branch(effective, [RULESET])
     assert not result['all_ruleset_sources_captured']
-    assert not result['independent_review_enforced']
+    assert not result['security_review_status_required']
     assert not result['required_ci_enforced']
     assert not result['direct_pushes_blocked']
 
@@ -78,7 +82,7 @@ def test_disabled_rule_does_not_count_as_enforced():
     ruleset = deepcopy(RULESET)
     ruleset['enforcement'] = 'disabled'
     result = assess(ruleset)
-    assert not result['independent_review_enforced']
+    assert not result['security_review_status_required']
     assert not result['required_ci_enforced']
     assert not result['direct_pushes_blocked']
 
@@ -109,3 +113,35 @@ def test_collector_retains_all_paginated_environments(monkeypatch):
     assert github_json('repos/example/repository/environments')['environments'] == [
         {'name': 'staging'}, {'name': 'production'},
     ]
+
+
+def test_blanket_approval_restrictions_are_rejected():
+    for field, value in (('required_approving_review_count', 1), ('require_last_push_approval', True), ('require_code_owner_review', True)):
+        ruleset = deepcopy(RULESET)
+        ruleset['rules'][0]['parameters'][field] = value
+        assert not assess(ruleset)['ordinary_prs_need_no_approval']
+
+
+def test_team_specific_reviewer_is_rejected():
+    ruleset = deepcopy(RULESET)
+    ruleset['rules'][0]['parameters']['required_reviewers'] = [{
+        'minimum_approvals': 1, 'file_patterns': ['**/CODEOWNERS'],
+        'reviewer': {'id': 17798426, 'type': 'Team'},
+    }]
+    assert not assess(ruleset)['no_team_reviewer_restriction']
+
+
+def test_review_status_must_be_bound_to_github_actions():
+    ruleset = deepcopy(RULESET)
+    ruleset['rules'][1]['parameters']['required_status_checks'][-1].pop('integration_id')
+    assert not assess(ruleset)['security_review_status_required']
+
+
+def test_inherited_blanket_rule_blocks_ordinary_prs():
+    inherited = deepcopy(RULESET)
+    inherited['id'] = 2
+    inherited['rules'][0]['parameters']['required_approving_review_count'] = 1
+    effective = [{**rule, 'ruleset_id': source['id']} for source in (RULESET, inherited) for rule in source['rules']]
+    result = evaluate_branch(effective, [RULESET, inherited])
+    assert result['security_review_status_required']
+    assert not result['ordinary_prs_need_no_approval']

@@ -50,10 +50,22 @@ def evaluate_branch(effective_rules, rulesets):
     # A flattened effective-rules response omits bypass actors. Inspect every
     # contributing ruleset before treating the requirements as non-bypassable.
     all_sources_captured = source_ids == {ruleset['id'] for ruleset in sources}
-    review_enforced = any(
-        rule['parameters']['required_approving_review_count'] >= 1
+    security_review_enforced = any(
+        check['context'] == 'Security review' and check.get('integration_id') == 15368
         for source in sources if source['enforcement'] == 'active' and not source['bypass_actors']
-        for rule in source['rules'] if rule['type'] == 'pull_request'
+        for rule in source['rules'] if rule['type'] == 'required_status_checks'
+        for check in rule['parameters']['required_status_checks']
+    )
+    ordinary_prs_need_no_approval = bool(pr_rules) and all(
+        rule['required_approving_review_count'] == 0
+        and not rule.get('require_last_push_approval', False)
+        and not rule.get('require_code_owner_review', False)
+        for rule in pr_rules
+    )
+    # Team-specific file reviewers would prevent any other writer's approval
+    # from satisfying the security policy, even with the status gate enabled.
+    no_team_reviewer_restriction = all(
+        not rule.get('required_reviewers') for rule in pr_rules
     )
     direct_push_blocked = any(
         source['enforcement'] == 'active'
@@ -72,7 +84,9 @@ def evaluate_branch(effective_rules, rulesets):
         'code_owner_review_required': any(rule['require_code_owner_review'] for rule in pr_rules),
         'required_checks': sorted(required_checks),
         'all_ruleset_sources_captured': all_sources_captured,
-        'independent_review_enforced': all_sources_captured and review_enforced,
+        'security_review_status_required': all_sources_captured and security_review_enforced,
+        'ordinary_prs_need_no_approval': all_sources_captured and ordinary_prs_need_no_approval,
+        'no_team_reviewer_restriction': all_sources_captured and no_team_reviewer_restriction,
         'required_ci_enforced': all_sources_captured and REQUIRED_CHECKS <= ci_enforced,
         'direct_pushes_blocked': all_sources_captured and direct_push_blocked,
     }
@@ -115,6 +129,7 @@ def capture(repository):
         'workflows': workflows,
         'scope': {
             'github_settings': 'Observed through authenticated read-only GitHub API calls.',
+            'security_review': 'Assesses required status configuration, not workflow correctness or individual PR approvals. Retain trusted workflow and status-run evidence.',
             'render_settings': 'Not captured. GitHub environments do not prove Render approval gates.',
             'historical_operation': 'Not established by this configuration snapshot; retain PR and deployment records.',
         },
@@ -132,7 +147,8 @@ def main():
     args.output.write_text(json.dumps(evidence, indent=2, sort_keys=True) + '\n')
     failures = []
     for branch, data in evidence['branches'].items():
-        for control in ('independent_review_enforced', 'required_ci_enforced', 'direct_pushes_blocked'):
+        for control in ('security_review_status_required', 'ordinary_prs_need_no_approval',
+                        'no_team_reviewer_restriction', 'required_ci_enforced', 'direct_pushes_blocked'):
             if not data['assessment'][control]:
                 failures.append(f'{branch}: {control}')
         if not data['codeowners']:
