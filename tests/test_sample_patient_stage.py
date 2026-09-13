@@ -60,7 +60,11 @@ def test_backfill_preserves_projection_and_real_source_wins_later():
     record = PatientRecordFactory(organization=OrganizationFactory(slug='synthea-bc'), stage='IIIB')
     call_command('backfill_sample_patient_stage', confirm=True)
     assert refresh_patient_record(record.person).stage == 'IIIB'
-    ObservationFactory(person=record.person, observation_source_value='21908-9', value_as_string='Stage IV')
+    # The command allocates an OMOP ID independently of factory_boy's counter.
+    from omop_core.models import Observation
+    from omop_core.services.pk import next_pk
+    ObservationFactory(observation_id=next_pk(Observation, 'observation_id'),
+        person=record.person, observation_source_value='21908-9', value_as_string='Stage IV')
     assert refresh_patient_record(record.person).stage == 'Stage IV'
 
 

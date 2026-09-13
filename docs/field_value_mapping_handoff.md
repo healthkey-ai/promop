@@ -1,6 +1,114 @@
 # Codex handoff: field and field-value concept mappings
 
-Checkpoint: 2026-09-13. **Work in progress; not ready to merge.**
+## Resumed work: 2026-09-13
+
+**Still unfinished. PR #1235 is closed at the user's explicit request because it
+was an information handoff. Do not reopen it, merge this branch, or close any
+associated issue as part of this checkpoint. The user specifically requires
+#21, #26 and #1223–#1231 to remain open.**
+
+Active worktree: `/private/tmp/promop-1235`; branch:
+`feat/field-value-concept-mappings`. The original checkout at
+`/Users/adamblum/promop` retains its unrelated `AGENTS.md` and frontend lockfile
+changes. CancerBot at `/Users/adamblum/cancerbot` was read without modification.
+
+Current `dev` is integrated through `de4c164` (#1234), including #1233 genomics
+and #1222 vocabulary checksums. Merge commits `ee39b07` and `a3aa8b2` preserve
+upstream changes. Implementation commit `d658a8e` contains the resumed fixes.
+The sample-stage conflict was resolved by keeping the dated/coded staging
+reader, upstream synthetic-cohort fallback, and blank/Boolean filtering.
+R-ISS may supersede an explicitly labeled legacy ISS result; it does not
+unconditionally replace a clinical/pathological breast stage.
+
+Implemented and verified since the original checkpoint:
+
+- The confirmed same-day cytogenetic clear regression is fixed. Recursive
+  clears preserve `after_pk`; one transaction rolls back all clear writes if
+  any destination fails. Tests cover base/override failures, no-op clears,
+  retired choices, replaced question history and the original regression.
+- Long mapped source aliases use a patient/fact-linked Note instead of silent
+  50-character truncation. Retry tests verify note reuse.
+- Concurrent/stale choice updates reload under the scope lock, preserving
+  another curator's rename, aliases and retirement state.
+- Patient pickers show curated display labels and submit canonical numeric
+  and Boolean values without converting them to display strings.
+- Staging no longer chooses an older linked result over a newer unlinked one.
+  Histology chooses by date across Measurement and Observation; default
+  scalar readback cannot overwrite the built-in selection with an older row.
+  Newer approved question overrides remain readable, and the existing bounded
+  snapshot query contract is preserved.
+- Migration 0233 now matches vocabulary/code pairs and checks replacement
+  validity dates. It withdraws only untouched `hk-labs-seed` Ki-67 source-code
+  mappings pointing to ER, recording their old target; explicit reviews are
+  preserved for separate reconciliation. No clinical facts are rewritten.
+  Definitions rechecked at [LOINC 85337-4](https://loinc.org/85337-4/) and
+  [LOINC 29593-1](https://loinc.org/29593-1/).
+- Mapping-hub coverage separates field questions from answer choices and
+  screens the **existing** regimen/component/class tables. Those tables,
+  their relationships, and all existing mapping/management capabilities
+  remain authoritative and intact. No replacement catalogs were introduced.
+  Existing reference APIs and the therapy editor now expose per-row mapping
+  disposition and actual vocabulary/code, including nested relationships,
+  unlinked classes, and disease/round associations. Regimen curation loads
+  successive 50-row pages; disease/round picker responses remain complete.
+  These validity/role screens are not clinical approvals. Existing CRUD and
+  relationship-management behavior remains available and tested.
+- Candidate search is bounded and resumable, applies a database statement
+  timeout per label, and atomically checkpoints each result. Completed
+  [candidate evidence](field_value_candidate_search.json): 1,079 distinct
+  labels, 342 with candidates, no timeouts. This is name/synonym evidence;
+  it does not establish semantic approval or an exhaustive Maps-to review.
+- [CancerBot source evidence](cancerbot_field_value_reference.json) records
+  commit `a840f8d9af2c35477e2b6b76f981b29f02c21eec`, 172 API option bindings,
+  reference-loader literals and 339 checked-in therapy crosswalk rows with
+  source hashes. Regenerate with `audit_cancerbot_reference --cancerbot-root
+  /path/to/cancerbot --output docs/cancerbot_field_value_reference.json`.
+  Crosswalk rows are comparison evidence, never imported approvals.
+
+Render staging reference access works through the main checkout's existing
+`STAGING_DATABASE_URL`; credentials were neither copied nor committed. Read-only
+queries confirm SNOMED metadata still says `synthetic, benchmark seed`.
+**No staging migrations, seeds, patient writes or reconciliations were run.**
+All automated tests use local PostgreSQL 18 on port 5433, disposable application
+database `promop_1235` and test database `test_promop_1235`.
+
+The CancerBot checkout contains no `.env`, live database configuration or live
+ValueOptions export. Source/seed data and the checked-in crosswalk are now
+available; live reference parity remains unverified. The user has been asked
+where a reference-only export or read-only database configuration is available.
+Do not substitute source seed totals for actual live options.
+
+Remaining scope is substantial: complete live inventory and per-value evidence;
+context-aware c/p/yp writes; report/test metadata linkage; fact/structured and
+multi-criterion adapters; exhaustive MM/FL/CLL/genetic/therapy dispositions;
+FHIR/source-alias edge cases; and bounded, audited historical reconciliation
+with recovery. Passing regression suites does not complete these obligations.
+The issue-by-issue table below remains a description of unfinished scope.
+
+Final local verification for this checkpoint:
+
+- Full pytest: **2,115 passed, 4 skipped**, with the two opt-in e2e tests
+  deselected by the repository's default configuration.
+- Redis/Celery e2e run separately with an isolated broker on port 16385 and
+  real local worker subprocesses: **2 passed**. The broker was stopped afterward.
+- Full Django `manage.py test omop_core patient_portal --noinput`:
+  **1,998 tests, OK, 1 skipped**, including migrations.
+- Frontend Vitest with this worktree's own `npm ci` dependencies:
+  **552 passed, 4 skipped**. TypeScript/build passed; ESLint reports
+  **0 errors and 3 existing warnings**.
+- `makemigrations --check --dry-run`: no changes. `manage.py check`: no issues.
+  `git diff --check`: clean.
+- GitHub state rechecked: PR #1235 **CLOSED**, `mergedAt: null`; all eleven
+  associated issues **OPEN**. No new PR, merge, issue closure or deployment.
+
+The sample-stage regression fixture now allocates its imported Observation ID
+with the existing sequence helper; factory counters can otherwise collide with
+IDs allocated by the backfill command in focused test orders. A readback fixture
+without the optional snapshot cache is also supported without additional queries.
+
+---
+
+Original checkpoint: 2026-09-13. **Historical handoff; superseded above where noted.**
 
 ## Resume instruction
 
@@ -116,9 +224,9 @@ No implementation issue was closed during this session.
 
 ## Known failures and review priorities
 
-### 1. Fix the confirmed clear regression first
+### 1. Historical clear regression (resolved in resumed work)
 
-Latest full pytest run:
+The original checkpoint full pytest run (the failure below is now covered and fixed):
 
 ```text
 FAILED tests/test_cytogenetic_observations.py::test_same_day_legacy_import_then_clear_does_not_restore_marker

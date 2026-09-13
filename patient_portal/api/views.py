@@ -8261,7 +8261,8 @@ def therapy_regimen_list(request):
         regimen = TherapyRegimen.objects.create(code=code, title=title, concept_id=concept_id)
         return Response({'code': regimen.code, 'title': regimen.title, 'concept_id': regimen.concept_id}, status=status.HTTP_201_CREATED)
 
-    qs = TherapyRegimen.objects.all().order_by('title')
+    from omop_core.services.mapping_coverage import therapy_reference_data
+    qs = TherapyRegimen.objects.select_related('concept').order_by('title', 'code')
 
     disease_code = request.query_params.get('disease')
     round_code = request.query_params.get('round')
@@ -8280,10 +8281,16 @@ def therapy_regimen_list(request):
     if search:
         qs = qs.filter(title__icontains=search)
 
-    values = qs.values('code', 'title', 'concept_id')
+    try:
+        offset = int(request.query_params.get('offset', 0))
+        if offset < 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return Response({'detail': 'offset must be a non-negative integer'}, status=status.HTTP_400_BAD_REQUEST)
     # A disease/round picker needs the complete available list. Search remains
     # bounded, but alphabetical truncation must not hide valid supportive care.
-    items = list(values if round_code and not search else values[:50])
+    page = qs[offset:] if round_code and not search else qs[offset:offset + 50]
+    items = [therapy_reference_data(row, 'regimens') for row in page]
     return Response(items)
 
 
@@ -8296,8 +8303,9 @@ def therapy_regimen_detail(request, code):
     PATCH /api/v1/therapy-regimens/<code>/  {title?, concept_id?}
     DELETE /api/v1/therapy-regimens/<code>/
     """
+    from omop_core.services.mapping_coverage import therapy_reference_data
     try:
-        regimen = TherapyRegimen.objects.get(code=code)
+        regimen = TherapyRegimen.objects.select_related('concept').get(code=code)
     except TherapyRegimen.DoesNotExist:
         return Response({'error': f'Regimen not found: {code}'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -8326,7 +8334,7 @@ def therapy_regimen_detail(request, code):
     ).select_related('component', 'component__concept').prefetch_related(
         Prefetch(
             'component__component_classes',
-            queryset=TherapyComponentClassLink.objects.select_related('therapy_class'),
+            queryset=TherapyComponentClassLink.objects.select_related('therapy_class__concept'),
         )
     )
 
@@ -8335,13 +8343,11 @@ def therapy_regimen_detail(request, code):
         comp = link.component
         concept = comp.concept
         classes = [
-            {'code': cl.therapy_class.code, 'title': cl.therapy_class.title, 'concept_id': cl.therapy_class.concept_id}
+            therapy_reference_data(cl.therapy_class, 'classes')
             for cl in comp.component_classes.all()
         ]
         components.append({
-            'code': comp.code,
-            'title': comp.title,
-            'concept_id': comp.concept_id,
+            **therapy_reference_data(comp, 'components'),
             'concept_name': concept.concept_name if concept else comp.title,
             'concept_code': concept.concept_code if concept else comp.code,
             'vocabulary_id': concept.vocabulary_id if concept else None,
@@ -8349,9 +8355,7 @@ def therapy_regimen_detail(request, code):
         })
 
     return Response({
-        'code': regimen.code,
-        'title': regimen.title,
-        'concept_id': regimen.concept_id,
+        **therapy_reference_data(regimen, 'regimens'),
         'components': components,
     })
 
@@ -8380,7 +8384,8 @@ def therapy_component_list(request):
         comp = TherapyComponent.objects.create(code=code, title=title, concept_id=concept_id)
         return Response({'code': comp.code, 'title': comp.title, 'concept_id': comp.concept_id}, status=status.HTTP_201_CREATED)
 
-    qs = TherapyComponent.objects.all().order_by('title')
+    from omop_core.services.mapping_coverage import therapy_reference_data
+    qs = TherapyComponent.objects.select_related('concept').order_by('title')
     search = request.query_params.get('search', '').strip()
     if search:
         qs = qs.filter(title__icontains=search)
@@ -8388,16 +8393,16 @@ def therapy_component_list(request):
     qs = qs.prefetch_related(
         Prefetch(
             'component_classes',
-            queryset=TherapyComponentClassLink.objects.select_related('therapy_class'),
+            queryset=TherapyComponentClassLink.objects.select_related('therapy_class__concept'),
         )
     )
     items = []
     for comp in qs:
         classes = [
-            {'code': link.therapy_class.code, 'title': link.therapy_class.title, 'concept_id': link.therapy_class.concept_id}
+            therapy_reference_data(link.therapy_class, 'classes')
             for link in comp.component_classes.all()
         ]
-        items.append({'code': comp.code, 'title': comp.title, 'concept_id': comp.concept_id, 'classes': classes})
+        items.append({**therapy_reference_data(comp, 'components'), 'classes': classes})
     return Response(items)
 
 
@@ -8425,7 +8430,9 @@ def therapy_class_list(request):
         tc = TherapyClass.objects.create(code=code, title=title, concept_id=concept_id)
         return Response({'code': tc.code, 'title': tc.title, 'concept_id': tc.concept_id}, status=status.HTTP_201_CREATED)
 
-    items = list(TherapyClass.objects.values('code', 'title', 'concept_id').order_by('title'))
+    from omop_core.services.mapping_coverage import therapy_reference_data
+    items = [therapy_reference_data(row, 'classes')
+             for row in TherapyClass.objects.select_related('concept').order_by('title')]
     return Response(items)
 
 
@@ -8552,7 +8559,13 @@ def disease_therapy_regimen_list(request):
     POST /api/v1/disease-therapy-regimens/  {disease_code, round_code, regimen_code}
     """
     if request.method == 'GET':
-        qs = DiseaseTherapyRegimen.objects.select_related('disease', 'round', 'regimen').all()
+        from omop_core.services.mapping_coverage import therapy_reference_data
+        qs = DiseaseTherapyRegimen.objects.select_related('disease', 'round', 'regimen__concept').all()
+        if request.query_params.get('disease'):
+            from omop_core.services.treatment_catalog import disease_filter
+            qs = qs.filter(disease_filter(request.query_params['disease']))
+        if request.query_params.get('round'):
+            qs = qs.filter(round__code=request.query_params['round'])
         items = [{
             'id': d.id,
             'disease_code': d.disease.code,
@@ -8561,6 +8574,7 @@ def disease_therapy_regimen_list(request):
             'round_title': d.round.title,
             'regimen_code': d.regimen.code,
             'regimen_title': d.regimen.title,
+            'regimen_mapping': therapy_reference_data(d.regimen, 'regimens'),
         } for d in qs]
         return Response(items)
 

@@ -61,3 +61,18 @@ def therapy_coverage():
             counts[therapy_target_disposition(reference.concept, provider)] += 1
         result[provider] = dict(counts)
     return result
+
+
+def therapy_reference_data(reference, provider):
+    """Describe an existing catalog row without assigning clinical approval."""
+    concept = reference.concept
+    return {
+        'code': reference.code, 'title': reference.title, 'concept_id': reference.concept_id,
+        'mapping_disposition': therapy_target_disposition(concept, provider),
+        'mapped_concept': None if concept is None else {
+            'vocabulary_id': concept.vocabulary_id, 'concept_code': concept.concept_code,
+            'concept_name': concept.concept_name, 'domain_id': concept.domain_id,
+            'concept_class_id': concept.concept_class_id,
+            'standard_concept': concept.standard_concept,
+        },
+    }

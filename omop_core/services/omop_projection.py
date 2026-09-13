@@ -114,13 +114,15 @@ def curated_values_from_snapshot(snapshot):
         known_codes = STAGE_QUESTIONS.get(name, {})
         if name == 'histologic_type':
             known_codes = _HISTOLOGIC_TYPE_LOINCS
-        if mapping['concept__vocabulary_id'] == 'LOINC' and mapping['concept__concept_code'] in known_codes:
-            continue
         target = mapping_target_for(mapping['omop_table'])
         if target not in indexed:
             continue
         source_value = mapping['source_value'] or mapping['concept__concept_code']
         matching = [indexed[target].get((mapping['concept_id'], source_value))]
+        native_rows = getattr(snapshot, 'genomics_cache', {}).get('field_value_native_rows', {})
+        if (name in native_rows and mapping['concept__vocabulary_id'] == 'LOINC'
+                and mapping['concept__concept_code'] in known_codes):
+            matching = [native_rows[name]]
         for choice in resolver.choices.get((name, ''), []):
             answer = resolver.mapping(choice)
             if answer and answer.question_concept_id:

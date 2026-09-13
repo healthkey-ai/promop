@@ -10,9 +10,31 @@ import {
   fetchDiseaseTherapyRegimens, addDiseaseTherapyRegimen, removeDiseaseTherapyRegimen,
   type TherapyRegimenItem, type TherapyComponentItem, type TherapyClassItem,
   type DiseaseTherapyRegimenItem,
+  type TherapyMappingEvidence,
 } from '@/api/mappingHub';
 
 type Tab = 'regimen-component' | 'component-class' | 'disease-regimen';
+
+const mappingLabels = {
+  unmapped: 'Unmapped',
+  invalid_target: 'Invalid target',
+  passes_role_screen: 'Role checked; clinical review needed',
+  classification_only: 'Classification only',
+  requires_role_review: 'Role review needed',
+};
+
+function MappingEvidence({ reference }: { reference: TherapyMappingEvidence }) {
+  return (
+    <span className="ml-2 text-xs text-muted-foreground">
+      {reference.mapped_concept && (
+        <span title={reference.mapped_concept.concept_name}>
+          {reference.mapped_concept.vocabulary_id}:{reference.mapped_concept.concept_code}{' · '}
+        </span>
+      )}
+      {reference.mapping_disposition ? mappingLabels[reference.mapping_disposition] : 'Coverage unavailable'}
+    </span>
+  );
+}
 
 function useDebouncedValue(value: string, delay = 300): string {
   const [debounced, setDebounced] = useState(value);
@@ -187,7 +209,7 @@ function RegimenComponentTab() {
                   {expanded === reg.code ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                   <span className="font-medium text-sm">{reg.title}</span>
                   <span className="text-xs text-muted-foreground">({reg.code})</span>
-                  {reg.concept_id && <span className="text-xs text-muted-foreground">HemOnc:{reg.concept_id}</span>}
+                  <MappingEvidence reference={reg} />
                 </div>
                 <button
                   onClick={(e) => { e.stopPropagation(); handleDeleteRegimen(reg.code); }}
@@ -212,6 +234,7 @@ function RegimenComponentTab() {
                               <div>
                                 <span className="font-medium">{comp.title}</span>
                                 <span className="text-xs text-muted-foreground ml-2">({comp.code})</span>
+                                <MappingEvidence reference={comp} />
                                 {comp.classes?.length ? (
                                   <span className="ml-2 text-xs text-blue-600">
                                     [{comp.classes.map(cl => cl.title).join(', ')}]
@@ -425,10 +448,11 @@ function ComponentClassTab() {
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-medium text-sm">{comp.title}</span>
                   <span className="text-xs text-muted-foreground">({comp.code})</span>
-                  {comp.concept_id && <span className="text-xs text-muted-foreground">HemOnc:{comp.concept_id}</span>}
+                  <MappingEvidence reference={comp} />
                   {compClasses.map(cl => (
                     <span key={cl.code} className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-0.5 text-xs text-blue-700">
                       {cl.title}
+                      <MappingEvidence reference={cl} />
                       <button
                         onClick={() => handleRemoveClass(comp.code, cl.code)}
                         className="hover:text-destructive"
@@ -447,7 +471,9 @@ function ComponentClassTab() {
                   >
                     <option value="">+ Class</option>
                     {availableClasses.map(c => (
-                      <option key={c.code} value={c.code}>{c.title}</option>
+                      <option key={c.code} value={c.code}>
+                        {c.title} — {c.mapping_disposition ? mappingLabels[c.mapping_disposition] : 'Coverage unavailable'}
+                      </option>
                     ))}
                   </select>
                 )}
@@ -456,6 +482,17 @@ function ComponentClassTab() {
           })
         )}
       </div>
+      <details className="mt-4 rounded-md border border-border p-3">
+        <summary className="cursor-pointer text-sm font-medium">All component classes ({allClasses.length})</summary>
+        <ul className="mt-2 space-y-2">
+          {allClasses.map(cl => (
+            <li key={cl.code} className="text-sm">
+              {cl.title} <span className="text-xs text-muted-foreground">({cl.code})</span>
+              <MappingEvidence reference={cl} />
+            </li>
+          ))}
+        </ul>
+      </details>
     </div>
   );
 }
@@ -582,6 +619,7 @@ function DiseaseRegimenTab() {
                   </td>
                   <td className="px-4 py-2">
                     {item.regimen_title ?? item.regimen_code}
+                    {item.regimen_mapping && <MappingEvidence reference={item.regimen_mapping} />}
                   </td>
                   <td className="px-4 py-2">
                     <button

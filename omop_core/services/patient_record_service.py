@@ -2468,6 +2468,7 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         [*snapshot.measurements, *snapshot.observations],
         key=lambda row: (fact_date(row), row.pk, row._meta.db_table), reverse=True,
     ) if matches(row, _HISTOLOGIC_TYPE_LOINCS)), None)
+    snapshot.genomics_cache.setdefault('field_value_native_rows', {})['histologic_type'] = histology
     if histology:
         data['histologic_type'] = resolver.reverse('histologic_type', histology) or _coded_value(histology)
 

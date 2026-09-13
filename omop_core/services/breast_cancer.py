@@ -44,6 +44,8 @@ def staging_data(snapshot, legacy_source):
     from omop_core.services.patient_record_service import _coded_value
 
     resolver = ValueResolver.for_snapshot(snapshot)
+    selected_rows = snapshot.genomics_cache.setdefault('field_value_native_rows', {})
+    selected_rows.update({field: None for field in STAGE_QUESTIONS})
     def stage_value(field, row):
         value = resolver.reverse(field, row)
         if value is None:
@@ -76,6 +78,7 @@ def staging_data(snapshot, legacy_source):
         if getattr(row, 'qualifier_source_value', None) == 'yp' and basis == 'p':
             basis = 'yp'
         data[field] = stage_value(field, row)
+        selected_rows[field] = row
         bases.add(basis)
     if bases:
         data['staging_modalities'] = ', '.join(sorted(bases))
@@ -84,10 +87,12 @@ def staging_data(snapshot, legacy_source):
         row = next((r for r in rows if getattr(r, 'observation_source_value', None) == legacy_source), None)
         if row and _coded_value(row):
             data['stage'] = _coded_value(row)
+            selected_rows['stage'] = row
     riss = next((r for r in rows if (getattr(r, 'measurement_source_value', None)
         or getattr(r, 'observation_source_value', None)) == '21908-9-riss'), None)
     if riss and _coded_value(riss) and ('stage' not in data or data['stage'].upper().startswith('ISS ')):
         data['stage'] = _coded_value(riss)
+        selected_rows['stage'] = riss
     if 'nodes_stage' in data:
         present = stage_presence(data['nodes_stage'], 'N')
         if present is not None:

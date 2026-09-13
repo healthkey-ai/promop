@@ -8,21 +8,33 @@ export interface MappingStats {
   therapy: { regimens: number; components: number; classes: number; disease_links: number };
 }
 
-export interface TherapyRegimenItem {
+export interface TherapyMappingEvidence {
+  mapping_disposition?: 'unmapped' | 'invalid_target' | 'passes_role_screen' | 'classification_only' | 'requires_role_review';
+  mapped_concept?: {
+    vocabulary_id: string;
+    concept_code: string;
+    concept_name: string;
+    domain_id: string;
+    concept_class_id: string;
+    standard_concept: string | null;
+  } | null;
+}
+
+export interface TherapyRegimenItem extends TherapyMappingEvidence {
   code: string;
   title: string;
   concept_id?: number | null;
   components?: TherapyComponentItem[];
 }
 
-export interface TherapyComponentItem {
+export interface TherapyComponentItem extends TherapyMappingEvidence {
   code: string;
   title: string;
   concept_id?: number | null;
   classes?: TherapyClassItem[];
 }
 
-export interface TherapyClassItem {
+export interface TherapyClassItem extends TherapyMappingEvidence {
   code: string;
   title: string;
   concept_id?: number | null;
@@ -36,6 +48,7 @@ export interface DiseaseTherapyRegimenItem {
   round_title?: string;
   regimen_code: string;
   regimen_title?: string;
+  regimen_mapping?: TherapyRegimenItem;
 }
 
 export async function fetchMappingStats(): Promise<MappingStats> {
@@ -48,8 +61,14 @@ export async function fetchMappingStats(): Promise<MappingStats> {
 export async function fetchRegimens(search?: string): Promise<TherapyRegimenItem[]> {
   const params: Record<string, string> = {};
   if (search) params.search = search;
-  const resp = await api.get('/v1/therapy-regimens/', { params });
-  return resp.data as TherapyRegimenItem[];
+  const items: TherapyRegimenItem[] = [];
+  // The public picker keeps its 50-row response. Curation needs every page.
+  for (let offset = 0; ; offset += 50) {
+    const resp = await api.get('/v1/therapy-regimens/', { params: { ...params, offset } });
+    const page = resp.data as TherapyRegimenItem[];
+    items.push(...page);
+    if (page.length < 50) return items;
+  }
 }
 
 export async function fetchRegimenDetail(code: string): Promise<TherapyRegimenItem> {

@@ -200,6 +200,27 @@ def test_question_override_is_cleared_with_the_field():
     assert set(Measurement.objects.filter(person=person).values_list('value_source_value', flat=True)) == {CLEAR_VALUE}
 
 
+def test_histology_question_override_survives_builtin_reader_selection():
+    from datetime import date
+    from omop_core.models import FieldConceptMapping
+    from omop_core.services.patient_record_service import refresh_patient_record
+    from tests.factories import MeasurementFactory, ObservationFactory
+    choice, concept = mapped_choice(field='histologic_type', value='Reviewed histology')
+    default = ConceptFactory(vocabulary__vocabulary_id='LOINC', concept_code='59847-4')
+    override = ConceptFactory(domain=DomainFactory(domain_id='Measurement'))
+    save_mapping(choice, {'question_concept': override})
+    FieldConceptMapping.objects.update_or_create(field_name='histologic_type', defaults={
+        'concept': default, 'vocabulary_id': 'LOINC', 'concept_code': default.concept_code,
+        'source_value': default.concept_code, 'status': 'approved', 'omop_table': 'measurement', 'value_kind': 'string'})
+    person = PersonFactory()
+    ObservationFactory(person=person, observation_source_value=default.concept_code,
+        observation_date=date(2020, 1, 1), value_as_string='Older legacy histology')
+    MeasurementFactory(person=person, measurement_concept=override,
+        measurement_source_value=override.concept_code, measurement_date=date(2021, 1, 1),
+        value_as_concept=concept, value_as_string=None)
+    assert refresh_patient_record(person).histologic_type == 'Reviewed histology'
+
+
 @pytest.mark.parametrize('failing_question', ['base', 'override'])
 def test_clear_rolls_back_every_question_on_partial_failure(monkeypatch, failing_question):
     choice, concept = mapped_choice()
