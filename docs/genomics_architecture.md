@@ -52,7 +52,8 @@ The repository's domain regression fixture records 81252-9 in Observation. Paren
 | genomic_dna_change | LOINC 81290-9 | Observation when resolved; frozen seed fallback is Measurement |
 | variant_analysis_method_type | LOINC 81304-8 | Observation when resolved; frozen seed fallback is Measurement |
 | variant_category | LOINC 83005-9 | Observation when resolved; frozen seed fallback is Measurement |
-| variant_name, variant_description, origin | `genomics:<field>` | Observation text; variant name is still uncoded |
+| variant_name | LOINC 81253-7; source genomics:variant_name | Observation text; v3 promotion of exact untouched seeds |
+| variant_description, origin | `genomics:<field>` | Observation text |
 | assessment, specimen_id, specimen_type, collection_date, report_id, laboratory | `genomics:<field>` | Observation text |
 | interpretation_date, classification_framework, evidence_source, genomic_reference_sequence_id, zygosity | `genomics:<field>` | Observation text |
 | status | LOINC 69548-6; source genomics:status | Measurement text |
@@ -61,7 +62,9 @@ The repository's domain regression fixture records 81252-9 in Observation. Paren
 | coverage_depth | LOINC 82121-5; source genomics:coverage_depth | Observation when resolved; migration fallback is Measurement |
 | amino_acid_change_type | LOINC 48006-1; source genomics:amino_acid_change_type | Measurement text |
 
-The effective runtime registry corrects the four Observation fallbacks shown above, but the writer ultimately uses the persisted mapping table. A vocabulary load after initial seeding therefore needs a mapping audit; changing FIELDS does not repair existing recipes. See [domain regression tests](../tests/test_genomics_loinc_domains.py).
+The effective runtime registry corrects the four Observation fallbacks shown above, but the writer ultimately uses the persisted mapping table. A vocabulary load after initial seeding therefore needs a mapping audit; changing FIELDS does not repair existing recipes. See [domain regression tests](../tests/test_genomics_loinc_domains.py) and [recipe/audit tests](../tests/test_genomics_recipes.py).
+
+Recipe v3 adds portable variant-name metadata without changing the frozen v1 catalog or rewriting patient facts. Migration 0231 and seed retries promote only the exact original approved seed shape, with no reviewer and no curator provenance; blank provenance alone is insufficient. Nonmatching recipes need explicit curation. Reads and edits recognize historical local keys, portable component codes and current curator source values. The shared resolver accepts one active source and one active standard target (direct or Maps to); missing, ambiguous and unsupported-domain resolution retains concept 0 and raw source.
 
 Reads retain legacy gene-specific Measurements and mappings with withdrawn approval. Legacy qualifier/value concepts can supply origin and interpretation; linked components overlay them. Editing converts a legacy parent to the current parent recipe and clears the old qualifier/value concepts. Legacy hardcoded origin/interpretation IDs remain compatibility behavior, not portable examples for new integrations.
 
@@ -148,7 +151,9 @@ Patient/representative, clinician, organization and service-token authorization 
 
 Migration 0223_priority_genomic_fields adds the 42 lists; 0224_seed_genomics_mappings seeds the initial 68 recipes; 0226_seed_genomics_status_component and 0227_seed_genomics_v2_components add five recipes. 0228_merge_cytogenetics_and_genomics creates the NOTE sequence. Apply the complete current migration graph, including its merge migrations.
 
-manage.py seed_genomics_catalog seeds all 73 recipes idempotently, preserving existing curator decisions including rejections. It does not repair existing domain assignments. manage.py audit_genomics_domains checks approved coded component mappings against the installed vocabulary; no vocabulary, no mappings or unresolved codes can result in a successful exit without full verification. Required unmapped, type and CDM event concepts must exist before writes.
+manage.py seed_genomics_catalog seeds all 73 recipes idempotently and promotes exact untouched variant-name seeds to v3, preserving curator decisions including rejections. It does not repair other existing domain assignments. manage.py audit_genomics_domains audits all 31 component recipes, distinguishes intentionally local fields, and exits nonzero for missing approvals, absent/unresolved/ambiguous vocabulary or domain/concept mismatches. It prints source and standard domains plus proposed repairs, without changing any mappings or patient data. Required unmapped, type and CDM event concepts must exist before writes.
+
+After loading vocabulary, run the audit on that deployment. For each proposed repair, review the field in the field-mapping curation interface, set the installed standard concept and matching OMOP table, retain the source key and independent value/unit settings, and record the decision before approving it. Rerun the audit and retain its output with the vocabulary version. Curation applies to future writes; migrating existing facts between tables requires a separately reviewed data repair. Passing fixture tests does not certify a deployment vocabulary.
 
 Existing coverage is in test_genomics_crud.py, test_genomics_catalog.py, test_genetic_mutation_roundtrip.py, the domain tests and shared frontend component tests. It covers CRUD, status, numeric components, NOTE round trips, approval, repeated findings, marker isolation and projection stubs. Local verification for this update is recorded in the implementation plan. Deployed schemas and vocabulary completeness have not been certified by this change.
 

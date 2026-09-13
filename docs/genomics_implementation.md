@@ -9,7 +9,7 @@ See [the implemented architecture](genomics_architecture.md) for current behavio
 | secure owned NOTE overflow references and bound projection reads | [#1236](https://github.com/healthkey-ai/promop/issues/1236) | Implemented in this change; validation below |
 | reconcile previously widened shared text columns without data loss | [#1237](https://github.com/healthkey-ai/promop/issues/1237) | Open |
 | expose all implemented components through one curation registry | [#1238](https://github.com/healthkey-ai/promop/issues/1238) | Implemented in this change; validation below |
-| promote variant-name LOINC recipe and make domain audits conclusive | [#1239](https://github.com/healthkey-ai/promop/issues/1239) | Open |
+| promote variant-name LOINC recipe and make domain audits conclusive | [#1239](https://github.com/healthkey-ai/promop/issues/1239) | Implemented on recipe branch; deployment audit pending |
 | unify finding state, complete dialog fields and preserve unknown evidence | [#1240](https://github.com/healthkey-ai/promop/issues/1240) | Open |
 | make asserted projection provenance editable and derivation metadata consistent | [#1241](https://github.com/healthkey-ai/promop/issues/1241) | Implemented in this change; validation below |
 | reconcile cytogenetic summaries and centralize overlapping finding editing | [#1242](https://github.com/healthkey-ai/promop/issues/1242) | Open |
@@ -42,19 +42,17 @@ Acceptance. Fresh and previously widened schema paths converge; 60/61/10,000 cha
 
 ### 2. Complete portable component recipes and curation
 
-The 31-field effective registry and curation visibility are implemented in this change (#1238). Portable recipe promotion, conclusive audits and reviewed domain repair remain #1239. Historical seed inputs have not been rewritten.
+The 31-field effective registry and curation visibility are implemented (#1238). Recipe v3 and the conclusive audit implement #1239 without rewriting historical seed inputs. Exact untouched variant-name seeds gain LOINC 81253-7 metadata while retaining the local source key; curator and rejected mappings are preserved. Reads and edits recognize both local and portable component codes.
 
-Observed gap. variant_name remains a local text Observation, so the requested promotion to LOINC 81253-7 has not happened. Before #1238, descriptor inventory and mapping validation used only the frozen 26-component catalog. The effective registry now exposes all 31 fields. Runtime fallback domains differ from seed defaults for several Observation components. Existing mappings survive seeding unchanged.
+The shared vocabulary resolver requires an unambiguous active source and standard target, including Maps to. Absent vocabulary retains concept 0/raw source. The audit checks every component recipe and fails for missing approvals, unresolved/ambiguous codes and domain drift; it prints explicit repairs for the existing curation workflow. Tests cover loading vocabulary before and after promotion, legacy/coded reads, curator preservation and the four Observation-domain corrections.
 
-Work. Add the coded variant-name recipe with source-compatible reads for genomics:variant_name and existing curator source values. Use a forward migration or explicit curation process that distinguishes untouched seeds from curator decisions and preserves rejections. Keep the v1 fixture immutable; use versioned additions for new metadata. Retain the effective component registry shared by the writer, descriptor inventory and serializer validation, including all 31 fields.
-
-Verify source codes, standard concepts and domains in the installed vocabulary, including Maps to where applicable. Preserve concept 0/raw-source fallbacks. Record unresolved lookups instead of treating an empty audit as certification. Audit recipes seeded before vocabulary loading, and repair domain drift without silently overriding reviewed mappings. The code's Observation domain for coverage depth is a justified correction to an unconditional Measurement placement; the resolved domain determines the destination.
+Deployment action remains: run the audit against the installed vocabulary after loading it, review each proposed mapping correction in field-mapping curation, preserve source/value/unit settings, and rerun until verified. Retain the audit output and vocabulary version. No deployment vocabulary has been certified by fixture tests, and no existing clinical facts are rewritten by a recipe repair. Clinical/source review of answer sets and depth granularity remains open.
 
 | Requirement from references | Current state / remaining action |
 | --- | --- |
 | Status, 69548-6 | Seeded; verify installed mapping and obtain BIDMC answer set |
 | Clone fraction | Local numeric recipe exists; document vocabulary search and retain fallback if no suitable code |
-| Variant name, 81253-7 | Missing coded promotion; preserve old reads |
+| Variant name, 81253-7 | Version 3 promotion and compatible reads implemented; nonmatching old recipes require curation |
 | Transcript DNA change, 48004-6 | Exists; keep distinct from genomic DNA change, 81290-9, and preserve raw variant |
 | Coverage depth, 82121-5 | Per-finding number exists; verify domain and source granularity |
 | Amino-acid change type, 48006-1 | Exists; keep distinct from protein change, 48005-3 |
