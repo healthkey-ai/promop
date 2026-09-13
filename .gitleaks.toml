@@ -67,3 +67,13 @@ description = "BCL2 amplification catalog identifier"
 targetRules = ["generic-api-key"]
 regexTarget = "secret"
 regexes = ['''^bcl2_amplification$''']
+
+# The clinical assay identifier in the field-value inventories is not a secret.
+# Limit the exception to this exact value, rule and two inventory files, including its history.
+[[allowlists]]
+description = "Dako 22C3 pharmDx assay identifier in the field-value inventory"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)docs/(field_value_mapping_inventory|cancerbot_field_value_reference)\.json$''']
+regexTarget = "secret"
+regexes = ['''^dako_22c3_pharm_dx$''']
