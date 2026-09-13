@@ -48,7 +48,7 @@ paths = [
 # Scoped to ONE rule. The high-signal rules — AWS keys, private keys, GitHub
 # PATs — remain active everywhere this gate can see.
 [[allowlists]]
-description = "generic-api-key noise from test fixtures"
+description = "generic-api-key noise from test fixtures and data inventories"
 targetRules = ["generic-api-key"]
 paths = [
   '''.*tests?\.py$''',
@@ -58,6 +58,7 @@ paths = [
   '''.*/__tests__/.*''',
   '''omop_core/data/.*\.json$''',
   '''docs/genomics_handoff\.md$''',
+  '''docs/field_value_mapping_inventory\.json$''',
 ]
 
 # This genomic marker identifier appears as a catalog key and in its handoff
