@@ -25,6 +25,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError
+from omop_core.services.sample_patient_stage import ensure_sample_patient_stage
 from django.db import close_old_connections, connection, transaction
 
 from omop_core.models import (
@@ -563,6 +564,9 @@ class Command(BaseCommand):
                 bundle_key = _patient_key_from_person(person)
                 source = bundle_by_key.get(bundle_key)
                 if source is None:
+                    ensure_sample_patient_stage(record, disease='MM', dry_run=dry_run)
+                    if not dry_run:
+                        touched_person_ids.append(person.person_id)
                     self.stdout.write(
                         f'  [{idx}/{len(cohort)}] person_id={person.person_id} skipped (no bundle match)'
                     )
@@ -573,6 +577,12 @@ class Command(BaseCommand):
                 if diagnosis_date is None:
                     diagnosis_date = datetime.utcnow().date()
                 condition_resource = source['conditions'][0] if source['conditions'] else None
+                stage_summaries = [s.get('summary', {}) for s in (condition_resource or {}).get('stage', [])]
+                stage_labels = [s.get('text') or next((c.get('display') for c in s.get('coding', [])
+                                                     if c.get('display')), '') for s in stage_summaries]
+                asserted_stage = next((s for s in stage_labels if s.upper().startswith('R-ISS')),
+                                      next((s for s in stage_labels if s), None))
+                ensure_sample_patient_stage(record, disease='MM', asserted_stage=asserted_stage, dry_run=dry_run)
                 condition_date = None
                 condition_code = None
                 condition_name = 'Multiple Myeloma'

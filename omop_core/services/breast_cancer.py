@@ -44,9 +44,18 @@ def staging_data(snapshot, legacy_source):
     from omop_core.services.patient_record_service import _coded_value
 
     resolver = ValueResolver.for_snapshot(snapshot)
+    def stage_value(field, row):
+        value = resolver.reverse(field, row)
+        if value is None:
+            value = _coded_value(row)
+        if value is None or str(value).strip().casefold() in ('', 'true', 'false', 'yes', 'no'):
+            return None
+        return str(value).strip()
+
     rows = sorted([*snapshot.measurements, *snapshot.observations],
                   key=lambda r: (fact_date(r), r.pk, r._meta.db_table), reverse=True)
-    candidates = [r for r in rows if any(matches(r, codes) for codes in STAGE_QUESTIONS.values())]
+    candidates = [r for r in rows if any(matches(r, codes) and stage_value(field, r) is not None
+                                        for field, codes in STAGE_QUESTIONS.items())]
     # Never combine facts explicitly linked to different tumors/assessments.
     if candidates:
         latest_link = event_key(candidates[0])
@@ -58,7 +67,7 @@ def staging_data(snapshot, legacy_source):
             candidates = [r for r in candidates if not all(event_key(r))]
     data, bases = {}, set()
     for field, codes in STAGE_QUESTIONS.items():
-        row = next((r for r in candidates if matches(r, codes)), None)
+        row = next((r for r in candidates if matches(r, codes) and stage_value(field, r) is not None), None)
         if row is None:
             continue
         concept = getattr(row, 'measurement_concept', None) or getattr(row, 'observation_concept', None)
@@ -66,12 +75,7 @@ def staging_data(snapshot, legacy_source):
         basis = codes.get(getattr(concept, 'concept_code', None)) or codes.get(source)
         if getattr(row, 'qualifier_source_value', None) == 'yp' and basis == 'p':
             basis = 'yp'
-        value = resolver.reverse(field, row)
-        if value is None:
-            value = _coded_value(row)
-        if value is None:
-            continue
-        data[field] = str(value)
+        data[field] = stage_value(field, row)
         bases.add(basis)
     if bases:
         data['staging_modalities'] = ', '.join(sorted(bases))
@@ -82,7 +86,7 @@ def staging_data(snapshot, legacy_source):
             data['stage'] = _coded_value(row)
     riss = next((r for r in rows if (getattr(r, 'measurement_source_value', None)
         or getattr(r, 'observation_source_value', None)) == '21908-9-riss'), None)
-    if riss and _coded_value(riss) and 'stage' not in data:
+    if riss and _coded_value(riss) and ('stage' not in data or data['stage'].upper().startswith('ISS ')):
         data['stage'] = _coded_value(riss)
     if 'nodes_stage' in data:
         present = stage_presence(data['nodes_stage'], 'N')

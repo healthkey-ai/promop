@@ -2591,6 +2591,8 @@ def _get_genomics_pathology_data(person: Person, snapshot: OmopSnapshot = None) 
 # 21908-9-riss is a non-standard code the MM generator uses for R-ISS stage
 # (it mis-resolves to an unrelated concept on import, so it is matched by
 # source_value only).
+SAMPLE_STAGE_SOURCE_VALUE = 'sample-patient-stage'
+
 _STAGING_LOINCS = frozenset({'21908-9', '21908-9-riss', '21905-5', '21906-3', '21907-1', '21901-4', '21899-0', '21900-6', '21902-2'})
 
 
@@ -2601,7 +2603,16 @@ def _get_staging_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     21900-6, 21901-4. Overall group: 21908-9 / 21902-2.
     """
     from omop_core.services.breast_cancer import staging_data
-    return staging_data(snapshot or _build_snapshot(person), FHIR_CONDITION_STAGE_SOURCE_VALUE)
+    snapshot = snapshot or _build_snapshot(person)
+    data = staging_data(snapshot, FHIR_CONDITION_STAGE_SOURCE_VALUE)
+    if 'stage' not in data:
+        stage = next((row.value_as_string for row in snapshot.observations
+                      if row.observation_source_value == SAMPLE_STAGE_SOURCE_VALUE
+                      and row.value_as_string), None)
+        if stage:
+            data['stage'] = stage
+    return data
+
 
 
 def _get_bc_clinical_data(person: Person, snapshot: OmopSnapshot = None) -> dict:

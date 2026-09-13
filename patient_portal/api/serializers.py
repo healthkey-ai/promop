@@ -273,6 +273,7 @@ class PatientListSerializer(serializers.ModelSerializer):
     person_id = serializers.IntegerField(source='person.person_id', read_only=True)
     patient_name = serializers.SerializerMethodField()
     age = serializers.SerializerMethodField()
+    genomics_summary = serializers.SerializerMethodField()
     organization_name = serializers.CharField(source='organization.name', read_only=True, allow_null=True)
     organization_slug = serializers.CharField(source='organization.slug', read_only=True, allow_null=True)
     updated_at = serializers.DateTimeField(format='%Y-%m-%d', read_only=True)
@@ -288,6 +289,8 @@ class PatientListSerializer(serializers.ModelSerializer):
             'organization_slug',
             'disease',
             'stage',
+            'genomics_summary',
+            'therapy_lines_count',
             'updated_at',
         ]
     
@@ -304,6 +307,25 @@ class PatientListSerializer(serializers.ModelSerializer):
             age = today.year - obj.date_of_birth.year - ((today.month, today.day) < (obj.date_of_birth.month, obj.date_of_birth.day))
             return age
         return None
+
+
+    def get_genomics_summary(self, obj):
+        # Use the persisted projection: listing a page must not query OMOP once
+        # per patient. Keep negative/unknown results distinct from findings.
+        summaries = []
+        for variant in obj.genetic_mutations or []:
+            if not isinstance(variant, dict):
+                continue
+            gene = str(variant.get('gene') or '').strip().upper()
+            change = str(variant.get('variant') or variant.get('variant_name')
+                         or variant.get('genomic_dna_change') or variant.get('amino_acid_change') or '').strip()
+            label = ' '.join(dict.fromkeys(v for v in (gene, change) if v))
+            status = variant.get('status') or variant.get('interpretation')
+            if label and status:
+                label += f" ({status})"
+            if label and label not in summaries:
+                summaries.append(label)
+        return '; '.join(summaries)
 
 
 class GenderField(serializers.CharField):

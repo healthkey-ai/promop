@@ -609,6 +609,9 @@ class FLBundleGenerator:
         tx_dt = (transformation_date or diag_date).strftime('%Y-%m-%d')
         grade_text = f"Grade {p['grade']}{'b' if p['grade_3b'] else 'a' if p['grade'] == 3 else ''}"
         return [
+            self._obs(pid, f"obs-{pid}-ann-arbor-stage", '21908-9',
+                      'Ann Arbor stage', 'laboratory', dt, 'string',
+                      f"Stage {p['ann_arbor_stage']}{'B' if p['b_symptoms'] else ''}"),
             self._q_obs(pid, 'bm-b-cells', _L['bm_b_cells'],
                         'Clonal B lymphocytes in bone marrow biopsy (%)', p['bm_b_cells_pct'], '%', dt),
             self._obs(pid, f"obs-{pid}-prior-lines", '21861-0', 'Prior lines of therapy', 'laboratory', dt, 'integer', p['prior_lines']),
