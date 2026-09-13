@@ -60,6 +60,7 @@ from omop_core.services.patient_record_service import (
     refresh_patient_record,
     set_language_skills,
 )
+from omop_core.services.vocab_snapshot import TABLE_COLUMNS
 from omop_core.services.derivation_jobs import get_dispatcher
 from omop_core.services.patient_cleanup import delete_omop_clinical_rows
 from omop_core.services.prolog_cleanup import delete_prolog_data_for_persons
@@ -9411,19 +9412,7 @@ class VocabSnapshotView(APIView):
     """
     permission_classes = [VocabReadPermission]
 
-    # SECURITY: db_table values are hardcoded; never interpolate user input.
-    ALLOWED_TABLES = {
-        'concept': 'concept',
-        'concept_ancestor': 'concept_ancestor',
-        'concept_class': 'concept_class',
-        'concept_relationship': 'concept_relationship',
-        'concept_synonym': 'concept_synonym',
-        'domain': 'domain',
-        'drug_strength': 'drug_strength',
-        'relationship': 'relationship',
-        'source_to_concept_map': 'source_to_concept_map',
-        'vocabulary': 'vocabulary',
-    }
+    ALLOWED_TABLES = {table: table for table in TABLE_COLUMNS}
 
     def get(self, request, table, release_id=None):
         from django.http import HttpResponseNotModified, StreamingHttpResponse
@@ -9468,39 +9457,29 @@ class VocabSnapshotView(APIView):
                 status=status.HTTP_409_CONFLICT,
             )
 
-        # 3. ETag / conditional request
+        from omop_core.services.vocab_snapshot import CANONICALIZATION, stream_ndjson
+
         etag = get_release_etag(release)
+        source_param = request.query_params.get('source') if table == 'concept' else None
+
+        # Vary ETag by source filter so different queries don't share ETags
+        if source_param and etag:
+            etag = etag.rstrip('"') + f'-{source_param}"'
+
         if_none_match = request.META.get('HTTP_IF_NONE_MATCH', '')
         if _etag_matches(if_none_match, etag):
             resp = HttpResponseNotModified()
             if etag:
                 resp['ETag'] = etag
             resp['X-Vocab-Release-Id'] = str(release.pk)
+            resp['X-Vocab-Checksum-Format'] = CANONICALIZATION
             return resp
 
-        # 4. Build WHERE clause (source filter for concept table only)
-        db_table = self.ALLOWED_TABLES[table]
-        where = ''
-        params = []
-        source_param = None
-        if table == 'concept':
-            source_param = request.query_params.get('source')
-            if source_param == 'HealthKey':
-                where = 'WHERE source = %s'
-                params = ['HealthKey']
-            elif source_param == 'external':
-                where = 'WHERE source IS NULL'
-
-        # Vary ETag by source filter so different queries don't share ETags
-        if source_param and etag:
-            etag = etag.rstrip('"') + f'-{source_param}"'
-
-        # 5. Stream NDJSON
-        sql = f'SELECT row_to_json(t) FROM {db_table} t {where}'
         response = StreamingHttpResponse(
-            self._stream_ndjson(sql, params),
+            stream_ndjson(table, source=source_param),
             content_type='application/x-ndjson',
         )
+        response['X-Vocab-Checksum-Format'] = CANONICALIZATION
         response['Content-Disposition'] = (
             f'attachment; filename="{table}_{release.pk}.ndjson"'
         )
@@ -9512,28 +9491,6 @@ class VocabSnapshotView(APIView):
             response['ETag'] = etag
             response['Cache-Control'] = 'private, max-age=86400'
         return response
-
-    @staticmethod
-    def _stream_ndjson(sql, params=None):
-        import json as _json
-        from django.db import connection, transaction
-        count = 0
-        # A server-side (named) cursor issues DECLARE CURSOR, which Postgres only
-        # allows inside a transaction block. The streaming generator runs after the
-        # view returns, in Django's default autocommit — so wrap it in an explicit
-        # transaction spanning the whole stream, or the first fetch raises
-        # NoActiveSqlTransaction.
-        with transaction.atomic():
-            with connection.connection.cursor(name='vocab_snapshot') as cursor:
-                cursor.itersize = 1000
-                cursor.execute(sql, params or [])
-                for (row_json,) in cursor:
-                    if isinstance(row_json, dict):
-                        yield _json.dumps(row_json) + '\n'
-                    else:
-                        yield str(row_json) + '\n'
-                    count += 1
-        yield _json.dumps({'__done': True, 'rows': count}) + '\n'
 
 
 # =============================================================================

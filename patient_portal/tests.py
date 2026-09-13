@@ -16327,6 +16327,26 @@ class VocabSnapshotStreamTransactionTest(TransactionTestCase):
             'stream must end with the __done sentinel',
         )
 
+    def test_publication_and_stream_share_bytes_without_ambient_transaction(self):
+        import hashlib
+        import time
+        from io import StringIO
+        from omop_core.management.commands.load_athena_vocabularies import Command
+        from omop_core.models import VocabularyRelease
+
+        command = Command(stdout=StringIO())
+        command._build_start = time.time()
+        command._publish_release({'vocabulary': 999999})
+        release = VocabularyRelease.objects.latest('pk')
+        response = self.client.get(
+            f'/api/v1/vocab-releases/{release.pk}/snapshot/vocabulary/')
+        lines = b''.join(response.streaming_content).splitlines(keepends=True)
+        self.assertEqual(
+            hashlib.sha256(b''.join(lines[:-1])).hexdigest(),
+            release.checksums['vocabulary']['digest'],
+        )
+
+
 
 class VocabSystemScopeTest(_SmartBase):
     """#344 — vocabulary release/snapshot endpoints are reference (system) data,
