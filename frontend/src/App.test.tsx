@@ -219,3 +219,24 @@ describe("App force-password-change gate (TI.1.1#09)", () => {
     expect(screen.queryByText("CHANGE_PASSWORD")).not.toBeInTheDocument();
   });
 });
+
+describe('administrative upload routes', () => {
+  for (const [path, marker] of [['/upload-fhir', 'UPLOAD_FHIR'], ['/upload-csv', 'UPLOAD_CSV']]) {
+    it.each([{ is_staff: true }, { is_org_admin: true }])(`allows admins at ${path}: %j`, role => {
+      mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, ...role } });
+      renderAt(path);
+      expect(screen.getByText(marker)).toBeInTheDocument();
+    });
+    it.each([{ is_patient: true }, { org_accesses: [{ role: 'doctor' }] }, { org_accesses: [{ role: 'analyst' }] }])(`blocks other roles at ${path}: %j`, role => {
+      mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, ...role } });
+      renderAt(path);
+      expect(screen.queryByText(marker)).not.toBeInTheDocument();
+    });
+  }
+  it('offers both upload formats', () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, is_staff: true } });
+    renderAt('/upload');
+    expect(screen.getByRole('link', { name: /^FHIR/ })).toHaveAttribute('href', '/upload-fhir');
+    expect(screen.getByRole('link', { name: /^CSV/ })).toHaveAttribute('href', '/upload-csv');
+  });
+});

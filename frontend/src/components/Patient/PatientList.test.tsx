@@ -100,3 +100,14 @@ it('uses the same clinical filters when deleting all matching patients', async (
   fireEvent.click(screen.getByRole('button', { name: /^Delete$/ }));
   await waitFor(() => expect(api.delete).toHaveBeenCalledWith('/patient-info/bulk_delete_filtered/', expect.objectContaining({ params: expect.objectContaining({ ecog: '0' }) })));
 });
+
+it('places Upload immediately after Mappings', async () => {
+  vi.mocked(api.get).mockResolvedValue({ data: { count: 0, results: [] } });
+  render(<PatientList />);
+  const mappings = await screen.findByRole('button', { name: 'Mappings' });
+  const upload = screen.getByRole('button', { name: 'Upload' });
+  expect(mappings.nextElementSibling).toBe(upload);
+  fireEvent.click(upload);
+  expect(navigate).toHaveBeenCalledWith('/upload');
+  expect(screen.queryByRole('button', { name: 'Upload CSV' })).not.toBeInTheDocument();
+});

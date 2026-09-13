@@ -422,7 +422,6 @@ class FhirUploadOmopTablesTest(FhirUploadBase):
             for entry in bundle['entry']
             if entry['resource']['resourceType'] == 'Patient'
         )
-        patient['id'] = 'test-patient-jane-deceased'
         patient['name'] = [{'family': 'Deceased', 'given': ['Jane']}]
         patient['deceasedDateTime'] = '2024-04-05T12:34:00Z'
         bundle_bytes = json.dumps(bundle).encode('utf-8')
@@ -450,7 +449,6 @@ class FhirUploadOmopTablesTest(FhirUploadBase):
             for entry in bundle['entry']
             if entry['resource']['resourceType'] == 'Patient'
         )
-        patient['id'] = 'test-patient-jane-deceased-bool'
         patient['name'] = [{'family': 'BooleanDeceased', 'given': ['Jane']}]
         patient['deceasedBoolean'] = True
         bundle_bytes = json.dumps(bundle).encode('utf-8')
@@ -4533,7 +4531,7 @@ class ProvenanceFhirUploadTest(_SmartBase):
         self.assertTrue(
             ProvenanceRecord.objects.filter(
                 source='EHR_SYNC',
-                source_user_id='ehr-001',
+                source_user_id=f'urn:oauth-client|{self.app.client_id}',
                 content_type__in=omop_types,
             ).exists(),
             'FHIR OMOP facts were not tagged with provenance',
@@ -4541,7 +4539,7 @@ class ProvenanceFhirUploadTest(_SmartBase):
         self.assertFalse(
             ProvenanceRecord.objects.filter(
                 source='EHR_SYNC',
-                source_user_id='ehr-001',
+                source_user_id=f'urn:oauth-client|{self.app.client_id}',
                 content_type=ContentType.objects.get_for_model(PatientRecord),
                 object_id=pi.pk,
             ).exists(),
