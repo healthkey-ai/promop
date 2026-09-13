@@ -2230,7 +2230,10 @@ _BIOMARKER_MEASUREMENT_LOINCS = frozenset({
     '16112-5',  # Estrogen receptor
     '16113-3',  # Progesterone receptor
     '48676-1',  # HER2
-    '85319-2',  # Ki-67
+    '85319-2', '85337-4',  # HER2 / ER IHC
+    '105303-2', '105304-0', '105305-7', '105302-4', '83053-9',
+    '107286-7',  # HRD test
+    '29593-1',  # Ki-67 percentage; 85319-2 is HER2
     '83055-4',  # PD-L1 by clone 28-8 [Presence] in Tissue by Immune stain
     '83054-7',  # PD-L1 by clone 22C3 [Interpretation] in Tissue Narrative
     '44648-4',  # Biopsy/Nottingham grade
@@ -2261,7 +2264,8 @@ _GENETIC_MUTATION_LOINCS = {
 # ids: Athena reloads may change concept ids, while the source code is the
 # durable vocabulary contract.
 _GENOMICS_PATHOLOGY_LOINCS = frozenset({
-    '85337-4',  # genomic/test methodology (also carries numeric Oncotype score)
+    '85069-3',  # Lab test method; 85337-4 is an ER assay
+    '3903', '3904',  # NAACCR Oncotype score (DCIS / invasive)
     '31208-2',  # specimen source
     '69548-6',  # pathology test interpretation
     # Androgen receptor. 49457-5 ("Androgen receptor Ag [Presence] in Tissue by
@@ -2272,7 +2276,7 @@ _GENOMICS_PATHOLOGY_LOINCS = frozenset({
     # one still projects; nothing new is written under it.
     '49457-5',
     '82185-1',
-    '92837-4',  # lymph-node involvement
+    '21906-3',  # clinical regional lymph nodes; 92837-4 is perineural invasion
     '21907-1',  # distant-metastasis status (not TNM M category)
     '44648-4',  # Nottingham biopsy grade
 })
@@ -2319,12 +2323,14 @@ def _observation_code(observation):
 def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
     snapshot = snapshot or _build_snapshot(person)
+    from omop_core.services.breast_cancer import matches, fact_date
+    from omop_core.services.field_values import ValueResolver
+    resolver = ValueResolver.for_snapshot(snapshot)
 
     _all_biomarker_codes = _BIOMARKER_MEASUREMENT_LOINCS | _HISTOLOGIC_TYPE_LOINCS
     measurements = [
         m for m in snapshot.measurements
-        if (getattr(m.measurement_concept, 'concept_code', None) in _all_biomarker_codes
-            or m.measurement_source_value in _all_biomarker_codes)
+        if matches(m, _all_biomarker_codes)
     ]
 
     _all_obs_codes = _BIOMARKER_OBS_LOINCS | _HISTOLOGIC_TYPE_LOINCS
@@ -2338,10 +2344,11 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             )))
     ]
 
-    pdl1_test = next((m for m in measurements if _measurement_code(m) == '83052-1'), None)
+    pdl1_test = next((m for m in measurements if _measurement_code(m) in {'105304-0', '83053-9'}), None)
     if pdl1_test:
-        data['pd_l1_tumor_cells'] = int(pdl1_test.value_as_number) if pdl1_test.value_as_number else None
-        data['pd_l1_assay'] = pdl1_test.value_source_value
+        data['pd_l1_tumor_cells'] = int(pdl1_test.value_as_number) if pdl1_test.value_as_number is not None else None
+    # A scoring method (TPS/CPS) is not an antibody clone (22C3/SP142).
+    # pd_l1_assay is read only through its separately curated field mapping.
 
     def _receptor_status(measurement):
         """Return a normalized receptor status from a Measurement row.
@@ -2362,15 +2369,15 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         if not raw:
             return None
         s = raw.strip().lower()
-        if 'positive' in s:
+        if s in ('positive', 'pos', '+'):
             return 'Positive'
-        if 'negative' in s:
+        if s in ('negative', 'neg', '-'):
             return 'Negative'
-        if 'equivocal' in s:
+        if s == 'equivocal':
             return 'Equivocal'
         return raw.strip().title()
 
-    er_measurement = next((m for m in measurements if _measurement_code(m) == '16112-5'), None)
+    er_measurement = next((m for m in measurements if _measurement_code(m) in {'16112-5', '85337-4'}), None)
     if er_measurement:
         status = _receptor_status(er_measurement)
         if status:
@@ -2382,13 +2389,13 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         if status:
             data['progesterone_receptor_status'] = status
 
-    her2_measurement = next((m for m in measurements if _measurement_code(m) == '48676-1'), None)
+    her2_measurement = next((m for m in measurements if _measurement_code(m) in {'48676-1', '85319-2'}), None)
     if her2_measurement:
         status = _receptor_status(her2_measurement)
         if status:
             data['her2_status'] = status
 
-    if 'estrogen_receptor_status' in data and 'progesterone_receptor_status' in data and 'her2_status' in data:
+    if all(data.get(f) in ('Positive', 'Negative') for f in ('estrogen_receptor_status', 'progesterone_receptor_status', 'her2_status')):
         data['tnbc_status'] = (
             data['estrogen_receptor_status'] == 'Negative'
             and data['progesterone_receptor_status'] == 'Negative'
@@ -2402,105 +2409,82 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             or next((m for m in measurements if m.measurement_source_value == concept_code), None)
         )
 
-    # Ki-67 proliferation index — LOINC 85319-2
-    ki67_m = _first_m('85319-2')
+    # Ki-67 proliferation index — LOINC 29593-1
+    ki67_m = _first_m('29593-1')
     if ki67_m and ki67_m.value_as_number is not None:
         data['ki67_proliferation_index'] = int(ki67_m.value_as_number)
 
-    # PD-L1 immune cell percentage — LOINC 83055-4
-    pdl1_ic_m = _first_m('83055-4')
+    # PD-L1 immune-cell area fraction, not a clone-presence assay.
+    pdl1_ic_m = _first_m('105305-7')
     if pdl1_ic_m and pdl1_ic_m.value_as_number is not None:
         data['pd_l1_ic_percentage'] = int(pdl1_ic_m.value_as_number)
 
-    # PD-L1 combined positive score — LOINC 83054-7
-    pdl1_cps_m = _first_m('83054-7')
+    # PD-L1 combined positive score, not an interpretation narrative.
+    pdl1_cps_m = _first_m('105303-2')
     if pdl1_cps_m and pdl1_cps_m.value_as_number is not None:
         data['pd_l1_combined_positive_score'] = int(pdl1_cps_m.value_as_number)
 
     # Biopsy (Nottingham) grade — LOINC 44648-4
     biopsy_m = _first_m('44648-4')
-    if biopsy_m and biopsy_m.value_as_number is not None:
-        data['biopsy_grade'] = int(biopsy_m.value_as_number)
+    if biopsy_m:
+        grade = resolver.reverse('biopsy_grade', biopsy_m)
+        try:
+            if not isinstance(grade, bool) and float(grade) in (1, 2, 3):
+                data['biopsy_grade'] = int(float(grade))
+        except (ValueError, TypeError):
+            pass
 
-    # Menopausal status — no reliable LOINC exists (76690-7 was "Sexual
-    # orientation", not menopausal status). Read from Observation only, matched
-    # by concept name containing 'menopaus'.
+    # Exact questions only: age at menopause or a similarly named local
+    # observation is not a menopausal-status assessment.
     menopause_obs = next(
-        (obs for obs in observations
-         if obs.observation_concept
-         and obs.observation_concept.concept_name
-         and 'menopaus' in obs.observation_concept.concept_name.lower()),
+        (obs for obs in snapshot.observations if matches(obs, {'276477006'}, 'SNOMED')),
         None,
     )
     if menopause_obs:
-        val = menopause_obs.value_as_string
-        if not val and menopause_obs.value_as_concept:
-            val = menopause_obs.value_as_concept.concept_name
+        val = resolver.reverse('menopausal_status', menopause_obs) or _coded_value(menopause_obs)
         if val:
             data['menopausal_status'] = val
 
-    # HRD status — Observation concept name containing 'homologous recombination'
+    # HRD is a test result, not a computed hormone receptor status.
     hrd_obs = next(
         (
-            obs for obs in observations
-            if obs.observation_concept
-            and 'homologous recombination' in obs.observation_concept.concept_name.lower()
+            obs for obs in sorted([*snapshot.measurements, *snapshot.observations], key=lambda r: (fact_date(r), r.pk), reverse=True)
+            if matches(obs, {'107286-7'})
         ),
         None,
     )
     if hrd_obs:
-        val = hrd_obs.value_as_string or hrd_obs.value_source_value
+        val = resolver.reverse('hrd_status', hrd_obs) or _coded_value(hrd_obs)
         if val:
             data['hrd_status'] = val
 
-    # Bone-only metastasis status — LOINC 44667-4 or concept-name matching
-    bone_obs = next((obs for obs in observations if _observation_code(obs) == '44667-4'), None)
-    if not bone_obs:
-        bone_obs = next(
-            (
-                obs for obs in observations
-                if obs.observation_concept
-                and 'bone only metastas' in obs.observation_concept.concept_name.lower()
-            ),
-            None,
-        )
-    if bone_obs:
-        if bone_obs.value_as_number is not None:
-            data['bone_only_metastasis_status'] = bool(int(bone_obs.value_as_number))
-        elif bone_obs.value_as_string:
-            s = bone_obs.value_as_string.lower()
-            if s in ('yes', 'true', '1', 'positive'):
-                data['bone_only_metastasis_status'] = True
-            elif s in ('no', 'false', '0', 'negative'):
-                data['bone_only_metastasis_status'] = False
+    # A bone-site assertion does not establish *bone-only* metastatic disease.
+    # Keep that aggregate unset unless its dedicated curated recipe supplies it.
+    hr = next((obs for obs in snapshot.observations if matches(obs, {'310871000000100'}, 'SNOMED')), None)
+    if hr:
+        data['hr_status'] = resolver.reverse('hr_status', hr) or _coded_value(hr)
 
     # Histologic type — Observation concept matching 'histologic' or 'histology'
     histologic_measurement = next(
         (
             m for m in measurements
-            if _measurement_code(m) in _HISTOLOGIC_TYPE_LOINCS and m.value_as_string
+            if _measurement_code(m) in _HISTOLOGIC_TYPE_LOINCS
         ),
         None,
     )
-    if histologic_measurement and histologic_measurement.value_as_string:
-        data['histologic_type'] = histologic_measurement.value_as_string
+    if histologic_measurement:
+        data['histologic_type'] = resolver.reverse('histologic_type', histologic_measurement) or _coded_value(histologic_measurement)
         return data
 
     histologic_obs = next(
         (
             obs for obs in observations
-            if obs.value_as_string and (
-                _observation_code(obs) in _HISTOLOGIC_TYPE_LOINCS
-                or (
-                    obs.observation_concept
-                    and 'histolog' in obs.observation_concept.concept_name.lower()
-                )
-            )
+            if matches(obs, _HISTOLOGIC_TYPE_LOINCS)
         ),
         None,
     )
-    if histologic_obs and histologic_obs.value_as_string:
-        data['histologic_type'] = histologic_obs.value_as_string
+    if histologic_obs:
+        data['histologic_type'] = resolver.reverse('histologic_type', histologic_obs) or _coded_value(histologic_obs)
 
     return data
 
@@ -2537,13 +2521,15 @@ def _get_genomics_pathology_data(person: Person, snapshot: OmopSnapshot = None) 
     def latest(code):
         return next((m for m in measurements if _measurement_code(m) == code), None)
 
-    methodology = latest('85337-4')
+    methodology = latest('85069-3')
     if methodology:
         value = _coded_value(methodology)
         if value:
             data['test_methodology'] = value[:50]
-        if methodology.value_as_number is not None:
-            data['oncotype_dx_score'] = int(methodology.value_as_number)
+    oncotype = next((m for m in measurements if _measurement_code(m) in {'3903', '3904'}
+        and (not m.measurement_concept_id or m.measurement_concept.vocabulary_id == 'NAACCR')), None)
+    if oncotype and oncotype.value_as_number is not None:
+        data['oncotype_dx_score'] = int(oncotype.value_as_number)
 
     specimen = latest('31208-2')
     if specimen:
@@ -2572,12 +2558,6 @@ def _get_genomics_pathology_data(person: Person, snapshot: OmopSnapshot = None) 
         value = _coded_value(androgen_receptor)
         if value:
             data['androgen_receptor_status'] = value[:50]
-
-    lymph_node = latest('92837-4')
-    if lymph_node:
-        value = _coded_value(lymph_node)
-        if value:
-            data['lymph_node_status'] = value[:50]
 
     metastasis = latest('21907-1')
     if metastasis:
@@ -2626,114 +2606,17 @@ def _get_genomics_pathology_data(person: Person, snapshot: OmopSnapshot = None) 
 # 21908-9-riss is a non-standard code the MM generator uses for R-ISS stage
 # (it mis-resolves to an unrelated concept on import, so it is matched by
 # source_value only).
-_STAGING_LOINCS = frozenset({'21908-9', '21908-9-riss', '21905-5', '21906-3', '21901-4'})
+_STAGING_LOINCS = frozenset({'21908-9', '21908-9-riss', '21905-5', '21906-3', '21907-1', '21901-4', '21899-0', '21900-6', '21902-2'})
 
 
 def _get_staging_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
-    """Derive TNM staging and overall stage group from OMOP Measurement/Observation rows.
+    """Read clinical/pathological TNM questions and coded answers by event date.
 
-    Reads staging data by LOINC code matched on either the concept code
-    (OMOP-native path) or the source_value (FHIR upload path), across both
-    Measurement and Observation rows.
+    Clinical T/N/M: 21905-5, 21906-3, 21907-1. Pathological: 21899-0,
+    21900-6, 21901-4. Overall group: 21908-9 / 21902-2.
     """
-    snapshot = snapshot or _build_snapshot(person)
-    data = {}
-
-    measurements = [
-        m for m in snapshot.measurements
-        if (getattr(m.measurement_concept, 'concept_code', None) in _STAGING_LOINCS
-            or m.measurement_source_value in _STAGING_LOINCS)
-    ]
-    _staging_obs_sources = _STAGING_LOINCS | {FHIR_CONDITION_STAGE_SOURCE_VALUE}
-    observations = [
-        o for o in snapshot.observations
-        if (getattr(o.observation_concept, 'concept_code', None) in _STAGING_LOINCS
-            or o.observation_source_value in _staging_obs_sources)
-    ]
-
-    def _stage_value(loinc_code):
-        """Return the best string value for a staging LOINC code (Measurement then Observation)."""
-        # Primary: concept code match
-        m = next(
-            (
-                measurement for measurement in measurements
-                if measurement.measurement_concept
-                and measurement.measurement_concept.concept_code == loinc_code
-            ),
-            None,
-        )
-        if m:
-            return m.value_as_string or (str(int(m.value_as_number)) if m.value_as_number is not None else None)
-        # Secondary: LOINC stored as source_value (FHIR upload path)
-        m = next((measurement for measurement in measurements if measurement.measurement_source_value == loinc_code), None)
-        if m:
-            return m.value_as_string or (str(int(m.value_as_number)) if m.value_as_number is not None else None)
-        # Tertiary: Observation by concept code, then by source_value.
-        obs = next(
-            (
-                observation for observation in observations
-                if observation.observation_concept
-                and observation.observation_concept.concept_code == loinc_code
-            ),
-            None,
-        )
-        if obs is None:
-            obs = next(
-                (observation for observation in observations
-                 if observation.observation_source_value == loinc_code),
-                None,
-            )
-        if obs:
-            return obs.value_as_string or (
-                str(int(obs.value_as_number)) if obs.value_as_number is not None else None
-            )
-        return None
-
-    # Overall stage group. For MM both ISS (21908-9) and R-ISS (21908-9-riss)
-    # are recorded; prefer R-ISS as it is the more current MM staging system.
-    stage_val = _stage_value('21908-9-riss') or _stage_value('21908-9')
-    if not stage_val:
-        # Fallback for a dated FHIR Condition.stage assertion which had no
-        # standard staging code. This is still an OMOP fact; its distinct
-        # source value prevents it being confused with a coded LOINC result.
-        stage_val = next(
-            (
-                observation.value_as_string
-                for observation in observations
-                if observation.observation_source_value == FHIR_CONDITION_STAGE_SOURCE_VALUE
-                and observation.value_as_string
-            ),
-            None,
-        )
-    if stage_val:
-        data['stage'] = stage_val
-
-    # T stage — LOINC 21905-5
-    t_val = _stage_value('21905-5')
-    if t_val:
-        data['tumor_stage'] = t_val
-
-    # N stage — LOINC 21906-3
-    n_val = _stage_value('21906-3')
-    if n_val:
-        data['nodes_stage'] = n_val
-
-    # M (distant metastasis) stage — LOINC 21901-4
-    m_val = _stage_value('21901-4')
-    if m_val:
-        data['distant_metastasis_stage'] = m_val
-
-    # Staging modalities — Observation concept name containing 'staging method'
-    staging_vals = list(dict.fromkeys(
-        obs.value_as_string for obs in observations
-        if obs.value_as_string
-        and obs.observation_concept
-        and 'staging' in obs.observation_concept.concept_name.lower()
-    ))
-    if staging_vals:
-        data['staging_modalities'] = ', '.join(staging_vals)
-
-    return data
+    from omop_core.services.breast_cancer import staging_data
+    return staging_data(snapshot or _build_snapshot(person), FHIR_CONDITION_STAGE_SOURCE_VALUE)
 
 
 def _get_bc_clinical_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
@@ -3918,18 +3801,19 @@ def _compute_derived_fields(patient_info: PatientRecord, *, apply_formulas=True)
     her2 = patient_info.her2_status
     patient_info.tnbc_status = (
         all(status == 'Negative' for status in (er, pr, her2))
-        if all(status is not None for status in (er, pr, her2)) else None
+        if all(status in ('Positive', 'Negative') for status in (er, pr, her2)) else None
     )
-    if er is not None or pr is not None:
-        if (er and 'positive' in er.lower()) or (pr and 'positive' in pr.lower()):
+    if not patient_info.hr_status:
+        if er == 'Positive' or pr == 'Positive':
             patient_info.hr_status = 'HR+'
         elif er == 'Negative' and pr == 'Negative':
             patient_info.hr_status = 'HR-'
 
-    # Metastatic status — True when M stage is M1
+    # Only explicit M0/M1 resolves metastatic status; unknown is not negative.
     m_stage = patient_info.distant_metastasis_stage
     if m_stage is not None:
-        patient_info.metastatic_status = 'M1' in m_stage.upper()
+        from omop_core.services.breast_cancer import stage_presence
+        patient_info.metastatic_status = stage_presence(m_stage, 'M')
 
     # Renal adequacy — eGFR >= 30 mL/min/1.73m² (CTCAE G4 threshold)
     egfr = patient_info.egfr_ml_min_173m2

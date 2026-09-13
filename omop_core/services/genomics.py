@@ -259,6 +259,8 @@ def enrich_variants(variants, snapshot):
     """Overlay linked components in one snapshot pass, including imported facts."""
     by_id = {v['id']: v for v in variants}
     codes = {code: key for key, (code, _) in FIELDS.items()}
+    from omop_core.services.field_values import ValueResolver
+    resolver = ValueResolver.for_snapshot(snapshot)
     # Reads survive withdrawn approval; only writes require current approval.
     codes.update({m.source_value: m.field_name.split('.', 1)[1]
         for m in FieldConceptMapping.objects.filter(field_name__startswith='genetic_mutations.')})
@@ -287,7 +289,12 @@ def enrich_variants(variants, snapshot):
             elif field == 'coverage_depth':
                 target[field] = float(row.value_as_number) if row.value_as_number is not None else None
             elif field:
-                value = _read_note_text(row.value_as_string)
+                context = str(target.get('gene', '')).upper()
+                field_name = 'genetic_mutations.' + field
+                if (field_name, context) not in resolver.choices:
+                    context = ''
+                value = resolver.reverse(field_name, row, context)
+                value = _read_note_text(value) if isinstance(value, str) else value
                 if value is None and row.value_as_concept_id:
                     value = row.value_as_concept.concept_name
                 target[field] = value
@@ -371,6 +378,8 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_r
             f'{concept_field}__vocabulary_id': 'LOINC', f'{concept_field}__concept_code__in': codes,
         })).update(
             is_erroneous=True, erroneous_reason='Superseded in Genomics editor')
+    from omop_core.services.field_values import ValueResolver
+    resolver = ValueResolver(['genetic_mutations.' + key for key in FIELDS])
     for key, (code, fallback_domain) in FIELDS.items():
         value = data.get(key)
         if value is None or value == '':
@@ -405,6 +414,16 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_r
         else:
             stored_text, _ = _store_text(str(value), person, data['test_date'], type_concept_id, parent.pk)
             attrs['value_as_string'] = stored_text
+            field_name = 'genetic_mutations.' + key
+            context = data['gene'].upper()
+            if (field_name, context) not in resolver.choices:
+                context = ''
+            answer = resolver.mapping(resolver.resolve(field_name, value, context))
+            if answer and answer.role == 'answer':
+                attrs['value_as_concept_id'] = answer.target_concept_id
+                attrs['value_source_value'] = str(value)[:50]
+                if answer.question_concept_id and answer.question_concept.domain_id == domain:
+                    attrs[f'{prefix}_concept_id'] = answer.question_concept_id
         model.objects.create(**attrs)
     if not skip_refresh:
         from omop_core.services.patient_record_service import refresh_patient_record

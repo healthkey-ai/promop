@@ -101,16 +101,27 @@ def curated_values_from_snapshot(snapshot):
     ).exclude(value_kind='json').exclude(field_name='cytogenetic_markers', vocabulary_id='SNOMED', concept_code='107675007').values(
         'field_name', 'omop_table', 'concept_id', 'concept__concept_code', 'source_value',
     )
+    from omop_core.services.field_values import ValueResolver
+    mappings = list(mappings)
+    resolver = ValueResolver.for_snapshot(snapshot)
     for mapping in mappings:
         name = mapping['field_name']
         target = mapping_target_for(mapping['omop_table'])
         if target not in indexed:
             continue
         source_value = mapping['source_value'] or mapping['concept__concept_code']
-        row = indexed[target].get((mapping['concept_id'], source_value))
+        matching = [indexed[target].get((mapping['concept_id'], source_value))]
+        for choice in resolver.choices.get((name, ''), []):
+            answer = resolver.mapping(choice)
+            if answer and answer.question_concept_id:
+                question = answer.question_concept
+                matching.append(indexed[question.domain_id.lower()].get((question.pk, question.concept_code)))
+        matching = [r for r in matching if r is not None]
+        from omop_core.services.breast_cancer import fact_date
+        row = max(matching, key=lambda r: (fact_date(r), r.pk)) if matching else None
         if row is None:
             continue
-        value = row.value_as_number if row.value_as_number is not None else row.value_as_string
+        value = resolver.reverse(name, row)
         if value is None:
             continue
         try:
@@ -164,7 +175,7 @@ def project_field_to_omop(mapping) -> int:
 
 
 def project_single_value(person, field_name, value, projection, *, acknowledge_existing=False,
-                         after_pk=None):
+                         after_pk=None, _clear_overrides=True):
     """Update a matching non-erroneous fact today, or create today's fact.
 
     Matching includes the concept and source key. Earlier dates are history and
@@ -183,6 +194,40 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
         except Exception:
             logger.warning('Cytogenetic projection failed; edit remains pending')
             return False
+    from omop_core.services.field_values import ValueResolver
+    resolver = ValueResolver([field_name])
+    if _is_empty(value) and _clear_overrides:
+        # Clear prior question overrides too, including withdrawn decisions.
+        from omop_core.models import FieldValueConceptMapping
+        overrides = FieldValueConceptMapping.objects.filter(
+            choice__field_name=field_name, choice__context_key=projection.get('context_key', ''),
+            question_concept__domain_id__in=['Measurement', 'Observation'],
+        ).select_related('question_concept')
+        with transaction.atomic():
+            changed, seen = False, set()
+            for mapping in overrides:
+                question = mapping.question_concept
+                if question.pk in seen:
+                    continue
+                seen.add(question.pk)
+                changed |= project_single_value(person, field_name, None, {
+                    **projection, 'concept_id': question.pk, 'omop_table': question.domain_id.lower(),
+                    'source_value': question.concept_code,
+                }, acknowledge_existing=acknowledge_existing, _clear_overrides=False)
+            base = project_single_value(person, field_name, None, projection,
+                acknowledge_existing=acknowledge_existing, _clear_overrides=False)
+            return changed or base
+    choice = resolver.resolve(field_name, value, projection.get('context_key', '')) if not _is_empty(value) else None
+    answer_mapping = resolver.mapping(choice)
+    raw_value = value
+    if choice:
+        value = choice.canonical_value
+    projection = dict(projection)
+    if answer_mapping and answer_mapping.role == 'fact':
+        return False  # An assertion requires an event-aware writer, never a scalar fallback.
+    if answer_mapping and answer_mapping.question_concept_id:
+        question = answer_mapping.question_concept
+        projection.update(concept_id=question.pk, omop_table=question.domain_id.lower(), source_value=question.concept_code)
     target = projection.get('omop_table')
     concept_id = projection.get('concept_id')
     source_value = projection.get('source_value')
@@ -237,6 +282,9 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
                             instance.value_as_string = str(value)
                 instance.unit_source_value = projection.get('unit') or None
                 instance.unit_concept_id = projection.get('unit_concept_id') or None
+                if answer_mapping and not _is_empty(value):
+                    instance.value_as_concept_id = answer_mapping.target_concept_id
+                    instance.value_source_value = str(raw_value)[:50]
             if existing and not note_changed and all(getattr(instance, f) == v for f, v in previous.items()):
                 return acknowledge_existing
             instance._skip_patient_record_refresh = True

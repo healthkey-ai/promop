@@ -507,6 +507,9 @@ class TestAttributionsTrackDerivation:
         for field, (code, _vocab, extractor) in DERIVED_FIELD_TO_CODE.items():
             source = inspect.getsource(getattr(prs, extractor))
             writes_field = f"data['{field}']" in source or f'data["{field}"]' in source
+            if extractor == '_get_staging_data':
+                from omop_core.services.breast_cancer import STAGE_QUESTIONS, staging_data
+                writes_field = field in STAGE_QUESTIONS and 'data[field]' in inspect.getsource(staging_data)
             # The code may be inline or reached through a module-level constant
             # the function names; both count as this extractor reading it.
             mentions_code = f"'{code}'" in source or f'"{code}"' in source

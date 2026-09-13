@@ -456,7 +456,7 @@ def test_custom_mapping_survives_later_external_refresh_without_pending_override
     assert record.supportive_therapies == 'New imported supportive care'
 
 
-def test_curated_snapshot_reader_uses_one_query_without_editor_metadata(editor):
+def test_curated_snapshot_reader_uses_two_bounded_queries_without_editor_metadata(editor):
     from types import SimpleNamespace
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
@@ -479,4 +479,5 @@ def test_curated_snapshot_reader_uses_one_query_without_editor_metadata(editor):
     with CaptureQueriesContext(connection) as queries:
         values = curated_values_from_snapshot(snapshot)
     assert values == {'supportive_therapies': 'Supportive care'}
-    assert len(queries) == 1
+    # Field questions and joined answer decisions, independent of field count.
+    assert len(queries) == 2

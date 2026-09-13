@@ -105,6 +105,8 @@ class Command(BaseCommand):
     )
 
     def add_arguments(self, parser):
+        parser.add_argument('--field-and-values', action='store_true',
+            help='Transfer mappings, synonyms, custom fields and choices including value reviews. Does not transfer source-code mappings.')
         parser.add_argument(
             '--source-url',
             help='Source database URL. Defaults to $SOURCE_DATABASE_URL.',
@@ -138,7 +140,7 @@ class Command(BaseCommand):
                 'Set SOURCE_DATABASE_URL (or pass --source-url) to the database '
                 'of the instance to copy field mappings from.'
             )
-        tables = tuple(options['tables'])
+        tables = ('mappings', 'synonyms', 'custom_fields', 'choices') if options['field_and_values'] else tuple(options['tables'])
         dry_run = options['dry_run']
 
         register_source_connection(url)

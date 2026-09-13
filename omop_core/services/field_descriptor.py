@@ -541,11 +541,15 @@ def get_all_field_descriptors() -> list[dict]:
 
     # 3b. Load field choices (curator-managed value sets).
     choices_by_field: dict[str, list[dict]] = {}
-    for fc in FieldChoice.objects.prefetch_related('codes').all():
+    from omop_core.services.field_values import choice_queryset, mapping_data
+    for fc in choice_queryset().prefetch_related('codes').filter(retired=False):
         choices_by_field.setdefault(fc.field_name, []).append({
             'id': fc.id,
             'display': fc.display,
             'sort_order': fc.sort_order,
+            'code': fc.code, 'canonical_value': fc.canonical_value,
+            'context_key': fc.context_key, 'aliases': fc.aliases,
+            'value_mapping': mapping_data(getattr(fc, 'value_mapping', None)),
             'codes': [
                 {'code': c.code, 'vocabulary_id': c.vocabulary_id,
                  'display': c.display, 'is_primary': c.is_primary}

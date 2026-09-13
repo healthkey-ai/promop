@@ -62,7 +62,7 @@ LAB_FIELD_TO_LOINC = {
     'beta2_microglobulin':            ('1952-1',   'mg/L',            'Beta-2-Microglobulin [Mass/volume] in Serum or Plasma'),
     'c_reactive_protein':             ('1988-5',   'mg/L',            'C reactive protein [Mass/volume] in Serum or Plasma'),
     'esr':                            ('30341-2',  'mm/h',            'Erythrocyte sedimentation rate'),
-    'ki67_proliferation_index':       ('85319-2',  '%',               'Ki-67 Ag [Presence] in Tissue by Immune stain'),
+    'ki67_proliferation_index':       ('29593-1',  '%',               'Cells.Ki-67 nuclear Ag/cells in Tissue by Immune stain'),
     # Vital signs
     'weight':                         ('29463-7',  'kg',              'Body weight'),
     'height':                         ('8302-2',   'cm',              'Body height'),
@@ -427,10 +427,7 @@ def get_gender_concept(gender_str):
 #   legacy duplicate   white_blood_cell_count shares 6690-2 with
 #                      wbc_count_thousand_per_ul; biopsy_grade_depr shares
 #                      44648-4 with biopsy_grade
-#   two parts of one   pd_l1_assay and pd_l1_tumor_cells are the assay and the
-#   fact               numeric result of ONE 83052-1 measurement, as are
-#                      test_methodology and oncotype_dx_score of one 85337-4
-#                      report, and ecog_assessment_date is the date of the
+#   two parts of one   ecog_assessment_date is the date of the
 #                      ecog_performance_status observation
 #   resolved (#785)    btk_inhibitor_refractory and bcl2_inhibitor_refractory
 #                      both read SNOMED 182842009, which cannot say which drug
@@ -441,13 +438,12 @@ def get_gender_concept(gender_str):
 # field → (concept_code, vocabulary_id, attributed_from_extractor)
 DERIVED_FIELD_TO_CODE = {
     # Biomarkers — _get_biomarker_data
-    'bone_only_metastasis_status':   ('44667-4',   'LOINC',  '_get_biomarker_data'),
     'estrogen_receptor_status':      ('16112-5',   'LOINC',  '_get_biomarker_data'),
     'her2_status':                   ('48676-1',   'LOINC',  '_get_biomarker_data'),
     'histologic_type':               ('59847-4',   'LOINC',  '_get_biomarker_data'),
     'progesterone_receptor_status':  ('16113-3',   'LOINC',  '_get_biomarker_data'),
-    'pd_l1_combined_positive_score': ('83054-7',   'LOINC',  '_get_biomarker_data'),
-    'pd_l1_ic_percentage':           ('83055-4',   'LOINC',  '_get_biomarker_data'),
+    'pd_l1_combined_positive_score': ('105303-2',  'LOINC',  '_get_biomarker_data'),
+    'pd_l1_ic_percentage':           ('105305-7',  'LOINC',  '_get_biomarker_data'),
     # Genomics / pathology — _get_genomics_pathology_data
     # Derivation historically read 82185-1, which is not a LOINC code — it
     # resolves against no vocabulary release, so a fact written under it could
@@ -457,12 +453,11 @@ DERIVED_FIELD_TO_CODE = {
     # Derivation now reads 49457-5 first and 82185-1 second, so the round trip
     # holds and any pre-existing row still projects.
     'androgen_receptor_status':      ('49457-5',   'LOINC',  '_get_genomics_pathology_data'),
-    'lymph_node_status':             ('92837-4',   'LOINC',  '_get_genomics_pathology_data'),
-    'metastasis_status':             ('21907-1',   'LOINC',  '_get_genomics_pathology_data'),
+    # Presence is computed from N/M, not another scalar sharing their question.
     'report_interpretation':         ('69548-6',   'LOINC',  '_get_genomics_pathology_data'),
     'test_specimen_type':            ('31208-2',   'LOINC',  '_get_genomics_pathology_data'),
     # Staging — _get_staging_data
-    'distant_metastasis_stage':      ('21901-4',   'LOINC',  '_get_staging_data'),
+    'distant_metastasis_stage':      ('21907-1',   'LOINC',  '_get_staging_data'),
     'nodes_stage':                   ('21906-3',   'LOINC',  '_get_staging_data'),
     'stage':                         ('21908-9',   'LOINC',  '_get_staging_data'),
     'tumor_stage':                   ('21905-5',   'LOINC',  '_get_staging_data'),
@@ -508,7 +503,7 @@ SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
     # Breast cancer
     'tnbc_status':                   ('706886006', 'SNOMED'),
     'hr_status':                     ('416053008', 'SNOMED'),
-    'oncotype_dx_score':             ('85337-4',   'LOINC'),
+    'oncotype_dx_score':             ('3904',      'NAACCR'),
     'menopausal_status':             ('276498001', 'SNOMED'),
     # Lymphoma
     'flipi_score':                   ('444723004', 'SNOMED'),
@@ -605,7 +600,6 @@ SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
     'hrd_status':                    ('94077-5',   'LOINC'),   # Homologous recombination deficiency
     'pd_l1_assay':                   ('85147-7',   'LOINC'),   # PD-L1 by immunohistochemistry
     'tumor_size':                    ('21889-1',   'LOINC'),   # Tumor size
-    'bone_only_metastasis_status':   ('21907-1',   'LOINC'),   # Distant metastasis
     'pd_l1_tumor_cells':             ('85147-7',   'LOINC'),   # PD-L1 Cells
     'pd_l1_ic_percentage':           ('85146-9',   'LOINC'),   # PD-L1 Immune cells
     'pd_l1_combined_positive_score': ('96267-2',   'LOINC'),   # PD-L1 Combined Positive Score

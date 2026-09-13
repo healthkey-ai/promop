@@ -165,11 +165,20 @@ def read_payload(
         ]
 
     if 'choices' in tables:
+        from omop_core.services.field_values import mapping_data
         payload['choices'] = [
             {
                 'field_name': fc.field_name,
                 'display': fc.display,
                 'sort_order': fc.sort_order,
+                'code': fc.code,
+                'context_key': fc.context_key,
+                'canonical_value': fc.canonical_value,
+                'aliases': fc.aliases,
+                'retired': fc.retired,
+                'value_mapping': mapping_data(getattr(fc, 'value_mapping', None)),
+                'value_mapping_history': [r.decision for r in fc.value_mapping.revisions.all()]
+                    if getattr(fc, 'value_mapping', None) else [],
                 'codes': [
                     {
                         'code': code.code,
@@ -183,7 +192,8 @@ def read_payload(
                 ],
             }
             for fc in FieldChoice.objects.using(using)
-            .prefetch_related('codes')
+            .select_related('value_mapping__target_concept', 'value_mapping__question_concept')
+            .prefetch_related('codes', 'value_mapping__revisions')
             .order_by('field_name', 'sort_order', 'display')
         ]
 
@@ -402,22 +412,29 @@ def _apply_custom_fields(rows: list[dict], stats: TransferStats) -> None:
 
 
 def _apply_choices(rows: list[dict], stats: TransferStats) -> None:
-    existing = {(c.field_name, c.display): c for c in FieldChoice.objects.all()}
+    from django.core.exceptions import ValidationError
+    from omop_core.services.field_values import lock_scope, mapping_data, save_mapping, validate_choice
     for row in rows:
-        key = (row['field_name'], row['display'])
-        choice = existing.get(key)
+        context = row.get('context_key', '')
+        lock_scope(row['field_name'], context)
+        lookup = dict(field_name=row['field_name'], context_key=context)
+        lookup['code' if row.get('code') else 'display'] = row.get('code') or row['display']
+        choice = FieldChoice.objects.filter(**lookup).first()
+        values = {k: row[k] for k in ('display', 'sort_order', 'canonical_value', 'aliases', 'retired') if k in row}
         if choice is None:
-            choice = FieldChoice.objects.create(
-                field_name=row['field_name'],
-                display=row['display'],
-                sort_order=row['sort_order'],
-                created_by=None,
-            )
+            choice = FieldChoice(field_name=row['field_name'], context_key=context, code=row.get('code', ''), **values)
+            validate_choice(choice)
+            choice.save()
             stats._bump(stats.created, 'choices')
         else:
-            choice.sort_order = row['sort_order']
-            choice.created_by = None
-            choice.save(update_fields=['sort_order', 'created_by'])
+            if 'canonical_value' in row and choice.canonical_value != row['canonical_value']:
+                raise ValidationError('Transfer cannot change the canonical identity of an existing choice.')
+            if choice.display != row['display']:
+                values['aliases'] = list(dict.fromkeys([*choice.aliases, *values.get('aliases', []), choice.display]))
+            for key, value in values.items():
+                setattr(choice, key, value)
+            validate_choice(choice)
+            choice.save()
             stats._bump(stats.updated, 'choices')
         # Codes are pure data hanging off the choice, so the source's set
         # replaces the local one wholesale rather than being merged.
@@ -425,6 +442,29 @@ def _apply_choices(rows: list[dict], stats: TransferStats) -> None:
         FieldChoiceCode.objects.bulk_create([
             FieldChoiceCode(choice=choice, **code) for code in row['codes']
         ])
+        source = row.get('value_mapping')
+        if source:
+            decision = {k: source[k] for k in ('role', 'status', 'outcome', 'notes', 'vocabulary_release')}
+            for key in ('target_concept', 'question_concept'):
+                ref = source.get(key)
+                target = Concept.objects.filter(vocabulary_id=ref['vocabulary_id'], concept_code=ref['concept_code']).first() if ref else None
+                decision[key] = target
+                if ref and not target:
+                    decision['status'], decision['outcome'] = 'proposed', 'needs_review'
+                    stats.warn(f"Unresolved {key} for {choice.field_name}/{choice.code}; imported as proposed.")
+            previous = mapping_data(getattr(choice, 'value_mapping', None))
+            comparable = {k: previous.get(k) for k in decision} if previous else None
+            incoming = {**decision, **{k: (None if decision[k] is None else {
+                'concept_id': decision[k].pk, 'vocabulary_id': decision[k].vocabulary_id,
+                'concept_code': decision[k].concept_code, 'concept_name': decision[k].concept_name,
+                'domain_id': decision[k].domain_id}) for k in ('target_concept', 'question_concept')}}
+            if comparable != incoming:
+                try:
+                    save_mapping(choice, decision, audit_context={'transfer': source, 'history': row.get('value_mapping_history', [])})
+                except ValidationError:
+                    decision['status'] = 'proposed'
+                    stats.warn(f"Invalid approval for {choice.field_name}/{choice.code}; imported as proposed.")
+                    save_mapping(choice, decision, audit_context={'transfer': source, 'history': row.get('value_mapping_history', [])})
 
 
 def _apply_formulas(rows: list[dict], stats: TransferStats) -> None:
@@ -586,12 +626,14 @@ def _prune(payload: dict, tables: tuple[str, ...], stats: TransferStats) -> None
         stats._bump(stats.deleted, 'mappings', deleted)
 
     if 'choices' in tables:
-        keep = {(row['field_name'], row['display']) for row in payload.get('choices', [])}
+        keep = {(row['field_name'], row.get('context_key', ''), row.get('code') or row['display']) for row in payload.get('choices', [])}
         stale = [c.pk for c in FieldChoice.objects.all()
-                 if (c.field_name, c.display) not in keep]
+                 if (c.field_name, c.context_key, c.code) not in keep
+                 and (c.field_name, c.context_key, c.display) not in keep]
         if stale:
-            # Cascades to FieldChoiceCode; count only the choices themselves.
-            FieldChoice.objects.filter(pk__in=stale).delete()
+            # Reviewed identities cannot be erased by an environment transfer.
+            FieldChoice.objects.filter(pk__in=stale, value_mapping__isnull=False).update(retired=True)
+            FieldChoice.objects.filter(pk__in=stale, value_mapping__isnull=True).delete()
             stats._bump(stats.deleted, 'choices', len(stale))
 
     if 'formulas' in tables:

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { X, Plus, Trash2, ChevronUp, ChevronDown } from "lucide-react";
 import api from "@/api/axios";
+import { ValueMappingEditor, type ValueMapping } from "./ValueMappingEditor";
 
 interface ChoiceCode {
   id?: number;
@@ -16,6 +17,11 @@ interface Choice {
   display: string;
   sort_order: number;
   codes: ChoiceCode[];
+  code?: string;
+  context_key?: string;
+  canonical_value?: unknown;
+  aliases?: string[];
+  value_mapping?: ValueMapping | null;
 }
 
 interface Props {
@@ -27,6 +33,11 @@ export function FieldChoiceEditor({ fieldName, onClose }: Props) {
   const [choices, setChoices] = useState<Choice[]>([]);
   const [loading, setLoading] = useState(true);
   const [newDisplay, setNewDisplay] = useState("");
+  const [newContext, setNewContext] = useState("");
+  const [newCanonical, setNewCanonical] = useState("");
+  const [editing, setEditing] = useState<number | null>(null);
+  const [editDisplay, setEditDisplay] = useState("");
+  const [editAliases, setEditAliases] = useState("");
   const [saving, setSaving] = useState(false);
   const [reordering, setReordering] = useState(false);
   const [error, setError] = useState("");
@@ -54,12 +65,20 @@ export function FieldChoiceEditor({ fieldName, onClose }: Props) {
     setSaving(true);
     setError("");
     try {
+      let canonical: unknown;
+      if (newCanonical.trim()) {
+        try { canonical = JSON.parse(newCanonical); }
+        catch { setError('Canonical value must be valid JSON: e.g. true, 1, or "Positive".'); return; }
+      }
       await api.post("/v1/field-choices/", {
         field_name: fieldName,
         display: newDisplay.trim(),
         sort_order: choices.length,
+        ...(newContext.trim() ? { context_key: newContext.trim() } : {}),
+        ...(canonical !== undefined ? { canonical_value: canonical } : {}),
       });
       setNewDisplay("");
+      setNewCanonical("");
       await fetchChoices();
     } catch {
       setError("Failed to add choice.");
@@ -68,8 +87,19 @@ export function FieldChoiceEditor({ fieldName, onClose }: Props) {
     }
   };
 
+  const saveIdentity = async (choiceId: number) => {
+    setSaving(true); setError("");
+    try {
+      await api.patch(`/v1/field-choices/${choiceId}/`, {
+        display: editDisplay.trim(), aliases: editAliases.split('\n').map(v => v.trim()).filter(Boolean),
+      });
+      setEditing(null); await fetchChoices();
+    } catch { setError('Could not update label or aliases. Check for a duplicate value in this context.'); }
+    finally { setSaving(false); }
+  };
+
   const handleDeleteChoice = async (choiceId: number) => {
-    if (!window.confirm("Delete this choice?")) return;
+    if (!window.confirm("Remove this choice from selection? Reviewed choices will be retired, preserving their history.")) return;
     try {
       await api.delete(`/v1/field-choices/${choiceId}/`);
       await fetchChoices();
@@ -128,7 +158,7 @@ export function FieldChoiceEditor({ fieldName, onClose }: Props) {
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
     >
-      <div className="relative w-full max-w-lg rounded-lg border bg-white p-6 shadow-xl max-h-[80vh] overflow-y-auto">
+      <div role="dialog" aria-modal="true" aria-label="Field choices" className="relative w-full max-w-2xl rounded-lg border bg-white p-6 shadow-xl max-h-[80vh] overflow-y-auto">
         <button
           onClick={onClose}
           className="absolute right-3 top-3 rounded p-1 text-gray-400 hover:text-gray-600"
@@ -172,6 +202,16 @@ export function FieldChoiceEditor({ fieldName, onClose }: Props) {
                   </div>
                   <div className="flex-1">
                     <div className="text-sm font-medium">{choice.display}</div>
+                    {choice.context_key && <div className="text-xs text-gray-500">Context: {choice.context_key}</div>}
+                    <button type="button" className="text-xs text-gray-500 underline" onClick={() => {
+                      setEditing(choice.id || null); setEditDisplay(choice.display); setEditAliases((choice.aliases || []).join('\n'));
+                    }}>Edit label and aliases</button>
+                    {editing === choice.id && <div className="my-2 space-y-2 rounded bg-gray-50 p-2">
+                      <p className="break-all text-xs text-gray-500">Stable code: {choice.code}. Canonical value: {JSON.stringify(choice.canonical_value)}. Identity and context cannot be changed.</p>
+                      <label className="block text-xs">Display label<input className="mt-1 w-full rounded border p-1 text-sm" value={editDisplay} onChange={e => setEditDisplay(e.target.value)} /></label>
+                      <label className="block text-xs">Aliases (one per line)<textarea className="mt-1 w-full rounded border p-1 text-sm" value={editAliases} onChange={e => setEditAliases(e.target.value)} /></label>
+                      <button type="button" disabled={saving || !editDisplay.trim()} className="text-xs text-blue-700" onClick={() => choice.id && saveIdentity(choice.id)}>Save label and aliases</button>
+                    </div>}
                     <div className="mt-1 flex flex-wrap gap-1">
                       {choice.codes.map((c) => (
                         <span
@@ -192,6 +232,7 @@ export function FieldChoiceEditor({ fieldName, onClose }: Props) {
                         <Plus size={10} className="inline" /> code
                       </button>
                     </div>
+                    {choice.id && <ValueMappingEditor choiceId={choice.id} initial={choice.value_mapping} onSaved={fetchChoices} />}
                   </div>
                   <button
                     onClick={() => choice.id && handleDeleteChoice(choice.id)}
@@ -210,6 +251,14 @@ export function FieldChoiceEditor({ fieldName, onClose }: Props) {
             </div>
 
             {/* Add new choice */}
+            <details className="mb-2 text-xs text-gray-600">
+              <summary className="cursor-pointer">New choice context and typed value</summary>
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                <label>Context key<input className="mt-1 w-full rounded border p-2" value={newContext} onChange={e => setNewContext(e.target.value)} placeholder="Blank for default; e.g. BC:p" /></label>
+                <label>Canonical value (JSON)<input className="mt-1 w-full rounded border p-2" value={newCanonical} onChange={e => setNewCanonical(e.target.value)} placeholder="Blank uses display label" /></label>
+              </div>
+              <p className="mt-1">A context-specific choice is only resolved by a writer that supplies that exact context.</p>
+            </details>
             <div className="flex gap-2">
               <input
                 type="text"

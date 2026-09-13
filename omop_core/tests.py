@@ -4690,6 +4690,11 @@ class HealthKeyConceptSurvivesReloadTest(TestCase):
         # its job; it is this simulation that is blunter than production.
         from omop_core.models import FieldConceptMapping
         FieldConceptMapping.objects.all().delete()
+        # Value decisions have the same deliberate concept protection.
+        # This legacy loader simulation must remove its reference fixtures too.
+        from omop_core.models import FieldValueConceptMapping, FieldValueMappingRevision
+        FieldValueMappingRevision.objects.all().delete()
+        FieldValueConceptMapping.objects.all().delete()
         Concept.objects.all().delete()
         self.assertFalse(Concept.objects.filter(concept_id=2_000_000_001).exists())
 
@@ -4858,7 +4863,7 @@ class RefreshQueryCountTest(TestCase):
             )
 
     def test_query_count_under_budget(self):
-        """refresh_patient_record must not exceed 21 SQL queries."""
+        """refresh_patient_record must not exceed 22 SQL queries."""
         from django.test.utils import CaptureQueriesContext
         with CaptureQueriesContext(connection) as ctx:
             refresh_patient_record(self.person)
@@ -4866,8 +4871,9 @@ class RefreshQueryCountTest(TestCase):
         # + a few ancillary lookups (Episode, concept cache, genomics OMOP
         # projections, etc.)
         self.assertLessEqual(
-            len(ctx.captured_queries), 21,
-            f'Expected ≤20 queries, got {len(ctx.captured_queries)}. '
+            # One joined value-decision query is shared by all extractors.
+            len(ctx.captured_queries), 22,
+            f'Expected ≤22 queries, got {len(ctx.captured_queries)}. '
             f'Query breakdown:\n'
             + '\n'.join(
                 f'  [{i}] {q["sql"][:120]}'

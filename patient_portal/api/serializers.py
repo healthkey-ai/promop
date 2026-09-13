@@ -1592,6 +1592,7 @@ class FieldChoiceCodeSerializer(serializers.ModelSerializer):
 
 class FieldChoiceSerializer(serializers.ModelSerializer):
     codes = FieldChoiceCodeSerializer(many=True, required=False)
+    value_mapping = serializers.SerializerMethodField()
     created_by = serializers.CharField(
         source='created_by.username', read_only=True, default=None,
     )
@@ -1601,8 +1602,13 @@ class FieldChoiceSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'field_name', 'display', 'sort_order',
             'codes', 'created_by', 'created_at',
+            'code', 'canonical_value', 'aliases', 'context_key', 'retired', 'value_mapping',
         ]
         read_only_fields = ['id', 'created_by', 'created_at']
+
+    def get_value_mapping(self, obj):
+        from omop_core.services.field_values import mapping_data
+        return mapping_data(getattr(obj, 'value_mapping', None))
 
     def validate_field_name(self, value):
         from omop_core.models import PatientRecord
@@ -1610,32 +1616,57 @@ class FieldChoiceSerializer(serializers.ModelSerializer):
             f.name for f in PatientRecord._meta.get_fields()
             if getattr(f, 'concrete', False)
         }
-        if value not in concrete_names:
+        from omop_core.services.genomics import FIELDS
+        if value not in concrete_names and value not in {f'genetic_mutations.{k}' for k in FIELDS}:
             raise serializers.ValidationError(
                 f"'{value}' is not a concrete PatientRecord field."
             )
         return value
 
     def create(self, validated_data):
+        from django.db import transaction
+        from django.core.exceptions import ValidationError as ModelValidationError
+        from omop_core.services.field_values import lock_scope, validate_choice
         codes_data = validated_data.pop('codes', [])
         request = self.context.get('request')
-        choice = FieldChoice.objects.create(
+        choice = FieldChoice(
             **validated_data,
             created_by=request.user if request else None,
         )
-        for code_data in codes_data:
-            FieldChoiceCode.objects.create(choice=choice, **code_data)
+        with transaction.atomic():
+            lock_scope(choice.field_name, choice.context_key)
+            try:
+                validate_choice(choice)
+                choice.save()
+                for code_data in codes_data:
+                    FieldChoiceCode.objects.create(choice=choice, **code_data)
+            except ModelValidationError as exc:
+                raise serializers.ValidationError(exc.message_dict)
         return choice
 
     def update(self, instance, validated_data):
+        from django.db import transaction
+        from django.core.exceptions import ValidationError as ModelValidationError
+        from omop_core.services.field_values import lock_scope, validate_choice
+        for key in ('field_name', 'code', 'canonical_value', 'context_key'):
+            if key in validated_data and validated_data[key] != getattr(instance, key):
+                raise serializers.ValidationError({key: 'Choice identity is immutable; retire it and create a new choice.'})
         codes_data = validated_data.pop('codes', None)
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-        instance.save()
-        if codes_data is not None:
-            instance.codes.all().delete()
-            for code_data in codes_data:
-                FieldChoiceCode.objects.create(choice=instance, **code_data)
+        with transaction.atomic():
+            lock_scope(instance.field_name, instance.context_key)
+            if validated_data.get('display', instance.display) != instance.display:
+                validated_data['aliases'] = list(dict.fromkeys([*validated_data.get('aliases', instance.aliases), instance.display]))
+            for attr, value in validated_data.items():
+                setattr(instance, attr, value)
+            try:
+                validate_choice(instance)
+                instance.save()
+            except ModelValidationError as exc:
+                raise serializers.ValidationError(exc.message_dict)
+            if codes_data is not None:
+                instance.codes.all().delete()
+                for code_data in codes_data:
+                    FieldChoiceCode.objects.create(choice=instance, **code_data)
         return instance
 
 

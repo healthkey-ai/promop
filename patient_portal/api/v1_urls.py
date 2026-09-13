@@ -1,6 +1,7 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 from .concept_mint import mint_destination
+from .field_values import field_value_mapping
 from .supportive_therapies import SupportiveTherapyViewSet, therapy_outcomes
 
 from .views import (
@@ -169,6 +170,7 @@ urlpatterns = [
     path('field-choices/', field_choice_list, name='v1-field-choice-list'),
     path('field-choices/<int:pk>/', field_choice_detail, name='v1-field-choice-detail'),
     path('field-choices/<int:choice_pk>/codes/', field_choice_codes, name='v1-field-choice-codes'),
+    path('field-choices/<int:choice_pk>/mapping/', field_value_mapping, name='v1-field-value-mapping'),
     path('field-formulas/', field_formula_list, name='v1-field-formula-list'),
     path('field-formulas/test/', field_formula_test, name='v1-field-formula-test'),
     path('field-formulas/<int:pk>/', field_formula_detail, name='v1-field-formula-detail'),

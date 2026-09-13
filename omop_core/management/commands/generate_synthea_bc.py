@@ -295,16 +295,13 @@ _BC_LABS = [
 ]
 
 _BC_BIOMARKERS = [
-    ('85337-4', 'Ki-67 [Interpretation] in Tissue', None),
+    ('29593-1', 'Ki-67 cells/100 cells in Tissue by Immune stain', None),
     ('16112-5', 'Estrogen receptor [Interpretation] in Tissue', 'positive'),
     ('16113-3', 'Progesterone receptor [Interpretation] in Tissue', 'positive'),
     ('48676-1', 'HER2 [Interpretation] in Tissue', 'negative'),
-    ('85319-2', 'Ki-67 Ag [Presence] in Tissue by Immune stain', None),
-    ('85336-6', 'PD-L1 immune cells [#/area] in Tissue by Immune stain', None),
-    ('96893-3', 'PD-L1 combined positive score', None),
+    ('105305-7', 'PD-L1 immune-cell area fraction', None),
+    ('105303-2', 'PD-L1 combined positive score', None),
     ('44648-4', 'Biopsy grade', None),
-    ('76690-7', 'Menopausal status', None),
-    ('44667-4', 'Bone-only metastasis status', None),
 ]
 
 _BC_BIOMARKER_DISPLAYS = {code: display for code, display, _ in _BC_BIOMARKERS}
@@ -780,13 +777,10 @@ def _enrich_patient_bundle(bundle: dict, index: int) -> None:
             })
 
     biomarker_values = {
-        '85337-4': (rng.randint(5, 95), '%'),
-        '85319-2': (rng.randint(5, 75), '%'),
-        '85336-6': (rng.randint(1, 30), '%'),
-        '96893-3': (rng.randint(1, 50), None),
+        '29593-1': (rng.randint(5, 75), '%'),
+        '105305-7': (rng.randint(1, 30), '%'),
+        '105303-2': (rng.randint(1, 50), None),
         '44648-4': (rng.choice([1, 2, 3]), None),
-        '76690-7': (rng.choice(['Premenopausal', 'Perimenopausal', 'Postmenopausal']), None),
-        '44667-4': (rng.choice([True, False]), None),
     }
     existing_biomarker_codes = {
         ((resource.get('code') or {}).get('coding') or [{}])[0].get('code')

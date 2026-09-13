@@ -11279,7 +11279,12 @@ def field_choice_list(request):
     from .serializers import FieldChoiceSerializer
 
     if request.method == 'GET':
-        qs = FieldChoice.objects.prefetch_related('codes').all()
+        from omop_core.services.field_values import choice_queryset
+        qs = choice_queryset().prefetch_related('codes')
+        if request.query_params.get('include_retired') != 'true':
+            qs = qs.filter(retired=False)
+        if 'context_key' in request.query_params:
+            qs = qs.filter(context_key=request.query_params['context_key'])
         field_name = request.query_params.get('field_name')
         if field_name:
             qs = qs.filter(field_name=field_name)
@@ -11312,7 +11317,11 @@ def field_choice_detail(request, pk):
         return Response({'detail': 'Organization admin access required to manage field choices.'}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == 'DELETE':
-        choice.delete()
+        if hasattr(choice, 'value_mapping'):
+            choice.retired = True
+            choice.save(update_fields=['retired'])
+        else:
+            choice.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     serializer = FieldChoiceSerializer(

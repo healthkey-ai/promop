@@ -501,9 +501,9 @@ class Command(BaseCommand):
                 }],
                 "code": {
                     "coding": [{
-                        "system": "http://loinc.org",
-                        "code": "92837-4",
-                        "display": "Lymph nodes involvement"
+                        "system": "https://healthkey.example/fhir/CodeSystem/source-fields",
+                        "code": "lymph-node-involvement",
+                        "display": "Lymph node involvement"
                     }],
                     "text": "Lymph node status"
                 },
@@ -675,7 +675,7 @@ class Command(BaseCommand):
                 "status": "final",
                 "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "imaging"}]}],
                 "code": {
-                    "coding": [{"system": "http://loinc.org", "code": "85319-2", "display": "Staging modality"}],
+                    "coding": [{"system": "https://healthkey.example/fhir/CodeSystem/source-fields", "code": "staging-imaging-modality", "display": "Staging imaging modality"}],
                     "text": "Staging modality"
                 },
                 "subject": {"reference": f"Patient/{patient_id}"},
@@ -889,8 +889,8 @@ class Command(BaseCommand):
                 "code": {
                     "coding": [{
                         "system": "http://loinc.org",
-                        "code": "85337-4",
-                        "display": "Ki-67 [Interpretation] in Tissue"
+                        "code": "29593-1",
+                        "display": "Ki-67 cells/100 cells in Tissue by Immune stain"
                     }],
                     "text": "Ki67 Proliferation Index"
                 },

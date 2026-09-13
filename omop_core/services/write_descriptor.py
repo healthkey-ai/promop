@@ -135,12 +135,15 @@ def _unmapped_group(field):
     return GROUP_NEEDS_CONCEPT
 
 
-def _field_choice_options() -> dict[str, list[tuple[str, str | None]]]:
+def _field_choice_options() -> dict[str, list[dict]]:
     """Return curator-managed displays and their preferred code for every field."""
-    result: dict[str, list[tuple[str, str | None]]] = {}
-    for choice in FieldChoice.objects.prefetch_related('codes').all():
+    result: dict[str, list[dict]] = {}
+    for choice in FieldChoice.objects.prefetch_related('codes').filter(retired=False, context_key=''):
         primary = next((code.code for code in choice.codes.all() if code.is_primary), None)
-        result.setdefault(choice.field_name, []).append((choice.display, primary))
+        option = {'value': choice.canonical_value if choice.canonical_value is not None else choice.display, 'code': primary}
+        if option['value'] != choice.display:
+            option['label'] = choice.display
+        result.setdefault(choice.field_name, []).append(option)
     return result
 
 # PatientRecord field → the Person field the persons endpoint accepts.
@@ -541,13 +544,7 @@ def build_writable_field_descriptor():
         concept_id=CONCEPT_LARGEST_LYMPH_NODE_DIMENSION
     ).only('concept_id', 'concept_code', 'concept_name', 'vocabulary_id').first()
 
-    choice_options = {
-        field_name: [
-            {'value': display, 'code': primary_code}
-            for display, primary_code in choices
-        ]
-        for field_name, choices in _field_choice_options().items()
-    }
+    choice_options = _field_choice_options()
     curated = _curated_writes(choice_options)
 
     descriptor = {}

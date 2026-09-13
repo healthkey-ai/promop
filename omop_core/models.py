@@ -3750,6 +3750,11 @@ class FieldChoice(models.Model):
     """One allowed value for a PatientRecord field (curator-managed)."""
     field_name = models.CharField(max_length=100, db_index=True)
     display = models.CharField(max_length=200)
+    code = models.CharField(max_length=100, blank=True, default='')
+    canonical_value = models.JSONField(null=True, blank=True)
+    aliases = models.JSONField(default=list, blank=True)
+    context_key = models.CharField(max_length=100, blank=True, default='')
+    retired = models.BooleanField(default=False)
     sort_order = models.IntegerField(default=0)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
@@ -3758,11 +3763,69 @@ class FieldChoice(models.Model):
 
     class Meta:
         db_table = 'field_choice'
-        unique_together = [('field_name', 'display')]
+        unique_together = [('field_name', 'context_key', 'display')]
+        constraints = [models.UniqueConstraint(
+            fields=['field_name', 'context_key', 'code'],
+            condition=~Q(code=''), name='uq_field_choice_scoped_code',
+        )]
         ordering = ['field_name', 'sort_order', 'display']
 
     def __str__(self):
         return f"{self.field_name}: {self.display}"
+
+    def save(self, *args, **kwargs):
+        if not self.code:
+            from hashlib import sha256
+            from django.utils.text import slugify
+            self.code = (slugify(self.display)[:80] or 'value') + '-' + sha256(self.display.encode()).hexdigest()[:12]
+        if self.canonical_value is None:
+            self.canonical_value = self.display
+        super().save(*args, **kwargs)
+
+
+class FieldValueConceptMapping(models.Model):
+    """Reviewed meaning of a scoped answer, distinct from its question."""
+    choice = models.OneToOneField(FieldChoice, on_delete=models.PROTECT, related_name='value_mapping')
+    target_concept = models.ForeignKey(Concept, null=True, blank=True, on_delete=models.PROTECT, related_name='+')
+    question_concept = models.ForeignKey(Concept, null=True, blank=True, on_delete=models.PROTECT, related_name='+')
+    role = models.CharField(max_length=20, default='answer', choices=[
+        ('answer', 'Coded answer'), ('fact', 'Clinical assertion'), ('structured', 'Structured representation'),
+    ])
+    status = models.CharField(max_length=20, default='proposed', choices=FieldConceptMapping.STATUS_CHOICES)
+    outcome = models.CharField(max_length=30, default='needs_review', choices=[
+        ('mapped', 'Mapped'), ('needs_review', 'Needs review'), ('ambiguous', 'Ambiguous'),
+        ('no_equivalent', 'No standard equivalent'), ('not_applicable', 'Not applicable'),
+        ('structured', 'Requires structured representation'),
+    ])
+    notes = models.TextField(blank=True, default='')
+    vocabulary_release = models.CharField(max_length=100, blank=True, default='')
+    reviewer = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name='+')
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    revision = models.PositiveIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'field_value_concept_mapping'
+        constraints = [models.CheckConstraint(
+            condition=~Q(status='approved', outcome='mapped') | Q(target_concept__isnull=False),
+            name='field_value_approved_requires_target',
+        )]
+
+    def clean(self):
+        super().clean()
+        from omop_core.services.field_values import validate_value_mapping
+        validate_value_mapping(self)
+
+
+class FieldValueMappingRevision(models.Model):
+    mapping = models.ForeignKey(FieldValueConceptMapping, on_delete=models.PROTECT, related_name='revisions')
+    revision = models.PositiveIntegerField()
+    decision = models.JSONField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'field_value_mapping_revision'
+        constraints = [models.UniqueConstraint(fields=['mapping', 'revision'], name='uq_field_value_revision')]
 
 
 class FieldChoiceCode(models.Model):
