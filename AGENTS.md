@@ -9,3 +9,4 @@
 
 - There is no team review process. Do not request team reviewers (including `healthkey`) or configure required team-review rules.
 - Request individual reviewers as directed by the user. Lars Burgess is `@larsburgess` on GitHub.
+- Merging to `dev` does not require review approval. Individual review requests are optional; required CI checks must still pass.
