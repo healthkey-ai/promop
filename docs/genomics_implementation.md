@@ -11,7 +11,7 @@ See [the implemented architecture](genomics_architecture.md) for current behavio
 | expose all implemented components through one curation registry | [#1238](https://github.com/healthkey-ai/promop/issues/1238) | Implemented in this change; validation below |
 | promote variant-name LOINC recipe and make domain audits conclusive | [#1239](https://github.com/healthkey-ai/promop/issues/1239) | Open |
 | unify finding state, complete dialog fields and preserve unknown evidence | [#1240](https://github.com/healthkey-ai/promop/issues/1240) | Open |
-| make asserted projection provenance editable and derivation metadata consistent | [#1241](https://github.com/healthkey-ai/promop/issues/1241) | Open |
+| make asserted projection provenance editable and derivation metadata consistent | [#1241](https://github.com/healthkey-ai/promop/issues/1241) | Implemented in this change; validation below |
 | reconcile cytogenetic summaries and centralize overlapping finding editing | [#1242](https://github.com/healthkey-ai/promop/issues/1242) | Open |
 | agree BIDMC test, specimen, scope and volume requirements | [#1243](https://github.com/healthkey-ai/promop/issues/1243) | Source agreement required |
 | implement shared tests, specimens, scope and bounded sequencing projections | [#1244](https://github.com/healthkey-ai/promop/issues/1244) | Gated on source agreement |
@@ -78,13 +78,11 @@ Acceptance. Status round-trips on general and named routes; contradictory inputs
 
 ### 4. Finish provenance plumbing, leaving derivation disabled
 
-Observed gap. The two complex-karyotype named projections annotate asserted entries and skip derivation when an assertion exists. Stubs return no value, as requested. There is no version/timestamp envelope, no equivalent provenance on the general-list entries, and changed named-list echoes fail validation when they contain the server-added provenance key. The provenance registry still describes the general list as SNOMED Observations, which does not describe this implementation.
+Implemented for #1241: both general and named lists consistently identify assertions. Existing asserted projection echoes can be edited while client-authored derived metadata is rejected. A typed, versioned derivation result gains a timestamp at projection time; the two clinical stubs remain disabled. Derivation receives copies of canonical observed inputs and cannot feed previous derived lists back into its inputs.
 
-Work. Define a consistent read-only projection envelope with row provenance and, for future derived values, derivation_version and derived_at. Keep the two derivation stubs returning no value until clinical definitions are approved. Prepare their input boundary to read canonical finding parents/components rather than previously derived PatientRecord values. Align field provenance metadata with actual storage and eventual clinically-derived outputs.
+The provenance registry and source lookup now describe and return actual finding Measurements and recognized linked components, including safe NOTE text, across the general and all named fields. The three interactive write paths select the same actor type, and parent/component edits retain the current writer's type consistently.
 
-Make an asserted finding returned by GET editable through the named-list route without accepting client-authored derived provenance as an OMOP assertion. Apply a documented read-only-field policy and reject attempts to persist derived rows. Preserve assertion precedence for both complex-karyotype keys. Review the different actor-type choices in dedicated, named-list and compatibility writes so equivalent edits have truthful provenance.
-
-Acceptance. Editing an asserted projection round-trips; client-supplied derived entries cannot create facts; assertions bypass derivation; both stubs still return no value. Version/time metadata can be exercised using a synthetic derived result without adding a clinical threshold. Refresh cannot feed such a result back into its observed inputs.
+Acceptance retained for future changes: asserted echoes round-trip; derived writes create no facts; assertions bypass derivation; synthetic derived output has version/time and no stored parent ID; derivation has no feedback from previous projections. Clinical rules and extraction provenance remain separate work.
 
 ### 5. Close linkage and overlapping-editor inconsistencies
 
@@ -176,3 +174,5 @@ On isolated PostgreSQL (`localhost:5433`, database name `promop_genomics_integri
 Schema-history reconciliation, live-source enablement and clinical decisions remain tracked in their open issues. This change does not certify deployed column widths or run live migrations.
 
 Additional local checks passed: **145** mapping descriptor, provenance, cytogenetic compatibility and sample-data tests; **3** refresh query-budget tests after a fresh full migration chain; and `makemigrations --check --dry-run` reported no changes. PostgreSQL test databases were isolated from application data.
+
+Provenance continuation: **208** genomics/provenance/catalog/legacy tests and **15** shared Genomics UI tests passed. The two additional composite cases and all 12 existing provenance registry/service/API and refresh-budget tests also passed.

@@ -3501,6 +3501,7 @@ def _get_genetic_mutations(person: Person, snapshot: OmopSnapshot = None) -> dic
     # Default status to 'present' for legacy rows with no stored status component.
     for v in data['genetic_mutations']:
         v.setdefault('status', 'present')
+        v['provenance'] = 'asserted'
     data.update(project_priority_variants(data['genetic_mutations']))
     snapshot.genomics_cache['projection'] = data
     return data

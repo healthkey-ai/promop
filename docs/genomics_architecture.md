@@ -86,9 +86,11 @@ Detected-marker summaries and TP53 disruption require both a present status and 
 
 ## Asserted and derived findings
 
-genomics_catalog.py adds provenance: "asserted" to entries in the two named complex-karyotype lists. If an asserted entry exists, it skips derivation for that marker. Otherwise it calls a derivation stub, which currently returns None. No complex-karyotype threshold is implemented and no derived finding is written to OMOP.
+Every canonical finding in the general and named lists has `provenance: "asserted"`. The row ID identifies its stored Measurement parent. An existing finding can echo this unchanged server metadata during a dedicated, general-list or named-list edit. Supplying provenance on create, changing it to `derived`, or supplying `derivation_version`/`derived_at` on any write is rejected atomically. Projection metadata is never stored as an asserted component.
 
-This is partial infrastructure: the stubs receive the in-memory finding list; there is no implemented versioned derivation result with derivation_version and derived_at. The general genetic_mutations list does not receive the named-list provenance annotation. The writer also rejects provenance as an input key, so a changed named-list projection echoed with that key cannot be saved directly. These limitations are tracked in the plan.
+Both complex-karyotype derivation functions still return `None`. An asserted finding of any status takes precedence. The derivation boundary receives copies of canonical finding/component projections, excludes derived rows, and never reads previously derived PatientRecord lists. A future function must return `DerivedFinding(finding, derivation_version)` without a stored parent ID. Projection adds `provenance: "derived"`, the explicit rule version and `derived_at`; synthetic tests exercise this envelope without implementing a clinical threshold. Derived rows stay outside `genetic_mutations` and are never persisted to OMOP as observations.
+
+The field-provenance registry describes the general list and all 42 named lists as Measurement parents with linked Measurement/Observation components. Its lookup reuses canonical projection, event identity and owned-text resolution, excluding other patients, wrong event types, erroneous rows and unrelated attributes. A projection-only derived row has no stored assertion to return. Composite field provenance can trace its genomic inputs too.
 
 ## Long text and schema
 
@@ -140,7 +142,7 @@ Content-Type: application/json
 
 The named field supplies the catalog gene and marker identity. General POST requires a gene; use marker_key to identify a specific catalog abnormality. IDs must belong to the patient and, for named edits, the marker; duplicates are rejected. Changed general-list and named-list replacements cannot be mixed in one request. Unchanged full-record projection echoes are ignored. List replacement is not an incremental import contract.
 
-Patient/representative, clinician, organization and service-token authorization uses the existing patient access and SMART scope checks in views.py and permissions.py. Dedicated CRUD selects type 32865 for self/representative writes and 32817 otherwise. The compatibility full-list writer currently uses 32865; the named-list service defaults to 32817. These are actual path differences, not a uniform provenance guarantee.
+Patient/representative, clinician, organization and service-token authorization uses the existing patient access and SMART scope checks in views.py and permissions.py. Dedicated CRUD, general-list replacement and named-list edits share actor selection: type 32865 for self/representative writes and 32817 otherwise. An edit records that type on both the current parent and replacement components. Service calls default to 32817 and can explicitly supply another type. This actor type is distinct from the asserted/derived projection envelope; automated extraction provenance remains a separate receiving gate.
 
 ## Installation, verification and integration limits
 

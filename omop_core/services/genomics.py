@@ -54,6 +54,16 @@ def mapped_concept(mapping):
 def normalize_variant(payload, existing=None):
     if not isinstance(payload, dict):
         raise ValidationError({'variant': 'Expected an object.'})
+    # Projection metadata is server-owned. An existing assertion may echo its
+    # unchanged provenance, but new/derived metadata never becomes an OMOP fact.
+    payload = dict(payload)
+    for key in ('provenance', 'derivation_version', 'derived_at'):
+        if key not in payload:
+            continue
+        if (key != 'provenance' or not existing
+                or payload[key] != 'asserted' or existing.get(key) != 'asserted'):
+            raise ValidationError({key: 'Read-only projection metadata; derived findings cannot be written.'})
+        payload.pop(key)
     allowed = set(FIELDS) | {'id', 'variant', 'mutation', 'test_date', 'assay_method', 'allelic_frequency_unit', 'clone_fraction_unit', 'marker_key'}
     unknown = set(payload) - allowed
     if unknown:
@@ -227,13 +237,28 @@ def _components(person, parent_id):
     )
 
 
+def _component_codes(snapshot):
+    if 'component_codes' not in snapshot.genomics_cache:
+        codes = {code: key for key, (code, _) in FIELDS.items()}
+        # Reads survive withdrawn approval; only writes require current approval.
+        codes.update({m.source_value: m.field_name.split('.', 1)[1]
+            for m in FieldConceptMapping.objects.filter(field_name__startswith='genetic_mutations.')})
+        snapshot.genomics_cache['component_codes'] = codes
+    return snapshot.genomics_cache['component_codes']
+
+
+def _component_field(row, prefix, codes):
+    field = codes.get(getattr(row, f'{prefix}_source_value'))
+    if not field:
+        concept = getattr(row, f'{prefix}_concept')
+        field = codes.get(concept.concept_code) if concept.vocabulary_id == 'LOINC' else None
+    return field
+
+
 def enrich_variants(variants, snapshot):
     """Overlay linked components in one snapshot pass, including imported facts."""
     by_id = {v['id']: v for v in variants}
-    codes = {code: key for key, (code, _) in FIELDS.items()}
-    # Reads survive withdrawn approval; only writes require current approval.
-    codes.update({m.source_value: m.field_name.split('.', 1)[1]
-        for m in FieldConceptMapping.objects.filter(field_name__startswith='genetic_mutations.')})
+    codes = _component_codes(snapshot)
     for rows, prefix, event_field in (
         (snapshot.measurements, 'measurement', 'meas_event_field_concept_id'),
         (snapshot.observations, 'observation', 'obs_event_field_concept_id'),
@@ -245,10 +270,7 @@ def enrich_variants(variants, snapshot):
             target = by_id.get(getattr(row, f'{prefix}_event_id'))
             if target is None or getattr(row, event_field) not in valid_ids or row.is_erroneous:
                 continue
-            field = codes.get(getattr(row, f'{prefix}_source_value'))
-            if not field:
-                concept = getattr(row, f'{prefix}_concept')
-                field = codes.get(concept.concept_code) if concept.vocabulary_id == 'LOINC' else None
+            field = _component_field(row, prefix, codes)
             if field == 'allelic_frequency':
                 target[field] = float(row.value_as_number) if row.value_as_number is not None else None
                 target['allelic_frequency_unit'] = row.unit_source_value or '1'
@@ -315,6 +337,7 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_r
         )
     else:
         parent = Measurement.objects.get(person=person, pk=variant_id, is_erroneous=False)
+    parent.measurement_type_concept_id = type_concept_id
     parent.measurement_date = data['test_date']
     parent.qualifier_source_value = data['gene']
     raw_variant = data['variant'] or data['variant_name'] or data['genomic_dna_change'] or data['amino_acid_change']
@@ -400,7 +423,7 @@ def delete_variant(person, variant_id, skip_refresh=False):
 
 @transaction.atomic
 @suppress_patient_record_refresh()
-def replace_variants(person, payload):
+def replace_variants(person, payload, type_concept_id=32817):
     """Compatibility for PatientRecord PATCH and existing import callers."""
     if not isinstance(payload, list):
         raise ValidationError({'genetic_mutations': 'Expected a list of variants.'})
@@ -417,7 +440,7 @@ def replace_variants(person, payload):
         if variant_id is not None and row == current[variant_id]:
             keep.add(variant_id)
             continue
-        saved = save_variant(person, row, variant_id, type_concept_id=32865)
+        saved = save_variant(person, row, variant_id, type_concept_id=type_concept_id)
         keep.add(saved['id'])
     for variant_id in current.keys() - keep:
         delete_variant(person, variant_id)

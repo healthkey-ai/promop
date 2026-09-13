@@ -6,7 +6,7 @@ const mocks = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), d
 vi.mock('@/api/clinicalTransport', () => ({ clinicalClient: () => mocks, clinicalUrl: (path: string) => `/host${path}` }));
 vi.mock('@/hooks/useWritableFields', () => ({ useWritableFields: () => ({ descriptors: { genetic_mutations: { writable: mocks.writable } } }) }));
 
-const saved = { id: 123, gene: 'BRCA1', variant: 'c.68_69delAG', origin: 'Germline', interpretation: 'Pathogenic', genome_assembly: 'GRCh38', variant_description: 'Complete source report', allelic_frequency: 0, allelic_frequency_unit: '%' };
+const saved = { id: 123, provenance: 'asserted', gene: 'BRCA1', variant: 'c.68_69delAG', origin: 'Germline', interpretation: 'Pathogenic', genome_assembly: 'GRCh38', variant_description: 'Complete source report', allelic_frequency: 0, allelic_frequency_unit: '%' };
 const url = '/host/v1/patient-records/42/genomics/';
 
 beforeEach(() => {
@@ -105,7 +105,7 @@ describe('Genomics tab', () => {
     fireEvent.change(screen.getByLabelText('Interpretation'), { target: { value: 'Likely pathogenic' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save variant' }));
     await waitFor(() => expect(mocks.patch).toHaveBeenCalled());
-    expect(mocks.patch).toHaveBeenCalledWith(`${url}123/`, expect.objectContaining({ id: 123, genome_assembly: 'GRCh38', interpretation: 'Likely pathogenic' }));
+    expect(mocks.patch).toHaveBeenCalledWith(`${url}123/`, expect.objectContaining({ id: 123, provenance: 'asserted', genome_assembly: 'GRCh38', interpretation: 'Likely pathogenic' }));
     expect(await screen.findByText('Variant saved.')).toBeInTheDocument();
     expect(screen.getByText('Likely pathogenic')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
