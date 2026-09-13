@@ -16,6 +16,7 @@ from omop_core.models import Concept, FieldConceptMapping, Measurement, Observat
 from omop_core.services.genomics_catalog import marker_for_variant, patient_fields
 from omop_core.services.genomics_components import component_codes, components
 from omop_core.services.genomics_vocabulary import resolve_loinc
+from omop_core.services.genomics_state import ASSESSMENT_STATUS, effective_status
 from omop_core.services.pk import next_pk
 from omop_core.services.clinical_text import OwnedTextReader, store_text
 from omop_core.signals import suppress_patient_record_refresh
@@ -29,7 +30,8 @@ FIELDS = {a['key']: (a['code'], a['table'].title()) for a in components()}
 # Variant-level components that do not apply to absent findings.
 _VARIANT_LEVEL_FIELDS = frozenset({
     'amino_acid_change', 'allelic_frequency', 'genomic_dna_change',
-    'transcript_reference_sequence_id',
+    'transcript_reference_sequence_id', 'transcript_dna_change',
+    'amino_acid_change_type', 'zygosity',
 })
 
 
@@ -106,14 +108,25 @@ def normalize_variant(payload, existing=None):
                 raise ValueError()
         except ValueError:
             raise ValidationError({key: 'Use a valid YYYY-MM-DD date.'})
-    if data.get('assessment') not in ('', 'present', 'absent', 'not_tested', 'no_call', 'indeterminate'):
+    # A state-only edit supersedes an inherited legacy assessment. The old
+    # component remains in erroneous history; a supplied contradiction fails.
+    if (existing and payload.get('status') and 'assessment' not in payload
+            and payload['status'] != effective_status(existing)):
+        data['assessment'] = ''
+    if (data.get('assessment') not in ('', 'present', 'absent', 'not_tested', 'no_call', 'indeterminate')
+            and not (existing and data.get('assessment') == existing.get('assessment'))):
         raise ValidationError({'assessment': 'Use present, absent, not_tested, no_call or indeterminate.'})
     status = data.get('status', '')
     if status not in ('', 'present', 'absent', 'indeterminate'):
         raise ValidationError({'status': 'Use present, absent or indeterminate.'})
-    # Default to present when omitted, preserving every existing caller.
-    if not status:
-        data['status'] = 'present'
+    assessment_status = ASSESSMENT_STATUS.get(data.get('assessment'))
+    # Legacy clients use assessment as their only state control. An explicit
+    # status in this request still takes precedence and must agree.
+    if assessment_status and 'assessment' in payload and 'status' not in payload:
+        status = data['status'] = assessment_status
+    if status and assessment_status and status != assessment_status:
+        raise ValidationError({'assessment': 'Result assessment contradicts finding status.'})
+    data['status'] = effective_status(data)
     # Variant-level components do not apply to absent findings.
     if data['status'] == 'absent':
         supplied_variant_fields = _VARIANT_LEVEL_FIELDS & set(payload or {})
