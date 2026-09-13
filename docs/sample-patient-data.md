@@ -52,3 +52,16 @@ refreshing PatientRecord. Their `generate_import_enrich_synthea_*` wrappers
 inherit this behavior. FL generation also emits a coded stage observation, and
 FHIR imports persist condition-stage assertions for each supported disease so a
 later refresh retains them.
+
+The standalone breast-cancer enrichment command now includes `synthea-bc` in
+its default organization selection, alongside the older foundation cohorts:
+
+```bash
+python manage.py enrich_breast_cancer_omop_data --confirm
+```
+
+Organization slugs match case-insensitively. Selection recognizes breast disease
+labels (including `Malignant tumor of breast` and `BC`) and non-erroneous OMOP
+breast-cancer diagnoses when the patient disease projection is missing or stale.
+Explicit `--org-slugs` still limits the cohort; `--person-ids` remains available
+for individual patients.
