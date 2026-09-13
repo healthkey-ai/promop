@@ -9,6 +9,31 @@ from tests.factories import ConceptFactory, MeasurementFactory, ObservationFacto
 pytestmark = pytest.mark.django_db
 
 
+def test_indexed_biomarkers_select_newer_source_fact_across_code_buckets():
+    from datetime import date
+    from omop_core.services.patient_record_service import _get_biomarker_data
+    person = PersonFactory()
+    question = ConceptFactory(concept_code='29593-1')
+    MeasurementFactory(person=person, measurement_concept=question, value_as_number=10,
+                       measurement_date=date(2024, 1, 1))
+    MeasurementFactory(person=person, measurement_source_value='29593-1', value_as_number=30,
+                       measurement_date=date(2024, 2, 1))
+    assert _get_biomarker_data(person)['ki67_proliferation_index'] == 30
+
+
+def test_indexed_oncotype_keeps_naaccr_namespace_and_latest_source():
+    from datetime import date
+    from omop_core.services.patient_record_service import _get_genomics_pathology_data
+    from tests.factories import VocabularyFactory
+    person = PersonFactory()
+    unrelated = ConceptFactory(concept_code='3903', vocabulary=VocabularyFactory(vocabulary_id='Unrelated'))
+    MeasurementFactory(person=person, measurement_concept=unrelated, value_as_number=99,
+                       measurement_date=date(2024, 3, 1))
+    MeasurementFactory(person=person, measurement_source_value='3903', value_as_number=18,
+                       measurement_date=date(2024, 2, 1))
+    assert _get_genomics_pathology_data(person)['oncotype_dx_score'] == 18
+
+
 def test_er_her2_are_not_methodology_score_or_ki67():
     person = PersonFactory()
     MeasurementFactory(person=person, measurement_source_value='85337-4', value_as_string='Positive', value_as_number=80)
