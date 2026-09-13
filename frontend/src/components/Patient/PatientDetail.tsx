@@ -4,7 +4,6 @@ import { ArrowLeft, Check, AlertCircle, ChevronDown, Download, ShieldCheck } fro
 import api from "@/api/axios";
 import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
 // Profile fields now write through PatientRecord PATCH alongside clinical fields.
-import { getActiveBranding } from "@/config/branding";
 import type { User } from "@/hooks/useAuth";
 import DeleteAccountDialog from "./DeleteAccountDialog";
 import AllergyList from "./AllergyList";
@@ -675,25 +674,12 @@ export default function PatientDetail({
 
   const initials = getInitials(patientName);
   const avatarBg = getAvatarBg(patientName);
-  const branding = getActiveBranding();
 
   return (
     <div className="min-h-screen bg-[#f5f7fa]">
       <div className="sticky top-0 z-20 border-b border-border bg-background/90 shadow-[0_1px_3px_rgba(0,0,0,0.05)] backdrop-blur-md">
         <div className="mx-auto flex h-14 max-w-5xl items-center justify-between gap-4 px-6">
           <div className="flex shrink-0 items-center gap-3">
-            {branding.logoUrl && (
-              <>
-                <img src={branding.logoUrl} alt={branding.appName} className="h-6 w-auto" />
-                <div className="h-4 w-px bg-border" />
-              </>
-            )}
-            {!branding.logoUrl && branding.appName && (
-              <>
-                <span className="text-sm font-bold tracking-tight text-portal-brand">{branding.appName}</span>
-                <div className="h-4 w-px bg-border" />
-              </>
-            )}
             {!patientMode && (
               <button
                 onClick={() => navigate("/")}

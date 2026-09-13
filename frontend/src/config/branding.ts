@@ -1,3 +1,5 @@
+import promopLogoUrl from "@/assets/promop-logo.svg";
+
 export interface PortalBranding {
   appName: string;
   tagline: string;
@@ -11,6 +13,7 @@ export interface PortalBranding {
 
 export const defaultBranding: PortalBranding = {
   appName: 'PRomop',
+  logoUrl: promopLogoUrl,
   tagline: 'An Open Source Personal Health Record from HealthKey.ai',
   brandHsl: '212 87% 33%',
   brandHoverHsl: '212 95% 28%',
