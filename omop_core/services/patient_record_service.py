@@ -2626,6 +2626,8 @@ def _get_genomics_pathology_data(person: Person, snapshot: OmopSnapshot = None) 
 # 21908-9-riss is a non-standard code the MM generator uses for R-ISS stage
 # (it mis-resolves to an unrelated concept on import, so it is matched by
 # source_value only).
+SAMPLE_STAGE_SOURCE_VALUE = 'sample-patient-stage'
+
 _STAGING_LOINCS = frozenset({'21908-9', '21908-9-riss', '21905-5', '21906-3', '21901-4'})
 
 
@@ -2644,7 +2646,7 @@ def _get_staging_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         if (getattr(m.measurement_concept, 'concept_code', None) in _STAGING_LOINCS
             or m.measurement_source_value in _STAGING_LOINCS)
     ]
-    _staging_obs_sources = _STAGING_LOINCS | {FHIR_CONDITION_STAGE_SOURCE_VALUE}
+    _staging_obs_sources = _STAGING_LOINCS | {FHIR_CONDITION_STAGE_SOURCE_VALUE, SAMPLE_STAGE_SOURCE_VALUE}
     observations = [
         o for o in snapshot.observations
         if (getattr(o.observation_concept, 'concept_code', None) in _STAGING_LOINCS
@@ -2653,40 +2655,25 @@ def _get_staging_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
 
     def _stage_value(loinc_code):
         """Return the best string value for a staging LOINC code (Measurement then Observation)."""
-        # Primary: concept code match
-        m = next(
-            (
-                measurement for measurement in measurements
-                if measurement.measurement_concept
-                and measurement.measurement_concept.concept_code == loinc_code
-            ),
-            None,
-        )
-        if m:
-            return m.value_as_string or (str(int(m.value_as_number)) if m.value_as_number is not None else None)
-        # Secondary: LOINC stored as source_value (FHIR upload path)
-        m = next((measurement for measurement in measurements if measurement.measurement_source_value == loinc_code), None)
-        if m:
-            return m.value_as_string or (str(int(m.value_as_number)) if m.value_as_number is not None else None)
-        # Tertiary: Observation by concept code, then by source_value.
-        obs = next(
-            (
-                observation for observation in observations
-                if observation.observation_concept
-                and observation.observation_concept.concept_code == loinc_code
-            ),
-            None,
-        )
-        if obs is None:
-            obs = next(
-                (observation for observation in observations
-                 if observation.observation_source_value == loinc_code),
-                None,
-            )
-        if obs:
-            return obs.value_as_string or (
-                str(int(obs.value_as_number)) if obs.value_as_number is not None else None
-            )
+        # Ignore empty rows and legacy boolean RECIST results incorrectly coded
+        # as stage. A blank Measurement must not hide a populated Observation.
+        for rows, concept_attr, source_attr in (
+            (measurements, 'measurement_concept', 'measurement_source_value'),
+            (observations, 'observation_concept', 'observation_source_value'),
+        ):
+            for by_source in (False, True):
+                for row in rows:
+                    code = (getattr(row, source_attr) if by_source else
+                            getattr(getattr(row, concept_attr), 'concept_code', None))
+                    if code != loinc_code:
+                        continue
+                    value = row.value_as_string
+                    if not value and row.value_as_concept:
+                        value = row.value_as_concept.concept_name
+                    if not value and row.value_as_number is not None:
+                        value = str(int(row.value_as_number))
+                    if value and value.strip().lower() not in {'true', 'false', 'yes', 'no', 'unknown'}:
+                        return value.strip()
         return None
 
     # Overall stage group. For MM both ISS (21908-9) and R-ISS (21908-9-riss)
@@ -2705,6 +2692,10 @@ def _get_staging_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             ),
             None,
         )
+    if not stage_val:
+        stage_val = next((o.value_as_string for o in observations
+                          if o.observation_source_value == SAMPLE_STAGE_SOURCE_VALUE
+                          and o.value_as_string), None)
     if stage_val:
         data['stage'] = stage_val
 
