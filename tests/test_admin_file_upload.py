@@ -202,3 +202,26 @@ def test_trust_admin_can_upload_into_trusting_organization(setup):
     assert response.status_code == 200, response.data
     assert response.data['created_count'] == 1
     assert PatientRecord.objects.get(person__given_name='Jane').organization == trusting
+
+
+def test_userless_service_upload_preserves_scopes_and_service_attribution(setup):
+    from oauth2_provider.models import Application, AccessToken
+    from omop_core.models import ApplicationOrganization
+    _, user, org = setup
+    app = Application.objects.create(name='Upload service', client_id='test-upload-service',
+                                     client_type=Application.CLIENT_CONFIDENTIAL,
+                                     authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS, user=user)
+    ApplicationOrganization.objects.create(application=app, organization=org)
+    token = AccessToken.objects.create(application=app, user=None, token='test-userless-upload',
+                                       scope='patient/*.write', expires=timezone.now() + timedelta(hours=1))
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
+    response = upload(client, source_user_id='forged-user')
+    assert response.status_code == 200, response.data
+    assert response.data['created_count'] == 1
+    assert response.data['errors'] == []
+    assert ProvenanceRecord.objects.filter(source_user_id='urn:oauth-client|test-upload-service', organization=org).exists()
+    assert not ProvenanceRecord.objects.filter(source_user_id='forged-user').exists()
+    token.scope = 'patient/*.read'
+    token.save()
+    assert upload(client).status_code == 403

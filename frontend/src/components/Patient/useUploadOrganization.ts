@@ -26,4 +26,3 @@ export function useUploadOrganization() {
   return { organizations, organization, setOrganization, loading, error, required,
     ready: !loading && !error && (!required || !!organization) };
 }
-
