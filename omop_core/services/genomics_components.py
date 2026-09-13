@@ -36,4 +36,17 @@ def components():
         'value_kind': kind, 'vocabulary_id': 'LOINC' if loinc else '',
         'concept_code': loinc,
     } for key, loinc, table, kind in _V2_COMPONENTS)
+    for attribute in attributes:
+        if attribute['key'] == 'variant_name':
+            attribute.update(vocabulary_id='LOINC', concept_code='81253-7', recipe_version=3)
     return attributes
+
+
+def component_codes():
+    """Compatible source keys and portable LOINC aliases for stored facts."""
+    codes = {}
+    for attribute in components():
+        for code in (attribute['code'], attribute.get('concept_code')):
+            if code:
+                codes[code] = attribute['key']
+    return codes

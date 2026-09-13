@@ -12,9 +12,10 @@ from django.utils.dateparse import parse_date
 from django.utils.timezone import localdate
 from rest_framework.exceptions import NotFound, ValidationError
 
-from omop_core.models import Concept, ConceptRelationship, FieldConceptMapping, Measurement, Observation, PatientRecord
+from omop_core.models import Concept, FieldConceptMapping, Measurement, Observation, PatientRecord
 from omop_core.services.genomics_catalog import marker_for_variant, patient_fields
-from omop_core.services.genomics_components import components
+from omop_core.services.genomics_components import component_codes, components
+from omop_core.services.genomics_vocabulary import resolve_loinc
 from omop_core.services.pk import next_pk
 from omop_core.services.clinical_text import OwnedTextReader, store_text
 from omop_core.signals import suppress_patient_record_refresh
@@ -40,9 +41,13 @@ def approved_mapping(field_name):
 
 
 def mapped_concept(mapping):
-    if mapping.concept_id and mapping.concept.standard_concept == 'S':
+    if (mapping.concept_id and mapping.concept.standard_concept == 'S'
+            and mapping.concept.invalid_reason is None):
         if mapping.concept.domain_id.lower() == mapping.omop_table:
-            return mapping.concept_id, mapping.concept_id
+            source = (resolve_loinc(mapping.concept_code).source
+                      if mapping.vocabulary_id == 'LOINC' and mapping.concept_code
+                      else mapping.concept)
+            return mapping.concept_id, source.pk if source else None
         # Domain drifted in a newer Athena release — fall through to LOINC
         # resolution which handles mismatches gracefully (concept 0 + source).
     if mapping.vocabulary_id == 'LOINC' and mapping.concept_code:
@@ -172,22 +177,11 @@ def normalize_variant(payload, existing=None):
 
 
 def _resolve(code, domain):
-    source = Concept.objects.filter(
-        vocabulary_id='LOINC', concept_code=code, invalid_reason__isnull=True,
-    ).first() if not code.startswith(PREFIX) else None
-    standard = source if source and source.standard_concept == 'S' else None
-    if source and standard is None:
-        mapping = ConceptRelationship.objects.filter(
-            concept_1=source, relationship_id='Maps to', invalid_reason__isnull=True,
-            concept_2__standard_concept='S', concept_2__invalid_reason__isnull=True,
-            concept_2__domain_id__in=['Measurement', 'Observation'],
-        ).select_related('concept_2').first()
-        standard = mapping.concept_2 if mapping else None
-    if standard and standard.domain_id in ('Measurement', 'Observation'):
-        domain = standard.domain_id
-    else:
-        standard = None
-    return (standard.pk if standard else 0), (source.pk if source else None), domain
+    resolved = resolve_loinc(code) if not code.startswith(PREFIX) else None
+    source = resolved.source if resolved else None
+    standard = resolved.standard if resolved else None
+    return (standard.pk if standard else 0), (source.pk if source else None), (
+        standard.domain_id if standard else domain)
 
 
 def _measurement_event_concepts():
@@ -239,7 +233,7 @@ def _components(person, parent_id):
 
 def _component_codes(snapshot):
     if 'component_codes' not in snapshot.genomics_cache:
-        codes = {code: key for key, (code, _) in FIELDS.items()}
+        codes = component_codes()
         # Reads survive withdrawn approval; only writes require current approval.
         codes.update({m.source_value: m.field_name.split('.', 1)[1]
             for m in FieldConceptMapping.objects.filter(field_name__startswith='genetic_mutations.')})
@@ -357,7 +351,7 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_r
     for rows in _components(person, parent.pk):
         # Only replace known component fields; unrelated linked facts survive.
         source_field = f'{rows.model._meta.model_name}_source_value'
-        codes = [code for code, _ in FIELDS.values()] + list(FieldConceptMapping.objects.filter(
+        codes = list(component_codes()) + list(FieldConceptMapping.objects.filter(
             field_name__startswith='genetic_mutations.').values_list('source_value', flat=True))
         concept_field = f'{rows.model._meta.model_name}_concept'
         rows.filter(Q(**{f'{source_field}__in': codes}) | Q(**{
