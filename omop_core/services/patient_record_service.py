@@ -1254,6 +1254,36 @@ def _canonicalize_disease(name: str) -> str:
     return _DISEASE_ALIASES.get(normalized, name)
 
 
+SAMPLE_DISEASE_STATUS_SOURCE_VALUE = 'sample-patient-disease-status'
+
+
+def meaningful_disease_status(value):
+    return bool(value and value.strip().lower() not in {
+        '', 'unknown', 'n/a', 'not recorded', 'not available', 'no matching concept',
+    })
+
+
+def condition_clinical_status(condition):
+    """Read a condition's clinical status, including unmapped source values."""
+    if condition is None:
+        return None
+    concept = condition.condition_status_concept
+    name = (_usable_concept_name(concept) if condition.condition_status_concept_id else None)
+    name = name or condition.condition_status_source_value
+    if not meaningful_disease_status(name):
+        return None
+    name = name.strip().lower()
+    if 'remission' in name:
+        return 'remission'
+    if 'relapse' in name or 'recur' in name:
+        return 'relapse'
+    if 'resolved' in name or 'inactive' in name:
+        return 'resolved'
+    if 'active' in name:
+        return 'active'
+    return name[:50]
+
+
 def _get_disease_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
     snapshot = snapshot or _build_snapshot(person)
@@ -1294,24 +1324,12 @@ def _get_disease_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     # snapshot.conditions is -start_date ordered, so first is most recent
     most_recent_condition = snapshot.conditions[0] if snapshot.conditions else None
 
-    if most_recent_condition:
-        if most_recent_condition.condition_status_concept:
-            status_name = most_recent_condition.condition_status_concept.concept_name.lower()
-        elif most_recent_condition.condition_status_source_value:
-            status_name = most_recent_condition.condition_status_source_value.lower()
-        else:
-            status_name = None
-        if status_name:
-            if 'remission' in status_name:
-                data['condition_clinical_status'] = 'remission'
-            elif 'relapse' in status_name or 'recur' in status_name or 'recurrence' in status_name:
-                data['condition_clinical_status'] = 'relapse'
-            elif 'active' in status_name:
-                data['condition_clinical_status'] = 'active'
-            elif 'resolved' in status_name or 'inactive' in status_name:
-                data['condition_clinical_status'] = 'resolved'
-            else:
-                data['condition_clinical_status'] = status_name[:50]
+    status = condition_clinical_status(most_recent_condition)
+    if not status:
+        rows = snapshot.obs_by_source.get(SAMPLE_DISEASE_STATUS_SOURCE_VALUE, ())
+        status = next((o.value_as_string for o in rows if meaningful_disease_status(o.value_as_string)), None)
+    if status:
+        data['condition_clinical_status'] = status
 
     # disease_slug — machine-readable ID derived from disease name
     disease_name = data.get('disease', '')
