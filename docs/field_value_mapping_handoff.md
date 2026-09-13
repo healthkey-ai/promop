@@ -4,6 +4,28 @@
 
 ### Additional review and implementation after `57646dc`
 
+**Verified checkpoint `2fe2f6e`:** full pytest **2,356 passed, 4 skipped**;
+Django **1,998 tests OK, 1 skipped**; frontend **560 passed, 4 skipped**;
+Redis/Celery e2e **2 passed** with an isolated local broker. Production build,
+lint (0 errors, 3 existing warnings), migration drift, system and diff checks
+passed. All tests used local PostgreSQL, and the joined migration chain applied
+to the local application database. This checkpoint is integrated through dev
+`07a1cc4`, not the newer changes below. No implementation PR has been merged.
+
+Dev advanced again while these checks ran: `ddbfc6e` (#1258 sample disease
+status), `820afd8` (#1218 service identities), and `b8d0ef8` (#1259 cytogenetic
+ownership/history) are queued for the next integration. In particular, #1259
+makes Genomics the owner of new cytogenetic entry and adds a bounded, authorized
+legacy history view. Preserve that contract rather than restoring the old
+summary editor. The underlying clear regression tests remain useful for
+compatibility and reconciliation.
+
+The next therapy review should validate concept role/validity in the existing
+`author_therapy_line` path and verify all-or-nothing behavior when an Episode
+cannot be created. The current serializer rejects future start dates; its
+managed quarantine paths and all regimen/component/class tables must remain.
+Do not create a second therapy catalog or silently invent historical dates.
+
 The next integration includes dev `07a1cc4` (#1249 genomics architecture) and
 `bedca25` (#1256 patient-list context). Use upstream's shared component registry,
 owned NOTE reader, finding-state logic and provenance implementation; do not
@@ -20,7 +42,7 @@ Django **1,998 tests (1 skipped)**, frontend **553 tests (4 skipped)**, build
 passed and lint had 0 errors/3 existing warnings. After the latest genomics
 integration, **316 integrated backend tests** and **560 frontend tests** passed;
 the additional alias/staging/descriptor/reconciliation checks passed **87 tests**.
-Full verification on the newest integrated tree remains to be completed.
+Full verification of that integration is recorded above.
 
 Local commit `4a68f79` adds the following reviewed fixes and capabilities.
 Merge `1e163ed` integrates current dev through `f1bd3a2`, including the scoped
