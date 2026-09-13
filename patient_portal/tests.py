@@ -26581,3 +26581,36 @@ class RecordAttestationTest(TestCase):
         self.record.refresh_from_db()
         # Date should be updated to today
         self.assertNotEqual(self.record.validation_date, date_type(2026, 1, 1))
+
+
+class FhirConditionStagePersistenceTest(FhirUploadBase):
+    """Condition-only stages survive upload and later OMOP projection refresh."""
+
+    def _upload_condition_stage(self, disease, stages):
+        bundle = _make_fl_bundle()
+        condition = bundle['entry'][1]['resource']
+        condition['code'] = {'text': disease}
+        condition['stage'] = [{'summary': {'text': stage}} for stage in stages]
+        # Keep the later unstaged condition: it must not steal the stage date.
+        fhir_file = io.BytesIO(json.dumps(bundle).encode())
+        fhir_file.name = 'condition-stage.json'
+        response = self.client.post('/api/patient-info/upload_fhir/', {'file': fhir_file}, format='multipart')
+        self.assertIn(response.status_code, [200, 201], response.data)
+        return Person.objects.get(given_name='Larry', family_name='Follic')
+
+    def test_fl_stage_survives_refresh_with_transformation_condition(self):
+        from omop_core.services.patient_record_service import refresh_patient_record
+        person = self._upload_condition_stage('Follicular Lymphoma', ['Follicular Lymphoma Ann Arbor Stage IIIB'])
+        self.assertEqual(refresh_patient_record(person).stage, 'IIIB')
+        fact = Observation.objects.get(person=person, observation_source_value='FHIR-condition-stage')
+        self.assertEqual(fact.observation_date, date(2020, 6, 1))
+
+    def test_mm_condition_only_prefers_riss_and_survives_refresh(self):
+        from omop_core.services.patient_record_service import refresh_patient_record
+        person = self._upload_condition_stage('Multiple Myeloma', ['ISS Stage II', 'R-ISS Stage III'])
+        self.assertEqual(refresh_patient_record(person).stage, 'R-ISS III')
+
+    def test_bare_condition_stage_text_is_retained(self):
+        from omop_core.services.patient_record_service import refresh_patient_record
+        person = self._upload_condition_stage('Follicular Lymphoma', ['IVB'])
+        self.assertEqual(refresh_patient_record(person).stage, 'IVB')
