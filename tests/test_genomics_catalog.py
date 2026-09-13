@@ -158,3 +158,52 @@ def test_nonpositive_assessments_do_not_become_detected_markers(setup, assessmen
     record.refresh_from_db()
     assert record.tp53_disruption is True
     assert 'TP53' in record.molecular_markers
+
+
+@pytest.mark.parametrize('key,value_kind', [
+    ('status', 'string'), ('clone_fraction', 'number'),
+    ('transcript_dna_change', 'string'), ('coverage_depth', 'number'),
+    ('amino_acid_change_type', 'string'),
+])
+def test_later_components_are_discoverable_editable_and_rejectable(setup, key, value_kind):
+    from omop_core.services.field_descriptor import get_all_field_descriptors
+    from patient_portal.api.serializers import FieldConceptMappingSerializer
+
+    field = 'genetic_mutations.' + key
+    descriptor = next(d for d in get_all_field_descriptors() if d['field_name'] == field)
+    assert descriptor['tab'] == 'genomics'
+    assert descriptor['field_type'] == value_kind
+    mapping = FieldConceptMapping.objects.get(field_name=field)
+    serializer = FieldConceptMappingSerializer(mapping, data={
+        'status': 'rejected', 'source_value': 'reviewed:' + key, 'notes': 'Curator decision',
+    }, partial=True)
+    assert serializer.is_valid(), serializer.errors
+    serializer.save()
+    call_command('seed_genomics_catalog')
+    mapping.refresh_from_db()
+    assert mapping.status == 'rejected'
+    assert mapping.source_value == 'reviewed:' + key
+    assert mapping.notes == 'Curator decision'
+
+
+def test_effective_registry_is_complete_and_does_not_mutate_frozen_catalog(setup):
+    from copy import deepcopy
+    from omop_core.services.genomics import FIELDS
+    from omop_core.services.genomics_catalog import catalog
+    from omop_core.services.genomics_components import components
+    from omop_core.services.field_descriptor import get_all_field_descriptors
+    from patient_portal.api.serializers import FieldConceptMappingSerializer
+
+    frozen = deepcopy(catalog())
+    registry = components()
+    fields = {'genetic_mutations.' + row['key'] for row in registry}
+    assert len(registry) == len(fields) == 31
+    assert fields == {'genetic_mutations.' + key for key in FIELDS}
+    assert fields <= {row['field_name'] for row in get_all_field_descriptors()}
+    assert fields <= set(FieldConceptMapping.objects.values_list('field_name', flat=True))
+    registry[0]['table'] = 'modified by caller'
+    assert catalog() == frozen
+    assert components()[0]['table'] != 'modified by caller'
+    serializer = FieldConceptMappingSerializer(data={'field_name': 'genetic_mutations.unknown'})
+    assert not serializer.is_valid()
+    assert 'field_name' in serializer.errors

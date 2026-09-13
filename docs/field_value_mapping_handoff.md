@@ -4,6 +4,24 @@
 
 ### Additional review and implementation after `57646dc`
 
+The next integration includes dev `07a1cc4` (#1249 genomics architecture) and
+`bedca25` (#1256 patient-list context). Use upstream's shared component registry,
+owned NOTE reader, finding-state logic and provenance implementation; do not
+restore the superseded genomics documents or duplicate its text helpers.
+Scoped answer resolution and original source aliases are retained. Vocabulary
+expiry validation now extends upstream `genomics_vocabulary.resolve_loinc`,
+and gene aliases resolve before selecting a dependent answer's gene scope.
+Migration `0234_merge_genomics_and_field_values` joins the independent 0231
+genomic recipe migration and this feature's 0233 chain without data operations.
+Refresh plans also fingerprint vocabulary release provenance records.
+
+At local checkpoint `612d36c`, full pytest passed **2,172 tests (4 skipped)**,
+Django **1,998 tests (1 skipped)**, frontend **553 tests (4 skipped)**, build
+passed and lint had 0 errors/3 existing warnings. After the latest genomics
+integration, **316 integrated backend tests** and **560 frontend tests** passed;
+the additional alias/staging/descriptor/reconciliation checks passed **87 tests**.
+Full verification on the newest integrated tree remains to be completed.
+
 Local commit `4a68f79` adds the following reviewed fixes and capabilities.
 Merge `1e163ed` integrates current dev through `f1bd3a2`, including the scoped
 Org Admin permission fix and indexed patient refresh. Conflict resolution
@@ -67,9 +85,11 @@ associated issue as part of this checkpoint. The user specifically requires
 Active worktree: `/private/tmp/promop-1235`; branch:
 `feat/field-value-concept-mappings`. The original checkout at
 `/Users/adamblum/promop` retains its unrelated `AGENTS.md` and frontend lockfile
-changes. CancerBot at `/Users/adamblum/cancerbot` was read without modification.
+history; all feature edits were made in the isolated worktree. The original
+checkout is now clean after other ongoing repository work. CancerBot at
+`/Users/adamblum/cancerbot` was read without modification.
 
-Current `dev` is integrated through `de4c164` (#1234), including #1233 genomics
+The earlier checkpoint integrated `dev` through `de4c164` (#1234), including #1233 genomics
 and #1222 vocabulary checksums. Merge commits `ee39b07` and `a3aa8b2` preserve
 upstream changes. Implementation commit `d658a8e` contains the resumed fixes.
 The sample-stage conflict was resolved by keeping the dated/coded staging

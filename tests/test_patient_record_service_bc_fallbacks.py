@@ -56,6 +56,7 @@ def test_genetic_mutations_use_measurement_source_value_fallback():
             'variant': 'BRCA1 pathogenic variant',
             'test_date': '2024-05-01',
             'status': 'present',
+            'provenance': 'asserted',
         },
     ]
 
@@ -77,6 +78,7 @@ def test_generic_gene_mutation_loinc_round_trips_gene_from_qualifier():
         'variant': 'c.68_69delAG',
         'test_date': '2024-01-15',
         'status': 'present',
+        'provenance': 'asserted',
     }]
 
 

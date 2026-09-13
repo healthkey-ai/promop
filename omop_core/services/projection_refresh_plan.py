@@ -60,7 +60,7 @@ def _environment():
 def _definition():
     from omop_core.services.field_curation_transfer import read_payload
     from omop_core.services.patient_record_service import DERIVATION_VERSION
-    from omop_core.models import Vocabulary
+    from omop_core.models import Vocabulary, VocabularyRelease
 
     code = hashlib.sha256()
     root = Path(__file__).resolve().parent
@@ -71,6 +71,7 @@ def _definition():
         'code': code.hexdigest(), 'version': DERIVATION_VERSION,
         'curation': read_payload('default', tables=('mappings', 'custom_fields', 'choices', 'formulas')),
         'releases': list(Vocabulary.objects.order_by('pk').values()),
+        'release_provenance': list(VocabularyRelease.objects.order_by('pk').values()),
     })
 
 

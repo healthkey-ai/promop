@@ -30,6 +30,26 @@ def test_genomic_answer_override_routes_to_its_domain_and_preserves_source(setup
     assert result['origin'] == 'Germline'
 
 
+def test_gene_alias_resolves_before_dependent_answer_scope_and_preserves_source(setup):
+    from omop_core.models import FieldConceptMapping
+    person, _, _ = setup
+    FieldChoice.objects.create(field_name='genetic_mutations.gene', display='BRCA1',
+                               aliases=['BRCA one'])
+    origin = FieldChoice.objects.create(field_name='genetic_mutations.origin',
+        display='Germline', aliases=['inherited'], context_key='BRCA1')
+    answer = ConceptFactory(domain__domain_id='Meas Value')
+    save_mapping(origin, {'status': 'approved', 'outcome': 'mapped', 'target_concept': answer,
+        'notes': 'Reviewed BRCA1-scoped source answer.', 'vocabulary_release': 'Test release'})
+    result = save_variant(person, {'gene': 'BRCA one', 'origin': 'inherited'})
+    assert result['gene'].upper() == 'BRCA1'
+    assert result['origin'] == 'Germline'
+    mapping = FieldConceptMapping.objects.get(field_name='genetic_mutations.gene')
+    model = Measurement if mapping.omop_table == 'measurement' else Observation
+    row = model.objects.get(person=person, **{f'{mapping.omop_table}_source_value': mapping.source_value})
+    assert row.value_source_value == 'BRCA one'
+    assert Measurement.objects.filter(person=person, value_as_concept=answer).exists() or Observation.objects.filter(person=person, value_as_concept=answer).exists()
+
+
 @pytest.mark.parametrize('scope', ['other_person', 'other_parent'])
 def test_overflow_note_reference_cannot_escape_patient_and_variant(setup, scope):
     from tests.factories import PersonFactory
