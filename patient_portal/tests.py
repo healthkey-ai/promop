@@ -6294,8 +6294,20 @@ class PersonFindOrCreateTest(_SmartBase):
 
     URL = '/api/persons/find_or_create/'
 
-    def _auth(self):
-        return {'HTTP_AUTHORIZATION': f'Bearer {self.write_token.token}'}
+    def _auth(self, sub='uid-abc'):
+        identity, _ = Identity.objects.get_or_create(
+            issuer='https://securetoken.google.com/proj', sub=sub,
+        )
+        if self.foundation_user.is_staff:
+            identity.is_staff = True
+            identity.save(update_fields=['is_staff'])
+        self.client.force_authenticate(user=identity)
+        return {}
+
+    def setUp(self):
+        from rest_framework.test import APIClient
+        self.client = APIClient()
+
 
     def test_creates_person_on_first_call(self):
         resp = self.client.post(
@@ -6318,20 +6330,20 @@ class PersonFindOrCreateTest(_SmartBase):
             self.URL,
             {'actor_iss': 'https://securetoken.google.com/proj', 'actor_sub': 'refreshable-uid'},
             content_type='application/json',
-            **self._auth(),
+            **self._auth('refreshable-uid'),
         )
 
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
         refresh = self.client.post(
             f"/api/v1/patient-records/{resp.json()['person_id']}/refresh/",
-            **self._auth(),
+            **self._auth('refreshable-uid'),
         )
         self.assertEqual(refresh.status_code, status.HTTP_202_ACCEPTED, refresh.data)
 
     def test_returns_same_person_id_on_repeat(self):
         payload = {'actor_iss': 'https://securetoken.google.com/proj', 'actor_sub': 'uid-xyz'}
-        r1 = self.client.post(self.URL, payload, content_type='application/json', **self._auth())
-        r2 = self.client.post(self.URL, payload, content_type='application/json', **self._auth())
+        r1 = self.client.post(self.URL, payload, content_type='application/json', **self._auth('uid-xyz'))
+        r2 = self.client.post(self.URL, payload, content_type='application/json', **self._auth('uid-xyz'))
         self.assertEqual(r1.status_code, status.HTTP_201_CREATED)
         self.assertEqual(r2.status_code, status.HTTP_200_OK)
         self.assertEqual(r1.json()['person_id'], r2.json()['person_id'])
@@ -6355,7 +6367,7 @@ class PersonFindOrCreateTest(_SmartBase):
             self.URL,
             {'actor_iss': actor_iss, 'actor_sub': actor_sub},
             content_type='application/json',
-            **self._auth(),
+            **self._auth('linked-uid'),
         )
 
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
@@ -6380,10 +6392,10 @@ class PersonFindOrCreateTest(_SmartBase):
         payload = {'actor_iss': actor_iss, 'actor_sub': actor_sub}
 
         first = self.client.post(
-            self.URL, payload, content_type='application/json', **self._auth(),
+            self.URL, payload, content_type='application/json', **self._auth('unlinked-uid'),
         )
         second = self.client.post(
-            self.URL, payload, content_type='application/json', **self._auth(),
+            self.URL, payload, content_type='application/json', **self._auth('unlinked-uid'),
         )
 
         self.assertEqual(first.status_code, status.HTTP_201_CREATED)
@@ -6396,8 +6408,8 @@ class PersonFindOrCreateTest(_SmartBase):
 
     def test_different_subs_get_different_persons(self):
         base = {'actor_iss': 'https://securetoken.google.com/proj'}
-        r1 = self.client.post(self.URL, {**base, 'actor_sub': 'uid-1'}, content_type='application/json', **self._auth())
-        r2 = self.client.post(self.URL, {**base, 'actor_sub': 'uid-2'}, content_type='application/json', **self._auth())
+        r1 = self.client.post(self.URL, {**base, 'actor_sub': 'uid-1'}, content_type='application/json', **self._auth('uid-1'))
+        r2 = self.client.post(self.URL, {**base, 'actor_sub': 'uid-2'}, content_type='application/json', **self._auth('uid-2'))
         self.assertNotEqual(r1.json()['person_id'], r2.json()['person_id'])
 
     def test_missing_actor_iss_returns_400(self):
@@ -10481,7 +10493,7 @@ class ServiceTokenOmopAccessTest(TestCase):
             'actor_iss': 'https://etl.example.test',
             'actor_sub': 'import-subject',
         }, format='json')
-        self.assertIn(response.status_code, (200, 201), response.data)
+        self.assertEqual(response.status_code, 403, response.data)
         response = client.post('/api/v1/measurements/', [{
             'person': self.person_a.person_id,
             'measurement_concept': self.m_a.measurement_concept_id,
@@ -18063,7 +18075,8 @@ class BulkOmopWriteTest(TestCase):
             content_type=ct, object_id__in=resp.data['ids'])
         self.assertEqual(prov.count(), 4)
         self.assertEqual({p.source for p in prov}, {'EHR_SYNC'})
-        self.assertEqual({p.source_user_id for p in prov}, {'etl-run-7'})
+        self.assertEqual({p.source_user_id for p in prov},
+                         {f'{self.service_identity.issuer}|{self.service_identity.sub}'})
         self.assertEqual(
             {p.target_patient_id for p in prov}, {str(self.person.person_id)})
 
@@ -18585,7 +18598,7 @@ class BulkOmopUpsertTest(TestCase):
                 content_type=ct,
                 object_id=first.data['measurement_id'],
                 source='EHR_SYNC',
-                source_user_id='etl-retry-1',
+                source_user_id=f'{self.service_identity.issuer}|{self.service_identity.sub}',
             ).count(),
             1,
         )

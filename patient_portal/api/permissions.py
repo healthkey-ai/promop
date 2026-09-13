@@ -5,18 +5,48 @@ from django.utils import timezone
 from rest_framework.permissions import BasePermission
 
 from .providers.base import TokenClaims
+from patient_portal.service_tokens import ServiceCredential
 from omop_core.services.access import has_org_admin_access
 
 logger = logging.getLogger(__name__)
 
-# Sentinel value set by ServiceTokenAuthentication when the HMAC check passes.
-# Use is_service_token() rather than comparing this string directly.
+# Compatibility sentinel for existing integrations/tests. New authentication
+# returns ServiceCredential; callers must use is_service_token().
 SERVICE_TOKEN = "service-token"
 
 
 def is_service_token(request) -> bool:
     """Return True when the request was authenticated as a trusted service token."""
-    return request.auth == SERVICE_TOKEN
+    token = getattr(request, "auth", None)
+    return isinstance(token, ServiceCredential) or token == SERVICE_TOKEN
+
+
+def service_token_scopes(request):
+    if isinstance(request.auth, ServiceCredential):
+        return request.auth.scope
+    return settings.SERVICE_AUTH_SCOPES
+
+
+def is_machine_request(request):
+    if is_service_token(request):
+        return True
+    from oauth2_provider.models import Application
+    application = getattr(request.auth, "application", None)
+    return (
+        getattr(application, "authorization_grant_type", None)
+        == Application.GRANT_CLIENT_CREDENTIALS
+        or getattr(request.user, "issuer", None) == "urn:service"
+    )
+
+
+def reject_machine_actor_claims(request, actor_iss, actor_sub):
+    """A service credential proves the service, never a user named in JSON."""
+    if is_machine_request(request) and (actor_iss or actor_sub):
+        from rest_framework.exceptions import PermissionDenied
+        raise PermissionDenied(
+            "User attribution requires end-user authentication. "
+            "For service imports, omit actor_iss/actor_sub and supply person_id."
+        )
 
 
 def get_request_org(request):
@@ -80,7 +110,7 @@ class ScopedTokenPermission(BasePermission):
 
     Role model for non-OAuth2 auth paths:
 
-      service-token         → SERVICE_AUTH_SCOPES (read-only by default)
+      service-token         → credential scopes (read-only by default)
       is_staff              → full access
       other authenticated   → safe methods + PATCH only
                               (read + self-edit; POST/DELETE denied)
@@ -104,7 +134,7 @@ class ScopedTokenPermission(BasePermission):
         token = request.auth
 
         if is_service_token(request):
-            return self.has_scopes(request.method, settings.SERVICE_AUTH_SCOPES)
+            return self.has_scopes(request.method, service_token_scopes(request))
 
         # Partner-auth (Firebase, SAML) and session-auth: role-based enforcement.
         if token is None or isinstance(token, TokenClaims):
@@ -154,7 +184,7 @@ def _has_legacy_etl_write_grant(request) -> bool:
     return (
         is_service_token(request)
         and request.method.upper() in _ETL_WRITE_METHODS
-        and _ETL_WRITE_SCOPE in settings.SERVICE_AUTH_SCOPES.split()
+        and _ETL_WRITE_SCOPE in service_token_scopes(request).split()
     )
 
 

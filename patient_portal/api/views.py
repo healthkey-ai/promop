@@ -119,7 +119,7 @@ from io import StringIO
 from .permissions import (
     EtlPatientCrudPermission, EtlWritePermission, PatientCrudPermission, GenomicsCrudPermission,
     PatientDeletePermission, PatientSelfScopePermission, ScopedTokenPermission,
-    VocabReadPermission, get_request_org, is_service_token,
+    VocabReadPermission, LabSyncPermission, get_request_org, is_service_token,
 )
 from .providers.base import TokenClaims
 from .serializers import (
@@ -412,6 +412,8 @@ def _extract_provenance(request):
         body.get('source_user_id')
         or request.META.get('HTTP_X_PROVENANCE_USER_ID', '')
     )
+    if is_service_token(request):
+        source_user_id = f"{request.user.issuer}|{request.user.sub}"
     modification_reason = body.get('modification_reason')
     return source, source_user_id, modification_reason
 
@@ -1761,6 +1763,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             source_user_id = request.META.get(
                 'HTTP_X_PROVENANCE_USER_ID', str(getattr(request_user, 'pk', '') or ''),
             )
+            if is_service_token(request):
+                source_user_id = f"{request.user.issuer}|{request.user.sub}"
             provenance_org = get_request_org(request) if request_user is not None else None
             
             for row_num, row in enumerate(reader, start=2):
@@ -5451,19 +5455,32 @@ class PersonViewSet(viewsets.GenericViewSet):
     queryset = Person.objects.all()
     lookup_field = 'person_id'
 
-    @action(detail=False, methods=['post'], url_path='find_or_create')
+    @action(detail=False, methods=['post'], url_path='find_or_create',
+            permission_classes=[LabSyncPermission])
     def find_or_create(self, request):
         """
         POST /api/persons/find_or_create/
         Body: { "actor_iss": "...", "actor_sub": "..." }
         Response 200/201: { "person_id": 1234, "created": true }
         """
+        from patient_portal.api.permissions import is_machine_request
+        if is_machine_request(request):
+            return Response(
+                {'detail': 'Person identity provisioning requires end-user authentication.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         actor_iss = request.data.get('actor_iss', '').strip()
         actor_sub = request.data.get('actor_sub', '').strip()
         if not actor_iss or not actor_sub:
             return Response(
                 {'detail': 'actor_iss and actor_sub are required.'},
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if (actor_iss, actor_sub) != (request.user.issuer, request.user.sub):
+            return Response(
+                {'detail': 'Actor must match the authenticated user.'},
+                status=status.HTTP_403_FORBIDDEN,
             )
 
         from patient_portal.models import Identity, PatientUser

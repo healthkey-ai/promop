@@ -18,6 +18,7 @@ import PatientHome from "@/components/Patient/PatientHome";
 import UploadFHIR from "@/components/Patient/UploadFHIR";
 import UploadCSV from "@/components/Patient/UploadCSV";
 import OrgAdminPage from "@/components/OrgAdmin/OrgAdminPage";
+import ServiceApplicationsPage from "@/components/OrgAdmin/ServiceApplicationsPage";
 import FieldMappingPage from "@/components/FieldMappings/FieldMappingPage";
 import CodeMappingPage from "@/components/CodeMappings/CodeMappingPage";
 import SuggestRunLogPage from "@/components/CodeMappings/SuggestRunLogPage";
@@ -153,6 +154,7 @@ function AppRoutes() {
       <Route path="/upload-fhir" element={providerRoute(<UploadFHIR />)} />
       <Route path="/upload-csv" element={providerRoute(<UploadCSV />)} />
       <Route path="/stats" element={<Navigate to="/org-admin" replace />} />
+      <Route path="/service-applications" element={currentUser?.is_staff ? <ServiceApplicationsPage /> : <Navigate to={currentUser ? "/" : "/login"} replace />} />
       <Route path="/org-admin" element={providerRoute(<OrgAdminPage />)} />
       <Route path="/mappings" element={mappingAdminRoute(<MappingHubPage />)} />
       <Route path="/field-mappings" element={mappingAdminRoute(<FieldMappingPage />)} />
