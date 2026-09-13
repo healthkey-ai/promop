@@ -36,7 +36,7 @@ describe('Genomics tab', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Edit result' }));
     expect(screen.getByLabelText('Gene *')).toHaveValue('BRCA1');
     expect(screen.getByLabelText('Specimen ID')).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('Variant / transcript DNA change (HGVS)'), { target: { value: 'c.68_69delAG' } });
+    fireEvent.change(screen.getByLabelText('Original variant text'), { target: { value: 'c.68_69delAG' } });
     mocks.patch.mockResolvedValueOnce({ data: { genetic_mutations: [{ ...saved, marker_key: 'brca1' }] } });
     fireEvent.click(screen.getByRole('button', { name: 'Save variant' }));
     await screen.findByText('Variant saved.');
@@ -101,7 +101,7 @@ describe('Genomics tab', () => {
   it('updates the specific record, preserves other fields and cancels without saving', async () => {
     render(<GenomicsTab formData={{ person_id: 42 }} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
-    expect(screen.getByLabelText('Variant / transcript DNA change (HGVS)')).toHaveValue('c.68_69delAG');
+    expect(screen.getByLabelText('Original variant text')).toHaveValue('c.68_69delAG');
     fireEvent.change(screen.getByLabelText('Interpretation'), { target: { value: 'Likely pathogenic' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save variant' }));
     await waitFor(() => expect(mocks.patch).toHaveBeenCalled());
@@ -153,12 +153,12 @@ describe('Genomics tab', () => {
   it('renders select dropdowns for enumerated fields in edit form', async () => {
     render(<GenomicsTab formData={{ person_id: 42 }} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
-    for (const field of ['Origin', 'Interpretation', 'Genome assembly', 'Variant category', 'Genomic source class', 'Variant analysis method type', 'Result assessment', 'Finding status', 'Zygosity', 'Chromosome']) {
+    for (const field of ['Origin', 'Interpretation', 'Genome assembly', 'Variant category', 'Genomic source class', 'Variant analysis method type', 'Finding status', 'Zygosity', 'Chromosome']) {
       const el = screen.getByLabelText(field);
       expect(el.tagName).toBe('SELECT');
     }
     // Free-text fields remain inputs
-    for (const field of ['Variant name', 'Variant / transcript DNA change (HGVS)', 'Transcript reference sequence ID']) {
+    for (const field of ['Variant name', 'Original variant text', 'Transcript reference sequence ID']) {
       const el = screen.getByLabelText(field);
       expect(el.tagName).toBe('INPUT');
     }
@@ -198,4 +198,58 @@ describe('Genomics tab', () => {
     expect(suggestions).toContain('del(17p13)');
     expect(suggestions).toContain('del17p13');
   });
+});
+
+it('keeps the new DNA, protein, depth and fraction controls independent on save', async () => {
+  render(<GenomicsTab formData={{ person_id: 42 }} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+  for (const [label, value] of [
+    ['Transcript DNA change (c.HGVS)', 'c.123A>G'], ['Genomic DNA change (g.HGVS)', 'g.321A>G'],
+    ['Protein / amino acid change (p.HGVS)', 'p.Arg41Gly'], ['Amino acid change type', 'missense'],
+    ['Coverage depth', '250'], ['Clone fraction', '0.4'],
+  ]) fireEvent.change(screen.getByLabelText(label), { target: { value } });
+  fireEvent.change(screen.getByLabelText('Clone fraction unit'), { target: { value: '1' } });
+  expect(screen.getByLabelText('Allelic frequency unit')).toHaveValue('%');
+  expect(screen.getByLabelText('Original variant text')).toHaveValue(saved.variant);
+  fireEvent.click(screen.getByRole('button', { name: 'Save variant' }));
+  await screen.findByText('Variant saved.');
+  expect(mocks.patch).toHaveBeenCalledWith(`${url}123/`, expect.objectContaining({
+    variant: saved.variant, transcript_dna_change: 'c.123A>G', genomic_dna_change: 'g.321A>G',
+    amino_acid_change: 'p.Arg41Gly', amino_acid_change_type: 'missense', coverage_depth: '250',
+    allelic_frequency: 0, allelic_frequency_unit: '%', clone_fraction: '0.4', clone_fraction_unit: '1',
+  }));
+});
+
+it('shows unknown placeholders separately from absent and indeterminate results', async () => {
+  mocks.get.mockImplementation(async path => ({ data: path.includes('genomics-catalog')
+    ? { markers: [{ key: 'tp53', field_name: 'genomics_tp53', gene: 'TP53', kind: 'gene', label: 'TP53' }] }
+    : [{ ...saved, status: 'absent' }, { ...saved, id: 124, gene: 'BRCA2', status: 'indeterminate', assessment: 'no_call' }] }));
+  render(<GenomicsTab formData={{ person_id: 42 }} />);
+  expect(await screen.findByText('Absent')).toBeInTheDocument();
+  expect(screen.getByText('Indeterminate')).toBeInTheDocument();
+  expect(screen.getByText('Unknown')).toBeInTheDocument();
+  expect(mocks.post).not.toHaveBeenCalled();
+});
+
+it('uses one state control and clears incompatible inherited values on an absent edit', async () => {
+  mocks.get.mockImplementation(async path => ({ data: path.includes('genomics-catalog') ? { markers: [] }
+    : [{ ...saved, status: 'present', assessment: 'present', transcript_dna_change: 'c.123A>G',
+      amino_acid_change_type: 'missense', zygosity: 'Heterozygous', coverage_depth: 200 }] }));
+  render(<GenomicsTab formData={{ person_id: 42 }} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+  expect(screen.queryByLabelText('Result assessment')).not.toBeInTheDocument();
+  expect(screen.getByText('Source result assessment: present')).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText('Finding status'), { target: { value: 'absent' } });
+  expect(screen.getByLabelText('Transcript DNA change (c.HGVS)')).toHaveValue('');
+  expect(screen.getByLabelText('Transcript DNA change (c.HGVS)')).toBeDisabled();
+  expect(screen.getByLabelText('Amino acid change type')).toBeDisabled();
+  expect(screen.getByLabelText('Coverage depth')).toHaveValue(200);
+  fireEvent.click(screen.getByRole('button', { name: 'Save variant' }));
+  await screen.findByText('Variant saved.');
+  const payload = mocks.patch.mock.calls[0][1];
+  expect(payload.status).toBe('absent');
+  expect(payload.assessment).toBeUndefined();
+  expect(payload.transcript_dna_change).toBe('');
+  expect(payload.coverage_depth).toBe(200);
+  expect(screen.getByText('Absent')).toBeInTheDocument();
 });
