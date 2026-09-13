@@ -125,7 +125,7 @@ _SLUG_TO_CODE = {v: k for k, v in _SLUG_MAP.items()}
 
 # Reference annotations for the paired examples above. Coordinates are only
 # supplied where checked; do not invent a genomic position from a c.HGVS.
-# See docs/genomics.md for reference sources and the legacy PALB1 limitation.
+# See docs/genomics_architecture.md for reference sources and the legacy PALB1 limitation.
 _GENE_ANNOTATIONS = {
     'brca1': ('17', '17q21.31', 'NM_007294.4', 'NC_000017.11'),
     'brca2': ('13', '13q13.1', 'NM_000059.4', 'NC_000013.11'),

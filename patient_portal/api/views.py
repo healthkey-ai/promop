@@ -141,9 +141,14 @@ from django.views.decorators.http import require_http_methods
 logger = logging.getLogger(__name__)
 
 
-def _write_genetic_mutations(person, mutations):
+def _genomics_type_concept(user, person):
+    from omop_core.authorization import get_actor_role
+    return 32865 if get_actor_role(user, person.person_id) in ('self', 'representative') else 32817
+
+
+def _write_genetic_mutations(person, mutations, type_concept_id):
     from omop_core.services.genomics import replace_variants
-    replace_variants(person, mutations)
+    replace_variants(person, mutations, type_concept_id=type_concept_id)
 
 
 class PatientRecordPagination(PageNumberPagination):
@@ -1050,8 +1055,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             return error
         if request.method == 'GET':
             return Response(list_variants(person))
-        from omop_core.authorization import get_actor_role
-        type_id = 32865 if get_actor_role(request.user, person.person_id) in ('self', 'representative') else 32817
+        type_id = _genomics_type_concept(request.user, person)
         return Response(save_variant(person, request.data, type_concept_id=type_id), status=201)
 
     @action(detail=True, methods=['get'], url_path='genomics-catalog')
@@ -1080,8 +1084,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if request.method == 'DELETE':
             delete_variant(person, variant_id)
             return Response(status=204)
-        from omop_core.authorization import get_actor_role
-        type_id = 32865 if get_actor_role(request.user, person.person_id) in ('self', 'representative') else 32817
+        type_id = _genomics_type_concept(request.user, person)
         return Response(save_variant(person, request.data, variant_id, type_concept_id=type_id))
 
     def _patch_record(self, request, person, patient_info):
@@ -1160,12 +1163,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             _apply_patient_name(person, patient_name)
             if priority_edits:
                 from omop_core.services.genomics import replace_priority_fields
-                from omop_core.authorization import get_actor_role
-                type_id = 32865 if get_actor_role(request.user, person.person_id) in ('self', 'representative') else 32817
+                type_id = _genomics_type_concept(request.user, person)
                 replace_priority_fields(person, priority_edits, type_id)
                 patient_info.refresh_from_db()
             if mutations is not None:
-                _write_genetic_mutations(person, mutations)
+                _write_genetic_mutations(person, mutations, _genomics_type_concept(request.user, person))
                 patient_info.refresh_from_db()
             # The UI's height/weight inputs use canonical units. Set them before
             # Model.save computes BMI, without requiring an OMOP read-back.

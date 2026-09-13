@@ -683,8 +683,8 @@ def get_all_field_descriptors() -> list[dict]:
 
     # Nested variant attributes are mappings within genetic_mutations, not
     # independent patient-level scalars. Expose them for curator review too.
-    from omop_core.services.genomics_catalog import catalog
-    for attribute in catalog()['attributes']:
+    from omop_core.services.genomics_components import components
+    for attribute in components():
         name = 'genetic_mutations.' + attribute['key']
         mapping = mappings_by_field.get(name)
         result.append({

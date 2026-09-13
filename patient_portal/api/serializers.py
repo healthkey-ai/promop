@@ -1379,8 +1379,8 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
                 f.name for f in PatientRecord._meta.get_fields()
                 if getattr(f, 'concrete', False)
             }
-            from omop_core.services.genomics_catalog import catalog
-            genomic_components = {'genetic_mutations.' + a['key'] for a in catalog()['attributes']}
+            from omop_core.services.genomics_components import components
+            genomic_components = {'genetic_mutations.' + a['key'] for a in components()}
             if field_name not in concrete_names | genomic_components:
                 raise serializers.ValidationError({
                     'field_name': f"'{field_name}' is not a concrete PatientRecord field."

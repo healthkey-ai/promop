@@ -2652,12 +2652,8 @@ def _get_genomics_pathology_data(person: Person, snapshot: OmopSnapshot = None) 
             data['mrd_status'] = value[:50]
 
     mutations = _get_genetic_mutations(person, snapshot).get('genetic_mutations', [])
-    # A recorded negative/no-call is not a detected molecular marker. Legacy
-    # findings without an assessment retain their historical summary behavior.
-    # Status defaults to 'present' for legacy rows, so the filter is safe.
-    mutations = [m for m in mutations
-                 if m.get('assessment') in (None, '', 'present')
-                 and m.get('status', 'present') == 'present']
+    # The canonical state already accounts for explicit and legacy evidence.
+    mutations = [m for m in mutations if m.get('status') == 'present']
     if mutations:
         # ``genetic_mutations`` remains the structured canonical projection;
         # molecular_markers is its legacy display-compatible summary.
@@ -3537,11 +3533,11 @@ def _get_genetic_mutations(person: Person, snapshot: OmopSnapshot = None) -> dic
         if not gene and code not in ('36908-2', '81252-9') and not marker:
             continue
 
-        from omop_core.services.genomics import _read_note_text
+        from omop_core.services.genomics import _note_reader, _read_note_text
         mutation_data = {
             'id': measurement.measurement_id,
             'gene': (gene or '').lower(),
-            'variant': _read_note_text(measurement.value_as_string),
+            'variant': _read_note_text(measurement, measurement.pk, _note_reader(snapshot, person.pk)),
             'test_date': measurement.measurement_date.isoformat() if measurement.measurement_date else None,
         }
         if marker:
@@ -3560,9 +3556,10 @@ def _get_genetic_mutations(person: Person, snapshot: OmopSnapshot = None) -> dic
 
     from omop_core.services.genomics import enrich_variants
     data['genetic_mutations'] = [v for v in enrich_variants(mutations, snapshot) if v.get('gene')]
-    # Default status to 'present' for legacy rows with no stored status component.
+    from omop_core.services.genomics_state import effective_status
     for v in data['genetic_mutations']:
-        v.setdefault('status', 'present')
+        v['status'] = effective_status(v)
+        v['provenance'] = 'asserted'
     data.update(project_priority_variants(data['genetic_mutations']))
     snapshot.genomics_cache['projection'] = data
     return data

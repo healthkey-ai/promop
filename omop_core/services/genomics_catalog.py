@@ -1,5 +1,9 @@
 """Versioned CancerBot priority catalog; no patient facts are created by reads."""
 import json
+from copy import deepcopy
+from dataclasses import dataclass
+
+from django.utils import timezone
 from functools import lru_cache
 from pathlib import Path
 
@@ -71,21 +75,40 @@ _DERIVATION_FUNCTIONS = {
 }
 
 
+@dataclass(frozen=True)
+class DerivedFinding:
+    """Future derivations must identify their clinical rule version explicitly."""
+
+    finding: dict
+    derivation_version: str
+
+
 def project_priority_variants(variants):
+    # Inputs come from canonical parents/components, never previous derived
+    # PatientRecord values. Ignore derived rows defensively at this boundary.
+    asserted = [{**v, 'provenance': 'asserted'} for v in variants
+                if v.get('provenance') != 'derived']
     result = {name: [] for name in patient_fields()}
-    for variant in variants:
+    for variant in asserted:
         marker = marker_for_variant(variant)
         if marker:
-            entry = dict(variant)
-            if marker['key'] in _DERIVABLE_MARKERS:
-                entry['provenance'] = 'asserted'
-            result[marker['field_name']].append(entry)
-    # For derivable markers with no asserted finding, attempt derivation.
+            result[marker['field_name']].append(dict(variant))
     for marker_key in _DERIVABLE_MARKERS:
         field = next(m['field_name'] for m in markers() if m['key'] == marker_key)
-        if not result[field]:
-            derived = _DERIVATION_FUNCTIONS[marker_key](variants)
-            if derived is not None:
-                derived['provenance'] = 'derived'
-                result[field].append(derived)
+        if result[field]:
+            continue  # An assertion of any status takes precedence.
+        derived = _DERIVATION_FUNCTIONS[marker_key](deepcopy(asserted))
+        if derived is None:
+            continue
+        if (not isinstance(derived, DerivedFinding)
+                or not isinstance(derived.derivation_version, str)
+                or not derived.derivation_version.strip()
+                or not isinstance(derived.finding, dict)
+                or 'id' in derived.finding):
+            raise ValueError('Derived findings require a rule version and cannot claim a stored parent ID.')
+        result[field].append({
+            **derived.finding, 'marker_key': marker_key, 'provenance': 'derived',
+            'derivation_version': derived.derivation_version,
+            'derived_at': timezone.now().isoformat(),
+        })
     return result

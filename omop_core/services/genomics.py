@@ -12,35 +12,26 @@ from django.utils.dateparse import parse_date
 from django.utils.timezone import localdate
 from rest_framework.exceptions import NotFound, ValidationError
 
-from omop_core.models import Concept, ConceptRelationship, FieldConceptMapping, Measurement, Note, Observation, PatientRecord
-from omop_core.services.genomics_catalog import catalog, marker_for_variant, patient_fields
+from omop_core.models import Concept, FieldConceptMapping, Measurement, Observation, PatientRecord
+from omop_core.services.genomics_catalog import marker_for_variant, patient_fields
+from omop_core.services.genomics_components import component_codes, components
+from omop_core.services.genomics_vocabulary import resolve_loinc
+from omop_core.services.genomics_state import ASSESSMENT_STATUS, effective_status
 from omop_core.services.pk import next_pk
+from omop_core.services.clinical_text import OwnedTextReader, store_text
 from omop_core.signals import suppress_patient_record_refresh
 
 PREFIX = 'genomics:'
 PARENT_CODE = '81252-9'
-_CDM_TEXT_WIDTH = 60  # CDM conformant column width for value_as_string.
-# field: (source code, fallback OMOP domain). LOINCs from the discrete
-# genetic variant panel; local narrative fields explicitly remain unmapped.
-FIELDS = {a['key']: (a['code'], a['table'].title()) for a in catalog()['attributes']}
-# Correct catalog domains that disagree with LOINC (the catalog is frozen).
-# The seed migration resolves without domain filtering, so the mapping's
-# omop_table is correct; these fix the FIELDS fallback domain.
-FIELDS['genomic_dna_change'] = ('81290-9', 'Observation')
-FIELDS['variant_analysis_method_type'] = ('81304-8', 'Observation')
-FIELDS['variant_category'] = ('83005-9', 'Observation')
-# Components added after the frozen v1 catalog; seeded by later migrations.
-# Fallback domains match LOINC's standard domain where a LOINC exists.
-FIELDS['status'] = ('genomics:status', 'Measurement')          # LOINC 69548-6 → Measurement
-FIELDS['clone_fraction'] = ('genomics:clone_fraction', 'Measurement')  # no LOINC
-FIELDS['transcript_dna_change'] = ('genomics:transcript_dna_change', 'Measurement')  # LOINC 48004-6 → Measurement
-FIELDS['coverage_depth'] = ('genomics:coverage_depth', 'Observation')  # LOINC 82121-5 → Observation
-FIELDS['amino_acid_change_type'] = ('genomics:amino_acid_change_type', 'Measurement')  # LOINC 48006-1 → Measurement
+# Persisted approved mappings govern writes; this effective registry also
+# supplies discovery and serializer validation without rewriting seed history.
+FIELDS = {a['key']: (a['code'], a['table'].title()) for a in components()}
 
 # Variant-level components that do not apply to absent findings.
 _VARIANT_LEVEL_FIELDS = frozenset({
     'amino_acid_change', 'allelic_frequency', 'genomic_dna_change',
-    'transcript_reference_sequence_id',
+    'transcript_reference_sequence_id', 'transcript_dna_change',
+    'amino_acid_change_type', 'zygosity',
 })
 
 
@@ -52,9 +43,13 @@ def approved_mapping(field_name):
 
 
 def mapped_concept(mapping):
-    if mapping.concept_id and mapping.concept.standard_concept == 'S':
+    if (mapping.concept_id and mapping.concept.standard_concept == 'S'
+            and mapping.concept.invalid_reason is None):
         if mapping.concept.domain_id.lower() == mapping.omop_table:
-            return mapping.concept_id, mapping.concept_id
+            source = (resolve_loinc(mapping.concept_code).source
+                      if mapping.vocabulary_id == 'LOINC' and mapping.concept_code
+                      else mapping.concept)
+            return mapping.concept_id, source.pk if source else None
         # Domain drifted in a newer Athena release — fall through to LOINC
         # resolution which handles mismatches gracefully (concept 0 + source).
     if mapping.vocabulary_id == 'LOINC' and mapping.concept_code:
@@ -66,6 +61,16 @@ def mapped_concept(mapping):
 def normalize_variant(payload, existing=None):
     if not isinstance(payload, dict):
         raise ValidationError({'variant': 'Expected an object.'})
+    # Projection metadata is server-owned. An existing assertion may echo its
+    # unchanged provenance, but new/derived metadata never becomes an OMOP fact.
+    payload = dict(payload)
+    for key in ('provenance', 'derivation_version', 'derived_at'):
+        if key not in payload:
+            continue
+        if (key != 'provenance' or not existing
+                or payload[key] != 'asserted' or existing.get(key) != 'asserted'):
+            raise ValidationError({key: 'Read-only projection metadata; derived findings cannot be written.'})
+        payload.pop(key)
     allowed = set(FIELDS) | {'id', 'variant', 'mutation', 'test_date', 'assay_method', 'allelic_frequency_unit', 'clone_fraction_unit', 'marker_key'}
     unknown = set(payload) - allowed
     if unknown:
@@ -103,14 +108,25 @@ def normalize_variant(payload, existing=None):
                 raise ValueError()
         except ValueError:
             raise ValidationError({key: 'Use a valid YYYY-MM-DD date.'})
-    if data.get('assessment') not in ('', 'present', 'absent', 'not_tested', 'no_call', 'indeterminate'):
+    # A state-only edit supersedes an inherited legacy assessment. The old
+    # component remains in erroneous history; a supplied contradiction fails.
+    if (existing and payload.get('status') and 'assessment' not in payload
+            and payload['status'] != effective_status(existing)):
+        data['assessment'] = ''
+    if (data.get('assessment') not in ('', 'present', 'absent', 'not_tested', 'no_call', 'indeterminate')
+            and not (existing and data.get('assessment') == existing.get('assessment'))):
         raise ValidationError({'assessment': 'Use present, absent, not_tested, no_call or indeterminate.'})
     status = data.get('status', '')
     if status not in ('', 'present', 'absent', 'indeterminate'):
         raise ValidationError({'status': 'Use present, absent or indeterminate.'})
-    # Default to present when omitted, preserving every existing caller.
-    if not status:
-        data['status'] = 'present'
+    assessment_status = ASSESSMENT_STATUS.get(data.get('assessment'))
+    # Legacy clients use assessment as their only state control. An explicit
+    # status in this request still takes precedence and must agree.
+    if assessment_status and 'assessment' in payload and 'status' not in payload:
+        status = data['status'] = assessment_status
+    if status and assessment_status and status != assessment_status:
+        raise ValidationError({'assessment': 'Result assessment contradicts finding status.'})
+    data['status'] = effective_status(data)
     # Variant-level components do not apply to absent findings.
     if data['status'] == 'absent':
         supplied_variant_fields = _VARIANT_LEVEL_FIELDS & set(payload or {})
@@ -174,22 +190,11 @@ def normalize_variant(payload, existing=None):
 
 
 def _resolve(code, domain):
-    source = Concept.objects.filter(
-        vocabulary_id='LOINC', concept_code=code, invalid_reason__isnull=True,
-    ).first() if not code.startswith(PREFIX) else None
-    standard = source if source and source.standard_concept == 'S' else None
-    if source and standard is None:
-        mapping = ConceptRelationship.objects.filter(
-            concept_1=source, relationship_id='Maps to', invalid_reason__isnull=True,
-            concept_2__standard_concept='S', concept_2__invalid_reason__isnull=True,
-            concept_2__domain_id__in=['Measurement', 'Observation'],
-        ).select_related('concept_2').first()
-        standard = mapping.concept_2 if mapping else None
-    if standard and standard.domain_id in ('Measurement', 'Observation'):
-        domain = standard.domain_id
-    else:
-        standard = None
-    return (standard.pk if standard else 0), (source.pk if source else None), domain
+    resolved = resolve_loinc(code) if not code.startswith(PREFIX) else None
+    source = resolved.source if resolved else None
+    standard = resolved.standard if resolved else None
+    return (standard.pk if standard else 0), (source.pk if source else None), (
+        standard.domain_id if standard else domain)
 
 
 def _measurement_event_concepts():
@@ -208,39 +213,25 @@ def _event_concept():
     return concept.pk
 
 
-def _store_text(value, person, date, type_concept_id, parent_pk):
-    """Store text, overflow to a linked NOTE row if it exceeds CDM width.
-
-    Returns the string to store in value_as_string (truncated with note
-    reference if overflow) and the created Note pk (or None).
-    """
-    if not value or len(value) <= _CDM_TEXT_WIDTH:
-        return value, None
-    note = Note.objects.create(
-        note_id=next_pk(Note, 'note_id'),
-        person=person,
-        note_date=date,
-        note_type_concept_id=0,
-        note_text=value,
-        note_source_value=f'genomics:overflow:{parent_pk}',
-    )
-    reference = f'[note:{note.pk}]'
-    return value[:_CDM_TEXT_WIDTH - len(reference)] + reference, note.pk
+def _note_context(parent_id):
+    return f'genomics:overflow:{parent_id}'
 
 
-def _read_note_text(value):
-    """Retrieve full text from a linked NOTE if the value contains a note reference."""
-    if not value or '[note:' not in value:
-        return value
-    import re
-    match = re.search(r'\[note:(\d+)\]$', value)
-    if not match:
-        return value
-    try:
-        note = Note.objects.get(pk=int(match.group(1)))
-        return note.note_text
-    except Note.DoesNotExist:
-        return value
+def _store_text(value, row, parent_id):
+    return store_text(row, value, namespace='genomics', context=_note_context(parent_id))
+
+
+def _note_reader(snapshot, person_id):
+    if 'notes' not in snapshot.genomics_cache:
+        snapshot.genomics_cache['notes'] = OwnedTextReader(
+            person_id, [*snapshot.measurements, *snapshot.observations],
+        )
+    return snapshot.genomics_cache['notes']
+
+
+def _read_note_text(row, parent_id, reader):
+    return reader.read(row, namespace='genomics', context=_note_context(parent_id),
+                       legacy_source=_note_context(parent_id))
 
 
 def _components(person, parent_id):
@@ -253,13 +244,28 @@ def _components(person, parent_id):
     )
 
 
+def _component_codes(snapshot):
+    if 'component_codes' not in snapshot.genomics_cache:
+        codes = component_codes()
+        # Reads survive withdrawn approval; only writes require current approval.
+        codes.update({m.source_value: m.field_name.split('.', 1)[1]
+            for m in FieldConceptMapping.objects.filter(field_name__startswith='genetic_mutations.')})
+        snapshot.genomics_cache['component_codes'] = codes
+    return snapshot.genomics_cache['component_codes']
+
+
+def _component_field(row, prefix, codes):
+    field = codes.get(getattr(row, f'{prefix}_source_value'))
+    if not field:
+        concept = getattr(row, f'{prefix}_concept')
+        field = codes.get(concept.concept_code) if concept.vocabulary_id == 'LOINC' else None
+    return field
+
+
 def enrich_variants(variants, snapshot):
     """Overlay linked components in one snapshot pass, including imported facts."""
     by_id = {v['id']: v for v in variants}
-    codes = {code: key for key, (code, _) in FIELDS.items()}
-    # Reads survive withdrawn approval; only writes require current approval.
-    codes.update({m.source_value: m.field_name.split('.', 1)[1]
-        for m in FieldConceptMapping.objects.filter(field_name__startswith='genetic_mutations.')})
+    codes = _component_codes(snapshot)
     for rows, prefix, event_field in (
         (snapshot.measurements, 'measurement', 'meas_event_field_concept_id'),
         (snapshot.observations, 'observation', 'obs_event_field_concept_id'),
@@ -271,10 +277,7 @@ def enrich_variants(variants, snapshot):
             target = by_id.get(getattr(row, f'{prefix}_event_id'))
             if target is None or getattr(row, event_field) not in valid_ids or row.is_erroneous:
                 continue
-            field = codes.get(getattr(row, f'{prefix}_source_value'))
-            if not field:
-                concept = getattr(row, f'{prefix}_concept')
-                field = codes.get(concept.concept_code) if concept.vocabulary_id == 'LOINC' else None
+            field = _component_field(row, prefix, codes)
             if field == 'allelic_frequency':
                 target[field] = float(row.value_as_number) if row.value_as_number is not None else None
                 target['allelic_frequency_unit'] = row.unit_source_value or '1'
@@ -284,7 +287,7 @@ def enrich_variants(variants, snapshot):
             elif field == 'coverage_depth':
                 target[field] = float(row.value_as_number) if row.value_as_number is not None else None
             elif field:
-                value = _read_note_text(row.value_as_string)
+                value = _read_note_text(row, target['id'], _note_reader(snapshot, row.person_id))
                 if value is None and row.value_as_concept_id:
                     value = row.value_as_concept.concept_name
                 target[field] = value
@@ -341,11 +344,11 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_r
         )
     else:
         parent = Measurement.objects.get(person=person, pk=variant_id, is_erroneous=False)
+    parent.measurement_type_concept_id = type_concept_id
     parent.measurement_date = data['test_date']
     parent.qualifier_source_value = data['gene']
     raw_variant = data['variant'] or data['variant_name'] or data['genomic_dna_change'] or data['amino_acid_change']
-    stored, _ = _store_text(raw_variant, person, data['test_date'], type_concept_id, parent.measurement_id)
-    parent.value_as_string = stored
+    parent.value_as_string = _store_text(raw_variant, parent, parent.pk)
     # Origin and interpretation are separate facts. Do not leave stale legacy
     # qualifiers after the corresponding component has been cleared.
     parent.qualifier_concept_id = None
@@ -361,7 +364,7 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_r
     for rows in _components(person, parent.pk):
         # Only replace known component fields; unrelated linked facts survive.
         source_field = f'{rows.model._meta.model_name}_source_value'
-        codes = [code for code, _ in FIELDS.values()] + list(FieldConceptMapping.objects.filter(
+        codes = list(component_codes()) + list(FieldConceptMapping.objects.filter(
             field_name__startswith='genetic_mutations.').values_list('source_value', flat=True))
         concept_field = f'{rows.model._meta.model_name}_concept'
         rows.filter(Q(**{f'{source_field}__in': codes}) | Q(**{
@@ -400,8 +403,7 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_r
         elif key == 'coverage_depth':
             attrs['value_as_number'] = value
         else:
-            stored_text, _ = _store_text(str(value), person, data['test_date'], type_concept_id, parent.pk)
-            attrs['value_as_string'] = stored_text
+            attrs['value_as_string'] = _store_text(str(value), model(**attrs), parent.pk)
         model.objects.create(**attrs)
     if not skip_refresh:
         from omop_core.services.patient_record_service import refresh_patient_record
@@ -428,7 +430,7 @@ def delete_variant(person, variant_id, skip_refresh=False):
 
 @transaction.atomic
 @suppress_patient_record_refresh()
-def replace_variants(person, payload):
+def replace_variants(person, payload, type_concept_id=32817):
     """Compatibility for PatientRecord PATCH and existing import callers."""
     if not isinstance(payload, list):
         raise ValidationError({'genetic_mutations': 'Expected a list of variants.'})
@@ -445,7 +447,7 @@ def replace_variants(person, payload):
         if variant_id is not None and row == current[variant_id]:
             keep.add(variant_id)
             continue
-        saved = save_variant(person, row, variant_id, type_concept_id=32865)
+        saved = save_variant(person, row, variant_id, type_concept_id=type_concept_id)
         keep.add(saved['id'])
     for variant_id in current.keys() - keep:
         delete_variant(person, variant_id)
