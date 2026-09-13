@@ -129,8 +129,8 @@ def curated_values_from_snapshot(snapshot):
                 question = answer.question_concept
                 matching.append(indexed[question.domain_id.lower()].get((question.pk, question.concept_code)))
         matching = [r for r in matching if r is not None]
-        from omop_core.services.breast_cancer import fact_date
-        row = max(matching, key=lambda r: (fact_date(r), r.pk)) if matching else None
+        from omop_core.services.breast_cancer import fact_order
+        row = max(matching, key=fact_order) if matching else None
         if row is None:
             continue
         value = resolver.reverse(name, row)
@@ -176,7 +176,8 @@ def project_field_to_omop(mapping) -> int:
                 if mapping.field_name not in (record.user_edited_fields or []):
                     continue
                 if project_single_value(record.person, mapping.field_name,
-                                        getattr(record, mapping.field_name), projection):
+                                        getattr(record, mapping.field_name),
+                                        {**projection, 'staging_basis': record.staging_modalities}):
                     refresh_patient_record(record.person)
                     count += 1
         except Exception:
@@ -192,6 +193,15 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
     try:
         with transaction.atomic():
             Person.objects.select_for_update().get(pk=person.pk)
+            from omop_core.services.breast_cancer import STAGE_QUESTIONS, staging_clear_projections, staging_projection
+            if field_name in STAGE_QUESTIONS and 'staging_basis' in projection:
+                if _is_empty(value):
+                    changed = False
+                    for recipe in staging_clear_projections(field_name, projection):
+                        changed |= _project_single_value(person, field_name, value, recipe,
+                            acknowledge_existing=acknowledge_existing, after_pk=after_pk)
+                    return changed
+                projection = staging_projection(field_name, projection)
             return _project_single_value(
                 person, field_name, value, projection,
                 acknowledge_existing=acknowledge_existing, after_pk=after_pk,
@@ -269,6 +279,15 @@ def _project_single_value(person, field_name, value, projection, *, acknowledge_
                 person=person, is_erroneous=False,
                 **{concept_field: concept_id, src_field: source_value, date_field: today},
             )
+            if projection.get('staging_field'):
+                from django.db.models import Q
+                basis = projection['qualifier_source_value']
+                qualifiers = Q(qualifier_source_value=basis)
+                if basis in ('c', 'p'):
+                    qualifiers |= Q(qualifier_source_value__isnull=True) | Q(qualifier_source_value='')
+                event_field = 'meas_event_field_concept' if target == 'measurement' else 'obs_event_field_concept'
+                candidates = candidates.filter(qualifiers, **{
+                    f'{target}_event_id__isnull': True, f'{event_field}__isnull': True})
             if after_pk is not None:
                 candidates = candidates.filter(pk__gt=after_pk)
             instance = candidates.order_by('-' + pk_field).first()
@@ -282,6 +301,9 @@ def _project_single_value(person, field_name, value, projection, *, acknowledge_
             answer_fields = ('value_as_number', 'value_as_string', 'value_as_concept_id',
                              'value_source_value', 'unit_source_value', 'unit_concept_id')
             previous = {f: getattr(instance, f) for f in answer_fields} if val_num else {}
+            if projection.get('staging_field'):
+                previous['qualifier_source_value'] = instance.qualifier_source_value
+                instance.qualifier_source_value = projection['qualifier_source_value']
             note_changed = False
             if val_num is not None:
                 # Reset all answer columns, including answers on same-day imports.
@@ -304,13 +326,16 @@ def _project_single_value(person, field_name, value, projection, *, acknowledge_
                             instance.value_as_string = str(value)
                 instance.unit_source_value = projection.get('unit') or None
                 instance.unit_concept_id = projection.get('unit_concept_id') or None
-                if answer_mapping and not _is_empty(value):
+                if choice and not _is_empty(value):
                     from omop_core.services.field_values import store_source_answer
-                    instance.value_as_concept_id = answer_mapping.target_concept_id
+                    if answer_mapping:
+                        instance.value_as_concept_id = answer_mapping.target_concept_id
                     instance.value_source_value, source_changed = store_source_answer(instance, raw_value)
                     note_changed |= source_changed
             if existing and not note_changed and all(getattr(instance, f) == v for f, v in previous.items()):
                 return acknowledge_existing
+            if projection.get('staging_field'):
+                setattr(instance, f'{target}_datetime', timezone.now())
             instance._skip_patient_record_refresh = True
             instance.save()
         return True
@@ -331,6 +356,8 @@ def without_cleared_history(rows, target):
     result = []
     for row in rows:
         key = (getattr(row, concept_field), getattr(row, source_field))
+        from omop_core.services.breast_cancer import staging_history_key
+        key = staging_history_key(row) or key
         if row.value_source_value == CLEAR_VALUE:
             cleared.add(key)
         elif key not in cleared:

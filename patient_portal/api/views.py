@@ -1217,7 +1217,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             if clinical_fields:
                 from omop_core.services.patient_record_service import recompute_patient_record_fields
 
-                projected = self._project_mapped_fields(person, clinical_fields, serializer.validated_data)
+                projected = self._project_mapped_fields(person, clinical_fields, serializer.validated_data, record=patient_info)
                 patient_info.user_edited_fields = sorted(
                     set(patient_info.user_edited_fields or []) - projected
                 )
@@ -1231,7 +1231,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         return Response({**PatientRecordSerializer(patient_info).data, 'previous_values': previous_values})
 
     @staticmethod
-    def _project_mapped_fields(person, direct_fields, patch_data):
+    def _project_mapped_fields(person, direct_fields, patch_data, *, record=None):
         """Project validated edits using the editor's curated or built-in recipe.
 
         Each projection uses a savepoint so failure preserves the PatientRecord
@@ -1249,9 +1249,14 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             logger.warning('Could not resolve OMOP projections')
             return set()
         projected = set()
+        from omop_core.services.breast_cancer import STAGE_QUESTIONS
+        if set(direct_fields) & STAGE_QUESTIONS.keys() and record is None:
+            record = PatientRecord.objects.filter(person=person).only('staging_modalities').first()
         for field in direct_fields:
             projection = projection_for_descriptor(descriptors.get(field))
             if projection:
+                if field in STAGE_QUESTIONS:
+                    projection = {**projection, 'staging_basis': record.staging_modalities if record else None}
                 if project_single_value(person, field, patch_data[field], projection,
                                         acknowledge_existing=True):
                     # Occurrences and structured answers need their dedicated

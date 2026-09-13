@@ -19,8 +19,10 @@ Usage:
 """
 
 import logging
+import json
+import os
 
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 
 from omop_core.models import PatientRecord
 from omop_core.services.patient_record_service import (
@@ -35,6 +37,12 @@ class Command(BaseCommand):
     help = "Re-derive PatientRecord rows whose derivation_version is below the current version."
 
     def add_arguments(self, parser):
+        plans = parser.add_mutually_exclusive_group()
+        plans.add_argument('--plan', metavar='PRIVATE_FILE', help='Preview an explicit, bounded person scope into a new private signed file.')
+        plans.add_argument('--apply-plan', metavar='PRIVATE_FILE', help='Apply a reviewed plan, resuming previously completed records.')
+        plans.add_argument('--rollback-plan', metavar='PRIVATE_FILE', help='Restore applied read-model changes if no later edits occurred.')
+        parser.add_argument('--person-id', type=int, action='append', default=[],
+                            help='Select a person for --plan; repeat for up to 100 people.')
         parser.add_argument(
             "--target-version",
             type=int,
@@ -67,6 +75,10 @@ class Command(BaseCommand):
         )
 
     def handle(self, **options):
+        if options['plan'] or options['apply_plan'] or options['rollback_plan']:
+            return self._handle_plan(options)
+        if options['person_id']:
+            raise CommandError('--person-id requires --plan.')
         target = options["target_version"] if options["target_version"] is not None else DERIVATION_VERSION
         backfill_all = options["backfill_all"]
         batch_size = options["batch_size"]
@@ -122,3 +134,37 @@ class Command(BaseCommand):
                 f"Done. {success} re-derived, {errors} error(s)."
             )
         )
+
+    def _handle_plan(self, options):
+        from omop_core.services.projection_refresh_plan import (
+            PlanConflict, apply_plan, create_plan, summarize,
+        )
+        if (options['backfill_all'] or options['organization'] or options['dry_run']
+                or options['target_version'] is not None):
+            raise CommandError('Plan operations use their explicit person scope; do not combine legacy backfill filters.')
+        if not options['plan'] and options['person_id']:
+            raise CommandError('Apply and rollback use the scope in the signed plan.')
+        try:
+            if options['plan']:
+                plan = create_plan(options['person_id'])
+                # Exclusive creation prevents overwriting another plan; mode
+                # 0600 prevents exposing exact before/after clinical values.
+                fd = os.open(options['plan'], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, 'w') as output:
+                    json.dump(plan, output, indent=2, sort_keys=True)
+                    output.write('\n')
+                self.stdout.write(json.dumps({'preview': summarize(plan)}, sort_keys=True))
+            else:
+                path = options['apply_plan'] or options['rollback_plan']
+                with open(path) as source:
+                    plan = json.load(source)
+                result = apply_plan(plan, rollback=bool(options['rollback_plan']))
+                self.stdout.write(json.dumps(result, sort_keys=True))
+        except PlanConflict as error:
+            raise CommandError(str(error)) from None
+        except (OSError, ValueError, KeyError, TypeError):
+            raise CommandError('The private plan could not be read or written. Check its path and format; existing files are never overwritten.') from None
+        except Exception:
+            # Driver errors can contain clinical values; preserve the original
+            # transaction rollback without copying exception text to logs.
+            raise CommandError('Refresh plan failed. Completed records remain audited; the current record was rolled back.') from None

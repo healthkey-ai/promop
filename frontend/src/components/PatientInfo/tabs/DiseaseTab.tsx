@@ -22,6 +22,8 @@ interface Props {
 }
 
 function BreastCancerSection({ formData, onChange }: Omit<Props, 'diseaseType'>) {
+  const basis = String(formData?.staging_modalities ?? '').split(/\s*(?:→|:)\s*/)[0].toLowerCase();
+  const stagingContext = ['c', 'p', 'yp'].includes(basis) ? `BC:${basis}` : undefined;
   // Ask about *this* patient: whether a field may be edited depends on who is
   // asking and whose record it is, not only on whether the field is mapped.
   const personId = (formData?.person_id ?? formData?.person) as number | undefined;
@@ -47,10 +49,10 @@ function BreastCancerSection({ formData, onChange }: Omit<Props, 'diseaseType'>)
             <ClinicalField label="Histologic Type" name="histologic_type" descriptor={descriptors.histologic_type} type="select" value={formData?.histologic_type} options={histOptions} onChange={onChange} vocabSource={histologicSource} />
           </div>
           <ClinicalField label="Menopausal Status" name="menopausal_status" descriptor={descriptors.menopausal_status} type="select" value={formData?.menopausal_status} options={MENOPAUSAL_OPTIONS} onChange={onChange} />
-          <ClinicalField label="Tumor Stage" name="tumor_stage" descriptor={descriptors.tumor_stage} type="select" value={formData?.tumor_stage} options={TUMOR_STAGE_OPTIONS} onChange={onChange} vocabSource={tumorStageSource} />
-          <ClinicalField label="Nodes Stage" name="nodes_stage" descriptor={descriptors.nodes_stage} type="select" value={formData?.nodes_stage} options={NODES_STAGE_OPTIONS} onChange={onChange} vocabSource={nodesStageSource} />
-          <ClinicalField label="Staging Modalities" name="staging_modalities" descriptor={descriptors.staging_modalities} type="select" value={formData?.staging_modalities} options={STAGING_MODALITIES_OPTIONS} onChange={onChange} vocabSource={stagingModalitySource} />
-          <ClinicalField label="Distant Metastasis Stage" name="distant_metastasis_stage" descriptor={descriptors.distant_metastasis_stage} type="select" value={formData?.distant_metastasis_stage} options={DISTANT_METASTASIS_STAGE_OPTIONS} onChange={onChange} vocabSource={distantMetSource} />
+          <ClinicalField label="Tumor Stage" name="tumor_stage" descriptor={descriptors.tumor_stage} valueContext={stagingContext} type="select" value={formData?.tumor_stage} options={TUMOR_STAGE_OPTIONS} onChange={onChange} vocabSource={tumorStageSource} />
+          <ClinicalField label="Nodes Stage" name="nodes_stage" descriptor={descriptors.nodes_stage} valueContext={stagingContext} type="select" value={formData?.nodes_stage} options={NODES_STAGE_OPTIONS} onChange={onChange} vocabSource={nodesStageSource} />
+          <ClinicalField label="Staging Basis" name="staging_modalities" descriptor={descriptors.staging_modalities} type="select" value={formData?.staging_modalities} options={STAGING_MODALITIES_OPTIONS} onChange={onChange} vocabSource={stagingModalitySource} />
+          <ClinicalField label="Distant Metastasis Stage" name="distant_metastasis_stage" descriptor={descriptors.distant_metastasis_stage} valueContext={stagingContext} type="select" value={formData?.distant_metastasis_stage} options={DISTANT_METASTASIS_STAGE_OPTIONS} onChange={onChange} vocabSource={distantMetSource} />
           <ClinicalField label="Bone-Only Metastasis" name="bone_only_metastasis_status" descriptor={descriptors.bone_only_metastasis_status} type="boolean" value={formData?.bone_only_metastasis_status} onChange={onChange} />
           <ClinicalField label="Measurable Disease by RECIST" name="measurable_disease_by_recist_status" descriptor={descriptors.measurable_disease_by_recist_status} type="boolean" value={formData?.measurable_disease_by_recist_status} onChange={onChange} />
         </div>

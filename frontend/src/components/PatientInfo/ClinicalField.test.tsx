@@ -33,6 +33,17 @@ async function openSelect() {
 }
 
 describe('ClinicalField choices', () => {
+  it('uses the selected staging scope and keeps its canonical value', async () => {
+    const onChange = vi.fn();
+    render(<ClinicalField label="Tumor stage" name="tumor_stage" type="select" value=""
+      valueContext="BC:p" descriptor={{ kind: 'direct', writable: true,
+        options: [{ value: 'T2', label: 'Default category' }],
+        options_by_context: { 'BC:p': [{ value: 'T1', label: 'Pathological category one' }] },
+      }} onChange={onChange} />);
+    expect(await openSelect()).toEqual(['Pathological category one']);
+    fireEvent.click(screen.getByRole('option', { name: 'Pathological category one' }));
+    expect(onChange).toHaveBeenCalledWith('tumor_stage', 'T1');
+  });
   it.each([[1, 'Grade one'], [false, 'Absent']] as const)(
     'shows a curated label and saves typed value %s', async (value, label) => {
       const onChange = vi.fn();

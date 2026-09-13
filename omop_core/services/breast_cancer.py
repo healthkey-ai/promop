@@ -10,8 +10,110 @@ STAGE_QUESTIONS = {
 }
 
 
+def staging_basis(value):
+    """Accept the existing basis labels; never choose one from a mixed list."""
+    if value is None or value == '':
+        return None
+    labels = {'c': 'clinical', 'p': 'pathological', 'yp': 'pathological after neoadjuvant therapy'}
+    token = str(value).strip().casefold()
+    for basis, label in labels.items():
+        if token in (basis, label, f'{basis}: {label}', f'{basis} → {label}'):
+            return basis
+    raise ValueError('Select one clinical, pathological or post-neoadjuvant pathological basis')
+
+
+def staging_projection(field, projection, *, basis=None):
+    """Narrow TNM adapter under the approved canonical field recipe.
+
+    Unscoped custom questions retain their existing recipe. A scoped answer is
+    reviewed under BC:c, BC:p or BC:yp; an unspecified basis retains the default
+    answer scope of the approved field mapping.
+    """
+    from omop_core.models import Concept
+    from omop_core.services.field_values import standard_target
+    codes = STAGE_QUESTIONS.get(field, {})
+    question = Concept.objects.filter(pk=projection.get('concept_id')).first()
+    if not question or question.vocabulary_id != 'LOINC' or question.concept_code not in codes:
+        if projection.get('staging_basis'):
+            raise ValueError('The approved field question has no staging recipe for the selected basis')
+        return projection
+    selected = staging_basis(projection.get('staging_basis')) if basis is None else basis
+    explicit = selected is not None
+    selected = selected or codes[question.concept_code]
+    code = next(code for code, b in codes.items() if b == ('p' if selected == 'yp' else selected))
+    target = Concept.objects.filter(vocabulary_id='LOINC', concept_code=code).first()
+    if not standard_target(target, {'Measurement'}):
+        raise ValueError('The selected staging question is unavailable in the current vocabulary')
+    return {**projection, 'concept_id': target.pk, 'source_value': code, 'omop_table': 'measurement',
+            'staging_field': field, 'qualifier_source_value': selected,
+            'context_key': f'BC:{selected}' if explicit else ''}
+
+
+def staging_clear_projections(field, projection):
+    first = staging_projection(field, projection)
+    if 'staging_field' not in first:
+        return [first]
+    # PatientRecord's flat-field clear suppresses every prior basis in the
+    # aggregate view. Underlying dated/linked assessment history is retained.
+    recipes = [first]
+    for basis in ('c', 'p', 'yp'):
+        recipe = staging_projection(field, projection, basis=basis)
+        if recipe not in recipes:
+            recipes.append(recipe)
+    return recipes
+
+
+def staging_history_key(row):
+    for field, codes in STAGE_QUESTIONS.items():
+        if matches(row, codes):
+            concept = getattr(row, 'measurement_concept', None) or getattr(row, 'observation_concept', None)
+            source = getattr(row, 'measurement_source_value', None) or getattr(row, 'observation_source_value', None)
+            basis = codes.get(getattr(concept, 'concept_code', None)) or codes.get(source)
+            if basis == 'p' and getattr(row, 'qualifier_source_value', None) == 'yp':
+                basis = 'yp'
+            return ('staging', field, basis)
+    return None
+
+
 def fact_date(row):
-    return getattr(row, 'measurement_date', None) or getattr(row, 'observation_date', None)
+    from datetime import date
+    value = getattr(row, 'measurement_date', None) or getattr(row, 'observation_date', None)
+    return date.fromisoformat(value) if isinstance(value, str) else value
+
+
+def fact_order(row):
+    from datetime import datetime, time, timezone
+    moment = getattr(row, 'measurement_datetime', None) or getattr(row, 'observation_datetime', None)
+    if isinstance(moment, str):
+        moment = datetime.fromisoformat(moment)
+    moment = moment or datetime.combine(fact_date(row), time.min, tzinfo=timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return (fact_date(row), moment, row.pk, row._meta.db_table)
+
+
+def without_cleared_staging_history(measurements, observations):
+    """Apply staging clears across current and legacy OMOP destinations."""
+    from omop_core.services.omop_projection import CLEAR_VALUE
+    clears = {}
+    for row in [*measurements, *observations]:
+        key = staging_history_key(row)
+        if key and row.value_source_value == CLEAR_VALUE:
+            if key not in clears or fact_order(row) > fact_order(clears[key]):
+                clears[key] = row
+
+    def visible(row):
+        clear = clears.get(staging_history_key(row))
+        if clear is None or row.value_source_value == CLEAR_VALUE:
+            return True
+        # Cross-table PKs do not establish same-day chronology. An undated
+        # legacy row cannot override a clear merely because its ID is larger.
+        if (fact_date(row) == fact_date(clear) and row._meta.db_table != clear._meta.db_table
+                and not (getattr(row, 'measurement_datetime', None) or getattr(row, 'observation_datetime', None))):
+            return False
+        return fact_order(row) > fact_order(clear)
+
+    return [r for r in measurements if visible(r)], [r for r in observations if visible(r)]
 
 
 def event_key(row):
@@ -46,18 +148,41 @@ def staging_data(snapshot, legacy_source):
     resolver = ValueResolver.for_snapshot(snapshot)
     selected_rows = snapshot.genomics_cache.setdefault('field_value_native_rows', {})
     selected_rows.update({field: None for field in STAGE_QUESTIONS})
+    overrides = {}
+    for (field, context), choices in resolver.choices.items():
+        if field not in STAGE_QUESTIONS or context not in ('', 'BC:c', 'BC:p', 'BC:yp'):
+            continue
+        for choice in choices:
+            mapping = resolver.mapping(choice)
+            if mapping and mapping.question_concept_id:
+                overrides.setdefault((field, mapping.question_concept_id), set()).add(context.removeprefix('BC:'))
+
+    def field_basis(field, row):
+        native = staging_history_key(row)
+        if native and native[1] == field:
+            return native[2]
+        question_id = getattr(row, 'measurement_concept_id', None) or getattr(row, 'observation_concept_id', None)
+        bases = overrides.get((field, question_id), set())
+        qualifier = getattr(row, 'qualifier_source_value', None)
+        if qualifier in ('c', 'p', 'yp') and (qualifier in bases or '' in bases):
+            return qualifier
+        return next(iter(bases)) if len(bases) == 1 and '' not in bases else None
+
     def stage_value(field, row):
-        value = resolver.reverse(field, row)
+        basis = field_basis(field, row)
+        context = f'BC:{basis}' if basis else ''
+        if (field, context) not in resolver.choices:
+            context = ''
+        value = resolver.reverse(field, row, context)
         if value is None:
             value = _coded_value(row)
         if value is None or str(value).strip().casefold() in ('', 'true', 'false', 'yes', 'no'):
             return None
         return str(value).strip()
 
-    rows = sorted([*snapshot.measurements, *snapshot.observations],
-                  key=lambda r: (fact_date(r), r.pk, r._meta.db_table), reverse=True)
-    candidates = [r for r in rows if any(matches(r, codes) and stage_value(field, r) is not None
-                                        for field, codes in STAGE_QUESTIONS.items())]
+    rows = sorted([*snapshot.measurements, *snapshot.observations], key=fact_order, reverse=True)
+    candidates = [r for r in rows if any(field_basis(field, r) and stage_value(field, r) is not None
+                                        for field in STAGE_QUESTIONS)]
     # Never combine facts explicitly linked to different tumors/assessments.
     if candidates:
         latest_link = event_key(candidates[0])
@@ -69,14 +194,10 @@ def staging_data(snapshot, legacy_source):
             candidates = [r for r in candidates if not all(event_key(r))]
     data, bases = {}, set()
     for field, codes in STAGE_QUESTIONS.items():
-        row = next((r for r in candidates if matches(r, codes) and stage_value(field, r) is not None), None)
+        row = next((r for r in candidates if field_basis(field, r) and stage_value(field, r) is not None), None)
         if row is None:
             continue
-        concept = getattr(row, 'measurement_concept', None) or getattr(row, 'observation_concept', None)
-        source = getattr(row, 'measurement_source_value', None) or getattr(row, 'observation_source_value', None)
-        basis = codes.get(getattr(concept, 'concept_code', None)) or codes.get(source)
-        if getattr(row, 'qualifier_source_value', None) == 'yp' and basis == 'p':
-            basis = 'yp'
+        basis = field_basis(field, row)
         data[field] = stage_value(field, row)
         selected_rows[field] = row
         bases.add(basis)

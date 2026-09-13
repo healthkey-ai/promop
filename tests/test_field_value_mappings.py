@@ -34,6 +34,49 @@ def test_stable_identity_and_typed_values():
     assert choice.canonical_value == 1
 
 
+@pytest.mark.parametrize('original,replacement', [(1, True), (0, False), (True, 1), (False, 0)])
+def test_choice_identity_cannot_switch_boolean_and_number(original, replacement):
+    from patient_portal.api.serializers import FieldChoiceSerializer
+    from rest_framework.exceptions import ValidationError as APIValidationError
+    choice = FieldChoice.objects.create(field_name='biopsy_grade', display='Reviewed identity', canonical_value=original)
+    serializer = FieldChoiceSerializer(choice, data={'canonical_value': replacement}, partial=True)
+    with pytest.raises(APIValidationError, match='immutable'):
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+    choice.refresh_from_db()
+    assert type(choice.canonical_value) is type(original)
+
+
+def test_clear_uses_imported_question_history_without_clearing_unapproved_questions():
+    from omop_core.services.field_curation_transfer import apply_payload, read_payload
+    from tests.factories import MeasurementFactory
+    choice, concept = mapped_choice()
+    old_question, current_question, proposed_question = [ConceptFactory() for _ in range(3)]
+    save_mapping(choice, {'question_concept': current_question})
+    payload = read_payload('default', tables=('choices',))
+    row = next(r for r in payload['choices'] if r['code'] == choice.code)
+    prior = {**row['value_mapping'], 'question_concept': {
+        'vocabulary_id': old_question.vocabulary_id, 'concept_code': old_question.concept_code}}
+    row['value_mapping_history'].append(prior)
+    row['value_mapping']['notes'] = 'Imported history from the source environment.'
+    apply_payload(payload, tables=('choices',))
+    unreviewed = FieldChoice.objects.create(field_name=choice.field_name, display='Unreviewed')
+    save_mapping(unreviewed, {'question_concept': proposed_question, 'status': 'proposed'})
+    person = PersonFactory()
+    from django.utils import timezone
+    old = MeasurementFactory(person=person, measurement_concept=old_question,
+        measurement_source_value=old_question.concept_code, measurement_date=timezone.localdate(), value_as_concept=concept)
+    unrelated = MeasurementFactory(person=person, measurement_concept=proposed_question,
+        measurement_source_value=proposed_question.concept_code, measurement_date=timezone.localdate(), value_as_string='Keep this result')
+    assert project_single_value(person, choice.field_name, None, {
+        'concept_id': current_question.pk, 'omop_table': 'measurement',
+        'source_value': current_question.concept_code, 'value_kind': 'string'})
+    old.refresh_from_db()
+    unrelated.refresh_from_db()
+    assert old.value_source_value == CLEAR_VALUE
+    assert unrelated.value_as_string == 'Keep this result'
+
+
 def test_coded_projection_readback_and_clear():
     choice, concept = mapped_choice(aliases=['pos'])
     question = ConceptFactory()
@@ -62,6 +105,29 @@ def test_unmapped_choice_remains_text_and_no_equivalent_can_be_reviewed():
     row = Measurement.objects.get(person=person, measurement_concept=question)
     assert row.value_as_string == 'Other'
     assert row.value_as_concept_id is None
+
+
+def test_unmapped_alias_retains_source_separately_from_canonical_text():
+    choice = FieldChoice.objects.create(field_name='her2_status', display='Other', aliases=['Local laboratory wording'])
+    question, person = ConceptFactory(), PersonFactory()
+    assert project_single_value(person, choice.field_name, 'Local laboratory wording', {
+        'concept_id': question.pk, 'omop_table': 'measurement',
+        'source_value': question.concept_code, 'value_kind': 'string'})
+    row = Measurement.objects.get(person=person, measurement_concept=question)
+    assert row.value_as_string == 'Other'
+    assert row.value_source_value == 'Local laboratory wording'
+    assert row.value_as_concept_id is None
+
+
+def test_transfer_cannot_switch_boolean_and_number_identity():
+    from omop_core.services.field_curation_transfer import apply_payload, read_payload
+    choice = FieldChoice.objects.create(field_name='biopsy_grade', display='Grade 1', canonical_value=1)
+    payload = read_payload('default', tables=('choices',))
+    next(row for row in payload['choices'] if row['code'] == choice.code)['canonical_value'] = True
+    with pytest.raises(ValidationError, match='canonical identity'):
+        apply_payload(payload, tables=('choices',))
+    choice.refresh_from_db()
+    assert type(choice.canonical_value) is int
 
 
 @pytest.mark.parametrize('change', [

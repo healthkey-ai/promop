@@ -135,16 +135,20 @@ def _unmapped_group(field):
     return GROUP_NEEDS_CONCEPT
 
 
-def _field_choice_options() -> dict[str, list[dict]]:
+def _field_choice_options():
     """Return curator-managed displays and their preferred code for every field."""
     result: dict[str, list[dict]] = {}
-    for choice in FieldChoice.objects.prefetch_related('codes').filter(retired=False, context_key=''):
+    scoped: dict[str, dict[str, list[dict]]] = {}
+    for choice in FieldChoice.objects.prefetch_related('codes').filter(retired=False):
         primary = next((code.code for code in choice.codes.all() if code.is_primary), None)
         option = {'value': choice.canonical_value if choice.canonical_value is not None else choice.display, 'code': primary}
         if option['value'] != choice.display:
             option['label'] = choice.display
-        result.setdefault(choice.field_name, []).append(option)
-    return result
+        if choice.context_key:
+            scoped.setdefault(choice.field_name, {}).setdefault(choice.context_key, []).append(option)
+        else:
+            result.setdefault(choice.field_name, []).append(option)
+    return result, scoped
 
 # PatientRecord field → the Person field the persons endpoint accepts.
 #
@@ -544,7 +548,7 @@ def build_writable_field_descriptor():
         concept_id=CONCEPT_LARGEST_LYMPH_NODE_DIMENSION
     ).only('concept_id', 'concept_code', 'concept_name', 'vocabulary_id').first()
 
-    choice_options = _field_choice_options()
+    choice_options, scoped_options = _field_choice_options()
     curated = _curated_writes(choice_options)
 
     descriptor = {}
@@ -902,4 +906,13 @@ def build_writable_field_descriptor():
             'source_value': 'patient-record:' + field,
         }
     descriptor['death_date']['reason'] = 'Corrections are dated OMOP observations; earlier facts remain as history.'
+    for field, contexts in scoped_options.items():
+        if field in descriptor:
+            descriptor[field]['options_by_context'] = contexts
+    descriptor['staging_modalities'] = {
+        'kind': KIND_DIRECT, 'writable': True, 'target': 'patient_record', 'value_kind': 'string',
+        'reason': 'Sets the basis for subsequent TNM edits; stored with their assessment.',
+        'options': [{'value': value, 'label': label} for value, label in (
+            ('c', 'Clinical'), ('p', 'Pathological'), ('yp', 'Pathological after neoadjuvant therapy'))],
+    }
     return descriptor

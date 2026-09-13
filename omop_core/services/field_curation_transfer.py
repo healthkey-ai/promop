@@ -413,7 +413,7 @@ def _apply_custom_fields(rows: list[dict], stats: TransferStats) -> None:
 
 def _apply_choices(rows: list[dict], stats: TransferStats) -> None:
     from django.core.exceptions import ValidationError
-    from omop_core.services.field_values import lock_scope, mapping_data, save_mapping, validate_choice
+    from omop_core.services.field_values import lock_scope, mapping_data, same_canonical_value, save_mapping, validate_choice
     for row in rows:
         context = row.get('context_key', '')
         lock_scope(row['field_name'], context)
@@ -427,7 +427,7 @@ def _apply_choices(rows: list[dict], stats: TransferStats) -> None:
             choice.save()
             stats._bump(stats.created, 'choices')
         else:
-            if 'canonical_value' in row and choice.canonical_value != row['canonical_value']:
+            if 'canonical_value' in row and not same_canonical_value(choice.canonical_value, row['canonical_value']):
                 raise ValidationError('Transfer cannot change the canonical identity of an existing choice.')
             if choice.display != row['display']:
                 values['aliases'] = list(dict.fromkeys([*choice.aliases, *values.get('aliases', []), choice.display]))

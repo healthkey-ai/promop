@@ -385,6 +385,21 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_r
         concept_id, source_id = mapped_concept(mapping)
         domain = mapping.omop_table.title()
         code = mapping.source_value
+        raw_value, choice, answer = value, None, None
+        if key not in ('allelic_frequency', 'clone_fraction', 'coverage_depth'):
+            field_name = 'genetic_mutations.' + key
+            context = data['gene'].upper()
+            if (field_name, context) not in resolver.choices:
+                context = ''
+            choice = resolver.resolve(field_name, value, context)
+            answer = resolver.mapping(choice)
+            if choice:
+                value = choice.canonical_value
+            if answer and answer.role != 'answer':
+                raise ValidationError({key: 'This assertion requires its own clinical event adapter.'})
+            if answer and answer.question_concept_id:
+                concept_id = answer.question_concept_id
+                domain = answer.question_concept.domain_id
         model, prefix, event_field = ((Measurement, 'measurement', 'meas_event_field_concept_id')
             if domain == 'Measurement' else (Observation, 'observation', 'obs_event_field_concept_id'))
         attrs = {
@@ -411,17 +426,13 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_r
         else:
             stored_text, _ = _store_text(str(value), person, data['test_date'], type_concept_id, parent.pk)
             attrs['value_as_string'] = stored_text
-            field_name = 'genetic_mutations.' + key
-            context = data['gene'].upper()
-            if (field_name, context) not in resolver.choices:
-                context = ''
-            answer = resolver.mapping(resolver.resolve(field_name, value, context))
-            if answer and answer.role == 'answer':
+            if answer:
                 attrs['value_as_concept_id'] = answer.target_concept_id
-                attrs['value_source_value'] = str(value)[:50]
-                if answer.question_concept_id and answer.question_concept.domain_id == domain:
-                    attrs[f'{prefix}_concept_id'] = answer.question_concept_id
-        model.objects.create(**attrs)
+        row = model(**attrs)
+        if choice:
+            from omop_core.services.field_values import store_source_answer
+            row.value_source_value, _ = store_source_answer(row, raw_value)
+        row.save()
     if not skip_refresh:
         from omop_core.services.patient_record_service import refresh_patient_record
         refresh_patient_record(person)

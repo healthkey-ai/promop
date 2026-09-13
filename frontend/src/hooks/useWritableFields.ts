@@ -46,6 +46,7 @@ export interface FieldDescriptor {
    *  whole vocabulary — OMOP's Race holds 1,409 concepts, which is not the
    *  question a clinical form asks. */
   options?: Array<{ value: string | number | boolean; label?: string; code?: string }>;
+  options_by_context?: Record<string, Array<{ value: string | number | boolean; label?: string; code?: string }>>;
   /** Several answers at once, stored comma-joined. */
   multiple?: boolean;
   /** OMOP projection metadata — present when the field has an approved mapping.

@@ -1669,9 +1669,9 @@ class FieldChoiceSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         from django.db import transaction
         from django.core.exceptions import ValidationError as ModelValidationError
-        from omop_core.services.field_values import lock_scope, validate_choice
+        from omop_core.services.field_values import lock_scope, same_canonical_value, validate_choice
         for key in ('field_name', 'code', 'canonical_value', 'context_key'):
-            if key in validated_data and validated_data[key] != getattr(instance, key):
+            if key in validated_data and not same_canonical_value(validated_data[key], getattr(instance, key)):
                 raise serializers.ValidationError({key: 'Choice identity is immutable; retire it and create a new choice.'})
         codes_data = validated_data.pop('codes', None)
         with transaction.atomic():

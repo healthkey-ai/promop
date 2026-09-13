@@ -714,6 +714,8 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
         (o.observation_source_value or '').startswith(SOURCE_PREFIX)
         or o.observation_source_value == LEGACY_SOURCE]
     from omop_core.services.omop_projection import without_cleared_history
+    from omop_core.services.breast_cancer import without_cleared_staging_history
+    measurements, observations = without_cleared_staging_history(measurements, observations)
     measurements = without_cleared_history(measurements, 'measurement')
     observations = without_cleared_history(observations, 'observation')
 
@@ -822,6 +824,12 @@ def _derived_value_matches(field_name, derived_value, saved_value):
     """Compare at the PatientRecord column's precision, including float extractors."""
     if _is_empty(derived_value) or _is_empty(saved_value):
         return _is_empty(derived_value) and _is_empty(saved_value)
+    if field_name == 'staging_modalities':
+        from omop_core.services.breast_cancer import staging_basis
+        try:
+            return staging_basis(derived_value) == staging_basis(saved_value)
+        except ValueError:
+            return derived_value == saved_value
     field = PatientRecord._meta.get_field(field_name)
     if isinstance(field, models.DecimalField):
         quantum = Decimal(1).scaleb(-field.decimal_places)

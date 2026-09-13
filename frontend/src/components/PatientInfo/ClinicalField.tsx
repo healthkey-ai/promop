@@ -18,6 +18,7 @@ interface Props {
    *  refuses to write. See #646. */
   unknownField?: boolean;
   descriptor?: FieldDescriptor;
+  valueContext?: string;
   onChange: (name: string, value: unknown) => void;
   /** Event date for this edit, shared across the tab. */
   date?: string;
@@ -47,6 +48,7 @@ export default function ClinicalField({
   type,
   value,
   descriptor,
+  valueContext,
   onChange,
   options,
   vocabSource,
@@ -63,7 +65,8 @@ export default function ClinicalField({
   const [ownDate, setOwnDate] = useState(today());
   // `absent` is stronger than "not writable": the server has no such field.
   const absent = !!unknownField;
-  const curated = descriptor?.options?.map((o) => ({ value: o.value, label: o.label ?? String(o.value) }));
+  const scoped = valueContext ? descriptor?.options_by_context?.[valueContext] : undefined;
+  const curated = (scoped ?? descriptor?.options)?.map((o) => ({ value: o.value, label: o.label ?? String(o.value) }));
   const choices = curated ?? options;
   // `multiple` is the descriptor saying several answers are stored at once,
   // comma-joined — SCT history is "autologous SCT,tandem SCT". Rendering that as

@@ -40,6 +40,14 @@ def validate_value_mapping(mapping):
         raise ValidationError({'target_concept': 'Select a current external standard concept in the appropriate domain.'})
     if mapping.question_concept_id and not standard_target(mapping.question_concept, {'Measurement', 'Observation'}):
         raise ValidationError({'question_concept': 'Select a current standard Measurement or Observation question.'})
+    if mapping.question_concept_id and mapping.choice.context_key in ('BC:c', 'BC:p', 'BC:yp'):
+        from omop_core.services.breast_cancer import STAGE_QUESTIONS
+        codes = STAGE_QUESTIONS.get(mapping.choice.field_name, {})
+        question = mapping.question_concept
+        basis = mapping.choice.context_key.removeprefix('BC:')
+        if (question.vocabulary_id == 'LOINC' and question.concept_code in codes
+                and codes[question.concept_code] != ('p' if basis == 'yp' else basis)):
+            raise ValidationError({'question_concept': 'The TNM question must match the reviewed staging basis.'})
     if mapping.role == 'fact' and mapping.question_concept_id:
         raise ValidationError({'question_concept': 'A clinical assertion is its own fact concept.'})
     if not mapping.vocabulary_release:
@@ -56,6 +64,11 @@ def value_key(value):
     if isinstance(value, bool):
         return ('boolean', value)
     return ('scalar', str(value).strip().casefold())
+
+
+def same_canonical_value(left, right):
+    """Python's True == 1 must not change a curated JSON value's identity."""
+    return type(left) is type(right) and left == right
 
 
 def choice_aliases(choice):
@@ -122,15 +135,26 @@ def historical_questions(field_name, context_key=''):
     mappings = FieldValueConceptMapping.objects.filter(
         choice__field_name=field_name, choice__context_key=context_key,
     )
-    keys = set(mappings.exclude(question_concept=None).values_list(
+    keys = set(mappings.filter(status='approved', outcome='mapped', role='answer').exclude(question_concept=None).values_list(
         'question_concept__vocabulary_id', 'question_concept__concept_code',
     ))
-    for decision in FieldValueMappingRevision.objects.filter(
-        mapping__in=mappings, decision__status='approved', decision__outcome='mapped',
-    ).values_list('decision', flat=True):
-        question = decision.get('question_concept')
-        if question:
-            keys.add((question['vocabulary_id'], question['concept_code']))
+    for revision in FieldValueMappingRevision.objects.filter(mapping__in=mappings).values_list('decision', flat=True):
+        # Transfers retain source revisions under origin/history. Follow them
+        # across repeated transfers, including a currently downgraded mapping.
+        pending = [revision]
+        while pending:
+            decision = pending.pop()
+            if not isinstance(decision, dict):
+                continue
+            if (decision.get('status') == 'approved' and decision.get('outcome') == 'mapped'
+                    and decision.get('role', 'answer') == 'answer'):
+                question = decision.get('question_concept')
+                if isinstance(question, dict) and question.get('vocabulary_id') and question.get('concept_code'):
+                    keys.add((question['vocabulary_id'], question['concept_code']))
+            origin = decision.get('origin')
+            if isinstance(origin, dict):
+                pending.extend(origin.get('history') or [])
+                pending.append(origin.get('transfer'))
     query = Q(pk__in=[])
     for vocabulary, code in keys:
         query |= Q(vocabulary_id=vocabulary, concept_code=code)
