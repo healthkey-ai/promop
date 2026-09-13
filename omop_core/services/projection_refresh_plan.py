@@ -181,6 +181,8 @@ def apply_plan(plan, *, rollback=False):
                 continue
             if rollback:
                 if not applied:
+                    if _digest(_state(record)) != entry['before_hash']:
+                        raise PlanConflict('The original record state and recovery audit are unavailable; automatic rollback was refused.')
                     counts['not_applied'] += 1
                     continue
                 if applied.signature != applied.compute_signature():

@@ -194,19 +194,29 @@ class ValueResolver:
         return cache['field_value_resolver']
 
     def __init__(self, fields=None):
-        qs = choice_queryset().filter(retired=False)
+        qs = choice_queryset()
         if fields is not None:
             qs = qs.filter(field_name__in=fields)
         self.choices = {}
+        # Retirement affects new selections, not the meaning of a stored
+        # result. Keep read candidates in the same query; never re-approve a
+        # withdrawn mapping or resolve a reused historical alias arbitrarily.
+        self.read_choices = {}
         for choice in qs:
-            self.choices.setdefault((choice.field_name, choice.context_key), []).append(choice)
+            key = (choice.field_name, choice.context_key)
+            self.read_choices.setdefault(key, []).append(choice)
+            if not choice.retired:
+                self.choices.setdefault(key, []).append(choice)
 
-    def resolve(self, field, value, context=''):
-        matches = [c for c in self.choices.get((field, context), []) if value_key(value) in {value_key(a) for a in choice_aliases(c)}]
+    def resolve(self, field, value, context='', *, include_retired=False):
+        pool = self.read_choices if include_retired else self.choices
+        matches = [c for c in pool.get((field, context), []) if value_key(value) in {value_key(a) for a in choice_aliases(c)}]
         return matches[0] if len(matches) == 1 else None
 
     @staticmethod
-    def mapping(choice):
+    def mapping(choice, *, for_read=False):
+        if choice and choice.retired and not for_read:
+            return None
         mapping = getattr(choice, 'value_mapping', None) if choice else None
         if mapping is None or mapping.status != 'approved' or mapping.outcome != 'mapped':
             return None
@@ -221,13 +231,13 @@ class ValueResolver:
         if target_id:
             question_id = getattr(row, 'measurement_concept_id', None) or getattr(row, 'observation_concept_id', None)
             matches = []
-            for choice in self.choices.get((field, context), []):
-                mapping = self.mapping(choice)
+            for choice in self.read_choices.get((field, context), []):
+                mapping = self.mapping(choice, for_read=True)
                 if (mapping and mapping.role == 'answer' and mapping.target_concept_id == target_id
                         and (not mapping.question_concept_id or mapping.question_concept_id == question_id)):
                     matches.append(choice)
             if len(matches) == 1:
                 return matches[0].canonical_value
         raw = row.value_as_number if row.value_as_number is not None else row.value_as_string
-        choice = self.resolve(field, raw, context) if raw is not None else None
+        choice = self.resolve(field, raw, context, include_retired=True) if raw is not None else None
         return choice.canonical_value if choice else raw

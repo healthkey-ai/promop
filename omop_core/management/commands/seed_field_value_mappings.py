@@ -14,6 +14,7 @@ class Command(BaseCommand):
 
     def handle(self, **options):
         counts = {'fields_created': 0, 'choices_created': 0, 'proposals_created': 0, 'existing_reviews_preserved': 0, 'unresolved_candidates': 0}
+        retired_preserved = set()
         with transaction.atomic():
             valid_fields = {f.name for f in models.PatientRecord._meta.concrete_fields}
             for field, vocab, code, expected_id, kind, unit in QUESTIONS:
@@ -34,10 +35,10 @@ class Command(BaseCommand):
             resolver = ValueResolver()
             def choice_for(field, context, value, label=None, aliases=()):
                 lock_scope(field, context)
-                existing = resolver.resolve(field, value, context)
+                existing = resolver.resolve(field, value, context) or resolver.resolve(field, value, context, include_retired=True)
                 if not existing and field in ('tumor_stage', 'nodes_stage', 'distant_metastasis_stage'):
                     # Existing TNM options retain their full explanatory labels.
-                    matching = [c for c in resolver.choices.get((field, context), [])
+                    matching = [c for c in resolver.read_choices.get((field, context), [])
                         if c.display.split(':', 1)[0].strip().casefold() == str(value).casefold()]
                     existing = matching[0] if len(matching) == 1 else None
                 if existing:
@@ -47,6 +48,7 @@ class Command(BaseCommand):
                 validate_choice(choice)
                 choice.save()
                 resolver.choices.setdefault((field, context), []).append(choice)
+                resolver.read_choices.setdefault((field, context), []).append(choice)
                 counts['choices_created'] += 1
                 return choice
             # Catalog rows remain available even when no equivalent is known.
@@ -54,13 +56,21 @@ class Command(BaseCommand):
                 if field not in valid_fields and not field.startswith('genetic_mutations.'):
                     continue
                 for row in getattr(models, model_name).objects.all():
-                    existing = resolver.resolve(field, row.title) or resolver.resolve(field, row.code)
+                    existing = (resolver.resolve(field, row.title) or resolver.resolve(field, row.code)
+                        or resolver.resolve(field, row.title, include_retired=True)
+                        or resolver.resolve(field, row.code, include_retired=True))
                     choice = existing or choice_for(field, '', row.title, aliases=[row.code])
+                    if choice.retired:
+                        retired_preserved.add(choice.pk)
+                        continue
                     if not getattr(choice, 'value_mapping', None):
                         save_mapping(choice, {'notes': f'{model_name}:{row.code}. Source catalog option; not a clinical approval.', 'outcome': 'needs_review'})
                         counts['proposals_created'] += 1
             for field, context, value, vocab, code in answer_candidates():
                 choice = choice_for(field, context, value)
+                if choice.retired:
+                    retired_preserved.add(choice.pk)
+                    continue
                 previous = models.FieldValueConceptMapping.objects.filter(choice=choice).first()
                 # Only upgrade our empty migration/seed proposals, never a curator's decision.
                 if previous and (previous.reviewer_id or previous.status != 'proposed' or previous.target_concept_id
@@ -79,4 +89,5 @@ class Command(BaseCommand):
                 counts['proposals_created'] += 1
             if not options['apply']:
                 transaction.set_rollback(True)
+        counts['retired_preserved'] = len(retired_preserved)
         self.stdout.write(('APPLIED ' if options['apply'] else 'DRY RUN ') + str(counts))

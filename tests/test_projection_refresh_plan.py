@@ -83,6 +83,15 @@ def test_rollback_cannot_overwrite_later_user_edit():
     assert record.stage == 'Later edit'
 
 
+def test_missing_recovery_audit_is_not_reported_as_never_applied():
+    record, _ = stale_record()
+    plan = create_plan([record.person_id])
+    apply_plan(plan)
+    AuditEvent.objects.filter(path=AUDIT_PATH).delete()
+    with pytest.raises(PlanConflict, match='recovery audit are unavailable'):
+        apply_plan(plan, rollback=True)
+
+
 def test_plan_tampering_and_unbounded_scope_rejected():
     record, _ = stale_record()
     plan = copy.deepcopy(create_plan([record.person_id]))

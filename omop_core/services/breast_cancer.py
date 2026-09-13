@@ -149,11 +149,11 @@ def staging_data(snapshot, legacy_source):
     selected_rows = snapshot.genomics_cache.setdefault('field_value_native_rows', {})
     selected_rows.update({field: None for field in STAGE_QUESTIONS})
     overrides = {}
-    for (field, context), choices in resolver.choices.items():
+    for (field, context), choices in resolver.read_choices.items():
         if field not in STAGE_QUESTIONS or context not in ('', 'BC:c', 'BC:p', 'BC:yp'):
             continue
         for choice in choices:
-            mapping = resolver.mapping(choice)
+            mapping = resolver.mapping(choice, for_read=True)
             if mapping and mapping.question_concept_id:
                 overrides.setdefault((field, mapping.question_concept_id), set()).add(context.removeprefix('BC:'))
 
@@ -171,7 +171,7 @@ def staging_data(snapshot, legacy_source):
     def stage_value(field, row):
         basis = field_basis(field, row)
         context = f'BC:{basis}' if basis else ''
-        if (field, context) not in resolver.choices:
+        if (field, context) not in resolver.read_choices:
             context = ''
         value = resolver.reverse(field, row, context)
         if value is None:

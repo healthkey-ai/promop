@@ -182,6 +182,47 @@ def test_shared_concept_reverse_requires_unambiguous_choice():
     assert ValueResolver().reverse(first.field_name, row) == 'raw ambiguous'
 
 
+def test_retired_choice_remains_readable_but_cannot_resolve_for_new_writes():
+    choice, concept = mapped_choice(aliases=['pos'])
+    choice.retired = True
+    choice.save(update_fields=['retired'])
+    resolver = ValueResolver()
+    assert resolver.resolve(choice.field_name, 'pos') is None
+    assert resolver.mapping(choice) is None
+    row = Measurement(value_as_concept=concept)
+    assert resolver.reverse(choice.field_name, row) == 'Positive'
+    row.value_as_concept = None
+    row.value_as_string = 'pos'
+    assert resolver.reverse(choice.field_name, row) == 'Positive'
+
+
+def test_retired_alias_reuse_does_not_relabel_ambiguous_historical_text():
+    choice, _ = mapped_choice(aliases=['old laboratory term'])
+    choice.retired = True
+    choice.save(update_fields=['retired'])
+    FieldChoice.objects.create(field_name=choice.field_name, display='New interpretation', aliases=choice.aliases)
+    row = Measurement(value_as_string='old laboratory term')
+    assert ValueResolver().reverse(choice.field_name, row) == 'old laboratory term'
+
+
+def test_retired_override_question_still_reads_coded_only_patient_history():
+    from omop_core.models import FieldConceptMapping
+    from omop_core.services.patient_record_service import refresh_patient_record
+    from tests.factories import MeasurementFactory, PatientRecordFactory
+    choice, concept = mapped_choice()
+    base, override = ConceptFactory(), ConceptFactory()
+    FieldConceptMapping.objects.update_or_create(field_name=choice.field_name, defaults={
+        'concept': base, 'vocabulary_id': base.vocabulary_id, 'concept_code': base.concept_code,
+        'source_value': base.concept_code, 'status': 'approved', 'omop_table': 'measurement', 'value_kind': 'string'})
+    save_mapping(choice, {'question_concept': override})
+    choice.retired = True
+    choice.save(update_fields=['retired'])
+    record = PatientRecordFactory()
+    MeasurementFactory(person=record.person, measurement_concept=override,
+                       measurement_source_value=override.concept_code, value_as_concept=concept)
+    assert refresh_patient_record(record.person).her2_status == 'Positive'
+
+
 def test_mapping_api_permissions_and_audit():
     from rest_framework.test import APIClient
     from patient_portal.models import Identity
@@ -374,6 +415,30 @@ def test_seed_is_dry_by_default_and_does_not_overwrite_reviewed_decisions():
     revisions = sum(FieldValueConceptMapping.objects.values_list('revision', flat=True))
     call_command('seed_field_value_mappings', apply=True, stdout=StringIO())
     assert sum(FieldValueConceptMapping.objects.values_list('revision', flat=True)) == revisions
+
+
+def test_seed_preserves_retired_answers_and_catalog_aliases():
+    from django.core.management import call_command
+    from io import StringIO
+    from omop_core.models import MutationOrigin
+    answer_choice, _ = mapped_choice()
+    answer_choice.retired = True
+    answer_choice.save(update_fields=['retired'])
+    MutationOrigin.objects.create(code='legacy-origin', title='Historical laboratory wording')
+    catalog_choice = FieldChoice.objects.create(field_name='genetic_mutations.origin',
+        display='Renamed retired origin', canonical_value='Historical laboratory wording',
+        aliases=['legacy-origin'], retired=True)
+    revision = answer_choice.value_mapping.revision
+    for _ in range(2):
+        output = StringIO()
+        call_command('seed_field_value_mappings', apply=True, stdout=output)
+        assert "'retired_preserved': 2" in output.getvalue()
+    answer_choice.refresh_from_db()
+    catalog_choice.refresh_from_db()
+    assert answer_choice.retired and catalog_choice.retired
+    assert answer_choice.value_mapping.revision == revision
+    assert not FieldValueConceptMapping.objects.filter(choice=catalog_choice).exists()
+    assert FieldChoice.objects.filter(field_name=answer_choice.field_name, display='Positive').count() == 1
 
 
 def test_read_only_inventory_includes_unmapped_catalog_options():

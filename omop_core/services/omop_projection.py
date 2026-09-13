@@ -123,8 +123,8 @@ def curated_values_from_snapshot(snapshot):
         if (name in native_rows and mapping['concept__vocabulary_id'] == 'LOINC'
                 and mapping['concept__concept_code'] in known_codes):
             matching = [native_rows[name]]
-        for choice in resolver.choices.get((name, ''), []):
-            answer = resolver.mapping(choice)
+        for choice in resolver.read_choices.get((name, ''), []):
+            answer = resolver.mapping(choice, for_read=True)
             if answer and answer.question_concept_id:
                 question = answer.question_concept
                 matching.append(indexed[question.domain_id.lower()].get((question.pk, question.concept_code)))

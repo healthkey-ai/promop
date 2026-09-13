@@ -24,7 +24,7 @@ def test_genomic_overflow_reference_fits_cdm_width_with_large_note_ids(monkeypat
     assert created_id == note_id
     assert len(stored) == 60
     assert stored.endswith(f'[note:{note_id}]')
-    assert _read_note_text(stored) == value
+    assert _read_note_text(stored, person_id=person.pk, parent_id=7) == value
 
 
 @pytest.fixture(params=['legacy', 'athena'])

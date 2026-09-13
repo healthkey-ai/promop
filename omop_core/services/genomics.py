@@ -52,7 +52,8 @@ def approved_mapping(field_name):
 
 
 def mapped_concept(mapping):
-    if mapping.concept_id and mapping.concept.standard_concept == 'S':
+    from omop_core.services.field_values import standard_target
+    if standard_target(mapping.concept, {'Measurement', 'Observation'}):
         if mapping.concept.domain_id.lower() == mapping.omop_table:
             return mapping.concept_id, mapping.concept_id
         # Domain drifted in a newer Athena release — fall through to LOINC
@@ -174,17 +175,27 @@ def normalize_variant(payload, existing=None):
 
 
 def _resolve(code, domain):
+    from omop_core.services.field_values import standard_target
+    today = localdate()
     source = Concept.objects.filter(
         vocabulary_id='LOINC', concept_code=code, invalid_reason__isnull=True,
     ).first() if not code.startswith(PREFIX) else None
-    standard = source if source and source.standard_concept == 'S' else None
-    if source and standard is None:
-        mapping = ConceptRelationship.objects.filter(
+    standard = source if standard_target(source, {'Measurement', 'Observation'}) else None
+    if (source and source.standard_concept != 'S'
+            and str(source.valid_start_date) <= today.isoformat() <= str(source.valid_end_date)):
+        mappings = list(ConceptRelationship.objects.filter(
             concept_1=source, relationship_id='Maps to', invalid_reason__isnull=True,
+            valid_start_date__lte=today, valid_end_date__gte=today,
             concept_2__standard_concept='S', concept_2__invalid_reason__isnull=True,
             concept_2__domain_id__in=['Measurement', 'Observation'],
-        ).select_related('concept_2').first()
-        standard = mapping.concept_2 if mapping else None
+            concept_2__valid_start_date__lte=today, concept_2__valid_end_date__gte=today,
+            concept_2_id__gt=0, concept_2_id__lt=2_000_000_000,
+        ).exclude(concept_2__source='HealthKey').exclude(
+            concept_2__vocabulary__vocabulary_id__startswith='HK-',
+        ).select_related('concept_2').order_by('concept_2_id')[:2])
+        # Multiple standard destinations may be a composite assertion. Do not
+        # choose one by PK; preserve the source until a recipe resolves it.
+        standard = mappings[0].concept_2 if len(mappings) == 1 else None
     if standard and standard.domain_id in ('Measurement', 'Observation'):
         domain = standard.domain_id
     else:
@@ -228,7 +239,7 @@ def _store_text(value, person, date, type_concept_id, parent_pk):
     return value[:_CDM_TEXT_WIDTH - len(reference)] + reference, note.pk
 
 
-def _read_note_text(value):
+def _read_note_text(value, *, person_id, parent_id):
     """Retrieve full text from a linked NOTE if the value contains a note reference."""
     if not value or '[note:' not in value:
         return value
@@ -237,7 +248,8 @@ def _read_note_text(value):
     if not match:
         return value
     try:
-        note = Note.objects.get(pk=int(match.group(1)))
+        note = Note.objects.get(pk=int(match.group(1)), person_id=person_id,
+                                note_source_value=f'genomics:overflow:{parent_id}')
         return note.note_text
     except Note.DoesNotExist:
         return value
@@ -288,10 +300,10 @@ def enrich_variants(variants, snapshot):
             elif field:
                 context = str(target.get('gene', '')).upper()
                 field_name = 'genetic_mutations.' + field
-                if (field_name, context) not in resolver.choices:
+                if (field_name, context) not in resolver.read_choices:
                     context = ''
                 value = resolver.reverse(field_name, row, context)
-                value = _read_note_text(value) if isinstance(value, str) else value
+                value = _read_note_text(value, person_id=row.person_id, parent_id=target['id']) if isinstance(value, str) else value
                 if value is None and row.value_as_concept_id:
                     value = row.value_as_concept.concept_name
                 target[field] = value

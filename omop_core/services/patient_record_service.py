@@ -2399,7 +2399,6 @@ def _observation_code(observation):
 def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
     snapshot = snapshot or _build_snapshot(person)
-    from omop_core.services.breast_cancer import matches, fact_date
     from omop_core.services.field_values import ValueResolver
     resolver = ValueResolver.for_snapshot(snapshot)
 
@@ -2462,7 +2461,7 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         )
 
     def _first_m(concept_code):
-        """Return the most recent Measurement for a LOINC code, checking concept first then source_value."""
+        """Return the most recent Measurement across the LOINC/source indexes."""
         return _latest_coded_fact(snapshot, {concept_code})
 
     # Ki-67 proliferation index — LOINC 29593-1
@@ -3421,7 +3420,8 @@ def _get_genetic_mutations(person: Person, snapshot: OmopSnapshot = None) -> dic
         mutation_data = {
             'id': measurement.measurement_id,
             'gene': (gene or '').lower(),
-            'variant': _read_note_text(measurement.value_as_string),
+            'variant': _read_note_text(measurement.value_as_string,
+                                      person_id=measurement.person_id, parent_id=measurement.pk),
             'test_date': measurement.measurement_date.isoformat() if measurement.measurement_date else None,
         }
         if marker:

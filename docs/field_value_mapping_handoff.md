@@ -2,6 +2,63 @@
 
 ## Resumed work: 2026-09-13
 
+### Additional review and implementation after `57646dc`
+
+Local commit `4a68f79` adds the following reviewed fixes and capabilities.
+Merge `1e163ed` integrates current dev through `f1bd3a2`, including the scoped
+Org Admin permission fix and indexed patient refresh. Conflict resolution
+preserves the corrected breast-cancer concepts, vocabulary namespaces, c/p/yp
+semantics, source-code fallback and latest-event selection. It also fixes an
+automatically merged Oncotype block whose input list had been removed upstream.
+
+- Boolean and numeric JSON identities cannot silently switch (`True == 1` in
+  Python is insufficient for immutable canonical values), including transfer.
+- Clear resolution follows imported nested question-decision history and
+  excludes proposed questions that never had approval.
+- Genomics approved answer overrides select their own Measurement/Observation
+  destination atomically. Mapped and unmapped aliases preserve source text;
+  unsupported assertion roles leave the original record unchanged.
+- The existing canonical TNM mapping has a narrow c/p/yp adapter. The basis
+  saved in the same PATCH controls the question and qualifier. Pathological
+  and post-neoadjuvant pathological results remain distinct; scoped picker
+  values come from the existing FieldChoice editor. Ambiguous basis leaves the
+  edit pending. Basis is stored context, not a fabricated standalone question.
+- Flat-field staging clears suppress older c/p/yp results across current
+  Measurement and legacy Observation tables. Same-day un-timed cross-table
+  imports cannot override an explicit clear just because their PK is larger.
+  New dated facts and later direct corrections remain readable. Linked
+  imported assessments are preserved when creating a direct correction.
+- `backfill_patient_records` has bounded private signed preview/apply/rollback
+  plans for the derived read model. It uses existing refresh, RecordRevision
+  and AuditEvent paths, preserves pending clears, rejects drift, and resumes
+  per-record application. Rollback refuses later edits and preserves full
+  timestamp precision. See [operations and limits](field_value_reconciliation.md).
+  This does not implement the separate historical fact-repair modes.
+
+Verification before the latest dev integration: full pytest **2,135 passed,
+4 skipped**, Django **1,998 tests OK, 1 skipped**, frontend **553 passed,
+4 skipped**, production build passed, lint 0 errors/3 existing warnings.
+The new reconciliation suite subsequently passed **10 tests**. The merged
+staging/BC/descriptor/reconciliation checks passed **86 tests**; two additional
+indexed-source regression tests were added to the merge. Full integrated
+backend verification is in progress. No staging clinical writes occurred.
+
+Further review fixes now preserve retired choices during coded-only and alias
+readback without making them writable or reviving rejected decisions. Reused
+historical aliases stay ambiguous. Genomic question resolution rejects expired
+source, relationship and target evidence, and keeps ambiguous Maps-to results
+unmapped. Overflow notes require matching patient and variant ownership.
+Rollback now reports a missing recovery audit instead of silently counting a
+changed record as never applied. Focused retirement/staging/genomics/descriptor/
+reconciliation verification: **120 passed**. Full pytest after dev integration,
+before these last review fixes: **2,157 passed, 4 skipped**.
+
+Historical answer targets superseded by different decisions still require
+provenance-aware reconciliation; retired readback does not infer clinical
+correctness from an old rejected mapping. Report metadata/event authoring,
+complete disease/catalog dispositions, and other reconciliation modes remain
+unfinished.
+
 **Still unfinished. PR #1235 is closed at the user's explicit request because it
 was an information handoff. Do not reopen it, merge this branch, or close any
 associated issue as part of this checkpoint. The user specifically requires
@@ -79,7 +136,7 @@ where a reference-only export or read-only database configuration is available.
 Do not substitute source seed totals for actual live options.
 
 Remaining scope is substantial: complete live inventory and per-value evidence;
-context-aware c/p/yp writes; report/test metadata linkage; fact/structured and
+full staging assessment/event authoring; report/test metadata linkage; fact/structured and
 multi-criterion adapters; exhaustive MM/FL/CLL/genetic/therapy dispositions;
 FHIR/source-alias edge cases; and bounded, audited historical reconciliation
 with recovery. Passing regression suites does not complete these obligations.
