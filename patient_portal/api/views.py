@@ -116,10 +116,14 @@ import os
 import re
 from decimal import Decimal, InvalidOperation
 from io import StringIO
+from patient_portal.api.bulk_upload import (
+    BULK_UPLOAD_AUTHENTICATION, BulkUploadPermission, ordered_bundle_entries,
+    upload_organization, upload_actor_id,
+)
 from .permissions import (
     EtlPatientCrudPermission, EtlWritePermission, PatientCrudPermission, GenomicsCrudPermission,
     PatientDeletePermission, PatientSelfScopePermission, ScopedTokenPermission,
-    VocabReadPermission, LabSyncPermission, get_request_org, is_service_token,
+    VocabReadPermission, LabSyncPermission, get_request_org, is_service_token, is_machine_request,
 )
 from .providers.base import TokenClaims
 from .serializers import (
@@ -1743,7 +1747,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         response[EXPORT_SIGNATURE_HEADER] = signature
         return response
 
-    @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+    @action(detail=False, methods=['post'],
+            authentication_classes=BULK_UPLOAD_AUTHENTICATION,
+            permission_classes=[BulkUploadPermission, PatientSelfScopePermission])
     def upload_csv(self, request):
         """Upload the documented CSV shape into OMOP source tables.
 
@@ -1753,11 +1759,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         ConditionOccurrence.  PatientRecord is created only by the final
         refresh, never by this importer.
         """
+        upload_org = upload_organization(request)
         if 'file' not in request.FILES:
             return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
         
         file = request.FILES['file']
-        if not file.name.endswith('.csv'):
+        if not file.name.lower().endswith('.csv'):
             return Response({'error': 'File must be a CSV'}, status=status.HTTP_400_BAD_REQUEST)
         
         try:
@@ -1766,16 +1773,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             reader = csv.DictReader(csv_data)
             
             created_count = 0
+            updated_count = 0
             errors = []
             source = request.META.get('HTTP_X_PROVENANCE_SOURCE', 'EHR_SYNC')
-            request_user = getattr(request, 'user', None)
-            source_user_id = request.META.get(
-                'HTTP_X_PROVENANCE_USER_ID', str(getattr(request_user, 'pk', '') or ''),
-            )
-            if is_service_token(request):
-                source_user_id = f"{request.user.issuer}|{request.user.sub}"
-            provenance_org = get_request_org(request) if request_user is not None else None
-            
+            source_user_id = upload_actor_id(request)
+            provenance_org = upload_org
+
             for row_num, row in enumerate(reader, start=2):
                 try:
                     person_id = int(row.get('person_id', 0))
@@ -1783,7 +1786,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         last_person = Person.objects.all().order_by('-person_id').first()
                         person_id = last_person.person_id + 1 if last_person else 1000
 
-                    auth_error = _csv_row_write_error(request, person_id)
+                    auth_error = _csv_row_write_error(request, person_id, upload_org)
                     if auth_error:
                         raise PermissionError(auth_error)
 
@@ -1872,6 +1875,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             patient_record.save(update_fields=['organization', 'updated_at'])
                     if created:
                         created_count += 1
+                    else:
+                        updated_count += 1
                         
                 except Exception as e:
                     errors.append(f"Row {row_num}: {str(e)}")
@@ -1879,6 +1884,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({
                 'success': True,
                 'created_count': created_count,
+                'updated_count': updated_count,
                 'errors': errors
             })
             
@@ -1886,14 +1892,17 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             logger.exception('CSV upload failed')
             return Response({'error': 'Upload failed. Please check the file format and try again.'}, status=status.HTTP_400_BAD_REQUEST)
 
-    @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+    @action(detail=False, methods=['post'],
+            authentication_classes=BULK_UPLOAD_AUTHENTICATION,
+            permission_classes=[BulkUploadPermission, PatientSelfScopePermission])
     def upload_fhir(self, request):
         """Upload patients from FHIR JSON file"""
+        upload_org = upload_organization(request)
         if 'file' not in request.FILES:
             return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
         
         file = request.FILES['file']
-        if not file.name.endswith('.json'):
+        if not file.name.lower().endswith('.json'):
             return Response({'error': 'File must be a JSON file'}, status=status.HTTP_400_BAD_REQUEST)
 
         # Bounded multi-version interchange (TI.5.2#01): decline unsupported
@@ -1917,16 +1926,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
             fhir_data = json.loads(raw_bytes)
 
-            if fhir_data.get('resourceType') != 'Bundle':
-                return Response({'error': 'FHIR file must be a Bundle'}, status=status.HTTP_400_BAD_REQUEST)
-
             from patient_portal.api.fhir.sync import validate_fhir_bundle_types
             try:
+                entries = ordered_bundle_entries(fhir_data)
                 validate_fhir_bundle_types(fhir_data)
             except serializers.ValidationError as exc:
                 return Response({'error': str(exc.detail[0])}, status=status.HTTP_400_BAD_REQUEST)
 
-            prov_source, prov_user_id, prov_reason = _extract_provenance(request)
+            prov_source, _, prov_reason = _extract_provenance(request)
+            prov_source = prov_source or 'EHR_SYNC'
+            prov_user_id = upload_actor_id(request)
             if prov_source == 'ADMIN_CORRECTION' and not prov_reason:
                 return Response(
                     {'error': 'modification_reason is required when source is ADMIN_CORRECTION'},
@@ -1960,7 +1969,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     return patient_ref_aliases[bare_ref]
                 return ref.split('/')[-1] if '/' in ref else bare_ref
 
-            for entry in fhir_data.get('entry', []):
+            for entry in entries:
                 resource = entry.get('resource', {})
                 resource_type = resource.get('resourceType')
 
@@ -2124,6 +2133,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             import time as _time
             for fhir_patient_id, data in patients_data.items():
                 try:
+                    _atomic_entered = False
+                    _last_exc = None
                     _pt_start = _time.monotonic()
                     _pt_measurement_ids = []
                     _pt_condition_ids = []
@@ -2308,11 +2319,20 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                     and _normalize_name(candidate.family_name) == normalized_family
                                 ):
                                     person = candidate
-                                    if candidate.given_name != given_name or candidate.family_name != family_name:
-                                        candidate.given_name = given_name
-                                        candidate.family_name = family_name
-                                        candidate.save(update_fields=['given_name', 'family_name'])
                                     break
+                    if person is not None:
+                        from omop_core.authorization import can_write_patient
+                        record_org_id = PatientRecord.objects.filter(person=person).values_list('organization_id', flat=True).first()
+                        same_org_upload = upload_org is not None and record_org_id == upload_org.pk
+                        wrong_org = upload_org is not None and record_org_id not in (None, upload_org.pk)
+                        if wrong_org or (not same_org_upload and not can_write_patient(request.user, person.person_id)):
+                            errors.append({'patient': f'{given_name} {family_name}',
+                                           'error': 'You have read-only or no access to this patient in the selected organization.'})
+                            _last_exc = PermissionError('Write denied for existing patient.')
+                            continue
+                        if person.given_name != given_name or person.family_name != family_name:
+                            person.given_name, person.family_name = given_name, family_name
+                            person.save(update_fields=['given_name', 'family_name'])
                     if person is None:
                         from omop_core.services.pk import next_pk as _next_pk
                         person = Person.objects.create(
@@ -2331,9 +2351,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         person_is_new = True
                         full_name = f"{given_name} {family_name}".strip()
                         identity, _ = Identity.objects.get_or_create(
+                            issuer='urn:local',
                             sub=f'patient{person.person_id}',
                             defaults={
-                                'issuer': 'urn:local',
                                 'name': full_name,
                             },
                         )
@@ -2406,7 +2426,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             prov_user_id,
                             target_patient_id=fhir_patient_id,
                             modification_reason=death_reason or prov_reason,
-                            organization=get_request_org(request),
+                            organization=upload_org,
                         )
 
                     for encounter in data.get('encounters', []):
@@ -2460,30 +2480,6 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                     'visit_occurrence': visit,
                                 },
                             )
-
-                    # Block analysts from updating existing patients via FHIR upload.
-                    if not person_is_new and not getattr(request.user, 'is_staff', False):
-                        request_org = get_request_org(request)
-                        same_org_upload = (
-                            request_org is not None
-                            and PatientRecord.objects.filter(person=person, organization=request_org).exists()
-                        )
-                        from omop_core.authorization import can_write_patient
-                        if not same_org_upload and not can_write_patient(request.user, person.person_id):
-                            errors.append({
-                                'patient': f'{given_name} {family_name}',
-                                'error': 'Analysts have read-only access. Contact a doctor or org admin to update patient data.',
-                            })
-                            # The Person upsert, Location, Death and VisitOccurrence
-                            # writes above already ran inside this patient's savepoint.
-                            # `continue` raises nothing, so the finally block would see
-                            # _last_exc is None and call _atomic_cm.__exit__(None, None,
-                            # None) — and Django's Atomic.__exit__ COMMITS a savepoint it
-                            # is not given an exception for. Setting _last_exc is what
-                            # routes the finally block to a rollback, so a caller we just
-                            # denied does not get their partial writes persisted.
-                            _last_exc = PermissionError('Write denied for existing patient.')
-                            continue
 
                     # Extract disease, stage, and histologic type from Condition
                     disease = None
@@ -2674,7 +2670,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 _co.save()
                                 _pt_condition_ids.append(_co.condition_occurrence_id)
                                 if prov_source:
-                                    _record_provenance(_co, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                                    _record_provenance(_co, prov_source, prov_user_id, modification_reason=prov_reason, organization=upload_org)
                         except Exception as _coex:
                             logger.warning(
                                 '{"event": "condition_occurrence_save_failed", "error_type": "%s"}',
@@ -2711,7 +2707,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 prov_user_id,
                                 target_patient_id=fhir_patient_id,
                                 modification_reason=prov_reason,
-                                organization=get_request_org(request),
+                                organization=upload_org,
                             )
 
                     # FL diagnosis and DLBCL transformation conditions (FL → DLBCL
@@ -3425,7 +3421,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             for _bm in _pending_measurements:
                                 _pt_measurement_ids.append(_bm.measurement_id)
                             for (_bm, _psrc, _puid, _preason) in _pending_provenances:
-                                _record_provenance(_bm, _psrc, _puid, modification_reason=_preason, organization=get_request_org(request))
+                                _record_provenance(_bm, _psrc, _puid, modification_reason=_preason, organization=upload_org)
                         except Exception as _bcex:
                             logger.warning(
                                 '{"event": "measurement_bulk_create_failed", "count": %d, "error": "%s"}',
@@ -3894,7 +3890,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                     _de.save()
                                     _pt_drug_exposure_ids.append(_de.drug_exposure_id)
                                     if prov_source:
-                                        _record_provenance(_de, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                                        _record_provenance(_de, prov_source, prov_user_id, modification_reason=prov_reason, organization=upload_org)
 
                                 # Episode + EpisodeEvent + per-line outcome via
                                 # the shared LOT writer so CDM tagging and the
@@ -3973,7 +3969,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _pt_drug_exposure_ids.append(_de.drug_exposure_id)
                         _existing_drug_keys.add(key)
                         if prov_source:
-                            _record_provenance(_de, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                            _record_provenance(_de, prov_source, prov_user_id, modification_reason=prov_reason, organization=upload_org)
 
                     for _med_request in data.get('medication_requests', []):
                         # Prefer inline medicationCodeableConcept; fall back to
@@ -4059,7 +4055,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _obs.save()
                         _existing_report_keys.add(_report_key)
                         if prov_source:
-                            _record_provenance(_obs, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                            _record_provenance(_obs, prov_source, prov_user_id, modification_reason=prov_reason, organization=upload_org)
 
                     logger.info(
                         "TIMING patient=%s phase=diagnostic_reports elapsed=%.1fs count=%d",
@@ -4117,7 +4113,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _obs.save()
                         _existing_report_keys.add(_allergy_key)
                         if prov_source:
-                            _record_provenance(_obs, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                            _record_provenance(_obs, prov_source, prov_user_id, modification_reason=prov_reason, organization=upload_org)
 
                     # --- Write ProcedureOccurrence records ---
                     _existing_proc_keys = {
@@ -4189,7 +4185,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _pt_procedure_ids.append(_proc.procedure_occurrence_id)
                         _existing_proc_keys.add(_proc_key)
                         if prov_source:
-                            _record_provenance(_proc, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                            _record_provenance(_proc, prov_source, prov_user_id, modification_reason=prov_reason, organization=upload_org)
 
                     logger.info(
                         "TIMING patient=%s phase=procedures elapsed=%.1fs count=%d",
@@ -4263,7 +4259,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 prov_user_id,
                                 target_patient_id=fhir_patient_id,
                                 modification_reason=prov_reason,
-                                organization=get_request_org(request),
+                                organization=upload_org,
                             )
                     elif sct_history_str or sct_eligibility_str:
                         logger.warning(
@@ -4455,9 +4451,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         'no_geographic_exposure_risk': no_geographic_exposure_risk if no_geographic_exposure_risk is not None else True,
                         'geographic_exposure_risk_details': geographic_exposure_risk_details,
                     }.items() if v is not None})
-                    # Stamp the org derived from the OAuth2 token so this patient
-                    # is scoped to the uploading service client's tenant.
-                    upload_org = get_request_org(request)
+                    # Assign the authorized upload organization to new/unassigned records.
                     if upload_org is not None and patient_info.organization_id is None:
                         _patch['organization'] = upload_org
 
@@ -5302,12 +5296,12 @@ def _caller_may_write_patient(request, person_id: int) -> bool:
     return can_write_patient(request.user, person_id)
 
 
-def _csv_row_write_error(request, person_id: int) -> str | None:
+def _csv_row_write_error(request, person_id: int, upload_org=None) -> str | None:
     """Return a row-level CSV authorization error, or None when allowed."""
     if getattr(request, 'auth', None) is not None and is_service_token(request):
         return None
 
-    org = get_request_org(request)
+    org = upload_org or get_request_org(request)
     if org is not None:
         record = PatientRecord.objects.filter(person_id=person_id).first()
         if (
@@ -5316,6 +5310,10 @@ def _csv_row_write_error(request, person_id: int) -> str | None:
             and record.organization_id != org.id
         ):
             return 'patient belongs to a different organization'
+        if not is_machine_request(request) and Person.objects.filter(person_id=person_id).exists():
+            from omop_core.authorization import can_write_patient
+            if not can_write_patient(request.user, person_id):
+                return 'caller does not have write access to this patient'
         return None
 
     actor = getattr(request, 'user', None)

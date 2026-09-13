@@ -31,7 +31,7 @@ def is_machine_request(request):
     if is_service_token(request):
         return True
     from oauth2_provider.models import Application
-    application = getattr(request.auth, "application", None)
+    application = getattr(getattr(request, "auth", None), "application", None)
     return (
         getattr(application, "authorization_grant_type", None)
         == Application.GRANT_CLIENT_CREDENTIALS
