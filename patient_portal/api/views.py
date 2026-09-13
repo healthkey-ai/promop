@@ -901,7 +901,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 pass
             queryset = queryset.filter(name_query)
 
-        return queryset
+        from omop_core.services.patient_list_context import filter_context
+        return filter_context(queryset, params, self.request.user)
 
     def _build_filter_options(self, queryset):
         org_rows = (
@@ -937,11 +938,17 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
     def list(self, request):
         """List all patients - accessible to authenticated users"""
         base_queryset = self.get_queryset()
-        queryset = self._apply_patient_list_filters(base_queryset).order_by('-updated_at', '-created_at')
+        from omop_core.services.patient_list_context import annotate_context, order_context
+        queryset = order_context(self._apply_patient_list_filters(base_queryset),
+                                 request.query_params.get('ordering', '-updated'), request.user)
+        from patient_portal.models import PatientUser
+        own_person_id = (PatientUser.objects.filter(identity=request.user).values_list('person_id', flat=True).first()
+                         if request.user and request.user.is_authenticated else None)
+        context = {'request': request, 'own_person_id': own_person_id}
 
         if 'page' in request.query_params or 'page_size' in request.query_params:
             page = self.paginate_queryset(queryset)
-            serializer = PatientListSerializer(page, many=True)
+            serializer = PatientListSerializer(page, many=True, context=context)
             response = self.get_paginated_response(serializer.data)
             try:
                 page_num = int(request.query_params.get('page', 1))
@@ -949,9 +956,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 page_num = 1
             if page_num == 1:
                 response.data['filter_options'] = self._build_filter_options(base_queryset)
+                response.data['filter_options']['clinical_statuses'] = list(
+                    annotate_context(base_queryset).exclude(list_disease_status__isnull=True)
+                    .values_list('list_disease_status', flat=True).distinct().order_by('list_disease_status')
+                )
             return response
 
-        serializer = PatientListSerializer(queryset[:500], many=True)
+        serializer = PatientListSerializer(queryset[:500], many=True, context=context)
         return Response(serializer.data)
 
     def retrieve(self, request, pk=None):

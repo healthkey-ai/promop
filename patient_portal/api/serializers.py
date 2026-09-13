@@ -274,6 +274,13 @@ class PatientListSerializer(serializers.ModelSerializer):
     patient_name = serializers.SerializerMethodField()
     age = serializers.SerializerMethodField()
     genomics_summary = serializers.SerializerMethodField()
+    treatment_summary = serializers.SerializerMethodField()
+    disease_status = serializers.SerializerMethodField()
+    subtype_biomarkers = serializers.SerializerMethodField()
+    data_gaps = serializers.SerializerMethodField()
+    latest_result_date = serializers.DateField(read_only=True, default=None)
+    location_summary = serializers.SerializerMethodField()
+    contact_available = serializers.BooleanField(read_only=True, default=False)
     organization_name = serializers.CharField(source='organization.name', read_only=True, allow_null=True)
     organization_slug = serializers.CharField(source='organization.slug', read_only=True, allow_null=True)
     updated_at = serializers.DateTimeField(format='%Y-%m-%d', read_only=True)
@@ -291,9 +298,49 @@ class PatientListSerializer(serializers.ModelSerializer):
             'stage',
             'genomics_summary',
             'therapy_lines_count',
+            'treatment_summary', 'disease_status', 'subtype_biomarkers',
+            'ecog_performance_status', 'ecog_assessment_date', 'data_gaps',
+            'latest_result_date', 'location_summary', 'contact_available',
             'updated_at',
         ]
     
+    def get_treatment_summary(self, obj):
+        from omop_core.services.patient_list_context import latest_treatment
+        return latest_treatment(obj)
+
+    def get_disease_status(self, obj):
+        from omop_core.services.patient_list_context import recorded
+        return next((value for value in (obj.condition_clinical_status, obj.progression)
+                     if recorded(value)), None)
+
+    def get_subtype_biomarkers(self, obj):
+        from omop_core.services.patient_list_context import subtype_biomarkers
+        return subtype_biomarkers(obj)
+
+    def get_data_gaps(self, obj):
+        from omop_core.services.patient_list_context import recorded
+        gaps = []
+        if not recorded(obj.stage):
+            gaps.append('Stage')
+        if obj.ecog_performance_status is None:
+            gaps.append('ECOG')
+        if not obj.genetic_mutations and not recorded(obj.molecular_markers) and not recorded(obj.cytogenetic_markers):
+            gaps.append('Genomics')
+        return gaps
+
+    def get_location_summary(self, obj):
+        return ', '.join(str(value).strip() for value in (obj.city, obj.region, obj.country) if value and str(value).strip())
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if (self.context.get('request') is not None
+                and instance.suppress_demographics_for_others
+                and self.context.get('own_person_id') != instance.person_id):
+            for field in ('patient_name', 'age', 'location_summary'):
+                data[field] = None
+            data['demographics_redacted'] = True
+        return data
+
     def get_patient_name(self, obj):
         # Get name from Person model (OMOP extension)
         if obj.person:
