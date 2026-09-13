@@ -48,9 +48,14 @@ def staging_data(snapshot, legacy_source):
                   key=lambda r: (fact_date(r), r.pk, r._meta.db_table), reverse=True)
     candidates = [r for r in rows if any(matches(r, codes) for codes in STAGE_QUESTIONS.values())]
     # Never combine facts explicitly linked to different tumors/assessments.
-    linked = next((event_key(r) for r in candidates if all(event_key(r))), None)
-    if linked:
-        candidates = [r for r in candidates if event_key(r) == linked]
+    if candidates:
+        latest_link = event_key(candidates[0])
+        if all(latest_link):
+            candidates = [r for r in candidates if event_key(r) == latest_link]
+        else:
+            # An older linked assessment must not outrank a newer unlinked
+            # result. Nor can its other axes be attributed to the new result.
+            candidates = [r for r in candidates if not all(event_key(r))]
     data, bases = {}, set()
     for field, codes in STAGE_QUESTIONS.items():
         row = next((r for r in candidates if matches(r, codes)), None)
@@ -77,7 +82,7 @@ def staging_data(snapshot, legacy_source):
             data['stage'] = _coded_value(row)
     riss = next((r for r in rows if (getattr(r, 'measurement_source_value', None)
         or getattr(r, 'observation_source_value', None)) == '21908-9-riss'), None)
-    if riss and _coded_value(riss):
+    if riss and _coded_value(riss) and 'stage' not in data:
         data['stage'] = _coded_value(riss)
     if 'nodes_stage' in data:
         present = stage_presence(data['nodes_stage'], 'N')

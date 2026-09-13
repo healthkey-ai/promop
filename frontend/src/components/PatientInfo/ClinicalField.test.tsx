@@ -33,6 +33,18 @@ async function openSelect() {
 }
 
 describe('ClinicalField choices', () => {
+  it.each([[1, 'Grade one'], [false, 'Absent']] as const)(
+    'shows a curated label and saves typed value %s', async (value, label) => {
+      const onChange = vi.fn();
+      render(<ClinicalField label="Result" name="result" type="select" value=""
+        descriptor={{ kind: 'editable', writable: true, options: [{ value, label }] }}
+        onChange={onChange} />);
+      expect(await openSelect()).toEqual([label]);
+      fireEvent.click(screen.getByRole('option', { name: label }));
+      expect(onChange).toHaveBeenCalledWith('result', value);
+    },
+  );
+
   it('prefers the curated options the descriptor carries', async () => {
     // The descriptor's set is what the server resolves a concept from. A local
     // list is a display convenience, and offering a value from it that the

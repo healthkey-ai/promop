@@ -1654,6 +1654,10 @@ class FieldChoiceSerializer(serializers.ModelSerializer):
         codes_data = validated_data.pop('codes', None)
         with transaction.atomic():
             lock_scope(instance.field_name, instance.context_key)
+            # The serializer may have been loaded before another curator's
+            # rename. Reload under the lock so that save() cannot restore a
+            # stale display, alias list or retirement state.
+            instance = FieldChoice.objects.select_for_update().get(pk=instance.pk)
             if validated_data.get('display', instance.display) != instance.display:
                 validated_data['aliases'] = list(dict.fromkeys([*validated_data.get('aliases', instance.aliases), instance.display]))
             for attr, value in validated_data.items():

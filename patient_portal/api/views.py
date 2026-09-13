@@ -8440,6 +8440,7 @@ def mapping_stats(request):
         return Response({'detail': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldConceptMapping
+    from omop_core.services.mapping_coverage import answer_coverage, therapy_coverage
 
     field_approved = FieldConceptMapping.objects.filter(status='approved').count()
     field_proposed = FieldConceptMapping.objects.filter(status='proposed').count()
@@ -8451,6 +8452,8 @@ def mapping_stats(request):
     code_total = code_approved + code_proposed
 
     return Response({
+        'field_values': answer_coverage(),
+        'therapy_mapping_coverage': therapy_coverage(),
         'field_mappings': {'total': field_total, 'approved': field_approved, 'proposed': field_proposed, 'unmapped': field_unmapped},
         'code_mappings': {'total': code_total, 'approved': code_approved, 'proposed': code_proposed},
         'therapy': {

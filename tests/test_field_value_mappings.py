@@ -152,6 +152,40 @@ def test_choice_rename_keeps_alias_and_rejects_identity_change():
     assert client.patch(url, {'code': 'replacement'}, format='json').status_code == 400
 
 
+def test_stale_choice_update_keeps_concurrent_rename_and_retirement():
+    from patient_portal.api.serializers import FieldChoiceSerializer
+    choice = FieldChoice.objects.create(field_name='her2_status', display='Positive')
+    stale = FieldChoice.objects.get(pk=choice.pk)
+    first = FieldChoiceSerializer(choice, data={'display': 'Detected', 'retired': True}, partial=True)
+    first.is_valid(raise_exception=True)
+    first.save()
+    second = FieldChoiceSerializer(stale, data={'sort_order': 9}, partial=True)
+    second.is_valid(raise_exception=True)
+    second.save()
+    choice.refresh_from_db()
+    assert choice.display == 'Detected'
+    assert choice.retired
+    assert choice.aliases == ['Positive']
+    assert choice.sort_order == 9
+
+
+def test_long_source_alias_is_preserved_and_retry_reuses_its_note():
+    from omop_core.models import Note
+    raw = 'Positive (' + 'full laboratory source wording ' * 10 + ')'
+    choice, concept = mapped_choice(aliases=[raw])
+    question, person = ConceptFactory(), PersonFactory()
+    recipe = {'concept_id': question.pk, 'source_value': question.concept_code,
+              'omop_table': 'measurement', 'value_kind': 'string'}
+    assert project_single_value(person, choice.field_name, raw, recipe)
+    row = Measurement.objects.get(person=person)
+    note = Note.objects.get(person=person, note_source_value=f'field-answer:measurement:{row.pk}')
+    assert row.value_as_concept_id == concept.pk
+    assert row.value_source_value == f'[note:{note.pk}]'
+    assert note.note_text == raw
+    assert project_single_value(person, choice.field_name, raw, recipe, acknowledge_existing=True)
+    assert Note.objects.filter(person=person).count() == 1
+
+
 def test_question_override_is_cleared_with_the_field():
     choice, _ = mapped_choice()
     question = ConceptFactory(domain=DomainFactory(domain_id='Measurement'))
@@ -164,6 +198,60 @@ def test_question_override_is_cleared_with_the_field():
     assert project_single_value(person, choice.field_name, None, recipe)
     assert not Measurement.objects.filter(person=person, value_as_concept__isnull=False).exists()
     assert set(Measurement.objects.filter(person=person).values_list('value_source_value', flat=True)) == {CLEAR_VALUE}
+
+
+@pytest.mark.parametrize('failing_question', ['base', 'override'])
+def test_clear_rolls_back_every_question_on_partial_failure(monkeypatch, failing_question):
+    choice, concept = mapped_choice()
+    override = ConceptFactory(domain=DomainFactory(domain_id='Measurement'))
+    base = ConceptFactory(domain=DomainFactory(domain_id='Measurement'))
+    save_mapping(choice, {'question_concept': override})
+    person = PersonFactory()
+    recipe = {'concept_id': base.pk, 'source_value': base.concept_code,
+              'omop_table': 'measurement', 'value_kind': 'string'}
+    assert project_single_value(person, choice.field_name, 'Positive', recipe)
+    failed_id = base.pk if failing_question == 'base' else override.pk
+    original_save = Measurement.save
+
+    def fail_save(instance, *args, **kwargs):
+        if instance.measurement_concept_id == failed_id:
+            raise ValueError('Simulated unavailable destination')
+        return original_save(instance, *args, **kwargs)
+
+    monkeypatch.setattr(Measurement, 'save', fail_save)
+    assert not project_single_value(person, choice.field_name, None, recipe)
+    row = Measurement.objects.get(person=person)
+    assert row.measurement_concept_id == override.pk
+    assert row.value_as_concept_id == concept.pk
+    assert row.value_as_string == 'Positive'
+
+
+def test_clear_noop_is_distinct_from_failure():
+    question, person = ConceptFactory(), PersonFactory()
+    recipe = {'concept_id': question.pk, 'source_value': question.concept_code,
+              'omop_table': 'measurement', 'value_kind': 'string'}
+    assert project_single_value(person, 'her2_status', None, recipe)
+    assert not project_single_value(person, 'her2_status', None, recipe)
+    assert project_single_value(person, 'her2_status', None, recipe, acknowledge_existing=True)
+    assert Measurement.objects.filter(person=person).count() == 1
+
+
+def test_clear_includes_replaced_question_on_retired_choice():
+    choice, _ = mapped_choice()
+    first = ConceptFactory(domain=DomainFactory(domain_id='Measurement'))
+    replacement = ConceptFactory(domain=DomainFactory(domain_id='Measurement'))
+    base, person = ConceptFactory(), PersonFactory()
+    recipe = {'concept_id': base.pk, 'source_value': base.concept_code,
+              'omop_table': 'measurement', 'value_kind': 'string'}
+    save_mapping(choice, {'question_concept': first})
+    assert project_single_value(person, choice.field_name, 'Positive', recipe)
+    save_mapping(choice, {'question_concept': replacement})
+    choice.retired = True
+    choice.save()
+    assert project_single_value(person, choice.field_name, None, recipe)
+    row = Measurement.objects.get(person=person, measurement_concept=first)
+    assert row.value_source_value == CLEAR_VALUE
+    assert row.value_as_concept_id is None
 
 
 def test_transfer_re_resolves_review_and_preserves_identity_and_history():

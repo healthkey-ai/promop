@@ -110,6 +110,56 @@ def choice_queryset():
     return FieldChoice.objects.select_related('value_mapping__target_concept', 'value_mapping__question_concept')
 
 
+def historical_questions(field_name, context_key=''):
+    """Resolve prior approved override questions by portable vocabulary/code.
+
+    Retiring a choice or changing its question must not prevent a later clear
+    from suppressing facts written using the old decision.
+    """
+    from django.db.models import Q
+    from omop_core.models import Concept
+
+    mappings = FieldValueConceptMapping.objects.filter(
+        choice__field_name=field_name, choice__context_key=context_key,
+    )
+    keys = set(mappings.exclude(question_concept=None).values_list(
+        'question_concept__vocabulary_id', 'question_concept__concept_code',
+    ))
+    for decision in FieldValueMappingRevision.objects.filter(
+        mapping__in=mappings, decision__status='approved', decision__outcome='mapped',
+    ).values_list('decision', flat=True):
+        question = decision.get('question_concept')
+        if question:
+            keys.add((question['vocabulary_id'], question['concept_code']))
+    query = Q(pk__in=[])
+    for vocabulary, code in keys:
+        query |= Q(vocabulary_id=vocabulary, concept_code=code)
+    return Concept.objects.filter(query, domain_id__in=['Measurement', 'Observation'])
+
+
+def store_source_answer(row, raw):
+    """Keep long source aliases in a patient/fact-linked NOTE, never truncate."""
+    from omop_core.models import Note
+    from omop_core.services.pk import next_pk
+
+    text = str(raw)
+    if len(text) <= row._meta.get_field('value_source_value').max_length:
+        return text, False
+    source = f'field-answer:{row._meta.db_table}:{row.pk}'
+    note = Note.objects.filter(person_id=row.person_id, note_source_value=source).first()
+    changed = note is None or note.note_text != text
+    if note is None:
+        note = Note.objects.create(
+            note_id=next_pk(Note, 'note_id'), person_id=row.person_id,
+            note_date=getattr(row, f'{row._meta.db_table}_date'),
+            note_type_concept_id=0, note_source_value=source, note_text=text,
+        )
+    elif changed:
+        note.note_text = text
+        note.save(update_fields=['note_text'])
+    return f'[note:{note.pk}]', changed
+
+
 class ValueResolver:
     """One bounded query for a batch; instances never outlive a request/refresh."""
     @classmethod
@@ -131,7 +181,8 @@ class ValueResolver:
         matches = [c for c in self.choices.get((field, context), []) if value_key(value) in {value_key(a) for a in choice_aliases(c)}]
         return matches[0] if len(matches) == 1 else None
 
-    def mapping(self, choice):
+    @staticmethod
+    def mapping(choice):
         mapping = getattr(choice, 'value_mapping', None) if choice else None
         if mapping is None or mapping.status != 'approved' or mapping.outcome != 'mapped':
             return None

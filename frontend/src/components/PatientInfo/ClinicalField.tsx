@@ -63,7 +63,7 @@ export default function ClinicalField({
   const [ownDate, setOwnDate] = useState(today());
   // `absent` is stronger than "not writable": the server has no such field.
   const absent = !!unknownField;
-  const curated = descriptor?.options?.map((o) => o.value);
+  const curated = descriptor?.options?.map((o) => ({ value: o.value, label: o.label ?? String(o.value) }));
   const choices = curated ?? options;
   // `multiple` is the descriptor saying several answers are stored at once,
   // comma-joined — SCT history is "autologous SCT,tandem SCT". Rendering that as
@@ -88,7 +88,8 @@ export default function ClinicalField({
           name={name}
           type={control}
           value={value}
-          options={choices}
+          options={options}
+          curatedOptions={curated}
           onChange={onChange}
           readOnly
         />
@@ -108,7 +109,8 @@ export default function ClinicalField({
         name={name}
         type={control}
         value={value}
-        options={choices}
+        options={options}
+        curatedOptions={curated}
         vocabSource={vocabSource}
         onChange={onChange}
       />

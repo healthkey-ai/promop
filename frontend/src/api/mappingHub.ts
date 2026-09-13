@@ -1,6 +1,8 @@
 import api from '@/api/axios';
 
 export interface MappingStats {
+  field_values?: Record<string, number>;
+  therapy_mapping_coverage?: Record<string, Record<string, number>>;
   field_mappings: { total: number; approved: number; proposed: number; unmapped: number };
   code_mappings: { total: number; approved: number; proposed: number };
   therapy: { regimens: number; components: number; classes: number; disease_links: number };

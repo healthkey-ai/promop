@@ -64,3 +64,35 @@ def test_unknown_receptor_is_not_tnbc_negative_and_menopause_is_exact():
     record = refresh_patient_record(person)
     assert record.tnbc_status is None
     assert record.menopausal_status is None
+
+
+def test_newer_unlinked_observation_outranks_older_linked_measurement():
+    person = PersonFactory()
+    MeasurementFactory(person=person, measurement_source_value='21905-5', value_as_string='T4',
+        measurement_date=date(2024, 1, 1), measurement_event_id=1,
+        meas_event_field_concept=ConceptFactory())
+    ObservationFactory(person=person, observation_source_value='21905-5', value_as_string='T1',
+        observation_date=date(2024, 2, 1))
+    ObservationFactory(person=person, observation_source_value='21908-9', value_as_string='I',
+        observation_date=date(2024, 2, 1))
+    ObservationFactory(person=person, observation_source_value='21908-9-riss', value_as_string='III',
+        observation_date=date(2024, 1, 1))
+    data = _get_staging_data(person)
+    assert data['tumor_stage'] == 'T1'
+    assert data['stage'] == 'I'
+
+
+def test_histology_uses_latest_date_across_measurement_and_observation():
+    from omop_core.models import FieldConceptMapping
+    person = PersonFactory()
+    question = ConceptFactory(vocabulary__vocabulary_id='LOINC', concept_code='59847-4',
+                              concept_name='Histology and Behavior ICD-O-3 Cancer')
+    FieldConceptMapping.objects.update_or_create(field_name='histologic_type', defaults={
+        'concept': question, 'vocabulary_id': 'LOINC', 'concept_code': '59847-4',
+        'source_value': '59847-4', 'status': 'approved', 'omop_table': 'measurement', 'value_kind': 'string'})
+    MeasurementFactory(person=person, measurement_concept=question, measurement_source_value='59847-4', value_as_string='Older histology',
+        measurement_date=date(2024, 1, 1))
+    ObservationFactory(person=person, observation_source_value='59847-4', value_as_string='Current histology',
+        observation_date=date(2024, 2, 1))
+    assert _get_biomarker_data(person)['histologic_type'] == 'Current histology'
+    assert refresh_patient_record(person).histologic_type == 'Current histology'

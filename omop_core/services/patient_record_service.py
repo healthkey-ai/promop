@@ -2464,27 +2464,12 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     if hr:
         data['hr_status'] = resolver.reverse('hr_status', hr) or _coded_value(hr)
 
-    # Histologic type — Observation concept matching 'histologic' or 'histology'
-    histologic_measurement = next(
-        (
-            m for m in measurements
-            if _measurement_code(m) in _HISTOLOGIC_TYPE_LOINCS
-        ),
-        None,
-    )
-    if histologic_measurement:
-        data['histologic_type'] = resolver.reverse('histologic_type', histologic_measurement) or _coded_value(histologic_measurement)
-        return data
-
-    histologic_obs = next(
-        (
-            obs for obs in observations
-            if matches(obs, _HISTOLOGIC_TYPE_LOINCS)
-        ),
-        None,
-    )
-    if histologic_obs:
-        data['histologic_type'] = resolver.reverse('histologic_type', histologic_obs) or _coded_value(histologic_obs)
+    histology = next((row for row in sorted(
+        [*snapshot.measurements, *snapshot.observations],
+        key=lambda row: (fact_date(row), row.pk, row._meta.db_table), reverse=True,
+    ) if matches(row, _HISTOLOGIC_TYPE_LOINCS)), None)
+    if histology:
+        data['histologic_type'] = resolver.reverse('histologic_type', histology) or _coded_value(histology)
 
     return data
 

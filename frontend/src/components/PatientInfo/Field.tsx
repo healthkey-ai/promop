@@ -7,6 +7,7 @@ import MultiSelectControl from './controls/MultiSelectControl';
 import DateControl from './controls/DateControl';
 import TextNumberControl from './controls/TextNumberControl';
 import { stringsToOptions } from './utils';
+import type { Option } from './utils';
 
 interface FieldProps {
   label: string;
@@ -14,6 +15,7 @@ interface FieldProps {
   type: 'text' | 'number' | 'date' | 'select' | 'multiselect' | 'boolean' | 'email';
   value: unknown;
   options?: string[];
+  curatedOptions?: Option[];
   onChange: (name: string, value: unknown) => void;
   disabled?: boolean;
   readOnly?: boolean;
@@ -27,13 +29,14 @@ export default function Field({
   type,
   value,
   options = [],
+  curatedOptions,
   onChange,
   disabled,
   readOnly,
   vocabSource,
 }: FieldProps) {
   const isDisabled = disabled || readOnly;
-  const optionObjects = useMemo(() => stringsToOptions(options), [options]);
+  const optionObjects = useMemo(() => curatedOptions ?? stringsToOptions(options), [curatedOptions, options]);
 
   const selectedValues = useMemo<string[]>(() => {
     const v = value;
@@ -73,7 +76,7 @@ export default function Field({
       case 'select':
         return (
           <SelectControl
-            value={value != null && value !== '' ? String(value) : ''}
+            value={value ?? ''}
             options={optionObjects}
             disabled={isDisabled}
             placeholder="Select…"
