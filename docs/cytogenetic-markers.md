@@ -1,16 +1,8 @@
-# Cytogenetic marker selections (#1049)
+# Legacy cytogenetic marker storage (#1049, #1208)
 
-The Disease tab's **Cytogenetic Markers** control is a multiselect. The canonical
-PatientRecord/API key is `cytogenetic_markers`; writes also accept the historical
-`cytogenic_markers` spelling for compatibility. Clients
-can PATCH a list or comma-separated text. The server normalizes legacy spellings
-such as `del(17p13)`, `1q21 amplification`, and `t(4,14)` to the existing matching
-tokens (`del17p`, `1q_amp`, and `t(4;14)`) before saving.
+New interactive findings now belong to Genomics (#1242). The Disease summary is read-only; changed PatientRecord PATCHes to either `cytogenetic_markers` or its historical alias are rejected. Unchanged echoes are ignored. See the [implemented genomics architecture](genomics_architecture.md) for ownership and the source-preserving history API.
 
-Each selection creates its own Observation through the PatientRecord-first save
-path. `FieldChoiceCode` holds the per-value mapping; the writable descriptor
-exposes the code, vocabulary, resolved concept ID and concept name for every
-option. The field-level approved `FieldConceptMapping` enables this recipe.
+The following describes historical per-selection storage and the retained internal projector, not an active Disease-tab editor. Each selection used its own Observation. `FieldChoiceCode` holds the per-value mapping, and the approved `FieldConceptMapping` supplies the legacy recipe.
 
 | Selected field value | Standard SNOMED code | OMOP concept ID | Standard Observation category |
 | --- | --- | --- | --- |
@@ -49,9 +41,9 @@ earlier results remain as history. Full OMOP refreshes read these rows and legac
 removed selections. Newer individual imported marker observations update the
 matching PatientRecord values.
 
-Projection is atomic across the selection. If a selected concept is unavailable
-or a row fails, the PatientRecord edit remains pending and protected from stale
-OMOP refreshes. Unrecognized new values are rejected; existing unrecognized
+The retained internal projector is atomic across the selection. If a selected
+concept is unavailable or a row fails, no partial selection is committed. Existing
+pending legacy edits remain protected from stale OMOP refreshes. Unrecognized new values are rejected; existing unrecognized
 legacy text is preserved without claiming it has an individual concept mapping.
 When edits retain or remove unlisted legacy values, a dated Chromosomal
 morphology aggregate replaces the legacy set, followed by a separate coded row

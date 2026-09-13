@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import LegacyCytogeneticHistory from './LegacyCytogeneticHistory';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 import { Button } from '@/components/shadcn/button';
 import { useWritableFields } from '@/hooks/useWritableFields';
@@ -196,6 +197,7 @@ export default function GenomicsTab({ formData, readOnly = false }: {
         </tr>)}</tbody>
       </table>
     </div>}
+    {personId && <LegacyCytogeneticHistory key={personId} personId={personId} />}
     {deleting && <div role="alertdialog" aria-label="Delete variant" className="rounded-md border p-4 space-y-3">
       <p>Delete {deleting.gene} {deleting.variant_name || deleting.variant} from the active genomics list?</p>
       <div className="flex gap-2"><Button disabled={busy} onClick={remove}>Confirm delete</Button><Button variant="outline" disabled={busy} onClick={() => setDeleting(null)}>Cancel</Button></div>

@@ -427,26 +427,21 @@ def _derived_wearable_fields():
 
 
 class CytogeneticMarkersField(serializers.Field):
-    """Accept multiselect arrays and preserve compatibility with text clients."""
+    """Read legacy summaries; tolerate unchanged autosave echoes without writes."""
 
     def to_representation(self, value):
         from omop_core.services.cytogenetics import selections
         return ', '.join(selections(value)) if value is not None else None
 
-    def to_internal_value(self, value):
-        from omop_core.services.cytogenetics import selections, VALUES
-        try:
-            selected = selections(value)
-        except ValueError:
-            raise serializers.ValidationError('Select recognized cytogenetic markers.') from None
-        allowed = set(VALUES) | set(FieldChoice.objects.filter(field_name='cytogenetic_markers')
-                      .values_list('display', flat=True))
-        # Legacy imported text may be echoed by autosave. Preserve it without
-        # pretending it has an approved concept mapping.
-        existing = selections(getattr(self.parent.instance, 'cytogenetic_markers', None))
-        if set(selected) - allowed - set(existing):
-            raise serializers.ValidationError('Select recognized cytogenetic markers.')
-        return ', '.join(selected)
+    def run_validation(self, data=serializers.empty):
+        if data is serializers.empty:
+            raise serializers.SkipField()
+        existing = self.to_representation(getattr(self.parent.instance, 'cytogenetic_markers', None))
+        candidate = ', '.join(data) if isinstance(data, list) and all(isinstance(v, str) for v in data) else data
+        if candidate == existing or (candidate in (None, '') and existing in (None, '')):
+            raise serializers.SkipField()
+        raise serializers.ValidationError(
+            'Legacy cytogenetic summaries are read-only. Record individual findings in Genomics.')
 
 
 class PatientRecordSerializer(serializers.ModelSerializer):
