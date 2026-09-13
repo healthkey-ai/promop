@@ -4,6 +4,7 @@ Widths and aggregate counts describe the selected database at one snapshot.
 They do not establish NOTE ownership, vocabulary validity or migration contents.
 """
 from django.db import transaction
+from psycopg import sql
 
 
 TABLES = ('measurement', 'observation')
@@ -26,7 +27,7 @@ def audit_schema(connection, *, statement_timeout_ms=30000):
         cursor.execute("SELECT set_config('statement_timeout', %s, true)", [str(statement_timeout_ms)])
         cursor.execute('SELECT CURRENT_TIMESTAMP')
         captured_at = cursor.fetchone()[0].isoformat()
-        columns = [_audit_column(cursor, connection, table) for table in TABLES]
+        columns = [_audit_column(cursor, table) for table in TABLES]
         cursor.execute("SELECT to_regclass('django_migrations')")
         history_available = cursor.fetchone()[0] is not None
         applied = None
@@ -50,7 +51,7 @@ def audit_schema(connection, *, statement_timeout_ms=30000):
     }
 
 
-def _audit_column(cursor, connection, table):
+def _audit_column(cursor, table):
     # Resolve the same relation the application's unqualified table name uses,
     # including installations whose search_path is not public.
     cursor.execute('''
@@ -74,11 +75,11 @@ def _audit_column(cursor, connection, table):
     if data_type not in ('varchar', 'bpchar', 'text'):
         result['status'] = 'unsupported_type'
         return result
-    qualified = '.'.join(connection.ops.quote_name(name) for name in (schema, relation))
-    cursor.execute(f'''
+    query = sql.SQL('''
         SELECT count(*), count(*) FILTER (WHERE length(value_as_string) > %s),
-               max(length(value_as_string)) FROM {qualified}
-    ''', [WIDTH])
+               max(length(value_as_string)) FROM {}
+    ''').format(sql.Identifier(schema, relation))
+    cursor.execute(query, [WIDTH])
     result['row_count'], result['over_width_count'], result['maximum_value_length'] = cursor.fetchone()
     result['status'] = 'matches' if result['matches_expected_width'] else 'schema_mismatch'
     return result

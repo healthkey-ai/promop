@@ -6,6 +6,7 @@ from uuid import uuid4
 import pytest
 from django.core.management import call_command, CommandError
 from django.db import connection, DatabaseError, transaction
+from psycopg import sql
 
 from omop_core.services.genomics_schema_audit import audit_schema
 
@@ -17,13 +18,13 @@ pytestmark = pytest.mark.django_db(transaction=True)
 def schema():
     # Independent minimal tables exercise actual PostgreSQL types and prevent
     # schema-variant tests from altering the application's reflected tables.
-    name = 'genomics_audit_' + uuid4().hex
-    quoted = connection.ops.quote_name(name)
+    name = 'genomics_audit_' + uuid4().hex + '.quoted"'
+    identifier = sql.Identifier(name)
     with connection.cursor() as cursor:
         cursor.execute('SHOW search_path')
         previous = cursor.fetchone()[0]
-        cursor.execute(f'CREATE SCHEMA {quoted}')
-        cursor.execute("SELECT set_config('search_path', %s, false)", [name])
+        cursor.execute(sql.SQL('CREATE SCHEMA {}').format(identifier))
+        cursor.execute("SELECT set_config('search_path', %s, false)", [identifier.as_string()])
         for table in ('measurement', 'observation'):
             cursor.execute(f'CREATE TABLE {table} (value_as_string varchar(60))')
         cursor.execute('CREATE TABLE django_migrations (app text, name text, applied timestamptz)')
@@ -33,7 +34,7 @@ def schema():
     finally:
         with connection.cursor() as cursor:
             cursor.execute("SELECT set_config('search_path', %s, false)", [previous])
-            cursor.execute(f'DROP SCHEMA {quoted} CASCADE')
+            cursor.execute(sql.SQL('DROP SCHEMA {} CASCADE').format(identifier))
 
 
 def command(**options):
@@ -115,7 +116,7 @@ def test_transaction_is_database_enforced_read_only_and_settings_are_restored(sc
         cursor.execute('SHOW statement_timeout')
         timeout = cursor.fetchone()[0]
 
-    def accidental_write(cursor, conn, table):
+    def accidental_write(cursor, table):
         cursor.execute('SHOW transaction_isolation')
         assert cursor.fetchone()[0] == 'repeatable read'
         cursor.execute('SHOW transaction_read_only')
@@ -156,7 +157,7 @@ def test_nested_transaction_is_rejected_before_audit_queries(schema):
 def test_actual_statement_timeout_fails_without_partial_output(schema, monkeypatch):
     from omop_core.services import genomics_schema_audit
 
-    def slow_query(cursor, conn, table):
+    def slow_query(cursor, table):
         cursor.execute('SELECT pg_sleep(0.05)')
 
     monkeypatch.setattr(genomics_schema_audit, '_audit_column', slow_query)
