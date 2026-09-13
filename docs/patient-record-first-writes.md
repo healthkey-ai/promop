@@ -1,5 +1,10 @@
 # PatientRecord-First Write Architecture
 
+This is the current architecture, superseding the historical
+[`writable-ui-plan.md`](writable-ui-plan.md). UI edits save to PatientRecord;
+OMOP-derived values are not read-only merely because they were imported.
+Explicit computations such as BMI remain read-only for authorized editors.
+
 ## Problem
 
 The original write architecture had two frontend paths:
@@ -36,7 +41,7 @@ User edits a field
     |
     v
 Frontend: PATCH /api/patient-info/{person_id}/
-    |  (all writable fields in one request, except Person profile fields)
+    |  (all writable fields in one request, including Person profile fields)
     v
 Backend: PatientRecordSerializer.save()
     |  (value lands on PatientRecord immediately)
@@ -58,9 +63,13 @@ Response to frontend
 
 ### Profile fields
 
-Fields targeting `Person` (gender, race, ethnicity, address) still go to the
-persons endpoint (`PATCH /v1/persons/{id}/`) because they are a different resource.
-The frontend sends them via `writeProfileFields()`.
+Since PR #1163, profile edits use the same PatientRecord PATCH as clinical
+edits. The backend saves profile values, then `_project_profile_fields()` updates
+Person (demographics, contact information, and birth fields) or its Location row
+(address and coordinates), without calling `refresh_patient_record()`.
+Patient name uses the same PATCH and updates Person's name columns; its response
+field is not a stored PatientRecord column. Clinician validation fields retain
+their staff access checks.
 
 ## Write Descriptor Changes
 
@@ -181,17 +190,14 @@ await api.patch(`/patient-info/${personId}/`, directFields);
 ### After (single path)
 
 ```typescript
-// Profile fields → persons endpoint
-await writeProfileFields(personId, profileEdits);
-// Everything else → PatientRecord PATCH
+// Clinical and profile edits → one PatientRecord PATCH
 await api.patch(`/patient-info/${personId}/`, patchFields);
 ```
 
-The frontend no longer needs to know which fields are OMOP-mapped. It classifies
-fields into two buckets:
-
-1. `target === 'person'` → persons endpoint
-2. Everything else → PatientRecord PATCH
+The frontend does not choose an OMOP table. Clinical and profile edits share
+the PatientRecord PATCH; the backend routes onward writes to Person/Location or
+mapped clinical facts. Full OMOP-to-PatientRecord derivation belongs to the
+import/ingestion path, not an interactive save.
 
 ## Key Files
 

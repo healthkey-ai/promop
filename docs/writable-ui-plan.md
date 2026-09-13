@@ -1,6 +1,13 @@
-# Writable UI — plan of record
+# Writable UI — historical plan (superseded)
 
-Status as of 2026-08-23, against `dev` at `cefc2c0`.
+**Superseded by [PatientRecord-first writes](patient-record-first-writes.md).**
+The OMOP-first routing, mapping-dependent editability, and reverse derivation
+on UI saves described below are historical and must not guide implementation.
+Current UI edits save to PatientRecord, then project onward where appropriate;
+only explicitly computed values are read-only for an authorized editor.
+See issue #1066 for the remaining writability audit.
+
+Historical status as of 2026-08-23, against `dev` at `cefc2c0`.
 
 This is the working plan for making the patient editor write. It exists so the
 work can be picked up in another terminal, or by another person, without
