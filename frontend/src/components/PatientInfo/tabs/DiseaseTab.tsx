@@ -207,7 +207,11 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <ClinicalField label="Cytogenetic Risk" name="cytogenetic_risk" descriptor={descriptors.cytogenetic_risk} unknownField type="select" value={formData?.cytogenetic_risk} options={CYTOGENETIC_RISK_OPTIONS} onChange={onChange} />
           <div className="sm:col-span-2">
-            <ClinicalField label="Cytogenetic Markers" name="cytogenetic_markers" descriptor={descriptors.cytogenetic_markers} type="multiselect" value={formData?.cytogenetic_markers} onChange={onChange} />
+            <div data-patient-field="cytogenetic_markers">
+              <p className="text-sm font-medium">Legacy cytogenetic summary</p>
+              <p className="text-sm whitespace-pre-wrap">{String(formData?.cytogenetic_markers || 'No legacy summary recorded.')}</p>
+              <p className="text-sm text-muted-foreground">Record individual findings in Genomics. Original legacy results are available there for review.</p>
+            </div>
           </div>
         </div>
       </Section>

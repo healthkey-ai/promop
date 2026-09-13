@@ -1058,6 +1058,15 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         type_id = _genomics_type_concept(request.user, person)
         return Response(save_variant(person, request.data, type_concept_id=type_id), status=201)
 
+    @action(detail=True, methods=['get'], url_path='genomics-legacy-cytogenetics',
+            permission_classes=[GenomicsCrudPermission, PatientSelfScopePermission])
+    def genomics_legacy_cytogenetics(self, request, pk=None):
+        from omop_core.services.cytogenetic_history import history_page
+        person, error = self._genomics_access(request, pk)
+        if error is not None:
+            return error
+        return Response(history_page(person, request.query_params.get('cursor')))
+
     @action(detail=True, methods=['get'], url_path='genomics-catalog')
     def genomics_catalog(self, request, pk=None):
         from omop_core.models import FieldConceptMapping

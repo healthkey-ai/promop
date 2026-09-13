@@ -1,5 +1,9 @@
 # Legacy cytogenetic marker summary coding
 
+Interactive summary editing was retired by #1242. New discrete entry belongs to
+Genomics; original legacy evidence remains available through its read-only
+history view. See the [implemented architecture](genomics_architecture.md).
+
 The per-selection standard Observation mappings added by #1208 are documented in
 [cytogenetic-markers.md](cytogenetic-markers.md). The description below covers the
 legacy aggregate recipe, which remains readable for existing data and curator

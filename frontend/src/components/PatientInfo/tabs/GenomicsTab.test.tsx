@@ -2,8 +2,8 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import GenomicsTab from './GenomicsTab';
 
-const mocks = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn(), writable: true }));
-vi.mock('@/api/clinicalTransport', () => ({ clinicalClient: () => mocks, clinicalUrl: (path: string) => `/host${path}` }));
+const mocks = vi.hoisted(() => ({ historyGet: vi.fn(), get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn(), writable: true }));
+vi.mock('@/api/clinicalTransport', () => ({ clinicalClient: () => ({ ...mocks, get: (path: string, config: unknown) => path.includes('genomics-legacy-cytogenetics') ? mocks.historyGet(path, config) : mocks.get(path, ...(config === undefined ? [] : [config])) }), clinicalUrl: (path: string) => `/host${path}` }));
 vi.mock('@/hooks/useWritableFields', () => ({ useWritableFields: () => ({ descriptors: { genetic_mutations: { writable: mocks.writable } } }) }));
 
 const saved = { id: 123, provenance: 'asserted', gene: 'BRCA1', variant: 'c.68_69delAG', origin: 'Germline', interpretation: 'Pathogenic', genome_assembly: 'GRCh38', variant_description: 'Complete source report', allelic_frequency: 0, allelic_frequency_unit: '%' };
@@ -11,6 +11,7 @@ const url = '/host/v1/patient-records/42/genomics/';
 
 beforeEach(() => {
   vi.clearAllMocks(); mocks.writable = true;
+  mocks.historyGet.mockResolvedValue({ data: { results: [], next_cursor: null } });
   mocks.get.mockImplementation(async path => ({ data: path.includes('genomics-catalog') ? { markers: [] } : [saved] }));
   mocks.post.mockImplementation(async (_url, data) => ({ data: { ...data, id: 456 } }));
   mocks.patch.mockImplementation(async (_url, data) => ({ data }));

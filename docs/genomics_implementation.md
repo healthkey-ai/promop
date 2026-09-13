@@ -1,18 +1,18 @@
 # PRomop Genomics: Remaining Implementation Plan
 
-See [the implemented architecture](genomics_architecture.md) for current behavior and source links. Reviewed against `dev` at `de4c164` on 2026-09-13; the supplied Word documents are source material, not a claim that every proposed feature exists. This is a work plan for remaining requirements.
+See [the implemented architecture](genomics_architecture.md) for current behavior and source links. Updated from `dev` at `07a1cc4` with the #1242 ownership implementation on 2026-09-13; the supplied Word documents are source material, not a claim that every proposed feature exists. This is a work plan for remaining requirements.
 
 ## Issue tracking
 
 | Work | Issue | Status |
 | --- | --- | --- |
-| secure owned NOTE overflow references and bound projection reads | [#1236](https://github.com/healthkey-ai/promop/issues/1236) | Implemented in this change; validation below |
+| secure owned NOTE overflow references and bound projection reads | [#1236](https://github.com/healthkey-ai/promop/issues/1236) | Merged in [#1249](https://github.com/healthkey-ai/promop/pull/1249) |
 | reconcile previously widened shared text columns without data loss | [#1237](https://github.com/healthkey-ai/promop/issues/1237) | Open |
-| expose all implemented components through one curation registry | [#1238](https://github.com/healthkey-ai/promop/issues/1238) | Implemented in this change; validation below |
-| promote variant-name LOINC recipe and make domain audits conclusive | [#1239](https://github.com/healthkey-ai/promop/issues/1239) | Implemented on recipe branch; deployment audit pending |
+| expose all implemented components through one curation registry | [#1238](https://github.com/healthkey-ai/promop/issues/1238) | Merged in [#1249](https://github.com/healthkey-ai/promop/pull/1249) |
+| promote variant-name LOINC recipe and make domain audits conclusive | [#1239](https://github.com/healthkey-ai/promop/issues/1239) | Merged in [#1249](https://github.com/healthkey-ai/promop/pull/1249); deployment audit pending |
 | unify finding state, complete dialog fields and preserve unknown evidence | [#1240](https://github.com/healthkey-ai/promop/issues/1240) | Core state/UI implemented; clinical aggregate and consumer review remain |
-| make asserted projection provenance editable and derivation metadata consistent | [#1241](https://github.com/healthkey-ai/promop/issues/1241) | Implemented in this change; validation below |
-| reconcile cytogenetic summaries and centralize overlapping finding editing | [#1242](https://github.com/healthkey-ai/promop/issues/1242) | Open |
+| make asserted projection provenance editable and derivation metadata consistent | [#1241](https://github.com/healthkey-ai/promop/issues/1241) | Merged in [#1249](https://github.com/healthkey-ai/promop/pull/1249) |
+| reconcile cytogenetic summaries and centralize overlapping finding editing | [#1242](https://github.com/healthkey-ai/promop/issues/1242) | Implemented: Genomics owns entry; original legacy history remains readable |
 | agree BIDMC test, specimen, scope and volume requirements | [#1243](https://github.com/healthkey-ai/promop/issues/1243) | Source agreement required |
 | implement shared tests, specimens, scope and bounded sequencing projections | [#1244](https://github.com/healthkey-ai/promop/issues/1244) | Gated on source agreement |
 | publish and implement idempotent source import and extraction provenance | [#1245](https://github.com/healthkey-ai/promop/issues/1245) | Open |
@@ -80,11 +80,11 @@ Acceptance retained for future changes: asserted echoes round-trip; derived writ
 
 ### 5. Close linkage and overlapping-editor inconsistencies
 
-Completed linkage work: [PR #1233](https://github.com/healthkey-ai/promop/pull/1233) shares event-concept identity across reads, writes, supersession and deletion and parametrizes CRUD tests for literal codes and Athena names. Retain this regression coverage. Remaining gap: the Disease tab retains a separate cytogenetic multiselect covering markers that overlap the genomics catalog, despite the earlier intent to centralize finding editing.
+Completed linkage work: [PR #1233](https://github.com/healthkey-ai/promop/pull/1233) shares event-concept identity across reads, writes, supersession and deletion and parametrizes CRUD tests for literal codes and Athena names. Retain this regression coverage. Overlapping-editor ownership is now implemented in #1242: the Disease summary is read-only and Genomics owns new discrete entry.
 
 Preserve the shared resolver and its patient/event-type isolation when extending report/test linkage.
 
-Choose and document ownership for the overlapping cytogenetic summary. To fulfill the centralized-editor intent, move new discrete finding entry to Genomics and make the legacy summary a compatibility/read projection once reconciliation rules exist. Do not infer negative findings from deselection, synthesize dates, or convert historical aggregate prose into invented discrete results. Preserve different exact source tokens and distinguish gain from amplification when the source does. Cytogenetic risk classification remains a separate clinical field.
+Implemented reconciliation contract: retain the legacy summary as a compatibility read and show original, paginated individual/aggregate facts in Genomics for comparison before manual entry. Preserve source text and dates, expose historical clears/errors as history, and show cache-only summaries without a date. Reject changed legacy summary PATCHes while ignoring unchanged autosave echoes. Do not infer negative findings from deselection, synthesize dates, or automatically convert or merge historical prose. Gain and amplification remain distinct where the source distinguishes them; ambiguous wording stays ambiguous. Cytogenetic risk classification remains a separate clinical field. Automated source identity/deduplication belongs to #1245 after the source agreement; clinical interpretation remains #1246.
 
 Acceptance. Both event-concept encodings support read/edit/delete round trips without duplicate active components. Existing individual and aggregate cytogenetic data remain readable; the UI has a documented owner for overlapping findings and cannot silently maintain contradictory copies.
 
@@ -170,3 +170,9 @@ Schema-history reconciliation, live-source enablement and clinical decisions rem
 Additional local checks passed: **145** mapping descriptor, provenance, cytogenetic compatibility and sample-data tests; **3** refresh query-budget tests after a fresh full migration chain; and `makemigrations --check --dry-run` reported no changes. PostgreSQL test databases were isolated from application data.
 
 Provenance continuation: **208** genomics/provenance/catalog/legacy tests and **15** shared Genomics UI tests passed. The two additional composite cases and all 12 existing provenance registry/service/API and refresh-budget tests also passed.
+
+## Verification for cytogenetic ownership (#1242)
+
+The genomics/cytogenetics, NOTE, catalog, state, provenance, recipe and domain regression suite passed **387 tests with one existing skip**. A final run covering the new history endpoint, shared descriptors, projection reconciliation and legacy mutation round trips passed **120 tests**. These runs overlap and should not be added together. Coverage retains both literal-code and Athena-name event fixtures, original aggregate/individual text, gain/amplification ambiguity, historical clears/errors, patient/fact NOTE ownership, bounded pagination, cache-only undated summaries, and unchanged autosave echoes without fact writes.
+
+All **67** Disease/Genomics/history UI tests passed, including retry, pagination and patient-switch isolation. TypeScript and targeted ESLint passed. A fresh full migration chain followed by the **12** Django provenance/API/refresh-budget tests passed on a separate isolated local database. The NOTE-heavy history page uses five queries regardless of the number of rows within a page. No schema migration or live-data conversion is introduced.

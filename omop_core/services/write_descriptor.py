@@ -561,6 +561,12 @@ def build_writable_field_descriptor():
                 'reason': 'Priority findings write through approved Genomics mappings.',
             }
             continue
+        if field == 'cytogenetic_markers':
+            descriptor[field] = {
+                'kind': KIND_COMPUTED, 'writable': False, 'target': 'genomics',
+                'reason': 'Legacy cytogenetic summary is read-only. Record individual findings in Genomics.',
+            }
+            continue
         if field == 'genetic_mutations':
             descriptor[field] = {
                 'kind': KIND_EDITABLE, 'writable': True, 'target': 'genomics',

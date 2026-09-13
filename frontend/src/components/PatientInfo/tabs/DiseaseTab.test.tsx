@@ -217,14 +217,14 @@ describe('MyelomaSection — SCT fields', () => {
     expect(screen.getByText('SCT Eligibility')).toBeInTheDocument();
   });
 
-  it('renders cytogenetic markers from the server descriptor and emits a comma string', () => {
+  it('shows legacy cytogenetics read-only even with a stale writable descriptor', () => {
     const onChange = vi.fn();
     renderMyeloma({ cytogenetic_markers: 'del17p' }, onChange);
-
-    expect(screen.getByText('Cytogenetic Markers')).toBeInTheDocument();
-    expect(screen.getByTestId('ms-opt-del17p')).toHaveAttribute('aria-pressed', 'true');
-    fireEvent.click(screen.getByTestId('ms-opt-1q_amp'));
-    expect(onChange).toHaveBeenCalledWith('cytogenetic_markers', 'del17p, 1q_amp');
+    expect(screen.getByText('Legacy cytogenetic summary')).toBeInTheDocument();
+    expect(screen.getByText('del17p')).toBeInTheDocument();
+    expect(screen.queryByTestId('ms-opt-1q_amp')).not.toBeInTheDocument();
+    expect(screen.getByText(/Record individual findings in Genomics/)).toBeInTheDocument();
+    expect(onChange).not.toHaveBeenCalled();
   });
 
   it('keeps the myeloma type fallback options aligned with the requested value set', () => {
@@ -645,7 +645,7 @@ describe('DiseaseTab — shared staging and biomarkers', () => {
   });
 });
 
-describe('DiseaseTab — cytogenetic marker multiselect', () => {
+describe('DiseaseTab — legacy cytogenetic summary', () => {
   beforeEach(async () => {
     __resetWritableFieldsCache();
     (globalThis as Record<string, unknown>).__DESCRIPTORS__ = {
@@ -659,16 +659,12 @@ describe('DiseaseTab — cytogenetic marker multiselect', () => {
     setupVocabMock();
   });
 
-  it('adds and removes individual choices without discarding other selections', () => {
+  it('preserves the displayed legacy tokens without emitting selection edits', () => {
     const onChange = vi.fn();
-    const { rerender } = render(<DiseaseTab {...BASE_PROPS}
-      formData={{ cytogenetic_markers: 't(4;14)' }} onChange={onChange} />);
-    expect(screen.getByText('Cytogenetic Markers')).toBeInTheDocument();
-    fireEvent.click(screen.getByTestId('ms-opt-t(11;14)'));
-    expect(onChange).toHaveBeenLastCalledWith('cytogenetic_markers', 't(4;14), t(11;14)');
-    rerender(<DiseaseTab {...BASE_PROPS}
-      formData={{ cytogenetic_markers: 't(4;14), t(11;14)' }} onChange={onChange} />);
-    fireEvent.click(screen.getByTestId('ms-opt-t(4;14)'));
-    expect(onChange).toHaveBeenLastCalledWith('cytogenetic_markers', 't(11;14)');
+    render(<DiseaseTab {...BASE_PROPS}
+      formData={{ cytogenetic_markers: 't(4;14), 1q21 gain/amplification' }} onChange={onChange} />);
+    expect(screen.getByText('t(4;14), 1q21 gain/amplification')).toBeInTheDocument();
+    expect(screen.queryByTestId('ms-opt-t(11;14)')).not.toBeInTheDocument();
+    expect(onChange).not.toHaveBeenCalled();
   });
 });
