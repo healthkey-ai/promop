@@ -667,6 +667,38 @@ class OmopSnapshot:
     genomics_cache: dict = dataclasses.field(default_factory=dict, compare=False)
 
 
+def _first_by_code(snapshot: OmopSnapshot, code: str, table: str = 'measurement'):
+    """O(1) lookup of the latest row with a given concept code."""
+    idx = snapshot.meas_by_code if table == 'measurement' else snapshot.obs_by_code
+    rows = idx.get(code, ())
+    return rows[0] if rows else None
+
+
+def _first_by_source(snapshot: OmopSnapshot, source_value: str, table: str = 'measurement'):
+    """O(1) lookup of the latest row with a given source value."""
+    idx = snapshot.meas_by_source if table == 'measurement' else snapshot.obs_by_source
+    rows = idx.get(source_value, ())
+    return rows[0] if rows else None
+
+
+def _rows_by_codes(snapshot: OmopSnapshot, codes, table: str = 'measurement') -> list:
+    """Collect rows matching any code in *codes* from the snapshot index, preserving date order."""
+    idx = snapshot.meas_by_code if table == 'measurement' else snapshot.obs_by_code
+    result = []
+    for code in codes:
+        result.extend(idx.get(code, ()))
+    return result
+
+
+def _rows_by_sources(snapshot: OmopSnapshot, source_values, table: str = 'measurement') -> list:
+    """Collect rows matching any source value from the snapshot index."""
+    idx = snapshot.meas_by_source if table == 'measurement' else snapshot.obs_by_source
+    result = []
+    for sv in source_values:
+        result.extend(idx.get(sv, ()))
+    return result
+
+
 def _build_snapshot(person: Person) -> OmopSnapshot:
     """Fetch all OMOP rows for *person* in ~6 SQL queries and build lookup indexes."""
     measurements = list(
@@ -773,15 +805,15 @@ def _get_custom_patient_field_data(snapshot: OmopSnapshot) -> dict[str, object]:
         concept_id = mapping.concept_id
         rows = []
         if table == 'measurement':
-            rows = [row for row in snapshot.measurements if (
-                (source and row.measurement_source_value == source)
-                or (concept_id and row.measurement_concept_id == concept_id)
-            )]
+            if source:
+                rows = list(snapshot.meas_by_source.get(source, ()))
+            if not rows and concept_id:
+                rows = [row for row in snapshot.measurements if row.measurement_concept_id == concept_id]
         elif table == 'observation':
-            rows = [row for row in snapshot.observations if (
-                (source and row.observation_source_value == source)
-                or (concept_id and row.observation_concept_id == concept_id)
-            )]
+            if source:
+                rows = list(snapshot.obs_by_source.get(source, ()))
+            if not rows and concept_id:
+                rows = [row for row in snapshot.observations if row.observation_concept_id == concept_id]
         elif table == 'conditionoccurrence':
             rows = [row for row in snapshot.conditions if row.condition_concept_id == concept_id]
         elif table == 'drugexposure':
@@ -2177,23 +2209,18 @@ def _get_vitals_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     }
 
     codes = set(vital_sign_concepts.values())
-    # Filter from snapshot: measurements with value_as_number, matching codes
-    measurements = [
-        m for m in snapshot.measurements
-        if m.value_as_number is not None
-        and (getattr(m.measurement_concept, 'concept_code', None) in codes
-             or m.measurement_source_value in codes)
-    ]
+    # O(1) index lookups instead of O(N) linear scan
     first_by_code = {}
-    for measurement in measurements:
-        code = _measurement_code(measurement)
-        if code not in codes:
-            # _measurement_code prefers whichever field looks like a LOINC; if
-            # that is a code we did not ask for, fall back to the one that
-            # actually matched so the row is not dropped.
-            concept_code = getattr(measurement.measurement_concept, 'concept_code', None)
-            code = concept_code if concept_code in codes else measurement.measurement_source_value
-        first_by_code.setdefault(code, measurement)
+    for code in codes:
+        for m in snapshot.meas_by_code.get(code, ()):
+            if m.value_as_number is not None:
+                first_by_code.setdefault(code, m)
+                break
+        if code not in first_by_code:
+            for m in snapshot.meas_by_source.get(code, ()):
+                if m.value_as_number is not None:
+                    first_by_code.setdefault(code, m)
+                    break
 
     for vital_type, loinc_code in vital_sign_concepts.items():
         measurement = first_by_code.get(loinc_code)
@@ -2320,25 +2347,8 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
     snapshot = snapshot or _build_snapshot(person)
 
-    _all_biomarker_codes = _BIOMARKER_MEASUREMENT_LOINCS | _HISTOLOGIC_TYPE_LOINCS
-    measurements = [
-        m for m in snapshot.measurements
-        if (getattr(m.measurement_concept, 'concept_code', None) in _all_biomarker_codes
-            or m.measurement_source_value in _all_biomarker_codes)
-    ]
-
-    _all_obs_codes = _BIOMARKER_OBS_LOINCS | _HISTOLOGIC_TYPE_LOINCS
-    observations = [
-        o for o in snapshot.observations
-        if (getattr(o.observation_concept, 'concept_code', None) in _all_obs_codes
-            or o.observation_source_value in _all_obs_codes
-            or (o.observation_concept and o.observation_concept.concept_name and any(
-                term in o.observation_concept.concept_name.lower()
-                for term in ('homologous recombination', 'bone only metastas', 'histologic')
-            )))
-    ]
-
-    pdl1_test = next((m for m in measurements if _measurement_code(m) == '83052-1'), None)
+    # Use index lookups instead of building filtered sublists
+    pdl1_test = _first_by_code(snapshot, '83052-1')
     if pdl1_test:
         data['pd_l1_tumor_cells'] = int(pdl1_test.value_as_number) if pdl1_test.value_as_number else None
         data['pd_l1_assay'] = pdl1_test.value_source_value
@@ -2370,19 +2380,19 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             return 'Equivocal'
         return raw.strip().title()
 
-    er_measurement = next((m for m in measurements if _measurement_code(m) == '16112-5'), None)
+    er_measurement = _first_by_code(snapshot, '16112-5')
     if er_measurement:
         status = _receptor_status(er_measurement)
         if status:
             data['estrogen_receptor_status'] = status
 
-    pr_measurement = next((m for m in measurements if _measurement_code(m) == '16113-3'), None)
+    pr_measurement = _first_by_code(snapshot, '16113-3')
     if pr_measurement:
         status = _receptor_status(pr_measurement)
         if status:
             data['progesterone_receptor_status'] = status
 
-    her2_measurement = next((m for m in measurements if _measurement_code(m) == '48676-1'), None)
+    her2_measurement = _first_by_code(snapshot, '48676-1')
     if her2_measurement:
         status = _receptor_status(her2_measurement)
         if status:
@@ -2397,10 +2407,7 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
 
     def _first_m(concept_code):
         """Return the most recent Measurement for a LOINC code, checking concept first then source_value."""
-        return (
-            next((m for m in measurements if _measurement_code(m) == concept_code), None)
-            or next((m for m in measurements if m.measurement_source_value == concept_code), None)
-        )
+        return _first_by_code(snapshot, concept_code) or _first_by_source(snapshot, concept_code)
 
     # Ki-67 proliferation index — LOINC 85319-2
     ki67_m = _first_m('85319-2')
@@ -2426,7 +2433,7 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     # orientation", not menopausal status). Read from Observation only, matched
     # by concept name containing 'menopaus'.
     menopause_obs = next(
-        (obs for obs in observations
+        (obs for obs in snapshot.observations
          if obs.observation_concept
          and obs.observation_concept.concept_name
          and 'menopaus' in obs.observation_concept.concept_name.lower()),
@@ -2442,7 +2449,7 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     # HRD status — Observation concept name containing 'homologous recombination'
     hrd_obs = next(
         (
-            obs for obs in observations
+            obs for obs in snapshot.observations
             if obs.observation_concept
             and 'homologous recombination' in obs.observation_concept.concept_name.lower()
         ),
@@ -2454,11 +2461,11 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             data['hrd_status'] = val
 
     # Bone-only metastasis status — LOINC 44667-4 or concept-name matching
-    bone_obs = next((obs for obs in observations if _observation_code(obs) == '44667-4'), None)
+    bone_obs = _first_by_code(snapshot, '44667-4', table='observation')
     if not bone_obs:
         bone_obs = next(
             (
-                obs for obs in observations
+                obs for obs in snapshot.observations
                 if obs.observation_concept
                 and 'bone only metastas' in obs.observation_concept.concept_name.lower()
             ),
@@ -2474,31 +2481,47 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             elif s in ('no', 'false', '0', 'negative'):
                 data['bone_only_metastasis_status'] = False
 
-    # Histologic type — Observation concept matching 'histologic' or 'histology'
-    histologic_measurement = next(
-        (
-            m for m in measurements
-            if _measurement_code(m) in _HISTOLOGIC_TYPE_LOINCS and m.value_as_string
-        ),
-        None,
-    )
+    # Histologic type — index lookup by LOINC code (concept or source), then concept-name fallback
+    histologic_measurement = None
+    for code in _HISTOLOGIC_TYPE_LOINCS:
+        for m in snapshot.meas_by_code.get(code, ()):
+            if m.value_as_string:
+                histologic_measurement = m
+                break
+        if not histologic_measurement:
+            for m in snapshot.meas_by_source.get(code, ()):
+                if m.value_as_string:
+                    histologic_measurement = m
+                    break
+        if histologic_measurement:
+            break
     if histologic_measurement and histologic_measurement.value_as_string:
         data['histologic_type'] = histologic_measurement.value_as_string
         return data
 
-    histologic_obs = next(
-        (
-            obs for obs in observations
-            if obs.value_as_string and (
-                _observation_code(obs) in _HISTOLOGIC_TYPE_LOINCS
-                or (
-                    obs.observation_concept
-                    and 'histolog' in obs.observation_concept.concept_name.lower()
-                )
-            )
-        ),
-        None,
-    )
+    histologic_obs = None
+    for code in _HISTOLOGIC_TYPE_LOINCS:
+        for o in snapshot.obs_by_code.get(code, ()):
+            if o.value_as_string:
+                histologic_obs = o
+                break
+        if not histologic_obs:
+            for o in snapshot.obs_by_source.get(code, ()):
+                if o.value_as_string:
+                    histologic_obs = o
+                    break
+        if histologic_obs:
+            break
+    if not histologic_obs:
+        histologic_obs = next(
+            (
+                obs for obs in snapshot.observations
+                if obs.value_as_string
+                and obs.observation_concept
+                and 'histolog' in obs.observation_concept.concept_name.lower()
+            ),
+            None,
+        )
     if histologic_obs and histologic_obs.value_as_string:
         data['histologic_type'] = histologic_obs.value_as_string
 
@@ -2528,14 +2551,9 @@ def _get_genomics_pathology_data(person: Person, snapshot: OmopSnapshot = None) 
     """
     snapshot = snapshot or _build_snapshot(person)
     data = {}
-    measurements = [
-        m for m in snapshot.measurements
-        if (getattr(m.measurement_concept, 'concept_code', None) in _GENOMICS_PATHOLOGY_LOINCS
-            or m.measurement_source_value in _GENOMICS_PATHOLOGY_LOINCS)
-    ]
 
     def latest(code):
-        return next((m for m in measurements if _measurement_code(m) == code), None)
+        return _first_by_code(snapshot, code) or _first_by_source(snapshot, code)
 
     methodology = latest('85337-4')
     if methodology:
@@ -2639,50 +2657,24 @@ def _get_staging_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     snapshot = snapshot or _build_snapshot(person)
     data = {}
 
-    measurements = [
-        m for m in snapshot.measurements
-        if (getattr(m.measurement_concept, 'concept_code', None) in _STAGING_LOINCS
-            or m.measurement_source_value in _STAGING_LOINCS)
-    ]
-    _staging_obs_sources = _STAGING_LOINCS | {FHIR_CONDITION_STAGE_SOURCE_VALUE}
-    observations = [
-        o for o in snapshot.observations
-        if (getattr(o.observation_concept, 'concept_code', None) in _STAGING_LOINCS
-            or o.observation_source_value in _staging_obs_sources)
-    ]
+    def _stage_row_value(row):
+        """Extract the string value from a staging row."""
+        return row.value_as_string or (str(int(row.value_as_number)) if row.value_as_number is not None else None)
 
     def _stage_value(loinc_code):
         """Return the best string value for a staging LOINC code (Measurement then Observation)."""
-        # Primary: concept code match
-        m = next(
-            (
-                measurement for measurement in measurements
-                if measurement.measurement_concept
-                and measurement.measurement_concept.concept_code == loinc_code
-            ),
-            None,
-        )
+        # Primary: concept code match (O(1) index lookup)
+        m = _first_by_code(snapshot, loinc_code)
         if m:
-            return m.value_as_string or (str(int(m.value_as_number)) if m.value_as_number is not None else None)
+            return _stage_row_value(m)
         # Secondary: LOINC stored as source_value (FHIR upload path)
-        m = next((measurement for measurement in measurements if measurement.measurement_source_value == loinc_code), None)
+        m = _first_by_source(snapshot, loinc_code)
         if m:
-            return m.value_as_string or (str(int(m.value_as_number)) if m.value_as_number is not None else None)
+            return _stage_row_value(m)
         # Tertiary: Observation by concept code, then by source_value.
-        obs = next(
-            (
-                observation for observation in observations
-                if observation.observation_concept
-                and observation.observation_concept.concept_code == loinc_code
-            ),
-            None,
-        )
+        obs = _first_by_code(snapshot, loinc_code, table='observation')
         if obs is None:
-            obs = next(
-                (observation for observation in observations
-                 if observation.observation_source_value == loinc_code),
-                None,
-            )
+            obs = _first_by_source(snapshot, loinc_code, table='observation')
         if obs:
             return obs.value_as_string or (
                 str(int(obs.value_as_number)) if obs.value_as_number is not None else None
@@ -2696,13 +2688,9 @@ def _get_staging_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         # Fallback for a dated FHIR Condition.stage assertion which had no
         # standard staging code. This is still an OMOP fact; its distinct
         # source value prevents it being confused with a coded LOINC result.
+        fhir_stage_rows = snapshot.obs_by_source.get(FHIR_CONDITION_STAGE_SOURCE_VALUE, ())
         stage_val = next(
-            (
-                observation.value_as_string
-                for observation in observations
-                if observation.observation_source_value == FHIR_CONDITION_STAGE_SOURCE_VALUE
-                and observation.value_as_string
-            ),
+            (obs.value_as_string for obs in fhir_stage_rows if obs.value_as_string),
             None,
         )
     if stage_val:
@@ -2725,7 +2713,7 @@ def _get_staging_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
 
     # Staging modalities — Observation concept name containing 'staging method'
     staging_vals = list(dict.fromkeys(
-        obs.value_as_string for obs in observations
+        obs.value_as_string for obs in snapshot.observations
         if obs.value_as_string
         and obs.observation_concept
         and 'staging' in obs.observation_concept.concept_name.lower()
@@ -2778,20 +2766,16 @@ def _get_social_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
     snapshot = snapshot or _build_snapshot(person)
 
-    _EMPLOYMENT_CODES = {'224362002', '160903007'}
-    employment_obs = next(
-        (o for o in snapshot.observations
-         if getattr(o.observation_concept, 'concept_code', None) in _EMPLOYMENT_CODES),
-        None,
-    )
+    _EMPLOYMENT_CODES = ('224362002', '160903007')
+    employment_obs = None
+    for code in _EMPLOYMENT_CODES:
+        employment_obs = _first_by_code(snapshot, code, table='observation')
+        if employment_obs:
+            break
     if employment_obs:
         data['employment_status'] = employment_obs.value_as_string
 
-    insurance_obs = next(
-        (o for o in snapshot.observations
-         if getattr(o.observation_concept, 'concept_code', None) == '408729009'),
-        None,
-    )
+    insurance_obs = _first_by_code(snapshot, '408729009', table='observation')
     if insurance_obs:
         data['insurance_type'] = insurance_obs.value_as_string
 
@@ -2805,9 +2789,8 @@ def _get_behavior_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     # New format (question/answer, #451): observation_concept = LOINC 72166-2,
     # answer in value_as_concept (LA18978-9 / LA15920-4 / LA18976-3).
     tobacco_qa_obs = [
-        o for o in snapshot.observations
-        if getattr(o.observation_concept, 'concept_code', None) == '72166-2'
-        and getattr(o.observation_concept, 'vocabulary_id', None) == 'LOINC'
+        o for o in snapshot.obs_by_code.get('72166-2', ())
+        if getattr(o.observation_concept, 'vocabulary_id', None) == 'LOINC'
     ]
     _ANSWER_MAP = {
         'LA18978-9': (True,  'Never smoker'),
@@ -2829,11 +2812,8 @@ def _get_behavior_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     # Backward compat: old format wrote SNOMED codes directly into
     # observation_concept_id. Only apply if the new format didn't match.
     if 'no_tobacco_use_status' not in data:
-        _OLD_TOBACCO_CODES = {'266919005', '8517006', '77176002'}
-        old_tobacco_obs = [
-            o for o in snapshot.observations
-            if getattr(o.observation_concept, 'concept_code', None) in _OLD_TOBACCO_CODES
-        ]
+        _OLD_TOBACCO_CODES = ('266919005', '8517006', '77176002')
+        old_tobacco_obs = _rows_by_codes(snapshot, _OLD_TOBACCO_CODES, table='observation')
         for obs in old_tobacco_obs:
             code = obs.observation_concept.concept_code
             if code == '266919005':
@@ -2846,30 +2826,28 @@ def _get_behavior_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
                 data['no_tobacco_use_status'] = False
                 data['tobacco_use_details'] = 'Current smoker'
 
-    # snapshot.measurements is already ordered -date -id
-    for measurement in snapshot.measurements:
-        code = _measurement_code(measurement)
-        field_info = _BEHAVIOR_MEASUREMENT_FIELDS.get(code)
-        if not field_info:
-            continue
-        field_name, caster = field_info
+    # Use index lookups instead of scanning all measurements
+    for code, (field_name, caster) in _BEHAVIOR_MEASUREMENT_FIELDS.items():
         if field_name in data:
             continue
+        # Check both concept code and source value indexes
+        candidates = snapshot.meas_by_code.get(code, ()) or snapshot.meas_by_source.get(code, ())
+        for measurement in candidates:
+            if measurement.value_as_string not in (None, ''):
+                if caster is str:
+                    data[field_name] = measurement.value_as_string
+                else:
+                    try:
+                        data[field_name] = caster(float(measurement.value_as_string))
+                    except (TypeError, ValueError):
+                        continue
+                break
 
-        if measurement.value_as_string not in (None, ''):
-            if caster is str:
-                data[field_name] = measurement.value_as_string
-            else:
-                try:
-                    data[field_name] = caster(float(measurement.value_as_string))
-                except (TypeError, ValueError):
-                    continue
-            continue
-
-        if measurement.value_as_number is None:
-            continue
-        value = float(measurement.value_as_number)
-        data[field_name] = caster(value) if caster is not str else str(value)
+            if measurement.value_as_number is None:
+                continue
+            value = float(measurement.value_as_number)
+            data[field_name] = caster(value) if caster is not str else str(value)
+            break
 
     return data
 
@@ -2923,15 +2901,27 @@ def _get_assertion_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     unparseable answer, deliberately leaves the projection unknown.
     """
     snapshot = snapshot or _build_snapshot(person)
-    measurement_rows = snapshot.measurements
-    observation_rows = snapshot.observations
-    rows = [
-        (m.measurement_date, m.measurement_id, _measurement_code(m), m)
-        for m in measurement_rows
-    ] + [
-        (o.observation_date, o.observation_id, _observation_code(o), o)
-        for o in observation_rows
-    ]
+    # Only collect rows matching known assertion codes (O(K) instead of O(N))
+    _assertion_codes = set(_ASSERTION_FIELDS.keys())
+    rows = []
+    for code in _assertion_codes:
+        for m in snapshot.meas_by_code.get(code, ()):
+            rows.append((m.measurement_date, m.measurement_id, code, m))
+        for m in snapshot.meas_by_source.get(code, ()):
+            rows.append((m.measurement_date, m.measurement_id, code, m))
+        for o in snapshot.obs_by_code.get(code, ()):
+            rows.append((o.observation_date, o.observation_id, code, o))
+        for o in snapshot.obs_by_source.get(code, ()):
+            rows.append((o.observation_date, o.observation_id, code, o))
+    # Deduplicate by (table, id) since a row could appear in both code and source indexes
+    seen = set()
+    deduped = []
+    for item in rows:
+        key = (type(item[3]).__name__, item[1])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(item)
+    rows = deduped
     rows.sort(key=lambda item: (item[0], item[1]), reverse=True)
 
     data = {}
@@ -2967,8 +2957,6 @@ def _get_infection_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
     snapshot = snapshot or _build_snapshot(person)
 
-    measurements = snapshot.measurements  # already non-erroneous
-
     def _infection_value(m):
         """Return 'negative', 'positive', or None from a Measurement row."""
         if m.value_as_concept_id:
@@ -2987,12 +2975,8 @@ def _get_infection_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
                 return 'positive'
         return None
 
-    _HIV_CODES = {'5221-7', '7917-8'}
-    hiv_measurements = [
-        m for m in measurements
-        if getattr(m.measurement_concept, 'concept_code', None) in _HIV_CODES
-        or m.measurement_source_value in _HIV_CODES
-    ]
+    _HIV_CODES = ('5221-7', '7917-8')
+    hiv_measurements = _rows_by_codes(snapshot, _HIV_CODES) or _rows_by_sources(snapshot, _HIV_CODES)
     for m in hiv_measurements:
         result = _infection_value(m)
         if result == 'negative':
@@ -3002,12 +2986,8 @@ def _get_infection_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             data['no_hiv_status'] = False
             data['hiv_status'] = True
 
-    _HEPB_CODES = {'5195-3'}
-    hepb_measurements = [
-        m for m in measurements
-        if getattr(m.measurement_concept, 'concept_code', None) in _HEPB_CODES
-        or m.measurement_source_value in _HEPB_CODES
-    ]
+    _HEPB_CODES = ('5195-3',)
+    hepb_measurements = _rows_by_codes(snapshot, _HEPB_CODES) or _rows_by_sources(snapshot, _HEPB_CODES)
     for m in hepb_measurements:
         result = _infection_value(m)
         if result == 'negative':
@@ -3017,12 +2997,8 @@ def _get_infection_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             data['no_hepatitis_b_status'] = False
             data['hepatitis_b_status'] = True
 
-    _HEPC_CODES = {'5196-1'}
-    hepc_measurements = [
-        m for m in measurements
-        if getattr(m.measurement_concept, 'concept_code', None) in _HEPC_CODES
-        or m.measurement_source_value in _HEPC_CODES
-    ]
+    _HEPC_CODES = ('5196-1',)
+    hepc_measurements = _rows_by_codes(snapshot, _HEPC_CODES) or _rows_by_sources(snapshot, _HEPC_CODES)
     for m in hepc_measurements:
         result = _infection_value(m)
         if result == 'negative':
@@ -3106,8 +3082,7 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
     }
 
     mm_measurements = sorted(
-        (m for m in snapshot.measurements
-         if m.measurement_source_value in MM_LOINC_CODES),
+        _rows_by_sources(snapshot, MM_LOINC_CODES.keys()),
         key=lambda m: m.measurement_date or date.min,
     )
     def _coerce_mm_boolean(number_value, string_value):
@@ -3133,8 +3108,7 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
     # all-or-nothing fallback, because some environments split MM facts across
     # Measurement and Observation tables.
     mm_obs = sorted(
-        (o for o in snapshot.observations
-         if o.observation_source_value in MM_LOINC_CODES),
+        _rows_by_sources(snapshot, MM_LOINC_CODES.keys(), table='observation'),
         key=lambda o: o.observation_date or date.min,
     )
     for o in mm_obs:
@@ -3147,13 +3121,15 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
     # EHR rows carry the display name in source_value and the LOINC on the
     # concept, so a source_value-only filter saw demo data and nothing else.
     slim_vals = {}
-    slim_measurements = sorted(
-        (m for m in snapshot.measurements
-         if m.value_as_number is not None
-         and (getattr(m.measurement_concept, 'concept_code', None) in _SLIM_MATCH_VALUES
-              or m.measurement_source_value in _SLIM_MATCH_VALUES)),
-        key=lambda m: (m.measurement_date or date.min, m.measurement_id),
-    )
+    _slim_candidates = _rows_by_codes(snapshot, _SLIM_MATCH_VALUES) + _rows_by_sources(snapshot, _SLIM_MATCH_VALUES)
+    # Deduplicate (a row could appear in both indexes) via seen set
+    _slim_seen = set()
+    slim_measurements = []
+    for m in _slim_candidates:
+        if m.measurement_id not in _slim_seen and m.value_as_number is not None:
+            _slim_seen.add(m.measurement_id)
+            slim_measurements.append(m)
+    slim_measurements.sort(key=lambda m: (m.measurement_date or date.min, m.measurement_id))
     for m in slim_measurements:
         code = _measurement_code(m)
         field = _LOINC_LAB_FIELDS.get(code, (None, None))[0]
@@ -3184,11 +3160,12 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
 
     # ── meets_crab fallback: compute from OMOP Measurements when obs missing ─
     if 'meets_crab' not in data:
-        _CRAB_CODES = {'718-7', '59260-0', '17861-6', '2000-0', '2164-2', '33914-3'}
+        _CRAB_CODES = ('718-7', '59260-0', '17861-6', '2000-0', '2164-2', '33914-3')
         crab_vals = {}
-        for m in snapshot.measurements:
-            if m.measurement_source_value in _CRAB_CODES and m.value_as_number is not None:
-                crab_vals.setdefault(m.measurement_source_value, []).append(float(m.value_as_number))
+        for code in _CRAB_CODES:
+            for m in snapshot.meas_by_source.get(code, ()):
+                if m.value_as_number is not None:
+                    crab_vals.setdefault(code, []).append(float(m.value_as_number))
 
         hgb_vals = crab_vals.get('718-7', []) or crab_vals.get('59260-0', [])
         ca_vals = crab_vals.get('17861-6', []) or crab_vals.get('2000-0', [])
@@ -3214,15 +3191,10 @@ def _get_sct_cytogenetic_data(person: Person, snapshot: OmopSnapshot = None) -> 
     """
     snapshot = snapshot or _build_snapshot(person)
     data = {}
-    _SOURCE_KEYS = frozenset({
-        'mm-cytogenetic-markers', 'mm-sct-date',
-        'mm-sct-history', 'mm-sct-eligibility',
-    })
-    # snapshot.observations is already ordered -observation_date
-    obs_qs = [
-        o for o in snapshot.observations
-        if o.observation_source_value in _SOURCE_KEYS
-    ]
+    _SOURCE_KEYS = ('mm-cytogenetic-markers', 'mm-sct-date',
+        'mm-sct-history', 'mm-sct-eligibility')
+    # Use index lookups instead of scanning all observations
+    obs_qs = _rows_by_sources(snapshot, _SOURCE_KEYS, table='observation')
     seen = set()
     for obs in obs_qs:
         src = obs.observation_source_value
@@ -3265,17 +3237,9 @@ def _get_assessment_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
     snapshot = snapshot or _build_snapshot(person)
 
-    # snapshot.observations is already ordered -observation_date, non-erroneous
-    tumor_stage_obs = next(
-        (o for o in snapshot.observations
-         if getattr(o.observation_concept, 'concept_code', None) == '21905-5'),
-        None,
-    )
-    metastasis_obs = next(
-        (o for o in snapshot.observations
-         if getattr(o.observation_concept, 'concept_code', None) == '21901-4'),
-        None,
-    )
+    # O(1) index lookups instead of O(N) linear scans
+    tumor_stage_obs = _first_by_code(snapshot, '21905-5', table='observation')
+    metastasis_obs = _first_by_code(snapshot, '21901-4', table='observation')
 
     t_stage_val = tumor_stage_obs.value_as_string if tumor_stage_obs else None
     m_stage_val = metastasis_obs.value_as_string if metastasis_obs else None
@@ -3311,6 +3275,18 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             data[f'{field_name}_units'] = measurement.unit_source_value
 
     # --- New UI fields via LOINC concept code (primary path) ---
+    # Lazy unit_system: queried at most once, outside the per-measurement loop.
+    _unit_system_cache = []  # sentinel: empty = not yet fetched
+
+    def _get_unit_system():
+        if not _unit_system_cache:
+            _unit_system_cache.append(
+                PatientRecord.objects.filter(person=person)
+                .values_list('organization__clinical_unit_system', flat=True)
+                .first()
+            )
+        return _unit_system_cache[0]
+
     loinc_ms = [m for m in measurements if m.value_as_number is not None]
     wbc_projection_blocked = False
     for m in loinc_ms:
@@ -3351,28 +3327,23 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             if code != '6690-2' or canonical_value is not None:
                 data[field] = cast(canonical_value if code == '6690-2' else m.value_as_number)
         if code == '6690-2' and canonical_value is not None and 'white_blood_cell_count' not in data:
-            unit_system = (
-                PatientRecord.objects.filter(person=person)
-                .values_list('organization__clinical_unit_system', flat=True)
-                .first()
-            )
             data['white_blood_cell_count'] = canonical_value
-            data['white_blood_cell_count_units'] = canonical_wbc_unit(unit_system)
+            data['white_blood_cell_count_units'] = canonical_wbc_unit(_get_unit_system())
 
     # --- New UI fields via display-name source_value (legacy/generator path) ---
     unfound = {f for (f, _) in _LOINC_LAB_FIELDS.values() if f not in data}
     if unfound:
-        sv_ms = [
-            m for m in measurements
-            if m.measurement_source_value in _SOURCE_VALUE_LAB_FIELDS
-            and m.value_as_number is not None
-        ]
-        for m in sv_ms:
-            field = _SOURCE_VALUE_LAB_FIELDS.get(m.measurement_source_value)
+        for source_value, field in _SOURCE_VALUE_LAB_FIELDS.items():
+            if field not in unfound:
+                continue
             if field == 'wbc_count_thousand_per_ul' and wbc_projection_blocked:
                 continue
-            if field and field not in data:
-                data[field] = float(m.value_as_number)
+            if field in data:
+                continue
+            for m in snapshot.meas_by_source.get(source_value, ()):
+                if m.value_as_number is not None:
+                    data[field] = float(m.value_as_number)
+                    break
 
     # --- Copy canonical values to legacy aliases (issue #471) ---
     for canonical, aliases in _LAB_FIELD_ALIASES.items():
@@ -3398,28 +3369,46 @@ def _performance_rows(snapshot: OmopSnapshot, name_fragment: str, loinc_code: st
     vocabulary is not loaded and the code survives only in the source value.
     """
     name_lower = name_fragment.lower()
-    obs = [
-        (o.observation_date, o.value_as_number)
-        for o in snapshot.observations
-        if o.value_as_number is not None
-        and (
-            (o.observation_concept and o.observation_concept.concept_name
-             and name_lower in o.observation_concept.concept_name.lower())
-            or getattr(o.observation_concept, 'concept_code', None) == loinc_code
-            or o.observation_source_value == loinc_code
-        )
-    ]
-    meas = [
-        (m.measurement_date, m.value_as_number)
-        for m in snapshot.measurements
-        if m.value_as_number is not None
-        and (
-            (m.measurement_concept and m.measurement_concept.concept_name
-             and name_lower in m.measurement_concept.concept_name.lower())
-            or getattr(m.measurement_concept, 'concept_code', None) == loinc_code
-            or m.measurement_source_value == loinc_code
-        )
-    ]
+    # Use index lookups for code/source, then add name-based matches
+    _seen_obs = set()
+    obs = []
+    for o in snapshot.obs_by_code.get(loinc_code, ()):
+        if o.value_as_number is not None:
+            obs.append((o.observation_date, o.value_as_number))
+            _seen_obs.add(o.observation_id)
+    for o in snapshot.obs_by_source.get(loinc_code, ()):
+        if o.value_as_number is not None and o.observation_id not in _seen_obs:
+            obs.append((o.observation_date, o.value_as_number))
+            _seen_obs.add(o.observation_id)
+    # Name-based fallback (unavoidable linear scan, but only if index didn't find anything)
+    if not obs:
+        obs = [
+            (o.observation_date, o.value_as_number)
+            for o in snapshot.observations
+            if o.value_as_number is not None
+            and o.observation_concept and o.observation_concept.concept_name
+            and name_lower in o.observation_concept.concept_name.lower()
+        ]
+
+    _seen_meas = set()
+    meas = []
+    for m in snapshot.meas_by_code.get(loinc_code, ()):
+        if m.value_as_number is not None:
+            meas.append((m.measurement_date, m.value_as_number))
+            _seen_meas.add(m.measurement_id)
+    for m in snapshot.meas_by_source.get(loinc_code, ()):
+        if m.value_as_number is not None and m.measurement_id not in _seen_meas:
+            meas.append((m.measurement_date, m.value_as_number))
+            _seen_meas.add(m.measurement_id)
+    # Name-based fallback
+    if not meas:
+        meas = [
+            (m.measurement_date, m.value_as_number)
+            for m in snapshot.measurements
+            if m.value_as_number is not None
+            and m.measurement_concept and m.measurement_concept.concept_name
+            and name_lower in m.measurement_concept.concept_name.lower()
+        ]
     # Measurements first, and the sort below is stable (reverse=True preserves
     # the order of equal keys), so a same-date tie resolves in favour of
     # `measurement`. That is the PATCH write-through's table and
@@ -3467,11 +3456,22 @@ def _get_genetic_mutations(person: Person, snapshot: OmopSnapshot = None) -> dic
         for m in FieldConceptMapping.objects.filter(field_name__in=_genomic_patient_fields()) if m.source_value})
 
     _gen_codes = set(_GENETIC_MUTATION_LOINCS.keys())
-    genetic_measurements = [
-        m for m in snapshot.measurements
-        if (getattr(m.measurement_concept, 'concept_code', None) in _gen_codes
-            or m.measurement_source_value in _gen_codes or m.measurement_source_value in marker_sources)
-    ]
+    _gen_seen = set()
+    genetic_measurements = []
+    for code in _gen_codes:
+        for m in snapshot.meas_by_code.get(code, ()):
+            if m.measurement_id not in _gen_seen:
+                _gen_seen.add(m.measurement_id)
+                genetic_measurements.append(m)
+        for m in snapshot.meas_by_source.get(code, ()):
+            if m.measurement_id not in _gen_seen:
+                _gen_seen.add(m.measurement_id)
+                genetic_measurements.append(m)
+    for src in marker_sources:
+        for m in snapshot.meas_by_source.get(src, ()):
+            if m.measurement_id not in _gen_seen:
+                _gen_seen.add(m.measurement_id)
+                genetic_measurements.append(m)
 
     for measurement in genetic_measurements:
         marker = marker_sources.get(measurement.measurement_source_value)
@@ -3524,14 +3524,16 @@ def _get_tumor_size_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     A code-only row is therefore never allowed to populate both projections.
     """
     snapshot = snapshot or _build_snapshot(person)
-    row = next(
-        (m for m in snapshot.measurements
-         if m.value_as_number is not None
-         and (getattr(m.measurement_concept, 'concept_code', None) == '21889-1'
-              or m.measurement_source_value == '21889-1')
-         and (m.qualifier_source_value or '').lower() != 'lymph-node'),
-        None,
-    )
+    row = None
+    for m in snapshot.meas_by_code.get('21889-1', ()):
+        if m.value_as_number is not None and (m.qualifier_source_value or '').lower() != 'lymph-node':
+            row = m
+            break
+    if not row:
+        for m in snapshot.meas_by_source.get('21889-1', ()):
+            if m.value_as_number is not None and (m.qualifier_source_value or '').lower() != 'lymph-node':
+                row = m
+                break
     return {'tumor_size': float(row.value_as_number)} if row else {}
 
 
@@ -3552,31 +3554,36 @@ def _get_cll_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         '44996-6': 'spleen_size',
     }
     for loinc_code, field in loinc_map.items():
-        m = next(
-            (m for m in measurements
-             if getattr(m.measurement_concept, 'concept_code', None) == loinc_code
-             and m.value_as_number is not None),
-            None,
-        )
+        m = None
+        for candidate in snapshot.meas_by_code.get(loinc_code, ()):
+            if candidate.value_as_number is not None:
+                m = candidate
+                break
         if m:
             data[field] = float(m.value_as_number)
 
     # Athena Cancer Modifier 36769292 (Dimension of Largest Lymph Node) is the
     # specific standard concept for this field (#911).  Keep the qualified
     # legacy LOINC form readable so historical imports remain intact.
-    lymph_node = next(
-        (m for m in measurements
-         if (
-             getattr(m.measurement_concept, 'concept_id', None) == 36769292
-             or (
-                 (getattr(m.measurement_concept, 'concept_code', None) == '21889-1'
-                  or m.measurement_source_value == '21889-1')
-                 and (m.qualifier_source_value or '').lower() == 'lymph-node'
-             )
-         )
-         and m.value_as_number is not None),
-        None,
-    )
+    # Check specific concept id 36769292 first, then qualified LOINC 21889-1
+    lymph_node = None
+    # Check by concept code (which maps from concept_id in the index)
+    for m in snapshot.meas_by_code.get('21889-1', ()):
+        if m.value_as_number is not None and (m.qualifier_source_value or '').lower() == 'lymph-node':
+            lymph_node = m
+            break
+    if not lymph_node:
+        for m in snapshot.meas_by_source.get('21889-1', ()):
+            if m.value_as_number is not None and (m.qualifier_source_value or '').lower() == 'lymph-node':
+                lymph_node = m
+                break
+    # Also check by concept_id 36769292 (Dimension of Largest Lymph Node)
+    if not lymph_node:
+        for m in snapshot.measurements:
+            if (getattr(m.measurement_concept, 'concept_id', None) == 36769292
+                    and m.value_as_number is not None):
+                lymph_node = m
+                break
     if lymph_node:
         data['largest_lymph_node_size'] = float(lymph_node.value_as_number)
 
@@ -3652,10 +3659,7 @@ def _get_cll_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         for de in drug_exposures if de.drug_concept
     )
 
-    has_progression = any(
-        getattr(o.observation_concept, 'concept_code', None) == '182842009'
-        for o in observations
-    )
+    has_progression = bool(snapshot.obs_by_code.get('182842009', ()))
 
     # A curated assertion answers the question directly. The inference is a
     # fallback for records that have none: it means "took the drug and
@@ -3667,11 +3671,10 @@ def _get_cll_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     if had_bcl2 and _CURATED_REFRACTORY_CODES['bcl2_inhibitor_refractory'] not in curated_codes:
         data['bcl2_inhibitor_refractory'] = has_progression
 
-    # ALC doubling time — filter from snapshot by LOINC concept code 731-0
+    # ALC doubling time — index lookup by LOINC concept code 731-0
     alc_rows = sorted(
-        (m for m in measurements
-         if getattr(m.measurement_concept, 'concept_code', None) == '731-0'
-         and getattr(getattr(m.measurement_concept, 'vocabulary', None), 'vocabulary_id', None) == 'LOINC'
+        (m for m in snapshot.meas_by_code.get('731-0', ())
+         if getattr(getattr(m.measurement_concept, 'vocabulary', None), 'vocabulary_id', None) == 'LOINC'
          and m.value_as_number is not None),
         key=lambda m: m.measurement_date or date.min,
     )
@@ -4041,26 +4044,40 @@ def _get_wearable_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     _wearable_codes = set(WEARABLE_CONCEPT_CODE.values())
 
     def _wearable_measurements(date_filter=None):
-        return [
-            (getattr(m.measurement_concept, 'concept_code', None),
-             m.measurement_source_value, m.measurement_date, m.value_as_number)
-            for m in snapshot.measurements
-            if m.value_as_number is not None
-            and (getattr(m.measurement_concept, 'concept_code', None) in _wearable_codes
-                 or m.measurement_source_value in _wearable_codes)
-            and (date_filter is None or (m.measurement_date and m.measurement_date >= date_filter))
-        ]
+        result = []
+        seen = set()
+        for code in _wearable_codes:
+            for m in snapshot.meas_by_code.get(code, ()):
+                if (m.measurement_id not in seen and m.value_as_number is not None
+                        and (date_filter is None or (m.measurement_date and m.measurement_date >= date_filter))):
+                    seen.add(m.measurement_id)
+                    result.append((getattr(m.measurement_concept, 'concept_code', None),
+                                   m.measurement_source_value, m.measurement_date, m.value_as_number))
+            for m in snapshot.meas_by_source.get(code, ()):
+                if (m.measurement_id not in seen and m.value_as_number is not None
+                        and (date_filter is None or (m.measurement_date and m.measurement_date >= date_filter))):
+                    seen.add(m.measurement_id)
+                    result.append((getattr(m.measurement_concept, 'concept_code', None),
+                                   m.measurement_source_value, m.measurement_date, m.value_as_number))
+        return result
 
     def _wearable_observations(date_filter=None):
-        return [
-            (getattr(o.observation_concept, 'concept_code', None),
-             o.observation_source_value, o.observation_date, o.value_as_number)
-            for o in snapshot.observations
-            if o.value_as_number is not None
-            and (getattr(o.observation_concept, 'concept_code', None) in _wearable_codes
-                 or o.observation_source_value in _wearable_codes)
-            and (date_filter is None or (o.observation_date and o.observation_date >= date_filter))
-        ]
+        result = []
+        seen = set()
+        for code in _wearable_codes:
+            for o in snapshot.obs_by_code.get(code, ()):
+                if (o.observation_id not in seen and o.value_as_number is not None
+                        and (date_filter is None or (o.observation_date and o.observation_date >= date_filter))):
+                    seen.add(o.observation_id)
+                    result.append((getattr(o.observation_concept, 'concept_code', None),
+                                   o.observation_source_value, o.observation_date, o.value_as_number))
+            for o in snapshot.obs_by_source.get(code, ()):
+                if (o.observation_id not in seen and o.value_as_number is not None
+                        and (date_filter is None or (o.observation_date and o.observation_date >= date_filter))):
+                    seen.add(o.observation_id)
+                    result.append((getattr(o.observation_concept, 'concept_code', None),
+                                   o.observation_source_value, o.observation_date, o.value_as_number))
+        return result
 
     # Try recent data first; fall back to all data if nothing within 90 days
     measurement_rows = _wearable_measurements(recency_cutoff)
