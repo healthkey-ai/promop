@@ -9,7 +9,7 @@ from django.conf import settings
 from django.utils import timezone
 from oauth2_provider.models import AccessToken, Application, Grant, RefreshToken
 
-from ctomop.oauth import SessionOnlyBrowserValidator
+from promop.oauth import SessionOnlyBrowserValidator
 from patient_portal.models import Identity
 
 pytestmark = pytest.mark.django_db

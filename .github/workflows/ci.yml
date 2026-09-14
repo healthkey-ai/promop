@@ -270,7 +270,7 @@ jobs:
       # step go red.
       - name: Python SAST (bandit)
         run: |
-          bandit -q -r omop_core patient_portal ctomop omop_oncology omop_genomics \
+          bandit -q -r omop_core patient_portal promop ctomop omop_oncology omop_genomics \
             -ll -x '*/tests.py,*/tests/*,*/migrations/*' \
             -b .bandit-baseline.json -f json -o bandit-new.json || true
           python - <<'CHECK'
@@ -290,7 +290,7 @@ jobs:
       # service-token sentinel, a test-only string, an empty PKCE secret).
       - name: Hardcoded credential scan (bandit)
         run: |
-          bandit -q -r omop_core patient_portal ctomop omop_oncology omop_genomics \
+          bandit -q -r omop_core patient_portal promop ctomop omop_oncology omop_genomics \
             -t B105,B106,B107 -x '*/tests.py,*/tests/*,*/migrations/*' \
             -b .bandit-credentials-baseline.json -f json -o bandit-creds.json || true
           python - <<'CHECK'

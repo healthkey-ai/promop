@@ -1,6 +1,6 @@
 # Error monitoring (Sentry)
 
-Sentry is initialised in `ctomop/settings.py` through `ctomop/sentry.py`, and
+Sentry is initialised in `promop/settings.py` through `promop/sentry.py`, and
 only when `SENTRY_DSN` is set. Local development, CI and the test suite leave it
 unset, so nothing is sent and no vendor account is needed to run the project.
 
@@ -46,7 +46,7 @@ reason, so each failure is one event. `TestOneEventPerFailure` holds that.
 ## PHI
 
 This service stores patient data, so the SDK's capture defaults are narrowed in
-`ctomop/sentry.py`:
+`promop/sentry.py`:
 
 - `send_default_pii=False` — no signed-in user, no cookies, no `Authorization`
   header.

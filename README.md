@@ -243,3 +243,17 @@ by University of Nottingham Health Informatics under the MIT License. See
 [semantic retrieval setup](docs/semantic-retrieval.md).
 
 If you use PRomop in research, please cite it using [CITATION.cff](CITATION.cff) or via GitHub's "Cite this repository" button.
+
+## Project package and deployment compatibility
+
+`promop` is the canonical Django project package. Use `promop.settings`,
+`gunicorn promop.wsgi:application`, and `celery -A promop worker` for new
+configuration. The `ctomop` modules remain compatibility aliases to the same
+settings, URL configuration, WSGI/ASGI applications and Celery app, so existing
+deployment commands and imports continue to work without duplicate applications.
+Database tables, Django app labels and migration history are unchanged.
+
+Render staging, Render production and Google Cloud Run staging remain supported.
+The unused legacy Render web service has been retired. Existing OAuth client IDs,
+bridge environment variables, and Cloud Run service/image/bucket identifiers are
+preserved; a Python package rename does not migrate external integration IDs.
