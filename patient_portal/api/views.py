@@ -3273,6 +3273,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             value_qty = observation['valueQuantity']
                             value_number = value_qty.get('value')
                             unit = value_qty.get('unit')
+                            if not unit and value_qty.get('system') == 'http://unitsofmeasure.org':
+                                unit = value_qty.get('code')
                         elif observation.get('valueInteger') is not None:
                             # FHIR integer type — used for ECOG (0-4), Karnofsky, grades, etc.
                             value_number = float(observation['valueInteger'])
@@ -3386,9 +3388,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 # Only UPDATE if value actually changed — avoids
                                 # pointless writes on every re-import of the same bundle.
                                 if (existing_m.value_as_number != value_number
-                                        or existing_m.value_as_string != value_string):
+                                        or existing_m.value_as_string != value_string
+                                        or existing_m.unit_source_value != (unit[:50] if unit else None)):
                                     existing_m.value_as_number = value_number
                                     existing_m.value_as_string = value_string
+                                    existing_m.unit_source_value = unit[:50] if unit else None
                                     existing_m.qualifier_source_value = qualifier_source_value
                                     existing_m._skip_patient_record_refresh = True
                                     existing_m.save()
