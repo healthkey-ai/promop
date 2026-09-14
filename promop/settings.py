@@ -28,9 +28,12 @@ def _env_list(name, default=''):
     return [value.strip() for value in os.environ.get(name, default).split(',') if value.strip()]
 
 
-# Load environment variables from .env file (for local development). Tests that
-# boot these settings to assert on shipped defaults set PYTHON_DOTENV_DISABLED,
-# so a developer's .env cannot decide what those assertions see.
+# Load environment variables from .env file (for local development).
+# python-dotenv honours PYTHON_DOTENV_DISABLED itself from 1.2.0 on, and we pin
+# 1.2.2; repeating the check here keeps tests/test_debug_security_settings.py
+# honest on an older install, where the flag it sets would do nothing. The two
+# truthy sets overlap rather than nest — upstream also takes "t"/"y", we also
+# take padded values — but on 1.2.2 either one disabling is enough.
 if not _env_bool('PYTHON_DOTENV_DISABLED'):
     load_dotenv()
 
