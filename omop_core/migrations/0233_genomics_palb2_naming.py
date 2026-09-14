@@ -49,7 +49,7 @@ def rename_projection(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-    dependencies = [('omop_core', '0231_genomics_variant_name_recipe')]
+    dependencies = [('omop_core', '0232_disease_assessment_fields')]
     operations = [
         migrations.RenameField('patientrecord', 'genomics_palb1', 'genomics_palb2'),
         migrations.RunPython(rename_projection),

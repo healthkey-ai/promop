@@ -1,13 +1,13 @@
 # PRomop Genomics: Implementation Plan
 
-Current baseline: `dev` at `ba8494e`, including merged [#1249](https://github.com/healthkey-ai/promop/pull/1249), [#1259](https://github.com/healthkey-ai/promop/pull/1259) and [schema audit #1263](https://github.com/healthkey-ai/promop/pull/1263). Updated 2026-09-14 with the reviewed PALB2 implementation below. The [implemented architecture](genomics_architecture.md) describes runtime behavior; this plan records delivery status, remaining requirements and acceptance criteria. The supplied Word documents are retained as requirements through these two canonical documents.
+Current baseline: `dev` at `4302c97`, including merged [#1249](https://github.com/healthkey-ai/promop/pull/1249), [#1259](https://github.com/healthkey-ai/promop/pull/1259) and [schema audit #1263](https://github.com/healthkey-ai/promop/pull/1263). Updated 2026-09-14 with the reviewed PALB2 implementation below. The [implemented architecture](genomics_architecture.md) describes runtime behavior; this plan records delivery status, remaining requirements and acceptance criteria. The supplied Word documents are retained as requirements through these two canonical documents.
 
 ## Delivery status
 
 | Work | Issue | Current state |
 | --- | --- | --- |
 | Owned NOTE references and bounded projection reads | [#1236](https://github.com/healthkey-ai/promop/issues/1236) | Closed; merged in #1249 |
-| Shared text-column schema reconciliation | [#1237](https://github.com/healthkey-ai/promop/issues/1237) | Open; read-only audit implemented; staging evidence recorded; deployment inventory and any required remediation remain |
+| Shared text-column schema reconciliation | [#1237](https://github.com/healthkey-ai/promop/issues/1237) | Open; read-only audit merged in #1263; all three Render databases have narrow columns and zero overflow; no current width remediation indicated |
 | Complete component/curation registry | [#1238](https://github.com/healthkey-ai/promop/issues/1238) | Closed; merged in #1249 |
 | Portable variant-name recipe and conclusive domain audit | [#1239](https://github.com/healthkey-ai/promop/issues/1239) | Closed; merged in #1249; installed-vocabulary audits remain an operational requirement |
 | Effective finding state and shared dialog | [#1240](https://github.com/healthkey-ai/promop/issues/1240) | Core implementation merged in #1249; clinical applicability, TP53/del(17p) aggregation and consumer review remain |
@@ -29,11 +29,19 @@ The owned-NOTE writer and batched reader are complete. Migration `0222_genomics_
 
 Implemented now: `python manage.py audit_genomics_schema --environment <deployment> --check` reports the actual Measurement/Observation `value_as_string` types, character limits, complete row/overflow counts, maximum lengths and the recorded migration timestamp. It uses one database-enforced read-only, repeatable-read transaction with a configurable statement timeout. JSON contains metadata and aggregate counts, not patient identifiers or source text. Missing/unsupported columns fail `--check`; query failures or row-security restrictions produce no partial success report. A passing width check does not verify NOTE ownership or historical migration operations. See the [architecture's operator procedure](genomics_architecture.md#long-text-and-schema).
 
-[Render staging evidence](https://github.com/healthkey-ai/promop/issues/1237#issuecomment-5658503062), captured 2026-09-14 03:17 UTC, found both columns already `varchar(60)` and zero oversized values across 320,262 Measurements and 314,262 Observations. No narrowing/backfill is indicated for those observed columns. This result does not establish another deployment's state.
+Read-only Render audits at 2026-09-14 07:09 UTC resolved all five services to three databases. Every Measurement/Observation `value_as_string` column is `varchar(60)` with zero oversized values:
+
+| Database | Services | Measurements / Observations | Maximum lengths | Migration 0222 recorded |
+| --- | --- | --- | --- | --- |
+| `promop-dev` | `promop-staging`, `promop-staging-worker` | 330,310 / 327,811 | 36 / 60 | 2026-09-12 10:51:35 UTC |
+| `promop-db` | `promop`, `promop-worker` | 0 / 0 | empty / empty | No |
+| `ctomop` | `ctomop` | 2,411 / 0 | 8 / empty | No |
+
+No narrowing/backfill is indicated for these observed columns. The staging database was verified against Render's internal/external connection identity. These results supersede the [earlier staging snapshot](https://github.com/healthkey-ai/promop/issues/1237#issuecomment-5658503062); they do not prove which historical migration operations ran or certify NOTE ownership.
 
 Remaining work:
 
-1. Retain an audit report for each affected deployment. Render service inventory on 2026-09-14 identifies `promop` / `promop-worker` on `main`, `promop-staging` / `promop-staging-worker` on `dev`, and the additional `ctomop` web service on `dev`; establish which share a database before treating service names as distinct deployments. Only staging has a retained schema report so far. Review recorded migration history alongside actual widths and overflow counts.
+1. Retain an audit report for each affected deployment. Render service inventory on 2026-09-14 identifies `promop` / `promop-worker` on `main`, `promop-staging` / `promop-staging-worker` on `dev`, and the additional `ctomop` web service on `dev`; establish which share a database before treating service names as distinct deployments. The verified service connections resolve to three databases; the audit below covers each. Review recorded migration history alongside actual widths and overflow counts.
 2. If a formerly widened deployment is found, identify every consumer of affected genomic and non-genomic text before choosing an owned-NOTE encoding. The shared columns contain more than genomics; rewriting them to references before their readers support those references would lose usable source text.
 3. Implement and test a forward, resumable backfill only for the evidenced schema/data paths. Preserve original values and dates, patient/fact/context ownership, ambiguous or missing legacy references, and historical notes. Do not manufacture clinical assertions to hold overflow.
 4. Narrow only after lossless readback, reader compatibility and a final zero-overflow check are demonstrated under a strategy that handles concurrent writes. Apply deployment remediation as an explicit operational step; do not edit deployed migration history again.
@@ -44,7 +52,9 @@ Acceptance remaining: fresh and formerly widened paths converge without losing 6
 
 The effective registry exposes 31 components; all 73 parent/component recipes seed idempotently. Recipe v3 promotes only exact untouched variant-name seeds to LOINC 81253-7 while preserving curator decisions and local source identity. Domain resolution and audit tooling are implemented.
 
-The 2026-09-14 read-only staging component audit passed: 17 resolved standard mappings, 14 intentionally local, zero incomplete and zero domain mismatches. This does not certify parent/event prerequisites or other deployments; retain vocabulary release metadata with the operational report.
+The 2026-09-14 07:09 UTC read-only staging component audit passed: 17 resolved standard mappings, 14 intentionally local, zero incomplete and zero domain mismatches. Installed metadata reports LOINC 2.80, vocabulary release `v5.0 29-AUG-26`, and UCUM 1.8.2. SNOMED identifies itself as a synthetic benchmark seed; the component audit is not broad clinical vocabulary certification.
+
+Production `promop-db` and `ctomop` passed the width audit but could not run the component audit. Metadata inspection confirmed that production lacks `field_concept_mapping.provenance` and `ctomop` lacks the mapping table entirely. Their component readiness is unverified; [#1286](https://github.com/healthkey-ai/promop/issues/1286) tracks migration/mapping prerequisites and verification before enabling genomics there. Production metadata reports LOINC 2.82 and `v5.0 29-AUG-26`; `ctomop` reports LOINC 2.76 / SNOMED 2023-07. No vocabulary, mapping, migration or clinical-data changes were made on these deployments.
 
 For each deployment, run `audit_genomics_domains` after vocabulary loading and retain its output with the vocabulary version. Resolve incomplete/ambiguous codes and table/domain mismatches through field-mapping curation, retaining source/value/unit settings. Rerun until verified. Curation changes future writes; moving existing clinical facts between tables requires a separately reviewed repair.
 

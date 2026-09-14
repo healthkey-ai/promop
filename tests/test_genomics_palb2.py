@@ -18,7 +18,7 @@ from tests.test_genomics_catalog import client_for
 from tests.test_genomics_crud import setup  # noqa: F401
 
 pytestmark = pytest.mark.django_db
-migration = import_module('omop_core.migrations.0232_genomics_palb2_naming')
+migration = import_module('omop_core.migrations.0233_genomics_palb2_naming')
 
 
 def test_catalog_versions_reviewed_naming_without_editing_frozen_input():
@@ -156,7 +156,7 @@ def test_schema_and_data_upgrade_from_old_named_column():
     try:
         assert old_model.objects.get(pk=record.pk).genomics_palb1 == rows
         with connection.schema_editor() as editor:
-            migration.Migration('0232_genomics_palb2_naming', 'omop_core').apply(old, editor)
+            migration.Migration('0233_genomics_palb2_naming', 'omop_core').apply(old, editor)
         record.refresh_from_db()
         assert [row['id'] for row in record.genomics_palb2] == [101, 102]
         assert all(row['gene'] == 'PALB2' for row in record.genomics_palb2)
