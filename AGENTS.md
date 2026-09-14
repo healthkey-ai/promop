@@ -25,8 +25,10 @@
   `git diff --check` instead.
 - CI runs a lightweight file-change detector and skips backend, frontend,
   security, and async e2e jobs when every changed path is documentation. Keep
-  the named required jobs so GitHub records them as skipped instead of leaving
-  required checks pending.
+  the named suite jobs so GitHub records them as skipped. The required
+  `Application CI` gate passes documentation-only PRs without requiring frontend
+  or backend test results; code changes must pass the applicable application
+  suites. `Security gates` remains a separate required check.
 - Root Markdown/reStructuredText/AsciiDoc, documentation under `docs/`, and
   Markdown documentation under `.github/` qualify. Code, tests, configuration,
   dependency files, and runtime data do not qualify, even when changed alongside

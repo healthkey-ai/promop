@@ -132,6 +132,24 @@ jobs:
           BACKEND_RESULT: ${{ needs.backend_suites.result }}
         run: test "$BACKEND_RESULT" = success
 
+  application_ci:
+    name: Application CI
+    needs: [changes, backend, frontend]
+    # This is the ruleset gate. Documentation-only PRs need no application
+    # suite results; code changes must satisfy the suites selected above.
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enforce application checks for the detected scope
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          BACKEND_REQUIRED: ${{ needs.changes.outputs.backend }}
+          BACKEND_RESULT: ${{ needs.backend.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+        run: python3 .github/scripts/application_ci_gate.py
+
   e2e:
     name: Async derivation e2e
     needs: changes
