@@ -90,6 +90,44 @@ Implement concurrent retry, timeout-after-commit and extractor-rerun reconciliat
 
 A specialized whole-finding review/hold adapter must gate live imports until receiving capabilities are deployed. General/named-list replacement is not incremental import. Generic FHIR observation sync is not a validated finding/component/report adapter; any FHIR Genomics adapter needs its own contract and round-trip tests.
 
+## Field/value mapping coordination
+
+[ADR 0001](adr/0001-vocabulary-source-of-truth.md) defines vocabulary authority
+and the separation of vocabulary release, reviewed mapping revision and source
+catalog/recipe version. The
+[field/value plan](../field_concept_mapping_enhancements.md#vocabulary-distribution-and-mapping-provenance)
+owns shared distribution and answer-mapping delivery. This section owns the
+Genomics-specific acceptance; ADR 0002's therapy-class overlap rules do not
+establish genomic eligibility semantics.
+
+Coordinate **#1229 after #1223/#1224/#1226** with the existing recipe audit and
+clinical/source work in #1240/#1243/#1245/#1246:
+
+1. Inventory stable marker/component identities and scoped status, origin,
+   interpretation and variant values without changing the frozen v1 catalog.
+   Keep field questions, coded answers and whole findings distinct. Preserve
+   gene, transcript/build, method, source text and unknown/no-equivalent cases.
+2. Record installed vocabulary release evidence separately from each reviewed
+   parent/component/answer recipe revision and source catalog version. Recipe v3
+   is not a new catalog version or an Athena release. Resolve portable codes and
+   domains on the destination, rerun `audit_genomics_domains`, and retain curator
+   approvals/rejections and independent source/value/unit settings.
+3. Extend the common mapping interface/resolver through the existing structured
+   writer. Retain Measurement finding parents and linked Measurement/Observation
+   components; never substitute a flat answer list or G-CDM storage. A new answer
+   mapping must not change source assertion, effective finding state or clinical
+   interpretation without the corresponding reviewed contract.
+4. Under #1245, make import/reconciliation evidence identify source report/finding
+   version plus the mapping and vocabulary evidence used. Verify round trips,
+   repeat imports and amendments without changing historical source text/dates.
+   Correcting a recipe affects future writes; repairing existing facts is scoped,
+   separately reviewed work, not an automatic consequence of vocabulary sync.
+
+Do not close #1229 merely because recipes seed or a vocabulary loads. Require
+reviewed value dispositions, structured write/readback coverage and the agreed
+clinical state/consumer tests. Test/specimen identity, derivation activation and
+source receiving capabilities retain their existing gates above.
+
 ## Clinical and external coordination
 
 Track on #1246: definitions of both complex-karyotype markers and counting/grouping by test/date; marker-specific absence; PALB1 and source example validity; disease subsets; TP53/del(17p) evidence aggregation; dated interpretation history; FISH/karyotype/clone-fraction validation. Distinguish pathogenicity, somatic evidence tier and therapeutic actionability if the source requires them.
