@@ -7,7 +7,7 @@ Current baseline: `dev` at `4302c97`, including merged [#1249](https://github.co
 | Work | Issue | Current state |
 | --- | --- | --- |
 | Owned NOTE references and bounded projection reads | [#1236](https://github.com/healthkey-ai/promop/issues/1236) | Closed; merged in #1249 |
-| Shared text-column schema reconciliation | [#1237](https://github.com/healthkey-ai/promop/issues/1237) | Open; read-only audit merged in #1263; all three Render databases have narrow columns and zero overflow; no current width remediation indicated |
+| Shared text-column schema reconciliation | [#1237](https://github.com/healthkey-ai/promop/issues/1237) | Open; read-only audit merged in #1263; both active Render databases have narrow columns and zero overflow; Cloud Run verification remains; no current width remediation indicated |
 | Complete component/curation registry | [#1238](https://github.com/healthkey-ai/promop/issues/1238) | Closed; merged in #1249 |
 | Portable variant-name recipe and conclusive domain audit | [#1239](https://github.com/healthkey-ai/promop/issues/1239) | Closed; merged in #1249; installed-vocabulary audits remain an operational requirement |
 | Effective finding state and shared dialog | [#1240](https://github.com/healthkey-ai/promop/issues/1240) | Core implementation merged in #1249; clinical applicability, TP53/del(17p) aggregation and consumer review remain |
@@ -29,19 +29,13 @@ The owned-NOTE writer and batched reader are complete. Migration `0222_genomics_
 
 Implemented now: `python manage.py audit_genomics_schema --environment <deployment> --check` reports the actual Measurement/Observation `value_as_string` types, character limits, complete row/overflow counts, maximum lengths and the recorded migration timestamp. It uses one database-enforced read-only, repeatable-read transaction with a configurable statement timeout. JSON contains metadata and aggregate counts, not patient identifiers or source text. Missing/unsupported columns fail `--check`; query failures or row-security restrictions produce no partial success report. A passing width check does not verify NOTE ownership or historical migration operations. See the [architecture's operator procedure](genomics_architecture.md#long-text-and-schema).
 
-Read-only Render audits at 2026-09-14 07:09 UTC resolved all five services to three databases. Every Measurement/Observation `value_as_string` column is `varchar(60)` with zero oversized values:
+Read-only Render audits on 2026-09-14 verified that the two active deployment databases, `promop-dev` (Render staging) and `promop-db` (Render production), have `varchar(60)` Measurement/Observation columns and zero oversized values. [Retained audit evidence](https://github.com/healthkey-ai/promop/issues/1237#issuecomment-5660440818) includes an additional legacy deployment that the owner subsequently confirmed unused; its web service has been removed and it is excluded from active readiness work.
 
-| Database | Services | Measurements / Observations | Maximum lengths | Migration 0222 recorded |
-| --- | --- | --- | --- | --- |
-| `promop-dev` | `promop-staging`, `promop-staging-worker` | 330,310 / 327,811 | 36 / 60 | 2026-09-12 10:51:35 UTC |
-| `promop-db` | `promop`, `promop-worker` | 0 / 0 | empty / empty | No |
-| `ctomop` | `ctomop` | 2,411 / 0 | 8 / empty | No |
-
-No narrowing/backfill is indicated for these observed columns. The staging database was verified against Render's internal/external connection identity. These results supersede the [earlier staging snapshot](https://github.com/healthkey-ai/promop/issues/1237#issuecomment-5658503062); they do not prove which historical migration operations ran or certify NOTE ownership.
+No narrowing/backfill is indicated for the active Render databases. These audits do not certify historical migration operations, NOTE ownership, or the separately supported Cloud Run staging database. Verify Cloud Run's configured database and run the same audits there before claiming its readiness.
 
 Remaining work:
 
-1. Repeat the inventory and audits when deployments or schemas change. The current Render inventory is complete: `promop` / `promop-worker` track `main`; staging and `ctomop` track `dev`. [Retained reports](https://github.com/healthkey-ai/promop/issues/1237#issuecomment-5660440818) cover all three verified databases. Review recorded migration history alongside actual widths and overflow counts.
+1. Repeat the inventory and audits when deployments or schemas change. Active Render services are `promop` / `promop-worker` on `main` and `promop-staging` / `promop-staging-worker` on `dev`. Cloud Run staging remains supported by its existing workflow and needs separately identified database evidence. Review recorded migration history alongside actual widths and overflow counts.
 2. If a formerly widened deployment is found, identify every consumer of affected genomic and non-genomic text before choosing an owned-NOTE encoding. The shared columns contain more than genomics; rewriting them to references before their readers support those references would lose usable source text.
 3. Implement and test a forward, resumable backfill only for the evidenced schema/data paths. Preserve original values and dates, patient/fact/context ownership, ambiguous or missing legacy references, and historical notes. Do not manufacture clinical assertions to hold overflow.
 4. Narrow only after lossless readback, reader compatibility and a final zero-overflow check are demonstrated under a strategy that handles concurrent writes. Apply deployment remediation as an explicit operational step; do not edit deployed migration history again.
@@ -54,7 +48,7 @@ The effective registry exposes 31 components; all 73 parent/component recipes se
 
 The 2026-09-14 07:09 UTC read-only staging component audit passed: 17 resolved standard mappings, 14 intentionally local, zero incomplete and zero domain mismatches. Installed metadata reports LOINC 2.80, vocabulary release `v5.0 29-AUG-26`, and UCUM 1.8.2. SNOMED identifies itself as a synthetic benchmark seed; the component audit is not broad clinical vocabulary certification.
 
-Production `promop-db` and `ctomop` passed the width audit but could not run the component audit. Metadata inspection confirmed that production lacks `field_concept_mapping.provenance` and `ctomop` lacks the mapping table entirely. Their component readiness is unverified; [#1286](https://github.com/healthkey-ai/promop/issues/1286) tracks migration/mapping prerequisites and verification before enabling genomics there. Production metadata reports LOINC 2.82 and `v5.0 29-AUG-26`; `ctomop` reports LOINC 2.76 / SNOMED 2023-07. No vocabulary, mapping, migration or clinical-data changes were made on these deployments.
+Render production `promop-db` passed the width audit but could not run the component audit because it lacks `field_concept_mapping.provenance`. [#1286](https://github.com/healthkey-ai/promop/issues/1286) tracks that migration prerequisite and verification before enabling the current genomics writer there. Its metadata reports LOINC 2.82 and `v5.0 29-AUG-26`. The unused legacy Render deployment is outside this work. Cloud Run staging's mapping/vocabulary readiness remains to be verified against its own database. No live database, mapping or vocabulary changes were made during these audits.
 
 For each deployment, run `audit_genomics_domains` after vocabulary loading and retain its output with the vocabulary version. Resolve incomplete/ambiguous codes and table/domain mismatches through field-mapping curation, retaining source/value/unit settings. Rerun until verified. Curation changes future writes; moving existing clinical facts between tables requires a separately reviewed repair.
 
@@ -154,7 +148,7 @@ Coordinates/alleles/external identifiers, copy number, fusion breakpoints and re
 
 ## Verification and delivery
 
-Use explicitly configured isolated local PostgreSQL databases for tests. Staging means Render; use its configured shell or documented staging connection for operational audits. Never inherit an unspecified remote `.env` database URL in tests.
+Use explicitly configured isolated local PostgreSQL databases for tests. Render staging and Cloud Run staging are both supported; name the target and verify its configured database for operational audits. Never inherit an unspecified remote `.env` database URL in tests.
 
 Retain meaningful regressions for event/patient isolation, owned NOTE history, state transitions, independent components, source-preserving legacy reads, assertion/derivation separation and query budgets. For migration/backfill changes, exercise fresh and affected prior schema/data plus interrupted retries. Complete required GitHub CI before merge and update these two documents as capabilities land.
 

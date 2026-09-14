@@ -50,7 +50,7 @@ So:
 
 PROMOP is ahead of the global CancerBot SOC2 snapshot in a few areas:
 
-- `DEBUG` defaults to false in `ctomop/settings.py`.
+- `DEBUG` defaults to false in `promop/settings.py`.
 - Production CORS is restricted by `CORS_ALLOWED_ORIGINS`.
 - Production secure-cookie, HSTS, content-sniffing, frame-deny, and proxy SSL settings exist.
 - DRF throttling is configured for anonymous, user, sync, patient-sync, signup, and OMOP write buckets.
