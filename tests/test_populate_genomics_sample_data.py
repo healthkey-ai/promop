@@ -90,7 +90,7 @@ def test_sequence_annotations_are_paired_and_inapplicable_fields_empty(monkeypat
                     assert payload['amino_acid_change'] == sample._AMINO_ACID_CHANGES[key][index]
                 else:
                     assert 'amino_acid_change' not in payload
-                if key == 'palb1':
+                if key == 'palb2':
                     assert 'transcript_reference_sequence_id' not in payload
                     assert 'genomic_dna_change' not in payload
     esr1 = next(m for m in sample._DISEASE_POOLS['BC'] if m['marker_key'] == 'esr1')
