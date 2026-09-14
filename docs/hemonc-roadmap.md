@@ -9,9 +9,8 @@ governed source of coded therapy and vocabulary data." The original P0/P0b items
 mostly implemented; the remaining work is narrower and should be tracked as focused
 issues rather than a broad implementation plan.
 
-Source-code/source-to-concept mapping work is in flight separately in
-`source-code-mapping-plan.md`; this document should be updated again after that branch
-lands.
+The implemented source-code resolution contract is maintained separately in
+[Code Mapping API](code-mapping-api.md).
 
 ## Implemented
 
@@ -120,11 +119,11 @@ LOT inference uses OMOP vocabulary graph data where available:
 
 ## Remaining Work
 
-### 1. Finish Source-Code / Source-to-Concept Mapping
+### 1. Align the roadmap with implemented source-code mapping
 
-This is in flight in `source-code-mapping-plan.md`. After it lands, update this document
-and issue #236 to reflect what remains around `source_to_concept_map`, local source-code
-curation, and release metadata.
+Use [Code Mapping API](code-mapping-api.md) for the implemented SCCM resolver and
+curation lifecycle. Reconcile issue #236 with that contract to identify any
+remaining work around `source_to_concept_map` and release metadata.
 
 ### 2. Tighten Release Semantics
 

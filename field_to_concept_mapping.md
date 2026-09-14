@@ -2,6 +2,10 @@
 
 Snapshot: 2026-09-11. UI and projection code: `dev` commit `7065a3f`; vocabulary and mapping metadata queried from staging. This document does not describe or change the separate, unmerged genomics work. No patient values are included.
 
+For the active field-and-answer mapping work, see the
+[enhancement plan](field_concept_mapping_enhancements.md), including its current
+checkpoint and inventory prerequisite (#1223).
+
 ## How edits flow
 
 1. Patient clinical edits are PATCHed to PatientRecord (`/api/v1/patient-records/{person_id}/`; the current provider UI uses its legacy `/api/patient-info/` alias). The UI name below is the payload key; a concrete field writes the same-named PatientRecord column unless an exception is stated.

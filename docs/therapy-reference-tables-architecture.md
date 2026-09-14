@@ -80,3 +80,24 @@ dialog uses `frontend/src/api/therapyLines.ts` to search, list, and fetch regime
 The reference tables are curated lookup data, not patient clinical facts. Patient therapy
 lines are authored through the clinical therapy-line endpoints, using these tables as the
 selection surface.
+
+## Mapping administration
+
+The `/mappings` hub links Field Mapping, Code Mapping, and Therapy Mapping.
+`GET /api/v1/mapping-stats/` supplies its counts. The `/therapy-mappings` screen
+manages regimen-to-component, component-to-class, and disease/round-to-regimen
+relationships. Access follows [application roles](application-roles.md).
+
+Alongside the read endpoints above, the administration API provides:
+
+| Resource under `/api/v1/` | Mutations |
+| --- | --- |
+| `therapy-regimens/` and `therapy-regimens/{code}/` | POST; PATCH/DELETE |
+| `therapy-regimens/{code}/components/` and `therapy-regimens/{code}/components/{component_code}/` | POST; DELETE component link |
+| `therapy-components/` | POST |
+| `therapy-components/{code}/classes/` and `therapy-components/{code}/classes/{class_code}/` | POST; DELETE class link |
+| `therapy-classes/` | POST |
+| `disease-therapy-regimens/` and `disease-therapy-regimens/{id}/` | POST; DELETE |
+
+The admin client and response shapes live in `frontend/src/api/mappingHub.ts`.
+For the shared mapping service boundary, see [Mapping component](mapping-component-plan.md).
