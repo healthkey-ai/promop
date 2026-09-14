@@ -149,7 +149,7 @@ tracks consumer delivery and rollout. The ADR's
 [feasibility output](adr/0002-phase0-coverage.txt) is historical supporting evidence.
 
 [Implemented Genomics architecture](genomics_architecture.md) is the current
-storage and ownership reference. [Genomics implementation](genomics_implementation.md)
+storage and ownership reference. [Genomics implementation](genomics_plan.md)
 separately tracks remaining requirements, acceptance criteria, and deployment work.
 
 ## 5. Deliver patient and integration workflows
