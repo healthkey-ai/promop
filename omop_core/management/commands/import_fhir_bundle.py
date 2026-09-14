@@ -149,20 +149,16 @@ class Command(BaseCommand):
                 f"User with email '{options['email']}' not found."
             )
 
-        # Org setup — monkey-patch get_request_org so the upload view stamps the
-        # correct org on every PatientRecord it creates, even for superuser requests.
+        # Select the tenant through the same authorized upload input as the UI.
         org = None
         if options['org_slug']:
             from omop_core.models import Organization
-            import patient_portal.api.permissions as _perms
             org, created = Organization.objects.get_or_create(
                 slug=options['org_slug'],
                 defaults={'name': options['org_slug'].upper(), 'created_by': user},
             )
             action = 'Created' if created else 'Found existing'
             self._print(f'{action} org: {org.name} (slug={org.slug})')
-            import patient_portal.api.views as _views_mod
-            _views_mod.get_request_org = lambda req: org
 
         factory = RequestFactory()
 
@@ -179,12 +175,18 @@ class Command(BaseCommand):
             content = json.dumps(mini_bundle).encode('utf-8')
 
             uploaded = SimpleUploadedFile('bundle.json', content, content_type='application/json')
-            django_request = factory.post('/api/patient-info/upload_fhir/?skip_refresh=true', {'file': uploaded})
+            upload_data = {'file': uploaded}
+            if org:
+                upload_data['organization'] = org.slug
+            django_request = factory.post('/api/patient-info/upload_fhir/?skip_refresh=true', upload_data)
             django_request.user = user
             django_request._dont_enforce_csrf_checks = True
 
             request = DRFRequest(django_request, parsers=[MultiPartParser(), JSONParser()])
             request.user = user
+            # This is an explicitly authenticated management-command request.
+            # Reading auth must not trigger DRF to replace the user with AnonymousUser.
+            request.auth = None
 
             viewset = PatientRecordViewSet()
             viewset.request = request
@@ -198,6 +200,8 @@ class Command(BaseCommand):
                 created = data.get('created_count', 0) or 0
                 updated = data.get('updated_count', 0) or 0
                 errors = data.get('errors', [])
+                if getattr(response, 'status_code', 200) >= 400 and not errors:
+                    errors = [str(data.get('error') or data.get('detail') or data)]
             except Exception as exc:
                 created = updated = 0
                 errors = [str(exc)]
@@ -236,6 +240,8 @@ class Command(BaseCommand):
                 self._print(f'  refresh failed for person {pi.person_id}: {exc}', err=True)
         self._print(f'Refreshed {refreshed} patients.')
 
+        if total_errors:
+            raise CommandError(f'Import completed with {total_errors} error(s); see batch errors above.')
         self._print(self.style.SUCCESS(
             f'Done. Total: created={total_created} updated={total_updated} errors={total_errors}'
         ))

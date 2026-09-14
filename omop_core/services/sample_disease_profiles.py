@@ -133,6 +133,7 @@ def read_profile_rows(rows):
     from omop_core.models import PatientRecord
     fields = {f.name: f for f in PatientRecord._meta.fields}
     result = {}
+    rows = sorted(rows, key=lambda row: (getattr(row, 'measurement_date', None) or getattr(row, 'observation_date', None) or date.min, row.pk), reverse=True)
     for row in rows:
         source = getattr(row, 'measurement_source_value', None) or getattr(row, 'observation_source_value', '') or ''
         key = row.value_source_value or ''
@@ -143,7 +144,8 @@ def read_profile_rows(rows):
         value = row.value_as_number if row.value_as_number is not None else row.value_as_string
         if value is None: continue
         try:
-            if fields[field].get_internal_type() == 'JSONField': value = json.loads(str(value))
+            if fields[field].get_internal_type() == 'JSONField':
+                value = json.loads(str(value)) if str(value).startswith('[') else [s.strip() for s in str(value).split(',') if s.strip()]
             elif fields[field].get_internal_type() == 'BooleanField': value = str(value).lower() in {'true', 'yes', '1', '1.00000'}
             else: value = fields[field].to_python(value)
             if field == 'tumor_grade': value = normalize_grade(value)

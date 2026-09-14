@@ -144,3 +144,26 @@ def test_generated_assessments_survive_real_fhir_import(tmp_path):
     assert record.gelf_criteria_status=='Met'
     assert record.bone_marrow_involvement is True
     assert record.number_of_nodal_sites==6
+
+
+def test_backfill_honors_capitalized_approved_mapping_table_and_sct_roundtrip():
+    from omop_core.models import FieldConceptMapping
+    record=PatientRecordFactory(organization=OrganizationFactory(slug='synthea-mm'),disease='Multiple Myeloma')
+    concept=ConceptFactory(concept_name='Recorded myeloma subtype')
+    FieldConceptMapping.objects.create(field_name='myeloma_type',status='approved',omop_table='Observation',concept=concept,source_value='demo-myelo-type')
+    history=ConceptFactory(concept_name='Recorded transplant history')
+    FieldConceptMapping.objects.create(field_name='sct_eligibility',status='approved',omop_table='Observation',concept=history,source_value='mm-sct-eligibility',value_kind='string')
+    call_command('backfill_sample_disease_profiles',confirm=True,stdout=StringIO())
+    assert Observation.objects.filter(person=record.person,observation_concept=concept).exists()
+    record.refresh_from_db()
+    eligibility=record.sct_eligibility
+    assert refresh_patient_record(record.person).sct_eligibility==eligibility
+
+
+def test_screening_is_not_selected_as_primary_cancer_diagnosis():
+    from tests.factories import ConditionOccurrenceFactory
+    record=PatientRecordFactory()
+    with suppress_patient_record_refresh():
+        ConditionOccurrenceFactory(person=record.person,condition_start_date=date(2023,1,1),condition_concept=ConceptFactory(concept_name='Multiple myeloma'))
+        ConditionOccurrenceFactory(person=record.person,condition_start_date=date(2024,1,1),condition_concept=ConceptFactory(concept_name='Breast cancer screening not done'),condition_source_value='Breast Cancer')
+    assert refresh_patient_record(record.person).disease=='Multiple Myeloma'
