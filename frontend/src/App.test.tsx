@@ -241,6 +241,13 @@ describe('administrative upload routes', () => {
 });
 
 
+it('uses the inline profile heading without a second masthead for patient users', () => {
+  mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 1, is_patient: true, person_id: 5 } });
+  renderAt('/profile');
+  expect(screen.getByText('USER_PROFILE')).toBeInTheDocument();
+  expect(screen.queryByRole('banner')).not.toBeInTheDocument();
+});
+
 describe("retired OAuth callback", () => {
   it("requires session login instead of exchanging a code", () => {
     mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: null });
