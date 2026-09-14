@@ -10,7 +10,7 @@ consumer-side acknowledgement is tracked in the active plan.
 
 This ADR owns vocabulary authority, distribution and interpretation rules.
 Delivery status, outstanding work, issue ownership and acceptance gates live in
-[the field/value mapping plan](../../field_concept_mapping_plan.md#vocabulary-distribution-and-mapping-provenance).
+[the field/value mapping plan](../field_concept_mapping_plan.md#vocabulary-distribution-and-mapping-provenance).
 The [consumer protocol](../vocab-consumer-cache-protocol.md) owns the HTTP and
 checksum contract.
 
@@ -124,7 +124,7 @@ expansions even when concept IDs remain unchanged.
 
 ## Relationship to the active plans
 
-The [field/value plan](../../field_concept_mapping_plan.md) owns stable
+The [field/value plan](../field_concept_mapping_plan.md) owns stable
 scoped choices, reviewed answer mappings, question/answer roles, transfer and
 reconciliation. Existing therapy catalogs remain authoritative source inventories
 and are exposed through provider adapters; they are not recreated as flat enums.

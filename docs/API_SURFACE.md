@@ -27,11 +27,11 @@ is unavailable or fails. Direct saves recompute aliases and calculations without
 running a full OMOP refresh. External imports and explicit refreshes still derive
 from OMOP while preserving pending edits.
 
-Use [PatientRecord-first writes](docs/patient-record-first-writes.md) for save,
+Use [PatientRecord-first writes](patient-record-first-writes.md) for save,
 projection, and refresh semantics, and [the field mapping reference](field_concept_mapping_architecture.md)
 for field destinations and exceptions. Mapping availability alone does not determine
 editability. Computed fields, structured clinical resources, and retired summaries
-have their own contracts; [Genomics](docs/genomics_architecture.md) owns new discrete
+have their own contracts; [Genomics](genomics_architecture.md) owns new discrete
 genomic findings.
 
 > **Legacy SQL compatibility only:** `public.patient_info` is a read-only database view
@@ -47,7 +47,7 @@ genomic findings.
 | `PATCH /api/v1/persons/{person_id}/` | Supported direct Person demographic/profile updates |
 
 Authorization and patient/organization scope apply to every path. Use
-[application roles](docs/application-roles.md) for the implemented privilege model.
+[application roles](application-roles.md) for the implemented privilege model.
 
 ---
 
@@ -272,7 +272,7 @@ and profile fields. For example, an authorized editor can submit:
 The saved PatientRecord value is available immediately. A supported projection
 recipe writes the mapped OMOP fact; unmapped or failed projections remain pending
 and protected during later derivation. Profile fields project onward to Person or
-Location. See [PatientRecord-first writes](docs/patient-record-first-writes.md)
+Location. See [PatientRecord-first writes](patient-record-first-writes.md)
 for same-day updates, clears, pending-edit acknowledgement, and approval backfill.
 
 Consult `GET /api/v1/patient-records/writable-fields/` before building an editor.
@@ -386,7 +386,7 @@ Result caps: each source concept returns at most **1000** nodes; when more exist
 
 Direction semantics: without `relationship_id`, traversal uses the `concept_ancestor` closure table (true hierarchy). With `relationship_id`, traversal follows stored edge direction — `ancestors` returns in-neighbors (concepts with an edge pointing *at* the source) and `descendants` returns out-neighbors. For OMOP hierarchical relationships authored child → parent (e.g. `Is a`), use closure mode for true ancestor traversal. Edges with `invalid_reason` set are excluded from relationship-mode traversal.
 
-For background on how PRomop loads and uses `concept`, `concept_relationship`, and `concept_ancestor`, see [docs/concept-mapping.md](docs/concept-mapping.md#concept-graph-api).
+For background on how PRomop loads and uses `concept`, `concept_relationship`, and `concept_ancestor`, see [docs/concept-mapping.md](concept-mapping.md#concept-graph-api).
 
 ### GET /api/v1/concepts/{concept_id}/ancestors/
 
@@ -573,7 +573,7 @@ All support: GET (list + retrieve), POST (create), PUT/PATCH (update), DELETE.
 
 ### Detailed FHIR-to-OMOP CRUD sample
 
-See [`docs/examples/fhir_omop_crud.py`](docs/examples/fhir_omop_crud.py) for a
+See [`docs/examples/fhir_omop_crud.py`](examples/fhir_omop_crud.py) for a
 small, runnable example that parses a minimal FHIR bundle shape and exercises
 create/retrieve/update/delete for ConditionOccurrence, DrugExposure,
 Measurement, Observation, and ProcedureOccurrence. It shows the required event
@@ -660,7 +660,7 @@ Full CRUD. Org-scoped. These do not feed into PatientRecord.
 ## Vocabulary & concept lookup endpoints
 
 For a full explanation of how LOINC, SNOMED, and HemOnc codes are resolved to OMOP Concept IDs,
-see [docs/concept-mapping.md](docs/concept-mapping.md).
+see [docs/concept-mapping.md](concept-mapping.md).
 
 ### GET /api/v1/concepts/lookup/
 
@@ -942,8 +942,8 @@ means the stream was truncated (fail closed). Note the following:
 Clinical write APIs operate on OMOP resources, not on projection fields. A numeric
 observation must carry its clinical concept, event time, value, and unit; terminology
 mapping and canonical-unit policy are documented in
-[`docs/concept-mapping.md`](docs/concept-mapping.md) and
-[`docs/clinical-unit-policy.md`](docs/clinical-unit-policy.md). This prevents a
+[`docs/concept-mapping.md`](concept-mapping.md) and
+[`docs/clinical-unit-policy.md`](clinical-unit-policy.md). This prevents a
 lossy projection update from being mistaken for a source clinical fact.
 
 ---
@@ -1049,7 +1049,7 @@ karnofsky_performance_score        89243-0    {score}         Karnofsky Performa
 ### FHIR upload pipeline
 
 FHIR ingestion maps resources to OMOP tables and refreshes PatientRecord.
-Interactive edits follow the separate [PatientRecord-first write path](docs/patient-record-first-writes.md).
+Interactive edits follow the separate [PatientRecord-first write path](patient-record-first-writes.md).
 
 ```
 FHIR Bundle
