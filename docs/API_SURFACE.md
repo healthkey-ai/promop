@@ -655,6 +655,50 @@ Fill-if-empty patch on Person demographic fields. Each field is only written whe
 
 Full CRUD. Org-scoped. These do not feed into PatientRecord.
 
+### Trial search preferences
+
+`/api/v1/trial-search-preferences/?person_id=` — the filters a patient last searched
+with. One row per person. Reads are org-scoped like the two above, and it does not feed
+into PatientRecord either; what differs is the method set — GET and PATCH only, no POST,
+PUT or DELETE — and that the two write actions below authorize the `person_id` they are
+given, which the object-level permission alone does not do.
+
+Also served at the legacy `/api/trial-search-preferences/` path, under the deprecation
+note at the top of this document. Everything below applies to both paths.
+
+`preferences` is one opaque JSON object, whose filter vocabulary belongs to EXACT.
+Three write paths, all with the same replace semantics:
+
+| Call | Effect |
+|---|---|
+| `PATCH /api/v1/trial-search-preferences/upsert/?person_id=` | Save filters, creating the row on first use |
+| `PATCH /api/v1/trial-search-preferences/reset/?person_id=` | Clear filters |
+| `PATCH /api/v1/trial-search-preferences/{id}/` | The plain detail route. Writes the same way; it just cannot create the row, and it does not authorize a `person_id` |
+
+**A request carrying `preferences` replaces the whole object; it does not merge into it.**
+The method is PATCH and the action is called `upsert`, so the opposite is the natural
+reading, and a client built on that reading lost saved filters to it
+(healthkey-ai/exact#444). In full:
+
+- A key **absent** from the body is **removed**. That is the only way to remove one:
+  a null *inside* the object is stored as the value `null`, not treated as a delete.
+- A body that **omits** `preferences` leaves the stored object untouched — `partial=True`
+  applies at the field level, and that is the only level at which anything merges. It is
+  not a no-op on the row: it creates one if there was none, and `updated_at` moves either
+  way.
+- `{"preferences": null}` is a **400**. To clear, send the field carrying an empty
+  object — `{"preferences": {}}` — or call `reset`. A body that is merely `{}`, with no
+  `preferences` key in it at all, is the previous bullet and clears nothing.
+- So **a client holding part of the set must read-modify-write**: GET, merge its own
+  edits over what came back, PATCH the result.
+
+Concurrent writers are last-writer-wins and silently delete each other's keys — two tabs
+running the same client are enough. There is no precondition making a write conditional
+on what was read; see [issue #1312](https://github.com/healthkey-ai/promop/issues/1312).
+
+`non_default_filter_count` is computed server-side so every client's "Filters (N)" badge
+agrees; `sort` and `type` are not filters and are not counted.
+
 ---
 
 ## Vocabulary & concept lookup endpoints
