@@ -1,5 +1,9 @@
 # Patient Role and Org-Scoped Access Architecture
 
+For the complete Staff, Org Admin, Doctor, Analyst, and Patient hierarchy, see
+[SODAP role hierarchy and privileges](application-roles.md).
+
+
 PROMOP supports first-class patient identities inside the existing organization access
 model. Patients can be invited by an org, self-register where enabled, log in through
 org-scoped routes, and land directly on their own patient record.
