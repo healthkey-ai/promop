@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import time
 
 from django.conf import settings
 from django.db import transaction
@@ -10,12 +11,14 @@ from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.throttling import SimpleRateThrottle
+from drf_spectacular.utils import extend_schema
 
 from omop_core.models import Organization, PatientRecord
 from omop_core.services.access import get_admin_orgs
 from patient_portal.models import InboundWebhookEvent, WebhookDelivery, WebhookSubscription
 from patient_portal.webhooks import (
-    EVENT_TYPES, INBOUND_HANDLERS, compute_hmac_signature, resolve_webhook_url,
+    EVENT_TYPES, INBOUND_HANDLERS, compute_hmac_signature, validate_webhook_url,
 )
 from .permissions import ScopedTokenPermission
 
@@ -39,7 +42,7 @@ class WebhookSubscriptionSerializer(serializers.ModelSerializer):
 
     def validate_url(self, value):
         try:
-            resolve_webhook_url(value)
+            validate_webhook_url(value)
         except ValueError:
             raise serializers.ValidationError(
                 'Webhook URL must resolve only to public HTTPS addresses on port 443.'
@@ -109,19 +112,45 @@ class InboundEventSerializer(serializers.Serializer):
     data = InboundDataSerializer()
 
 
+class InboundWebhookThrottle(SimpleRateThrottle):
+    scope = 'webhook_inbound'
+
+    def get_rate(self):
+        return settings.WEBHOOK_INBOUND_RATE
+
+    def get_cache_key(self, request, view):
+        # Called only after signature verification, so unauthenticated callers
+        # cannot consume a configured source's quota by spoofing its header.
+        return self.cache_format % {'scope': self.scope, 'ident': view.source_id}
+
+
 class InboundWebhookView(APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
+    throttle_classes = []  # Apply the source quota after authentication below.
 
+    @extend_schema(request=InboundEventSerializer, responses={202: dict, 200: dict})
     def post(self, request):
+        if not settings.WEBHOOKS_ENABLED:
+            return Response({'detail': 'Webhooks are disabled.'}, status=503)
         source_id = request.headers.get('X-HealthKey-Source', '')
         source = settings.WEBHOOK_INBOUND_SOURCES.get(source_id, {})
         secret = source.get('secret', '')
         signature = request.headers.get('X-HealthKey-Signature', '')
         body = request.body
-        if (not secret or len(source_id) > 100 or not hmac.compare_digest(
-                signature.encode(), compute_hmac_signature(body, secret).encode())):
+        timestamp = request.headers.get('X-HealthKey-Timestamp', '')
+        try:
+            fresh = (timestamp.isascii() and timestamp.isdigit() and len(timestamp) <= 12
+                     and abs(time.time() - int(timestamp)) <= 300)
+        except ValueError:
+            fresh = False
+        if (not fresh or not secret or len(source_id) > 100 or not hmac.compare_digest(
+                signature.encode(), compute_hmac_signature(body, secret, timestamp).encode())):
             return Response({'detail': 'Invalid webhook signature.'}, status=401)
+        self.source_id = source_id
+        throttle = InboundWebhookThrottle()
+        if not throttle.allow_request(request, self):
+            self.throttled(request, throttle.wait())
         organization = Organization.objects.filter(slug=source.get('organization'), is_active=True).first()
         if organization is None:
             return Response({'detail': 'Invalid webhook source.'}, status=401)

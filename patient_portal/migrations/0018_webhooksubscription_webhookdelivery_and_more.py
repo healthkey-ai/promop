@@ -11,7 +11,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ("omop_core", "0230_cytogenetic_marker_choices"),
-        ("patient_portal", "0015_fix_patient_user_identity_fk"),
+        ("patient_portal", "0017_seed_service_application_names"),
     ]
 
     operations = [

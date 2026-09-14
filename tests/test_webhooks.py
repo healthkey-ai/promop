@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import socket
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from unittest.mock import Mock, patch
@@ -24,6 +25,9 @@ pytestmark = pytest.mark.django_db
 
 @pytest.fixture
 def setup(settings):
+    settings.WEBHOOKS_ENABLED = True
+    from django.core.cache import cache
+    cache.clear()
     settings.CELERY_BROKER_URL = ''
     org = Organization.objects.create(name='Webhook tenant', slug='webhook-tenant')
     other = Organization.objects.create(name='Other tenant', slug='webhook-other')
@@ -44,10 +48,12 @@ def setup(settings):
 def inbound(payload=None, signature=None, source='lab-system', **headers):
     payload = payload or {'id': 'event-1', 'type': 'lab.updated', 'data': {'person_id': 420001}}
     body = payload if isinstance(payload, bytes) else encode_payload(payload)
+    timestamp = headers.pop('HTTP_X_HEALTHKEY_TIMESTAMP', str(int(time.time())))
     return APIClient().post(
-        '/api/webhooks/inbound/', body, content_type='application/json',
+        '/api/v1/webhooks/inbound/', body, content_type='application/json',
         HTTP_X_HEALTHKEY_SOURCE=source,
-        HTTP_X_HEALTHKEY_SIGNATURE=signature if signature is not None else compute_hmac_signature(body, 'test-source-secret'),
+        HTTP_X_HEALTHKEY_TIMESTAMP=timestamp,
+        HTTP_X_HEALTHKEY_SIGNATURE=signature if signature is not None else compute_hmac_signature(body, 'test-source-secret', timestamp),
         **headers,
     )
 
@@ -116,40 +122,40 @@ def test_subscription_management_and_secret_visibility(setup):
     org, other, person, user, subscription = setup
     client = APIClient()
     client.force_authenticate(user)
-    with patch('patient_portal.api.webhook_views.resolve_webhook_url'):
-        response = client.post('/api/webhooks/subscriptions/', {
+    with patch('patient_portal.api.webhook_views.validate_webhook_url'):
+        response = client.post('/api/v1/webhooks/subscriptions/', {
             'organization': org.pk, 'url': subscription.url, 'event_types': ['lab.updated'],
         }, format='json')
         assert response.status_code == 201
         assert len(response.data['secret']) >= 32
-        assert client.post('/api/webhooks/subscriptions/', {
+        assert client.post('/api/v1/webhooks/subscriptions/', {
             'organization': other.pk, 'url': subscription.url, 'event_types': ['lab.updated'],
         }, format='json').status_code == 400
-    assert 'secret' not in client.get(f'/api/webhooks/subscriptions/{subscription.pk}/').data
-    assert subscription.secret not in client.get('/api/webhooks/subscriptions/').content.decode()
+    assert 'secret' not in client.get(f'/api/v1/webhooks/subscriptions/{subscription.pk}/').data
+    assert subscription.secret not in client.get('/api/v1/webhooks/subscriptions/').content.decode()
     alien = WebhookSubscription.objects.create(organization=other, url=subscription.url, event_types=['lab.updated'])
-    assert client.get(f'/api/webhooks/subscriptions/{alien.pk}/deliveries/').status_code == 404
-    assert client.patch(f'/api/webhooks/subscriptions/{alien.pk}/', {'active': False}, format='json').status_code == 404
-    assert client.patch(f'/api/webhooks/subscriptions/{subscription.pk}/', {'organization': other.pk}, format='json').status_code == 400
-    assert client.patch(f'/api/webhooks/subscriptions/{subscription.pk}/', {'active': False}, format='json').status_code == 200
+    assert client.get(f'/api/v1/webhooks/subscriptions/{alien.pk}/deliveries/').status_code == 404
+    assert client.patch(f'/api/v1/webhooks/subscriptions/{alien.pk}/', {'active': False}, format='json').status_code == 404
+    assert client.patch(f'/api/v1/webhooks/subscriptions/{subscription.pk}/', {'organization': other.pk}, format='json').status_code == 400
+    assert client.patch(f'/api/v1/webhooks/subscriptions/{subscription.pk}/', {'active': False}, format='json').status_code == 200
 
 
 def test_patient_and_expired_admin_cannot_manage_subscriptions(setup):
     org, other, person, user, subscription = setup
     client = APIClient()
-    assert client.get('/api/webhooks/subscriptions/').status_code in (401, 403)
+    assert client.get('/api/v1/webhooks/subscriptions/').status_code in (401, 403)
     client.force_authenticate(user)
     GroupAccess.objects.filter(identity=user).update(role='patient')
-    assert client.get('/api/webhooks/subscriptions/').status_code == 403
+    assert client.get('/api/v1/webhooks/subscriptions/').status_code == 403
     GroupAccess.objects.filter(identity=user).update(role='org_admin', expires_at=timezone.now() - timedelta(seconds=1))
-    assert client.get('/api/webhooks/subscriptions/').status_code == 403
+    assert client.get('/api/v1/webhooks/subscriptions/').status_code == 403
 
 
 def test_subscription_url_errors_never_expose_exception_details(setup):
     client = APIClient()
     client.force_authenticate(setup[3])
-    with patch('patient_portal.api.webhook_views.resolve_webhook_url', side_effect=ValueError('private resolver details')):
-        response = client.post('/api/webhooks/subscriptions/', {
+    with patch('patient_portal.api.webhook_views.validate_webhook_url', side_effect=ValueError('private resolver details')):
+        response = client.post('/api/v1/webhooks/subscriptions/', {
             'organization': setup[0].pk,
             'url': 'https://subscriber.example/events',
             'event_types': ['lab.updated'],
@@ -378,3 +384,155 @@ def test_concurrent_delivery_tasks_send_once(delivery):
         send.assert_called_once()
     delivery.refresh_from_db()
     assert delivery.attempts == 1
+
+
+@pytest.mark.parametrize('timestamp', ['', 'abc', '１２３', '-1', '9' * 30, '0'])
+def test_inbound_requires_valid_recent_timestamp(setup, timestamp):
+    # Invalid timestamp need not be signed: all fail before dispatch.
+    assert inbound(signature='invalid', HTTP_X_HEALTHKEY_TIMESTAMP=timestamp).status_code == 401
+    assert not InboundWebhookEvent.objects.exists()
+
+
+@pytest.mark.parametrize('offset', [-301, 301])
+def test_correctly_signed_stale_or_future_request_rejected(setup, offset):
+    assert inbound(HTTP_X_HEALTHKEY_TIMESTAMP=str(int(time.time()) + offset)).status_code == 401
+    assert not WebhookDelivery.objects.exists()
+
+
+def test_timestamp_is_part_of_signed_bytes(setup):
+    body = encode_payload({'id': 'event-1', 'type': 'lab.updated', 'data': {'person_id': 420001}})
+    timestamp = str(int(time.time()))
+    signature = compute_hmac_signature(body, 'test-source-secret', str(int(timestamp) - 1))
+    assert inbound(body, signature=signature, HTTP_X_HEALTHKEY_TIMESTAMP=timestamp).status_code == 401
+    expected = 'sha256=' + hmac.new(b'test-source-secret', timestamp.encode() + b'.' + body, hashlib.sha256).hexdigest()
+    assert compute_hmac_signature(body, 'test-source-secret', timestamp) == expected
+
+
+def test_inbound_quota_is_per_authenticated_source(setup, settings):
+    settings.WEBHOOK_INBOUND_RATE = '2/minute'
+    settings.WEBHOOK_INBOUND_SOURCES['second-source'] = settings.WEBHOOK_INBOUND_SOURCES['lab-system']
+    for _ in range(3):
+        assert inbound(signature='invalid').status_code == 401
+    assert inbound().status_code == 202
+    assert inbound().status_code == 200
+    response = inbound()
+    assert response.status_code == 429
+    assert int(response['Retry-After']) > 0
+    assert inbound(source='second-source').status_code == 202
+
+
+def test_subscription_validation_does_not_resolve_dns(setup):
+    client = APIClient()
+    client.force_authenticate(setup[3])
+    with patch('socket.getaddrinfo', side_effect=AssertionError('DNS in request')):
+        result = client.post('/api/v1/webhooks/subscriptions/', {
+            'organization': setup[0].pk, 'url': 'https://unresolvable.example/events',
+            'event_types': ['lab.updated'],
+        }, format='json')
+        assert result.status_code == 201, result.data
+        assert client.patch(f"/api/v1/webhooks/subscriptions/{result.data['id']}/", {
+            'url': 'https://another.example/events',
+        }, format='json').status_code == 200
+
+
+def test_disabled_webhooks_add_no_queries(setup, settings, django_assert_num_queries):
+    from django.db.models.signals import post_save
+    from patient_portal.webhooks import patient_data_changed, publish_patient_bulk_change
+    settings.WEBHOOKS_ENABLED = False
+    with django_assert_num_queries(0), patch('patient_portal.webhooks.enqueue_delivery') as enqueue:
+        patient_data_changed(PatientDocument, PatientDocument(person_id=setup[2].pk), signal=post_save)
+        publish_patient_bulk_change(setup[2].pk, 'measurement', 1)
+        publish_event(setup[0].pk, 'patient.changed', {})
+        dispatch_pending_webhooks()
+        enqueue.assert_not_called()
+    assert inbound().status_code == 503
+
+
+def test_broker_enqueue_disables_retry_and_result_backend(delivery, settings):
+    settings.CELERY_BROKER_URL = 'redis://unavailable'
+    with patch('patient_portal.tasks.deliver_webhook.apply_async') as enqueue:
+        enqueue_delivery(delivery.pk)
+    assert enqueue.call_args.kwargs['retry'] is False
+    assert enqueue.call_args.kwargs['ignore_result'] is True
+
+
+def test_webhooks_registered_only_in_current_api_and_schema(setup):
+    from django.urls import resolve
+    from drf_spectacular.generators import SchemaGenerator
+    from patient_portal.api import v1_urls, urls
+    from patient_portal.api.webhook_views import InboundWebhookView
+    assert resolve('/api/v1/webhooks/inbound/').func.view_class is InboundWebhookView
+    assert all('webhook' not in prefix for prefix, _, _ in urls.router.registry)
+    assert not any(getattr(pattern, 'name', None) == 'webhook-inbound' for pattern in urls.urlpatterns)
+    assert 'Deprecation' not in inbound()
+    schema = SchemaGenerator(patterns=v1_urls.urlpatterns).get_schema(public=True)
+    assert '/webhooks/inbound/' in schema['paths']
+    assert '/webhooks/subscriptions/' in schema['paths']
+
+
+def test_prune_keeps_active_recent_and_unprocessed_rows(delivery, setup):
+    from django.core.management import call_command
+    from io import StringIO
+    old = timezone.now() - timedelta(days=40)
+    retained = []
+    terminal = []
+    for status in ['pending', 'retry', 'sending', 'delivered', 'dead_letter', 'cancelled']:
+        row = WebhookDelivery.objects.create(subscription=setup[4], payload={}, status=status)
+        WebhookDelivery.objects.filter(pk=row.pk).update(created_at=old, next_attempt_at=old)
+        (retained if status in ['pending', 'retry', 'sending'] else terminal).append(row.pk)
+    assert inbound().status_code == 202
+    event = InboundWebhookEvent.objects.get()
+    InboundWebhookEvent.objects.filter(pk=event.pk).update(received_at=old, processed_at=old)
+    call_command('prune_webhooks', dry_run=True, stdout=StringIO())
+    assert WebhookDelivery.objects.filter(pk__in=terminal).count() == 3
+    call_command('prune_webhooks', batch_size=1, stdout=StringIO())
+    assert WebhookDelivery.objects.filter(pk__in=retained).count() == 3
+    assert WebhookDelivery.objects.filter(pk=delivery.pk).exists()
+    assert not WebhookDelivery.objects.filter(pk__in=terminal).exists()
+    assert not InboundWebhookEvent.objects.exists()
+    # An old captured signature remains invalid after deduplication storage is pruned.
+    assert inbound(HTTP_X_HEALTHKEY_TIMESTAMP=str(int(old.timestamp()))).status_code == 401
+
+
+@pytest.mark.parametrize('fail', [False, True])
+def test_fhir_outbox_shares_patient_transaction(setup, django_capture_on_commit_callbacks, fail):
+    from io import BytesIO
+    from patient_portal.tests import _make_vocab_fixtures, _make_fhir_bundle
+    from patient_portal.webhooks import publish_patient_bulk_change
+    _make_vocab_fixtures()
+    client = APIClient()
+    client.force_authenticate(setup[3])
+    upload = BytesIO(json.dumps(_make_fhir_bundle()).encode())
+    upload.name = 'bundle.json'
+    seen = []
+
+    def publish(*args, **kwargs):
+        from django.db import connection
+        # TestCase's outer transaction plus the upload's patient savepoint.
+        assert connection.savepoint_ids
+        publish_patient_bulk_change(*args, **kwargs)
+        seen.append(True)
+        if fail:
+            raise RuntimeError('force failure after outbox creation')
+
+    # Refresh is a final required step after the bulk events have been persisted.
+    with patch('patient_portal.webhooks.enqueue_delivery') as enqueue:
+        with django_capture_on_commit_callbacks(execute=True):
+            if fail:
+                with patch('patient_portal.api.views.refresh_patient_record', side_effect=RuntimeError('rollback')):
+                    response = client.post('/api/v1/patient-records/upload_fhir/', {'file': upload}, format='multipart')
+            else:
+                with patch('patient_portal.webhooks.publish_patient_bulk_change', side_effect=publish):
+                    response = client.post('/api/v1/patient-records/upload_fhir/', {'file': upload}, format='multipart')
+            enqueue.assert_not_called()
+        assert response.status_code == 200, response.data
+        if fail:
+            assert response.data['errors']
+            assert not WebhookDelivery.objects.exists()
+            assert not Person.objects.filter(given_name='Jane', family_name='Smith').exists()
+            enqueue.assert_not_called()
+        else:
+            assert not response.data['errors'], response.data
+            assert seen
+            assert WebhookDelivery.objects.exists()
+            assert enqueue.called

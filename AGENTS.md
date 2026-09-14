@@ -50,7 +50,3 @@
 - Keep field/value inventories in generated reference artifacts. Architecture
   documents explain behavior; plans link to inventory evidence instead of
   duplicating per-field tables or deployment receipts.
-
-# Pull request labels
-
-- When an issue has a security-related label, apply the same label to its pull request.

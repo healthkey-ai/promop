@@ -196,3 +196,5 @@ deployed revision. Repository working conventions are in [AGENTS.md](../AGENTS.m
 and agent implementation guidance is in [CLAUDE.md](../CLAUDE.md).
 [Code of conduct](../CODE_OF_CONDUCT.md) and [third-party notices](../THIRD_PARTY_NOTICES.md)
 cover participation and attribution.
+
+- [Webhook notifications](webhooks_architecture.md): signed inbound events, subscriptions, transactional delivery, and retention.

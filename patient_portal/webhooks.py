@@ -12,6 +12,7 @@ from contextvars import ContextVar
 from urllib.parse import urlsplit
 
 import urllib3
+from django.conf import settings
 from django.db import transaction
 from django.db.models.signals import post_delete, post_save
 from django.utils import timezone
@@ -33,8 +34,10 @@ def suppress_webhook_events():
         _suppress_events.reset(token)
 
 
-def compute_hmac_signature(payload, secret):
+def compute_hmac_signature(payload, secret, timestamp=None):
     """Sign the exact wire bytes; callers must not reserialize before verifying."""
+    if timestamp is not None:
+        payload = str(timestamp).encode('ascii') + b'.' + payload
     return 'sha256=' + hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
 
 
@@ -42,7 +45,8 @@ def encode_payload(payload):
     return json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()
 
 
-def resolve_webhook_url(url):
+def validate_webhook_url(url):
+    """Validate syntax and literal IPs without performing DNS in HTTP workers."""
     try:
         parsed = urlsplit(url)
         if (parsed.scheme != 'https' or not parsed.hostname or parsed.username is not None
@@ -50,11 +54,30 @@ def resolve_webhook_url(url):
             raise ValueError
         hostname = parsed.hostname.encode('idna').decode('ascii')
         parsed = parsed._replace(netloc=f'[{hostname}]' if ':' in hostname else hostname)
+        try:
+            address = ipaddress.ip_address(hostname)
+        except ValueError:
+            pass  # Hostname resolution and validation happen in the delivery task.
+        else:
+            if not _public_address(address):
+                raise ValueError
+    except (ValueError, OSError, UnicodeError):
+        raise ValueError('Webhook URL must resolve only to public HTTPS addresses on port 443.') from None
+    return parsed
+
+
+def _public_address(address):
+    return address.is_global and not address.is_multicast and not address.is_reserved
+
+
+def resolve_webhook_url(url):
+    parsed = validate_webhook_url(url)
+    try:
         addresses = socket.getaddrinfo(parsed.hostname, 443, type=socket.SOCK_STREAM)
         ips = sorted({address[4][0] for address in addresses})
-        if not ips or any(not ipaddress.ip_address(ip).is_global for ip in ips):
+        if not ips or any(not _public_address(ipaddress.ip_address(ip)) for ip in ips):
             raise ValueError
-    except (ValueError, OSError, UnicodeError):
+    except (ValueError, OSError):
         raise ValueError('Webhook URL must resolve only to public HTTPS addresses on port 443.') from None
     return parsed, ips[0]
 
@@ -93,16 +116,18 @@ def enqueue_delivery(delivery_id, countdown=0):
     from django.conf import settings
     from patient_portal.tasks import deliver_webhook
 
-    if not settings.CELERY_BROKER_URL:
+    if not settings.WEBHOOKS_ENABLED or not settings.CELERY_BROKER_URL:
         return
     try:
-        deliver_webhook.apply_async(args=[str(delivery_id)], countdown=countdown)
+        deliver_webhook.apply_async(args=[str(delivery_id)], countdown=countdown, retry=False, ignore_result=True)
     except Exception:
         # A periodic sweep recovers committed outbox rows after broker outages.
         logger.warning('Webhook queue unavailable; delivery retained in outbox')
 
 
 def publish_event(organization_id, event_type, data):
+    if not settings.WEBHOOKS_ENABLED:
+        return
     if event_type not in EVENT_TYPES:
         raise ValueError('Unsupported webhook event type')
     event = {
@@ -137,6 +162,8 @@ INBOUND_HANDLERS = {
 
 
 def publish_patient_bulk_change(person_id, model_name, count, operation='bulk_saved'):
+    if not settings.WEBHOOKS_ENABLED or not count:
+        return
     organization_id = (PatientRecord.objects.filter(person_id=person_id)
                        .values_list('organization_id', flat=True).first())
     if organization_id is not None and count:
@@ -148,7 +175,7 @@ def publish_patient_bulk_change(person_id, model_name, count, operation='bulk_sa
 
 
 def patient_data_changed(sender, instance, raw=False, signal=None, **kwargs):
-    if raw or _suppress_events.get():
+    if not settings.WEBHOOKS_ENABLED or raw or _suppress_events.get():
         return
     person_id = getattr(instance, 'person_id', None)
     if person_id is None:

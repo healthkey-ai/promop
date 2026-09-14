@@ -45,11 +45,17 @@ class WebhookDelivery(models.Model):
         ('delivered', 'Delivered'), ('dead_letter', 'Dead letter'), ('cancelled', 'Cancelled'),
     ])
     attempts = models.PositiveSmallIntegerField(default=0)
-    next_attempt_at = models.DateTimeField(default=timezone.now, db_index=True)
+    next_attempt_at = models.DateTimeField(default=timezone.now)
     response_status = models.PositiveSmallIntegerField(null=True)
     error = models.CharField(max_length=64, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     delivered_at = models.DateTimeField(null=True)
+
+    class Meta:
+        indexes = [models.Index(
+            fields=['next_attempt_at'], name='webhook_due_active_idx',
+            condition=Q(status__in=['pending', 'retry', 'sending']),
+        )]
 
 
 class IdentityManager(BaseUserManager):

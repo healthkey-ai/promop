@@ -3,6 +3,7 @@
 from datetime import timedelta
 
 from celery import shared_task
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
@@ -15,6 +16,8 @@ RETRY_BASE_SECONDS = 30
 
 @shared_task(soft_time_limit=45, time_limit=60)
 def deliver_webhook(delivery_id):
+    if not settings.WEBHOOKS_ENABLED:
+        return
     with transaction.atomic():
         delivery = (WebhookDelivery.objects.select_for_update()
                     .select_related('subscription__organization').filter(pk=delivery_id).first())
@@ -73,8 +76,10 @@ def deliver_webhook(delivery_id):
 
 @shared_task
 def dispatch_pending_webhooks():
+    if not settings.WEBHOOKS_ENABLED:
+        return
     due = WebhookDelivery.objects.filter(
         status__in=['pending', 'retry', 'sending'], next_attempt_at__lte=timezone.now(),
-    ).values_list('pk', flat=True)[:1000]
+    ).order_by('next_attempt_at', 'pk').values_list('pk', flat=True)[:1000]
     for delivery_id in due:
         enqueue_delivery(delivery_id)

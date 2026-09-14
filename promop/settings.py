@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 import os
+import json
 from pathlib import Path
 import dj_database_url
 from dotenv import load_dotenv
@@ -632,6 +633,18 @@ else:
 CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', '')
 CELERY_RESULT_BACKEND = os.environ.get('CELERY_RESULT_BACKEND', CELERY_BROKER_URL)
 CELERY_TASK_SERIALIZER = 'json'
+# Explicit opt-in avoids webhook queries on ordinary clinical writes.
+WEBHOOKS_ENABLED = _env_bool('WEBHOOKS_ENABLED', False)
+WEBHOOK_INBOUND_SOURCES = json.loads(os.environ.get('WEBHOOK_INBOUND_SOURCES', '{}'))
+WEBHOOK_INBOUND_RATE = os.environ.get('WEBHOOK_INBOUND_RATE', '600/minute')
+WEBHOOK_RETENTION_DAYS = int(os.environ.get('WEBHOOK_RETENTION_DAYS', '30'))
+CELERY_BEAT_SCHEDULE = {
+    'recover-webhook-deliveries': {
+        'task': 'patient_portal.tasks.dispatch_pending_webhooks',
+        'schedule': 60.0,
+    },
+}
+CELERY_BROKER_CONNECTION_TIMEOUT = 2
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_ACCEPT_CONTENT = ['json']
 
@@ -663,8 +676,8 @@ CELERY_BROKER_TRANSPORT_OPTIONS = {
     # The refresh endpoint enqueues inside the request, so an unreachable
     # broker has to fail fast. Unset, kombu waits on the connect indefinitely
     # and the caller sits there until gunicorn kills the worker.
-    'socket_connect_timeout': 5,
-    'socket_timeout': 5,
+    'socket_connect_timeout': 2,
+    'socket_timeout': 2,
 }
 # How long a caller can still poll a finished task id.
 CELERY_RESULT_EXPIRES = int(os.environ.get('CELERY_RESULT_EXPIRES', '86400'))
