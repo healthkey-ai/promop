@@ -1,6 +1,7 @@
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { vi, describe, it, expect, beforeEach } from "vitest";
 import OrgDetail from "./OrgDetail";
+import { MemoryRouter } from "react-router-dom";
 
 // Mock api
 const mockGet = vi.fn();
@@ -104,7 +105,7 @@ function setupMocks(overrides: Partial<typeof ORG_DATA> = {}) {
 
 function renderOrgDetail(props: Partial<React.ComponentProps<typeof OrgDetail>> = {}) {
   return render(
-    <OrgDetail slug="acme" isStaff={true} onBack={vi.fn()} {...props} />
+    <MemoryRouter><OrgDetail slug="acme" isStaff={true} onBack={vi.fn()} {...props} /></MemoryRouter>
   );
 }
 

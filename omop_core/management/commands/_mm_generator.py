@@ -239,7 +239,8 @@ class Command(BaseCommand):
         bundle = {'resourceType': 'Bundle', 'type': 'collection', 'entry': []}
         for i in range(1, count + 1):
             self._add_patient(bundle, i)
-        return bundle
+        from omop_core.services.sample_disease_profiles import complete_demo_fhir_bundle
+        return complete_demo_fhir_bundle(bundle, 'MM')
 
     def _add_patient(self, bundle, pid):
         p = self._profile(pid)
@@ -1239,6 +1240,14 @@ class Command(BaseCommand):
             'laboratory', dt, 'string',
             ','.join(p['refractory']) if p['refractory'] else 'none',
         ))
+        from omop_core.services.sample_disease_profiles import profile_fhir_observation
+        assessments = {'myeloma_type': p['disease_type'], 'sct_eligibility': p['sct_eligibility'],
+                       'stem_cell_transplant_history': p['sct_types']}
+        if p['sct_types']:
+            assessments['sct_date'] = (diag_date + timedelta(days=210)).date().isoformat()
+        if p['cytogenetics']:
+            assessments['cytogenetic_markers'] = ','.join(p['cytogenetics'])
+        obs_list.extend(profile_fhir_observation(pid, field, value, dt) for field, value in assessments.items())
         return obs_list
 
     # ------------------------------------------------------------------

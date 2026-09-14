@@ -18,7 +18,7 @@ def client_for(staff):
 
 
 @pytest.mark.parametrize('disease,expected', [
-    ('BC', {'brca1', 'brca2', 'pik3ca', 'tp53', 'esr1', 'palb1'}),
+    ('BC', {'brca1', 'brca2', 'pik3ca', 'tp53', 'esr1', 'palb2'}),
     ('FL', {'bcl2', 'ezh2', 'kmt2d', 'crebbp', 'bcl6'}),
     ('MM', {'tp53', 'kras', 'nras', 'braf', 'del17p', 't414', 't1114', 'gain1q'}),
     ('MCL', {'tp53', 'notch1', 'notch2', 'nsd2', 'ccnd1', 'bcl2_amplification'}),
@@ -32,6 +32,52 @@ def test_catalog_is_disease_specific_without_patient_facts(setup, disease, expec
     assert all(m['writable'] for m in response.data['markers'])
     assert not Measurement.objects.filter(person=person).exists()
     assert not Observation.objects.filter(person=person).exists()
+
+
+@pytest.mark.parametrize('changes', [
+    None, {'status': 'rejected'}, {'status': 'proposed'},
+    {'source_value': ''}, {'source_value': 'x' * 51},
+    {'omop_table': 'observation'}, {'omop_table': 'condition_occurrence'},
+])
+def test_catalog_disables_parent_recipes_that_the_writer_rejects(setup, changes):
+    person, _, staff = setup
+    mapping = FieldConceptMapping.objects.filter(field_name='genomics_brca1')
+    if changes is None:
+        mapping.delete()
+    else:
+        mapping.update(**changes)
+    client = client_for(staff)
+    response = client.get(f'/api/v1/patient-records/{person.pk}/genomics-catalog/', {'disease': 'BC'})
+    assert response.status_code == 200
+    writable = {m['key']: m['writable'] for m in response.data['markers']}
+    assert writable['brca1'] is False
+    assert writable['tp53'] is True
+    response = client.patch(f'/api/v1/patient-records/{person.pk}/', {
+        'genomics_brca1': [{'gene': 'BRCA1', 'variant': 'source variant'}],
+    }, format='json')
+    assert response.status_code == 400, response.data
+    assert 'genomics_brca1' in response.data
+    assert not Measurement.objects.filter(person=person).exists()
+    assert not Observation.objects.filter(person=person).exists()
+
+
+@pytest.mark.parametrize('concept_id', [None, 0])
+def test_catalog_keeps_complete_source_only_parent_recipes_writable(setup, concept_id):
+    person, _, staff = setup
+    source = 'genomics:' + 'x' * 41  # Exact supported 50-character limit.
+    FieldConceptMapping.objects.filter(field_name='genomics_brca1').update(
+        concept_id=concept_id, vocabulary_id='', concept_code='', source_value=source,
+    )
+    client = client_for(staff)
+    response = client.get(f'/api/v1/patient-records/{person.pk}/genomics-catalog/', {'disease': 'BC'})
+    assert response.status_code == 200
+    assert next(m for m in response.data['markers'] if m['key'] == 'brca1')['writable'] is True
+    response = client.patch(f'/api/v1/patient-records/{person.pk}/', {
+        'genomics_brca1': [{'gene': 'BRCA1', 'variant': 'source variant'}],
+    }, format='json')
+    assert response.status_code == 200, response.data
+    parent = Measurement.objects.get(person=person, measurement_source_value=source)
+    assert parent.measurement_concept_id == 0
 
 
 def test_named_patientrecord_edits_project_both_directions(setup):
@@ -152,9 +198,74 @@ def test_nonpositive_assessments_do_not_become_detected_markers(setup, assessmen
         'interpretation': 'Pathogenic', 'assessment': assessment})
     record.refresh_from_db()
     assert record.genomics_tp53[0]['assessment'] == assessment
-    assert record.tp53_disruption is not True
+    assert record.tp53_disruption is None
     assert not record.molecular_markers
     save_variant(person, {'assessment': 'present'}, saved['id'])
     record.refresh_from_db()
     assert record.tp53_disruption is True
     assert 'TP53' in record.molecular_markers
+
+
+@pytest.mark.parametrize('key,value_kind', [
+    ('status', 'string'), ('clone_fraction', 'number'),
+    ('transcript_dna_change', 'string'), ('coverage_depth', 'number'),
+    ('amino_acid_change_type', 'string'),
+])
+def test_later_components_are_discoverable_editable_and_rejectable(setup, key, value_kind):
+    from omop_core.services.field_descriptor import get_all_field_descriptors
+    from patient_portal.api.serializers import FieldConceptMappingSerializer
+
+    field = 'genetic_mutations.' + key
+    descriptor = next(d for d in get_all_field_descriptors() if d['field_name'] == field)
+    assert descriptor['tab'] == 'genomics'
+    assert descriptor['field_type'] == value_kind
+    mapping = FieldConceptMapping.objects.get(field_name=field)
+    serializer = FieldConceptMappingSerializer(mapping, data={
+        'status': 'rejected', 'source_value': 'reviewed:' + key, 'notes': 'Curator decision',
+    }, partial=True)
+    assert serializer.is_valid(), serializer.errors
+    serializer.save()
+    call_command('seed_genomics_catalog')
+    mapping.refresh_from_db()
+    assert mapping.status == 'rejected'
+    assert mapping.source_value == 'reviewed:' + key
+    assert mapping.notes == 'Curator decision'
+
+
+def test_effective_registry_is_complete_and_does_not_mutate_frozen_catalog(setup):
+    from copy import deepcopy
+    from omop_core.services.genomics import FIELDS
+    from omop_core.services.genomics_catalog import catalog
+    from omop_core.services.genomics_components import components
+    from omop_core.services.field_descriptor import get_all_field_descriptors
+    from patient_portal.api.serializers import FieldConceptMappingSerializer
+
+    frozen = deepcopy(catalog())
+    registry = components()
+    fields = {'genetic_mutations.' + row['key'] for row in registry}
+    assert len(registry) == len(fields) == 31
+    assert fields == {'genetic_mutations.' + key for key in FIELDS}
+    assert fields <= {row['field_name'] for row in get_all_field_descriptors()}
+    assert fields <= set(FieldConceptMapping.objects.values_list('field_name', flat=True))
+    registry[0]['table'] = 'modified by caller'
+    assert catalog() == frozen
+    assert components()[0]['table'] != 'modified by caller'
+    serializer = FieldConceptMappingSerializer(data={'field_name': 'genetic_mutations.unknown'})
+    assert not serializer.is_valid()
+    assert 'field_name' in serializer.errors
+
+
+@pytest.mark.parametrize('assessment', ['absent', 'indeterminate', 'no_call', 'not_tested'])
+def test_tp53_aggregate_returns_json_null_after_positive_evidence_is_cleared(setup, assessment):
+    person, record, staff = setup
+    saved = save_variant(person, {'gene': 'TP53', 'interpretation': 'Pathogenic'})
+    record.refresh_from_db()
+    assert record.tp53_disruption is True
+    save_variant(person, {'assessment': assessment}, saved['id'])
+    record.refresh_from_db()
+    assert record.tp53_disruption is None
+    client = APIClient()
+    client.force_authenticate(staff)
+    response = client.get(f'/api/patient-info/{person.pk}/')
+    assert response.status_code == 200
+    assert response.data['patient_info']['tp53_disruption'] is None

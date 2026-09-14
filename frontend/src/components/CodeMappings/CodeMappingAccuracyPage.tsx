@@ -1,3 +1,4 @@
+import PageTitle from '@/components/Branding/PageTitle';
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import api from "@/api/axios";
@@ -28,7 +29,7 @@ export default function CodeMappingAccuracyPage() {
     .then(({ data }) => { setModels(data.models || []); setOverall(data.overall ?? null); }).catch(() => setError("Failed to load suggestion accuracy.")); }, []);
   return <div className="min-h-screen bg-slate-50 p-6"><main className="mx-auto max-w-6xl">
     <Link to="/code-mappings" className="text-sm text-slate-700 underline">← Code Mapping</Link>
-    <h1 className="mt-4 text-2xl font-semibold text-slate-950">Suggestion model accuracy</h1>
+    <PageTitle className="mt-4 text-2xl font-semibold text-slate-950">Suggestion model accuracy</PageTitle>
     <p className="mt-1 text-sm text-slate-600">Latest model first. Approved means the curator retained the suggested destination. Metrics use reviews of each model; — means no reviews yet. Reviewed models with no accepted suggestions score 0%.</p>
     {error && <p className="mt-4 text-sm text-red-700">{error}</p>}
     <div className="mt-5 overflow-hidden rounded-md border border-slate-200 bg-white"><table className="w-full text-left text-sm">

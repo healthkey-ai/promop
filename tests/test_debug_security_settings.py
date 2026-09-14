@@ -12,7 +12,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 BASE_ENV = {
     'PYTHON_DOTENV_DISABLED': '1',
-    'DJANGO_SETTINGS_MODULE': 'ctomop.settings',
+    'DJANGO_SETTINGS_MODULE': 'promop.settings',
     'SECRET_KEY': 'test-settings-key-that-is-never-used-by-a-deployment',
     'DATABASE_URL': 'postgresql://postgres@localhost/promop_test',
     'ALLOWED_HOSTS': 'app.example.invalid',

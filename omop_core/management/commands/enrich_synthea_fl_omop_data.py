@@ -20,6 +20,8 @@ from django.core.management import call_command
 from django.core.management.base import BaseCommand
 
 from omop_core.models import PatientRecord
+from omop_core.services.sample_patient_stage import ensure_sample_patient_stage
+from omop_core.services.sample_patient_disease_status import ensure_sample_patient_disease_status
 from omop_core.services.patient_record_service import refresh_patient_record
 from omop_core.signals import suppress_patient_record_refresh
 
@@ -28,6 +30,7 @@ DEFAULT_ORG_SLUGS = 'synthea-fl'
 # (label, PatientRecord field, "non-empty" predicate)
 _COMPLETENESS_FIELDS = [
     ('disease',                 'disease',                    bool),
+    ('stage',                   'stage',                      bool),
     ('diagnosis_date',          'diagnosis_date',             bool),
     ('FLIPI score',             'flipi_score',                lambda v: v is not None),
     ('1L therapy',              'first_line_therapy',         bool),
@@ -67,6 +70,8 @@ class Command(BaseCommand):
         with suppress_patient_record_refresh():
             for idx, rec in enumerate(records, 1):
                 try:
+                    ensure_sample_patient_stage(rec, disease='FL')
+                    ensure_sample_patient_disease_status(rec)
                     refreshed.append(refresh_patient_record(rec.person))
                 except Exception as exc:
                     failed += 1
@@ -78,6 +83,8 @@ class Command(BaseCommand):
         if failed:
             self.stderr.write(self.style.WARNING(f'{failed} patient(s) failed to refresh — see warnings above.'))
 
+        call_command('backfill_sample_disease_profiles', org_slugs=','.join(slugs), disease='FL',
+                     person_ids=','.join(str(r.person_id) for r in records), confirm=True)
         self.stdout.write('Deriving observation_period rows...')
         call_command('populate_observation_period', org_slugs=','.join(slugs))
 
@@ -85,6 +92,8 @@ class Command(BaseCommand):
         self.stdout.write('')
         self.stdout.write('FL completeness report:')
         total = len(refreshed)
+        if not total:
+            return
         for label, field, present in _COMPLETENESS_FIELDS:
             n = sum(1 for r in refreshed if present(getattr(r, field, None)))
             self.stdout.write(f'  {label:.<28s} {n:>5d} / {total} ({n / total:.0%})')

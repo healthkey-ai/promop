@@ -289,10 +289,10 @@ class FhirSyncTests(TestCase):
         }, format='json')
 
         self.assertEqual(resp.status_code, 403, resp.content)
-        self.assertIn('write access', resp.json()['detail'])
+        self.assertIn('end-user authentication', resp.json()['detail'])
         self.assertEqual(Measurement.objects.filter(person=person).count(), 0)
 
-    def test_userless_oauth_org_token_ignores_body_actor_for_provenance(self):
+    def test_userless_oauth_org_token_rejects_body_actor_for_provenance(self):
         from datetime import timedelta
         from oauth2_provider.models import AccessToken, Application
         from omop_core.models import ApplicationOrganization
@@ -329,17 +329,8 @@ class FhirSyncTests(TestCase):
             'bundle': SAMPLE_BUNDLE,
         }, format='json')
 
-        self.assertEqual(resp.status_code, 201, resp.content)
-        measurement = Measurement.objects.get(person=person)
-        provenance = ProvenanceRecord.objects.get(
-            content_type__model='measurement',
-            object_id=measurement.measurement_id,
-        )
-        self.assertEqual(provenance.source_user_id, '')
-        self.assertNotEqual(
-            provenance.source_user_id,
-            f'{spoofed_actor.issuer}|{spoofed_actor.sub}',
-        )
+        self.assertEqual(resp.status_code, 403, resp.content)
+        self.assertFalse(Measurement.objects.filter(person=person).exists())
 
     # ---- B0 connector: patient self-service ingest ---------------------- #
 

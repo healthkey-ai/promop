@@ -70,7 +70,10 @@ def curated_values_from_snapshot(snapshot):
     the field has no built-in extractor (for example supportive therapy dates).
     All facts come from the snapshot already loaded by that external refresh.
     """
-    from omop_core.services.patient_record_service import PATIENT_RECORD_OMOP_MAPPED_FIELDS
+    from omop_core.services.patient_record_service import (
+        PATIENT_RECORD_OMOP_MAPPED_FIELDS, _latest_blood_count_measurements,
+    )
+    from omop_core.services.clinical_units import blood_count_projection
     from omop_core.services.write_descriptor import (
         _LIFECYCLE_FIELDS, _WRITE_RECIPE_INCOMPLETE,
         get_serializer_read_only_fields, mapping_target_for,
@@ -93,6 +96,10 @@ def curated_values_from_snapshot(snapshot):
             by_key.setdefault((getattr(row, concept_field), getattr(row, source_field)), row)
         indexed[target] = by_key
     values = {}
+    count_dates = {
+        field: (row.measurement_date, row.pk)
+        for field, row in _latest_blood_count_measurements(snapshot).items()
+    }
     # One joined mapping lookup is sufficient. The editor descriptor also
     # loads choices, units, and unrelated vocabulary recipes that readers do
     # not need and that would exceed the full-refresh query budget.
@@ -109,6 +116,18 @@ def curated_values_from_snapshot(snapshot):
         source_value = mapping['source_value'] or mapping['concept__concept_code']
         row = indexed[target].get((mapping['concept_id'], source_value))
         if row is None:
+            continue
+        count_field = {
+            'absolute_neutrophile_count': 'anc_thousand_per_ul',
+            'platelet_count': 'platelet_count_thousand_per_ul',
+        }.get(name, name)
+        if count_field in ('anc_thousand_per_ul', 'platelet_count_thousand_per_ul'):
+            # Approved question mappings still carry source-scale results.
+            row_date = getattr(row, 'measurement_date', None) or row.observation_date
+            if count_dates.get(count_field, (row_date, row.pk)) > (row_date, row.pk):
+                continue
+            count_dates[count_field] = (row_date, row.pk)
+            values.update(blood_count_projection(count_field, row))
             continue
         value = row.value_as_number if row.value_as_number is not None else row.value_as_string
         if value is None:

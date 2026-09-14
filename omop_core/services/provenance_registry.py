@@ -17,7 +17,7 @@ class FieldProvenance:
 
     lookup_strategy: str
     """One of: 'loinc', 'source_value', 'concept_name', 'snomed',
-    'condition', 'drug_exposure', 'procedure', 'person', 'composite'."""
+    'condition', 'drug_exposure', 'procedure', 'person', 'composite', 'genomics'."""
 
     concept_codes: list[str] | None = None
     """LOINC or SNOMED codes used in the section extractor."""
@@ -415,11 +415,11 @@ _MANUAL_ENTRIES: dict[str, FieldProvenance] = {
 
     # --- Genetic mutations ---
     "genetic_mutations": FieldProvenance(
-        omop_table="Observation",
-        lookup_strategy="snomed",
+        omop_table="Measurement,Observation",
+        lookup_strategy="genomics",
         extractor="_get_genetic_mutations",
         selection_rule="all",
-        description="All genetic mutation Observations (structured JSON)",
+        description="Asserted genomic finding Measurements and their linked components; derived rows are projection-only.",
     ),
 
     # --- Procedures ---
@@ -499,7 +499,9 @@ _MANUAL_ENTRIES: dict[str, FieldProvenance] = {
         lookup_strategy="composite",
         extractor="_compute_derived_fields",
         selection_rule="composite",
-        description="True if genetic_mutations contains pathogenic TP53",
+        description=("True for a present pathogenic TP53 finding under the existing "
+                     "assessment/status rule; otherwise unknown. Does not establish "
+                     "a negative result or aggregate del(17p)."),
         constituent_fields=["genetic_mutations"],
     ),
     "measurable_disease_imwg": FieldProvenance(
@@ -559,4 +561,11 @@ def get_registry() -> dict[str, FieldProvenance]:
     if _REGISTRY_CACHE is None:
         _REGISTRY_CACHE = _auto_register_loinc_labs()
         _REGISTRY_CACHE.update(_MANUAL_ENTRIES)
+        from omop_core.services.genomics_catalog import patient_fields
+        for name, marker in patient_fields().items():
+            _REGISTRY_CACHE[name] = FieldProvenance(
+                omop_table="Measurement,Observation", lookup_strategy="genomics",
+                extractor="_get_genetic_mutations", selection_rule="all",
+                description=f"{marker['label']} finding parents and linked components; derived values have no stored assertion.",
+            )
     return _REGISTRY_CACHE

@@ -30,7 +30,7 @@ from rest_framework.exceptions import AuthenticationFailed
 
 from patient_portal.models import Identity
 
-from .permissions import SERVICE_TOKEN
+from patient_portal.service_tokens import service_credentials
 from .providers import get_providers
 from .providers.base import TokenClaims, decode_jwt_unverified
 
@@ -255,30 +255,38 @@ def _claim_placeholder_access(
 
 
 class ServiceTokenAuthentication(BaseAuthentication):
-    """Authenticate service-to-service calls via a pre-shared Bearer token."""
+    """Resolve a configured Bearer credential to its own scoped service principal."""
 
     def authenticate(self, request):
         import hmac
-
-        secret = getattr(settings, "SERVICE_AUTH_TOKEN", "").strip()
-        if not secret:
-            return None
 
         header = request.META.get("HTTP_AUTHORIZATION", "")
         if not header.startswith("Bearer "):
             return None
 
-        if not hmac.compare_digest(header[7:], secret):
+        credentials = service_credentials(
+            settings.SERVICE_AUTH_TOKENS, settings.SERVICE_AUTH_TOKEN,
+            settings.SERVICE_AUTH_SCOPES,
+        )
+        from patient_portal.service_applications import stored_credential, check_environment_fallback
+        matched = stored_credential(header[7:])
+        if matched is None:
+            for secret, credential in credentials:
+                if hmac.compare_digest(header[7:].encode(), secret.encode()):
+                    matched = credential
+            if matched is not None:
+                check_environment_fallback(matched)
+        if matched is None:
             return None
 
         identity, created = Identity.objects.get_or_create(
-            issuer='urn:service', sub='hk-labs-sync',
+            issuer='urn:service', sub=matched.service_id,
         )
         if created:
             identity.set_unusable_password()
             identity.save(update_fields=['password'])
         if identity.is_staff or identity.is_superuser:
-            # The shared bearer is a scoped compatibility credential, never a
+            # A service bearer is a scoped credential, never a
             # Django administrator. Repair the unsafe state proposed in #1144
             # so IsAdminUser and inline staff checks cannot bypass its grant.
             Identity.objects.filter(pk=identity.pk).update(
@@ -286,9 +294,11 @@ class ServiceTokenAuthentication(BaseAuthentication):
             )
             identity.is_staff = False
             identity.is_superuser = False
-            logger.warning("Removed staff flags from legacy service identity")
+            logger.warning("Removed staff flags from service identity %s", identity.pk)
 
-        return (identity, SERVICE_TOKEN)
+        if not identity.is_active:
+            raise AuthenticationFailed("Account is disabled.")
+        return (identity, matched)
 
     def authenticate_header(self, request):
         return "Bearer"

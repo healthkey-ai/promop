@@ -273,6 +273,14 @@ class PatientListSerializer(serializers.ModelSerializer):
     person_id = serializers.IntegerField(source='person.person_id', read_only=True)
     patient_name = serializers.SerializerMethodField()
     age = serializers.SerializerMethodField()
+    genomics_summary = serializers.SerializerMethodField()
+    treatment_summary = serializers.SerializerMethodField()
+    disease_status = serializers.SerializerMethodField()
+    subtype_biomarkers = serializers.SerializerMethodField()
+    data_gaps = serializers.SerializerMethodField()
+    latest_result_date = serializers.DateField(read_only=True, default=None)
+    location_summary = serializers.SerializerMethodField()
+    contact_available = serializers.BooleanField(read_only=True, default=False)
     organization_name = serializers.CharField(source='organization.name', read_only=True, allow_null=True)
     organization_slug = serializers.CharField(source='organization.slug', read_only=True, allow_null=True)
     updated_at = serializers.DateTimeField(format='%Y-%m-%d', read_only=True)
@@ -288,9 +296,51 @@ class PatientListSerializer(serializers.ModelSerializer):
             'organization_slug',
             'disease',
             'stage',
+            'genomics_summary',
+            'therapy_lines_count',
+            'treatment_summary', 'disease_status', 'subtype_biomarkers',
+            'ecog_performance_status', 'ecog_assessment_date', 'data_gaps',
+            'latest_result_date', 'location_summary', 'contact_available',
             'updated_at',
         ]
     
+    def get_treatment_summary(self, obj):
+        from omop_core.services.patient_list_context import latest_treatment
+        return latest_treatment(obj)
+
+    def get_disease_status(self, obj):
+        from omop_core.services.patient_list_context import recorded
+        return next((value for value in (obj.condition_clinical_status, obj.progression)
+                     if recorded(value)), None)
+
+    def get_subtype_biomarkers(self, obj):
+        from omop_core.services.patient_list_context import subtype_biomarkers
+        return subtype_biomarkers(obj)
+
+    def get_data_gaps(self, obj):
+        from omop_core.services.patient_list_context import recorded
+        gaps = []
+        if not recorded(obj.stage):
+            gaps.append('Stage')
+        if obj.ecog_performance_status is None:
+            gaps.append('ECOG')
+        if not obj.genetic_mutations and not recorded(obj.molecular_markers) and not recorded(obj.cytogenetic_markers):
+            gaps.append('Genomics')
+        return gaps
+
+    def get_location_summary(self, obj):
+        return ', '.join(str(value).strip() for value in (obj.city, obj.region, obj.country) if value and str(value).strip())
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if (self.context.get('request') is not None
+                and instance.suppress_demographics_for_others
+                and self.context.get('own_person_id') != instance.person_id):
+            for field in ('patient_name', 'age', 'location_summary'):
+                data[field] = None
+            data['demographics_redacted'] = True
+        return data
+
     def get_patient_name(self, obj):
         # Get name from Person model (OMOP extension)
         if obj.person:
@@ -304,6 +354,25 @@ class PatientListSerializer(serializers.ModelSerializer):
             age = today.year - obj.date_of_birth.year - ((today.month, today.day) < (obj.date_of_birth.month, obj.date_of_birth.day))
             return age
         return None
+
+
+    def get_genomics_summary(self, obj):
+        # Use the persisted projection: listing a page must not query OMOP once
+        # per patient. Keep negative/unknown results distinct from findings.
+        summaries = []
+        for variant in obj.genetic_mutations or []:
+            if not isinstance(variant, dict):
+                continue
+            gene = str(variant.get('gene') or '').strip().upper()
+            change = str(variant.get('variant') or variant.get('variant_name')
+                         or variant.get('genomic_dna_change') or variant.get('amino_acid_change') or '').strip()
+            label = ' '.join(dict.fromkeys(v for v in (gene, change) if v))
+            status = variant.get('status') or variant.get('interpretation')
+            if label and status:
+                label += f" ({status})"
+            if label and label not in summaries:
+                summaries.append(label)
+        return '; '.join(summaries)
 
 
 class GenderField(serializers.CharField):
@@ -358,26 +427,21 @@ def _derived_wearable_fields():
 
 
 class CytogeneticMarkersField(serializers.Field):
-    """Accept multiselect arrays and preserve compatibility with text clients."""
+    """Read legacy summaries; tolerate unchanged autosave echoes without writes."""
 
     def to_representation(self, value):
         from omop_core.services.cytogenetics import selections
         return ', '.join(selections(value)) if value is not None else None
 
-    def to_internal_value(self, value):
-        from omop_core.services.cytogenetics import selections, VALUES
-        try:
-            selected = selections(value)
-        except ValueError:
-            raise serializers.ValidationError('Select recognized cytogenetic markers.') from None
-        allowed = set(VALUES) | set(FieldChoice.objects.filter(field_name='cytogenetic_markers')
-                      .values_list('display', flat=True))
-        # Legacy imported text may be echoed by autosave. Preserve it without
-        # pretending it has an approved concept mapping.
-        existing = selections(getattr(self.parent.instance, 'cytogenetic_markers', None))
-        if set(selected) - allowed - set(existing):
-            raise serializers.ValidationError('Select recognized cytogenetic markers.')
-        return ', '.join(selected)
+    def run_validation(self, data=serializers.empty):
+        if data is serializers.empty:
+            raise serializers.SkipField()
+        existing = self.to_representation(getattr(self.parent.instance, 'cytogenetic_markers', None))
+        candidate = ', '.join(data) if isinstance(data, list) and all(isinstance(v, str) for v in data) else data
+        if candidate == existing or (candidate in (None, '') and existing in (None, '')):
+            raise serializers.SkipField()
+        raise serializers.ValidationError(
+            'Legacy cytogenetic summaries are read-only. Record individual findings in Genomics.')
 
 
 class PatientRecordSerializer(serializers.ModelSerializer):
@@ -428,6 +492,8 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                     ),
                 })
             data['cytogenetic_markers'] = legacy_value
+        from omop_core.services.genomics_catalog import canonicalize_fields
+        data = canonicalize_fields(data)
         return super().to_internal_value(data)
 
     def get_supportive_therapy_courses(self, obj):
@@ -435,6 +501,32 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         return SupportiveTherapySerializer(
             obj.person.supportive_courses.select_related('regimen').all(), many=True,
         ).data
+
+    def validate_flipi_score_options(self, value):
+        from omop_core.services.flipi import parse_factors
+        try:
+            selected = parse_factors(value)
+        except ValueError:
+            raise serializers.ValidationError('Select recognized FLIPI risk factors.') from None
+        return None if selected is None else ','.join(selected)
+
+    def validate_gelf_criteria_options(self, value):
+        from omop_core.services.sample_disease_profiles import GELF_FACTORS
+        if value is None:
+            return None
+        selected = {part.strip() for part in value.split(',') if part.strip()}
+        if selected - GELF_FACTORS.keys():
+            raise serializers.ValidationError('Select recognized GELF criteria.')
+        return ','.join(key for key in GELF_FACTORS if key in selected)
+
+    def validate_tumor_grade(self, value):
+        from omop_core.services.flipi import normalize_grade
+        try:
+            return normalize_grade(value)
+        except ValueError:
+            raise serializers.ValidationError(
+                'Use grade 1, 2, 3A, or 3B (3 for an unspecified historical grade).'
+            ) from None
 
     def validate_death_date(self, value):
         if value and value > localdate():
@@ -1125,6 +1217,40 @@ class TrialSearchPreferencesSerializer(serializers.ModelSerializer):
     # Filters button, and a count computed client-side drifts from the one
     # the server would compute.
     non_default_filter_count = serializers.IntegerField(read_only=True)
+    # Spelled out here rather than on the model: a `help_text` change on the
+    # field would be an AlterField migration, and this is a statement about
+    # the API contract, not about the column. It also reaches the detail
+    # route's schema, where the only other description is this class's
+    # docstring and that says nothing about replacing.
+    #
+    # Declaring the field decouples it from the model's `null`, `blank`,
+    # `default` and `validators`, which a model-derived field would inherit.
+    # Every one of those is a no-op today — `validators` is empty and the
+    # column is NOT NULL — but a future model-level validator or `null=True`
+    # would stop reaching the API silently. `allow_null` is therefore stated
+    # rather than left to the default, so the 400 on a null has a reason a
+    # reader can see.
+    preferences = serializers.JSONField(
+        required=False,
+        allow_null=False,
+        # Keeps the textarea the model-derived field rendered with in the
+        # browsable API; declaring the field would otherwise drop it.
+        style={'base_template': 'textarea.html'},
+        help_text=(
+            "Opaque filter payload, camelCase as EXACT's query params spell "
+            "it (searchTitle, trialType, phase, …). Not validated against a "
+            "schema here. Written WHOLESALE: a request carrying this field "
+            "replaces the entire object, so a key absent from the body is "
+            "removed, and removal of a key has no sentinel — a null INSIDE "
+            "the object is stored as the value null. (The field itself may "
+            "not be null; to clear, send it carrying an empty object, or use "
+            "the reset action — a request body that is merely {}, with no "
+            "preferences key in it, clears nothing.) "
+            "Omitting the field entirely leaves the stored object untouched. "
+            "A client holding part of the set must read-modify-write. See "
+            "the upsert action for the contract in full."
+        ),
+    )
 
     class Meta:
         model = TrialSearchPreferences
@@ -1310,8 +1436,8 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
                 f.name for f in PatientRecord._meta.get_fields()
                 if getattr(f, 'concrete', False)
             }
-            from omop_core.services.genomics_catalog import catalog
-            genomic_components = {'genetic_mutations.' + a['key'] for a in catalog()['attributes']}
+            from omop_core.services.genomics_components import components
+            genomic_components = {'genetic_mutations.' + a['key'] for a in components()}
             if field_name not in concrete_names | genomic_components:
                 raise serializers.ValidationError({
                     'field_name': f"'{field_name}' is not a concrete PatientRecord field."

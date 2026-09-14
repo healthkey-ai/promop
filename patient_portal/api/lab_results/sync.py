@@ -30,7 +30,10 @@ from omop_core.models import (
     Person, ProvenanceRecord, VisitOccurrence,
 )
 from omop_core.services.pk import next_pk, next_pk_batch
-from patient_portal.api.permissions import LabSyncPermission, get_request_org, is_service_token
+from patient_portal.api.permissions import (
+    LabSyncPermission, get_request_org, is_service_token, is_machine_request,
+    reject_machine_actor_claims,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -177,31 +180,19 @@ class SyncView(APIView):
         person_id = data.get('person_id')
         is_on_behalf_of = bool(person_id)
 
-        # For regular end-user callers, attribution is always the authenticated
-        # user: ignore any actor identity supplied in the request body. Every lab
-        # result stays tied to a real user, and a patient cannot impersonate
-        # another actor. Only trusted service tokens supply the actor explicitly
-        # for server-to-server on-behalf-of writes.
-        is_service = is_service_token(request)
-        is_privileged = is_service
-        if not is_privileged and getattr(request.user, 'is_authenticated', False):
-            actor_iss = getattr(request.user, 'issuer', '') or ''
-            actor_sub = getattr(request.user, 'sub', '') or ''
-        elif not is_privileged:
-            actor_iss = actor_sub = ''
+        reject_machine_actor_claims(request, actor_iss, actor_sub)
+        actor_identity = request.user if getattr(request.user, 'is_authenticated', False) else None
+        actor_iss = getattr(actor_identity, 'issuer', '') or ''
+        actor_sub = getattr(actor_identity, 'sub', '') or ''
 
         if not person_id:
-            if hasattr(request.user, 'issuer') and request.user.issuer != 'urn:service':
-                from patient_portal.services import resolve_or_create_person
-                person = resolve_or_create_person(request.user)
-                person_id = person.person_id
-            else:
-                person_id = self._resolve_person_from_identity(actor_iss, actor_sub)
-            if person_id is None:
+            if is_machine_request(request):
                 return Response(
-                    {'detail': 'Cannot resolve person from actor identity.'},
+                    {'detail': 'person_id is required for service imports.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            from patient_portal.services import resolve_or_create_person
+            person_id = resolve_or_create_person(request.user).person_id
 
         if not Person.objects.filter(person_id=person_id).exists():
             return Response(
@@ -209,33 +200,13 @@ class SyncView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        actor_identity = self._resolve_actor_identity(actor_iss, actor_sub, request.user)
-        has_explicit_actor = bool(actor_iss and actor_sub)
         org = get_request_org(request)
-
-        if is_on_behalf_of:
-            if is_service:
-                if has_explicit_actor and actor_identity is None:
-                    return Response(
-                        {'detail': 'Actor identity not found.'},
-                        status=status.HTTP_403_FORBIDDEN,
-                    )
-                if has_explicit_actor and not can_write_patient(actor_identity, person_id):
-                    return Response(
-                        {'detail': 'Actor does not have write access to this patient.'},
-                        status=status.HTTP_403_FORBIDDEN,
-                    )
-            elif org is None:
-                if not has_explicit_actor:
-                    return Response(
-                        {'detail': 'actor_iss and actor_sub required when writing on behalf of another person.'},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-                if not can_write_patient(actor_identity, person_id):
-                    return Response(
-                        {'detail': 'Actor does not have write access to this patient.'},
-                        status=status.HTTP_403_FORBIDDEN,
-                    )
+        if not is_service_token(request) and org is None:
+            if not can_write_patient(actor_identity, person_id):
+                return Response(
+                    {'detail': 'Actor does not have write access to this patient.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
 
         # Org-scope enforcement for OAuth2 service clients
         if org is not None:
@@ -359,18 +330,6 @@ class SyncView(APIView):
             'deduplicated_count': deduplicated_count,
         }, status=status.HTTP_201_CREATED)
 
-    def _resolve_actor_identity(self, actor_iss, actor_sub, request_user):
-        """Resolve the actor Identity for authorization checks."""
-        if actor_iss and actor_sub:
-            from patient_portal.models import Identity
-            try:
-                return Identity.objects.get(issuer=actor_iss, sub=actor_sub)
-            except Identity.DoesNotExist:
-                return None
-        if request_user and request_user.is_authenticated:
-            return request_user
-        return None
-
     def _record_provenance(self, *, actor_identity, actor_iss, actor_sub,
                            target_person_id, is_on_behalf_of, visit,
                            measurement_ids, org, source_type):
@@ -401,24 +360,6 @@ class SyncView(APIView):
             for m_id in measurement_ids
         ]
         ProvenanceRecord.objects.bulk_create(records, ignore_conflicts=True)
-
-    def _resolve_person_from_identity(self, actor_iss, actor_sub):
-        """Resolve (issuer, sub) → person_id, auto-provisioning if needed."""
-        if not actor_iss or not actor_sub:
-            return None
-
-        from patient_portal.models import Identity
-        from patient_portal.services import resolve_or_create_person
-
-        identity, created = Identity.objects.get_or_create(
-            issuer=actor_iss, sub=actor_sub,
-        )
-        if created:
-            identity.set_unusable_password()
-            identity.save(update_fields=['password'])
-
-        person = resolve_or_create_person(identity)
-        return person.person_id
 
     def _preload_hk_concepts(self, items, loinc_cache):
         """Pre-fetch or create HK-Labs concepts for LOINC-unmatched tests."""

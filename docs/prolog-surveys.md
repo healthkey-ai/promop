@@ -19,7 +19,7 @@ database by this project's migrations, and every response is bound to an
 | --- | --- |
 | `requirements.txt` | `prolog` pinned by release tag from the public repository. A bump is deliberate — see *Upgrading* below. |
 | `INSTALLED_APPS` | `prolog_surveys` |
-| `ctomop/urls.py` | `api/v1/prolog/` → the runner's own tree (`health/`, `run/…`) |
+| `promop/urls.py` | `api/v1/prolog/` → the runner's own tree (`health/`, `run/…`) |
 | `patient_portal.services.prolog_participant_id` | `PROLOG_PARTICIPANT_RESOLVER` — the signed-in patient's `person_id`, or `None` |
 | `patient_portal.services.create_unidentified_person` | `PROLOG_PARTICIPANT_FACTORY` — mints the person for a respondent who is not signed in |
 | `REST_FRAMEWORK.DEFAULT_THROTTLE_RATES` | the `run.*` scopes, per hashed client key |
@@ -112,7 +112,7 @@ PROLOG_THEME_DIRS=/data/themes         # one directory per theme, each with them
 PROLOG_LEGAL_DIRS=/data/legal          # privacy.md — served at /s/<slug>/privacy
 ```
 
-Each is read by the app as a **Django setting**, and `ctomop/settings.py` is
+Each is read by the app as a **Django setting**, and `promop/settings.py` is
 what turns the environment variable into one. A new `PROLOG_*` directory
 setting in a PROlog release therefore does nothing here until it is added
 there: setting only the environment variable looks right and has no effect,
@@ -137,7 +137,7 @@ VITE_API_BASE=/api/v1/prolog/run npx vite build --base=/prolog-static/
 # then point PROLOG_RUNNER_DIST at frontend/dist
 ```
 
-The directory is registered with WhiteNoise (`ctomop/whitenoise.py`), so its
+The directory is registered with WhiteNoise (`promop/whitenoise.py`), so its
 assets get the caching and conditional requests PRomop's own build gets, and the
 content-hashed files under `assets/` are cached for a year. WhiteNoise reads the
 directory at startup, so replacing a build in place needs a restart — which is

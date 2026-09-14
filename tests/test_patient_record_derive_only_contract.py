@@ -37,27 +37,16 @@ def test_derivation_preserves_user_edited_fields():
     assert "user_edited_fields" in derivation_service
 
 
-def test_public_contract_documents_read_only_mapped_fields_and_legacy_policy():
-    """Documentation guards the distinction between source facts and projections."""
-    api_surface = (REPOSITORY_ROOT / "API_SURFACE.md").read_text()
-    architecture_brief = (
-        REPOSITORY_ROOT / "docs/utah-rhtp-technical-architecture-brief.md"
-    ).read_text()
+def test_public_contract_documents_patient_record_first_writes_and_legacy_policy():
+    """Public docs link the current editing contract and retain SQL-view limits."""
+    api_surface = (REPOSITORY_ROOT / "docs" / "API_SURFACE.md").read_text()
 
-    assert "Mapped PatientRecord fields are read-only." in api_surface
-    assert "Profile/admin values that are\ndisplayed on PatientRecord" in api_surface
-    assert "PatientRecord, such as email and validation metadata" in api_surface
-    assert "PATCH /api/v1/persons/{person_id}/" in api_surface
+    assert "(patient-record-first-writes.md)" in api_surface
+    assert "field_concept_mapping_architecture.md" in api_surface
+    assert "PATCH /api/v1/patient-records/{person_id}/" in api_surface
     assert "Legacy SQL compatibility only:" in api_surface
     assert "New integrations must not query it" in api_surface
-    assert "405 Method Not Allowed" in api_surface
-    assert '"fields": ["hemoglobin_g_dl"]' in api_surface
-    assert "docs/omop_to_patientrecord.md" in api_surface
-    assert "The target state has no writable concrete PatientRecord clinical columns." in api_surface
-    assert "`PATCH /api/v1/persons/{person_id}/`" in api_surface
-    assert "PatientRecord fields are read-only at the PatientRecord API." in architecture_brief
-    assert "Producers write" in architecture_brief
-    assert "complete, provenance-bearing OMOP facts (or FHIR)" in architecture_brief
+    assert "Mapped PatientRecord fields are read-only." not in api_surface
 
 
 def test_partial_update_schema_description_explains_omop_write_migration():

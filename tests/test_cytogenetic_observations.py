@@ -1,4 +1,4 @@
-"""Per-value coded observations round-trip through the PatientRecord PATCH API."""
+"""Historical per-value projector and compatibility reads; new entry uses Genomics."""
 from datetime import timedelta
 from importlib import import_module
 from unittest.mock import patch
@@ -32,12 +32,22 @@ def editor(settings):
     return record, client
 
 
-def save(editor, value):
-    record, client = editor
-    response = client.patch(f'/api/patient-info/{record.person_id}/', {FIELD: value}, format='json')
-    assert response.status_code == 200, response.data
+def save(editor, value, *, expected=True):
+    # Exercise the retained legacy projector directly. Interactive summary
+    # writes are now rejected; historical/imported rows must remain readable.
+    from omop_core.services.cytogenetics import project_selections
+    record, _ = editor
+    try:
+        result = project_selections(record.person, value, descriptor()['projection'])
+    except ValueError:
+        if expected:
+            raise
+        result = False
+    assert result is expected
+    if result:
+        refresh_patient_record(record.person)
     record.refresh_from_db()
-    return response
+    return result
 
 
 @pytest.mark.parametrize('marker', VALUES)
@@ -114,10 +124,10 @@ def test_newer_external_marker_updates_record(editor):
 def test_invalid_or_wrong_domain_concept_never_projects_a_partial_selection(editor):
     record, _ = editor
     Concept.objects.filter(concept_code='55597007', vocabulary_id='SNOMED').update(standard_concept=None)
-    save(editor, ['t(4;14)', 'hyperdiploidy'])
+    save(editor, ['t(4;14)', 'hyperdiploidy'], expected=False)
     assert not Observation.objects.filter(person=record.person).exists()
-    assert FIELD in record.user_edited_fields
-    assert refresh_patient_record(record.person).cytogenetic_markers == 't(4;14), hyperdiploidy'
+    assert FIELD not in record.user_edited_fields
+    assert not refresh_patient_record(record.person).cytogenetic_markers
 
 
 def test_partial_failure_rolls_back_every_marker_and_preserves_edit(editor):
@@ -128,9 +138,9 @@ def test_partial_failure_rolls_back_every_marker_and_preserves_edit(editor):
             return False
         return project_single_value(person, field, value, recipe, **kwargs)
     with patch('omop_core.services.omop_projection.project_single_value', side_effect=fail_second):
-        save(editor, ['t(4;14)', 't(11;14)'])
+        save(editor, ['t(4;14)', 't(11;14)'], expected=False)
     assert not Observation.objects.filter(person=record.person).exists()
-    assert FIELD in record.user_edited_fields
+    assert FIELD not in record.user_edited_fields
 
 
 def test_descriptor_exposes_all_codes_and_migration_is_idempotent(editor):
@@ -229,11 +239,11 @@ def test_failed_marker_write_rolls_back_legacy_replacement(editor):
             return False
         return project_single_value(person, field, value, recipe, **kwargs)
     with patch('omop_core.services.omop_projection.project_single_value', side_effect=fail_marker):
-        save(editor, ['t(4;14)'])
+        save(editor, ['t(4;14)'], expected=False)
     assert Observation.objects.filter(person=record.person).count() == 1
     assert Observation.objects.get(person=record.person).value_as_string == 'del(1p)'
-    assert FIELD in record.user_edited_fields
-    assert refresh_patient_record(record.person).cytogenetic_markers == 't(4;14)'
+    assert FIELD not in record.user_edited_fields
+    assert refresh_patient_record(record.person).cytogenetic_markers == 'del(1p)'
 
 
 def test_all_canonical_choices_create_nine_individually_coded_rows(editor):
@@ -266,12 +276,10 @@ def test_long_legacy_note_remains_readable_while_supported_selections_are_coded(
     assert refresh_patient_record(record.person).cytogenetic_markers == 't(4;14)'
 
 
-def test_validation_does_not_expose_parser_exception_details(editor):
+def test_api_rejects_legacy_authoring_without_exposing_source_input(editor):
     record, client = editor
-    with patch('omop_core.services.cytogenetics.selections',
-               side_effect=ValueError('private parser details')):
-        response = client.patch(f'/api/patient-info/{record.person_id}/',
-                                {FIELD: ['t(4;14)']}, format='json')
+    response = client.patch(f'/api/patient-info/{record.person_id}/',
+                            {FIELD: ['private unrecognized source text']}, format='json')
     assert response.status_code == 400
-    assert response.data[FIELD] == ['Select recognized cytogenetic markers.']
-    assert 'private parser details' not in str(response.data)
+    assert 'Genomics' in str(response.data)
+    assert 'private unrecognized source text' not in str(response.data)

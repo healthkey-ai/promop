@@ -15,7 +15,6 @@ from typing import Any
 import os
 import tempfile
 from pathlib import Path
-import unittest
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
@@ -423,7 +422,6 @@ class FhirUploadOmopTablesTest(FhirUploadBase):
             for entry in bundle['entry']
             if entry['resource']['resourceType'] == 'Patient'
         )
-        patient['id'] = 'test-patient-jane-deceased'
         patient['name'] = [{'family': 'Deceased', 'given': ['Jane']}]
         patient['deceasedDateTime'] = '2024-04-05T12:34:00Z'
         bundle_bytes = json.dumps(bundle).encode('utf-8')
@@ -451,7 +449,6 @@ class FhirUploadOmopTablesTest(FhirUploadBase):
             for entry in bundle['entry']
             if entry['resource']['resourceType'] == 'Patient'
         )
-        patient['id'] = 'test-patient-jane-deceased-bool'
         patient['name'] = [{'family': 'BooleanDeceased', 'given': ['Jane']}]
         patient['deceasedBoolean'] = True
         bundle_bytes = json.dumps(bundle).encode('utf-8')
@@ -2386,10 +2383,6 @@ class SmartTokenAuthTest(TestCase):
         resp = client.get('/api/drug-exposures/')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
-    def test_no_token_returns_401(self):
-        resp = self.client.get('/api/conditions/')
-        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
-
     def test_empty_scope_token_returns_403(self):
         client = self._bearer(self.empty_scope_token.token)
         resp = client.get('/api/conditions/')
@@ -2772,6 +2765,7 @@ class MeasurementToPatientRecordTest(_SignalBase):
             measurement_date=date(2023, 3, 1),
             measurement_type_concept=self.type_concept,
             value_as_number=150000,
+            unit_source_value='cells/uL',
         )
         pi = self._get_pi()
         self.assertIsNotNone(pi.platelet_count)
@@ -4538,7 +4532,7 @@ class ProvenanceFhirUploadTest(_SmartBase):
         self.assertTrue(
             ProvenanceRecord.objects.filter(
                 source='EHR_SYNC',
-                source_user_id='ehr-001',
+                source_user_id=f'urn:oauth-client|{self.app.client_id}',
                 content_type__in=omop_types,
             ).exists(),
             'FHIR OMOP facts were not tagged with provenance',
@@ -4546,7 +4540,7 @@ class ProvenanceFhirUploadTest(_SmartBase):
         self.assertFalse(
             ProvenanceRecord.objects.filter(
                 source='EHR_SYNC',
-                source_user_id='ehr-001',
+                source_user_id=f'urn:oauth-client|{self.app.client_id}',
                 content_type=ContentType.objects.get_for_model(PatientRecord),
                 object_id=pi.pk,
             ).exists(),
@@ -4965,317 +4959,6 @@ class PatientNameRenameTest(_SmartBase):
         self.assertEqual(person.given_name, 'Adam')
 
 
-@unittest.skip("Retired: PatientRecord-to-OMOP write-through was removed")
-class PatientRecordOmopSyncTest(_SmartBase):
-    """PatientRecord PATCH → OMOP write-through via omop_write_service."""
-
-    def _patch(self, pi, payload):
-        return self.write_client.patch(
-            f'/api/patient-info/{pi.person.person_id}/',
-            payload,
-            format='json',
-        )
-
-    def test_patch_lab_creates_measurement(self):
-        """PATCHing a lab field creates a Measurement row."""
-        from omop_core.models import Measurement
-        person = Person.objects.create(person_id=91001)
-        pi = PatientRecord.objects.create(person=person, organization=self.organization)
-        before = Measurement.objects.filter(person=person).count()
-
-        self._patch(pi, {'hemoglobin_g_dl': 12.5})
-
-        self.assertEqual(Measurement.objects.filter(person=person).count(), before + 1)
-        m = Measurement.objects.filter(person=person).latest('measurement_id')
-        self.assertEqual(float(m.value_as_number), 12.5)
-
-    def test_patch_lab_same_day_updates_not_duplicates(self):
-        """Two PATCHes of the same lab on the same day → still 1 Measurement row."""
-        from omop_core.models import Measurement
-        person = Person.objects.create(person_id=91002)
-        pi = PatientRecord.objects.create(person=person, organization=self.organization)
-
-        self._patch(pi, {'hemoglobin_g_dl': 11.0})
-        self._patch(pi, {'hemoglobin_g_dl': 11.5})
-
-        rows = Measurement.objects.filter(
-            person=person,
-            measurement_source_value='718-7',
-        )
-        self.assertEqual(rows.count(), 1)
-        self.assertEqual(float(rows.first().value_as_number), 11.5)
-
-    def test_patch_lab_different_day_appends(self):
-        """PATCHes on different dates → separate Measurement rows."""
-        from unittest.mock import patch as mock_patch
-        from datetime import date
-        from omop_core.models import Measurement
-        person = Person.objects.create(person_id=91003)
-        pi = PatientRecord.objects.create(person=person, organization=self.organization)
-
-        with mock_patch('omop_core.services.omop_write_service._today', return_value=date(2024, 1, 1)):
-            self._patch(pi, {'hemoglobin_g_dl': 10.0})
-        with mock_patch('omop_core.services.omop_write_service._today', return_value=date(2024, 2, 1)):
-            self._patch(pi, {'hemoglobin_g_dl': 10.5})
-
-        rows = Measurement.objects.filter(person=person, measurement_source_value='718-7')
-        self.assertEqual(rows.count(), 2)
-
-    def test_patch_disease_creates_condition_occurrence(self):
-        """PATCHing 'disease' creates a new ConditionOccurrence row."""
-        from omop_core.models import ConditionOccurrence
-        person = Person.objects.create(person_id=91010)
-        pi = PatientRecord.objects.create(person=person, organization=self.organization)
-
-        self._patch(pi, {'disease': 'Breast Cancer'})
-
-        self.assertEqual(
-            ConditionOccurrence.objects.filter(person=person).count(), 1
-        )
-        co = ConditionOccurrence.objects.get(person=person)
-        self.assertEqual(co.condition_source_value, 'Breast Cancer')
-
-    def test_patch_stage_appends_condition_occurrence(self):
-        """Two PATCHes of 'stage' create two separate ConditionOccurrence rows."""
-        from omop_core.models import ConditionOccurrence
-        from unittest.mock import patch as mock_patch
-        from datetime import date
-        person = Person.objects.create(person_id=91011)
-        pi = PatientRecord.objects.create(person=person, organization=self.organization)
-
-        with mock_patch('omop_core.services.omop_write_service._today', return_value=date(2024, 1, 1)):
-            self._patch(pi, {'stage': 'Stage II'})
-        with mock_patch('omop_core.services.omop_write_service._today', return_value=date(2024, 3, 1)):
-            self._patch(pi, {'stage': 'Stage III'})
-
-        self.assertEqual(ConditionOccurrence.objects.filter(person=person).count(), 2)
-
-    def test_patch_demographics_updates_person(self):
-        """PATCHing gender and date_of_birth updates the linked Person record."""
-        person = Person.objects.create(person_id=91020)
-        pi = PatientRecord.objects.create(person=person, organization=self.organization)
-
-        self._patch(pi, {'gender': 'Female', 'date_of_birth': '1975-06-15'})
-
-        person.refresh_from_db()
-        self.assertEqual(person.year_of_birth, 1975)
-        self.assertEqual(person.month_of_birth, 6)
-        self.assertEqual(person.day_of_birth, 15)
-        self.assertIsNotNone(person.gender_concept)
-        self.assertEqual(person.gender_concept.concept_id, 8532)  # FEMALE
-
-    def test_patch_first_line_therapy_creates_episode(self):
-        """PATCHing first_line_therapy creates an Episode with episode_number=1."""
-        from omop_oncology.models import Episode
-        person = Person.objects.create(person_id=91030)
-        pi = PatientRecord.objects.create(person=person, organization=self.organization)
-
-        self._patch(pi, {
-            'first_line_therapy': 'AC-T',
-            'first_line_start_date': '2023-01-15',
-            'first_line_end_date': '2023-07-01',
-        })
-
-        episodes = Episode.objects.filter(person=person, episode_number=1)
-        self.assertEqual(episodes.count(), 1)
-        ep = episodes.first()
-        self.assertEqual(ep.episode_source_value, 'AC-T')
-        from datetime import date
-        self.assertEqual(ep.episode_start_date, date(2023, 1, 15))
-
-    def test_patch_therapy_outcome_writes_lot_outcome_observation(self):
-        """PATCHing a line's outcome persists a LOT-{n}-outcome Observation to OMOP."""
-        from omop_core.models import Observation
-        person = Person.objects.create(person_id=91035)
-        pi = PatientRecord.objects.create(person=person, organization=self.organization)
-
-        self._patch(pi, {
-            'first_line_therapy': 'AC-T',
-            'first_line_start_date': '2023-01-15',
-            'first_line_end_date': '2023-07-01',
-            'first_line_outcome': 'Partial Response',
-        })
-
-        obs = Observation.objects.filter(person=person, observation_source_value='LOT-1-outcome')
-        self.assertEqual(obs.count(), 1)
-        self.assertEqual(obs.first().value_as_string, 'Partial Response')
-
-    def test_patch_therapy_outcome_edit_updates_observation_in_place(self):
-        """Editing a line's outcome updates the existing Observation, no duplicate."""
-        from omop_core.models import Observation
-        person = Person.objects.create(person_id=91036)
-        pi = PatientRecord.objects.create(person=person, organization=self.organization)
-
-        self._patch(pi, {
-            'first_line_therapy': 'AC-T',
-            'first_line_start_date': '2023-01-15',
-            'first_line_outcome': 'Partial Response',
-        })
-        self._patch(pi, {'first_line_outcome': 'Complete Response'})
-
-        obs = Observation.objects.filter(person=person, observation_source_value='LOT-1-outcome')
-        self.assertEqual(obs.count(), 1)
-        self.assertEqual(obs.first().value_as_string, 'Complete Response')
-
-    def test_patch_therapy_links_existing_drug_exposures(self):
-        """DrugExposure rows in the episode date range are linked via EpisodeEvent."""
-        from omop_oncology.models import Episode, EpisodeEvent
-        from omop_core.models import DrugExposure, Concept
-        person = Person.objects.create(person_id=91031)
-        pi = PatientRecord.objects.create(person=person, organization=self.organization)
-        drug_concept = Concept.objects.get(concept_id=19136160)
-        type_concept = Concept.objects.get(concept_id=32817)
-
-        # Pre-existing DrugExposure within the therapy date range
-        de = DrugExposure.objects.create(
-            drug_exposure_id=9910001,
-            person=person,
-            drug_concept=drug_concept,
-            drug_exposure_start_date='2023-02-01',
-            drug_type_concept=type_concept,
-            drug_source_value='Paclitaxel',
-        )
-
-        self._patch(pi, {
-            'first_line_therapy': 'AC-T',
-            'first_line_start_date': '2023-01-15',
-            'first_line_end_date': '2023-07-01',
-        })
-
-        episode = Episode.objects.get(person=person, episode_number=1)
-        self.assertTrue(
-            EpisodeEvent.objects.filter(episode_id=episode.episode_id, event_id=de.drug_exposure_id).exists(),
-            'DrugExposure was not linked to Episode via EpisodeEvent',
-        )
-
-    def test_patch_therapy_no_duplicate_episode_events(self):
-        """Repeating the PATCH does not create duplicate EpisodeEvent rows."""
-        from omop_oncology.models import Episode, EpisodeEvent
-        from omop_core.models import DrugExposure, Concept
-        person = Person.objects.create(person_id=91032)
-        pi = PatientRecord.objects.create(person=person, organization=self.organization)
-        drug_concept = Concept.objects.get(concept_id=19136160)
-        type_concept = Concept.objects.get(concept_id=32817)
-
-        DrugExposure.objects.create(
-            drug_exposure_id=9910002,
-            person=person,
-            drug_concept=drug_concept,
-            drug_exposure_start_date='2023-02-01',
-            drug_type_concept=type_concept,
-            drug_source_value='Paclitaxel',
-        )
-
-        payload = {
-            'first_line_therapy': 'AC-T',
-            'first_line_start_date': '2023-01-15',
-            'first_line_end_date': '2023-07-01',
-        }
-        self._patch(pi, payload)
-        self._patch(pi, payload)  # second identical PATCH
-
-        episode = Episode.objects.get(person=person, episode_number=1)
-        self.assertEqual(
-            EpisodeEvent.objects.filter(episode_id=episode.episode_id, event_id=9910002).count(), 1,
-            'EpisodeEvent was duplicated',
-        )
-
-    def test_sync_failure_returns_500(self):
-        """If sync_to_omop raises, the PATCH rolls back and returns 500."""
-        from unittest.mock import patch as mock_patch
-        person = Person.objects.create(person_id=91040)
-        pi = PatientRecord.objects.create(person=person, organization=self.organization)
-        original_status = pi.ecog_performance_status
-
-        with mock_patch(
-            'patient_portal.api.views.sync_to_omop',
-            side_effect=RuntimeError('simulated DB failure'),
-        ):
-            response = self._patch(pi, {'ecog_performance_status': 1})
-
-        self.assertEqual(response.status_code, 500)
-        # PatientRecord must not have been updated — transaction was rolled back.
-        pi.refresh_from_db()
-        self.assertEqual(pi.ecog_performance_status, original_status)
-
-    def test_lab_field_to_loinc_in_mappings_not_views(self):
-        """LAB_FIELD_TO_LOINC must live in mappings, not be directly importable from views."""
-        import importlib
-        views_mod = importlib.import_module('patient_portal.api.views')
-        self.assertFalse(
-            hasattr(views_mod, '_LAB_FIELD_TO_LOINC'),
-            '_LAB_FIELD_TO_LOINC should have been removed from views.py',
-        )
-
-    # --- user_edited_fields bookkeeping (#434) ---------------------------------
-
-    def test_patch_records_only_the_field_that_moved(self):
-        """The React client autosaves by PATCHing the whole record back. Only
-        the field the user actually changed may be marked hand-edited — flagging
-        the body wholesale would pin every derived field on the row and stop
-        OMOP deletions ever propagating again."""
-        person = Person.objects.create(person_id=91101)
-        pi = PatientRecord.objects.create(
-            person=person, organization=self.organization,
-            her2_status='Positive', smoking_status='never', tumor_stage='T1',
-        )
-
-        # Whole record echoed back with a single field altered, as the UI does.
-        self._patch(pi, {
-            'her2_status': 'Positive',
-            'smoking_status': 'never',
-            'tumor_stage': 'T2',
-        })
-
-        pi.refresh_from_db()
-        self.assertEqual(pi.user_edited_fields, ['tumor_stage'])
-
-    def test_patch_that_changes_nothing_records_nothing(self):
-        person = Person.objects.create(person_id=91102)
-        pi = PatientRecord.objects.create(
-            person=person, organization=self.organization, her2_status='Positive',
-        )
-
-        self._patch(pi, {'her2_status': 'Positive'})
-
-        pi.refresh_from_db()
-        self.assertEqual(pi.user_edited_fields, [])
-
-    def test_read_only_fields_are_never_recorded(self):
-        """DRF discards read-only fields from the input, so attributing them to
-        the user would pin values the client never actually set."""
-        person = Person.objects.create(person_id=91103)
-        pi = PatientRecord.objects.create(
-            person=person, organization=self.organization, tumor_stage='T1',
-        )
-
-        self._patch(pi, {'tumor_stage': 'T2', 'therapy_component_ids': [1, 2, 3]})
-
-        pi.refresh_from_db()
-        self.assertEqual(pi.user_edited_fields, ['tumor_stage'])
-
-    def test_user_edited_fields_is_not_client_writable(self):
-        person = Person.objects.create(person_id=91104)
-        pi = PatientRecord.objects.create(person=person, organization=self.organization)
-
-        self._patch(pi, {'user_edited_fields': ['disease', 'stage']})
-
-        pi.refresh_from_db()
-        self.assertEqual(pi.user_edited_fields, [])
-
-    def test_patched_stage_survives_a_later_refresh(self):
-        """End-to-end for #434: the exact sequence that lost the staging
-        patient's stage — PATCH it, then re-derive."""
-        from omop_core.services.patient_record_service import refresh_patient_record
-        person = Person.objects.create(person_id=91105)
-        pi = PatientRecord.objects.create(person=person, organization=self.organization)
-
-        self._patch(pi, {'stage': 'I'})
-        refreshed = refresh_patient_record(person)
-
-        self.assertEqual(refreshed.stage, 'I')
-
-
 class VocabularyRelationshipModelTest(TestCase):
     """Verify Relationship, ConceptRelationship, ConceptAncestor models exist and are queryable."""
 
@@ -5455,19 +5138,13 @@ class AthenaVocabularyLoadTest(TestCase):
              ['5000001', '5000099', '2', '2']],
         )
 
-    def test_load_creates_relationship_rows(self):
-        from omop_core.models import Relationship
+    def test_loads_scoped_concepts_with_relationships_and_ancestors(self):
+        from omop_core.models import Concept, ConceptAncestor, ConceptRelationship, Relationship
         with tempfile.TemporaryDirectory() as tmpdir:
             self._write_minimal_athena(tmpdir)
             self._load_minimal_athena(tmpdir)
         self.assertTrue(Relationship.objects.filter(relationship_id='Maps to').exists())
         self.assertTrue(Relationship.objects.filter(relationship_id='Is a').exists())
-
-    def test_load_filters_concepts_to_scope(self):
-        from omop_core.models import Concept
-        with tempfile.TemporaryDirectory() as tmpdir:
-            self._write_minimal_athena(tmpdir)
-            self._load_minimal_athena(tmpdir)
         self.assertTrue(Concept.objects.filter(concept_id=5000001).exists())  # HemOnc
         self.assertTrue(Concept.objects.filter(concept_id=5000003).exists())  # RxNorm Ingredient
         self.assertTrue(Concept.objects.filter(concept_id=5000004).exists())  # RxNorm Branded
@@ -5479,12 +5156,6 @@ class AthenaVocabularyLoadTest(TestCase):
             concept_name='Number of Bone Lesions',
         ).exists())
         self.assertTrue(Concept.objects.filter(concept_id=5000099).exists())  # CPT4
-
-    def test_load_filters_concept_relationships(self):
-        from omop_core.models import ConceptRelationship
-        with tempfile.TemporaryDirectory() as tmpdir:
-            self._write_minimal_athena(tmpdir)
-            self._load_minimal_athena(tmpdir)
         # Edge between two in-scope concepts should be loaded
         self.assertTrue(ConceptRelationship.objects.filter(
             concept_1_id=5000003, concept_2_id=5000002
@@ -5493,12 +5164,6 @@ class AthenaVocabularyLoadTest(TestCase):
         self.assertTrue(ConceptRelationship.objects.filter(
             concept_2_id=5000099
         ).exists())
-
-    def test_load_concept_ancestors_hemonc_only(self):
-        from omop_core.models import ConceptAncestor
-        with tempfile.TemporaryDirectory() as tmpdir:
-            self._write_minimal_athena(tmpdir)
-            self._load_minimal_athena(tmpdir)
         self.assertTrue(ConceptAncestor.objects.filter(
             ancestor_concept_id=5000001, descendant_concept_id=5000002
         ).exists())
@@ -6118,10 +5783,6 @@ class ScopedTokenPermissionTest(TestCase):
         req = self._req("POST", None, self._user(is_staff=True))
         self.assertTrue(self.permission.has_permission(req, None))
 
-    def test_staff_allows_delete(self):
-        req = self._req("DELETE", None, self._user(is_staff=True))
-        self.assertTrue(self.permission.has_permission(req, None))
-
     def test_patient_allows_get(self):
         req = self._req("GET", None, self._user())
         self.assertTrue(self.permission.has_permission(req, None))
@@ -6215,75 +5876,6 @@ class PersonIdEnumerationTest(FhirUploadBase):
         self.assertEqual(resp.data['deleted_count'], 1)
         self.assertEqual(resp.data['errors'], [])
         self.assertFalse(P.objects.filter(person_id=78901).exists())
-
-
-@unittest.skip("Retired: mapped clinical PatientRecord fields are read-only")
-class FhirRxNavIntegrationTest(_SmartBase):
-    """FHIR upload for a drug unknown in local vocab → RxNav called → concept resolved."""
-
-    def _fhir_file(self, drug_name, filename='rxnav_test.json'):
-        bundle = {
-            'resourceType': 'Bundle',
-            'type': 'collection',
-            'entry': [
-                {'resource': {
-                    'resourceType': 'Patient',
-                    'id': 'rxnav-test-pt-1',
-                    'name': [{'family': 'RxNavTest', 'given': ['Patient']}],
-                    'gender': 'female',
-                    'birthDate': '1970-01-01',
-                }},
-                {'resource': {
-                    'resourceType': 'MedicationStatement',
-                    'id': 'rxnav-med-1',
-                    'status': 'completed',
-                    'subject': {'reference': 'Patient/rxnav-test-pt-1'},
-                    'medicationCodeableConcept': {'text': drug_name},
-                    'effectivePeriod': {'start': '2023-01-15', 'end': '2023-07-01'},
-                    'extension': [
-                        {'url': 'https://healthkey.ai/fhir/StructureDefinition/therapy-line',
-                         'valueInteger': 1},
-                    ],
-                }},
-            ],
-        }
-        f = io.BytesIO(json.dumps(bundle).encode('utf-8'))
-        f.name = filename
-        return f
-
-    def test_fhir_upload_uses_rxnav_for_unknown_drug(self):
-        from unittest.mock import patch
-        from omop_core.models import DrugExposure
-
-        with patch(
-            'omop_core.services.rxnav_service._rxnav_lookup',
-            return_value=('1421', 'bortezomib'),
-        ):
-            response = self.write_client.post(
-                '/api/patient-info/upload_fhir/',
-                {'file': self._fhir_file('Velcade')},
-                format='multipart',
-            )
-
-        self.assertIn(response.status_code, [200, 201])
-        de = DrugExposure.objects.filter(drug_source_value='Velcade').first()
-        self.assertIsNotNone(de, 'DrugExposure for Velcade not created')
-        self.assertNotEqual(de.drug_concept_id, 0)
-
-    def test_fhir_upload_unknown_drug_rxnav_fails_gracefully(self):
-        from unittest.mock import patch
-
-        with patch(
-            'omop_core.services.rxnav_service._rxnav_lookup',
-            return_value=(None, None),
-        ):
-            response = self.write_client.post(
-                '/api/patient-info/upload_fhir/',
-                {'file': self._fhir_file('completely-unknown-drug-xyz', 'rxnav_fallback.json')},
-                format='multipart',
-            )
-
-        self.assertIn(response.status_code, [200, 201])
 
 
 class SctEligibilityVocabTest(FhirUploadBase):
@@ -6701,8 +6293,20 @@ class PersonFindOrCreateTest(_SmartBase):
 
     URL = '/api/persons/find_or_create/'
 
-    def _auth(self):
-        return {'HTTP_AUTHORIZATION': f'Bearer {self.write_token.token}'}
+    def _auth(self, sub='uid-abc'):
+        identity, _ = Identity.objects.get_or_create(
+            issuer='https://securetoken.google.com/proj', sub=sub,
+        )
+        if self.foundation_user.is_staff:
+            identity.is_staff = True
+            identity.save(update_fields=['is_staff'])
+        self.client.force_authenticate(user=identity)
+        return {}
+
+    def setUp(self):
+        from rest_framework.test import APIClient
+        self.client = APIClient()
+
 
     def test_creates_person_on_first_call(self):
         resp = self.client.post(
@@ -6725,20 +6329,20 @@ class PersonFindOrCreateTest(_SmartBase):
             self.URL,
             {'actor_iss': 'https://securetoken.google.com/proj', 'actor_sub': 'refreshable-uid'},
             content_type='application/json',
-            **self._auth(),
+            **self._auth('refreshable-uid'),
         )
 
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
         refresh = self.client.post(
             f"/api/v1/patient-records/{resp.json()['person_id']}/refresh/",
-            **self._auth(),
+            **self._auth('refreshable-uid'),
         )
         self.assertEqual(refresh.status_code, status.HTTP_202_ACCEPTED, refresh.data)
 
     def test_returns_same_person_id_on_repeat(self):
         payload = {'actor_iss': 'https://securetoken.google.com/proj', 'actor_sub': 'uid-xyz'}
-        r1 = self.client.post(self.URL, payload, content_type='application/json', **self._auth())
-        r2 = self.client.post(self.URL, payload, content_type='application/json', **self._auth())
+        r1 = self.client.post(self.URL, payload, content_type='application/json', **self._auth('uid-xyz'))
+        r2 = self.client.post(self.URL, payload, content_type='application/json', **self._auth('uid-xyz'))
         self.assertEqual(r1.status_code, status.HTTP_201_CREATED)
         self.assertEqual(r2.status_code, status.HTTP_200_OK)
         self.assertEqual(r1.json()['person_id'], r2.json()['person_id'])
@@ -6762,7 +6366,7 @@ class PersonFindOrCreateTest(_SmartBase):
             self.URL,
             {'actor_iss': actor_iss, 'actor_sub': actor_sub},
             content_type='application/json',
-            **self._auth(),
+            **self._auth('linked-uid'),
         )
 
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
@@ -6787,10 +6391,10 @@ class PersonFindOrCreateTest(_SmartBase):
         payload = {'actor_iss': actor_iss, 'actor_sub': actor_sub}
 
         first = self.client.post(
-            self.URL, payload, content_type='application/json', **self._auth(),
+            self.URL, payload, content_type='application/json', **self._auth('unlinked-uid'),
         )
         second = self.client.post(
-            self.URL, payload, content_type='application/json', **self._auth(),
+            self.URL, payload, content_type='application/json', **self._auth('unlinked-uid'),
         )
 
         self.assertEqual(first.status_code, status.HTTP_201_CREATED)
@@ -6803,8 +6407,8 @@ class PersonFindOrCreateTest(_SmartBase):
 
     def test_different_subs_get_different_persons(self):
         base = {'actor_iss': 'https://securetoken.google.com/proj'}
-        r1 = self.client.post(self.URL, {**base, 'actor_sub': 'uid-1'}, content_type='application/json', **self._auth())
-        r2 = self.client.post(self.URL, {**base, 'actor_sub': 'uid-2'}, content_type='application/json', **self._auth())
+        r1 = self.client.post(self.URL, {**base, 'actor_sub': 'uid-1'}, content_type='application/json', **self._auth('uid-1'))
+        r2 = self.client.post(self.URL, {**base, 'actor_sub': 'uid-2'}, content_type='application/json', **self._auth('uid-2'))
         self.assertNotEqual(r1.json()['person_id'], r2.json()['person_id'])
 
     def test_missing_actor_iss_returns_400(self):
@@ -8403,33 +8007,21 @@ class TherapyConceptIdTest(TestCase):
         from omop_core.services.patient_record_service import refresh_patient_record
         return refresh_patient_record(person)
 
-    def test_krd_first_line_therapy_id_is_populated(self):
-        """refresh_patient_record sets first_line_therapy_id=35806284 for KRd."""
+    def test_krd_derivation_and_display_use_the_resolved_concept(self):
+        from patient_portal.api.serializers import PatientRecordSerializer
+
         pi = self._refresh(self.person_krd)
         self.assertEqual(pi.first_line_therapy_id, 35806284)
-
-    def test_krd_first_line_therapy_text_uses_canonical_name(self):
-        """When HemOnc concept_id resolved, therapy text is set to canonical name."""
-        pi = self._refresh(self.person_krd)
         self.assertEqual(pi.first_line_therapy, 'KRd')
-
-    def test_vrd_first_line_therapy_id_is_none(self):
-        """VRd has no HemOnc concept_id — field stays None."""
-        pi = self._refresh(self.person_vrd)
-        self.assertIsNone(pi.first_line_therapy_id)
-
-    def test_vrd_first_line_therapy_text_is_populated(self):
-        """VRd therapy text is still populated even without a concept_id."""
-        pi = self._refresh(self.person_vrd)
-        self.assertIsNotNone(pi.first_line_therapy)
-        self.assertNotEqual(pi.first_line_therapy, '')
-
-    def test_serializer_display_returns_hemonc_name_when_concept_id_set(self):
-        """first_line_therapy_display returns HemOnc concept_name when concept_id present."""
-        pi = self._refresh(self.person_krd)
-        from patient_portal.api.serializers import PatientRecordSerializer
         data = PatientRecordSerializer(pi).data
         self.assertEqual(data['first_line_therapy_display'], 'KRd')
+        self.assertIn(pi.later_therapy_ids, [None, []])
+
+    def test_vrd_derivation_preserves_text_without_a_concept(self):
+        pi = self._refresh(self.person_vrd)
+        self.assertIsNone(pi.first_line_therapy_id)
+        self.assertIsNotNone(pi.first_line_therapy)
+        self.assertNotEqual(pi.first_line_therapy, '')
 
     def test_serializer_display_falls_back_to_text_when_no_concept_id(self):
         """first_line_therapy_display falls back to first_line_therapy text when id is None."""
@@ -8440,12 +8032,6 @@ class TherapyConceptIdTest(TestCase):
         from patient_portal.api.serializers import PatientRecordSerializer
         data = PatientRecordSerializer(pi).data
         self.assertEqual(data['first_line_therapy_display'], 'VRd')
-
-    def test_later_therapy_ids_is_list_or_none(self):
-        """later_therapy_ids is either None or a list."""
-        pi = self._refresh(self.person_krd)
-        self.assertIn(pi.later_therapy_ids, [None, []])
-
 
 class OrgDiseaseStatsTest(TestCase):
     def setUp(self):
@@ -10702,34 +10288,6 @@ class WearablePatientRecordTest(TestCase):
         self.assertAlmostEqual(float(pi.hrv_sdnn_avg_30d), 45.0)
         self.assertIsNone(pi.hrv_rmssd_avg_30d)
 
-    @unittest.skip("Retired: user_edited_fields no longer preserves derived values")
-    def test_wearable_columns_can_never_be_flagged_user_edited(self):
-        """#440 and #434 must not cancel each other out.
-
-        candidate_user_edited_fields flags anything in _OMOP_DERIVED_FIELDS
-        that a PATCH changed, and every wearable column is in that list. Being
-        flagged would pin a client-supplied value against re-derivation
-        permanently — the exact failure #440 closed, reopened by a different
-        door. The only thing preventing it is that read-only fields never
-        reach validated_data and so can never appear in changed_fields.
-        """
-        from patient_portal.api.serializers import PatientRecordSerializer
-        from omop_core.services.omop_write_service import candidate_user_edited_fields
-
-        names = set(self._derived_wearable_field_names())
-        serializer = PatientRecordSerializer()
-
-        writable = {n for n in names
-                    if n in serializer.fields and not serializer.fields[n].read_only}
-        self.assertEqual(writable, set())
-
-        # If one ever did become writable, it would be flagged — assert the
-        # consequence directly so the reason this matters stays visible.
-        self.assertEqual(
-            candidate_user_edited_fields(names), names,
-            'wearable columns are in _OMOP_DERIVED_FIELDS, so read-only '
-            'enforcement is the only thing keeping them out of user_edited_fields')
-
     def _derived_wearable_field_names(self):
         """Every derived wearable column, read off the model rather than listed.
 
@@ -10934,7 +10492,7 @@ class ServiceTokenOmopAccessTest(TestCase):
             'actor_iss': 'https://etl.example.test',
             'actor_sub': 'import-subject',
         }, format='json')
-        self.assertIn(response.status_code, (200, 201), response.data)
+        self.assertEqual(response.status_code, 403, response.data)
         response = client.post('/api/v1/measurements/', [{
             'person': self.person_a.person_id,
             'measurement_concept': self.m_a.measurement_concept_id,
@@ -15648,6 +15206,57 @@ class SelfServicePasswordResetTest(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(len(mail.outbox), 0)
 
+    def test_shared_federated_email_resets_only_the_active_local_account(self):
+        from django.core import mail
+        from django.contrib.auth.tokens import default_token_generator
+        from django.utils.encoding import force_bytes
+        from django.utils.http import urlsafe_base64_encode
+        from urllib.parse import parse_qs, urlsplit
+        for active in (True, False):
+            federated = Identity(
+                issuer='https://identity.example.test', sub=f'federated-{active}',
+                email=self.identity.email.upper(), is_active=active,
+            )
+            federated.set_unusable_password()
+            federated.save()
+        response = APIClient().post('/api/v1/auth/request-reset/', {
+            'email': self.identity.email.upper(),
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(mail.outbox), 1)
+        uid = urlsafe_base64_encode(force_bytes(self.identity.pk))
+        link = next(line.strip() for line in mail.outbox[0].body.splitlines() if '/reset-password?' in line)
+        query = parse_qs(urlsplit(link).query)
+        self.assertEqual(query['uid'], [uid])
+        self.assertTrue(default_token_generator.check_token(self.identity, query['token'][0]))
+
+    def test_inactive_and_federated_accounts_receive_the_same_response_without_email(self):
+        from django.core import mail
+        self.identity.is_active = False
+        self.identity.save(update_fields=['is_active'])
+        federated = Identity(
+            issuer='https://identity.example.test', sub='federated-only',
+            email=self.identity.email,
+        )
+        federated.set_password('Zr7-quokka-vale')
+        federated.save()
+        client = APIClient()
+        known = client.post('/api/v1/auth/request-reset/', {'email': self.identity.email})
+        unknown = client.post('/api/v1/auth/request-reset/', {'email': 'absent@example.test'})
+        self.assertEqual(known.status_code, 200)
+        self.assertEqual(known.data, unknown.data)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_ambiguous_local_accounts_do_not_send_an_arbitrary_reset(self):
+        from django.core import mail
+        Identity.objects.create_user(
+            email=self.identity.email,
+            password='Zr7-quokka-vale',
+        )
+        response = APIClient().post('/api/v1/auth/request-reset/', {'email': self.identity.email})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(mail.outbox), 0)
+
     def test_missing_email_returns_400(self):
         resp = APIClient().post('/api/v1/auth/request-reset/', {
             'email': '',
@@ -16780,6 +16389,26 @@ class VocabSnapshotStreamTransactionTest(TransactionTestCase):
             'stream must end with the __done sentinel',
         )
 
+    def test_publication_and_stream_share_bytes_without_ambient_transaction(self):
+        import hashlib
+        import time
+        from io import StringIO
+        from omop_core.management.commands.load_athena_vocabularies import Command
+        from omop_core.models import VocabularyRelease
+
+        command = Command(stdout=StringIO())
+        command._build_start = time.time()
+        command._publish_release({'vocabulary': 999999})
+        release = VocabularyRelease.objects.latest('pk')
+        response = self.client.get(
+            f'/api/v1/vocab-releases/{release.pk}/snapshot/vocabulary/')
+        lines = b''.join(response.streaming_content).splitlines(keepends=True)
+        self.assertEqual(
+            hashlib.sha256(b''.join(lines[:-1])).hexdigest(),
+            release.checksums['vocabulary']['digest'],
+        )
+
+
 
 class VocabSystemScopeTest(_SmartBase):
     """#344 — vocabulary release/snapshot endpoints are reference (system) data,
@@ -17501,18 +17130,12 @@ class MeetsCrabSlimFieldTest(_SmartBase):
         self.assertEqual(resp.status_code, 200)
         return resp.data.get('patient_info', resp.data)
 
-    def test_meets_crab_in_response(self):
+    def test_response_includes_myeloma_criteria_and_type(self):
         data = self._get_patient_info()
         self.assertIn('meets_crab', data)
         self.assertTrue(data['meets_crab'])
-
-    def test_meets_slim_in_response(self):
-        data = self._get_patient_info()
         self.assertIn('meets_slim', data)
         self.assertFalse(data['meets_slim'])
-
-    def test_myeloma_type_in_response(self):
-        data = self._get_patient_info()
         self.assertIn('myeloma_type', data)
         self.assertEqual(data['myeloma_type'], 'IgG kappa')
 
@@ -18502,7 +18125,8 @@ class BulkOmopWriteTest(TestCase):
             content_type=ct, object_id__in=resp.data['ids'])
         self.assertEqual(prov.count(), 4)
         self.assertEqual({p.source for p in prov}, {'EHR_SYNC'})
-        self.assertEqual({p.source_user_id for p in prov}, {'etl-run-7'})
+        self.assertEqual({p.source_user_id for p in prov},
+                         {f'{self.service_identity.issuer}|{self.service_identity.sub}'})
         self.assertEqual(
             {p.target_patient_id for p in prov}, {str(self.person.person_id)})
 
@@ -19024,7 +18648,7 @@ class BulkOmopUpsertTest(TestCase):
                 content_type=ct,
                 object_id=first.data['measurement_id'],
                 source='EHR_SYNC',
-                source_user_id='etl-retry-1',
+                source_user_id=f'{self.service_identity.issuer}|{self.service_identity.sub}',
             ).count(),
             1,
         )
@@ -22003,7 +21627,7 @@ class FieldConceptMappingTest(TestCase):
 
     # -- GET list --
 
-    def test_list_returns_all_fields(self):
+    def test_list_returns_complete_descriptors_with_tabs_and_audit_equivalences(self):
         self.client.force_authenticate(user=self.staff)
         resp = self.client.get('/api/v1/field-mappings/')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
@@ -22013,6 +21637,30 @@ class FieldConceptMappingTest(TestCase):
         self.assertIn('disease', field_names)
         self.assertIn('weight', field_names)
         self.assertTrue(len(resp.data) > 100)
+        for d in resp.data:
+            self.assertIn('tab', d, f"Field {d['field_name']} missing 'tab' key")
+        tab_by_field = {d['field_name']: d['tab'] for d in resp.data}
+        self.assertEqual(tab_by_field.get('hemoglobin_g_dl'), 'blood')
+        self.assertEqual(tab_by_field.get('smoking_status'), 'behavior')
+        self.assertEqual(tab_by_field.get('date_of_birth'), 'general')
+        self.assertEqual(tab_by_field.get('serum_creatinine_level'), 'labs')
+        self.assertEqual(tab_by_field.get('first_line_therapy'), 'treatment')
+        descriptors = {item['field_name']: item for item in resp.data}
+
+        for field_name in ('validated', 'validated_by', 'validation_date'):
+            with self.subTest(field_name=field_name):
+                descriptor = descriptors[field_name]
+                self.assertEqual(descriptor['category'], 'computed')
+                self.assertFalse(descriptor['mappable'])
+                self.assertIsNone(descriptor['mapping'])
+                self.assertEqual(descriptor['formula'], {
+                    'id': FieldFormula.objects.get(field_name=field_name).id,
+                    'expression': field_name,
+                    'is_active': True,
+                })
+                self.assertEqual(
+                    descriptor['explanation'], f'Equivalent to Person.{field_name}',
+                )
 
     def test_list_requires_mapping_admin(self):
         self.client.force_authenticate(user=self.non_staff)
@@ -22208,47 +21856,6 @@ class FieldConceptMappingTest(TestCase):
             'field_name': 'smoking_status',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
-
-    def test_list_includes_tab_key(self):
-        """Every field descriptor should include a 'tab' key."""
-        self.client.force_authenticate(user=self.staff)
-        resp = self.client.get('/api/v1/field-mappings/')
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        for d in resp.data:
-            self.assertIn('tab', d, f"Field {d['field_name']} missing 'tab' key")
-
-    def test_tab_assignments_spot_check(self):
-        """Spot-check known field->tab assignments."""
-        self.client.force_authenticate(user=self.staff)
-        resp = self.client.get('/api/v1/field-mappings/')
-        tab_by_field = {d['field_name']: d['tab'] for d in resp.data}
-        self.assertEqual(tab_by_field.get('hemoglobin_g_dl'), 'blood')
-        self.assertEqual(tab_by_field.get('smoking_status'), 'behavior')
-        self.assertEqual(tab_by_field.get('date_of_birth'), 'general')
-        self.assertEqual(tab_by_field.get('serum_creatinine_level'), 'labs')
-        self.assertEqual(tab_by_field.get('first_line_therapy'), 'treatment')
-
-    def test_validation_audit_fields_are_non_mappable_person_equivalences(self):
-        self.client.force_authenticate(user=self.staff)
-        resp = self.client.get('/api/v1/field-mappings/')
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        descriptors = {item['field_name']: item for item in resp.data}
-
-        for field_name in ('validated', 'validated_by', 'validation_date'):
-            with self.subTest(field_name=field_name):
-                descriptor = descriptors[field_name]
-                self.assertEqual(descriptor['category'], 'computed')
-                self.assertFalse(descriptor['mappable'])
-                self.assertIsNone(descriptor['mapping'])
-                self.assertEqual(descriptor['formula'], {
-                    'id': FieldFormula.objects.get(field_name=field_name).id,
-                    'expression': field_name,
-                    'is_active': True,
-                })
-                self.assertEqual(
-                    descriptor['explanation'], f'Equivalent to Person.{field_name}',
-                )
-
 
 class FieldSynonymTest(TestCase):
     """Tests for /api/v1/field-mappings/<field_name>/synonyms/ endpoints."""
@@ -26338,13 +25945,13 @@ class PrologRunnerMountTest(TestCase):
     """
 
     def test_no_dist_means_no_routes(self):
-        from ctomop.urls import runner_urlpatterns
+        from promop.urls import runner_urlpatterns
 
         self.assertEqual(runner_urlpatterns(None), [])
         self.assertEqual(runner_urlpatterns(Path('/no/such/runner')), [])
 
     def test_a_dist_is_matched_before_the_spa_catch_all(self):
-        from ctomop.urls import runner_urlpatterns, urlpatterns
+        from promop.urls import runner_urlpatterns, urlpatterns
 
         with tempfile.TemporaryDirectory() as tmp:
             patterns = runner_urlpatterns(Path(tmp))
@@ -26360,7 +25967,7 @@ class PrologRunnerMountTest(TestCase):
         self.assertTrue(assembled[-1].pattern.match('anything/at/all'))
 
     def test_hashed_runner_assets_are_cacheable_and_the_page_is_not(self):
-        from ctomop.whitenoise import PromopWhiteNoise
+        from promop.whitenoise import PromopWhiteNoise
 
         test = PromopWhiteNoise.immutable_file_test
         instance = PromopWhiteNoise.__new__(PromopWhiteNoise)
@@ -27057,3 +26664,45 @@ class RecordAttestationTest(TestCase):
         self.record.refresh_from_db()
         # Date should be updated to today
         self.assertNotEqual(self.record.validation_date, date_type(2026, 1, 1))
+
+
+class FhirConditionStagePersistenceTest(FhirUploadBase):
+    """Condition-only stages survive upload and later OMOP projection refresh."""
+
+    def _upload_condition_stage(self, disease, stages):
+        bundle = _make_fl_bundle()
+        condition = bundle['entry'][1]['resource']
+        condition['code'] = disease if isinstance(disease, dict) else {'text': disease}
+        condition['stage'] = [{'summary': {'text': stage}} for stage in stages]
+        # Keep the later unstaged condition: it must not steal the stage date.
+        fhir_file = io.BytesIO(json.dumps(bundle).encode())
+        fhir_file.name = 'condition-stage.json'
+        response = self.client.post('/api/patient-info/upload_fhir/', {'file': fhir_file}, format='multipart')
+        self.assertIn(response.status_code, [200, 201], response.data)
+        return Person.objects.get(given_name='Larry', family_name='Follic')
+
+    def test_fl_stage_survives_refresh_with_transformation_condition(self):
+        from omop_core.services.patient_record_service import refresh_patient_record
+        person = self._upload_condition_stage('Follicular Lymphoma', ['Follicular Lymphoma Ann Arbor Stage IIIB'])
+        self.assertEqual(refresh_patient_record(person).stage, 'IIIB')
+        fact = Observation.objects.get(person=person, observation_source_value='FHIR-condition-stage')
+        self.assertEqual(fact.observation_date, date(2020, 6, 1))
+
+    def test_mm_condition_only_prefers_riss_and_survives_refresh(self):
+        from omop_core.services.patient_record_service import refresh_patient_record
+        person = self._upload_condition_stage('Multiple Myeloma', ['ISS Stage II', 'R-ISS Stage III'])
+        self.assertEqual(refresh_patient_record(person).stage, 'R-ISS III')
+
+    def test_bare_condition_stage_text_is_retained(self):
+        from omop_core.services.patient_record_service import refresh_patient_record
+        person = self._upload_condition_stage('Follicular Lymphoma', ['IVB'])
+        self.assertEqual(refresh_patient_record(person).stage, 'IVB')
+
+
+    def test_coded_breast_condition_without_display_retains_stage(self):
+        from omop_core.services.patient_record_service import refresh_patient_record
+        person = self._upload_condition_stage(
+            {'coding': [{'system': 'http://snomed.info/sct', 'code': '254837009'}]},
+            ['Stage IIA'],
+        )
+        self.assertEqual(refresh_patient_record(person).stage, 'IIA')

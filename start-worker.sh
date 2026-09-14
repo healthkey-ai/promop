@@ -10,4 +10,4 @@ set -euo pipefail
 # a small Render instance; operators can raise this after measuring memory.
 export CELERY_WORKER_CONCURRENCY="${CELERY_WORKER_CONCURRENCY:-1}"
 export CELERY_WORKER_PREFETCH_MULTIPLIER="${CELERY_WORKER_PREFETCH_MULTIPLIER:-1}"
-exec celery -A ctomop worker --loglevel=info
+exec celery -A promop worker --loglevel=info
