@@ -87,7 +87,9 @@ Three related mapping concerns have distinct responsibilities:
 The active [field-and-answer mapping plan](field_concept_mapping_plan.md)
 tracks the inventory, scoped choices, coded-answer projection and remaining
 disease-specific repairs. Its next prerequisite is the complete field/value
-inventory in #1223.
+inventory in #1223. The plan's [1.3 release gates](field_concept_mapping_plan.md#13-release-gates)
+record outstanding delivery and rollout checks, their status and the evidence
+required before release.
 
 The [Mapping component](mapping-component-plan.md) defines the shared Python
 service boundary and remaining refactoring work. The [code-mapping architecture
