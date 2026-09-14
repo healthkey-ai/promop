@@ -1,5 +1,6 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
+from .treating_institutions import TreatingInstitutionListView
 from .views import (
     SurveyViewSet, PatientSurveyResponseViewSet,
     CurrentUserViewSet, PatientRecordViewSet, login_view, logout_view, auth_test,
@@ -60,6 +61,7 @@ router.register(r'survey-responses', PatientSurveyResponseViewSet, basename='sur
 # Patient surveys
 
 urlpatterns = [
+    path('treating-institutions/', TreatingInstitutionListView.as_view(), name='treating-institutions'),
     path('', include(router.urls)),
     path('auth/login/', login_view, name='login'),
     path('auth/logout/', logout_view, name='logout'),

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useVocabulary } from '@/hooks/useVocabulary';
 import { useWritableFields } from '@/hooks/useWritableFields';
 import ClinicalField from '../ClinicalField';
+import TreatingInstitutionField from '../TreatingInstitutionField';
 import Section from '../Section';
 import { Input } from '@/components/shadcn/input';
 import { today } from '@/api/clinicalFacts';
@@ -117,7 +118,8 @@ export default function GeneralTab({
           {field('Phone Number', 'phone_number', 'text')}
 
           <div className="sm:col-span-2">
-            {field('Treating Institution', 'facility_name', 'text')}
+            <TreatingInstitutionField key={personId} value={String(formData?.facility_name || '')}
+              descriptor={descriptors.facility_name} onChange={onChange} />
           </div>
         </div>
       </Section>
