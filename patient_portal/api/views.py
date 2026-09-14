@@ -1110,7 +1110,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         # the provider UI PATCHes, and leaving the key in the body would 405 the
         # request below as a non-projection-owned field.
         patient_name, patch_data = _pop_patient_name(request.data)
-        from omop_core.services.genomics_catalog import patient_fields
+        from omop_core.services.genomics_catalog import canonicalize_fields, patient_fields
+        patch_data = canonicalize_fields(patch_data)
         priority_edits = {key: patch_data.pop(key) for key in list(patch_data) if key in patient_fields()}
         priority_edits = {key: value for key, value in priority_edits.items() if value != getattr(patient_info, key)}
 

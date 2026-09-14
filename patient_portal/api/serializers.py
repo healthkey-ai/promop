@@ -492,6 +492,8 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                     ),
                 })
             data['cytogenetic_markers'] = legacy_value
+        from omop_core.services.genomics_catalog import canonicalize_fields
+        data = canonicalize_fields(data)
         return super().to_internal_value(data)
 
     def get_supportive_therapy_courses(self, obj):

@@ -3167,7 +3167,7 @@ class PatientRecord(models.Model):
     genomics_pik3ca = models.JSONField(blank=True, default=list)
     genomics_tp53 = models.JSONField(blank=True, default=list)
     genomics_esr1 = models.JSONField(blank=True, default=list)
-    genomics_palb1 = models.JSONField(blank=True, default=list)
+    genomics_palb2 = models.JSONField(blank=True, default=list)
     genomics_kras = models.JSONField(blank=True, default=list)
     genomics_nras = models.JSONField(blank=True, default=list)
     genomics_braf = models.JSONField(blank=True, default=list)

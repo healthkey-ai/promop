@@ -11,7 +11,7 @@ class Command(BaseCommand):
     @transaction.atomic
     def handle(self, **options):
         with suppress_patient_record_refresh(), connection.schema_editor() as editor:
-            import_module('omop_core.migrations.0224_seed_genomics_mappings').seed(apps, editor)
+            import_module('omop_core.services.genomics_seeding').seed(apps, editor)
             # Components added after the frozen v1 catalog.
             import_module('omop_core.migrations.0226_seed_genomics_status_component').seed_status(apps, editor)
             import_module('omop_core.migrations.0227_seed_genomics_v2_components').seed_v2_components(apps, editor)

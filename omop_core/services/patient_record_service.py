@@ -3517,8 +3517,8 @@ def _get_genetic_mutations(person: Person, snapshot: OmopSnapshot = None) -> dic
 
     mutations = []
     from omop_core.models import FieldConceptMapping
-    from omop_core.services.genomics_catalog import markers, project_priority_variants
-    marker_sources = {'genomics:' + m['key']: m for m in markers()}
+    from omop_core.services.genomics_catalog import canonicalize_variant, marker_sources as catalog_sources, project_priority_variants
+    marker_sources = catalog_sources()
     marker_sources.update({m.source_value: _genomic_patient_fields()[m.field_name]
         for m in FieldConceptMapping.objects.filter(field_name__in=_genomic_patient_fields()) if m.source_value})
 
@@ -3554,7 +3554,7 @@ def _get_genetic_mutations(person: Person, snapshot: OmopSnapshot = None) -> dic
         from omop_core.services.genomics import _note_reader, _read_note_text
         mutation_data = {
             'id': measurement.measurement_id,
-            'gene': (gene or '').lower(),
+            'gene': gene if gene and gene.strip().upper() == 'PALB1' else (gene or '').lower(),
             'variant': _read_note_text(measurement, measurement.pk, _note_reader(snapshot, person.pk)),
             'test_date': measurement.measurement_date.isoformat() if measurement.measurement_date else None,
         }
@@ -3573,7 +3573,7 @@ def _get_genetic_mutations(person: Person, snapshot: OmopSnapshot = None) -> dic
         mutations.append(mutation_data)
 
     from omop_core.services.genomics import enrich_variants
-    data['genetic_mutations'] = [v for v in enrich_variants(mutations, snapshot) if v.get('gene')]
+    data['genetic_mutations'] = [canonicalize_variant(v) for v in enrich_variants(mutations, snapshot) if v.get('gene')]
     from omop_core.services.genomics_state import effective_status
     for v in data['genetic_mutations']:
         v['status'] = effective_status(v)
