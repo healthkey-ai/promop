@@ -145,7 +145,7 @@ Track in #236 and the ADR update issues.
 The [revised ADR 0001](adr/0001-vocabulary-source-of-truth.md) records the
 release-pinned mirror direction requested by #337. Shared ratification remains
 #254. Current vocabulary and therapy-consumer delivery tracking lives in the
-[field/value mapping plan](../field_concept_mapping_plan.md#vocabulary-distribution-and-mapping-provenance);
+[field/value mapping plan](field_concept_mapping_plan.md#vocabulary-distribution-and-mapping-provenance);
 this roadmap retains the wider HemOnc program context.
 
 ### 4. Graph-Based Regimen Resolution

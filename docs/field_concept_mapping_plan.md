@@ -3,7 +3,7 @@
 Future work and delivery tracking for field and field-value concept mapping.
 Implemented behavior is documented in the
 [field concept mapping architecture](field_concept_mapping_architecture.md);
-field-by-field evidence lives in the [generated inventory](docs/field-mapping-inventory/README.md).
+field-by-field evidence lives in the [generated inventory](field-mapping-inventory/README.md).
 
 Plan for [#26](https://github.com/healthkey-ai/promop/issues/26) and
 [#21](https://github.com/healthkey-ai/promop/issues/21). Prepared 2026-09-13
@@ -46,11 +46,11 @@ The inventory acceptance requirements below remain the guide for completing
    Commit the generator, safe reference artifacts and a repeatable coverage report.
 
 **First inventory slice implemented on 2026-09-14:** the
-[reproducible reference inventory](docs/field-mapping-inventory/README.md) now
+[reproducible reference inventory](field-mapping-inventory/README.md) now
 exports staging reference tables, typed source rows, frontend constants/control
 bindings, the frozen Genomics catalog, CancerBot static fragments, exact
 candidate evidence and both vocabulary release mechanisms. The
-[coverage report](docs/field-mapping-inventory/coverage.md) accounts for 2,801
+[coverage report](field-mapping-inventory/coverage.md) accounts for 2,801
 source occurrences, including 414 fields, without dropping unresolved rows.
 The SNOMED provenance investigation traced the metadata string to a historical
 benchmark helper; this does not certify individual staging concepts.
@@ -91,9 +91,9 @@ git fetch origin
 git worktree add ../promop-field-inventory-next -b feat/1223-next origin/dev
 ```
 
-Read [inventory instructions](docs/field-mapping-inventory/README.md),
-[coverage](docs/field-mapping-inventory/coverage.md), and
-[manifest](docs/field-mapping-inventory/manifest.json). The manifest contains the
+Read [inventory instructions](field-mapping-inventory/README.md),
+[coverage](field-mapping-inventory/coverage.md), and
+[manifest](field-mapping-inventory/manifest.json). The manifest contains the
 source revisions/file hashes, reference rows, candidate evidence, per-list
 coverage states, validation flags and implementation owners. It can be reviewed
 without access to either live database. To refresh it, configure the intended
@@ -124,8 +124,8 @@ accounted for. Then deliver stable scoped choices and reviewed answer mappings
 in #1224; #1225 (curation UI/API) and #1226 (projection/readback) build on that.
 
 Genomics has advanced since the original snapshot: use the
-[implemented Genomics architecture](docs/genomics_architecture.md) and
-[remaining Genomics work](docs/genomics_implementation.md) for current ownership.
+[implemented Genomics architecture](genomics_architecture.md) and
+[remaining Genomics work](genomics_implementation.md) for current ownership.
 Issue #1229 adds contextual value mapping to that finding/component model;
 it must preserve the frozen catalog, structured findings and reviewed recipes.
 The [field mapping architecture](field_concept_mapping_architecture.md) describes
@@ -199,7 +199,7 @@ that no equivalent exists in Athena.
 | `suggest_field_concept_mappings` | Field-only lexical suggestion workflow; its `kind == 'unmapped'` selection must be reconciled with current PatientRecord-first descriptors. Add separate field/answer coverage and suggestion modes. |
 
 The current write architecture is documented in
-[patient-record-first-writes.md](docs/patient-record-first-writes.md). Preserve
+[patient-record-first-writes.md](patient-record-first-writes.md). Preserve
 its pending-edit protection, partial projection failure handling, clear markers,
 same-day write locking and external refresh behavior. Some older source comments,
 issues and `clinicalFacts.ts` describe the previous OMOP-first UI; they must not
@@ -505,7 +505,7 @@ a concept with the wrong clinical name and thereby validate a wrong recipe.
 ## 7. Therapy integration
 
 The therapy architecture is already documented in
-[therapy-reference-tables-architecture.md](docs/therapy-reference-tables-architecture.md).
+[therapy-reference-tables-architecture.md](therapy-reference-tables-architecture.md).
 Audit the 52 unmapped regimens, 31 components and 25 classes and validate the
 mapped rows. Retain `TherapyRegimenComponent`, `TherapyComponentClassLink`,
 `DiseaseTherapyRegimen` and treatment-round scope. HemOnc regimen, RxNorm drug
@@ -522,7 +522,7 @@ existing loader/API tickets rather than porting the catalogs again.
 ### Therapy-type consumer delivery
 
 This section owns the delivery tracking moved from
-[ADR 0002](docs/adr/0002-omop-therapy-types.md). The ADR retains matching semantics;
+[ADR 0002](adr/0002-omop-therapy-types.md). The ADR retains matching semantics;
 this plan coordinates catalog coverage and consumer rollout without duplicating
 those decisions. Status checked against current PRomop code and GitHub on
 **2026-09-14**; merged code does not establish deployment or flag activation.
@@ -539,7 +539,7 @@ those decisions. Status checked against current PRomop code and GitHub on
 Complete the remaining gates in dependency order:
 
 1. Validate the intended class subset against the deployed release and actual
-   patient component identifiers. The [historical spike](docs/adr/0002-phase0-coverage.txt)
+   patient component identifiers. The [historical spike](adr/0002-phase0-coverage.txt)
    established 18 HemOnc classes in one export, not universal coverage. Resolve
    the two ATC gaps explicitly (retain legacy or approve a supported equivalent)
    and verify any RxNorm bridge needed by real inputs. Record release and evidence.
@@ -604,7 +604,7 @@ this plan and child issues does not itself close either implementation issue.
 ### Vocabulary distribution and mapping provenance
 
 This section owns delivery tracking moved from
-[ADR 0001](docs/adr/0001-vocabulary-source-of-truth.md). The shared infrastructure
+[ADR 0001](adr/0001-vocabulary-source-of-truth.md). The shared infrastructure
 work is coordinated with existing vocabulary issues; it does not replace the
 #1223 inventory prerequisite or make all cross-repository rollout work a new
 prerequisite for #1224.
@@ -615,7 +615,7 @@ snapshots and byte-verifiable SHA-256 checksums exist. The loader upserts and
 uses guarded replacement, with ancestry filtered to loaded endpoints across its
 configured vocabulary scope. It no longer uses destructive `TRUNCATE CASCADE`
 or limits ancestry to HemOnc. Follow the
-[consumer protocol](docs/vocab-consumer-cache-protocol.md) for exact HTTP and
+[consumer protocol](vocab-consumer-cache-protocol.md) for exact HTTP and
 checksum behavior. This code review does not certify a deployed corpus.
 
 The implementation remains a live-table publication model. Release IDs are
@@ -646,7 +646,7 @@ Acceptance must distinguish shipped server capabilities from consumer guarantees
 - Record the vocabulary, mapping and catalog/recipe revisions used in scoped
   reconciliation evidence. Publication does not authorize historical fact rewrites.
   Genomics-specific acceptance belongs to its
-  [mapping coordination section](docs/genomics_implementation.md#fieldvalue-mapping-coordination).
+  [mapping coordination section](genomics_implementation.md#fieldvalue-mapping-coordination).
 
 ### Remaining audit topics and reconciliation
 
