@@ -150,4 +150,4 @@ breast-cancer diagnoses when the patient disease projection is missing or stale.
 Explicit `--org-slugs` still limits the cohort; `--person-ids` remains available
 for individual patients.
 
-For disease-status assertions, see [Sample patient disease status](docs/sample-patient-disease-status.md).
+For disease-status assertions, see [Sample patient disease status](sample-patient-disease-status.md).

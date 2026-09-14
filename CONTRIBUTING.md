@@ -43,7 +43,7 @@ git checkout -b your-feature-branch
 ### 2. Set up your local environment
 
 Follow the [local setup instructions](README.md#local-setup) in the README, or use
-[Docker](BUILDING_WITH_DOCKER.md) if you prefer.
+[Docker](docs/BUILDING_WITH_DOCKER.md) if you prefer.
 
 ### 3. Make your changes
 

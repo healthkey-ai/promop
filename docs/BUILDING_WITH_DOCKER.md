@@ -178,7 +178,7 @@ The production `docker-compose.yml` runs gunicorn with 4 workers. For a producti
 4. Put a reverse proxy (nginx, Caddy, Render, etc.) in front of port 8000
 5. The database volume (`postgres_data`) persists across container restarts — back it up
 
-For Render deployment (the default CI target), see the [README](README.md#deployment-render).
+For Render deployment (the default CI target), see the [README](../README.md#deployment-render).
 
 ---
 

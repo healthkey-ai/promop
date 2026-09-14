@@ -78,7 +78,7 @@ There are two, and Step 1 covers both:
 **Route A** is the one to use when checking the paper's figures: it is the exact cohort those
 numbers came from. **Route B** needs no download and no citation, and is the better choice for
 adapting the benchmark to a different disease or cohort size. For Route B, see
-[Synthetic patient generation](../SYNTHETIC_PATIENT_GENERATION.md) for obtaining
+[Synthetic patient generation](SYNTHETIC_PATIENT_GENERATION.md) for obtaining
 `synthea-with-dependencies.jar`; pass its location with `--jar-path` if it is not on the
 default search path.
 
