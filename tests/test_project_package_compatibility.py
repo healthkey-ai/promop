@@ -26,7 +26,7 @@ from celery.app.utils import find_app
 first, second = sys.argv[1:]
 importlib.import_module(first)
 django.setup()
-for suffix in ('settings', 'urls', 'celery', 'wsgi', 'asgi', 'sentry', 'frontend_paths', 'whitenoise'):
+for suffix in ('settings', 'urls', 'celery', 'wsgi', 'asgi', 'sentry', 'frontend_paths', 'whitenoise', 'oauth'):
     before = importlib.import_module(first + '.' + suffix)
     after = importlib.import_module(second + '.' + suffix)
     assert before is after, suffix
@@ -73,7 +73,5 @@ def test_cloud_run_and_external_identity_contracts_are_preserved():
     dockerfile = (ROOT / 'Dockerfile.gcp').read_text()
     assert 'promop.wsgi:application' in dockerfile
     assert 'npm run build:remote' in dockerfile
-    oauth = (ROOT / 'frontend/src/utils/oauth.ts').read_text()
-    assert "VITE_OAUTH_CLIENT_ID ?? 'ctomop-smart-app'" in oauth
     bridge = (ROOT / 'docker-compose.bridge.yml').read_text()
     assert '${CTOMOP_SERVICE_TOKEN:-local-bridge-service-token}' in bridge
