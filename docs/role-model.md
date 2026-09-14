@@ -1,5 +1,12 @@
 # Role Model & Access Control
 
+> **Historical architecture document.** For the current SODAP hierarchy and
+> implemented privileges, use [Application roles and privileges](application-roles.md).
+> The role tables, pseudocode, and proposed API flows below are historical design
+> material, not the current authorization contract. In particular, bulk uploads,
+> verified representation, trust inheritance, and service attribution have changed.
+
+
 ## Overview
 
 This document defines how HealthKey services authorize access to patient
