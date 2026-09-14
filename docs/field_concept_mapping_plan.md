@@ -3,7 +3,7 @@
 Future work and delivery tracking for field and field-value concept mapping.
 Implemented behavior is documented in the
 [field concept mapping architecture](field_concept_mapping_architecture.md);
-field-by-field evidence lives in the [generated inventory](field-mapping-inventory/README.md).
+field-by-field evidence lives in the [generated inventory](https://github.com/healthkey-ai/promop/blob/0572098af4debbab93569842b10d8dd1d08a1ad0/docs/field-mapping-inventory/README.md).
 
 Plan for [#26](https://github.com/healthkey-ai/promop/issues/26) and
 [#21](https://github.com/healthkey-ai/promop/issues/21). Prepared 2026-09-13
@@ -14,7 +14,9 @@ implementation work; it does not approve mappings or change staging data.
 ## Current delivery status — 2026-09-14
 
 The active inventory work is [draft PR #1284](https://github.com/healthkey-ai/promop/pull/1284),
-on `feat/1223-next`. Work has continued on the current
+on `feat/1223-next`, at checkpoint `0572098`. The status and inventory evidence
+below describe that draft branch. This documentation update does not merge its
+implementation or generated inventory into `dev`. Work has continued on the current
 machine throughout September 14; the previous machine-transfer handoff is
 superseded by this status and the release gates below. The branch integrates
 dev through `0c655fa`, including
@@ -23,7 +25,7 @@ repairs. Earlier schema/runtime work remains preserved separately on
 `feat/field-value-concept-mappings`; do not replace upstream ownership contracts
 with that older implementation without review.
 
-The [generated inventory](field-mapping-inventory/README.md) now records
+The [generated inventory](https://github.com/healthkey-ai/promop/blob/0572098af4debbab93569842b10d8dd1d08a1ad0/docs/field-mapping-inventory/README.md) now records
 **7,767 source occurrences**, including 420 fields and 4,105 live CancerBot
 option occurrences. All 172 CancerBot public bindings have source accounting:
 118 lists reconstructed from 44 live reference tables, 51 deterministic static
@@ -38,7 +40,7 @@ Snapshots contain reference data only; no credentials or patient/trial rows.
 The PRomop reference and vocabulary evidence was refreshed read-only from Render
 staging after integrating dev. See the manifest for exact dates and file hashes.
 
-The [therapy import audit](field-mapping-inventory/therapy-import-audit.md)
+The [therapy import audit](https://github.com/healthkey-ai/promop/blob/0572098af4debbab93569842b10d8dd1d08a1ad0/docs/field-mapping-inventory/therapy-import-audit.md)
 confirms that all 239 CancerBot main therapy codes are present in PRomop. The
 94-entry CancerBot PlannedTherapy catalog is separate; it must not be confused
 with TherapyRegimen. Keep all managed therapy/component/class tables, link
@@ -77,7 +79,7 @@ the traced historical metadata helper; coordinate #461/#623 before bulk approval
 Continue in the existing isolated `feat/1223-next` worktree and update PR #1284.
 Preserve the earlier implementation on `feat/field-value-concept-mappings` and
 unrelated local changes. The [architecture](field_concept_mapping_architecture.md),
-[inventory instructions](field-mapping-inventory/README.md), coverage and manifest
+[inventory instructions](https://github.com/healthkey-ai/promop/blob/0572098af4debbab93569842b10d8dd1d08a1ad0/docs/field-mapping-inventory/README.md), coverage and manifest
 are the current references. CancerBot reference replay is portable and no longer
 depends on obtaining another export or transferring a chat.
 
