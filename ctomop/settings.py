@@ -490,8 +490,16 @@ REST_FRAMEWORK = {
     },
 }
 
+# The SPA uses Django sessions. Retired browser clients must also be blocked
+# server-side so credentials stolen before the frontend upgrade stop working.
+OAUTH2_RETIRED_BROWSER_CLIENT_IDS = {
+    'ctomop-smart-app',
+    *_env_list('OAUTH2_RETIRED_BROWSER_CLIENT_IDS'),
+}
+
 # SMART on FHIR / OAuth2 provider configuration
 OAUTH2_PROVIDER = {
+    'OAUTH2_VALIDATOR_CLASS': 'ctomop.oauth.SessionOnlyBrowserValidator',
     'SCOPES': {
         'openid':           'OpenID Connect identity token',
         'fhir-user':        'FHIR User profile',
@@ -525,6 +533,8 @@ SOCIAL_AUTH_GOOGLE_OAUTH2_SECRET = os.environ.get('SOCIAL_AUTH_GOOGLE_OAUTH2_SEC
 
 # Render redirects HTTP at its edge; deployments without that must opt in.
 SECURE_SSL_REDIRECT = _env_bool('SECURE_SSL_REDIRECT')
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = 'Lax'
 SESSION_COOKIE_SECURE = _env_bool('SESSION_COOKIE_SECURE', True)
 CSRF_COOKIE_SECURE = _env_bool('CSRF_COOKIE_SECURE', True)
 SECURE_HSTS_SECONDS = int(os.environ.get('SECURE_HSTS_SECONDS', '31536000'))
