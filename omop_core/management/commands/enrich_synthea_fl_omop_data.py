@@ -83,6 +83,8 @@ class Command(BaseCommand):
         if failed:
             self.stderr.write(self.style.WARNING(f'{failed} patient(s) failed to refresh — see warnings above.'))
 
+        call_command('backfill_sample_disease_profiles', org_slugs=','.join(slugs), disease='FL',
+                     person_ids=','.join(str(r.person_id) for r in records), confirm=True)
         self.stdout.write('Deriving observation_period rows...')
         call_command('populate_observation_period', org_slugs=','.join(slugs))
 

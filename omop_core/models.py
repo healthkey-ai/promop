@@ -3262,7 +3262,13 @@ class PatientRecord(models.Model):
     gelf_criteria_status = models.TextField(blank=True, null=True)
     flipi_score = models.IntegerField(blank=True, null=True)
     flipi_score_options = models.TextField(blank=True, null=True)
-    tumor_grade = models.IntegerField(blank=True, null=True)
+    tumor_grade = models.CharField(max_length=10, blank=True, null=True)
+    flipi_risk_category = models.CharField(max_length=20, blank=True, null=True)
+    number_of_nodal_sites = models.PositiveSmallIntegerField(blank=True, null=True)
+    bulky_disease = models.BooleanField(blank=True, null=True)
+    b_symptoms = models.BooleanField(blank=True, null=True)
+    gelf_criteria_options = models.TextField(blank=True, null=True)
+    ldh_upper_limit_normal = models.PositiveIntegerField(blank=True, null=True)
     # Histologic transformation of FL to DLBCL — derived from OMOP (DLBCL
     # ConditionOccurrence, or a transformation Observation as fallback).
     transformed_to_dlbcl = models.BooleanField(blank=True, null=True)

@@ -2477,6 +2477,20 @@ class PatientInfoCompatViewTest(TestCase):
         unbacked = set(self._view_columns()) - table_cols - {'status'}
         self.assertEqual(sorted(unbacked), [])
 
+    def test_text_tumor_grades_readable_through_view(self):
+        """0232 must rebuild the view without losing FL grades 3A / 3B."""
+        person = Person.objects.create(person_id=880005, year_of_birth=1980)
+        record = PatientRecord.objects.create(person=person)
+        for grade in ('1', '2', '3A', '3B', None):
+            with self.subTest(grade=grade):
+                PatientRecord.objects.filter(pk=record.pk).update(tumor_grade=grade)
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT tumor_grade FROM patient_info WHERE person_id = %s",
+                        [person.person_id],
+                    )
+                    self.assertEqual(cursor.fetchone()[0], grade)
+
     def test_view_exposes_death_date(self):
         """
         Migration 0139 adds `death_date` to the view. The column has existed on

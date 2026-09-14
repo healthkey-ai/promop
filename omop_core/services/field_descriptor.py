@@ -103,6 +103,7 @@ _EPISODE_COMPUTED_FIELDS = frozenset(
 
 # Computed fields (derived from other fields, not directly from OMOP).
 _COMPUTED_FIELDS = frozenset({
+    'flipi_score', 'flipi_risk_category', 'gelf_criteria_status',
     # Flattened language capabilities (#827) -- derived from
     # PersonLanguageSkill, so editing them here would be overwritten by
     # the next refresh.

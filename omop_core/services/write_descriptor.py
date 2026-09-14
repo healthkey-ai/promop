@@ -242,6 +242,9 @@ _ALIAS_TO_CANONICAL = {
 # Values computed during derivation from other projected fields, with the inputs
 # a UI needs in order to say why the box is not typeable.
 _COMPUTED_INPUTS = {
+    'gelf_criteria_status': ['gelf_criteria_options'],
+    'flipi_score': ['flipi_score_options'],
+    'flipi_risk_category': ['flipi_score_options'],
     'bmi': ['height', 'weight'],
     'tnbc_status': [
         'estrogen_receptor_status', 'progesterone_receptor_status', 'her2_status',
