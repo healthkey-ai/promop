@@ -14,14 +14,14 @@ implementation work; it does not approve mappings or change staging data.
 ## Current checkpoint and next action — 2026-09-14
 
 The active inventory work is [draft PR #1284](https://github.com/healthkey-ai/promop/pull/1284),
-on `feat/1223-next`. It integrates current dev through `418fc96`, including
+on `feat/1223-next`. It integrates current dev through `0c655fa`, including
 FLIPI/GELF assessments, the PALB2 naming correction and the deployment migration
 repairs. Earlier schema/runtime work remains preserved separately on
 `feat/field-value-concept-mappings`; do not replace upstream ownership contracts
 with that older implementation without review.
 
 The [generated inventory](field-mapping-inventory/README.md) now records
-**7,373 source occurrences**, including 420 fields and 4,105 live CancerBot
+**7,767 source occurrences**, including 420 fields and 4,105 live CancerBot
 option occurrences. All 172 CancerBot public bindings have source accounting:
 118 lists reconstructed from 44 live reference tables, 51 deterministic static
 lists, and three explicit trial-search exclusions. No public list remains
@@ -49,6 +49,10 @@ All 172 CancerBot lists have explicit destination-routing entries; eight expose
 missing MCL destinations. These entries retain source context and conflicts,
 including CancerBot's seven GELF criteria versus PRomop's eight. Source migration
 history is indexed; reviewed therapy aliases/removals remain catalog-specific.
+The manifest retains 394 historical option occurrences from pinned seed literals,
+schema declarations and catalog replacement/removal rules. These do not assert
+current membership, biological validity or migration execution. Historical
+numeric grade 40 is a null-clear rule, not an alias for an unknown answer.
 
 **#1223 remains unfinished.** Destination semantics, missing fields,
 retirement/replacement history and semantic candidate review still need
@@ -78,10 +82,12 @@ the traced historical metadata helper; coordinate #461/#623 before bulk approval
 All #1223–#1231 and parent #21/#26 remain open at the user's instruction.
 Priority-field coverage is additionally tracked by [#1311](https://github.com/healthkey-ai/promop/issues/1311).
 Informational PR #1235 stays closed and unmerged. Never close unfinished issues.
-Verification of this inventory/routing checkpoint: 101 focused checks; full pytest
-**2,703 passed, 4 skipped**; Django **2,003 tests OK, 1 skipped**; frontend
+Verification of this inventory/history checkpoint: full pytest
+**2,752 passed, 4 skipped**; Django **2,003 tests OK, 1 skipped**; frontend
 **595 passed, 4 skipped**; async end-to-end **4 passed**. All tests used local
-PostgreSQL/Redis. System and diff checks passed. PR #1284 remains a draft.
+PostgreSQL/Redis. A fresh local database applied the migration chain. System,
+migration drift, source-hash, manifest conservation, secret-scan and diff checks
+passed. PR #1284 remains a draft.
 
 ### Priority gene and marker field mappings — #1311
 

@@ -10,8 +10,8 @@ the inventory prerequisite.
 
 ## Regenerate
 
-The refreshed manifest contains **7,373 source occurrences**: 420 fields and
-6,953 values. All 172 CancerBot public bindings have source accounting:
+The refreshed manifest contains **7,767 source occurrences**: 420 fields and
+7,347 values. All 172 CancerBot public bindings have source accounting:
 118 reference-backed lists, 51 deterministic static lists, and three trial-search
 exclusions. There are zero public lists awaiting live reference access and zero
 planned lists awaiting source eligibility. These counts are not clinical approval.
@@ -149,6 +149,13 @@ drift. Descriptor options take precedence over frontend fallback values.
 Field renames/removals and historical choices are source evidence, not value
 equivalence. Reviewed catalog rules retain conditional i/s/t replacements,
 component-only St. John's Wort deduplication and removal of NSAIDs as a regimen.
+The manifest also retains 394 historical option occurrences: 309 pinned literal
+seed entries, 69 declared schema choices and 16 catalog-scoped old-code rules.
+These are additional source occurrences, not additions to the current catalogs.
+Legacy gene/variant strings remain unapproved, and the source PALB1 spelling is
+preserved. Each migration digest is stored as a separate `path`/`sha256` record.
+The index distinguishes 21 no-op functions from executable data operations and
+fingerprints delegated loader dependencies without importing or running them.
 Other data operations remain explicit review items; no execution receipt or
 historical row membership is inferred.
 

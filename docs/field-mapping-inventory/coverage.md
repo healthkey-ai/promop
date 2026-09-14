@@ -1,13 +1,14 @@
 # Field and value reference inventory
 
-Snapshot: 2026-09-14T13:44:50.349719+00:00. Schema: 1.
+Snapshot: 2026-09-14T14:26:50.038546+00:00. Schema: 1.
 
 **Inventory remains incomplete. No candidates are clinically approved by this export.**
 
-7373 source rows; 5831 await destination reconciliation; 4708 have no attached candidate.
+7767 source rows; 5906 await destination reconciliation; 5042 have no attached candidate.
 
 | Source | Rows |
 |---|---:|
+| cancerbot_history | 394 |
 | cancerbot_live | 4105 |
 | cancerbot_source | 175 |
 | cancerbot_static | 82 |
@@ -23,7 +24,7 @@ Snapshot: 2026-09-14T13:44:50.349719+00:00. Schema: 1.
 
 | Disposition | Rows |
 |---|---:|
-| needs_review | 6932 |
+| needs_review | 7326 |
 | not_applicable | 156 |
 | requires_structured_representation | 285 |
 
@@ -126,14 +127,21 @@ Definitions only; no migration, patient or trial table is read or executed. Unre
 
 | History evidence | Count |
 |---|---:|
-| schema_events | 90 |
-| catalog_events | 5 |
-| data_operation_requires_review | 95 |
-| unrecognized_operation_requires_review | 1 |
-| reviewed_catalog_rule | 3 |
+| schema_events | 91 |
+| catalog_events | 10 |
+| historical_seed_options | 309 |
+| data_operation_requires_review | 67 |
+| source_noop | 21 |
+| delegated_source_requires_review | 4 |
+| reviewed_catalog_rule | 6 |
 
 | Catalog scope | Old code | Replacement | Rule |
 |---|---|---|---|
+| PatientInfo | `40` | `(none)` | Clear the obsolete numeric grade-4 value to null; this is not selection of Unknown or a valid breast biopsy grade. |
+| Disease | `mm` | `MM` | Repoint disease relationships and deduplicate, or rename when uppercase counterpart is absent. Do not normalize unrelated codes. |
+| Disease | `fl` | `FL` | Repoint disease relationships and deduplicate, or rename when uppercase counterpart is absent. Do not normalize unrelated codes. |
+| Disease | `bc` | `BC` | Repoint disease relationships and deduplicate, or rename when uppercase counterpart is absent. Do not normalize unrelated codes. |
+| TrialType | `targeted_therapy_all` | `(none)` | Trial-type search category removed; this is not a Therapy, component or class catalog retirement. |
 | Therapy, TherapyComponent, TherapyComponentCategory | `i` | `ixazomib` | Replacement must exist in the same catalog level; unresolved references abort removal. |
 | Therapy, TherapyComponent, TherapyComponentCategory | `s` | `selinexor` | Replacement must exist in the same catalog level; unresolved references abort removal. |
 | Therapy, TherapyComponent, TherapyComponentCategory | `t` | `tazemetostat` | Replacement must exist in the same catalog level; unresolved references abort removal. |
@@ -154,7 +162,7 @@ Definitions only; no migration, patient or trial table is read or executed. Unre
 
 ## Reconciliation
 
-Duplicate source identities: 0. Shared destination/value/context groups: 234. These groups are evidence for review, not automatic aliases.
+Duplicate source identities: 0. Shared destination/value/context groups: 258. These groups are evidence for review, not automatic aliases.
 
 | Validation flag | Source rows |
 |---|---:|

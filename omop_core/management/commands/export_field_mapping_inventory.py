@@ -339,8 +339,9 @@ def build_inventory(root, cancerbot_root, frontend, live_export=None, search=Fal
                        'naming_decision': catalog['naming_decision']}]))
     from omop_core.services.field_inventory_crosswalk import reconcile_cancerbot_destinations, SOURCES as CROSSWALK_SOURCES
     destination_crosswalk = reconcile_cancerbot_destinations(cancerbot_root, source['bindings'], rows, tables)
-    from omop_core.services.field_inventory_history import collect_cancerbot_history
+    from omop_core.services.field_inventory_history import collect_cancerbot_history, historical_option_rows
     source_history = collect_cancerbot_history(cancerbot_root)
+    rows += historical_option_rows(source_history, {r['destination_path'] for r in rows if r['source'] == 'promop_field'})
     candidates = attach_candidates(rows, vocabularies, now.date())
     if search:
         search_candidates(rows, candidates, vocabularies, now.date())
@@ -375,6 +376,7 @@ def build_inventory(root, cancerbot_root, frontend, live_export=None, search=Fal
              'omop_core/services/field_inventory_frontend.py', 'omop_core/data/field_inventory_frontend_providers.json',
              'omop_core/services/field_inventory_crosswalk.py',
              'omop_core/services/field_inventory_history.py',
+             'omop_core/services/field_inventory_history_seeds.py',
              'omop_core/services/field_inventory_priority.py',
              'omop_core/services/demographics.py', 'omop_core/services/treatment_catalog.py',
              'omop_core/services/cancerbot_reference_options.py',
