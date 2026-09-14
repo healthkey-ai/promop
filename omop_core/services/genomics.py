@@ -35,9 +35,21 @@ _VARIANT_LEVEL_FIELDS = frozenset({
 })
 
 
+def mapping_is_usable(mapping, *, parent=False):
+    """Shared storage gate for the writer, catalog and readiness audit.
+
+    A standard concept is optional: source-only parent storage is supported.
+    This checks the recipe, not actor permissions or payload-specific fields.
+    """
+    tables = ('measurement',) if parent else ('measurement', 'observation')
+    return bool(mapping is not None and mapping.status == 'approved'
+                and mapping.omop_table in tables and mapping.source_value
+                and len(mapping.source_value) <= 50)
+
+
 def approved_mapping(field_name):
     mapping = FieldConceptMapping.objects.filter(field_name=field_name, status='approved').select_related('concept').first()
-    if mapping is None or mapping.omop_table not in ('measurement', 'observation') or not mapping.source_value or len(mapping.source_value) > 50:
+    if not mapping_is_usable(mapping):
         raise ValidationError({field_name: 'A complete approved genomics field mapping is required.'})
     return mapping
 
@@ -326,7 +338,7 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_r
     if marker and data['gene'].upper() != marker['gene'].upper():
         raise ValidationError({'gene': 'The gene must match the selected priority marker.'})
     parent_mapping = approved_mapping(marker['field_name']) if marker else None
-    if parent_mapping and parent_mapping.omop_table != 'measurement':
+    if parent_mapping and not mapping_is_usable(parent_mapping, parent=True):
         raise ValidationError({marker['field_name']: 'Variant parents must map to Measurement.'})
     component_mappings = {key: approved_mapping('genetic_mutations.' + key)
         for key in FIELDS if key in payload or (data.get(key) is not None and data.get(key) != '')}

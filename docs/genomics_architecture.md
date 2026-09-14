@@ -140,6 +140,8 @@ Every marker has a concrete JSON list field genomics_<key> on PatientRecord. The
 | MCL | tp53, myc, kmt2d, notch1, notch2, nsd2, cdkn2a, smarca4, ccnd1, del17p, t1114, bcl2_amplification, complex_karyotype, complex_karyotype_excl_t1114, atm_atr, notch1_notch2 |
 | CLL | tp53, notch1, sf3b1, atm, del17p, del11q, del13q, trisomy12 |
 
+Catalog `writable` flags use the same storage validation as the writer and readiness audit: an approved mapping, a Measurement parent table, and a nonempty source identifier of at most 50 characters. Valid source-only mappings remain writable without a standard concept. The catalog fetches the selected disease’s mappings in one query; actor authorization and payload-specific component validation still apply at save time. Invalid parent recipes remain visible with editing disabled.
+
 Exact structural aliases take precedence over generic gene matching. A TP53 mutation does not imply del(17p). Combined ATM/ATR and NOTCH1/NOTCH2 assertions are preserved rather than split. Source example validation remains pending; seeded storage approval does not validate those examples.
 
 Samar's [2026-09-11 decision](https://github.com/cancerbot-org/cancerbot/issues/4812#issuecomment-5633297037) approves correcting PALB1 to PALB2. The current marker is `palb2`, with `genomics_palb2` as its PatientRecord list. Migration `0233_genomics_palb2_naming` renames the projection column and curation field identities, corrects cached gene/marker codes, and preserves list order, repeated finding IDs and original gene text as `source_gene`. Mapping IDs, source keys, review status, reviewer and recipe settings survive; conflicting curation identities abort the atomic migration. The migration is forward-only because new PALB2 findings cannot safely be relabeled as the old spelling.
@@ -199,7 +201,7 @@ Interactive CRUD is implemented. A published versioned import contract, source-f
 - [Canonical writer](../omop_core/services/genomics.py), [PatientRecord projection](../omop_core/services/patient_record_service.py), [catalog](../omop_core/services/genomics_catalog.py), [frozen fixture](../omop_core/data/genomics_catalog_v1.json).
 - [Shared Genomics UI](../frontend/src/components/PatientInfo/tabs/GenomicsTab.tsx), [patient API](../patient_portal/api/views.py), [mapping inventory](../omop_core/services/field_descriptor.py), [mapping serializers](../patient_portal/api/serializers.py).
 - [Sample data command](../omop_core/management/commands/populate_genomics_sample_data.py) seeds demonstration findings; sample variants are not expert validation of clinical nomenclature.
-- Render staging is: `https://promop-staging.onrender.com`, web service `promop-staging`, worker `promop-staging-worker`. Follow [Render staging configuration](render-staging-celery.md). Cloud Run staging is also supported through its deployment workflow; verify its database separately. Never inherit a remote database URL for local tests.
+- Render staging is: `https://promop-staging.onrender.com`, web service `promop-staging`, worker `promop-staging-worker`. Follow [Render staging configuration](render-staging-celery.md). Use Render staging for genomics verification; Cloud Run access is outside the current delivery gates. Never inherit a remote database URL for local tests.
 
 The old root architecture, handoff, short pointer and genetic-mutations implementation notes are superseded by this document and the implementation plan. Historical PR status and test totals are not current verification evidence. Strict exports must explicitly preserve the local text and linkage conventions; generic FHIR sync is not a validated genomics graph adapter.
 
@@ -241,7 +243,7 @@ variant facts and replaces them with a newly generated set. It does not enrich
 the existing findings in place. Random previews and subsequent writes can differ.
 Dry runs perform no writes; verbosity 2 prints complete JSON payloads.
 
-For local testing, explicitly set `DATABASE_URL` to an isolated local database. For staging operations, name Render or Cloud Run explicitly and verify its configured database; never inherit an unspecified `.env` database URL.
+For local testing, explicitly set `DATABASE_URL` to an isolated local database. For staging operations, use Render staging and verify its configured database; never inherit an unspecified `.env` database URL.
 
 Load the OMOP vocabulary and apply migrations through the genomics component
 seeds before writing. `seed_genomics_catalog` can seed missing mappings while

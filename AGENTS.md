@@ -1,10 +1,11 @@
 # Environment conventions
 
-- Render staging and Google Cloud Run staging are both supported. Name the target explicitly when reporting deployments or verification.
-- Render staging is https://promop-staging.onrender.com: web service `promop-staging`, worker `promop-staging-worker`.
+- Staging always means Render: https://promop-staging.onrender.com.
+- The staging web service is `promop-staging`; its worker is `promop-staging-worker`.
+- Do not use the old Google Cloud / Cloud Run staging deployment to investigate or verify staging unless the user explicitly asks for it.
 - Render production is `promop` with worker `promop-worker`. The unused legacy Render web service has been retired; do not include it in active readiness work.
 - Cloud Run staging remains managed by `.github/workflows/deploy-staging.yml` and `Dockerfile.gcp`. Preserve its existing service, image, bucket and integration identifiers.
-- `STAGING_DATABASE_URL` identifies Render staging. Do not assume it targets Cloud Run staging. Verify each deployment's configured database separately.
+- `STAGING_DATABASE_URL` identifies Render staging; verify it matches the active Render web and worker configuration before database operations.
 - See `docs/render-staging-celery.md` for Render staging configuration and verification.
 
 # Pull request reviews
@@ -12,6 +13,10 @@
 - There is no team review process. Do not request team reviewers (including `healthkey`) or configure required team-review rules.
 - Request individual reviewers as directed by the user. Lars Burgess is `@larsburgess` on GitHub.
 - Merging to `dev` does not require review approval. Individual review requests are optional; required CI checks must still pass.
+
+# Pull request labels
+
+- When an issue has a security-related label, apply the same label to its pull request.
 
 ## Documentation-only changes
 

@@ -8,12 +8,11 @@ This file tells LLMs (Claude, Copilot, etc.) how to work on this codebase consis
 
 ### Staging deployment
 
-There are two supported staging deployments: Render and Google Cloud Run.
-Render staging is service `promop-staging` in Oregon, at
-https://promop-staging.onrender.com, deployed from `dev`. Cloud Run staging
-continues through `.github/workflows/deploy-staging.yml` and `Dockerfile.gcp`;
-preserve its existing resource and integration identifiers. Name the target
-explicitly when deploying or verifying it.
+Use Render staging for investigation and verification: service `promop-staging`
+in Oregon at https://promop-staging.onrender.com, deployed from `dev`. Cloud Run
+access is not a genomics delivery gate. Preserve the existing Cloud Run resource
+and integration identifiers in `.github/workflows/deploy-staging.yml` and
+`Dockerfile.gcp`.
 Use `STAGING_DATABASE_URL` from `.env` for Render staging database access; Render
 web and worker processes use `DATABASE_URL` for that same existing database.
 Never put the database connection string or credentials in Git or tool output.
