@@ -1,4 +1,9 @@
-"""django-oauth-toolkit must enforce the redirect schemes we configure."""
+"""django-oauth-toolkit must enforce the redirect schemes we configure.
+
+Each case overrides the setting, so this file pins the validator's contract,
+not the project default. The shipped value is pinned separately, in clean
+subprocesses, by test_debug_security_settings.py.
+"""
 
 import pytest
 from django.core.exceptions import ValidationError
