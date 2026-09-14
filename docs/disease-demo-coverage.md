@@ -33,6 +33,12 @@ score from those selections; it cannot be independently edited. A null factor
 list is unassessed, whereas an explicit empty list is an assessed score of zero.
 Historical cancerbot factor tokens are accepted. The criteria are baseline
 assessments and do not silently change when unrelated current labs are edited.
+Historical numeric FLIPI scores without a factor checklist remain visible and
+are preserved on unrelated edits and OMOP extraction. An explicit checklist
+replaces the historical score; an explicit clear remains authoritative during
+refresh while the old numeric source is still present. Demo backfilling does
+not invent missing factors for an already recorded numeric score, and recovery
+does not treat an assessed empty FLIPI/GELF checklist as missing.
 
 The GELF checklist makes the selected high-burden criteria explicit. It uses
 mass >7 cm, at least three areas each >3 cm, B symptoms, organ compromise,
@@ -79,6 +85,9 @@ identifiers. The FL generator previously used `21912-1` for a nodal count, but
 Those old keys are read only by the explicit sample repair path. Each disease's
 enrichment pass also completes its selected cohort, so the combined generation,
 import, and enrichment commands retain coverage on future runs.
+Generated profile observations stay beside their own Patient entry so that
+single-patient command-line import batches remain self-contained. Breast-cancer
+completion reads nodal stage (`21906-3`) before evaluating its Oncotype subgroup.
 
 The grade migration preserves numeric grades as text and can store 3A/3B.
 All factor inputs remain editable through PatientRecord. Computed outputs do

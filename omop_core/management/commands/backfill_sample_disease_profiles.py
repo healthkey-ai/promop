@@ -77,7 +77,10 @@ class Command(BaseCommand):
                         recovered.setdefault('stem_cell_transplant_history', ['autologous SCT'])
                         recovered.setdefault('sct_date', transplants[record.person_id])
                     for field, value in recovered.items():
-                        if field not in protected and (missing(getattr(record, field)) or field == 'stage'):
+                        current = getattr(record, field)
+                        is_missing = (current is None if field in {'flipi_score_options', 'gelf_criteria_options'}
+                                      else missing(current))
+                        if field not in protected and (is_missing or field == 'stage'):
                             setattr(record, field, value)
                     synthetic = profile_values(record, disease)
                     for field, value in synthetic.items():
@@ -111,8 +114,10 @@ class Command(BaseCommand):
                             if record.gelf_criteria_status != status:
                                 record.gelf_criteria_status = status
                                 delta['gelf_criteria_status'] = status
-                        try: score, risk = calculate_flipi(record.flipi_score_options)
-                        except ValueError: score, risk = None, None
+                        score, risk = record.flipi_score, record.flipi_risk_category
+                        if record.flipi_score_options is not None:
+                            try: score, risk = calculate_flipi(record.flipi_score_options)
+                            except ValueError: score, risk = None, None
                         if record.flipi_score != score or record.flipi_risk_category != risk:
                             record.flipi_score, record.flipi_risk_category = score, risk
                             delta.update(flipi_score=score, flipi_risk_category=risk)

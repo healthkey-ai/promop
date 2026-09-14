@@ -120,7 +120,7 @@ function LymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onCha
           <ClinicalField label="Tumor Grade" name="tumor_grade" descriptor={descriptors.tumor_grade} type="select" value={formData?.tumor_grade} options={FL_TUMOR_GRADE_OPTIONS} onChange={onChange} vocabSource={flGradeSource} />
           <div className="sm:col-span-2"><GelfAssessment value={formData?.gelf_criteria_options} descriptor={descriptors.gelf_criteria_options} onChange={onChange} /></div>
           <div className="sm:col-span-2">
-            <FlipiAssessment value={formData?.flipi_score_options} descriptor={descriptors.flipi_score_options} onChange={onChange} />
+            <FlipiAssessment value={formData?.flipi_score_options} recordedScore={formData?.flipi_score} descriptor={descriptors.flipi_score_options} onChange={onChange} />
           </div>
           <ClinicalField label="Bulky Disease" name="bulky_disease" descriptor={descriptors.bulky_disease} type="select" value={formData?.bulky_disease} options={YES_NO_OPTIONS} onChange={onChange} />
           <ClinicalField label="B Symptoms" name="b_symptoms" descriptor={descriptors.b_symptoms} type="select" value={formData?.b_symptoms} options={YES_NO_OPTIONS} onChange={onChange} />

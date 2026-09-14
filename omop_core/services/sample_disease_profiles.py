@@ -76,7 +76,8 @@ def profile_values(record, disease):
         put('spleen_size', round(rng.uniform(17, 22) if get('splenomegaly') else rng.uniform(10, 13), 1))
         put('serum_beta2_microglobulin_level', round(rng.uniform(1.2, 5), 1))
         # Null and explicit empty selections differ: preserve an assessed score of zero.
-        if getattr(record, 'flipi_score_options', None) is None and age is not None:
+        if (getattr(record, 'flipi_score_options', None) is None
+                and getattr(record, 'flipi_score', None) is None and age is not None):
             factors = [key for key, present in [
                 ('age', age > 60), ('stage', advanced), ('hemoglobin', float(get('hemoglobin_g_dl')) < 12),
                 ('nodalAreas', int(get('number_of_nodal_sites')) > 4),
@@ -238,7 +239,7 @@ def complete_demo_fhir_bundle(bundle, disease):
     code_fields = {code: field for code, (field, _) in _LOINC_LAB_FIELDS.items()}
     code_fields.update({'16112-5': 'estrogen_receptor_status', '16113-3': 'progesterone_receptor_status',
                         '48676-1': 'her2_status', '21908-9': 'stage', '21908-9-riss': 'stage',
-                        '21901-4': 'distant_metastasis_stage'})
+                        '21901-4': 'distant_metastasis_stage', '21906-3': 'nodes_stage'})
     for resource in resources:
         reference = (resource.get('subject') or {}).get('reference', '').split('/')[-1]
         record = by_patient.get(reference)
@@ -256,7 +257,17 @@ def complete_demo_fhir_bundle(bundle, disease):
             answer = resource.get('valueCodeableConcept', {})
             value = answer.get('text') or next((c.get('display') or c.get('code') for c in answer.get('coding', [])), None)
         if value is not None: setattr(record, field, value)
-    for patient_id, record in by_patient.items():
+    # Both command-line importers batch at Patient boundaries. Insert the new
+    # facts beside their Patient, not after the last patient's resources.
+    completed = []
+    for entry in bundle.get('entry', []):
+        completed.append(entry)
+        resource = entry.get('resource', {})
+        if resource.get('resourceType') != 'Patient':
+            continue
+        patient_id = resource['id']
+        record = by_patient[patient_id]
         for field, value in profile_values(record, disease).items():
-            bundle['entry'].append({'resource': profile_fhir_observation(patient_id, field, value, record.diagnosis_date or date.today())})
+            completed.append({'resource': profile_fhir_observation(patient_id, field, value, record.diagnosis_date or date.today())})
+    bundle['entry'] = completed
     return bundle

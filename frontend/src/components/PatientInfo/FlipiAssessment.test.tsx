@@ -32,4 +32,16 @@ describe('FLIPI transparent calculation', () => {
     render(<FlipiAssessment value="age" descriptor={{ writable: false } as FieldDescriptor} onChange={() => {}} />);
     for (const checkbox of screen.getAllByRole('checkbox')) expect(checkbox).toBeDisabled();
   });
+  it.each([0, 3])('displays a historical score of %s without inventing its factors', recordedScore => {
+    render(<FlipiAssessment value={null} recordedScore={recordedScore} descriptor={writable} onChange={() => {}} />);
+    expect(screen.getByText(`FLIPI Score: ${recordedScore} / 5 — historical`)).toBeInTheDocument();
+    expect(screen.getByText(/Factor checklist unavailable/)).toBeInTheDocument();
+    expect(screen.queryByText('FLIPI Score: Not assessed')).not.toBeInTheDocument();
+    for (const checkbox of screen.getAllByRole('checkbox')) expect(checkbox).not.toBeChecked();
+  });
+  it('uses an explicit empty assessment instead of a stale historical score', () => {
+    render(<FlipiAssessment value="" recordedScore={3} descriptor={writable} onChange={() => {}} />);
+    expect(screen.getByText('FLIPI Score: 0 / 5 — Low risk')).toBeInTheDocument();
+    expect(screen.queryByText(/historical/)).not.toBeInTheDocument();
+  });
 });

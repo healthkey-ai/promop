@@ -2,8 +2,8 @@ import type { FieldDescriptor } from '@/hooks/useWritableFields';
 
 import { FLIPI_FACTORS, selectedFlipiFactors } from './flipiFactors';
 
-export default function FlipiAssessment({ value, descriptor, onChange }: {
-  value: unknown; descriptor?: FieldDescriptor;
+export default function FlipiAssessment({ value, recordedScore, descriptor, onChange }: {
+  value: unknown; recordedScore?: unknown; descriptor?: FieldDescriptor;
   onChange: (field: string, value: unknown) => void;
 }) {
   const selected = selectedFlipiFactors(value);
@@ -22,7 +22,10 @@ export default function FlipiAssessment({ value, descriptor, onChange }: {
         </label>
       ))}
       <div className="rounded bg-muted p-3" aria-live="polite">
-        <p className="font-medium">FLIPI Score: {score == null ? 'Not assessed' : `${score} / 5 — ${risk} risk`}</p>
+        <p className="font-medium">FLIPI Score: {score == null ? (recordedScore == null ? 'Not assessed' : `${String(recordedScore)} / 5 — historical`) : `${score} / 5 — ${risk} risk`}</p>
+        {score == null && recordedScore != null && (
+          <p className="text-sm">Factor checklist unavailable; the historical score has not been recalculated.</p>
+        )}
         {score != null && <p className="text-sm">{FLIPI_FACTORS.map(([key]) => selected?.includes(key) ? '1' : '0').join(' + ')} = {score}</p>}
         <p className="text-xs text-muted-foreground">0–1: Low · 2: Intermediate · 3–5: High. FLIPI describes prognosis; GELF assesses tumor burden.</p>
       </div>

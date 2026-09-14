@@ -64,7 +64,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 5
+DERIVATION_VERSION = 6
 
 # Fields that are entirely derived from OMOP tables and must be reset before
 # each refresh so deletions are reflected (not just additions).
@@ -977,6 +977,11 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         for field, value in preserved.items():
             derived_value = getattr(patient_info, field, None)
             matches = _derived_value_matches(field, derived_value, value)
+            if (field == 'flipi_score_options' and value is None
+                    and patient_info.flipi_score is not None):
+                # A pending explicit clear also supersedes a legacy numeric
+                # score. Keep that edit pending while OMOP still carries it.
+                matches = False
             # Keep the already-stored representation even on a match so saving
             # a float extractor result cannot introduce another rounding step.
             setattr(patient_info, field, value)
@@ -991,7 +996,10 @@ def refresh_patient_record(person: Person) -> PatientRecord:
 
         patient_info.derivation_version = DERIVATION_VERSION
         patient_info.derived_at = timezone.now()
-        return recompute_patient_record_fields(patient_info)
+        return recompute_patient_record_fields(
+            patient_info,
+            changed_fields=user_edited & {'flipi_score_options', 'gelf_criteria_options'},
+        )
 
 
 def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fields=()) -> PatientRecord:
@@ -1021,10 +1029,15 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
         if inputs.intersection(changed_fields):
             setattr(patient_info, result, None)
     from omop_core.services.flipi import calculate_flipi
-    try:
-        patient_info.flipi_score, patient_info.flipi_risk_category = calculate_flipi(patient_info.flipi_score_options)
-    except ValueError:
-        patient_info.flipi_score = patient_info.flipi_risk_category = None
+    if (patient_info.flipi_score_options is not None
+            or 'flipi_score_options' in changed_fields):
+        try:
+            patient_info.flipi_score, patient_info.flipi_risk_category = calculate_flipi(patient_info.flipi_score_options)
+        except ValueError:
+            patient_info.flipi_score = patient_info.flipi_risk_category = None
+    # A historical score without recorded factors is not an unassessed score.
+    # Keep it on unrelated edits and after extracting a numeric OMOP result;
+    # only an explicit assessment edit may replace/clear it.
     if patient_info.gelf_criteria_options is not None:
         patient_info.gelf_criteria_status = 'Met' if patient_info.gelf_criteria_options.strip() else 'Not Met'
     elif 'gelf_criteria_options' in changed_fields:

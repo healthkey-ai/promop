@@ -124,10 +124,16 @@ def test_api_factor_save_recomputes_score_without_reverse_refresh():
 
 
 @pytest.mark.django_db(transaction=True)
-def test_generated_assessments_survive_real_fhir_import(tmp_path):
+def test_generated_assessments_survive_real_fhir_import(tmp_path, monkeypatch):
     import json
     from patient_portal.models import Identity
     from omop_core.services.sample_disease_profiles import profile_fhir_observation
+    from omop_core.test_utils import ensure_test_concept_zero
+    from omop_core.management.commands import import_fhir_bundle
+    # Transactional tests flush session seed rows. Make this import independent
+    # of test order, and leave global connection tuning untouched.
+    ensure_test_concept_zero()
+    monkeypatch.setattr(import_fhir_bundle, '_patch_db_timeouts', lambda: None)
     Identity.objects.create_user(email='demo-import@example.test',is_staff=True,is_superuser=True)
     resources=[{'resourceType':'Patient','id':'demo-import-patient','name':[{'given':['Demo'],'family':'Lymphoma'}],'gender':'female','birthDate':'1950-01-01'}]
     resources.extend(profile_fhir_observation('demo-import-patient',key,value,'2024-01-01') for key,value in {
