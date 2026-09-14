@@ -39,9 +39,9 @@ def test_derivation_preserves_user_edited_fields():
 
 def test_public_contract_documents_patient_record_first_writes_and_legacy_policy():
     """Public docs link the current editing contract and retain SQL-view limits."""
-    api_surface = (REPOSITORY_ROOT / "API_SURFACE.md").read_text()
+    api_surface = (REPOSITORY_ROOT / "docs" / "API_SURFACE.md").read_text()
 
-    assert "docs/patient-record-first-writes.md" in api_surface
+    assert "(patient-record-first-writes.md)" in api_surface
     assert "field_concept_mapping_architecture.md" in api_surface
     assert "PATCH /api/v1/patient-records/{person_id}/" in api_surface
     assert "Legacy SQL compatibility only:" in api_surface

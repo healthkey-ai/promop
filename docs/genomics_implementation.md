@@ -105,7 +105,7 @@ A specialized whole-finding review/hold adapter must gate live imports until rec
 [ADR 0001](adr/0001-vocabulary-source-of-truth.md) defines vocabulary authority
 and the separation of vocabulary release, reviewed mapping revision and source
 catalog/recipe version. The
-[field/value plan](../field_concept_mapping_plan.md#vocabulary-distribution-and-mapping-provenance)
+[field/value plan](field_concept_mapping_plan.md#vocabulary-distribution-and-mapping-provenance)
 owns shared distribution and answer-mapping delivery. This section owns the
 Genomics-specific acceptance; ADR 0002's therapy-class overlap rules do not
 establish genomic eligibility semantics.
