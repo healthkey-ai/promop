@@ -23,6 +23,18 @@ Cloud / Cloud Run staging deployment for this work.
 
 ## Recommended implementation order
 
+**Sequencing decision (2026-09-14): finish the genomics plan and the field
+concept mapping enhancements before selecting an RC revision or starting final
+candidate acceptance.** Both workstreams are still active in other terminals.
+Do not select a candidate SHA, freeze a branch, or chase successive staging
+deployments for release certification while this implementation is ongoing.
+The completed staging checks below are interim regression evidence only.
+
+Independent preparation can continue: maintain the scope and dependency list,
+draft release notes, and prepare the rollout/recovery checklist. The release
+owner's broader coded-value interoperability promise remains deferred; waiting
+for the active enhancements does not establish that broader acceptance claim.
+
 - [ ] **1. Correct breast cancer mappings — [#1227](https://github.com/healthkey-ai/promop/issues/1227), under [#21](https://github.com/healthkey-ai/promop/issues/21).**
   Fix the wrong-code paths through which HER2 can populate Ki-67, ER can populate
   Oncotype/methodology, and perineural invasion can populate nodal status. These
@@ -126,7 +138,8 @@ critical path. Keep their existing issues open.
 4. Work through the priorities in order, preserving unrelated local changes in
    separate worktrees where needed. Update this document in commits so the next
    machine can resume from the same state.
-5. Establish a clean candidate from the intended `dev` commit and record its exact
+5. Only after the genomics plan and field concept mapping enhancements are
+   finished, establish a clean candidate from the intended `dev` commit and record its exact
    SHA. Require CI and migration, login, patient-edit, import, and worker smoke
    checks on that exact candidate on Render. Repeat affected checks if it changes.
    Verify both fresh installation and supported upgrade paths. Record deployment
@@ -140,7 +153,7 @@ critical path. Keep their existing issues open.
 | Item | Decision / evidence |
 | --- | --- |
 | Supported release scope | PHR federation included by release-owner instruction on 2026-09-14. Confirmed mapping corrections included; broader coded-value interoperability deferred by release-owner instruction on 2026-09-14. |
-| Candidate branch and SHA | Pending |
+| Candidate branch and SHA | Deliberately not selected. Finish the genomics plan and field concept mapping enhancements first, then begin final candidate acceptance. |
 | Priority fixes and PRs | Breast mapping corrections belong to the separate `feat/field-value-concept-mappings` workstream; do not duplicate or close its parent issues. Unit normalization: [PR #1289](https://github.com/healthkey-ai/promop/pull/1289), merged to dev as `05cc776b7b7bc2296006994055ed8295cf5c2485` after all required CI passed. Browser auth: [PR #1216](https://github.com/healthkey-ai/promop/pull/1216), merged after required CI passed as `2951caf82e57c8ad9ecdaeadd4161a891ded2c48`; Render login/logout acceptance pending. Disease work merged through #1267 and #1280; read-only Render coverage and consistency verification passed on 2026-09-14. |
 | Remaining known limitations | Vlad owns PHR audience claims ([phr#65](https://github.com/healthkey-ai/phr/issues/65)) and verified-email evidence ([phr#66](https://github.com/healthkey-ai/phr/issues/66)); both are required gates. Local unpublished prototypes are paused and are not delivery evidence. Release owner approved a conservative TP53 unknown correction on 2026-09-14; [PR #1297](https://github.com/healthkey-ai/promop/pull/1297), merged to dev as `4832193c4a2625bb95df73387159734a02292cd8` after all required CI passed. The release owner transferred the remaining migration repair here: one empty `0236_merge_concurrent_0235_branches` joins both existing 0235 files without changing either history. Fresh migration and upgrades from either 0235 branch passed, with no model drift. Full CI passed: Django 2,000 tests OK (one skipped), pytest 2,620 passed (five skipped, four deselected), frontend lint/build, security and CodeQL. Final Render acceptance and controlled rederivation remain pending. Negative-result criteria, del(17p), source conflicts and downstream-consumer acceptance remain open. Genomics upgrade prerequisites in [#1286](https://github.com/healthkey-ai/promop/issues/1286) remain open. Render staging NOTE audit passed: 9,110 active and 11,956 retired legacy references, zero unresolved ownership/missing references; other supported deployments still need evidence. |
 | CI and migration evidence | #1289 local: 2,531 pytest passed, five skipped; Django 2,000 tests OK, one skipped; fresh migrations passed. #1216 after dev merge: 588 frontend passed, four skipped; lint/build passed; 50 auth/service-identity and 27 PHR/security tests passed. Integrated dev `2951caf`: 101 blood-count, edit, browser-auth and import regressions passed locally. TP53 correction: 233 targeted tests passed after the dev update, followed by full CI (2,620 pytest passed and Django 2,000 tests OK). These are branch checks, not exact-candidate release certification. |
@@ -173,3 +186,63 @@ would become unknown, with no qualifying positives in the cached findings and
 no pending edits on the aggregate/mutation inputs. This is not a source refresh.
 No rederivation/backfill was performed; versions 7 and 8 must be evaluated
 alongside their combined unit/disease effects before rollout.
+
+### Interim integration evidence, not candidate acceptance
+
+PR #1303 merged `0237_merge_concurrent_0236_branches`, joining the two 0236
+repairs without rewriting applied history. PR #1301 incorporated that repair;
+both backend migration setup steps passed on its replacement CI run. Full
+integration and the genomics deployment gates remain separate requirements.
+
+Before the sequencing clarification, bounded Render checks confirmed session
+login/logout, Secure/HttpOnly/SameSite=Lax cookies, and rejection of an invalidated
+session cookie. A separate synthetic-patient check imported one FHIR patient
+without errors, dispatched a real queued derivation, observed `SUCCESS`, and
+verified that absent TP53 evidence remained JSON `null` after import and worker
+completion. The temporary organization and patient were deleted and the test
+sessions logged out. These checks do not certify a release revision, complete
+patient-edit acceptance, establish PHR federation, or authorize a patient backfill.
+
+### Release-note draft to reconcile after implementation finishes
+
+Already merged changes that can be described, subject to final acceptance:
+
+- ANC and platelet derivation normalizes supported source units. Missing or
+  unsupported units remain unknown rather than supplying an unsafe numeric value.
+- Browser authentication uses server sessions and rejects credentials for retired
+  browser OAuth clients. External SMART/service clients retain their supported
+  authentication paths.
+- The legacy TP53 aggregate preserves qualifying positive evidence and otherwise
+  returns unknown. This does not add del(17p) aggregation or new negative criteria.
+- Disease-specific assessment and sample-coverage improvements include FLIPI/GELF
+  assessment semantics and disease-specific applicability checks.
+
+Add the completed genomics and field concept mapping changes after reviewing
+their final delivered scope. Include PHR federation only with the required partner
+implementation and end-to-end evidence. Do not claim full coded-value
+interoperability or complete clinical/source-conflict resolution.
+
+### Rollout and recovery preparation
+
+This is a checklist for use after implementation finishes, not an instruction to
+deploy or rederive existing patients now.
+
+- Inventory supported upgrade environments and their migration/vocabulary state.
+  Keep Render staging evidence separate from production evidence.
+- Reconcile the final migration graph and verify a fresh install plus supported
+  upgrade paths. Use the final genomics prerequisite audit and record unresolved
+  schema, recipe, vocabulary, and NOTE-ownership requirements.
+- Record required configuration: custom retired browser OAuth client IDs, PHR
+  issuer/service audience and verified-email claims, and matching Render web and
+  worker database/broker configuration. Keep credentials out of release artifacts.
+- Prepare a dry-run reconciliation report for the final derivation implementation,
+  including combined unit, TP53, disease, and mapping effects. Preserve manual
+  edits and review the affected patient scope before any backfill. Earlier cached
+  estimates are inputs to this report, not authorization to apply them.
+- Before a data rollout, retain a restorable snapshot and record the affected
+  canonical/source rows, derivation versions, and verification queries. Define
+  the recovery procedure for that specific rollout; reverting application code
+  alone does not restore rederived values or remove applied migrations.
+- After implementation finishes, select the candidate and run final login/logout,
+  PHR linking/invitations, authorized mapped/unmapped edits, import, worker, and
+  downstream unknown-value acceptance. Retain exact deployment evidence then.
