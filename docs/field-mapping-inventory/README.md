@@ -16,6 +16,14 @@ The refreshed manifest contains **7,767 source occurrences**: 420 fields and
 exclusions. There are zero public lists awaiting live reference access and zero
 planned lists awaiting source eligibility. These counts are not clinical approval.
 
+All source occurrences now have an implementation-routing disposition and owner;
+the [coverage report](coverage.md#implementation-destination-accounting) separates
+existing fields, managed catalogs, frontend/source consumers and retained
+historical evidence. Eight CancerBot routes still need MCL destination fields.
+Knowing a source's consumer does not resolve its clinical meaning or create that
+runtime field. The plan's [1.3 release gates](../field_concept_mapping_plan.md#13-release-gates)
+track inventory acceptance and the dependent implementation and rollout work.
+
 [cancerbot-reference.json](cancerbot-reference.json) contains the 44 allowlisted
 reference tables captured in one read-only transaction, reviewed provider source,
 file hashes and source revision. [cancerbot-options.json](cancerbot-options.json)
@@ -45,6 +53,9 @@ partial and empty exports, and retains removed options with
 `source_presence=absent_from_latest_export`. Absence does not prove retirement.
 A changed label is flagged for review. Stable identities retain reconciliation
 metadata; per-binding export dates/revisions distinguish partial refreshes.
+A changed source revision invalidates the reviewed routing contract until its
+definitions are reviewed again. Replays preserve existing dispositions while
+assigning new rows to the reviewed routes only when the source revision matches.
 
 For a fresh CancerBot read, privately configure `CANCERBOT_DATABASE_URL`, omit
 `--snapshot`, and add `--snapshot-output /tmp/cancerbot-reference.json`. No DSN
@@ -131,6 +142,10 @@ meanings**. Constants and their rendered controls are separate evidence.
   conflicts separately from immutable source scope; it does not approve aliases
   or replace canonical values. All 172 bindings have entries, including eight
   missing MCL destinations. Shared literal rows may have several routes.
+- `implementation_contract`: source/consumer routing status, destinations,
+  missing fields, implementation owners and unresolved representation context.
+  This annotation leaves typed source identities and existing mapping records
+  intact. It never constitutes semantic approval or proof of retirement.
 
 `reference_tables` retains safe source records and therapy/gene relationships.
 `source_revisions` records Git revisions, relevant source-file hashes and dirty
@@ -154,10 +169,15 @@ seed entries, 69 declared schema choices and 16 catalog-scoped old-code rules.
 These are additional source occurrences, not additions to the current catalogs.
 Legacy gene/variant strings remain unapproved, and the source PALB1 spelling is
 preserved. Each migration digest is stored as a separate `path`/`sha256` record.
-The index distinguishes 21 no-op functions from executable data operations and
-fingerprints delegated loader dependencies without importing or running them.
-Other data operations remain explicit review items; no execution receipt or
-historical row membership is inferred.
+All 98 data-migration operations have a recorded definition scope: 51 source-scope
+reviews, 20 literal-seed operations, 21 no-ops and six catalog-rule operations.
+`definition_coverage_complete` reports this bounded source review; the broader
+history `complete` flag remains false. Pinned source hashes invalidate reviews
+on drift. Delegated loader dependencies are fingerprinted without importing or
+running them. No execution receipt, historical row membership or clinical alias
+is inferred. In particular, the historical class-concept clearing operation is
+superseded by the retained PRomop regimen/component/class architecture and must
+not be replayed.
 
 `priority_field_coverage` implements the per-disease audit in
 [#1311](https://github.com/healthkey-ai/promop/issues/1311). All 42 effective
@@ -250,7 +270,7 @@ clinical approval; this inventory changes no vocabulary or mapping rows.
 
 1. Reconcile each catalog's destination/context and recorded semantic conflicts.
    Reconcile all #26 values and the #21 matrix against the source occurrences.
-2. Record source aliases, retirement and replacement evidence from source history.
+2. Reconcile the recorded source aliases, retirement and replacement evidence.
    Missing live membership must remain distinct from a reviewed retirement.
 3. Review recipe/domain/code conflicts, add semantic search evidence beyond exact
    lexical candidates, and assign final representation decisions and owners.

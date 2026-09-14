@@ -6,6 +6,7 @@ from pathlib import Path
 
 from omop_core.services.cancerbot_reference_options import REFERENCE_MODELS
 from omop_core.services.field_inventory_history_seeds import SEED_DECLARATIONS
+from omop_core.services.field_inventory_history_review import HISTORY_SCOPES
 
 
 REVIEWED = {
@@ -221,16 +222,27 @@ def collect_cancerbot_history(root):
             if kind in {'RunPython', 'RunSQL', 'SeparateDatabaseAndState'}:
                 reviewed = REVIEWED.get(path.name) == digest and kind == 'RunPython'
                 function = functions.get(op.args[0].id) if kind == 'RunPython' and op.args and isinstance(op.args[0], ast.Name) else None
+                scope_review = HISTORY_SCOPES.get(path.name)
+                if scope_review and scope_review['sha256'] != digest:
+                    scope_review = None
                 status = ('reviewed_catalog_rule' if reviewed else 'source_noop' if _is_noop(function)
+                          else 'literal_seed_definitions_recorded' if seed_rule and seed_rule['sha256'] == digest
+                          else 'source_scope_recorded' if scope_review
                           else 'delegated_source_requires_review' if loader_sources else 'data_operation_requires_review')
                 data_migrations.append({**evidence, 'kind': kind,
                                         'callable': ast.unparse(op.args[0]) if op.args else None,
+                                        'source_review': scope_review,
                                         'loader_sources': loader_sources,
                                         'status': status})
         if REVIEWED.get(path.name) == digest:
             catalog_events += [{**event, 'file': path.name, 'sha256': digest,
                                 'status': 'reviewed_source_rule_not_execution_receipt'} for event in _reviewed_events(path.name)]
+    pending = [r for r in data_migrations if 'requires_review' in r['status']]
+    missing_scope = [name for name, rule in HISTORY_SCOPES.items() if files.get(name) != rule['sha256']]
     return {'status': 'source_history_indexed', 'complete': False,
+            'definition_coverage_complete': not pending and not missing_scope
+                and all(files.get(n) == d for n, d in REVIEWED.items())
+                and all(files.get(n) == r['sha256'] for n, r in SEED_DECLARATIONS.items()),
             'files': [{'path': name, 'sha256': digest} for name, digest in files.items()],
             'schema_events': schema_events, 'data_migrations': data_migrations, 'catalog_events': catalog_events,
             'seed_options': seed_options,
@@ -240,5 +252,7 @@ def collect_cancerbot_history(root):
             'missing_or_changed_reviewed_files': [name for name, digest in REVIEWED.items() if files.get(name) != digest],
             'missing_or_changed_seed_files': [name for name, rule in SEED_DECLARATIONS.items()
                                               if files.get(name) != rule['sha256']],
+            'missing_or_changed_scope_files': missing_scope,
             'limitation': 'Definitions only; no migration, patient or trial table is read or executed. '
-                          'Unreviewed data operations include work outside field mapping. Absence never establishes retirement.'}
+                          'Recorded scopes distinguish clinical source repairs from trial/platform metadata. '
+                          'Definition coverage never certifies execution, clinical aliases or current membership. Absence never establishes retirement.'}

@@ -17,6 +17,7 @@ from omop_core.services.field_inventory import (
 def merge_reference_options(manifest, payload):
     validate_manifest(manifest)
     manifest = copy.deepcopy(manifest)
+    previous_ids = {r['id'] for r in manifest['rows']}
     bindings = manifest['cancerbot_bindings']
     rows, _ = validate_live_export(payload, [b['option_list'] for b in bindings])
     previous = {r['id']: r for r in manifest['rows'] if r['source'] == 'cancerbot_live'}
@@ -55,6 +56,36 @@ def merge_reference_options(manifest, payload):
         missing_live_lists=missing,
         live_metadata={key: value for key, value in payload.items() if key != 'options'},
     )
+    if 'implementation_contracts' in manifest:
+        from omop_core.services.field_inventory_contracts import implementation_contracts
+        crosswalk = manifest.get('destination_crosswalk', {})
+        reviewed_revision = (manifest.get('source_revisions', {}).get('cancerbot') or {}).get('revision')
+        source_review_required = (payload['source_revision'] != reviewed_revision
+                                  or crosswalk.get('status') == 'source_revision_requires_review')
+        if source_review_required:
+            # New source checkout definitions must be reviewed before their
+            # catalog entries inherit the old routing decisions.
+            crosswalk['status'] = 'source_revision_requires_review'
+            for row in manifest['rows']:
+                if row['source'] in {'cancerbot_live', 'cancerbot_static', 'cancerbot_source'}:
+                    row.pop('destination_route_keys', None)
+            manifest['totals']['source_coverage']['cancerbot_destination_routes'] = {'coverage': 'source_revision_requires_review'}
+            crosswalk = {}
+        else:
+            by_list = {}
+            for row in manifest['rows']:
+                if row['source'] in {'cancerbot_live', 'cancerbot_static'}:
+                    by_list.setdefault(row['option_list'], []).append(row)
+            for route in crosswalk.get('bindings', []):
+                related = by_list.get(route['option_list'], [])
+                route['source_row_ids'] = sorted(set(route.get('source_row_ids', [])) | {r['id'] for r in related})
+                for row in related:
+                    row['destination_route_keys'] = [route['option_list']]
+        manifest['implementation_contracts'] = implementation_contracts(
+            manifest['rows'], crosswalk, bindings, manifest.get('frontend', {}), manifest.get('representation_decisions', []),
+            preserve_dispositions_for=previous_ids)
+        if source_review_required:
+            manifest['implementation_contracts']['source_review_required'] = True
     manifest['totals'] = coverage(manifest['rows'], manifest['totals']['source_coverage'])
     manifest['limitations'] = [line for line in manifest['limitations'] if not line.startswith('CancerBot:')]
     manifest['limitations'].insert(0,
@@ -87,6 +118,7 @@ class Command(BaseCommand):
             'reconciled_at': timezone.now().isoformat(),
             'tool_source': source_revision(Path(settings.BASE_DIR), [
                 'omop_core/services/field_inventory.py',
+                'omop_core/services/field_inventory_contracts.py',
                 'omop_core/services/cancerbot_reference_options.py',
                 'omop_core/management/commands/export_cancerbot_reference_options.py',
                 'omop_core/management/commands/import_field_inventory_reference_options.py',

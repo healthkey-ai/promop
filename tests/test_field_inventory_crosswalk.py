@@ -21,6 +21,15 @@ def test_all_current_public_bindings_have_explicit_routes():
     assert set(crosswalk.reviewed_routes()) == {b['option_list'] for b in manifest['cancerbot_bindings']}
 
 
+def test_ancestry_and_prior_line_categories_keep_their_representation_conflicts():
+    routes = crosswalk.reviewed_routes()
+    assert routes['ethnicity']['representation'] == 'semantic_conflict'
+    assert routes['ethnicity']['destination_candidates'] == ['ethnicity', 'race']
+    assert routes['priorTherapy']['representation'] == 'structured'
+    assert routes['priorTherapy']['owning_issue'] == '#1230'
+    assert routes['estrogenReceptorStatus']['owning_issue'] == '#1227'
+
+
 def test_routes_preserve_typed_source_scope_candidates_and_approval(tmp_path, monkeypatch):
     source(tmp_path, monkeypatch)
     names = ['plannedTherapiesFirstLineMm', 'plannedTherapiesSecondLineBc', 'gelfCriteriaStatusFl']

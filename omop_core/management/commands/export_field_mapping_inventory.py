@@ -48,6 +48,8 @@ CONCEPT_COLUMNS = (
 )
 
 DECISIONS = [
+    {'scope': 'Ethnicity / race', 'fields': ['ethnicity', 'race'], 'owner': '#1228',
+     'decision': 'Keep CancerBot ancestry/race categories distinct from the PRomop Hispanic/Latino ethnicity picker; reconcile the legacy Ethnicity lookup without merging Person race and ethnicity.'},
     {'scope': 'bone_lesions', 'fields': ['bone_lesions'], 'owner': '#1228',
      'decision': 'Keep count and >2 comparator separate from presence; do not equate source counts with Yes/No.'},
     {'scope': 'GELF / FLIPI', 'fields': ['gelf_criteria_options', 'gelf_criteria_status', 'flipi_score_options', 'flipi_risk_category'], 'owner': '#1228',
@@ -342,6 +344,8 @@ def build_inventory(root, cancerbot_root, frontend, live_export=None, search=Fal
     from omop_core.services.field_inventory_history import collect_cancerbot_history, historical_option_rows
     source_history = collect_cancerbot_history(cancerbot_root)
     rows += historical_option_rows(source_history, {r['destination_path'] for r in rows if r['source'] == 'promop_field'})
+    from omop_core.services.field_inventory_contracts import implementation_contracts
+    contracts = implementation_contracts(rows, destination_crosswalk, source['bindings'], frontend, DECISIONS)
     candidates = attach_candidates(rows, vocabularies, now.date())
     if search:
         search_candidates(rows, candidates, vocabularies, now.date())
@@ -375,8 +379,10 @@ def build_inventory(root, cancerbot_root, frontend, live_export=None, search=Fal
              'omop_core/services/cancerbot_static_options.py',
              'omop_core/services/field_inventory_frontend.py', 'omop_core/data/field_inventory_frontend_providers.json',
              'omop_core/services/field_inventory_crosswalk.py',
+             'omop_core/services/field_inventory_contracts.py',
              'omop_core/services/field_inventory_history.py',
              'omop_core/services/field_inventory_history_seeds.py',
+             'omop_core/services/field_inventory_history_review.py',
              'omop_core/services/field_inventory_priority.py',
              'omop_core/services/demographics.py', 'omop_core/services/treatment_catalog.py',
              'omop_core/services/cancerbot_reference_options.py',
@@ -405,6 +411,7 @@ def build_inventory(root, cancerbot_root, frontend, live_export=None, search=Fal
         'reference_tables': tables, 'cancerbot_bindings': source['bindings'], 'frontend': frontend,
         'base_descriptors': descriptor_source,
         'destination_crosswalk': destination_crosswalk,
+        'implementation_contracts': contracts,
         'source_history': source_history,
         'priority_field_coverage': priority_coverage,
         'therapy_source_coverage': therapy_coverage,

@@ -29,8 +29,7 @@ def reviewed_routes():
                             'representation': representation, 'reason': reason, 'owning_issue': owner}
 
     scalar = {
-        'tumorGrade': 'tumor_grade', 'priorTherapy': 'prior_therapy',
-        'ethnicity': 'ethnicity', 'peripheralNeuropathyGrade': 'peripheral_neuropathy_grade',
+        'tumorGrade': 'tumor_grade', 'peripheralNeuropathyGrade': 'peripheral_neuropathy_grade',
         'progression': 'progression', 'disease': 'disease', 'gender': 'gender',
         'ecogPerformanceStatus': 'ecog_performance_status', 'karnofskyPerformanceScore': 'karnofsky_performance_score',
         'treatmentRefractoryStatus': 'treatment_refractory_status', 'menopausalStatus': 'menopausal_status',
@@ -40,7 +39,17 @@ def reviewed_routes():
         'progesteroneReceptorStatus': 'progesterone_receptor_status', 'toxicityGrade': 'toxicity_grade',
     }
     for name, field in scalar.items():
-        add(name, field, 'Reviewed source field route; codes, polarity, thresholds and answer concepts still require review.')
+        owner = '#1227' if name in {
+            'menopausalStatus', 'histologicType', 'biopsyGrade', 'pdL1Assay', 'her2Status',
+            'hrdStatus', 'hrStatus', 'estrogenReceptorStatus', 'progesteroneReceptorStatus',
+        } else '#1228'
+        add(name, field, 'Reviewed source field route; codes, polarity, thresholds and answer concepts still require review.', owner=owner)
+    add('ethnicity', ['ethnicity', 'race'],
+        'CancerBot ancestry/race-like categories and the PRomop legacy Ethnicity catalog conflict with the Hispanic/Latino ethnicity picker. '
+        'Preserve Person race/ethnicity ownership and source categories; no cross-field alias is approved.', representation='semantic_conflict')
+    add('priorTherapy', ['prior_therapy', 'therapy_lines_count'],
+        'Source line-count categories drive planned eligibility. Preserve line history and derived prior-therapy status; '
+        'a selected category alone does not establish a dated administration.', owner='#1230', representation='structured')
     add('allCountries', 'country', 'Administrative country selection; preserve Location ownership.',
         owner='#1223', representation='administrative')
     add('statuses register studyType trialPurpose trialType phases', [],
@@ -128,7 +137,7 @@ def reviewed_routes():
                         'mipiRisks': 'mipi_risk', 'mipiCRisks': 'mipi_c_risk',
                         'bulkyDiseaseCriteria': 'bulky_disease_criteria', 'highRiskMclCriteria': 'high_risk_mcl_criteria'}.items():
         add(name, field, 'Retain MCL criteria/source inputs; report missing PRomop destination rather than inventing a scalar mapping.',
-            representation='structured', disease='MCL')
+            representation='structured', disease='MCL', field_parity_issues=['#468', '#542', '#1149'])
     return routes
 
 

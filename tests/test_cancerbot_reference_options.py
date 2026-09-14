@@ -134,3 +134,40 @@ def test_partial_refresh_preserves_other_lists_and_removed_membership_history(sn
     assert retained['retired'] is None
     assert next(b for b in refreshed['cancerbot_bindings'] if b['option_list']==other['option_list']) == other
     assert next(b for b in refreshed['cancerbot_bindings'] if b['option_list']=='ethnicity')['live_source_row_ids']==[]
+
+
+@pytest.mark.parametrize('source_changed', [False, True])
+def test_new_reference_rows_get_routes_only_for_reviewed_source_without_rewriting_decisions(manifest, source_changed):
+    from omop_core.services.field_inventory_contracts import implementation_contracts
+    from omop_core.services.field_inventory_crosswalk import reviewed_routes
+    for route in manifest['destination_crosswalk']['bindings']:
+        route.update(reviewed_routes()[route['option_list']])
+    manifest['implementation_contracts'] = implementation_contracts(
+        manifest['rows'], manifest['destination_crosswalk'], manifest['cancerbot_bindings'],
+        manifest['frontend'], manifest['representation_decisions'])
+    manifest['totals'] = coverage(manifest['rows'], manifest['totals']['source_coverage'])
+    reviewed = next(r for r in manifest['rows'] if r['source'] == 'cancerbot_live' and r['option_list'] == 'ethnicity')
+    reviewed['reason'] = 'Existing curator rationale'
+    original = copy.deepcopy(reviewed)
+    payload = {'schema_version': 1, 'exported_at': '2026-09-14T00:00:00Z',
+               'source_revision': 'changed-source' if source_changed else manifest['source_revisions']['cancerbot']['revision'],
+               'options': {'ethnicity': {'options': [{'value': 'new-local-value', 'label': 'New local value'}]}}}
+    result = merge_reference_options(manifest, payload)
+    retained = next(r for r in result['rows'] if r['id'] == reviewed['id'])
+    for key in ('reason', 'disposition', 'owning_issue', 'existing_mappings', 'canonical_value'):
+        assert retained[key] == original[key]
+    new = next(r for r in result['rows'] if r['source_key']['value'] == 'new-local-value')
+    contract = new['implementation_contract']
+    assert new['candidate_ids'] == []
+    assert contract['semantic_approval'] is False
+    if source_changed:
+        assert contract['status'] == 'destination_unresolved'
+        assert contract['destinations'] == []
+        assert result['implementation_contracts']['source_review_required']
+        assert result['destination_crosswalk']['status'] == 'source_revision_requires_review'
+        assert 'destination_route_keys' not in retained
+    else:
+        assert contract['destinations'] == ['ethnicity', 'race']
+        assert contract['implementation_owners'] == ['#1228']
+        assert new['disposition'] == 'ambiguous'
+    assert merge_reference_options(result, payload) == result

@@ -171,3 +171,26 @@ def test_seed_source_drift_removes_historical_declarations(tmp_path, monkeypatch
     result = history.collect_cancerbot_history(tmp_path)
     assert result['seed_options'] == []
     assert result['missing_or_changed_seed_files'] == [file.name]
+
+
+def test_reviewed_source_scope_is_not_a_value_alias_and_requires_exact_source(tmp_path, monkeypatch):
+    base = tmp_path / 'trials/migrations'
+    base.mkdir(parents=True)
+    path = base / '0001_trial_patch.py'
+    path.write_text('class Migration:\n    operations = [migrations.RunSQL(sql="UPDATE trials_trial SET example=NULL")]\n')
+    monkeypatch.setattr(history, 'HISTORY_SCOPES', {path.name: {
+        'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'status': 'trial_search_metadata',
+        'reason': 'Trial filter only.', 'owning_issue': '#1223',
+    }})
+    monkeypatch.setattr(history, 'SEED_DECLARATIONS', {})
+    monkeypatch.setattr(history, 'REVIEWED', {})
+    result = history.collect_cancerbot_history(tmp_path)
+    assert result['definition_coverage_complete']
+    assert result['complete'] is False
+    assert result['data_migrations'][0]['source_review']['status'] == 'trial_search_metadata'
+    assert result['catalog_events'] == []
+    path.write_text(path.read_text() + '# changed\n')
+    result = history.collect_cancerbot_history(tmp_path)
+    assert not result['definition_coverage_complete']
+    assert result['data_migrations'][0]['source_review'] is None
+    assert result['data_migrations'][0]['status'] == 'data_operation_requires_review'

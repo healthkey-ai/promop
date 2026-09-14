@@ -1,10 +1,10 @@
 # Field and value reference inventory
 
-Snapshot: 2026-09-14T14:26:50.038546+00:00. Schema: 1.
+Snapshot: 2026-09-14T15:07:52.840817+00:00. Schema: 1.
 
 **Inventory remains incomplete. No candidates are clinically approved by this export.**
 
-7767 source rows; 5906 await destination reconciliation; 5042 have no attached candidate.
+7767 source rows; 5906 have no direct scalar-field destination (see source/catalog routing below); 5042 have no attached candidate.
 
 | Source | Rows |
 |---|---:|
@@ -24,9 +24,10 @@ Snapshot: 2026-09-14T14:26:50.038546+00:00. Schema: 1.
 
 | Disposition | Rows |
 |---|---:|
-| needs_review | 7326 |
-| not_applicable | 156 |
-| requires_structured_representation | 285 |
+| ambiguous | 80 |
+| needs_review | 4097 |
+| not_applicable | 404 |
+| requires_structured_representation | 3186 |
 
 ## Coverage gaps
 
@@ -50,7 +51,25 @@ Static results describe the checked-in source definitions, including empty and b
 | Unresolved list | Source models |
 |---|---|
 
+## Implementation destination accounting
+
+Source/consumer routing assigns implementation work. It does not approve concepts, merge aliases, infer retirement or certify runtime field availability.
+
+| Destination evidence | Source rows |
+|---|---:|
+| existing_reference_catalog | 977 |
+| field_destination_recorded | 1542 |
+| frontend_consumers_recorded | 290 |
+| historical_source_evidence | 394 |
+| retained_source_evidence | 202 |
+| source_consumers_recorded | 4360 |
+| trial_search_metadata | 2 |
+
+Rows awaiting a source/consumer routing disposition: 0. Missing runtime fields and ambiguous clinical contexts remain explicit even when source routing is known.
+
 ## CancerBot destination routing
+
+Source review status: `source_routes_recorded`.
 
 Routes retain source disease, line, nested keys and representation warnings separately from immutable source identity. A recorded route is not clinical equivalence or an approved answer mapping.
 
@@ -123,16 +142,18 @@ Staging membership above is preserved as independent evidence. Where live Cancer
 
 ## CancerBot source history
 
-Definitions only; no migration, patient or trial table is read or executed. Unreviewed data operations include work outside field mapping. Absence never establishes retirement.
+Definitions only; no migration, patient or trial table is read or executed. Recorded scopes distinguish clinical source repairs from trial/platform metadata. Definition coverage never certifies execution, clinical aliases or current membership. Absence never establishes retirement.
+
+Migration definition accounting complete: True.
 
 | History evidence | Count |
 |---|---:|
 | schema_events | 91 |
 | catalog_events | 10 |
 | historical_seed_options | 309 |
-| data_operation_requires_review | 67 |
+| source_scope_recorded | 51 |
+| literal_seed_definitions_recorded | 20 |
 | source_noop | 21 |
-| delegated_source_requires_review | 4 |
 | reviewed_catalog_rule | 6 |
 
 | Catalog scope | Old code | Replacement | Rule |
@@ -245,6 +266,7 @@ Both release mechanisms and vocabulary history are recorded separately in the ma
 
 | Scope | Required representation | Owner |
 |---|---|---|
+| Ethnicity / race | Keep CancerBot ancestry/race categories distinct from the PRomop Hispanic/Latino ethnicity picker; reconcile the legacy Ethnicity lookup without merging Person race and ethnicity. | #1228 |
 | bone_lesions | Keep count and >2 comparator separate from presence; do not equate source counts with Yes/No. | #1228 |
 | GELF / FLIPI | Retain CancerBot seven and PRomop eight GELF criteria with threshold conflicts explicit; aggregate is separate. Retain five FLIPI inputs, numeric score and risk separately. | #1228 |
 | TNM and staging basis | Retain tumor, system, edition and c/p/yp basis. Imaging modality is a separate event. | #1227 |

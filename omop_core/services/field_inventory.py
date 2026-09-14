@@ -340,7 +340,8 @@ def render_report(manifest):
     lines = ['# Field and value reference inventory', '',
              f"Snapshot: {manifest['generated_at']}. Schema: {manifest['schema_version']}.", '',
              '**Inventory remains incomplete. No candidates are clinically approved by this export.**', '',
-             f"{totals['total_rows']} source rows; {totals['without_destination']} await destination reconciliation; "
+             f"{totals['total_rows']} source rows; {totals['without_destination']} have no direct scalar-field destination "
+             '(see source/catalog routing below); '
              f"{totals['without_candidate']} have no attached candidate.", '',
              '| Source | Rows |', '|---|---:|']
     lines += [f'| {key} | {value} |' for key, value in totals['by_source'].items()]
@@ -362,8 +363,16 @@ def render_report(manifest):
             lines.append(f"| {binding['option_list']} | {', '.join(providers) or 'unresolved source expression'} |")
     therapy = manifest.get('therapy_source_coverage')
     crosswalk = manifest.get('destination_crosswalk')
+    contracts = manifest.get('implementation_contracts')
+    if contracts:
+        lines += ['', '## Implementation destination accounting', '', contracts['limitation'], '',
+                  '| Destination evidence | Source rows |', '|---|---:|']
+        lines += [f'| {key} | {count} |' for key, count in contracts['counts'].items()]
+        lines += ['', f"Rows awaiting a source/consumer routing disposition: {len(contracts['unresolved_row_ids'])}. "
+                  'Missing runtime fields and ambiguous clinical contexts remain explicit even when source routing is known.']
     if crosswalk:
         lines += ['', '## CancerBot destination routing', '',
+                  f"Source review status: `{crosswalk.get('status', 'unrecorded')}`.", '',
                   'Routes retain source disease, line, nested keys and representation warnings separately from immutable source identity. '
                   'A recorded route is not clinical equivalence or an approved answer mapping.', '',
                   '| Route status | Bindings |', '|---|---:|']
@@ -388,6 +397,7 @@ def render_report(manifest):
     source_history = manifest.get('source_history')
     if source_history:
         lines += ['', '## CancerBot source history', '', source_history.get('limitation', 'Source history unavailable.'), '',
+                  f"Migration definition accounting complete: {source_history.get('definition_coverage_complete', False)}.", '',
                   '| History evidence | Count |', '|---|---:|']
         lines += [f'| {key} | {count} |' for key, count in source_history.get('counts', {}).items()]
         lines += ['', '| Catalog scope | Old code | Replacement | Rule |', '|---|---|---|---|']
