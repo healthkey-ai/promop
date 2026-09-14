@@ -137,9 +137,10 @@ For inference rationale, the [LOT design](superpowers/specs/2026-05-16-lot-infer
 [Athena/ARTEMIS design](superpowers/specs/2026-05-17-athena-vocabulary-artemis-design.md),
 and [HemOnc classification design](superpowers/specs/2026-05-17-artemis-hemonc-lot-design.md)
 record the algorithm's development. Use [HemOnc status and roadmap](hemonc-roadmap.md)
-for the remaining program and [ADR 0002](adr/0002-omop-therapy-types.md) for therapy
-class semantics and cross-application decisions. Its [feasibility output](adr/0002-phase0-coverage.txt)
-is supporting evidence.
+for the wider program and [ADR 0002](adr/0002-omop-therapy-types.md) for therapy
+class semantics. The [field/value plan](../field_concept_mapping_enhancements.md#therapy-type-consumer-delivery)
+tracks consumer delivery and rollout. The ADR's
+[feasibility output](adr/0002-phase0-coverage.txt) is historical supporting evidence.
 
 [Implemented Genomics architecture](genomics_architecture.md) is the current
 storage and ownership reference. [Genomics implementation](genomics_implementation.md)
@@ -158,7 +159,9 @@ Applications consume patient state through the [API surface](../API_SURFACE.md).
 [FHIR export](fhir-export-architecture.md) describes patient download and integration
 exports. Consumers that need a local vocabulary mirror use the
 [vocabulary cache protocol](vocab-consumer-cache-protocol.md); [ADR 0001](adr/0001-vocabulary-source-of-truth.md)
-records the proposed source-of-truth and publication decisions behind it.
+records vocabulary authority and distribution decisions. The
+[field/value plan](../field_concept_mapping_enhancements.md#vocabulary-distribution-and-mapping-provenance)
+tracks delivery and shared ratification.
 
 The PHR functional-model documents have distinct purposes:
 [oncology profile](phrs-fm-onco-profile.md) defines the intended scope,
