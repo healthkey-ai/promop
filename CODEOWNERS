@@ -23,7 +23,7 @@
 
 # ── Deployment, configuration and secrets ─────────────────────────────────────
 # Changes here alter what runs in production or what guards it.
-/ctomop/settings.py                 @adamblum
+/promop/settings.py                 @adamblum
 /patient_portal/checks.py           @adamblum
 /start.sh                           @adamblum
 /Dockerfile                         @adamblum
@@ -35,3 +35,5 @@
 /.github/                           @adamblum
 /.gitleaks.toml                     @adamblum
 /.bandit-baseline.json              @adamblum
+
+/ctomop/settings.py                 @adamblum

@@ -13,7 +13,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from sentry_sdk.transport import Transport
 
-from ctomop import sentry
+from promop import sentry
 from patient_portal.api.exception_handlers import sentry_exception_handler
 
 
