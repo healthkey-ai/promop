@@ -679,13 +679,13 @@ export default function PatientDetail({
   return (
     <div className="min-h-screen bg-[#f5f7fa]">
       <div className="sticky top-0 z-20 border-b border-border bg-background/90 shadow-[0_1px_3px_rgba(0,0,0,0.05)] backdrop-blur-md">
-        <div className="mx-auto flex min-h-14 max-w-5xl flex-wrap items-center justify-between gap-x-4 gap-y-2 px-6 py-2 sm:flex-nowrap">
+        <div className={`mx-auto flex min-h-14 max-w-5xl items-center justify-between gap-4 px-6 py-2 ${patientMode ? "flex-wrap sm:flex-nowrap" : ""}`}>
           <div className="flex min-w-0 items-center gap-3">
             <BrandLogo size="toolbar" />
             {!patientMode && (
               <button
                 onClick={() => navigate("/")}
-                className="flex h-8 w-8 items-center justify-center rounded-full border border-border bg-[#f5f7fa] text-muted-foreground transition-colors hover:bg-[#eef0f4] hover:text-foreground"
+                className="hidden h-8 w-8 shrink-0 items-center justify-center rounded-full border border-border bg-[#f5f7fa] sm:flex text-muted-foreground transition-colors hover:bg-[#eef0f4] hover:text-foreground"
                 aria-label="Back to patient list"
               >
                 <ArrowLeft className="h-3.5 w-3.5" />
