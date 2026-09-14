@@ -116,6 +116,7 @@ def test_saved_snapshot_reconciliation_is_idempotent_and_preserves_reference_evi
     path.write_text(SOURCE)
     manifest['source_revisions']['cancerbot']['files']['trials/services/value_options.py'] = hashlib.sha256(path.read_bytes()).hexdigest()
     manifest['cancerbot_bindings'] = cancerbot_source(path)['bindings']
+    manifest['totals']['source_coverage']['cancerbot_public_lists']['live_metadata'] = None
     original = copy.deepcopy(manifest)
     once = reconcile_sources(manifest, tmp_path)
     twice = reconcile_sources(copy.deepcopy(once), tmp_path)
@@ -136,8 +137,8 @@ def test_manifest_rejects_inconsistent_public_list_evidence(corruption):
     if corruption == 'missing_row':
         manifest['cancerbot_bindings'][0]['source_row_ids'] = ['not-in-manifest']
     elif corruption == 'provider_total':
-        manifest['totals']['source_coverage']['cancerbot_public_lists']['by_provider']['requires_live_export'] += 1
+        manifest['totals']['source_coverage']['cancerbot_public_lists']['by_provider']['requires_live_export'] = 999
     else:
-        manifest['totals']['source_coverage']['cancerbot_public_lists']['missing_live_lists'] = []
+        manifest['totals']['source_coverage']['cancerbot_public_lists']['missing_live_lists'] = ['invented_missing_list']
     with pytest.raises(ValueError, match='CancerBot'):
         validate_manifest(manifest)

@@ -293,7 +293,7 @@ def build_inventory(root, cancerbot_root, frontend, live_export=None, search=Fal
     relationships = attach_relationships(candidates, vocabularies, now.date())
     sources = {
         'promop_reference': {'coverage': 'exported', 'tables': {k: len(v) for k, v in tables.items()}},
-        'cancerbot_public_lists': {'coverage': 'partial',
+        'cancerbot_public_lists': {'coverage': ('source_membership_accounted_for' if source['bindings'] and not missing_lists and not therapy_coverage['context_pending_lists'] else 'partial'),
                                  'by_provider': dict(sorted(Counter(b['coverage'] for b in source['bindings']).items())),
                                  'missing_live_lists': missing_lists, 'live_metadata': live_metadata},
         'frontend': {'coverage': 'partial', 'controls': len(frontend['controls']),
@@ -308,11 +308,14 @@ def build_inventory(root, cancerbot_root, frontend, live_export=None, search=Fal
              'omop_core/services/field_descriptor.py', 'omop_core/services/provenance_registry.py',
              'omop_core/services/field_inventory.py',
              'omop_core/services/cancerbot_static_options.py',
+             'omop_core/services/cancerbot_reference_options.py',
+             'omop_core/management/commands/export_cancerbot_reference_options.py',
+             'omop_core/management/commands/import_field_inventory_reference_options.py',
              'omop_core/management/commands/export_field_mapping_inventory.py',
              'scripts/inventory-frontend-options.cjs',
              'omop_core/data/genomics_catalog_v1.json', 'omop_core/services/genomics_catalog.py', *frontend['files']]
     limitations = [
-        f'CancerBot: {len(missing_lists)} public lists need further source/provider reconciliation; database-driven lists need live reference coverage. Therapy catalogs/disease links use authoritative staging exports; literal lists and planned picker context are tracked separately.',
+        f'CancerBot: {len(missing_lists)} public lists lack reference coverage; {len(therapy_coverage["context_pending_lists"])} planned lists lack source eligibility coverage. Reference membership is distinct from destination and clinical mapping approval.',
         'CancerBot seed/migration retirement history and source-to-destination crosswalk still require reconciliation.',
         'Dynamic frontend expressions and dependent genetics lists require explicit provider reconciliation; see source_coverage.',
         'Reference catalogs preserve codes, links and destination candidates; unresolved destination/context is never inferred from labels.',

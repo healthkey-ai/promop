@@ -1,117 +1,51 @@
 # Field and value reference inventory
 
-Snapshot: 2026-09-14T05:30:47.610466+00:00. Schema: 1.
+Snapshot: 2026-09-14T10:41:01.343772+00:00. Schema: 1.
 
 **Inventory remains incomplete. No candidates are clinically approved by this export.**
 
-2883 source rows; 1697 await destination reconciliation; 1282 have no attached candidate.
+6986 source rows; 5806 await destination reconciliation; 4523 have no attached candidate.
 
 | Source | Rows |
 |---|---:|
+| cancerbot_live | 4105 |
 | cancerbot_source | 175 |
 | cancerbot_static | 82 |
-| frontend_constant | 463 |
-| frontend_control | 336 |
+| frontend_constant | 467 |
+| frontend_control | 316 |
 | genomics_catalog | 42 |
 | promop_catalog | 977 |
 | promop_choice | 262 |
-| promop_field | 414 |
-| promop_model_choice | 132 |
+| promop_field | 420 |
+| promop_model_choice | 140 |
 
 | Disposition | Rows |
 |---|---:|
-| needs_review | 2451 |
-| not_applicable | 155 |
-| requires_structured_representation | 277 |
+| needs_review | 6563 |
+| not_applicable | 156 |
+| requires_structured_representation | 267 |
 
 ## Coverage gaps
 
-- CancerBot: 64 public lists still require live reference coverage. Deterministic source lists and trial-search exclusions are reconciled; planned picker context remains pending.
+- CancerBot: 0 public lists lack reference coverage; 0 planned lists lack source eligibility coverage. Live reference rows use checked-in provider semantics, not a verified deployed application revision. Source-to-destination relationships and clinical mappings still require reconciliation.
 - CancerBot seed/migration retirement history and source-to-destination crosswalk still require reconciliation.
 - Dynamic frontend expressions and dependent genetics lists require explicit provider reconciliation; see source_coverage.
 - Reference catalogs preserve codes, links and destination candidates; unresolved destination/context is never inferred from labels.
 - Exact labels and synonyms are lexical evidence only; case-sensitive search is not exhaustive and no-equivalent requires separate review.
 - Existing approved statuses are preserved; candidate semantic meaning, destination domains and vocabulary lineage still require review.
-- New static public-list rows retain source definitions without inheriting clinical approvals or candidate evidence; their destination and semantic search remain pending.
 
 ## CancerBot public-list reconciliation
 
 | Coverage | Lists |
 |---|---:|
-| covered_by_staging_reference | 34 |
+| covered_by_live_export | 118 |
 | covered_by_static_source | 51 |
 | excluded_trial_search | 3 |
-| requires_live_export | 64 |
-| staging_catalog_available_context_pending | 20 |
 
 Static results describe the checked-in source definitions, including empty and blank-only lists. They do not certify a deployed CancerBot version. Trial-search exclusions retain their source evidence. Unresolved providers below require reference data; model names come from source imports, not label matching.
 
 | Unresolved list | Source models |
 |---|---|
-| allCountries | PreferredCountry |
-| ethnicity | Ethnicity |
-| cytogenicMarkers | CytogenicMarker |
-| cytogenicMarkersMm | CytogenicMarker |
-| cytogenicMarkersFl | CytogenicMarker |
-| cytogenicMarkersBc | CytogenicMarker |
-| cytogenicMarkersCll | CytogenicMarker |
-| cytogenicMarkersMcl | CytogenicMarker |
-| molecularMarkers | MolecularMarker |
-| molecularMarkersMm | MolecularMarker |
-| molecularMarkersFl | MolecularMarker |
-| molecularMarkersBc | MolecularMarker |
-| molecularMarkersCll | MolecularMarker |
-| molecularMarkersMcl | MolecularMarker |
-| stemCellTransplantHistoryExcluded | StemCellTransplant |
-| preExistingConditionCategories | PreExistingConditionCategory |
-| upreExistingConditionCategories | PreExistingConditionCategory |
-| concomitantMedicationsMm | ConcomitantMedication |
-| concomitantMedicationsFl | ConcomitantMedication |
-| concomitantMedicationsBc | ConcomitantMedication |
-| histologicType | HistologicType |
-| tumorStages | TumorStage |
-| nodesStages | NodesStage |
-| distantMetastasisStages | DistantMetastasisStage |
-| stagingModalities | StagingModality |
-| geneticMutationGenes | MutationGene |
-| geneticMutationVariants | MutationCode |
-| geneticMutationAllVariants | MutationCode, MutationGene |
-| geneticMutationOrigins | MutationOrigin |
-| geneticMutationOriginsPerGene | MutationGene |
-| geneticMutationInterpretations | MutationInterpretation |
-| geneticMutationAllOrigins | MutationCode, MutationGene |
-| geneticMutationAllInterpretations | MutationGene, MutationInterpretation |
-| her2Status | Her2Status |
-| hrdStatus | HrdStatus |
-| hrStatus | HrStatus |
-| estrogenReceptorStatus | EstrogenReceptorStatus |
-| progesteroneReceptorStatus | ProgesteroneReceptorStatus |
-| languagesSkills | Language, LanguageSkillLevel |
-| toxicityGrade | ToxicityGrade |
-| binetStages | BinetStage |
-| binetStagesMm | BinetStage |
-| binetStagesFl | BinetStage |
-| binetStagesBc | BinetStage |
-| binetStagesCll | BinetStage |
-| binetStagesMcl | BinetStage |
-| proteinExpressions | ProteinExpression |
-| richterTransformations | RichterTransformation |
-| richterTransformationsMm | RichterTransformation |
-| richterTransformationsFl | RichterTransformation |
-| richterTransformationsBc | RichterTransformation |
-| richterTransformationsCll | RichterTransformation |
-| richterTransformationsMcl | RichterTransformation |
-| tumorBurdens | TumorBurden |
-| tumorBurdensMm | TumorBurden |
-| tumorBurdensFl | TumorBurden |
-| tumorBurdensBc | TumorBurden |
-| tumorBurdensCll | TumorBurden |
-| tumorBurdensMcl | TumorBurden |
-| proteinExpressionsMcl | ProteinExpression |
-| morphologicVariants | MorphologicVariant |
-| bulkyDiseaseCriteria | BulkyDiseaseCriteria |
-| highRiskMclCriteria | HighRiskMclCriteria |
-| extranodalSites | ExtranodalSite |
 
 ## CancerBot-derived staging therapy catalogs
 
@@ -161,7 +95,7 @@ Staging is the authoritative source for these catalogs, as confirmed by the user
 | supportiveTherapiesCll | 59 | C2987 | supportive_therapy |
 | supportiveTherapiesMcl | 69 | MCL | supportive_therapy |
 
-Planned-therapy catalogs are available; planned picker eligibility/status remains a context reconciliation task. Existing disease/round links do not encode administration status. Unknown/Other sentinels are recorded separately from catalog counts.
+Staging membership above is preserved as independent evidence. Where live CancerBot rows are supplied, the public binding references those rows instead. PlannedTherapy is a separate CancerBot source catalog; its disease/round eligibility never proves administration or a mapping to a PRomop regimen. Planned lists still awaiting source eligibility: 0. Unknown/Other sentinels are recorded separately from catalog counts.
 
 
 ## Reconciliation

@@ -189,7 +189,8 @@ def apply_live_coverage(bindings, payload, rows):
     for binding in bindings:
         name = binding['option_list']
         if name in payload['options']:
-            binding['coverage_before_live_export'] = binding['coverage']
+            if binding['coverage'] != 'covered_by_live_export':
+                binding['coverage_before_live_export'] = binding['coverage']
             binding['coverage'] = 'covered_by_live_export'
             binding['live_source_row_ids'] = sorted(by_list[name])
             binding['live_source_revision'] = payload['source_revision']
@@ -369,8 +370,10 @@ def render_report(manifest):
         lines += ['', '| Public list | Catalog options | Disease code | Round |', '|---|---:|---|---|']
         lines += [f"| {r['option_list']} | {r['catalog_options']} | {r['disease_code'] or 'all'} | {r['round_code'] or 'all'} |"
                   for r in therapy['memberships']]
-        lines += ['', 'Planned-therapy catalogs are available; planned picker eligibility/status remains a '
-                  'context reconciliation task. Existing disease/round links do not encode administration status. '
+        lines += ['', 'Staging membership above is preserved as independent evidence. Where live CancerBot rows are supplied, '
+                  'the public binding references those rows instead. PlannedTherapy is a separate CancerBot source catalog; '
+                  'its disease/round eligibility never proves administration or a mapping to a PRomop regimen. '
+                  f"Planned lists still awaiting source eligibility: {len(therapy['context_pending_lists'])}. "
                   'Unknown/Other sentinels are recorded separately from catalog counts.', '']
     lines += ['', '## Reconciliation', '',
               f"Duplicate source identities: {len(totals['duplicate_source_ids'])}. "

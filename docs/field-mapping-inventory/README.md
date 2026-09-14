@@ -3,46 +3,61 @@
 This is the first reproducible inventory slice of
 [`field_concept_mapping_plan.md`](../../field_concept_mapping_plan.md).
 The [coverage report](coverage.md) summarizes the [manifest](manifest.json).
-**#1223 remains open:** remaining CancerBot source/provider reconciliation, dynamic bindings,
-retirement history and semantic reconciliation prevent claiming full coverage.
+**#1223 remains open:** dynamic frontend bindings, destination/context crosswalks,
+retirement history and semantic reconciliation remain unfinished.
 Do not start dependent schema work on the assumption that this export completes
 the inventory prerequisite.
 
 ## Regenerate
 
-Source reconciliation now covers 51 deterministic public lists, including 26
-previously unresolved combinations (82 additional source-option rows). Three
-trial-search lists (`register`, `trialPurpose`, `trialType`) are outside patient
-clinical mapping scope; their source fragments remain visible. Together with
-34 staging therapy lists and 20 planned-context lists, this leaves 64 public
-lists requiring live reference coverage. The manifest has 2,883 rows. These
-counts describe source coverage, not completed clinical mappings.
+The refreshed manifest contains **6,986 source occurrences**: 420 fields and
+6,566 values. All 172 CancerBot public bindings have source accounting:
+118 reference-backed lists, 51 deterministic static lists, and three trial-search
+exclusions. There are zero public lists awaiting live reference access and zero
+planned lists awaiting source eligibility. These counts are not clinical approval.
 
-Reproduce the source-only update from the checked-in reference snapshot:
+[cancerbot-reference.json](cancerbot-reference.json) contains the 44 allowlisted
+reference tables captured in one read-only transaction, reviewed provider source,
+file hashes and source revision. [cancerbot-options.json](cancerbot-options.json)
+contains 4,105 reconstructed option occurrences across 118 public lists. Source
+code is parsed, never imported or executed. The pinned provider hash requires
+explicit review when CancerBot changes. The recorded checkout revision is not
+an assertion about CancerBot's deployed application revision.
+
+Replay the checked-in reference snapshot without any database access:
 
 ```sh
-python manage.py reconcile_field_inventory_sources \
+python manage.py export_cancerbot_reference_options \
   --inventory docs/field-mapping-inventory/manifest.json \
   --cancerbot-root /path/to/cancerbot \
-  --output docs/field-mapping-inventory/manifest.json \
-  --report docs/field-mapping-inventory/coverage.md
+  --snapshot docs/field-mapping-inventory/cancerbot-reference.json \
+  --output /tmp/cancerbot-options.json
+
+python manage.py import_field_inventory_reference_options \
+  --inventory docs/field-mapping-inventory/manifest.json \
+  --cancerbot-export /tmp/cancerbot-options.json \
+  --output /tmp/field-manifest.json \
+  --report /tmp/field-coverage.md
 ```
 
-This command makes no database connection. It requires the CancerBot source
-hash to match the original snapshot, preserves reference/candidate/release
-evidence and the snapshot date, and records a separate reconciliation timestamp
-and tool-source hashes. Repeated reconciliation preserves source identities and
-totals. If source changed or a live export was previously supplied, use the full
-exporter below with those original inputs instead.
+The merge keeps reference/candidate evidence and source identities, handles
+partial and empty exports, and retains removed options with
+`source_presence=absent_from_latest_export`. Absence does not prove retirement.
+A changed label is flagged for review. Stable identities retain reconciliation
+metadata; per-binding export dates/revisions distinguish partial refreshes.
 
-The static interpreter handles only a bounded set of dictionary/list operations,
-declared properties, local assignments and deterministic conditionals. It never
-imports or executes CancerBot. Unsupported calls, database providers, recursion,
-custom decorators and budget exhaustion remain unresolved. Dependency hashes
-and provider model imports are attached to each newly analyzed binding.
-Empty lists and explicit blank/Unknown options stay distinct. Disease context
-comes from explicit provider arguments; stage system/edition is not inferred.
-Additional static rows do not inherit candidates or approvals by label.
+For a fresh CancerBot read, privately configure `CANCERBOT_DATABASE_URL`, omit
+`--snapshot`, and add `--snapshot-output /tmp/cancerbot-reference.json`. No DSN
+is accepted as a command argument. The command queries only named reference
+columns; patient/trial data, reviewer identities and free-text notes are excluded.
+Duplicate IDs/codes, missing columns and orphan non-null FKs abort the export.
+Nullable source links remain explicit; they never create blank catalog records.
+Provider membership and labels are reproduced; database-specific text collation
+is not certified by Python ordering.
+
+The older `reconcile_field_inventory_sources` command remains available for
+pre-live-export snapshots. It deliberately refuses snapshots containing live
+metadata; use reference import or the full exporter below for the current data.
 
 Use the existing Python environment and install the frontend's locked dependencies
 with `npm ci` in `frontend/`. Configure `DATABASE_URL` separately for the intended
@@ -53,6 +68,7 @@ Never put connection strings in the artifacts or command arguments.
 ```sh
 python manage.py export_field_mapping_inventory \
   --cancerbot-root /path/to/cancerbot \
+  --cancerbot-export docs/field-mapping-inventory/cancerbot-options.json \
   --search \
   --output docs/field-mapping-inventory/manifest.json \
   --report docs/field-mapping-inventory/coverage.md
@@ -118,21 +134,24 @@ recorded separately. The snapshot date controls validity checks.
 
 ## Live CancerBot reference export
 
-All 172 public list bindings in `ValueOptions.get_all_options()` are enumerated,
-including trial/admin lists. Of these, 51 deterministic lists are covered
-by static source, three are trial-search exclusions, and 34 therapy lists use the authoritative staging
-catalogs. The user confirmed that the staging therapies, components, classes
-and regimen/disease mappings were generated from CancerBot. The export includes
-244 regimens, 187 components, 91 classes and 681 disease/round links. It records
-picker membership through references to these existing rows; no duplicate
-therapy export or new catalog is required.
+The live export covers all database-backed lists, including the 34 therapy
+lists previously approximated from staging and the 20 separate planned-therapy
+lists. Original staging catalogs and picker memberships remain independent
+manifest evidence, while each public binding now references actual reconstructed
+CancerBot source rows. See the [therapy import audit](therapy-import-audit.md)
+for the verified catalog differences and existing import defects.
 
-Twenty planned-therapy lists have catalog coverage with picker context pending:
-the staging disease/round link schema does not distinguish planned eligibility
-or administration status. The remaining 64 public lists require source/provider
-reconciliation. Database-driven lists within that remainder need live reference
-coverage; no live CancerBot database connection was configured locally. Partial
-literal fragments do not prove the contents of a dynamic list.
+The capture includes 197 variants, six genes and eight gene/origin connections.
+Nested parent keys and composite source codes remain intact. CancerBot's source
+PALB1 naming is preserved as source evidence; current PRomop Genomics uses the
+reviewed PALB2 naming correction. Do not silently rename source identities or
+approve variants by label. The frozen Genomics catalog owns runtime findings.
+
+CancerBot has 94 PlannedTherapy entries and 175 eligibility links, separately
+from its 239 Therapy regimens. Planned source eligibility does not establish a
+mapping to a PRomop regimen or administration status. The existing PRomop
+therapy, component, class, disease/round tables and mapping APIs remain authoritative
+for PRomop. This inventory never writes to them.
 
 `--cancerbot-export` accepts this deliberately narrow envelope:
 
@@ -194,14 +213,17 @@ clinical approval; this inventory changes no vocabulary or mapping rows.
 
 ## Remaining acceptance work
 
-1. Reconcile the remaining CancerBot providers, including nested genetic option
-   relationships. Reuse the exported staging therapy catalogs and disease/round
-   links; resolve planned-picker context without inferring administration. Establish membership,
-   aliases, retired values and replacements from seeds/migrations and live data.
-2. Resolve dynamic frontend providers and every catalog's destination/context.
-   Reconcile all #26 values and the #21 matrix against these source occurrences.
-3. Review flagged recipe/domain/code conflicts and exact candidates, add broader
-   semantic search evidence where needed, and assign final representation
-   dispositions. Preserve unknown, ambiguous and no-equivalent cases.
-4. Validate complete source and disposition totals before closing #1223 or
-   treating #1224 as unblocked.
+1. Resolve dynamic frontend providers and each catalog's destination/context.
+   Reconcile all #26 values and the #21 matrix against the source occurrences.
+2. Record source aliases, retirement and replacement evidence from source history.
+   Missing live membership must remain distinct from a reviewed retirement.
+3. Review recipe/domain/code conflicts, add semantic search evidence beyond exact
+   lexical candidates, and assign final representation decisions and owners.
+4. Resolve vocabulary provenance with #461/#623 before bulk approval. Reference
+   availability and a standard flag do not establish clinical correctness.
+5. Correct therapy import defects through existing managed catalogs (#1230),
+   preserving curator decisions. Keep planned and administered sources distinct.
+
+All associated issues remain open. The plan requires completing this inventory
+before dependent choice schema work. Earlier feature work remains preserved on
+`feat/field-value-concept-mappings` and must be reviewed against current dev.

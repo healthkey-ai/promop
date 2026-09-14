@@ -13,140 +13,67 @@ implementation work; it does not approve mappings or change staging data.
 
 ## Current checkpoint and next action — 2026-09-14
 
-Implementation checkpoint: [PR #1271](https://github.com/healthkey-ai/promop/pull/1271),
-based on `dev` through `144cd98`, delivers the first reproducible inventory slice.
-The checked-in inventory was refreshed read-only on **2026-09-14**. Section 2's
-original baseline counts and candidate tables remain the **2026-09-13 snapshot**;
-use the linked inventory report for the later reference export. No clinical
-mapping was approved and no staging reference or patient data was changed.
+The active inventory work is [draft PR #1284](https://github.com/healthkey-ai/promop/pull/1284),
+on `feat/1223-next`. It integrates current dev through `7015864`, including
+FLIPI/GELF assessments, the PALB2 naming correction and the deployment migration
+repairs. Earlier schema/runtime work remains preserved separately on
+`feat/field-value-concept-mappings`; do not replace upstream ownership contracts
+with that older implementation without review.
 
-All nine implementation issues (#1223–#1231) remain open. The current schema
-still keys `FieldChoice` by field name and display text; `FieldChoiceCode` has
-vocabulary/code and a primary flag, without the proposed scoped review model.
-The generic scalar writer clears `value_as_concept_id`, and generic curated
-readback selects number/text. The shared answer-mapping work is still required.
+The [generated inventory](docs/field-mapping-inventory/README.md) now records
+**6,986 source occurrences**, including 420 fields and 4,105 live CancerBot
+option occurrences. All 172 CancerBot public bindings have source accounting:
+118 lists reconstructed from 44 live reference tables, 51 deterministic static
+lists, and three explicit trial-search exclusions. No public list remains
+blocked on reference access. The 20 planned-therapy lists include their actual
+source eligibility relationships; they are not administered-therapy mappings.
 
-**Next: complete [#1223](https://github.com/healthkey-ai/promop/issues/1223), the
-field-and-value inventory, before starting the dependent schema change #1224.**
-The inventory acceptance requirements below remain the guide for completing
-#1223; the first generator/report slice is implemented, not the entire issue:
+The live rows are interpreted using the reviewed CancerBot checkout definitions,
+with source revision and hashes recorded separately from the reference snapshot
+time. This does not assert which application revision CancerBot has deployed.
+Snapshots contain reference data only; no credentials or patient/trial rows.
+The PRomop reference and vocabulary evidence was refreshed read-only from Render
+staging after integrating dev. See the manifest for exact dates and file hashes.
 
-1. Define a versioned manifest format using the row requirements in section 3.
-   Keep fields and values distinguishable, with stable source keys, typed values,
-   scope, question/answer roles, candidate evidence and explicit dispositions.
-2. Export the PRomop reference lists, mappings, choice codes and therapy catalogs;
-   collect CancerBot's static and database-generated options. Record source
-   revisions, export dates, vocabulary release and missing source coverage.
-3. Reconcile those sources with descriptors, recipes and frontend options. Report
-   duplicate identities, context conflicts, missing mappings and coverage totals.
-   Give every discovered row a disposition; preserve unresolved and no-equivalent
-   cases rather than dropping them from the counts.
-4. Investigate the captured SNOMED provenance inconsistency and revalidate
-   vocabulary/code, dates and domains before treating any candidate as reviewed.
-   Commit the generator, safe reference artifacts and a repeatable coverage report.
+The [therapy import audit](docs/field-mapping-inventory/therapy-import-audit.md)
+confirms that all 239 CancerBot main therapy codes are present in PRomop. The
+94-entry CancerBot PlannedTherapy catalog is separate; it must not be confused
+with TherapyRegimen. Keep all managed therapy/component/class tables, link
+management and clinical authoring capabilities. Source blank cells became a
+blank-code component and class in PRomop; 30 numeric mapping assignments remain
+unresolved. The audit records evidence for correction without changing catalogs.
 
-**First inventory slice implemented on 2026-09-14:** the
-[reproducible reference inventory](docs/field-mapping-inventory/README.md) now
-exports staging reference tables, typed source rows, frontend constants/control
-bindings, the frozen Genomics catalog, CancerBot static fragments, exact
-candidate evidence and both vocabulary release mechanisms. The
-[coverage report](docs/field-mapping-inventory/coverage.md) accounts for 2,801
-source occurrences, including 414 fields, without dropping unresolved rows.
-The SNOMED provenance investigation traced the metadata string to a historical
-benchmark helper; this does not certify individual staging concepts.
-
-The user confirmed that staging's therapies, components, classes and regimen/
-disease mappings were generated from CancerBot. They are the authoritative
-therapy inventory source: 34 public lists are covered by the staging catalogs,
-25 lists by complete static source, and 20 planned lists have catalog coverage
-with picker context pending. No duplicate therapy export is required.
-
-**#1223 remains open.** The first slice left 93 of 172 public bindings requiring
-source/provider reconciliation. The source reconciliation below reduces that
-remainder to 64 requiring live reference coverage. No live CancerBot database connection was configured.
-Dynamic provider reconciliation, retired-option history, destination/context
-crosswalks and semantic review also remain. Continue those inventory tasks;
-do not treat this first slice as completing the prerequisite for #1224.
+**#1223 remains unfinished.** Reference membership is now available, but dynamic
+frontend providers, destination/context crosswalks, retirement/replacement
+history and semantic candidate review still need reconciliation. No candidate
+is clinically approved by this export. SNOMED lineage remains uncertain despite
+the traced historical metadata helper; coordinate #461/#623 before bulk approval.
 
 ### Handoff: continue on another machine
 
-**Next inventory slice, 2026-09-14 ([draft PR #1284](https://github.com/healthkey-ai/promop/pull/1284)):** source reconciliation resolves 26 more
-deterministic public lists and records three trial-search exclusions. Coverage
-is now 51 static lists, 34 staging therapy lists, 20 planned-context lists, and
-64 lists requiring live reference coverage. The 2,883-row manifest preserves
-the original staging snapshot and adds 82 source-option rows with dependency
-hashes, explicit disease context and unreviewed dispositions. The source-only
-reconciliation command reproduces these changes without database access; see
-the inventory instructions below. Earlier feature implementation remains
-preserved separately on `feat/field-value-concept-mappings`; inventory work
-continues on `feat/1223-next`. No associated issue is closed.
+1. Fetch origin and use the existing `feat/1223-next` branch in an isolated
+   worktree. Preserve `feat/field-value-concept-mappings` and unrelated changes.
+2. Read this plan, the [architecture](field_concept_mapping_architecture.md),
+   [inventory instructions](docs/field-mapping-inventory/README.md), generated
+   coverage and manifest. CancerBot source/reference replay no longer requires
+   a live connection; portable reference artifacts are checked in.
+3. Finish the inventory's dynamic provider and destination/context crosswalks.
+   Retain disease, staging basis, marker polarity, typed unknown values,
+   source identity, candidate evidence and explicit unresolved dispositions.
+4. Account for aliases, retired values and replacements using source history.
+   Absence from a later reference snapshot is not proof of clinical retirement.
+5. Once #1223's acceptance is met, continue stable scoped choices (#1224),
+   curation (#1225), projection/readback (#1226), disease and genetic/therapy
+   integrations (#1227–#1230), then transfer/reconciliation (#1231). Review the
+   preserved earlier implementation against the completed inventory and current
+   dev before reusing it. Full tests use a local database.
 
-Verification of this source reconciliation: full local pytest **2,446 passed,
-4 skipped**; Django **1,999 tests OK, 1 skipped**; frontend **574 passed,
-4 skipped**; async end-to-end **2 passed**. All original 2,801 source rows and all reference/candidate/release
-evidence are retained. No staging reads or writes were needed for this update.
-
-**Completed in PR #1271:** versioned reference manifest and coverage report;
-typed field/value identities; frontend and CancerBot source extraction; staging
-therapy catalog/disease-round coverage; exact code/name/synonym/Maps-to evidence;
-SNOMED provenance investigation; and regression coverage for the inventory.
-The merge-review fixes use psycopg SQL composition, keep dynamically transformed
-literal lists unresolved, and update live-import bindings/provider counts
-consistently (including empty lists and planned-list coverage).
-
-The focused suite has **22 passing tests**. The refreshed staging export exercises
-the read-only SQL path; CI and merge status are recorded on PR #1271. The final
-merge commit is discoverable from that PR, so this checkpoint does not depend on
-a machine-local worktree or temporary runner.
-
-After PR #1271 is merged, start a new branch from current `origin/dev` in a clean
-checkout. For example, from an existing clone:
-
-```sh
-git fetch origin
-git worktree add ../promop-field-inventory-next -b feat/1223-next origin/dev
-```
-
-Read [inventory instructions](docs/field-mapping-inventory/README.md),
-[coverage](docs/field-mapping-inventory/coverage.md), and
-[manifest](docs/field-mapping-inventory/manifest.json). The manifest contains the
-source revisions/file hashes, reference rows, candidate evidence, per-list
-coverage states, validation flags and implementation owners. It can be reviewed
-without access to either live database. To refresh it, configure the intended
-reference database locally and follow the portable command in the inventory
-instructions; never copy credentials into the repository. Staging remains Render.
-
-**Next work, in order:**
-
-1. Reconcile the 64 outstanding CancerBot public lists: establish which are
-   static/provider-resolvable, which are trial/admin exclusions, and which need
-   live reference coverage. Use `cancerbot_bindings` and
-   `totals.source_coverage.cancerbot_public_lists` in the manifest. Do not request
-   another therapy catalog export: staging already supplies that CancerBot data.
-2. Resolve the 20 planned-picker contexts, remaining dynamic frontend providers,
-   and nested genetic relationships. Preserve planned versus administered
-   status, staging-system/basis, marker polarity and typed unknown values.
-3. Finish destination/context crosswalks, aliases and retirement/replacement
-   history. Review the manifest's domain/table and read-recipe conflicts and
-   expand semantic candidate evidence where exact searches are insufficient.
-   Coordinate vocabulary lineage repair with #461/#623 before bulk approval.
-4. Reconcile complete source/disposition totals and representation decisions;
-   only then close #1223 and start #1224. #1225–#1231 remain subsequent work,
-   with dependencies unchanged in section 9. Parent #21 and #26 remain open.
-
-The inventory can begin with available reference sources, but #1223 is complete
-only when its full source coverage, totals and representation decisions are
-accounted for. Then deliver stable scoped choices and reviewed answer mappings
-in #1224; #1225 (curation UI/API) and #1226 (projection/readback) build on that.
-
-Genomics has advanced since the original snapshot: use the
-[implemented Genomics architecture](docs/genomics_architecture.md) and
-[remaining Genomics work](docs/genomics_implementation.md) for current ownership.
-Issue #1229 adds contextual value mapping to that finding/component model;
-it must preserve the frozen catalog, structured findings and reviewed recipes.
-The [field mapping architecture](field_concept_mapping_architecture.md) describes
-implemented model and writer behavior. Use the generated inventory for individual
-field/value evidence rather than a second manually maintained baseline table.
+All #1223–#1231 and parent #21/#26 remain open at the user's instruction.
+Informational PR #1235 stays closed and unmerged. Never close unfinished issues.
+Verification of this reference-access checkpoint: 49 focused checks; full pytest
+**2,651 passed, 4 skipped**; Django **2,003 tests OK, 1 skipped**; frontend
+**595 passed, 4 skipped**; async end-to-end **4 passed**. All tests used local
+PostgreSQL/Redis. System and diff checks passed. PR #1284 remains a draft.
 
 ## 1. Intended result
 
