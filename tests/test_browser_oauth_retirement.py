@@ -109,4 +109,3 @@ def test_session_login_cookie(client, owner):
     assert client.get("/api/user/").status_code == 200
     assert client.post("/api/auth/logout/").status_code == 200
     assert client.get("/api/user/").status_code == 401
-

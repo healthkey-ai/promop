@@ -1,12 +1,43 @@
-"""Select async e2e from PR changes or the full deployment push diff."""
+"""Select CI suites from PR changes or the full deployment push diff."""
 
 import ast
 import fnmatch
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
+
+
+# These Markdown files are consumed by import/build commands as runtime data.
+# Keep them under full CI even though their extension and directory look like docs.
+RUNTIME_DOCUMENTS = {
+    "docs/code-concept-mappings.md",
+    "docs/ht-code-concept-mapping.md",
+    "docs/ht-fhir-code-concept-mapping.md",
+}
+DOC_EXTENSIONS = {".md", ".rst", ".adoc"}
+DOC_ASSET_EXTENSIONS = {".txt", ".pdf", ".png", ".jpg", ".jpeg", ".svg", ".webp"}
+
+
+def is_docs_only(paths):
+    """An empty or unrecognized change set must retain normal CI."""
+    if not paths:
+        return False
+    for name in paths:
+        path = PurePosixPath(name)
+        if name in RUNTIME_DOCUMENTS:
+            return False
+        if name in {"LICENSE", "NOTICE"}:
+            continue
+        if path.suffix in DOC_EXTENSIONS and (
+            path.parent == PurePosixPath(".") or name.startswith(("docs/", ".github/"))
+        ):
+            continue
+        if name.startswith("docs/") and path.suffix in DOC_ASSET_EXTENSIONS:
+            continue
+        return False
+    return True
 
 
 # Deliberately scoped to async execution, not all code a task might call.
@@ -112,10 +143,16 @@ def file_at(revision, path):
         "utf-8", errors="replace")
 
 
-def select_range(base, head, *, merge_base=True):
+def select_checks(base, head, *, merge_base=True):
     if merge_base:
         base = subprocess.check_output(["git", "merge-base", base, head], text=True).strip()
-    return requires_async_e2e(changed_paths(base, head, merge_base=False), base, head)
+    paths = changed_paths(base, head, merge_base=False)
+    docs_only = is_docs_only(paths)
+    return (False if docs_only else requires_async_e2e(paths, base, head)), docs_only
+
+
+def select_range(base, head, *, merge_base=True):
+    return select_checks(base, head, merge_base=merge_base)[0]
 
 
 def changed_paths(base, head, *, merge_base=True):
@@ -132,20 +169,20 @@ def changed_paths(base, head, *, merge_base=True):
 
 
 def main():
-    run = True
+    run, docs_only = True, False
     event_name = os.environ["GITHUB_EVENT_NAME"]
     if event_name in {"pull_request", "push"}:
         event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
     if event_name == "pull_request":
         pr = event["pull_request"]
-        run = select_range(pr["base"]["sha"], pr["head"]["sha"])
+        run, docs_only = select_checks(pr["base"]["sha"], pr["head"]["sha"])
     elif event_name == "push":
         # Reusable workflows keep the caller's push event. Compare both ends
         # of the entire push, not HEAD^ (which would miss multi-commit pushes).
         before, after = event.get("before"), event.get("after")
         if before and after and before != "0" * 40 and after != "0" * 40:
-            run = select_range(before, after, merge_base=False)
-    output = f"async_e2e={str(run).lower()}"
+            run, docs_only = select_checks(before, after, merge_base=False)
+    output = f"async_e2e={str(run).lower()}\ndocs_only={str(docs_only).lower()}"
     print(output)
     with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
         stream.write(output + "\n")

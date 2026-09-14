@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Plus } from 'lucide-react';
 import api from '@/api/axios';
 import { useAuth } from '@/hooks/useAuth';
@@ -104,6 +104,7 @@ export default function OrgAdminPage() {
           </button>
           <h1 className="text-2xl font-semibold text-gray-900">Org Admin</h1>
         </div>
+        {currentUser?.is_staff && <Link to="/service-applications" className="text-sm text-blue-700 hover:underline">Service applications</Link>}
         {currentUser?.is_staff && (
           <button
             onClick={() => setCreating(true)}

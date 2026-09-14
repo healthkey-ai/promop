@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import LegacyCytogeneticHistory from './LegacyCytogeneticHistory';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 import { Button } from '@/components/shadcn/button';
 import { useWritableFields } from '@/hooks/useWritableFields';
@@ -10,7 +11,8 @@ type Marker = { key: string; field_name: string; gene: string; label: string; ki
 const fields = [
   ['gene', 'Gene'],
   ['variant_name', 'Variant name'],
-  ['variant', 'Variant / transcript DNA change (HGVS)'],
+  ['variant', 'Original variant text'],
+  ['transcript_dna_change', 'Transcript DNA change (c.HGVS)'],
   ['origin', 'Origin'],
   ['interpretation', 'Interpretation'],
   ['test_date', 'Test date'],
@@ -24,7 +26,9 @@ const fields = [
   ['cytogenetic_location', 'Cytogenetic location'],
   ['genomic_dna_change', 'Genomic DNA change (g.HGVS)'],
   ['allelic_frequency', 'Sample variant allele frequency (VAF)'],
-  ['assessment', 'Result assessment'],
+  ['clone_fraction', 'Clone fraction'],
+  ['coverage_depth', 'Coverage depth'],
+  ['amino_acid_change_type', 'Amino acid change type'],
   ['specimen_id', 'Specimen ID'],
   ['specimen_type', 'Specimen / tissue type'],
   ['collection_date', 'Specimen collection date'],
@@ -46,11 +50,28 @@ const selectOptions: Record<string, string[]> = {
   variant_category: ['Simple variant', 'Structural variant'],
   genomic_source_class: ['Germline', 'Somatic', 'De novo', 'Unknown'],
   variant_analysis_method_type: ['Sequencing', 'Next generation sequencing', 'Sanger sequencing', 'PCR', 'FISH', 'Microarray'],
-  assessment: ['present', 'absent', 'not_tested', 'no_call', 'indeterminate'],
   status: ['present', 'absent', 'indeterminate'],
   zygosity: ['Heterozygous', 'Homozygous', 'Hemizygous', 'Unknown'],
   chromosome: ['1','2','3','4','5','6','7','8','9','10','11','12','13','14','15','16','17','18','19','20','21','22','X','Y'],
 };
+
+const numericFields = new Set(['allelic_frequency', 'clone_fraction', 'coverage_depth']);
+const absentVariantFields = ['amino_acid_change', 'allelic_frequency', 'genomic_dna_change',
+  'transcript_reference_sequence_id', 'transcript_dna_change', 'amino_acid_change_type', 'zygosity'];
+
+function findingStatus(finding: Variant): string {
+  if (!finding.id) return 'Unknown';
+  const state = finding.status || (['no_call', 'not_tested'].includes(String(finding.assessment))
+    ? 'indeterminate' : finding.assessment) || 'present';
+  return ({ present: 'Present', absent: 'Absent', indeterminate: 'Indeterminate' } as Record<string, string>)[String(state)] || 'Indeterminate';
+}
+
+function changeStatus(draft: Variant, status: string): Variant {
+  const changed: Variant = { ...draft, status };
+  if (status !== draft.status) delete changed.assessment;
+  if (status === 'absent') for (const key of absentVariantFields) changed[key] = '';
+  return changed;
+}
 
 function errorMessage(error: unknown): string {
   const data = (error as { response?: { data?: Record<string, unknown> } })?.response?.data;
@@ -144,16 +165,16 @@ export default function GenomicsTab({ formData, readOnly = false }: {
     <div className="flex items-center justify-between gap-3">
       <p className="text-sm text-muted-foreground">{variants.length} gene / variant record{variants.length === 1 ? '' : 's'}</p>
       {editable && <Button disabled={busy || !!draft} onClick={() => {
-        setDraft({ gene: '', variant: '', allelic_frequency_unit: '%' });
+        setDraft({ gene: '', variant: '', status: 'present', allelic_frequency_unit: '%', clone_fraction_unit: '%' });
         setViewing(null); setDeleting(null); setError(''); setStatus('');
       }}>Add variant</Button>}
     </div>
     {error && !draft && <p role="alert" className="text-sm text-red-600">{error}</p>}
     {status && <p role="status" className="text-sm text-emerald-700">{status}</p>}
-    {!variants.length && <p className="text-sm text-muted-foreground">No genomic variants recorded. Priority rows below have no data until a result is saved.</p>}
+    {!variants.length && <p className="text-sm text-muted-foreground">No genomic variants recorded. Priority rows below are unknown until a result is saved.</p>}
     {!!rows.length && <div className="overflow-x-auto">
       <table className="w-full text-left text-sm">
-        <thead><tr className="border-b">{['Gene', 'Mutation', 'Origin', 'Interpretation', 'Actions'].map(label => <th key={label} className="p-2 font-medium">{label}</th>)}</tr></thead>
+        <thead><tr className="border-b">{['Gene', 'Mutation', 'Finding status', 'Origin', 'Interpretation', 'Actions'].map(label => <th key={label} className="p-2 font-medium">{label}</th>)}</tr></thead>
         <tbody>{rows.map(v => <tr key={v.id ?? String(v.marker_key)} tabIndex={0}
           aria-label={`${v.gene} ${v.variant || markerFor(v)?.label || ''}`}
           onClick={() => { if (!busy && !draft) { setViewing(v); setDeleting(null); } }}
@@ -163,6 +184,7 @@ export default function GenomicsTab({ formData, readOnly = false }: {
           <td className="p-2 break-words max-w-xs">{v.variant || v.variant_name || v.genomic_dna_change || 'Not recorded'}
             {markerFor(v)?.kind === 'abnormality' && <span className="block text-xs text-muted-foreground">{markerFor(v)?.label}</span>}
           </td>
+          <td className="p-2">{findingStatus(v)}</td>
           <td className="p-2">{v.origin || v.genomic_source_class || '—'}</td>
           <td className="p-2">{v.interpretation || '—'}</td>
           <td className="p-2" onClick={e => e.stopPropagation()}><div className="flex gap-1">
@@ -175,6 +197,7 @@ export default function GenomicsTab({ formData, readOnly = false }: {
         </tr>)}</tbody>
       </table>
     </div>}
+    {personId && <LegacyCytogeneticHistory key={personId} personId={personId} />}
     {deleting && <div role="alertdialog" aria-label="Delete variant" className="rounded-md border p-4 space-y-3">
       <p>Delete {deleting.gene} {deleting.variant_name || deleting.variant} from the active genomics list?</p>
       <div className="flex gap-2"><Button disabled={busy} onClick={remove}>Confirm delete</Button><Button variant="outline" disabled={busy} onClick={() => setDeleting(null)}>Cancel</Button></div>
@@ -186,8 +209,8 @@ export default function GenomicsTab({ formData, readOnly = false }: {
       {markerFor((draft || viewing)!)?.expert_review && <p className="text-sm text-amber-700">{markerFor((draft || viewing)!)?.expert_review}</p>}
     {viewing && <div className="space-y-4">
       {editable && markerFor(viewing)?.writable !== false && <Button onClick={() => { setDraft({ ...viewing }); setViewing(null); }}>Edit result</Button>}
-      <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4">{[...fields, ['variant_description', 'Full variant description']].map(([key, label]) => <div key={key}>
-        <dt className="text-sm text-muted-foreground">{label}</dt><dd className="text-sm whitespace-pre-wrap break-words">{viewing[key] ?? '—'}{key === 'allelic_frequency' && viewing[key] != null ? ` ${viewing.allelic_frequency_unit === '1' ? '(fraction)' : '%'}` : ''}</dd>
+      <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4">{[...fields, ['assessment', 'Source result assessment'], ['variant_description', 'Full variant description']].map(([key, label]) => <div key={key}>
+        <dt className="text-sm text-muted-foreground">{label}</dt><dd className="text-sm whitespace-pre-wrap break-words">{key === 'status' ? findingStatus(viewing) : viewing[key] ?? '—'}{['allelic_frequency', 'clone_fraction'].includes(key) && viewing[key] != null ? ` ${viewing[`${key}_unit`] === '1' ? '(fraction)' : '%'}` : ''}</dd>
       </div>)}</dl>
     </div>}
     {draft && <form className="rounded-md border p-4 space-y-4" onSubmit={e => { e.preventDefault(); void save(); }}>
@@ -199,17 +222,18 @@ export default function GenomicsTab({ formData, readOnly = false }: {
           const aliasList = key === 'variant_name' && draftMarker?.kind === 'abnormality' ? [draftMarker.label, ...draftMarker.aliases] : undefined;
           return <label key={key} className="space-y-1 text-sm">
             <span className="block font-medium">{label}{key === 'gene' ? ' *' : ''}</span>
-            {opts ? <select className="w-full rounded-md border bg-background px-3 py-2"
-              value={draft[key] ?? ''} onChange={e => setDraft({ ...draft, [key]: e.target.value })}>
-              <option value="">— Select —</option>
+            {opts ? <select disabled={draft.status === 'absent' && absentVariantFields.includes(key)} className="w-full rounded-md border bg-background px-3 py-2"
+              value={draft[key] ?? (key === 'status' ? 'present' : '')} onChange={e => setDraft(key === 'status' ? changeStatus(draft, e.target.value) : { ...draft, [key]: e.target.value })}>
+              {key !== 'status' && <option value="">— Select —</option>}
               {opts.map(v => <option key={v} value={v}>{v}</option>)}
             </select>
             : <input className="w-full rounded-md border bg-background px-3 py-2" required={key === 'gene'}
-              type={key.endsWith('_date') ? 'date' : key === 'allelic_frequency' ? 'number' : 'text'}
+              type={key.endsWith('_date') ? 'date' : numericFields.has(key) ? 'number' : 'text'}
               readOnly={key === 'gene' && !!draft.marker_key}
-              min={key === 'allelic_frequency' ? 0 : undefined}
-              max={key === 'allelic_frequency' ? (draft.allelic_frequency_unit === '1' ? 1 : 100) : undefined}
-              step={key === 'allelic_frequency' ? '0.00001' : undefined}
+              min={numericFields.has(key) ? 0 : undefined}
+              max={['allelic_frequency', 'clone_fraction'].includes(key) ? (draft[`${key}_unit`] === '1' ? 1 : 100) : undefined}
+              step={key === 'coverage_depth' ? 'any' : numericFields.has(key) ? '0.00001' : undefined}
+              disabled={draft.status === 'absent' && absentVariantFields.includes(key)}
               maxLength={key === 'gene' ? 50 : 10000}
               list={aliasList ? `genomics-aliases-${key}` : undefined}
               value={draft[key] ?? ''} onChange={e => setDraft({ ...draft, [key]: e.target.value })} />}
@@ -221,6 +245,12 @@ export default function GenomicsTab({ formData, readOnly = false }: {
             <option value="%">Percent (0–100)</option><option value="1">Fraction (0–1)</option>
           </select>
         </label>
+        <label className="space-y-1 text-sm"><span className="block font-medium">Clone fraction unit</span>
+          <select className="w-full rounded-md border bg-background px-3 py-2" value={draft.clone_fraction_unit || '%'} onChange={e => setDraft({ ...draft, clone_fraction_unit: e.target.value })}>
+            <option value="%">Percent (0–100)</option><option value="1">Fraction (0–1)</option>
+          </select>
+        </label>
+        {draft.assessment && <p className="text-sm">Source result assessment: {draft.assessment}</p>}
         <label className="space-y-1 text-sm sm:col-span-2"><span className="block font-medium">Full variant description</span>
           <textarea className="w-full rounded-md border bg-background px-3 py-2" rows={4} maxLength={10000} value={draft.variant_description ?? ''} onChange={e => setDraft({ ...draft, variant_description: e.target.value })} />
         </label>

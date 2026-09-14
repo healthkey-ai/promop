@@ -217,14 +217,14 @@ describe('MyelomaSection — SCT fields', () => {
     expect(screen.getByText('SCT Eligibility')).toBeInTheDocument();
   });
 
-  it('renders cytogenetic markers from the server descriptor and emits a comma string', () => {
+  it('shows legacy cytogenetics read-only even with a stale writable descriptor', () => {
     const onChange = vi.fn();
     renderMyeloma({ cytogenetic_markers: 'del17p' }, onChange);
-
-    expect(screen.getByText('Cytogenetic Markers')).toBeInTheDocument();
-    expect(screen.getByTestId('ms-opt-del17p')).toHaveAttribute('aria-pressed', 'true');
-    fireEvent.click(screen.getByTestId('ms-opt-1q_amp'));
-    expect(onChange).toHaveBeenCalledWith('cytogenetic_markers', 'del17p, 1q_amp');
+    expect(screen.getByText('Legacy cytogenetic summary')).toBeInTheDocument();
+    expect(screen.getByText('del17p')).toBeInTheDocument();
+    expect(screen.queryByTestId('ms-opt-1q_amp')).not.toBeInTheDocument();
+    expect(screen.getByText(/Record individual findings in Genomics/)).toBeInTheDocument();
+    expect(onChange).not.toHaveBeenCalled();
   });
 
   it('keeps the myeloma type fallback options aligned with the requested value set', () => {
@@ -447,6 +447,16 @@ describe('LymphomaSection — transformation to DLBCL fields', () => {
     expect(screen.getByText('Post-Transformation Outcome')).toBeInTheDocument();
   });
 
+  it('keeps shared lab editors in Blood and Labs while retaining FL assessment inputs', () => {
+    renderLymphoma({ hemoglobin_g_dl: 11.5, ldh_u_l: 250 });
+    expect(screen.getByText('Record hemoglobin in Blood and LDH in Labs.')).toBeInTheDocument();
+    expect(screen.queryByText('Hemoglobin (g/dL)')).not.toBeInTheDocument();
+    expect(screen.queryByText('LDH (U/L)')).not.toBeInTheDocument();
+    expect(screen.getByText('LDH Upper Limit of Normal (U/L)')).toBeInTheDocument();
+    expect(screen.getByText('Number of Nodal Sites')).toBeInTheDocument();
+    expect(screen.getByText('Bone Marrow Involvement')).toBeInTheDocument();
+  });
+
   it('renders dlbcl_transformation_date value in the date input', () => {
     renderLymphoma({ dlbcl_transformation_date: '2023-04-15' });
     expect(screen.getByDisplayValue('2023-04-15')).toBeInTheDocument();
@@ -569,12 +579,12 @@ describe('DiseaseTab — descriptor-driven', () => {
     expect(screen.queryByTestId('reason-tnbc_status')).not.toBeInTheDocument();
   });
 
-  it('says a field the API has no column for is not stored, not that it is derived', () => {
+  it('recognizes the now-stored B symptoms field', () => {
     // #646. "Derived from OMOP data" would send a reader looking for a value
     // that was never recorded anywhere.
     render(<DiseaseTab {...baseProps} diseaseType="lymphoma" formData={{}} />);
 
-    expect(screen.getByTestId('reason-b_symptoms')).toHaveTextContent(
+    expect(screen.getByTestId('reason-b_symptoms')).not.toHaveTextContent(
       /not stored on the patient record yet/i,
     );
   });
@@ -583,7 +593,7 @@ describe('DiseaseTab — descriptor-driven', () => {
     render(<DiseaseTab {...baseProps} diseaseType="myeloma" formData={{}} />);
 
     for (const name of ['r_iss_stage', 'hypercalcemia', 'cytogenetic_risk']) {
-      expect(screen.getByTestId(`reason-${name}`)).toBeInTheDocument();
+      expect(screen.queryByTestId(`reason-${name}`)).not.toBeInTheDocument();
     }
   });
 });
@@ -620,13 +630,19 @@ describe('DiseaseTab — shared staging and biomarkers', () => {
     await fetchWritableFields();
   });
 
-  it.each(['breast', 'lymphoma', 'myeloma', 'cll', 'other'] as const)(
-    'shows them for %s, not only one disease',
+  it.each(['breast'] as const)(
+    'shows solid-tumor staging for %s',
     (diseaseType) => {
       render(<DiseaseTab {...baseProps} diseaseType={diseaseType} formData={{}} />);
       expect(screen.getByText('Staging & Biomarkers')).toBeInTheDocument();
     },
   );
+
+  it.each(['lymphoma', 'myeloma', 'cll', 'mcl', 'other'] as const)('omits routine solid-tumor biomarkers for %s', diseaseType => {
+    render(<DiseaseTab {...baseProps} diseaseType={diseaseType} formData={{}} />);
+    expect(screen.queryByText('Staging & Biomarkers')).not.toBeInTheDocument();
+    expect(screen.queryByText('PD-L1 Combined Positive Score')).not.toBeInTheDocument();
+  });
 
   it('leaves all four editable, since all four are mapped', () => {
     render(<DiseaseTab {...baseProps} diseaseType="breast" formData={{}} />);
@@ -645,7 +661,7 @@ describe('DiseaseTab — shared staging and biomarkers', () => {
   });
 });
 
-describe('DiseaseTab — cytogenetic marker multiselect', () => {
+describe('DiseaseTab — legacy cytogenetic summary', () => {
   beforeEach(async () => {
     __resetWritableFieldsCache();
     (globalThis as Record<string, unknown>).__DESCRIPTORS__ = {
@@ -659,16 +675,12 @@ describe('DiseaseTab — cytogenetic marker multiselect', () => {
     setupVocabMock();
   });
 
-  it('adds and removes individual choices without discarding other selections', () => {
+  it('preserves the displayed legacy tokens without emitting selection edits', () => {
     const onChange = vi.fn();
-    const { rerender } = render(<DiseaseTab {...BASE_PROPS}
-      formData={{ cytogenetic_markers: 't(4;14)' }} onChange={onChange} />);
-    expect(screen.getByText('Cytogenetic Markers')).toBeInTheDocument();
-    fireEvent.click(screen.getByTestId('ms-opt-t(11;14)'));
-    expect(onChange).toHaveBeenLastCalledWith('cytogenetic_markers', 't(4;14), t(11;14)');
-    rerender(<DiseaseTab {...BASE_PROPS}
-      formData={{ cytogenetic_markers: 't(4;14), t(11;14)' }} onChange={onChange} />);
-    fireEvent.click(screen.getByTestId('ms-opt-t(4;14)'));
-    expect(onChange).toHaveBeenLastCalledWith('cytogenetic_markers', 't(11;14)');
+    render(<DiseaseTab {...BASE_PROPS}
+      formData={{ cytogenetic_markers: 't(4;14), 1q21 gain/amplification' }} onChange={onChange} />);
+    expect(screen.getByText('t(4;14), 1q21 gain/amplification')).toBeInTheDocument();
+    expect(screen.queryByTestId('ms-opt-t(11;14)')).not.toBeInTheDocument();
+    expect(onChange).not.toHaveBeenCalled();
   });
 });

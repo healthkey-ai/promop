@@ -700,7 +700,7 @@ class Command(BaseCommand):
                     "status": "final",
                     "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "imaging"}]}],
                     "code": {
-                        "coding": [{"system": "http://loinc.org", "code": "21908-9", "display": "Measurable disease RECIST"}],
+                        "coding": [{"system": "http://healthkey.ai/fhir/CodeSystem/synthetic", "code": "measurable-disease-recist", "display": "Measurable disease RECIST"}],
                         "text": "Measurable disease RECIST"
                     },
                     "subject": {"reference": f"Patient/{patient_id}"},

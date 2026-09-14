@@ -353,6 +353,7 @@ def test_source_connection_carries_the_defaults_django_applies_at_startup():
     coverage catches.
     """
     from django.db import connections
+    from django.db.utils import ConnectionHandler
     from omop_core.management.commands.copy_curation import (
         register_source_connection,
     )
@@ -361,7 +362,11 @@ def test_source_connection_carries_the_defaults_django_applies_at_startup():
     try:
         register_source_connection('postgresql://u:p@example.invalid:5432/instance_a', alias)
         config = connections.databases[alias]
-        default = connections.databases['default']
+        # Compare framework defaults, not this deployment's optional settings
+        # (such as a test TEMPLATE that the remote source must not inherit).
+        default = ConnectionHandler({'default': {
+            'ENGINE': config['ENGINE'], 'NAME': 'instance_a',
+        }}).settings['default']
         assert set(default) <= set(config)
         assert set(default['TEST']) <= set(config['TEST'])
     finally:

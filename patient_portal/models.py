@@ -1,6 +1,7 @@
 import uuid
 
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
+from django.core.validators import RegexValidator
 from django.db import models
 from django.db.models import Q
 from django.utils import timezone
@@ -413,3 +414,47 @@ class BreakGlassGrant(models.Model):
 
     def __str__(self):
         return f"BreakGlass({self.identity_id} -> Person {self.person_id})"
+
+
+class ServiceApplication(models.Model):
+    """An editable application record with a stable service principal."""
+    name = models.CharField(max_length=160)
+    service_id = models.CharField(max_length=128, unique=True, validators=[
+        RegexValidator(
+            r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$', 'Use letters, numbers, dots, underscores, or hyphens.',
+        ),
+    ])
+    description = models.TextField(blank=True)
+    owner_contact = models.CharField(max_length=255, blank=True)
+    scopes = models.CharField(max_length=512, default='patient/*.read', blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name', 'pk']
+
+    def __str__(self):
+        return self.name
+
+
+class ServiceAccessToken(models.Model):
+    """Only the SHA-256 digest of a high-entropy bearer secret is persisted."""
+    application = models.ForeignKey(ServiceApplication, on_delete=models.PROTECT, related_name='tokens')
+    label = models.CharField(max_length=160)
+    digest = models.CharField(max_length=64, unique=True, editable=False)
+    suffix = models.CharField(max_length=4, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(Identity, null=True, blank=True, on_delete=models.SET_NULL,
+                                   related_name='issued_service_tokens')
+    expires_at = models.DateTimeField(null=True, blank=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_by = models.ForeignKey(Identity, null=True, blank=True, on_delete=models.SET_NULL,
+                                   related_name='revoked_service_tokens')
+
+    class Meta:
+        ordering = ['-created_at', '-pk']
+
+    def __str__(self):
+        return f'{self.application.name}: {self.label} (…{self.suffix})'

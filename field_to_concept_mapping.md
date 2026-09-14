@@ -2,6 +2,10 @@
 
 Snapshot: 2026-09-11. UI and projection code: `dev` commit `7065a3f`; vocabulary and mapping metadata queried from staging. This document does not describe or change the separate, unmerged genomics work. No patient values are included.
 
+For the active field-and-answer mapping work, see the
+[enhancement plan](field_concept_mapping_enhancements.md), including its current
+checkpoint and inventory prerequisite (#1223).
+
 ## How edits flow
 
 1. Patient clinical edits are PATCHed to PatientRecord (`/api/v1/patient-records/{person_id}/`; the current provider UI uses its legacy `/api/patient-info/` alias). The UI name below is the payload key; a concrete field writes the same-named PatientRecord column unless an exception is stated.
@@ -658,7 +662,7 @@ The table records the exact recipes applied by this work. `source_value` disting
 | `condition_clinical_status` | observation; 1989567; LOINC `99493-9` — Condition clinical status | PatientRecord edit retained; no active projection. Existing proposal requires review; not automatically approved. |
 | `condition_code_icd_10` | Observation; 3027027; LOINC `29308-4` — Diagnosis | PatientRecord edit retained; no active projection. Existing proposal requires review; not automatically approved. |
 | `condition_code_snomed_ct` | Observation; 3027027; LOINC `29308-4` — Diagnosis | PatientRecord edit retained; no active projection. Existing proposal requires review; not automatically approved. |
-| `cytogenetic_markers` | Observation; per-value standard SNOMED categories — [all nine mappings](docs/cytogenetic-markers.md) | Multiselect PATCH creates one coded Observation per marker; exact marker retained in value/source fields. |
+| `cytogenetic_markers` | Read-only legacy summary; see [Genomics architecture](docs/genomics_architecture.md) for current ownership and history access. | New discrete findings belong to Genomics. PatientRecord PATCH rejects changed summaries; retained internal projectors support import/history compatibility. |
 | `death_date` | observation; 0 — no matching standard concept | Current projection. Existing approved; historical origin unrecorded. source `patient-record:death_date`; type 32817; date |
 | `diagnosis_date` | observation; 40766651; LOINC `63931-0` — Date of diagnosis | Current projection. Existing approved; historical origin unrecorded. source `63931-0`; type 32817; date |
 | `disease_slug` | Unresolved; No verified concept | PatientRecord edit retained; no active projection. No verified concept candidate; tracked in the repurposed issue. |

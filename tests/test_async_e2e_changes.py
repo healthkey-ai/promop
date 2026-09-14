@@ -94,16 +94,17 @@ def test_event_selection_and_job_output(tmp_path, monkeypatch, event_name, paths
     monkeypatch.setenv("GITHUB_EVENT_NAME", event_name)
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
     monkeypatch.setenv("GITHUB_OUTPUT", str(output))
-    def select_range(base, head, *, merge_base=True):
+    def select_checks(base, head, *, merge_base=True):
         if event_name == "push":
             assert (base, head, merge_base) == ("before-push", "after-push", False)
         else:
             assert (base, head, merge_base) == ("base", "head", True)
-        return filter_module.requires_async_e2e(paths)
+        return filter_module.requires_async_e2e(paths), filter_module.is_docs_only(paths)
 
-    monkeypatch.setattr(filter_module, "select_range", select_range)
+    monkeypatch.setattr(filter_module, "select_checks", select_checks)
     filter_module.main()
-    assert output.read_text() == f"async_e2e={expected}\n"
+    docs_only = event_name in {"pull_request", "push"} and filter_module.is_docs_only(paths)
+    assert output.read_text() == f"async_e2e={expected}\ndocs_only={str(docs_only).lower()}\n"
 
 
 def test_new_branch_push_runs_without_a_comparison(tmp_path, monkeypatch):
@@ -114,7 +115,7 @@ def test_new_branch_push_runs_without_a_comparison(tmp_path, monkeypatch):
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
     monkeypatch.setenv("GITHUB_OUTPUT", str(output))
     filter_module.main()
-    assert output.read_text() == "async_e2e=true\n"
+    assert output.read_text() == "async_e2e=true\ndocs_only=false\n"
 
 
 @pytest.mark.parametrize("path,before,after,expected", [
@@ -143,3 +144,83 @@ def test_new_branch_push_runs_without_a_comparison(tmp_path, monkeypatch):
 def test_shared_files_only_run_for_async_changes(monkeypatch, path, before, after, expected):
     monkeypatch.setattr(filter_module, "file_at", lambda rev, path: before if rev == "base" else after)
     assert filter_module.requires_async_e2e([path], "base", "head") is expected
+
+
+@pytest.mark.parametrize("paths", [
+    ["README.md", "docs/guide.md", "AGENTS.md", "CLAUDE.md"],
+    ["field_concept_mapping_enhancements.md", "field_to_concept_mapping.md"],
+    ["docs/utah-rhtp-technical-architecture-brief.md", "docs/utah-rhtp-brief.pdf"],
+    ["docs/diagram.svg", "docs/screenshot.png", "docs/adr/evidence.txt"],
+    [".github/PULL_REQUEST_TEMPLATE.md", "LICENSE"],
+])
+def test_prose_and_documentation_assets_skip_application_ci(paths):
+    assert filter_module.is_docs_only(paths)
+
+
+@pytest.mark.parametrize("path", [
+    "omop_core/models.py", "tests/test_models.py", "frontend/src/page.tsx",
+    "requirements.txt", "runtime.txt", "frontend/package-lock.json",
+    "render.yaml", ".github/workflows/ci.yml", ".github/scripts/async_e2e_changes.py",
+    "docs/ht-code-concept-mapping.md", "docs/code-concept-mappings.md",
+    "docs/ht-fhir-code-concept-mapping.md", "docs/seed.json", "docs/helper.py",
+    "data/prompt.md", "unknown-file", "Dockerfile",
+])
+def test_mixed_changes_and_runtime_documents_require_application_ci(path):
+    assert not filter_module.is_docs_only(["README.md", path])
+
+
+def test_empty_diff_requires_application_ci():
+    assert not filter_module.is_docs_only([])
+
+
+def test_docs_diff_uses_merge_base_and_includes_deleted_code_on_rename(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    def git(*args):
+        return subprocess.check_output(["git", *args], text=True).strip()
+
+    git("init", "-q")
+    git("config", "user.name", "CI Test")
+    git("config", "user.email", "ci@example.test")
+    (tmp_path / "app.py").write_text("print('source')\n")
+    git("add", ".")
+    git("commit", "-qm", "common")
+    common = git("rev-parse", "HEAD")
+    (tmp_path / "requirements.txt").write_text("dependency\n")
+    git("add", ".")
+    git("commit", "-qm", "base only")
+    base = git("rev-parse", "HEAD")
+    git("checkout", "-q", "--detach", common)
+    (tmp_path / "README.md").write_text("Guide\n")
+    git("add", ".")
+    git("commit", "-qm", "docs PR")
+    assert filter_module.select_checks(base, "HEAD") == (False, True)
+    before_push = git("rev-parse", "HEAD")
+    (tmp_path / "docs").mkdir()
+    git("mv", "app.py", "docs/example.md")
+    git("commit", "-qm", "rename code into docs")
+    assert filter_module.select_checks(base, "HEAD")[1] is False
+    (tmp_path / "README.md").write_text("Updated guide\n")
+    git("add", ".")
+    git("commit", "-qm", "last commit only changes prose")
+    assert filter_module.select_checks("HEAD^", "HEAD", merge_base=False)[1] is True
+    assert filter_module.select_checks(before_push, "HEAD", merge_base=False)[1] is False
+
+
+def test_failed_diff_does_not_emit_a_docs_skip(tmp_path, monkeypatch):
+    event = tmp_path / "event.json"
+    event.write_text(json.dumps({
+        "pull_request": {"base": {"sha": "missing-base"}, "head": {"sha": "missing-head"}},
+    }))
+    output = tmp_path / "output"
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+
+    def unavailable(*args, **kwargs):
+        raise subprocess.CalledProcessError(128, "git diff")
+
+    monkeypatch.setattr(filter_module, "select_checks", unavailable)
+    with pytest.raises(subprocess.CalledProcessError):
+        filter_module.main()
+    assert not output.exists()

@@ -60,6 +60,7 @@ from omop_core.services.patient_record_service import (
     refresh_patient_record,
     set_language_skills,
 )
+from omop_core.services.vocab_snapshot import TABLE_COLUMNS
 from omop_core.services.derivation_jobs import get_dispatcher
 from omop_core.services.patient_cleanup import delete_omop_clinical_rows
 from omop_core.services.prolog_cleanup import delete_prolog_data_for_persons
@@ -115,10 +116,14 @@ import os
 import re
 from decimal import Decimal, InvalidOperation
 from io import StringIO
+from patient_portal.api.bulk_upload import (
+    BULK_UPLOAD_AUTHENTICATION, BulkUploadPermission, ordered_bundle_entries,
+    upload_organization, upload_actor_id,
+)
 from .permissions import (
     EtlPatientCrudPermission, EtlWritePermission, PatientCrudPermission, GenomicsCrudPermission,
     PatientDeletePermission, PatientSelfScopePermission, ScopedTokenPermission,
-    VocabReadPermission, get_request_org, is_service_token,
+    VocabReadPermission, LabSyncPermission, get_request_org, is_service_token, is_machine_request,
 )
 from .providers.base import TokenClaims
 from .serializers import (
@@ -140,9 +145,14 @@ from django.views.decorators.http import require_http_methods
 logger = logging.getLogger(__name__)
 
 
-def _write_genetic_mutations(person, mutations):
+def _genomics_type_concept(user, person):
+    from omop_core.authorization import get_actor_role
+    return 32865 if get_actor_role(user, person.person_id) in ('self', 'representative') else 32817
+
+
+def _write_genetic_mutations(person, mutations, type_concept_id):
     from omop_core.services.genomics import replace_variants
-    replace_variants(person, mutations)
+    replace_variants(person, mutations, type_concept_id=type_concept_id)
 
 
 class PatientRecordPagination(PageNumberPagination):
@@ -406,6 +416,8 @@ def _extract_provenance(request):
         body.get('source_user_id')
         or request.META.get('HTTP_X_PROVENANCE_USER_ID', '')
     )
+    if is_service_token(request):
+        source_user_id = f"{request.user.issuer}|{request.user.sub}"
     modification_reason = body.get('modification_reason')
     return source, source_user_id, modification_reason
 
@@ -900,7 +912,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 pass
             queryset = queryset.filter(name_query)
 
-        return queryset
+        from omop_core.services.patient_list_context import filter_context
+        return filter_context(queryset, params, self.request.user)
 
     def _build_filter_options(self, queryset):
         org_rows = (
@@ -936,11 +949,17 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
     def list(self, request):
         """List all patients - accessible to authenticated users"""
         base_queryset = self.get_queryset()
-        queryset = self._apply_patient_list_filters(base_queryset).order_by('-updated_at', '-created_at')
+        from omop_core.services.patient_list_context import annotate_context, order_context
+        queryset = order_context(self._apply_patient_list_filters(base_queryset),
+                                 request.query_params.get('ordering', '-updated'), request.user)
+        from patient_portal.models import PatientUser
+        own_person_id = (PatientUser.objects.filter(identity=request.user).values_list('person_id', flat=True).first()
+                         if request.user and request.user.is_authenticated else None)
+        context = {'request': request, 'own_person_id': own_person_id}
 
         if 'page' in request.query_params or 'page_size' in request.query_params:
             page = self.paginate_queryset(queryset)
-            serializer = PatientListSerializer(page, many=True)
+            serializer = PatientListSerializer(page, many=True, context=context)
             response = self.get_paginated_response(serializer.data)
             try:
                 page_num = int(request.query_params.get('page', 1))
@@ -948,9 +967,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 page_num = 1
             if page_num == 1:
                 response.data['filter_options'] = self._build_filter_options(base_queryset)
+                response.data['filter_options']['clinical_statuses'] = list(
+                    annotate_context(base_queryset).exclude(list_disease_status__isnull=True)
+                    .values_list('list_disease_status', flat=True).distinct().order_by('list_disease_status')
+                )
             return response
 
-        serializer = PatientListSerializer(queryset[:500], many=True)
+        serializer = PatientListSerializer(queryset[:500], many=True, context=context)
         return Response(serializer.data)
 
     def retrieve(self, request, pk=None):
@@ -1038,9 +1061,17 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             return error
         if request.method == 'GET':
             return Response(list_variants(person))
-        from omop_core.authorization import get_actor_role
-        type_id = 32865 if get_actor_role(request.user, person.person_id) in ('self', 'representative') else 32817
+        type_id = _genomics_type_concept(request.user, person)
         return Response(save_variant(person, request.data, type_concept_id=type_id), status=201)
+
+    @action(detail=True, methods=['get'], url_path='genomics-legacy-cytogenetics',
+            permission_classes=[GenomicsCrudPermission, PatientSelfScopePermission])
+    def genomics_legacy_cytogenetics(self, request, pk=None):
+        from omop_core.services.cytogenetic_history import history_page
+        person, error = self._genomics_access(request, pk)
+        if error is not None:
+            return error
+        return Response(history_page(person, request.query_params.get('cursor')))
 
     @action(detail=True, methods=['get'], url_path='genomics-catalog')
     def genomics_catalog(self, request, pk=None):
@@ -1068,8 +1099,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if request.method == 'DELETE':
             delete_variant(person, variant_id)
             return Response(status=204)
-        from omop_core.authorization import get_actor_role
-        type_id = 32865 if get_actor_role(request.user, person.person_id) in ('self', 'representative') else 32817
+        type_id = _genomics_type_concept(request.user, person)
         return Response(save_variant(person, request.data, variant_id, type_concept_id=type_id))
 
     def _patch_record(self, request, person, patient_info):
@@ -1148,12 +1178,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             _apply_patient_name(person, patient_name)
             if priority_edits:
                 from omop_core.services.genomics import replace_priority_fields
-                from omop_core.authorization import get_actor_role
-                type_id = 32865 if get_actor_role(request.user, person.person_id) in ('self', 'representative') else 32817
+                type_id = _genomics_type_concept(request.user, person)
                 replace_priority_fields(person, priority_edits, type_id)
                 patient_info.refresh_from_db()
             if mutations is not None:
-                _write_genetic_mutations(person, mutations)
+                _write_genetic_mutations(person, mutations, _genomics_type_concept(request.user, person))
                 patient_info.refresh_from_db()
             # The UI's height/weight inputs use canonical units. Set them before
             # Model.save computes BMI, without requiring an OMOP read-back.
@@ -1718,7 +1747,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         response[EXPORT_SIGNATURE_HEADER] = signature
         return response
 
-    @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+    @action(detail=False, methods=['post'],
+            authentication_classes=BULK_UPLOAD_AUTHENTICATION,
+            permission_classes=[BulkUploadPermission, PatientSelfScopePermission])
     def upload_csv(self, request):
         """Upload the documented CSV shape into OMOP source tables.
 
@@ -1728,11 +1759,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         ConditionOccurrence.  PatientRecord is created only by the final
         refresh, never by this importer.
         """
+        upload_org = upload_organization(request)
         if 'file' not in request.FILES:
             return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
         
         file = request.FILES['file']
-        if not file.name.endswith('.csv'):
+        if not file.name.lower().endswith('.csv'):
             return Response({'error': 'File must be a CSV'}, status=status.HTTP_400_BAD_REQUEST)
         
         try:
@@ -1741,14 +1773,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             reader = csv.DictReader(csv_data)
             
             created_count = 0
+            updated_count = 0
             errors = []
             source = request.META.get('HTTP_X_PROVENANCE_SOURCE', 'EHR_SYNC')
-            request_user = getattr(request, 'user', None)
-            source_user_id = request.META.get(
-                'HTTP_X_PROVENANCE_USER_ID', str(getattr(request_user, 'pk', '') or ''),
-            )
-            provenance_org = get_request_org(request) if request_user is not None else None
-            
+            source_user_id = upload_actor_id(request)
+            provenance_org = upload_org
+
             for row_num, row in enumerate(reader, start=2):
                 try:
                     person_id = int(row.get('person_id', 0))
@@ -1756,7 +1786,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         last_person = Person.objects.all().order_by('-person_id').first()
                         person_id = last_person.person_id + 1 if last_person else 1000
 
-                    auth_error = _csv_row_write_error(request, person_id)
+                    auth_error = _csv_row_write_error(request, person_id, upload_org)
                     if auth_error:
                         raise PermissionError(auth_error)
 
@@ -1845,6 +1875,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             patient_record.save(update_fields=['organization', 'updated_at'])
                     if created:
                         created_count += 1
+                    else:
+                        updated_count += 1
                         
                 except Exception as e:
                     errors.append(f"Row {row_num}: {str(e)}")
@@ -1852,6 +1884,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({
                 'success': True,
                 'created_count': created_count,
+                'updated_count': updated_count,
                 'errors': errors
             })
             
@@ -1859,14 +1892,17 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             logger.exception('CSV upload failed')
             return Response({'error': 'Upload failed. Please check the file format and try again.'}, status=status.HTTP_400_BAD_REQUEST)
 
-    @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+    @action(detail=False, methods=['post'],
+            authentication_classes=BULK_UPLOAD_AUTHENTICATION,
+            permission_classes=[BulkUploadPermission, PatientSelfScopePermission])
     def upload_fhir(self, request):
         """Upload patients from FHIR JSON file"""
+        upload_org = upload_organization(request)
         if 'file' not in request.FILES:
             return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
         
         file = request.FILES['file']
-        if not file.name.endswith('.json'):
+        if not file.name.lower().endswith('.json'):
             return Response({'error': 'File must be a JSON file'}, status=status.HTTP_400_BAD_REQUEST)
 
         # Bounded multi-version interchange (TI.5.2#01): decline unsupported
@@ -1890,16 +1926,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
             fhir_data = json.loads(raw_bytes)
 
-            if fhir_data.get('resourceType') != 'Bundle':
-                return Response({'error': 'FHIR file must be a Bundle'}, status=status.HTTP_400_BAD_REQUEST)
-
             from patient_portal.api.fhir.sync import validate_fhir_bundle_types
             try:
+                entries = ordered_bundle_entries(fhir_data)
                 validate_fhir_bundle_types(fhir_data)
             except serializers.ValidationError as exc:
                 return Response({'error': str(exc.detail[0])}, status=status.HTTP_400_BAD_REQUEST)
 
-            prov_source, prov_user_id, prov_reason = _extract_provenance(request)
+            prov_source, _, prov_reason = _extract_provenance(request)
+            prov_source = prov_source or 'EHR_SYNC'
+            prov_user_id = upload_actor_id(request)
             if prov_source == 'ADMIN_CORRECTION' and not prov_reason:
                 return Response(
                     {'error': 'modification_reason is required when source is ADMIN_CORRECTION'},
@@ -1933,7 +1969,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     return patient_ref_aliases[bare_ref]
                 return ref.split('/')[-1] if '/' in ref else bare_ref
 
-            for entry in fhir_data.get('entry', []):
+            for entry in entries:
                 resource = entry.get('resource', {})
                 resource_type = resource.get('resourceType')
 
@@ -2097,6 +2133,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             import time as _time
             for fhir_patient_id, data in patients_data.items():
                 try:
+                    _atomic_entered = False
+                    _last_exc = None
                     _pt_start = _time.monotonic()
                     _pt_measurement_ids = []
                     _pt_condition_ids = []
@@ -2281,11 +2319,20 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                     and _normalize_name(candidate.family_name) == normalized_family
                                 ):
                                     person = candidate
-                                    if candidate.given_name != given_name or candidate.family_name != family_name:
-                                        candidate.given_name = given_name
-                                        candidate.family_name = family_name
-                                        candidate.save(update_fields=['given_name', 'family_name'])
                                     break
+                    if person is not None:
+                        from omop_core.authorization import can_write_patient
+                        record_org_id = PatientRecord.objects.filter(person=person).values_list('organization_id', flat=True).first()
+                        same_org_upload = upload_org is not None and record_org_id == upload_org.pk
+                        wrong_org = upload_org is not None and record_org_id not in (None, upload_org.pk)
+                        if wrong_org or (not same_org_upload and not can_write_patient(request.user, person.person_id)):
+                            errors.append({'patient': f'{given_name} {family_name}',
+                                           'error': 'You have read-only or no access to this patient in the selected organization.'})
+                            _last_exc = PermissionError('Write denied for existing patient.')
+                            continue
+                        if person.given_name != given_name or person.family_name != family_name:
+                            person.given_name, person.family_name = given_name, family_name
+                            person.save(update_fields=['given_name', 'family_name'])
                     if person is None:
                         from omop_core.services.pk import next_pk as _next_pk
                         person = Person.objects.create(
@@ -2304,9 +2351,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         person_is_new = True
                         full_name = f"{given_name} {family_name}".strip()
                         identity, _ = Identity.objects.get_or_create(
+                            issuer='urn:local',
                             sub=f'patient{person.person_id}',
                             defaults={
-                                'issuer': 'urn:local',
                                 'name': full_name,
                             },
                         )
@@ -2379,7 +2426,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             prov_user_id,
                             target_patient_id=fhir_patient_id,
                             modification_reason=death_reason or prov_reason,
-                            organization=get_request_org(request),
+                            organization=upload_org,
                         )
 
                     for encounter in data.get('encounters', []):
@@ -2434,30 +2481,6 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 },
                             )
 
-                    # Block analysts from updating existing patients via FHIR upload.
-                    if not person_is_new and not getattr(request.user, 'is_staff', False):
-                        request_org = get_request_org(request)
-                        same_org_upload = (
-                            request_org is not None
-                            and PatientRecord.objects.filter(person=person, organization=request_org).exists()
-                        )
-                        from omop_core.authorization import can_write_patient
-                        if not same_org_upload and not can_write_patient(request.user, person.person_id):
-                            errors.append({
-                                'patient': f'{given_name} {family_name}',
-                                'error': 'Analysts have read-only access. Contact a doctor or org admin to update patient data.',
-                            })
-                            # The Person upsert, Location, Death and VisitOccurrence
-                            # writes above already ran inside this patient's savepoint.
-                            # `continue` raises nothing, so the finally block would see
-                            # _last_exc is None and call _atomic_cm.__exit__(None, None,
-                            # None) — and Django's Atomic.__exit__ COMMITS a savepoint it
-                            # is not given an exception for. Setting _last_exc is what
-                            # routes the finally block to a rollback, so a caller we just
-                            # denied does not get their partial writes persisted.
-                            _last_exc = PermissionError('Write denied for existing patient.')
-                            continue
-
                     # Extract disease, stage, and histologic type from Condition
                     disease = None
                     stage = ''
@@ -2468,8 +2491,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     dlbcl_onset = None          # onset from DLBCL (transformation) condition
                     _any_bc_condition = False   # True if any BC condition was seen in the bundle
                     _clinical_status_source = None  # FHIR Condition.clinicalStatus code for primary BC
-                    _breast_cancer_stage = None  # condition-stage assertion, persisted to OMOP below
-                    _breast_cancer_stage_datetime = None
+                    _condition_asserted_stage = None  # condition-stage assertion, persisted to OMOP below
+                    _condition_asserted_stage_datetime = None
 
                     def _disease_from_condition_code(codeable):
                         codeable = codeable or {}
@@ -2503,6 +2526,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         return re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')[:100]
 
                     for condition in data['conditions']:
+                        stage = ''
                         _condition_stage = None
                         # Get histologic type from code
                         code = condition.get('code', {})
@@ -2561,6 +2585,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             stage_summary = _stage_entry.get('summary', {})
                             if stage_summary.get('text'):
                                 stage_text = stage_summary['text']
+                                stage = stage_text.strip()
                                 if 'Stage' in stage_text:
                                     stage_suffix = stage_text.split('Stage')[-1].strip()
                                     stage_prefix = stage_text.split('Stage')[0].strip()
@@ -2580,7 +2605,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 else:
                                     stage = stage_display or _sc.get('code', '')
 
-                        if is_breast_cancer and stage:
+                        if (is_breast_cancer or disease_from_code) and stage:
                             _condition_stage = stage
 
                         # Get condition onset date (handles both 'YYYY-MM-DD' and ISO datetime)
@@ -2598,12 +2623,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 condition_date = _parsed_date  # fallback: last wins
                                 if is_breast_cancer and _parsed_date and (breast_cancer_onset is None or _parsed_date < breast_cancer_onset):
                                     breast_cancer_onset = _parsed_date
-                                if is_breast_cancer and _condition_stage:
+                                if _condition_stage:
                                     # Keep the stage tied to the condition that
                                     # asserted it, not to an earlier/later
-                                    # breast-cancer diagnosis in the bundle.
-                                    _breast_cancer_stage = _condition_stage
-                                    _breast_cancer_stage_datetime = _parsed_date
+                                    # diagnosis in the bundle.
+                                    _condition_asserted_stage = _condition_stage
+                                    _condition_asserted_stage_datetime = _parsed_date
                                 if is_fl and _parsed_date and (fl_onset is None or _parsed_date < fl_onset):
                                     fl_onset = _parsed_date
                                 if is_dlbcl and _parsed_date and (dlbcl_onset is None or _parsed_date < dlbcl_onset):
@@ -2645,7 +2670,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 _co.save()
                                 _pt_condition_ids.append(_co.condition_occurrence_id)
                                 if prov_source:
-                                    _record_provenance(_co, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                                    _record_provenance(_co, prov_source, prov_user_id, modification_reason=prov_reason, organization=upload_org)
                         except Exception as _coex:
                             logger.warning(
                                 '{"event": "condition_occurrence_save_failed", "error_type": "%s"}',
@@ -2655,13 +2680,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     if _any_bc_condition and condition_date:
                         _upsert_condition(_concept_breast_cancer, condition_date, disease, _clinical_status_source)
 
-                    if _breast_cancer_stage and _breast_cancer_stage_datetime:
-                        _stage_date = _breast_cancer_stage_datetime.date()
+                    if _condition_asserted_stage and _condition_asserted_stage_datetime:
+                        _stage_date = _condition_asserted_stage_datetime.date()
                         _stage_exists = Observation.objects.filter(
                             person=person,
                             observation_source_value=FHIR_CONDITION_STAGE_SOURCE_VALUE,
                             observation_date=_stage_date,
-                            value_as_string=_breast_cancer_stage,
+                            value_as_string=_condition_asserted_stage,
                         ).exists()
                         if not _stage_exists:
                             _stage_observation = Observation(
@@ -2669,9 +2694,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 person=person,
                                 observation_concept=_concept_ehr_type or _concept_tx_regimen,
                                 observation_date=_stage_date,
-                                observation_datetime=_breast_cancer_stage_datetime,
+                                observation_datetime=_condition_asserted_stage_datetime,
                                 observation_type_concept=_concept_ehr_type or _concept_tx_regimen,
-                                value_as_string=_breast_cancer_stage,
+                                value_as_string=_condition_asserted_stage,
                                 observation_source_value=FHIR_CONDITION_STAGE_SOURCE_VALUE,
                             )
                             _stage_observation._skip_patient_record_refresh = True
@@ -2682,7 +2707,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 prov_user_id,
                                 target_patient_id=fhir_patient_id,
                                 modification_reason=prov_reason,
-                                organization=get_request_org(request),
+                                organization=upload_org,
                             )
 
                     # FL diagnosis and DLBCL transformation conditions (FL → DLBCL
@@ -3200,6 +3225,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _timing_hash, _time.monotonic() - _t_mfetch, len(_existing_measurements),
                     )
 
+                    from omop_core.services.sample_disease_profiles import PREFIX as demo_prefix, SYSTEM as demo_system, PROFILE_FIELDS
+                    demo_unmapped = Concept.objects.filter(pk=0).first() if any(
+                        c.get('system') == demo_system for obs in data['observations']
+                        for c in obs.get('code', {}).get('coding', [])
+                    ) else None
+
                     # Accumulate new Measurement objects for bulk_create after the loop
                     # (one INSERT instead of one per observation = eliminates ~48 round-trips).
                     _pending_measurements: list = []
@@ -3274,6 +3305,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 obs_loinc = _c.get('code')
                                 break
 
+                        demo_code = next((c.get('code') for c in obs_code.get('coding', [])
+                                          if c.get('system') == demo_system
+                                          and str(c.get('code', '')).startswith(demo_prefix)
+                                          and str(c.get('code'))[len(demo_prefix):] in PROFILE_FIELDS), None)
+
                         # BP panel (85354-9) — expand components to individual measurements
                         # for systolic (8480-6) and diastolic (8462-4) so refresh_patient_record
                         # can derive BP from the Measurement table.
@@ -3320,17 +3356,20 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             measurement_concept = _cc_by_loinc(obs_loinc)
                         if not measurement_concept and obs_name:
                             measurement_concept = _cc_by_name(obs_name[:50])
-                        if not measurement_concept:
+                        if demo_code:
+                            measurement_concept = demo_unmapped
+                            qualifier_source_value = 'synthetic demo source'
+                        elif not measurement_concept:
                             # Use pre-hoisted generic lab test concept if not found
                             measurement_concept = _concept_generic_lab
 
                         if measurement_concept:
                             # Use pre-hoisted Lab type concept (32856 = Lab)
-                            type_concept = _concept_lab_type or measurement_concept
+                            type_concept = demo_unmapped if demo_code else (_concept_lab_type or measurement_concept)
 
                             # Use LOINC code as source_value when available — it's short,
                             # unique, and avoids collisions from truncating long display names.
-                            source_value = obs_loinc if obs_loinc else obs_name[:50]
+                            source_value = demo_code or obs_loinc or obs_name[:50]
                             # LOINC 21889-1 is officially Size Tumor.  A
                             # legacy lymph-node feed may reuse that code, but
                             # only its explicit text/context can authorize the
@@ -3396,7 +3435,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             for _bm in _pending_measurements:
                                 _pt_measurement_ids.append(_bm.measurement_id)
                             for (_bm, _psrc, _puid, _preason) in _pending_provenances:
-                                _record_provenance(_bm, _psrc, _puid, modification_reason=_preason, organization=get_request_org(request))
+                                _record_provenance(_bm, _psrc, _puid, modification_reason=_preason, organization=upload_org)
                         except Exception as _bcex:
                             logger.warning(
                                 '{"event": "measurement_bulk_create_failed", "count": %d, "error": "%s"}',
@@ -3865,7 +3904,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                     _de.save()
                                     _pt_drug_exposure_ids.append(_de.drug_exposure_id)
                                     if prov_source:
-                                        _record_provenance(_de, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                                        _record_provenance(_de, prov_source, prov_user_id, modification_reason=prov_reason, organization=upload_org)
 
                                 # Episode + EpisodeEvent + per-line outcome via
                                 # the shared LOT writer so CDM tagging and the
@@ -3944,7 +3983,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _pt_drug_exposure_ids.append(_de.drug_exposure_id)
                         _existing_drug_keys.add(key)
                         if prov_source:
-                            _record_provenance(_de, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                            _record_provenance(_de, prov_source, prov_user_id, modification_reason=prov_reason, organization=upload_org)
 
                     for _med_request in data.get('medication_requests', []):
                         # Prefer inline medicationCodeableConcept; fall back to
@@ -4030,7 +4069,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _obs.save()
                         _existing_report_keys.add(_report_key)
                         if prov_source:
-                            _record_provenance(_obs, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                            _record_provenance(_obs, prov_source, prov_user_id, modification_reason=prov_reason, organization=upload_org)
 
                     logger.info(
                         "TIMING patient=%s phase=diagnostic_reports elapsed=%.1fs count=%d",
@@ -4088,7 +4127,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _obs.save()
                         _existing_report_keys.add(_allergy_key)
                         if prov_source:
-                            _record_provenance(_obs, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                            _record_provenance(_obs, prov_source, prov_user_id, modification_reason=prov_reason, organization=upload_org)
 
                     # --- Write ProcedureOccurrence records ---
                     _existing_proc_keys = {
@@ -4160,7 +4199,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _pt_procedure_ids.append(_proc.procedure_occurrence_id)
                         _existing_proc_keys.add(_proc_key)
                         if prov_source:
-                            _record_provenance(_proc, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                            _record_provenance(_proc, prov_source, prov_user_id, modification_reason=prov_reason, organization=upload_org)
 
                     logger.info(
                         "TIMING patient=%s phase=procedures elapsed=%.1fs count=%d",
@@ -4234,7 +4273,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 prov_user_id,
                                 target_patient_id=fhir_patient_id,
                                 modification_reason=prov_reason,
-                                organization=get_request_org(request),
+                                organization=upload_org,
                             )
                     elif sct_history_str or sct_eligibility_str:
                         logger.warning(
@@ -4426,9 +4465,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         'no_geographic_exposure_risk': no_geographic_exposure_risk if no_geographic_exposure_risk is not None else True,
                         'geographic_exposure_risk_details': geographic_exposure_risk_details,
                     }.items() if v is not None})
-                    # Stamp the org derived from the OAuth2 token so this patient
-                    # is scoped to the uploading service client's tenant.
-                    upload_org = get_request_org(request)
+                    # Assign the authorized upload organization to new/unassigned records.
                     if upload_org is not None and patient_info.organization_id is None:
                         _patch['organization'] = upload_org
 
@@ -5273,12 +5310,12 @@ def _caller_may_write_patient(request, person_id: int) -> bool:
     return can_write_patient(request.user, person_id)
 
 
-def _csv_row_write_error(request, person_id: int) -> str | None:
+def _csv_row_write_error(request, person_id: int, upload_org=None) -> str | None:
     """Return a row-level CSV authorization error, or None when allowed."""
     if getattr(request, 'auth', None) is not None and is_service_token(request):
         return None
 
-    org = get_request_org(request)
+    org = upload_org or get_request_org(request)
     if org is not None:
         record = PatientRecord.objects.filter(person_id=person_id).first()
         if (
@@ -5287,6 +5324,10 @@ def _csv_row_write_error(request, person_id: int) -> str | None:
             and record.organization_id != org.id
         ):
             return 'patient belongs to a different organization'
+        if not is_machine_request(request) and Person.objects.filter(person_id=person_id).exists():
+            from omop_core.authorization import can_write_patient
+            if not can_write_patient(request.user, person_id):
+                return 'caller does not have write access to this patient'
         return None
 
     actor = getattr(request, 'user', None)
@@ -5435,19 +5476,32 @@ class PersonViewSet(viewsets.GenericViewSet):
     queryset = Person.objects.all()
     lookup_field = 'person_id'
 
-    @action(detail=False, methods=['post'], url_path='find_or_create')
+    @action(detail=False, methods=['post'], url_path='find_or_create',
+            permission_classes=[LabSyncPermission])
     def find_or_create(self, request):
         """
         POST /api/persons/find_or_create/
         Body: { "actor_iss": "...", "actor_sub": "..." }
         Response 200/201: { "person_id": 1234, "created": true }
         """
+        from patient_portal.api.permissions import is_machine_request
+        if is_machine_request(request):
+            return Response(
+                {'detail': 'Person identity provisioning requires end-user authentication.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         actor_iss = request.data.get('actor_iss', '').strip()
         actor_sub = request.data.get('actor_sub', '').strip()
         if not actor_iss or not actor_sub:
             return Response(
                 {'detail': 'actor_iss and actor_sub are required.'},
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if (actor_iss, actor_sub) != (request.user.issuer, request.user.sub):
+            return Response(
+                {'detail': 'Actor must match the authenticated user.'},
+                status=status.HTTP_403_FORBIDDEN,
             )
 
         from patient_portal.models import Identity, PatientUser
@@ -9411,19 +9465,7 @@ class VocabSnapshotView(APIView):
     """
     permission_classes = [VocabReadPermission]
 
-    # SECURITY: db_table values are hardcoded; never interpolate user input.
-    ALLOWED_TABLES = {
-        'concept': 'concept',
-        'concept_ancestor': 'concept_ancestor',
-        'concept_class': 'concept_class',
-        'concept_relationship': 'concept_relationship',
-        'concept_synonym': 'concept_synonym',
-        'domain': 'domain',
-        'drug_strength': 'drug_strength',
-        'relationship': 'relationship',
-        'source_to_concept_map': 'source_to_concept_map',
-        'vocabulary': 'vocabulary',
-    }
+    ALLOWED_TABLES = {table: table for table in TABLE_COLUMNS}
 
     def get(self, request, table, release_id=None):
         from django.http import HttpResponseNotModified, StreamingHttpResponse
@@ -9468,39 +9510,29 @@ class VocabSnapshotView(APIView):
                 status=status.HTTP_409_CONFLICT,
             )
 
-        # 3. ETag / conditional request
+        from omop_core.services.vocab_snapshot import CANONICALIZATION, stream_ndjson
+
         etag = get_release_etag(release)
+        source_param = request.query_params.get('source') if table == 'concept' else None
+
+        # Vary ETag by source filter so different queries don't share ETags
+        if source_param and etag:
+            etag = etag.rstrip('"') + f'-{source_param}"'
+
         if_none_match = request.META.get('HTTP_IF_NONE_MATCH', '')
         if _etag_matches(if_none_match, etag):
             resp = HttpResponseNotModified()
             if etag:
                 resp['ETag'] = etag
             resp['X-Vocab-Release-Id'] = str(release.pk)
+            resp['X-Vocab-Checksum-Format'] = CANONICALIZATION
             return resp
 
-        # 4. Build WHERE clause (source filter for concept table only)
-        db_table = self.ALLOWED_TABLES[table]
-        where = ''
-        params = []
-        source_param = None
-        if table == 'concept':
-            source_param = request.query_params.get('source')
-            if source_param == 'HealthKey':
-                where = 'WHERE source = %s'
-                params = ['HealthKey']
-            elif source_param == 'external':
-                where = 'WHERE source IS NULL'
-
-        # Vary ETag by source filter so different queries don't share ETags
-        if source_param and etag:
-            etag = etag.rstrip('"') + f'-{source_param}"'
-
-        # 5. Stream NDJSON
-        sql = f'SELECT row_to_json(t) FROM {db_table} t {where}'
         response = StreamingHttpResponse(
-            self._stream_ndjson(sql, params),
+            stream_ndjson(table, source=source_param),
             content_type='application/x-ndjson',
         )
+        response['X-Vocab-Checksum-Format'] = CANONICALIZATION
         response['Content-Disposition'] = (
             f'attachment; filename="{table}_{release.pk}.ndjson"'
         )
@@ -9512,28 +9544,6 @@ class VocabSnapshotView(APIView):
             response['ETag'] = etag
             response['Cache-Control'] = 'private, max-age=86400'
         return response
-
-    @staticmethod
-    def _stream_ndjson(sql, params=None):
-        import json as _json
-        from django.db import connection, transaction
-        count = 0
-        # A server-side (named) cursor issues DECLARE CURSOR, which Postgres only
-        # allows inside a transaction block. The streaming generator runs after the
-        # view returns, in Django's default autocommit — so wrap it in an explicit
-        # transaction spanning the whole stream, or the first fetch raises
-        # NoActiveSqlTransaction.
-        with transaction.atomic():
-            with connection.connection.cursor(name='vocab_snapshot') as cursor:
-                cursor.itersize = 1000
-                cursor.execute(sql, params or [])
-                for (row_json,) in cursor:
-                    if isinstance(row_json, dict):
-                        yield _json.dumps(row_json) + '\n'
-                    else:
-                        yield str(row_json) + '\n'
-                    count += 1
-        yield _json.dumps({'__done': True, 'rows': count}) + '\n'
 
 
 # =============================================================================

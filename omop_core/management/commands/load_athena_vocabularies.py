@@ -17,7 +17,7 @@ csv.field_size_limit(sys.maxsize)
 from django.core.management.base import CommandError
 from omop_core.management.embedding_command import EmbeddingLoadCommand
 from django.apps import apps
-from django.db import connection
+from django.db import connection, transaction
 from django.db.models import Count
 import requests
 
@@ -577,11 +577,11 @@ class Command(EmbeddingLoadCommand):
                 self._verify_required_clinical_vocabularies()
             self._load_raw_umls(options['verbosity'])
             self._record_version_history(replace)
-            self._publish_release(counts)
             if options['skip_code_mappings']:
                 self._log('  --skip-code-mappings: skipping code mapping artifact load.')
             else:
                 self._load_code_mappings(options['verbosity'])
+            self._publish_release(counts)
         elapsed = time.monotonic() - t0
         verb = 'would load' if dry_run else 'loaded'
         total = sum(counts.values())
@@ -1435,60 +1435,39 @@ class Command(EmbeddingLoadCommand):
         from datetime import datetime as dt, timezone as _tz
         from django.utils import timezone
 
-        vocab_versions = dict(
-            Vocabulary.objects.order_by('vocabulary_id')
-            .values_list('vocabulary_id', 'vocabulary_version')
-        )
-        # row_counts must reflect the ACTUAL table content the snapshot streams
-        # (SELECT COUNT(*)), not this run's load counts — the table can hold rows
-        # from prior loads / seed data / metadata vocabularies, so a consumer that
-        # cross-checks streamed rows against the manifest (EXACT's fail-closed
-        # completeness gate) would otherwise always mismatch.
-        checksums = {}
-        real_counts = {}
-        for table_name in counts:
-            try:
-                with connection.cursor() as cur:
-                    cur.execute(
-                        f'SELECT COUNT(*), MIN(ctid::text), MAX(ctid::text) '
-                        f'FROM {table_name}'
-                    )
-                    row = cur.fetchone()
-                    real_counts[table_name] = row[0]
-                    checksums[table_name] = {
-                        'count': row[0],
-                        'min_ctid': row[1],
-                        'max_ctid': row[2],
-                    }
-            except Exception as exc:
-                # Fall back to this run's load count, but never silently: a bare
-                # swallow here reintroduces the manifest↔stream mismatch (#343)
-                # with no server-side signal for the consumer's fail-closed gate.
-                logger.warning(
-                    "vocabulary_release: COUNT(*)/ctid probe failed for %s (%s); "
-                    "falling back to this run's load count — the manifest may "
-                    "disagree with the streamed table for %s.",
-                    table_name, exc, table_name, exc_info=True,
-                )
-                real_counts[table_name] = counts[table_name]
-                checksums[table_name] = {'count': counts[table_name]}
+        from omop_core.services.vocab_snapshot import table_checksum
 
-        now = timezone.now()
-        build_ts = dt.fromtimestamp(self._build_start, tz=_tz.utc)
-        release = VocabularyRelease.objects.create(
-            schema_version='5.4',
-            scope=sorted(VOCAB_SCOPE),
-            build_timestamp=build_ts,
-            athena_version=getattr(self, '_cdm_vocab_version', None),
-            vocab_versions=vocab_versions,
-            row_counts=real_counts,
-            checksums=checksums,
-            # Unit callers may publish a release directly rather than through
-            # handle(), which is where this per-run value is initialized.
-            umls_release=getattr(self, '_umls_release', None) or {},
-            status='published',
-            published_at=now,
-        )
+        outer_transaction = connection.in_atomic_block
+        with transaction.atomic():
+            if not outer_transaction:
+                with connection.cursor() as cursor:
+                    cursor.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ')
+            vocab_versions = dict(
+                Vocabulary.objects.order_by('vocabulary_id')
+                .values_list('vocabulary_id', 'vocabulary_version')
+            )
+            # Count the very same rows we hash. A failed scan must not create a
+            # published manifest with unverifiable fallback metadata.
+            checksums = {}
+            for table_name in counts:
+                self._log(f'  vocabulary_release: hashing {table_name}...')
+                checksums[table_name] = table_checksum(table_name)
+            real_counts = {table: checksum['count'] for table, checksum in checksums.items()}
+
+            now = timezone.now()
+            build_ts = dt.fromtimestamp(self._build_start, tz=_tz.utc)
+            release = VocabularyRelease.objects.create(
+                schema_version='5.4',
+                scope=sorted(VOCAB_SCOPE),
+                build_timestamp=build_ts,
+                athena_version=getattr(self, '_cdm_vocab_version', None),
+                vocab_versions=vocab_versions,
+                row_counts=real_counts,
+                checksums=checksums,
+                umls_release=getattr(self, '_umls_release', None) or {},
+                status='published',
+                published_at=now,
+            )
         self._log(f'  vocabulary_release: published release pk={release.pk}')
 
     def _load_code_mappings(self, verbosity):

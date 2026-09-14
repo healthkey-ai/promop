@@ -25,7 +25,6 @@ _ALIASES = {
     'tp53/17p deletion': 'del17p',
     '1q21 amplification': '1q_amp',
     '1q21 gain': '1q_gain',
-    '1q21 gain/amplification': '1q_gain',
     'fgfr3/igh translocation t(4;14)': 't(4;14)',
     'maf/igh translocation t(14;16)': 't(14;16)',
     'myc rearrangement': 'MYC rearrangement',

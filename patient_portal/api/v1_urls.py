@@ -65,7 +65,10 @@ from .representatives import PersonalRepresentativeViewSet
 from .password_reset import request_password_reset, reset_password
 from .break_glass import break_glass
 
+from .service_applications import ServiceApplicationViewSet
+
 router = DefaultRouter()
+router.register(r'service-applications', ServiceApplicationViewSet, basename='service-applications')
 
 router.register(r'user', CurrentUserViewSet, basename='v1-user')
 router.register(r'patient-records', PatientRecordV1ViewSet, basename='v1-patient-records')

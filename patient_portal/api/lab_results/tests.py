@@ -718,11 +718,7 @@ class LabResultsMutationAuthorizationTest(TestCase):
 
 @override_settings(SERVICE_AUTH_SCOPES='patient/*.write')
 class SyncOnBehalfOfTest(TestCase):
-    """Tests for actor_iss/actor_sub on-behalf-of sync flow.
-
-    On-behalf-of writes are a service-token feature: the caller supplies
-    actor_iss/actor_sub to attribute the write to a specific user.
-    """
+    """On-behalf writes require the authenticated user's patient write access."""
 
     def setUp(self):
         _setup_vocab()
@@ -738,7 +734,7 @@ class SyncOnBehalfOfTest(TestCase):
         PatientUser.objects.create(identity=self.actor, person=self.person)
 
         self.client = APIClient()
-        self.client.force_authenticate(user=self.service_user, token="service-token")
+        self.client.force_authenticate(user=self.actor)
 
     def _sync_payload(self, **overrides):
         base = {
@@ -765,8 +761,10 @@ class SyncOnBehalfOfTest(TestCase):
         resp = self.client.post('/api/lab-results/sync/', self._sync_payload(
             actor_iss='urn:unknown', actor_sub='nonexistent',
         ), format='json')
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
-        self.assertIn('Actor identity not found', resp.data['detail'])
+        # Unsigned body fields cannot replace the authenticated actor.
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(ProvenanceRecord.objects.get().source_user_id,
+                         f"{self.actor.issuer}|{self.actor.sub}")
 
     def test_on_behalf_of_actor_no_access(self):
         other_person = Person.objects.create(person_id=2002)
@@ -787,6 +785,7 @@ class SyncOnBehalfOfTest(TestCase):
         analyst = Identity.objects.create_user(email='lab-analyst@test.com', password='test')
         GroupAccess.objects.create(identity=analyst, org=org, role='analyst')
 
+        self.client.force_authenticate(user=analyst)
         resp = self.client.post('/api/lab-results/sync/', self._sync_payload(
             actor_iss=analyst.issuer,
             actor_sub=analyst.sub,
@@ -1113,8 +1112,6 @@ class OrgScopedSyncRejectionTest(TestCase):
     def _sync_payload(self, person_id):
         return {
             'person_id': person_id,
-            'actor_iss': self.user.issuer,
-            'actor_sub': self.user.sub,
             'measurements': [{
                 'test_name': 'WBC', 'value': '5.0',
                 'unit': 'K/uL', 'measured_at': '2026-05-01',
@@ -1145,7 +1142,15 @@ class OrgScopedSyncRejectionTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
         self.assertIn('Person not in your organization', resp.data['detail'])
 
-    def test_userless_org_token_ignores_body_actor_and_writes_org_patient(self):
+    def test_userless_org_token_can_import_without_actor_claims(self):
+        token = self._make_token('userless-service-import', user=None)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
+        resp = self.client.post('/api/lab-results/sync/', self._sync_payload(7001), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        provenance = ProvenanceRecord.objects.get(object_id=resp.data['measurement_ids'][0])
+        self.assertEqual(provenance.source_user_id, '')
+
+    def test_userless_org_token_rejects_body_actor(self):
         spoofed_actor = Identity.objects.create_user(email='spoofed-lab@test.com', password='test')
         token = self._make_token('userless-in-org', user=None)
         self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
@@ -1155,14 +1160,8 @@ class OrgScopedSyncRejectionTest(TestCase):
 
         resp = self.client.post('/api/lab-results/sync/', payload, format='json')
 
-        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
-        measurement_id = resp.data['measurement_ids'][0]
-        provenance = ProvenanceRecord.objects.get(object_id=measurement_id)
-        self.assertEqual(provenance.source_user_id, '')
-        self.assertNotEqual(
-            provenance.source_user_id,
-            f'{spoofed_actor.issuer}|{spoofed_actor.sub}',
-        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN, resp.data)
+        self.assertFalse(Measurement.objects.filter(person_id=7001).exists())
 
 
 class FirebaseAuthedSyncTest(TestCase):
@@ -1342,7 +1341,7 @@ class FirebaseAuthedSyncTest(TestCase):
 
 @override_settings(SERVICE_AUTH_SCOPES='patient/*.write')
 class ServiceTokenSyncFallbackTest(TestCase):
-    """Tests that service-token auth still uses actor_iss/actor_sub from payload."""
+    """Unsigned service actor claims are rejected without writing clinical data."""
 
     def setUp(self):
         _setup_vocab()
@@ -1364,7 +1363,7 @@ class ServiceTokenSyncFallbackTest(TestCase):
         # == "service-token") with an explicitly configured write scope.
         self.client.force_authenticate(user=self.service_user, token="service-token")
 
-    def test_service_token_resolves_person_from_actor_fields(self):
+    def test_service_token_cannot_resolve_person_from_actor_fields(self):
         resp = self.client.post('/api/lab-results/sync/', {
             'actor_iss': self.patient.issuer,
             'actor_sub': self.patient.sub,
@@ -1374,7 +1373,7 @@ class ServiceTokenSyncFallbackTest(TestCase):
             }],
             'source_type': 'document_extraction',
         }, format='json')
-        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_service_token_empty_actor_and_no_person_id_returns_400(self):
         resp = self.client.post('/api/lab-results/sync/', {
@@ -1388,7 +1387,7 @@ class ServiceTokenSyncFallbackTest(TestCase):
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_service_token_known_actor_resolves_correctly(self):
+    def test_service_token_cannot_impersonate_known_actor(self):
         resp = self.client.post('/api/lab-results/sync/', {
             'actor_iss': self.patient.issuer,
             'actor_sub': self.patient.sub,
@@ -1398,9 +1397,8 @@ class ServiceTokenSyncFallbackTest(TestCase):
             }],
             'source_type': 'document_extraction',
         }, format='json')
-        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
-        m = Measurement.objects.get(measurement_id=resp.data['measurement_ids'][0])
-        self.assertEqual(m.person_id, self.person.person_id)
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(Measurement.objects.filter(person=self.person).exists())
 
 
 class SyncNonStaffTest(TestCase):
