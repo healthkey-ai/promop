@@ -65,7 +65,7 @@ do not treat this first slice as completing the prerequisite for #1224.
 
 ### Handoff: continue on another machine
 
-**Next inventory slice, 2026-09-14:** source reconciliation resolves 26 more
+**Next inventory slice, 2026-09-14 ([draft PR #1284](https://github.com/healthkey-ai/promop/pull/1284)):** source reconciliation resolves 26 more
 deterministic public lists and records three trial-search exclusions. Coverage
 is now 51 static lists, 34 staging therapy lists, 20 planned-context lists, and
 64 lists requiring live reference coverage. The 2,883-row manifest preserves
@@ -78,7 +78,7 @@ continues on `feat/1223-next`. No associated issue is closed.
 
 Verification of this source reconciliation: full local pytest **2,446 passed,
 4 skipped**; Django **1,999 tests OK, 1 skipped**; frontend **574 passed,
-4 skipped**. All original 2,801 source rows and all reference/candidate/release
+4 skipped**; async end-to-end **2 passed**. All original 2,801 source rows and all reference/candidate/release
 evidence are retained. No staging reads or writes were needed for this update.
 
 **Completed in PR #1271:** versioned reference manifest and coverage report;
