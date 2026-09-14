@@ -44,7 +44,7 @@ def test_web_startup_commands_and_failure_gates(tmp_path, failed_command):
         "manage.py check --deploy --fail-level ERROR",
         "manage.py prepare_production_database --gdrive https://example.test/athena",
         "manage.py setup_admin",
-        "gunicorn ctomop.wsgi:application",
+        "gunicorn promop.wsgi:application",
     ]
     if failed_command:
         last = next(i for i, command in enumerate(expected) if command.split()[1] == failed_command)

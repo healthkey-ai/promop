@@ -21,4 +21,4 @@ echo "Creating/resetting admin user..."
 python manage.py setup_admin
 
 echo "Starting gunicorn..."
-exec gunicorn ctomop.wsgi:application
+exec gunicorn promop.wsgi:application

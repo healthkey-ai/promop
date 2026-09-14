@@ -1,8 +1,10 @@
 # Environment conventions
 
-- Staging always means Render: https://promop-staging.onrender.com.
-- The staging web service is `promop-staging`; its worker is `promop-staging-worker`.
-- Do not use the old Google Cloud / Cloud Run staging deployment to investigate or verify staging unless the user explicitly asks for it.
+- Render staging and Google Cloud Run staging are both supported. Name the target explicitly when reporting deployments or verification.
+- Render staging is https://promop-staging.onrender.com: web service `promop-staging`, worker `promop-staging-worker`.
+- Render production is `promop` with worker `promop-worker`. The unused legacy Render web service has been retired; do not include it in active readiness work.
+- Cloud Run staging remains managed by `.github/workflows/deploy-staging.yml` and `Dockerfile.gcp`. Preserve its existing service, image, bucket and integration identifiers.
+- `STAGING_DATABASE_URL` identifies Render staging. Do not assume it targets Cloud Run staging. Verify each deployment's configured database separately.
 - See `docs/render-staging-celery.md` for Render staging configuration and verification.
 
 # Pull request reviews

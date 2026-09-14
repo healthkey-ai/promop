@@ -195,7 +195,7 @@ Interactive CRUD is implemented. A published versioned import contract, source-f
 - [Canonical writer](../omop_core/services/genomics.py), [PatientRecord projection](../omop_core/services/patient_record_service.py), [catalog](../omop_core/services/genomics_catalog.py), [frozen fixture](../omop_core/data/genomics_catalog_v1.json).
 - [Shared Genomics UI](../frontend/src/components/PatientInfo/tabs/GenomicsTab.tsx), [patient API](../patient_portal/api/views.py), [mapping inventory](../omop_core/services/field_descriptor.py), [mapping serializers](../patient_portal/api/serializers.py).
 - [Sample data command](../omop_core/management/commands/populate_genomics_sample_data.py) seeds demonstration findings; sample variants are not expert validation of clinical nomenclature.
-- Staging is Render: `https://promop-staging.onrender.com`, web service `promop-staging`, worker `promop-staging-worker`. Follow [Render staging configuration](render-staging-celery.md). Never inherit a remote database URL for local tests.
+- Render staging is: `https://promop-staging.onrender.com`, web service `promop-staging`, worker `promop-staging-worker`. Follow [Render staging configuration](render-staging-celery.md). Cloud Run staging is also supported through its deployment workflow; verify its database separately. Never inherit a remote database URL for local tests.
 
 The old root architecture, handoff, short pointer and genetic-mutations implementation notes are superseded by this document and the implementation plan. Historical PR status and test totals are not current verification evidence. Strict exports must explicitly preserve the local text and linkage conventions; generic FHIR sync is not a validated genomics graph adapter.
 
@@ -220,7 +220,7 @@ The ESR1 c.1610A>G example is paired with p.Tyr537Cys, as reported in
 Reference annotations use GRCh38/RefSeq; they do not establish a clinical
 classification for a synthetic finding.
 
-Staging is Render (`promop-staging`). In its shell, where `DATABASE_URL` is
+In the Render staging (`promop-staging`) shell, where `DATABASE_URL` is
 already configured, preview a specific sample patient before writing:
 
 ```sh
@@ -237,7 +237,7 @@ variant facts and replaces them with a newly generated set. It does not enrich
 the existing findings in place. Random previews and subsequent writes can differ.
 Dry runs perform no writes; verbosity 2 prints complete JSON payloads.
 
-For local testing, explicitly set `DATABASE_URL` to an isolated local database. For staging operations, use the configured Render shell or the documented staging connection; never inherit an unspecified `.env` database URL.
+For local testing, explicitly set `DATABASE_URL` to an isolated local database. For staging operations, name Render or Cloud Run explicitly and verify its configured database; never inherit an unspecified `.env` database URL.
 
 Load the OMOP vocabulary and apply migrations through the genomics component
 seeds before writing. `seed_genomics_catalog` can seed missing mappings while

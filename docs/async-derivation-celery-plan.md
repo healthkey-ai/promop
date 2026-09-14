@@ -50,12 +50,12 @@ the same module.
 
 | File | Change |
 |---|---|
-| `ctomop/celery.py`, `ctomop/__init__.py` | Celery app + export |
+| `promop/celery.py`, `promop/__init__.py` | Celery app + export |
 | `omop_core/tasks.py` | `refresh_patient_record_task(person_id)` |
 | `omop_core/services/derivation_jobs.py` | Protocol, three dispatchers, `get_dispatcher()` |
 | `patient_portal/api/views.py` | `refresh/` → `202 {task_id}` |
 | `patient_portal/api/v1_urls.py` | `GET /derivation-status/{task_id}/` — same auth rule as `refresh/` |
-| `ctomop/settings.py` | Celery block, and the production guard stops demanding `ALLOWED_HOSTS`/`CORS_ALLOWED_ORIGINS` of a worker, which serves no HTTP and otherwise cannot boot |
+| `promop/settings.py` | Celery block, and the production guard stops demanding `ALLOWED_HOSTS`/`CORS_ALLOWED_ORIGINS` of a worker, which serves no HTTP and otherwise cannot boot |
 
 `202` instead of `200` + `derived_at` is a wire break: staging first,
 healthkey-etl migrates, then production. Update `CLAUDE.md` and `API_SURFACE.md`.

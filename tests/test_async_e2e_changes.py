@@ -28,8 +28,9 @@ def test_browser_and_documentation_changes_skip(path):
 
 
 @pytest.mark.parametrize("path", [
-    "omop_core/tasks.py", "another_app/tasks/email.py", "ctomop/celery.py",
-    "ctomop/__init__.py", "omop_core/services/derivation_jobs.py",
+    "omop_core/tasks.py", "another_app/tasks/email.py", "promop/celery.py",
+    "promop/__init__.py", "ctomop/__init__.py", "ctomop/settings.py",
+    "ctomop/celery.py", "omop_core/services/derivation_jobs.py",
     "omop_core/services/suggest_jobs.py", "omop_core/services/embedding_jobs.py",
     "tests/test_celery_e2e.py", "start-worker.sh",
     ".github/workflows/ci.yml", ".github/scripts/async_e2e_changes.py",
@@ -81,7 +82,7 @@ def test_merge_base_ignores_base_only_changes_and_detects_backend_rename(tmp_pat
     ("pull_request", ["frontend/page.tsx"], "false"),
     ("push", ["frontend/page.tsx"], "false"),
     ("push", ["docs/guide.md"], "false"),
-    ("push", ["ctomop/celery.py"], "true"),
+    ("push", ["promop/celery.py"], "true"),
     ("workflow_dispatch", [], "true"),
 ])
 def test_event_selection_and_job_output(tmp_path, monkeypatch, event_name, paths, expected):
@@ -125,8 +126,8 @@ def test_new_branch_push_runs_without_a_comparison(tmp_path, monkeypatch):
      "class PatientRecordV1ViewSet:\n def refresh(self): return 2", True),
     ("patient_portal/api/views.py", "def code_mapping_suggest_run(): return 1",
      "def code_mapping_suggest_run(): return 2", True),
-    ("ctomop/settings.py", "DEBUG = True", "DEBUG = False", False),
-    ("ctomop/settings.py", "CELERY_BROKER_TRANSPORT_OPTIONS = {\n 'visibility_timeout': 100\n}",
+    ("promop/settings.py", "DEBUG = True", "DEBUG = False", False),
+    ("promop/settings.py", "CELERY_BROKER_TRANSPORT_OPTIONS = {\n 'visibility_timeout': 100\n}",
      "CELERY_BROKER_TRANSPORT_OPTIONS = {\n 'visibility_timeout': 200\n}", True),
     ("requirements.txt", "celery==5.5.3\nDjango==5.2.1", "celery==5.5.3\nDjango==5.2.2", False),
     ("requirements.txt", "celery==5.5.3", "celery==5.5.4", True),

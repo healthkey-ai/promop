@@ -44,7 +44,7 @@ def is_docs_only(paths):
 # Synchronous derivation/ranking/model changes remain covered by backend tests.
 ASYNC_PATHS = (
     "**/tasks.py", "**/tasks/*.py", "**/celery.py",
-    "ctomop/__init__.py", "start-worker.sh",
+    "promop/__init__.py", "ctomop/**", "start-worker.sh",
     "omop_core/services/derivation_jobs.py",
     "omop_core/services/suggest_jobs.py",
     "omop_core/services/embedding_jobs.py",
@@ -108,7 +108,7 @@ def async_signature(path, source):
                     elif isinstance(node, ast.ClassDef):
                         visit(node.body, name + ".")
         visit(ast.parse(source).body)
-    elif path == "ctomop/settings.py":
+    elif path == "promop/settings.py":
         # Include whole multi-line settings expressions, not just CELERY_*'s
         # first line. Worker-specific boot guards are also covered.
         for node in ast.parse(source).body:
