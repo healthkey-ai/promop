@@ -499,7 +499,9 @@ _MANUAL_ENTRIES: dict[str, FieldProvenance] = {
         lookup_strategy="composite",
         extractor="_compute_derived_fields",
         selection_rule="composite",
-        description="True if genetic_mutations contains pathogenic TP53",
+        description=("True for a present pathogenic TP53 finding under the existing "
+                     "assessment/status rule; otherwise unknown. Does not establish "
+                     "a negative result or aggregate del(17p)."),
         constituent_fields=["genetic_mutations"],
     ),
     "measurable_disease_imwg": FieldProvenance(
