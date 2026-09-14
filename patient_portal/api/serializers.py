@@ -504,8 +504,8 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         from omop_core.services.flipi import parse_factors
         try:
             selected = parse_factors(value)
-        except ValueError as exc:
-            raise serializers.ValidationError(str(exc)) from None
+        except ValueError:
+            raise serializers.ValidationError('Select recognized FLIPI risk factors.') from None
         return None if selected is None else ','.join(selected)
 
     def validate_gelf_criteria_options(self, value):
@@ -521,8 +521,10 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         from omop_core.services.flipi import normalize_grade
         try:
             return normalize_grade(value)
-        except ValueError as exc:
-            raise serializers.ValidationError(str(exc)) from None
+        except ValueError:
+            raise serializers.ValidationError(
+                'Use grade 1, 2, 3A, or 3B (3 for an unspecified historical grade).'
+            ) from None
 
     def validate_death_date(self, value):
         if value and value > localdate():
