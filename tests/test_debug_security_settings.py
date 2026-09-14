@@ -149,8 +149,9 @@ def _loaded_dotenv(**overrides):
     find_dotenv reaches the repo-root .env either way: it falls back to cwd
     under `python -c`, which has no __main__.__file__, and otherwise walks up
     from promop/settings.py. Scrubbing the environment above never touches the
-    file, so only the PYTHON_DOTENV_DISABLED guard keeps it out. Stub the module
-    rather than write a real .env, which would clobber a developer's own.
+    file, so only PYTHON_DOTENV_DISABLED keeps it out. Stubbing the module
+    measures our own check rather than python-dotenv's, which honours the flag
+    from 1.2.0 on, and avoids writing a real .env over a developer's own.
     """
     code = '''
 import json
@@ -184,7 +185,8 @@ def test_dotenv_loads_by_default_for_local_development():
 
 
 def test_python_dotenv_disabled_keeps_a_developer_dotenv_out_of_these_assertions():
-    # Every assertion in this module about shipped defaults depends on this
-    # guard: .env.example sets ALLOWED_REDIRECT_URI_SCHEMES=https,http, and the
-    # docs tell developers to copy it.
+    # Every assertion in this module about shipped defaults depends on the flag
+    # being honoured: .env.example sets ALLOWED_REDIRECT_URI_SCHEMES=https,http,
+    # and the docs tell developers to copy it. This pins our own check, which is
+    # what covers installs older than python-dotenv 1.2.0.
     assert _loaded_dotenv(PYTHON_DOTENV_DISABLED='1') is False
