@@ -5,8 +5,8 @@ Do not delete when an RC is tagged. Move any unfinished work back to its GitHub
 issue and retain release evidence in the release notes or release PR before
 removing this document and any links to it.
 
-Created: 2026-09-14. Status: proposed priorities; implementation and release
-verification remain outstanding unless explicitly recorded below.
+Created: 2026-09-14. Updated: 2026-09-14. Status: implementation in progress;
+release verification remains outstanding unless explicitly recorded below.
 
 ## Purpose and scope
 
@@ -63,9 +63,11 @@ Cloud / Cloud Run staging deployment for this work.
 - [ ] **PHR authentication — [#750](https://github.com/healthkey-ai/promop/issues/750).**
   PROMOP audience validation is implemented and fails closed. Partner
   [phr#65](https://github.com/healthkey-ai/phr/issues/65) was still open at triage.
-  If PHR federation is in the candidate's supported scope, ship the partner
-  capability, confirm matching audience configuration, and prove authentication
-  works end to end. Do not weaken validation to make login work.
+  **Decision (2026-09-14): PHR ships in 1.3.** Ship the partner capability,
+  confirm matching service-specific audience configuration, and prove
+  authentication works end to end on Render. Reject missing/wrong audiences
+  and sibling-service token replay. Do not weaken validation to make login work.
+  Browser-session hardening alone does not satisfy this gate.
 - [ ] **Genomics schema compatibility — [#1237](https://github.com/healthkey-ai/promop/issues/1237).**
   Render staging passed the width audit with zero oversized values; see the
   [2026-09-14 evidence](https://github.com/healthkey-ai/promop/issues/1237#issuecomment-5658503062).
@@ -109,8 +111,9 @@ critical path. Keep their existing issues open.
    Until merged, it is on branch `docs/release-1.3-rc-plan`, targeting `dev`.
 2. Recheck linked issue comments, PR status, and current `dev`. The checkboxes here
    represent remaining work at handoff, not a live mirror of GitHub.
-3. Confirm the supported release scope, especially PHR federation and coded-value
-   interoperability. Record decisions and evidence below as work proceeds.
+3. PHR federation is required for 1.3. Confirm the remaining coded-value
+   interoperability scope and remind the release owner at relevant milestones.
+   Record decisions and evidence below as work proceeds.
 4. Work through the priorities in order, preserving unrelated local changes in
    separate worktrees where needed. Update this document in commits so the next
    machine can resume from the same state.
@@ -127,12 +130,12 @@ critical path. Keep their existing issues open.
 
 | Item | Decision / evidence |
 | --- | --- |
-| Supported release scope | Pending |
+| Supported release scope | PHR federation included by release-owner instruction on 2026-09-14. Full coded-value interoperability remains undecided. |
 | Candidate branch and SHA | Pending |
-| Priority fixes and PRs | Pending |
-| Remaining known limitations | Pending |
-| CI and migration evidence | Pending |
-| Render deployment and smoke evidence | Pending |
+| Priority fixes and PRs | Breast mapping corrections belong to the separate `feat/field-value-concept-mappings` workstream; do not duplicate or close its parent issues. Unit normalization: [PR #1289](https://github.com/healthkey-ai/promop/pull/1289), head `92e12e35c51d9ea506b9788566eab207199818a6`, awaiting backend CI. Browser auth: [PR #1216](https://github.com/healthkey-ai/promop/pull/1216), conflicts resolved against dev `7a9e808`; integration CI pending. Disease work merged through #1267 and #1280; Render coverage evidence still required. |
+| Remaining known limitations | PHR issuer lacks audience claims ([phr#65](https://github.com/healthkey-ai/phr/issues/65)); now a required gate. TP53/del(17p) evidence semantics and downstream-consumer agreement remain open. Genomics upgrade prerequisites in [#1286](https://github.com/healthkey-ai/promop/issues/1286) and NOTE integrity remain open. |
+| CI and migration evidence | #1289 local: 2,531 pytest passed, five skipped; Django 2,000 tests OK, one skipped; fresh migrations passed. #1216 after dev merge: 588 frontend passed, four skipped; lint/build passed; 50 auth/service-identity and 27 PHR/security tests passed. These are branch checks, not exact-candidate release certification. |
+| Render deployment and smoke evidence | Read-only unit audit at 2026-09-14 07:20 UTC: 1,000 latest ANC and 1,000 latest platelet rows lack source units/UCUM evidence and would become unknown under #1289; no pending canonical edits in that scope. No backfill performed; do not infer units. Exact-candidate deployment, login/federation, edit, import and worker smoke checks remain pending. |
 | Final 1.3.0 release URL | Pending |
 
 - [ ] After the **final 1.3.0 release** ships, preserve useful evidence in the
