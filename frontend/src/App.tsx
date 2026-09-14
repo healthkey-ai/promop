@@ -1,4 +1,3 @@
-import BrandHeader from "@/components/Branding/BrandHeader";
 import type { ReactNode } from "react";
 import {
   Routes,
@@ -177,7 +176,6 @@ function AppRoutes() {
 export default function App() {
   return (
     <div className="min-h-dvh">
-      <BrandHeader />
       <div className="app-page-content">
         <AppRoutes />
       </div>

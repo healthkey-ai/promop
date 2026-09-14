@@ -1,3 +1,4 @@
+import PageTitle from '@/components/Branding/PageTitle';
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Plus } from 'lucide-react';
@@ -102,7 +103,7 @@ export default function OrgAdminPage() {
           >
             <ArrowLeft size={14} /> Back
           </button>
-          <h1 className="text-2xl font-semibold text-gray-900">Org Admin</h1>
+          <PageTitle className="text-2xl font-semibold text-gray-900">Org Admin</PageTitle>
         </div>
         {currentUser?.is_staff && <Link to="/service-applications" className="text-sm text-blue-700 hover:underline">Service applications</Link>}
         {currentUser?.is_staff && (

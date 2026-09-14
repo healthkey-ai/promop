@@ -1,3 +1,4 @@
+import PageTitle from '@/components/Branding/PageTitle';
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { Upload, Trash2, LogOut, Settings, Globe } from "lucide-react";
@@ -244,9 +245,9 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
 
   return (
     <div className="p-6">
-      <div className="mb-6 flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-foreground">Patients</h1>
-        <div className="flex gap-2">
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
+        <PageTitle className="text-2xl font-bold text-foreground">Patients</PageTitle>
+        <div className="flex flex-wrap gap-2">
           {(selectedIds.size > 0 || selectAllMode) && (
             <button
               onClick={() => setDeleteDialogOpen(true)}

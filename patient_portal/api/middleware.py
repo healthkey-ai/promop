@@ -8,7 +8,7 @@ from typing import Callable
 import sentry_sdk
 from django.http import HttpRequest, HttpResponse, JsonResponse
 
-from ctomop.sentry import redact_path
+from promop.sentry import redact_path
 
 logger = logging.getLogger('audit')
 _deprecation_logger = logging.getLogger(__name__)
@@ -16,7 +16,7 @@ _deprecation_logger = logging.getLogger(__name__)
 # Sunset of the legacy, non-versioned /api/ prefix (#271).
 #
 # Moved 2026-09-01 -> 2026-12-01: the original date could not be honoured. Removing
-# the legacy alias (`path('api/', ...)` in ctomop/urls.py) retires all 14 legacy
+# the legacy alias (`path('api/', ...)` in promop/urls.py) retires all 14 legacy
 # router registrations at once, and promop's OWN React SPA is still the largest
 # consumer of them - frontend/src/api/axios.ts sets `baseURL: '/api'`, so 78 of its
 # 96 call sites resolve to the legacy prefix, including the module-federation
@@ -46,7 +46,7 @@ class DeprecationWarningMiddleware:
         if datetime.datetime.now(datetime.timezone.utc) > _SUNSET_DT:
             _deprecation_logger.warning(
                 "DeprecationWarningMiddleware: Sunset date %s has passed — "
-                "remove legacy /api/ URL aliases from ctomop/urls.py (the Django project package).",
+                "remove legacy /api/ URL aliases from promop/urls.py (the Django project package).",
                 _SUNSET_DATE,
             )
 

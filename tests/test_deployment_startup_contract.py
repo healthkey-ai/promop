@@ -8,7 +8,7 @@ def test_production_uses_bounded_database_preparation_before_gunicorn():
     script = (ROOT / 'start.sh').read_text()
 
     preparation = 'python manage.py prepare_production_database --gdrive'
-    gunicorn = 'exec gunicorn ctomop.wsgi:application'
+    gunicorn = 'exec gunicorn promop.wsgi:application'
 
     assert 'python manage.py seed_omop_concepts' not in script
     assert 'python manage.py load_athena_vocabularies' not in script

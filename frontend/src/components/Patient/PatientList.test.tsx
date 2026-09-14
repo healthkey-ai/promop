@@ -1,10 +1,11 @@
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { vi, it, expect, beforeEach } from 'vitest';
 import PatientList from './PatientList';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import api from '@/api/axios';
 
 const navigate = vi.hoisted(() => vi.fn());
-vi.mock('react-router-dom', () => ({ useNavigate: () => navigate }));
+vi.mock('react-router-dom', async importOriginal => ({ ...await importOriginal<typeof import('react-router-dom')>(), useNavigate: () => navigate }));
 vi.mock('@/api/axios', () => ({ default: { get: vi.fn(), delete: vi.fn() } }));
 vi.mock('@/hooks/useAuth', () => ({ useAuth: () => ({ currentUser: { is_staff: true } }) }));
 
@@ -20,7 +21,7 @@ it('shows genomics, zero and nonzero therapy counts, and the full name on hover'
     { person_id: 2, patient_name: 'Sam Example', disease: 'Follicular Lymphoma',
       genomics_summary: '', therapy_lines_count: 0 },
   ] } });
-  render(<PatientList />);
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
   expect(await screen.findByRole('columnheader', { name: 'Genomics' })).toBeInTheDocument();
   expect(screen.getByRole('columnheader', { name: 'Num Lines' })).toBeInTheDocument();
   expect(screen.getByTitle('Alexandra Catherine Example')).toHaveClass('truncate', 'w-28');
@@ -43,7 +44,7 @@ const cohort = { count: 30, results: [{ person_id: 7, patient_name: 'Review Exam
 
 it('shows clinical context without inferring active treatment or losing ECOG zero', async () => {
   vi.mocked(api.get).mockResolvedValue({ data: cohort });
-  render(<PatientList />);
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
   expect(await screen.findByText('Recorded regimen')).toBeInTheDocument();
   expect(screen.getByTitle('HER2: Negative')).toBeInTheDocument();
   expect(screen.getByText('End: Not recorded')).toBeInTheDocument();
@@ -55,7 +56,7 @@ it('shows clinical context without inferring active treatment or losing ECOG zer
 
 it('saves clinical filters and sort separately for each audience view', async () => {
   vi.mocked(api.get).mockResolvedValue({ data: cohort });
-  const { unmount } = render(<PatientList />);
+  const { unmount } = render(<MemoryRouter><PatientList /></MemoryRouter>);
   await screen.findByText('Recorded regimen');
   fireEvent.change(screen.getByLabelText('ECOG'), { target: { value: '0' } });
   await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({ params: expect.objectContaining({ ecog: '0', page: 1 }) })));
@@ -71,14 +72,14 @@ it('saves clinical filters and sort separately for each audience view', async ()
   expect(screen.getByLabelText('ECOG')).toHaveValue('0');
   expect(screen.getByLabelText('Sort by')).toHaveValue('-gaps');
   unmount();
-  render(<PatientList />);
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
   await screen.findByText('Recorded regimen');
   expect(screen.getByLabelText('ECOG')).toHaveValue('0');
 });
 
 it('applies text searches across the server cohort and resets the page', async () => {
   vi.mocked(api.get).mockResolvedValue({ data: cohort });
-  render(<PatientList />);
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
   await screen.findByText('Recorded regimen');
   fireEvent.click(screen.getByRole('button', { name: /next/i }));
   await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({ params: expect.objectContaining({ page: 2 }) })));
@@ -91,7 +92,7 @@ it('applies text searches across the server cohort and resets the page', async (
 it('uses the same clinical filters when deleting all matching patients', async () => {
   vi.mocked(api.get).mockResolvedValue({ data: cohort });
   vi.mocked(api.delete).mockResolvedValue({ data: {} });
-  render(<PatientList />);
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
   await screen.findByText('Recorded regimen');
   fireEvent.change(screen.getByLabelText('ECOG'), { target: { value: '0' } });
   await screen.findByText('Recorded regimen');
@@ -103,11 +104,25 @@ it('uses the same clinical filters when deleting all matching patients', async (
 
 it('places Upload immediately after Mappings', async () => {
   vi.mocked(api.get).mockResolvedValue({ data: { count: 0, results: [] } });
-  render(<PatientList />);
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
   const mappings = await screen.findByRole('button', { name: 'Mappings' });
   const upload = screen.getByRole('button', { name: 'Upload' });
   expect(mappings.nextElementSibling).toBe(upload);
   fireEvent.click(upload);
   expect(navigate).toHaveBeenCalledWith('/upload');
   expect(screen.queryByRole('button', { name: 'Upload CSV' })).not.toBeInTheDocument();
+});
+
+
+it('links the logo beside Patients to the system home', async () => {
+  vi.mocked(api.get).mockResolvedValue({ data: cohort });
+  render(<MemoryRouter initialEntries={['/nested']}><Routes>
+    <Route path="/nested" element={<PatientList />} />
+    <Route path="/" element={<div>System home</div>} />
+  </Routes></MemoryRouter>);
+  const title = await screen.findByRole('heading', { name: 'Patients' });
+  const logo = within(title.parentElement!).getByRole('link', { name: 'PRomop home' });
+  expect(logo).toHaveAttribute('href', '/');
+  fireEvent.click(logo);
+  expect(screen.getByText('System home')).toBeInTheDocument();
 });

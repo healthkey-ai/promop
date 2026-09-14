@@ -28,8 +28,9 @@ def test_browser_and_documentation_changes_skip(path):
 
 
 @pytest.mark.parametrize("path", [
-    "omop_core/tasks.py", "another_app/tasks/email.py", "ctomop/celery.py",
-    "ctomop/__init__.py", "omop_core/services/derivation_jobs.py",
+    "omop_core/tasks.py", "another_app/tasks/email.py", "promop/celery.py",
+    "promop/__init__.py", "ctomop/__init__.py", "ctomop/settings.py",
+    "ctomop/celery.py", "omop_core/services/derivation_jobs.py",
     "omop_core/services/suggest_jobs.py", "omop_core/services/embedding_jobs.py",
     "tests/test_celery_e2e.py", "start-worker.sh",
     ".github/workflows/ci.yml", ".github/scripts/async_e2e_changes.py",
@@ -63,6 +64,7 @@ def test_merge_base_ignores_base_only_changes_and_detects_backend_rename(tmp_pat
     git("commit", "-qm", "frontend PR")
     assert not filter_module.requires_async_e2e(filter_module.changed_paths(base, "HEAD"))
     assert not filter_module.select_range(base, "HEAD")
+    assert filter_module.select_checks(base, "HEAD")[2] is False
     before_push = git("rev-parse", "HEAD")
     git("mv", "omop_core/tasks.py", "frontend/tasks.py")
     git("commit", "-qm", "move backend to ignored path")
@@ -75,13 +77,14 @@ def test_merge_base_ignores_base_only_changes_and_detects_backend_rename(tmp_pat
     assert filter_module.requires_async_e2e(
         filter_module.changed_paths(before_push, "HEAD", merge_base=False))
     assert filter_module.select_range(before_push, "HEAD", merge_base=False)
+    assert filter_module.select_checks(before_push, "HEAD", merge_base=False)[2] is True
 
 
 @pytest.mark.parametrize("event_name,paths,expected", [
     ("pull_request", ["frontend/page.tsx"], "false"),
     ("push", ["frontend/page.tsx"], "false"),
     ("push", ["docs/guide.md"], "false"),
-    ("push", ["ctomop/celery.py"], "true"),
+    ("push", ["promop/celery.py"], "true"),
     ("workflow_dispatch", [], "true"),
 ])
 def test_event_selection_and_job_output(tmp_path, monkeypatch, event_name, paths, expected):
@@ -99,12 +102,13 @@ def test_event_selection_and_job_output(tmp_path, monkeypatch, event_name, paths
             assert (base, head, merge_base) == ("before-push", "after-push", False)
         else:
             assert (base, head, merge_base) == ("base", "head", True)
-        return filter_module.requires_async_e2e(paths), filter_module.is_docs_only(paths)
+        return filter_module.requires_async_e2e(paths), filter_module.is_docs_only(paths), filter_module.requires_backend(paths)
 
     monkeypatch.setattr(filter_module, "select_checks", select_checks)
     filter_module.main()
     docs_only = event_name in {"pull_request", "push"} and filter_module.is_docs_only(paths)
-    assert output.read_text() == f"async_e2e={expected}\ndocs_only={str(docs_only).lower()}\n"
+    backend = event_name not in {"pull_request", "push"} or filter_module.requires_backend(paths)
+    assert output.read_text() == f"async_e2e={expected}\ndocs_only={str(docs_only).lower()}\nbackend={str(backend).lower()}\n"
 
 
 def test_new_branch_push_runs_without_a_comparison(tmp_path, monkeypatch):
@@ -115,7 +119,7 @@ def test_new_branch_push_runs_without_a_comparison(tmp_path, monkeypatch):
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
     monkeypatch.setenv("GITHUB_OUTPUT", str(output))
     filter_module.main()
-    assert output.read_text() == "async_e2e=true\ndocs_only=false\n"
+    assert output.read_text() == "async_e2e=true\ndocs_only=false\nbackend=true\n"
 
 
 @pytest.mark.parametrize("path,before,after,expected", [
@@ -125,8 +129,8 @@ def test_new_branch_push_runs_without_a_comparison(tmp_path, monkeypatch):
      "class PatientRecordV1ViewSet:\n def refresh(self): return 2", True),
     ("patient_portal/api/views.py", "def code_mapping_suggest_run(): return 1",
      "def code_mapping_suggest_run(): return 2", True),
-    ("ctomop/settings.py", "DEBUG = True", "DEBUG = False", False),
-    ("ctomop/settings.py", "CELERY_BROKER_TRANSPORT_OPTIONS = {\n 'visibility_timeout': 100\n}",
+    ("promop/settings.py", "DEBUG = True", "DEBUG = False", False),
+    ("promop/settings.py", "CELERY_BROKER_TRANSPORT_OPTIONS = {\n 'visibility_timeout': 100\n}",
      "CELERY_BROKER_TRANSPORT_OPTIONS = {\n 'visibility_timeout': 200\n}", True),
     ("requirements.txt", "celery==5.5.3\nDjango==5.2.1", "celery==5.5.3\nDjango==5.2.2", False),
     ("requirements.txt", "celery==5.5.3", "celery==5.5.4", True),
@@ -194,7 +198,7 @@ def test_docs_diff_uses_merge_base_and_includes_deleted_code_on_rename(tmp_path,
     (tmp_path / "README.md").write_text("Guide\n")
     git("add", ".")
     git("commit", "-qm", "docs PR")
-    assert filter_module.select_checks(base, "HEAD") == (False, True)
+    assert filter_module.select_checks(base, "HEAD") == (False, True, False)
     before_push = git("rev-parse", "HEAD")
     (tmp_path / "docs").mkdir()
     git("mv", "app.py", "docs/example.md")
@@ -224,3 +228,48 @@ def test_failed_diff_does_not_emit_a_docs_skip(tmp_path, monkeypatch):
     with pytest.raises(subprocess.CalledProcessError):
         filter_module.main()
     assert not output.exists()
+
+
+@pytest.mark.parametrize('paths', [
+    ['frontend/src/App.tsx'],
+    ['frontend/package-lock.json', 'frontend/vite.config.ts', 'README.md'],
+    ['frontend/src/assets/logo.svg', 'frontend/.npmrc'],
+    ['docs/guide.md'],
+])
+def test_frontend_and_docs_changes_skip_backend(paths):
+    assert not filter_module.requires_backend(paths)
+
+
+@pytest.mark.parametrize('path', [
+    'omop_core/models.py', 'patient_portal/api/views.py', 'tests/test_api.py',
+    'requirements.txt', 'conftest.py', 'pytest.ini', 'render.yaml', 'Dockerfile',
+    '.github/workflows/ci.yml', '.github/scripts/async_e2e_changes.py',
+    'docs/ht-code-concept-mapping.md', 'frontend/backend_helper.py',
+    'new_backend/config.toml', 'unknown-file',
+])
+def test_backend_shared_unknown_and_mixed_changes_keep_backend(path):
+    assert filter_module.requires_backend(['frontend/src/App.tsx', path])
+
+
+def test_empty_diff_keeps_backend():
+    assert filter_module.requires_backend([])
+
+
+@pytest.mark.parametrize('result,passes', [
+    ('success', True), ('failure', False), ('cancelled', False),
+    ('skipped', False), ('', False),
+])
+def test_required_backend_gate_rejects_incomplete_matrix(result, passes):
+    import os
+    import yaml
+    workflow = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
+    assert workflow['permissions'] == {'contents': 'read'}
+    jobs = workflow['jobs']
+    gate = jobs['backend']
+    assert gate['name'] == 'Backend tests'
+    assert set(gate['needs']) == {'changes', 'backend_suites'}
+    assert 'always()' in gate['if']
+    assert set(jobs['backend_suites']['strategy']['matrix']['suite']) == {'django', 'pytest'}
+    command = gate['steps'][0]['run']
+    process = subprocess.run(['bash', '-c', command], env={**os.environ, 'BACKEND_RESULT': result})
+    assert (process.returncode == 0) is passes

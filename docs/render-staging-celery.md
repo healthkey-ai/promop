@@ -1,9 +1,9 @@
 # Render staging Celery
 
-Staging is `promop-staging` at https://promop-staging.onrender.com, on Render
+Render staging is `promop-staging` at https://promop-staging.onrender.com, on Render
 in Oregon, tracking `dev`. Local staging database access uses
 `STAGING_DATABASE_URL` from `.env`. Render processes use `DATABASE_URL` for
-that same existing database. This is not the old GCP staging deployment.
+that same existing database. Cloud Run staging has a separate deployment configuration.
 
 `render.yaml` now contains the concrete staging web, worker, and private
 Redis-compatible Key Value definitions alongside the existing production
@@ -52,7 +52,7 @@ Django uses the broker for its shared cache.
 
 - Worker logs must show a connection to the staging broker and registration of
   `omop_core.suggest_mappings`. From the Render shell,
-  `celery -A ctomop inspect ping` must get a worker response.
+  `celery -A promop inspect ping` must get a worker response.
 - Authenticated `/api/v1/code-mappings/reference/` must return
   `suggest_max_per_run: 100`.
 - Run Suggest on a curator-approved queue. The request must return 202 promptly,
@@ -87,3 +87,9 @@ python manage.py check --deploy --fail-level ERROR
 credentials or identity-service URLs. See [security settings](security-settings.md)
 for explicit overrides and local HTTP setup. Build commands retain their startup
 exemption; `check --deploy` validates runtime configuration before migrations.
+
+Google Cloud Run staging is a separate supported deployment, maintained by
+[its workflow](../.github/workflows/deploy-staging.yml) and
+[Dockerfile.gcp](../Dockerfile.gcp). Its existing service/image/bucket identifiers
+remain unchanged. The Render database connection documented here must not be
+assumed to identify the Cloud Run database.

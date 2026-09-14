@@ -1,3 +1,4 @@
+import PageTitle from '@/components/Branding/PageTitle';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import api from '@/api/axios';
@@ -95,7 +96,7 @@ export default function ServiceApplicationsPage() {
   return <main className="mx-auto max-w-6xl space-y-5 p-6">
     <Link to="/org-admin" className="text-sm text-blue-700">← Org Admin</Link>
     <div className="flex items-center justify-between gap-3">
-      <div><h1 className="text-2xl font-semibold">Service applications</h1>
+      <div><PageTitle className="text-2xl font-semibold">Service applications</PageTitle>
         <p className="text-sm text-gray-600">Manage application owners, access, and API tokens.</p></div>
       <button className={buttonClass} disabled={busy} onClick={() => {
         setSelectedId(null); setDraft({ ...emptyDraft }); setIssued(null); setRevokeId(null); setError('');

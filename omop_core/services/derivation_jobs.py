@@ -66,7 +66,7 @@ class CeleryDispatcher:
         return task_id
 
     def status(self, task_id: str) -> DerivationStatus:
-        from ctomop.celery import app as celery_app
+        from promop.celery import app as celery_app
 
         result = celery_app.AsyncResult(task_id)
         state = result.state
