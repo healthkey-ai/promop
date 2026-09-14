@@ -141,3 +141,50 @@ def test_local_debug_needs_explicit_identity_config_and_does_not_trust_proxy():
     assert posture['SECURE_PROXY_SSL_HEADER'] is None
     # Local HTTP callbacks need the explicit override, never just a local env.
     assert posture['ALLOWED_REDIRECT_URI_SCHEMES'] == ['https']
+
+
+def _loaded_dotenv(**overrides):
+    """Report whether importing settings called load_dotenv().
+
+    find_dotenv reaches the repo-root .env either way: it falls back to cwd
+    under `python -c`, which has no __main__.__file__, and otherwise walks up
+    from promop/settings.py. Scrubbing the environment above never touches the
+    file, so only the PYTHON_DOTENV_DISABLED guard keeps it out. Stub the module
+    rather than write a real .env, which would clobber a developer's own.
+    """
+    code = '''
+import json
+import sys
+import types
+
+calls = []
+stub = types.ModuleType('dotenv')
+stub.load_dotenv = lambda *args, **kwargs: calls.append(1)
+sys.modules['dotenv'] = stub
+
+from django.conf import settings
+settings.DEBUG  # force settings import
+print(json.dumps(bool(calls)))
+'''
+    env = {key: os.environ[key] for key in ('PATH', 'SYSTEMROOT') if key in os.environ}
+    env.update(BASE_ENV, DEBUG='False')
+    # BASE_ENV arms the guard for every other test here; this helper sets it.
+    env.pop('PYTHON_DOTENV_DISABLED')
+    env.update(overrides)
+    result = subprocess.run(
+        [sys.executable, '-c', code], cwd=ROOT, env=env,
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_dotenv_loads_by_default_for_local_development():
+    assert _loaded_dotenv() is True
+
+
+def test_python_dotenv_disabled_keeps_a_developer_dotenv_out_of_these_assertions():
+    # Every assertion in this module about shipped defaults depends on this
+    # guard: .env.example sets ALLOWED_REDIRECT_URI_SCHEMES=https,http, and the
+    # docs tell developers to copy it.
+    assert _loaded_dotenv(PYTHON_DOTENV_DISABLED='1') is False
