@@ -27,7 +27,7 @@ _BOOT = (
 
 
 def _boot(argv0: str) -> subprocess.CompletedProcess:
-    env = {**os.environ, **_PROD_ENV, 'DJANGO_SETTINGS_MODULE': 'ctomop.settings'}
+    env = {**os.environ, **_PROD_ENV, 'DJANGO_SETTINGS_MODULE': 'promop.settings'}
     return subprocess.run(
         [sys.executable, '-c', _BOOT.format(argv0=argv0)],
         env=env, capture_output=True, text=True,

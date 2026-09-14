@@ -1,6 +1,6 @@
 # PRomop Genomics: Implemented Architecture
 
-As implemented on `dev` through `25133b7` ([#1249](https://github.com/healthkey-ai/promop/pull/1249), [#1259](https://github.com/healthkey-ai/promop/pull/1259)), updated 2026-09-14 with the read-only schema audit below. Remaining requirements and deployment work are in [the implementation plan](genomics_implementation.md).
+Baseline `dev` through `4302c97`, including [#1249](https://github.com/healthkey-ai/promop/pull/1249), [#1259](https://github.com/healthkey-ai/promop/pull/1259) and the [schema audit #1263](https://github.com/healthkey-ai/promop/pull/1263). Updated 2026-09-14 with the reviewed PALB2 correction ([#1275](https://github.com/healthkey-ai/promop/issues/1275)). Remaining requirements and deployment work are in [the implementation plan](genomics_implementation.md).
 
 ## Storage decision
 
@@ -128,19 +128,24 @@ The snapshot batches all candidate NOTE IDs into one patient-scoped query and ca
 
 ## Catalog and presentation
 
-The immutable genomics_catalog_v1.json contains 42 marker keys and 26 initial components, sourced from CancerBot commit a840f8d9af2c35477e2b6b76f981b29f02c21eec. Five later component recipes bring the implemented component inventory to 31. The catalog is packaged migration data, not a runtime CancerBot dependency.
+The immutable genomics_catalog_v1.json contains 42 marker keys and 26 initial components, sourced from CancerBot commit a840f8d9af2c35477e2b6b76f981b29f02c21eec. Five later component recipes bring the implemented component inventory to 31. The source catalog is packaged migration data, not a runtime CancerBot dependency. Effective catalog version 2 overlays the reviewed PALB2 naming correction; it leaves the frozen JSON unchanged.
 
 Every marker has a concrete JSON list field genomics_<key> on PatientRecord. The full finding projection is genetic_mutations.
 
 | Disease | Priority keys, prefixed with genomics_ for the field |
 | --- | --- |
-| BC | brca1, brca2, pik3ca, tp53, esr1, palb1 |
+| BC | brca1, brca2, pik3ca, tp53, esr1, palb2 |
 | MM | tp53, kras, nras, braf, myc, fam46c, dis3, xbp1, del17p, t414, t1114, t1416, gain1q, hyperdiploidy, chromothripsis, igh |
 | FL | bcl2, ezh2, kmt2d, crebbp, bcl6 |
 | MCL | tp53, myc, kmt2d, notch1, notch2, nsd2, cdkn2a, smarca4, ccnd1, del17p, t1114, bcl2_amplification, complex_karyotype, complex_karyotype_excl_t1114, atm_atr, notch1_notch2 |
 | CLL | tp53, notch1, sf3b1, atm, del17p, del11q, del13q, trisomy12 |
 
-Exact structural aliases take precedence over generic gene matching. A TP53 mutation does not imply del(17p). Combined ATM/ATR and NOTCH1/NOTCH2 assertions are preserved rather than split. PALB1 and source examples remain pending expert review; seeded storage approval does not validate their clinical nomenclature.
+Exact structural aliases take precedence over generic gene matching. A TP53 mutation does not imply del(17p). Combined ATM/ATR and NOTCH1/NOTCH2 assertions are preserved rather than split. Source example validation remains pending; seeded storage approval does not validate those examples.
+
+Samar's [2026-09-11 decision](https://github.com/cancerbot-org/cancerbot/issues/4812#issuecomment-5633297037) approves correcting PALB1 to PALB2. The current marker is `palb2`, with `genomics_palb2` as its PatientRecord list. Migration `0233_genomics_palb2_naming` renames the projection column and curation field identities, corrects cached gene/marker codes, and preserves list order, repeated finding IDs and original gene text as `source_gene`. Mapping IDs, source keys, review status, reviewer and recipe settings survive; conflicting curation identities abort the atomic migration. The migration is forward-only because new PALB2 findings cannot safely be relabeled as the old spelling.
+
+Historical OMOP parents/components, NOTE text and provenance are unchanged by migration or reads. Legacy `genomics:palb1` parents and exact PALB1 gene values remain readable as PALB2, with read-only `source_gene` metadata on corrected findings. New writes accept the exact `PALB1` gene, `palb1` marker and `genomics_palb1` field aliases, and store the canonical gene. Responses expose the canonical field. Requests with conflicting old/new lists fail; unchanged finding echoes preserve stored facts. A subsequent edit retains superseded gene components in history. Raw variant/narrative strings are never rewritten by the naming correction. Existing curated source keys remain authoritative; fresh runtime seeds use `genomics:palb2` and do not recreate the retired mapping.
+
 
 Standalone and federated views share GenomicsTab.tsx. It provides a list, detail dialog, add/edit, confirmed deletion, read-only handling and keyboard row activation. Empty priority rows are presentation only. Changing disease changes suggested rows without removing stored findings. The dialog provides one editable finding-status control; the legacy source assessment is displayed separately. It exposes independent clone fraction/unit, VAF/unit, transcript DNA change, genomic DNA change, protein change/type and coverage depth controls. Original variant text is separate from transcript DNA change. Absent edits clear and disable inapplicable variant components. The list shows effective state and labels unsaved priority placeholders Unknown. The effective registry in [genomics_components.py](../omop_core/services/genomics_components.py) supplies all 31 components to the writer, mapping inventory and serializer validation, including the five later additions. Historical seed fixtures and persisted curator recipes remain unchanged.
 
@@ -148,7 +153,7 @@ Genomics owns all new interactive discrete finding entry, including overlapping 
 
 The Genomics tab exposes original legacy results through `GET /api/v1/patient-records/{person_id}/genomics-legacy-cytogenetics/`. This patient-authorized, read-only endpoint includes historical individual and aggregate Observation/Measurement rows, original text and source tokens, stored dates, selection clears and erroneous rows. It uses 50-row keyset pages ordered by date, table and ID, with batched NOTE resolution restricted to the owning patient and fact. Unresolvable references remain visible without disclosing another fact’s text. Cache-only or pending legacy summaries are also shown, explicitly without a date.
 
-Reconciliation is source-preserving and manual: compare original legacy evidence with current findings before entering another finding. Historical rows are not converted, rewritten or automatically merged with genomics lists; deselection is editing history, never an explicit negative test, and dates are never synthesized. Exact original text distinguishes gain from amplification when the source does; ambiguous “1q21 gain/amplification” is no longer normalized to gain. The compatibility summary can normalize known aliases, while the history view retains raw source evidence. See [legacy cytogenetic storage](cytogenetic-markers.md) and [aggregate coding history](cytogenetic-marker-coding.md) for the older storage formats.
+Reconciliation is source-preserving and manual: compare original legacy evidence with current findings before entering another finding. Historical rows are not converted, rewritten or automatically merged with genomics lists; deselection is editing history, never an explicit negative test, and dates are never synthesized. Exact original text distinguishes gain from amplification when the source does; ambiguous “1q21 gain/amplification” is no longer normalized to gain. The compatibility summary can normalize known aliases, while the history view retains raw source evidence.
 
 ## API contract
 
@@ -190,7 +195,7 @@ Interactive CRUD is implemented. A published versioned import contract, source-f
 - [Canonical writer](../omop_core/services/genomics.py), [PatientRecord projection](../omop_core/services/patient_record_service.py), [catalog](../omop_core/services/genomics_catalog.py), [frozen fixture](../omop_core/data/genomics_catalog_v1.json).
 - [Shared Genomics UI](../frontend/src/components/PatientInfo/tabs/GenomicsTab.tsx), [patient API](../patient_portal/api/views.py), [mapping inventory](../omop_core/services/field_descriptor.py), [mapping serializers](../patient_portal/api/serializers.py).
 - [Sample data command](../omop_core/management/commands/populate_genomics_sample_data.py) seeds demonstration findings; sample variants are not expert validation of clinical nomenclature.
-- Staging is Render: `https://promop-staging.onrender.com`, web service `promop-staging`, worker `promop-staging-worker`. Follow [Render staging configuration](render-staging-celery.md). Never inherit a remote database URL for local tests.
+- Render staging is: `https://promop-staging.onrender.com`, web service `promop-staging`, worker `promop-staging-worker`. Follow [Render staging configuration](render-staging-celery.md). Cloud Run staging is also supported through its deployment workflow; verify its database separately. Never inherit a remote database URL for local tests.
 
 The old root architecture, handoff, short pointer and genetic-mutations implementation notes are superseded by this document and the implementation plan. Historical PR status and test totals are not current verification evidence. Strict exports must explicitly preserve the local text and linkage conventions; generic FHIR sync is not a validated genomics graph adapter.
 
@@ -206,8 +211,8 @@ FISH findings use clone fraction (including zero for absent findings); karyotype
 omit sequence-specific values. Dates, quantities and report identities are
 generated examples, not clinical evidence or a representative patient cohort.
 
-Unsupported annotations remain empty. The catalog's legacy `PALB1` label is
-preserved without assigning a PALB2 transcript or reference locus. Genomic HGVS
+Unsupported annotations remain empty. Synthetic PALB2 findings use the reviewed
+gene name, while their examples still lack validated transcript/reference annotations. Genomic HGVS
 is supplied only for the checked [BRAF c.1799T>A example](https://www.ncbi.nlm.nih.gov/clinvar/RCV001248834/)
 and [TP53 c.743G>A example](https://www.ncbi.nlm.nih.gov/clinvar/RCV000013150.22/).
 The ESR1 c.1610A>G example is paired with p.Tyr537Cys, as reported in
@@ -215,7 +220,7 @@ The ESR1 c.1610A>G example is paired with p.Tyr537Cys, as reported in
 Reference annotations use GRCh38/RefSeq; they do not establish a clinical
 classification for a synthetic finding.
 
-Staging is Render (`promop-staging`). In its shell, where `DATABASE_URL` is
+In the Render staging (`promop-staging`) shell, where `DATABASE_URL` is
 already configured, preview a specific sample patient before writing:
 
 ```sh
@@ -232,7 +237,7 @@ variant facts and replaces them with a newly generated set. It does not enrich
 the existing findings in place. Random previews and subsequent writes can differ.
 Dry runs perform no writes; verbosity 2 prints complete JSON payloads.
 
-For local testing, explicitly set `DATABASE_URL` to an isolated local database. For staging operations, use the configured Render shell or the documented staging connection; never inherit an unspecified `.env` database URL.
+For local testing, explicitly set `DATABASE_URL` to an isolated local database. For staging operations, name Render or Cloud Run explicitly and verify its configured database; never inherit an unspecified `.env` database URL.
 
 Load the OMOP vocabulary and apply migrations through the genomics component
 seeds before writing. `seed_genomics_catalog` can seed missing mappings while

@@ -28,7 +28,7 @@ running a full OMOP refresh. External imports and explicit refreshes still deriv
 from OMOP while preserving pending edits.
 
 Use [PatientRecord-first writes](docs/patient-record-first-writes.md) for save,
-projection, and refresh semantics, and [the field mapping reference](field_to_concept_mapping.md)
+projection, and refresh semantics, and [the field mapping reference](field_concept_mapping_architecture.md)
 for field destinations and exceptions. Mapping availability alone does not determine
 editability. Computed fields, structured clinical resources, and retired summaries
 have their own contracts; [Genomics](docs/genomics_architecture.md) owns new discrete
@@ -63,7 +63,7 @@ Authorization and patient/organization scope apply to every path. Use
    - [Concept graph endpoints](#concept-graph-endpoints)
    - [Vocabulary release & snapshot (consumer mirror)](#vocabulary-release--snapshot-consumer-mirror)
    - [OAuth2 endpoints](#oauth2-endpoints)
-5. [OMOP write internals](#omop-write-internals) — _upsert_omop_measurement, _LAB_FIELD_TO_LOINC, FHIR pipeline, signal chain
+5. [OMOP write internals](#omop-write-and-derivation-internals) — _upsert_omop_measurement, _LAB_FIELD_TO_LOINC, FHIR pipeline, signal chain
 6. [Provenance tagging](#provenance-tagging)
 7. [Multi-tenant org scoping](#multi-tenant-org-scoping)
 
@@ -279,7 +279,7 @@ Consult `GET /api/v1/patient-records/writable-fields/` before building an editor
 Computed and other serializer read-only inputs are generally ignored; a successful
 response alone does not establish that such a field changed. Specific retired or
 structured fields can explicitly reject changes, including legacy genomic summaries.
-Use their dedicated resource APIs and the [field mapping reference](field_to_concept_mapping.md)
+Use their dedicated resource APIs and the [field mapping reference](field_concept_mapping_architecture.md)
 to determine ownership. The former blanket 405 rejection of mapped clinical edits
 no longer describes this endpoint.
 

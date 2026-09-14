@@ -18,7 +18,7 @@ def client_for(staff):
 
 
 @pytest.mark.parametrize('disease,expected', [
-    ('BC', {'brca1', 'brca2', 'pik3ca', 'tp53', 'esr1', 'palb1'}),
+    ('BC', {'brca1', 'brca2', 'pik3ca', 'tp53', 'esr1', 'palb2'}),
     ('FL', {'bcl2', 'ezh2', 'kmt2d', 'crebbp', 'bcl6'}),
     ('MM', {'tp53', 'kras', 'nras', 'braf', 'del17p', 't414', 't1114', 'gain1q'}),
     ('MCL', {'tp53', 'notch1', 'notch2', 'nsd2', 'ccnd1', 'bcl2_amplification'}),
@@ -152,7 +152,7 @@ def test_nonpositive_assessments_do_not_become_detected_markers(setup, assessmen
         'interpretation': 'Pathogenic', 'assessment': assessment})
     record.refresh_from_db()
     assert record.genomics_tp53[0]['assessment'] == assessment
-    assert record.tp53_disruption is not True
+    assert record.tp53_disruption is None
     assert not record.molecular_markers
     save_variant(person, {'assessment': 'present'}, saved['id'])
     record.refresh_from_db()
@@ -207,3 +207,19 @@ def test_effective_registry_is_complete_and_does_not_mutate_frozen_catalog(setup
     serializer = FieldConceptMappingSerializer(data={'field_name': 'genetic_mutations.unknown'})
     assert not serializer.is_valid()
     assert 'field_name' in serializer.errors
+
+
+@pytest.mark.parametrize('assessment', ['absent', 'indeterminate', 'no_call', 'not_tested'])
+def test_tp53_aggregate_returns_json_null_after_positive_evidence_is_cleared(setup, assessment):
+    person, record, staff = setup
+    saved = save_variant(person, {'gene': 'TP53', 'interpretation': 'Pathogenic'})
+    record.refresh_from_db()
+    assert record.tp53_disruption is True
+    save_variant(person, {'assessment': assessment}, saved['id'])
+    record.refresh_from_db()
+    assert record.tp53_disruption is None
+    client = APIClient()
+    client.force_authenticate(staff)
+    response = client.get(f'/api/patient-info/{person.pk}/')
+    assert response.status_code == 200
+    assert response.data['patient_info']['tp53_disruption'] is None

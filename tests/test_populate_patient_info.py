@@ -460,7 +460,7 @@ class TestLymphomaData:
         concept = ConceptFactory(concept_name='Lymphoma grade')
         MeasurementFactory(person=person, measurement_concept=concept, value_as_number=2)
         data = _cmd().get_lymphoma_data(person)
-        assert data['tumor_grade'] == 2
+        assert data['tumor_grade'] == '2'
 
     def test_no_lymphoma_data_empty_dict(self):
         person = PersonFactory()
@@ -679,21 +679,51 @@ class TestTp53Disruption:
         _cmd()._compute_derived_fields(pi)
         assert pi.tp53_disruption is True
 
-    def test_tp53_benign_stays_false(self):
+    def test_tp53_benign_is_unknown(self):
         pi = self._pi_with_mutations([
             {'gene': 'tp53', 'interpretation': 'benign'},
         ])
         _cmd()._compute_derived_fields(pi)
-        assert pi.tp53_disruption is False
+        assert pi.tp53_disruption is None
 
-    def test_no_mutations_false(self):
+    def test_no_mutations_is_unknown(self):
         pi = self._pi_with_mutations([])
         _cmd()._compute_derived_fields(pi)
-        assert pi.tp53_disruption is False
+        assert pi.tp53_disruption is None
 
     def test_other_gene_pathogenic_does_not_set_tp53(self):
         pi = self._pi_with_mutations([
             {'gene': 'brca1', 'interpretation': 'pathogenic'},
         ])
         _cmd()._compute_derived_fields(pi)
-        assert pi.tp53_disruption is False
+        assert pi.tp53_disruption is None
+
+
+    @pytest.mark.parametrize('mutations', [
+        None,
+        [{'gene': 'TP53', 'interpretation': 'Pathogenic', 'assessment': 'absent'}],
+        [{'gene': 'TP53', 'interpretation': 'Pathogenic', 'assessment': 'indeterminate'}],
+        [{'gene': 'TP53', 'interpretation': 'Pathogenic', 'assessment': 'not_tested'}],
+        [{'gene': 'TP53', 'interpretation': 'Pathogenic', 'assessment': 'no_call'}],
+        [{'gene': 'TP53', 'interpretation': 'Pathogenic', 'status': 'absent'}],
+        [{'gene': 'TP53', 'interpretation': 'Pathogenic', 'status': 'indeterminate'}],
+        [{'gene': 'TP53', 'interpretation': 'Likely pathogenic'}],
+        [{'gene': 'TP53', 'interpretation': 'Uncertain significance'}],
+        [{'gene': 'TP53'}],
+        [{'gene': 'del(17p)', 'interpretation': 'Pathogenic'}],
+    ])
+    @pytest.mark.parametrize('previous', [False, True])
+    def test_nonqualifying_evidence_clears_stale_aggregate(self, mutations, previous):
+        pi = self._pi_with_mutations(mutations)
+        pi.tp53_disruption = previous
+        _cmd()._compute_derived_fields(pi)
+        assert pi.tp53_disruption is None
+
+    def test_positive_rule_is_unchanged_with_other_nonqualifying_findings(self):
+        pi = self._pi_with_mutations([
+            {'gene': 'BRCA1', 'interpretation': 'Pathogenic'},
+            {'gene': 'TP53', 'interpretation': 'Benign'},
+            {'gene': 'TP53', 'interpretation': 'Pathogenic', 'assessment': 'present', 'status': 'present'},
+        ])
+        _cmd()._compute_derived_fields(pi)
+        assert pi.tp53_disruption is True

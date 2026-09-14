@@ -447,6 +447,16 @@ describe('LymphomaSection — transformation to DLBCL fields', () => {
     expect(screen.getByText('Post-Transformation Outcome')).toBeInTheDocument();
   });
 
+  it('keeps shared lab editors in Blood and Labs while retaining FL assessment inputs', () => {
+    renderLymphoma({ hemoglobin_g_dl: 11.5, ldh_u_l: 250 });
+    expect(screen.getByText('Record hemoglobin in Blood and LDH in Labs.')).toBeInTheDocument();
+    expect(screen.queryByText('Hemoglobin (g/dL)')).not.toBeInTheDocument();
+    expect(screen.queryByText('LDH (U/L)')).not.toBeInTheDocument();
+    expect(screen.getByText('LDH Upper Limit of Normal (U/L)')).toBeInTheDocument();
+    expect(screen.getByText('Number of Nodal Sites')).toBeInTheDocument();
+    expect(screen.getByText('Bone Marrow Involvement')).toBeInTheDocument();
+  });
+
   it('renders dlbcl_transformation_date value in the date input', () => {
     renderLymphoma({ dlbcl_transformation_date: '2023-04-15' });
     expect(screen.getByDisplayValue('2023-04-15')).toBeInTheDocument();
@@ -569,12 +579,12 @@ describe('DiseaseTab — descriptor-driven', () => {
     expect(screen.queryByTestId('reason-tnbc_status')).not.toBeInTheDocument();
   });
 
-  it('says a field the API has no column for is not stored, not that it is derived', () => {
+  it('recognizes the now-stored B symptoms field', () => {
     // #646. "Derived from OMOP data" would send a reader looking for a value
     // that was never recorded anywhere.
     render(<DiseaseTab {...baseProps} diseaseType="lymphoma" formData={{}} />);
 
-    expect(screen.getByTestId('reason-b_symptoms')).toHaveTextContent(
+    expect(screen.getByTestId('reason-b_symptoms')).not.toHaveTextContent(
       /not stored on the patient record yet/i,
     );
   });
@@ -583,7 +593,7 @@ describe('DiseaseTab — descriptor-driven', () => {
     render(<DiseaseTab {...baseProps} diseaseType="myeloma" formData={{}} />);
 
     for (const name of ['r_iss_stage', 'hypercalcemia', 'cytogenetic_risk']) {
-      expect(screen.getByTestId(`reason-${name}`)).toBeInTheDocument();
+      expect(screen.queryByTestId(`reason-${name}`)).not.toBeInTheDocument();
     }
   });
 });
@@ -620,13 +630,19 @@ describe('DiseaseTab — shared staging and biomarkers', () => {
     await fetchWritableFields();
   });
 
-  it.each(['breast', 'lymphoma', 'myeloma', 'cll', 'other'] as const)(
-    'shows them for %s, not only one disease',
+  it.each(['breast'] as const)(
+    'shows solid-tumor staging for %s',
     (diseaseType) => {
       render(<DiseaseTab {...baseProps} diseaseType={diseaseType} formData={{}} />);
       expect(screen.getByText('Staging & Biomarkers')).toBeInTheDocument();
     },
   );
+
+  it.each(['lymphoma', 'myeloma', 'cll', 'mcl', 'other'] as const)('omits routine solid-tumor biomarkers for %s', diseaseType => {
+    render(<DiseaseTab {...baseProps} diseaseType={diseaseType} formData={{}} />);
+    expect(screen.queryByText('Staging & Biomarkers')).not.toBeInTheDocument();
+    expect(screen.queryByText('PD-L1 Combined Positive Score')).not.toBeInTheDocument();
+  });
 
   it('leaves all four editable, since all four are mapped', () => {
     render(<DiseaseTab {...baseProps} diseaseType="breast" formData={{}} />);

@@ -22,7 +22,6 @@ vi.mock("@/components/FieldMappings/FieldMappingPage", () => ({ default: () => <
 vi.mock("@/components/CodeMappings/CodeMappingPage", () => ({ default: () => <div>CODE_MAPPINGS</div> }));
 vi.mock("@/components/User/UserProfilePage", () => ({ default: () => <div>USER_PROFILE</div> }));
 vi.mock("@/components/Auth/Login", () => ({ Login: () => <div>LOGIN</div> }));
-vi.mock("@/components/Auth/AuthCallback", () => ({ AuthCallback: () => <div>AUTH_CALLBACK</div> }));
 vi.mock("@/components/Auth/AcceptInvite", () => ({ default: () => <div>ACCEPT_INVITE</div> }));
 vi.mock("@/components/Auth/AcceptPatientInvite", () => ({ default: () => <div>ACCEPT_PATIENT_INVITE</div> }));
 vi.mock("@/components/Auth/ResetPassword", () => ({ default: () => <div>RESET_PASSWORD</div> }));
@@ -238,5 +237,27 @@ describe('administrative upload routes', () => {
     renderAt('/upload');
     expect(screen.getByRole('link', { name: /^FHIR/ })).toHaveAttribute('href', '/upload-fhir');
     expect(screen.getByRole('link', { name: /^CSV/ })).toHaveAttribute('href', '/upload-csv');
+  });
+});
+
+
+it('uses the inline profile heading without a second masthead for patient users', () => {
+  mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 1, is_patient: true, person_id: 5 } });
+  renderAt('/profile');
+  expect(screen.getByText('USER_PROFILE')).toBeInTheDocument();
+  expect(screen.queryByRole('banner')).not.toBeInTheDocument();
+});
+
+describe("retired OAuth callback", () => {
+  it("requires session login instead of exchanging a code", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: null });
+    renderAt("/auth/callback?code=old-code&state=old-state");
+    expect(screen.getByText("LOGIN")).toBeInTheDocument();
+  });
+
+  it("uses an existing session at the old callback URL", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, is_org_admin: true } });
+    renderAt("/auth/callback?code=old-code&state=old-state");
+    expect(screen.getByText("PROVIDER_LIST")).toBeInTheDocument();
   });
 });

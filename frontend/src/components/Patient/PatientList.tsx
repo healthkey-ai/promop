@@ -1,8 +1,8 @@
+import PageTitle from '@/components/Branding/PageTitle';
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { Upload, Trash2, LogOut, Settings, Globe } from "lucide-react";
 import api from "@/api/axios";
-import { clearTokens } from "@/utils/oauth";
 import { useAuth, type User } from "@/hooks/useAuth";
 import { PaginationControls } from "@/components/labs/PaginationControls";
 import { useLocalPagination } from "@/lib/pagination";
@@ -69,12 +69,12 @@ const getErrorMessage = (err: unknown, fallback: string) => {
 };
 
 export default function PatientList() {
-  const { currentUser, loading } = useAuth();
+  const { currentUser, loading, logout } = useAuth();
   if (loading) return <div role="status" className="p-6">Loading patient list…</div>;
-  return <PatientListContent key={currentUser?.id ?? 'session'} currentUser={currentUser} />;
+  return <PatientListContent key={currentUser?.id ?? 'session'} currentUser={currentUser} logout={logout} />;
 }
 
-function PatientListContent({ currentUser }: { currentUser: User | null }) {
+function PatientListContent({ currentUser, logout }: { currentUser: User | null; logout: () => Promise<void> }) {
   const navigate = useNavigate();
   const preferenceKey = `promop-patient-list:${currentUser?.id ?? 'session'}`;
   const [preferences, setPreferences] = useState(() => loadPreferences(preferenceKey));
@@ -87,6 +87,7 @@ function PatientListContent({ currentUser }: { currentUser: User | null }) {
   useEffect(() => {
     try { localStorage.setItem(preferenceKey, JSON.stringify(preferences)); } catch { /* Storage may be disabled. */ }
   }, [preferenceKey, preferences]);
+
   const [patients, setPatients] = useState<Patient[]>([]);
   const [patientCount, setPatientCount] = useState(0);
   const [filterOptions, setFilterOptions] = useState<FilterOptions>({
@@ -239,15 +240,14 @@ function PatientListContent({ currentUser }: { currentUser: User | null }) {
   const canManageMappings = !!(currentUser?.is_staff || currentUser?.is_org_admin);
 
   const handleLogout = () => {
-    clearTokens();
-    navigate("/login");
+    void logout();
   };
 
   return (
     <div className="p-6">
-      <div className="mb-6 flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-foreground">Patients</h1>
-        <div className="flex gap-2">
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
+        <PageTitle className="text-2xl font-bold text-foreground">Patients</PageTitle>
+        <div className="flex flex-wrap gap-2">
           {(selectedIds.size > 0 || selectAllMode) && (
             <button
               onClick={() => setDeleteDialogOpen(true)}

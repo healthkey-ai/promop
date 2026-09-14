@@ -30,7 +30,7 @@ from omop_core.services.mappings import (
     WEARABLE_TREND_IMPROVING_PCT, WEARABLE_TREND_DECLINING_PCT,
 )
 from omop_core.services.clinical_units import (
-    canonical_wbc_unit, flc_to_canonical, wbc_to_canonical,
+    canonical_wbc_unit, flc_to_canonical, wbc_to_canonical, blood_count_projection,
 )
 from omop_core.services.lot_regimens import (
     get_regimen_concept_id,
@@ -64,7 +64,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 5
+DERIVATION_VERSION = 8
 
 # Fields that are entirely derived from OMOP tables and must be reset before
 # each refresh so deletions are reflected (not just additions).
@@ -203,6 +203,8 @@ _OMOP_DERIVED_FIELDS = [
     'btk_inhibitor_refractory', 'bcl2_inhibitor_refractory', 'lymphocyte_doubling_time',
     # Lymphoma
     'flipi_score', 'gelf_criteria_status', 'tumor_grade',
+    'flipi_risk_category', 'number_of_nodal_sites', 'bulky_disease', 'b_symptoms',
+    'gelf_criteria_options', 'ldh_upper_limit_normal',
     'transformed_to_dlbcl', 'dlbcl_transformation_date', 'post_transformation_outcome',
     # Assessment
     'measurable_disease_by_recist_status',
@@ -255,7 +257,7 @@ PATIENT_RECORD_OMOP_MAPPED_FIELDS = frozenset(_OMOP_DERIVED_FIELDS) | frozenset(
     'tp53_disruption',
     # These clinical projection columns include pending OMOP derivations.
     # API editability is determined by the write descriptor; this registry
-    # records derivation coverage. See field_to_concept_mapping.md and
+    # records derivation coverage. See field_concept_mapping_architecture.md and
     # docs/patient-record-first-writes.md.
     'no_other_active_malignancies', 'preexisting_conditions', 'myeloma_type',
     'progression', 'condition_code_icd_10', 'condition_code_snomed_ct',
@@ -729,6 +731,7 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
         .select_related(
             'measurement_concept', 'value_as_concept',
             'qualifier_concept', 'measurement_concept__vocabulary',
+            'unit_concept',
         )
         .order_by('-measurement_date', '-measurement_id')
     )
@@ -738,6 +741,7 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
         .select_related(
             'observation_concept', 'value_as_concept',
             'observation_concept__vocabulary',
+            'unit_concept',
         )
         .order_by('-observation_date', '-observation_id')
     )
@@ -926,6 +930,12 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         # Pre-fetch all OMOP rows once (~6 queries) instead of per-section.
         snapshot = _build_snapshot(person)
 
+        # Explicit demo/local assessment codes are fallbacks. Real extractors
+        # and approved mappings below retain precedence during imports.
+        from omop_core.services.sample_disease_profiles import read_profile_rows
+        for field, value in read_profile_rows(snapshot.measurements + snapshot.observations).items():
+            setattr(patient_info, field, value)
+
         # Populate all sections
         for section_fn in [
             _get_demographics,
@@ -969,6 +979,11 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         for field, value in preserved.items():
             derived_value = getattr(patient_info, field, None)
             matches = _derived_value_matches(field, derived_value, value)
+            if (field == 'flipi_score_options' and value is None
+                    and patient_info.flipi_score is not None):
+                # A pending explicit clear also supersedes a legacy numeric
+                # score. Keep that edit pending while OMOP still carries it.
+                matches = False
             # Keep the already-stored representation even on a match so saving
             # a float extractor result cannot introduce another rounding step.
             setattr(patient_info, field, value)
@@ -983,7 +998,10 @@ def refresh_patient_record(person: Person) -> PatientRecord:
 
         patient_info.derivation_version = DERIVATION_VERSION
         patient_info.derived_at = timezone.now()
-        return recompute_patient_record_fields(patient_info)
+        return recompute_patient_record_fields(
+            patient_info,
+            changed_fields=user_edited & {'flipi_score_options', 'gelf_criteria_options'},
+        )
 
 
 def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fields=()) -> PatientRecord:
@@ -1012,6 +1030,20 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
     }.items():
         if inputs.intersection(changed_fields):
             setattr(patient_info, result, None)
+    from omop_core.services.flipi import calculate_flipi
+    if (patient_info.flipi_score_options is not None
+            or 'flipi_score_options' in changed_fields):
+        try:
+            patient_info.flipi_score, patient_info.flipi_risk_category = calculate_flipi(patient_info.flipi_score_options)
+        except ValueError:
+            patient_info.flipi_score = patient_info.flipi_risk_category = None
+    # A historical score without recorded factors is not an unassessed score.
+    # Keep it on unrelated edits and after extracting a numeric OMOP result;
+    # only an explicit assessment edit may replace/clear it.
+    if patient_info.gelf_criteria_options is not None:
+        patient_info.gelf_criteria_status = 'Met' if patient_info.gelf_criteria_options.strip() else 'Not Met'
+    elif 'gelf_criteria_options' in changed_fields:
+        patient_info.gelf_criteria_status = None
     _compute_derived_fields(patient_info, apply_formulas=False)
     _clear_overflowing_decimal_fields(patient_info)
     patient_info.save()
@@ -1299,6 +1331,9 @@ def _get_disease_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     def _is_oncologic(cond):
         cname = (cond.condition_concept.concept_name or '').lower() if cond.condition_concept else ''
         src = (cond.condition_source_value or '').lower()
+        # A screening encounter is not a cancer diagnosis.
+        if 'screening' in cname or (not cond.condition_concept_id and 'screening' in src):
+            return False
         return any(kw in cname or kw in src for kw in _ONCO_KEYWORDS)
 
     # snapshot.conditions is already ordered -condition_start_date
@@ -3324,12 +3359,32 @@ def _get_assessment_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     return data
 
 
+def _latest_blood_count_measurements(snapshot):
+    # Select ANC/platelets once across coded, source-only and legacy-name facts.
+    # The latest result owns the projection even if its value/unit is unknown.
+    count_fields = {'751-8': 'anc_thousand_per_ul', '777-3': 'platelet_count_thousand_per_ul'}
+    selected_counts = {}
+    for measurement in snapshot.measurements:
+        code = _measurement_code(measurement)
+        field = count_fields.get(code)
+        if field is None:
+            field = _SOURCE_VALUE_LAB_FIELDS.get(measurement.measurement_source_value)
+        if field not in count_fields.values():
+            name = (getattr(measurement.measurement_concept, 'concept_name', '') or '').casefold().strip()
+            field = {'platelet count': 'platelet_count_thousand_per_ul',
+                     'absolute neutrophil count': 'anc_thousand_per_ul'}.get(name)
+        if field is None or field in selected_counts:
+            continue
+        selected_counts[field] = measurement
+    return selected_counts
+
+
 def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
     snapshot = snapshot or _build_snapshot(person)
-
-    # snapshot.measurements already ordered -date -id, non-erroneous, select_related
     measurements = snapshot.measurements
+    for field, measurement in _latest_blood_count_measurements(snapshot).items():
+        data.update(blood_count_projection(field, measurement))
 
     # --- Legacy fields via exact historic concept-name matching ---
     for measurement in measurements:
@@ -3517,8 +3572,8 @@ def _get_genetic_mutations(person: Person, snapshot: OmopSnapshot = None) -> dic
 
     mutations = []
     from omop_core.models import FieldConceptMapping
-    from omop_core.services.genomics_catalog import markers, project_priority_variants
-    marker_sources = {'genomics:' + m['key']: m for m in markers()}
+    from omop_core.services.genomics_catalog import canonicalize_variant, marker_sources as catalog_sources, project_priority_variants
+    marker_sources = catalog_sources()
     marker_sources.update({m.source_value: _genomic_patient_fields()[m.field_name]
         for m in FieldConceptMapping.objects.filter(field_name__in=_genomic_patient_fields()) if m.source_value})
 
@@ -3554,7 +3609,7 @@ def _get_genetic_mutations(person: Person, snapshot: OmopSnapshot = None) -> dic
         from omop_core.services.genomics import _note_reader, _read_note_text
         mutation_data = {
             'id': measurement.measurement_id,
-            'gene': (gene or '').lower(),
+            'gene': gene if gene and gene.strip().upper() == 'PALB1' else (gene or '').lower(),
             'variant': _read_note_text(measurement, measurement.pk, _note_reader(snapshot, person.pk)),
             'test_date': measurement.measurement_date.isoformat() if measurement.measurement_date else None,
         }
@@ -3573,7 +3628,7 @@ def _get_genetic_mutations(person: Person, snapshot: OmopSnapshot = None) -> dic
         mutations.append(mutation_data)
 
     from omop_core.services.genomics import enrich_variants
-    data['genetic_mutations'] = [v for v in enrich_variants(mutations, snapshot) if v.get('gene')]
+    data['genetic_mutations'] = [canonicalize_variant(v) for v in enrich_variants(mutations, snapshot) if v.get('gene')]
     from omop_core.services.genomics_state import effective_status
     for v in data['genetic_mutations']:
         v['status'] = effective_status(v)
@@ -3776,8 +3831,12 @@ def _get_lymphoma_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         if not m.measurement_concept:
             continue
         cname = m.measurement_concept.concept_name.lower()
-        if 'grade' in cname and m.value_as_number is not None:
-            data['tumor_grade'] = int(m.value_as_number)
+        if 'grade' in cname and (m.value_as_number is not None or m.value_as_string):
+            from omop_core.services.flipi import normalize_grade
+            try:
+                data.setdefault('tumor_grade', normalize_grade(m.value_as_number if m.value_as_number is not None else m.value_as_string))
+            except ValueError:
+                pass
 
     data.update(_get_dlbcl_transformation(person, observations, snapshot))
 
@@ -3956,13 +4015,15 @@ def _compute_derived_fields(patient_info: PatientRecord, *, apply_formulas=True)
         patient_info.measurable_disease_iwcll = None
 
     mutations = patient_info.genetic_mutations or []
-    patient_info.tp53_disruption = any(
+    # This aggregate has an existing positive rule, but no rule establishing
+    # a negative TP53/del(17p) result. Missing/nonqualifying evidence is unknown.
+    patient_info.tp53_disruption = True if any(
         m.get('gene', '').lower() == 'tp53'
         and (m.get('interpretation') or '').lower() == 'pathogenic'
         and m.get('assessment') in (None, '', 'present')
         and m.get('status', 'present') == 'present'
         for m in mutations
-    )
+    ) else None
 
     # BMI — computed from weight and height when units are known
     weight = patient_info.weight

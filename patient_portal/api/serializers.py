@@ -492,6 +492,8 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                     ),
                 })
             data['cytogenetic_markers'] = legacy_value
+        from omop_core.services.genomics_catalog import canonicalize_fields
+        data = canonicalize_fields(data)
         return super().to_internal_value(data)
 
     def get_supportive_therapy_courses(self, obj):
@@ -499,6 +501,32 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         return SupportiveTherapySerializer(
             obj.person.supportive_courses.select_related('regimen').all(), many=True,
         ).data
+
+    def validate_flipi_score_options(self, value):
+        from omop_core.services.flipi import parse_factors
+        try:
+            selected = parse_factors(value)
+        except ValueError:
+            raise serializers.ValidationError('Select recognized FLIPI risk factors.') from None
+        return None if selected is None else ','.join(selected)
+
+    def validate_gelf_criteria_options(self, value):
+        from omop_core.services.sample_disease_profiles import GELF_FACTORS
+        if value is None:
+            return None
+        selected = {part.strip() for part in value.split(',') if part.strip()}
+        if selected - GELF_FACTORS.keys():
+            raise serializers.ValidationError('Select recognized GELF criteria.')
+        return ','.join(key for key in GELF_FACTORS if key in selected)
+
+    def validate_tumor_grade(self, value):
+        from omop_core.services.flipi import normalize_grade
+        try:
+            return normalize_grade(value)
+        except ValueError:
+            raise serializers.ValidationError(
+                'Use grade 1, 2, 3A, or 3B (3 for an unspecified historical grade).'
+            ) from None
 
     def validate_death_date(self, value):
         if value and value > localdate():

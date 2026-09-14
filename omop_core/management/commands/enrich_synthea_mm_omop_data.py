@@ -772,6 +772,12 @@ class Command(BaseCommand):
         if refresh_failed:
             self.stderr.write(self.style.WARNING(f'{refresh_failed} patient(s) failed to refresh.'))
 
+        from django.core.management import call_command
+        sample_slugs = list(PatientRecord.objects.filter(person_id__in=touched_person_ids).exclude(organization=None).values_list('organization__slug', flat=True).distinct())
+        if sample_slugs:
+            call_command('backfill_sample_disease_profiles', org_slugs=','.join(sample_slugs), disease='MM',
+                         person_ids=','.join(str(pk) for pk in touched_person_ids), confirm=True)
+
         # ----------------------------------------------------------------
         # Completeness validation: report null critical fields per patient
         # ----------------------------------------------------------------

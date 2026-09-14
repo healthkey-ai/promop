@@ -1,7 +1,7 @@
 # Field and value mapping inventory (#1223)
 
 This is the first reproducible inventory slice of
-[`field_concept_mapping_enhancements.md`](../../field_concept_mapping_enhancements.md).
+[`field_concept_mapping_plan.md`](../../field_concept_mapping_plan.md).
 The [coverage report](coverage.md) summarizes the [manifest](manifest.json).
 **#1223 remains open:** remaining CancerBot source/provider reconciliation, dynamic bindings,
 retirement history and semantic reconciliation prevent claiming full coverage.

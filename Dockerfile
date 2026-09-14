@@ -59,7 +59,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 
 # Run migrations and start gunicorn
 CMD python manage.py migrate && \
-    gunicorn ctomop.wsgi:application \
+    gunicorn promop.wsgi:application \
     --bind 0.0.0.0:$PORT \
     --workers 4 \
     --threads 2 \

@@ -1,5 +1,4 @@
-import BrandHeader from "@/components/Branding/BrandHeader";
-import { useEffect, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import {
   Routes,
   Route,
@@ -8,7 +7,6 @@ import {
   useParams,
 } from "react-router-dom";
 import { Login } from "@/components/Auth/Login";
-import { AuthCallback } from "@/components/Auth/AuthCallback";
 import AcceptInvite from "@/components/Auth/AcceptInvite";
 import AcceptPatientInvite from "@/components/Auth/AcceptPatientInvite";
 import ResetPassword from "@/components/Auth/ResetPassword";
@@ -66,14 +64,6 @@ function AppRoutes() {
   const { currentUser, loading: authLoading, refresh, logout } = useAuth();
   const location = useLocation();
 
-  useEffect(() => {
-    if (location.pathname === "/auth/callback") {
-      setTimeout(() => {
-        refresh();
-      }, 500);
-    }
-  }, [location.pathname, refresh]);
-
   const publicPaths = ['/accept-invite', '/accept-patient-invite', '/reset-password', '/forgot-password', '/login', '/auth/callback'];
   const isPublicPath = (path: string) =>
     publicPaths.includes(path) || /^\/org\/[^/]+\/(login|signup|forgot-password|accept-invite)$/.test(path);
@@ -130,7 +120,7 @@ function AppRoutes() {
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
-      <Route path="/auth/callback" element={<AuthCallback />} />
+      <Route path="/auth/callback" element={<Navigate to="/" replace />} />
       <Route path="/accept-invite" element={<AcceptInvite />} />
       {/* Alias for invitation emails sent before the link was un-nested — the
           token in the query string carries everything; the slug is cosmetic. */}
@@ -186,7 +176,6 @@ function AppRoutes() {
 export default function App() {
   return (
     <div className="min-h-dvh">
-      <BrandHeader />
       <div className="app-page-content">
         <AppRoutes />
       </div>

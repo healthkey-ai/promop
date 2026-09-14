@@ -2765,6 +2765,7 @@ class MeasurementToPatientRecordTest(_SignalBase):
             measurement_date=date(2023, 3, 1),
             measurement_type_concept=self.type_concept,
             value_as_number=150000,
+            unit_source_value='cells/uL',
         )
         pi = self._get_pi()
         self.assertIsNotNone(pi.platelet_count)
@@ -25893,13 +25894,13 @@ class PrologRunnerMountTest(TestCase):
     """
 
     def test_no_dist_means_no_routes(self):
-        from ctomop.urls import runner_urlpatterns
+        from promop.urls import runner_urlpatterns
 
         self.assertEqual(runner_urlpatterns(None), [])
         self.assertEqual(runner_urlpatterns(Path('/no/such/runner')), [])
 
     def test_a_dist_is_matched_before_the_spa_catch_all(self):
-        from ctomop.urls import runner_urlpatterns, urlpatterns
+        from promop.urls import runner_urlpatterns, urlpatterns
 
         with tempfile.TemporaryDirectory() as tmp:
             patterns = runner_urlpatterns(Path(tmp))
@@ -25915,7 +25916,7 @@ class PrologRunnerMountTest(TestCase):
         self.assertTrue(assembled[-1].pattern.match('anything/at/all'))
 
     def test_hashed_runner_assets_are_cacheable_and_the_page_is_not(self):
-        from ctomop.whitenoise import PromopWhiteNoise
+        from promop.whitenoise import PromopWhiteNoise
 
         test = PromopWhiteNoise.immutable_file_test
         instance = PromopWhiteNoise.__new__(PromopWhiteNoise)

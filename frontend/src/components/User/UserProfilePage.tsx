@@ -1,3 +1,4 @@
+import PageTitle from '@/components/Branding/PageTitle';
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft } from 'lucide-react';
 import { useAuth, type EffectiveRole } from '@/hooks/useAuth';
@@ -39,7 +40,7 @@ export default function UserProfilePage() {
         <button onClick={() => navigate('/')} className="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-800">
           <ArrowLeft size={14} /> Back
         </button>
-        <h1 className="text-2xl font-semibold text-gray-900">My Profile</h1>
+        <PageTitle className="text-2xl font-semibold text-gray-900">My Profile</PageTitle>
       </div>
       <div className="bg-white border border-gray-200 rounded-lg divide-y divide-gray-100">
         <div className="px-6 py-4">

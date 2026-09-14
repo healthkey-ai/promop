@@ -67,4 +67,4 @@ def test_worker_start_defaults_to_one_child(tmp_path):
            'DATABASE_URL': 'postgresql://example.invalid', 'SECRET_KEY': 'test-only'}
     result = subprocess.run(['bash', str(ROOT / 'start-worker.sh')], env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-    assert result.stdout == '1 1 -A ctomop worker --loglevel=info'
+    assert result.stdout == '1 1 -A promop worker --loglevel=info'

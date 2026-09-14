@@ -1110,7 +1110,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         # the provider UI PATCHes, and leaving the key in the body would 405 the
         # request below as a non-projection-owned field.
         patient_name, patch_data = _pop_patient_name(request.data)
-        from omop_core.services.genomics_catalog import patient_fields
+        from omop_core.services.genomics_catalog import canonicalize_fields, patient_fields
+        patch_data = canonicalize_fields(patch_data)
         priority_edits = {key: patch_data.pop(key) for key in list(patch_data) if key in patient_fields()}
         priority_edits = {key: value for key, value in priority_edits.items() if value != getattr(patient_info, key)}
 
@@ -3225,6 +3226,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _timing_hash, _time.monotonic() - _t_mfetch, len(_existing_measurements),
                     )
 
+                    from omop_core.services.sample_disease_profiles import PREFIX as demo_prefix, SYSTEM as demo_system, PROFILE_FIELDS
+                    demo_unmapped = Concept.objects.filter(pk=0).first() if any(
+                        c.get('system') == demo_system for obs in data['observations']
+                        for c in obs.get('code', {}).get('coding', [])
+                    ) else None
+
                     # Accumulate new Measurement objects for bulk_create after the loop
                     # (one INSERT instead of one per observation = eliminates ~48 round-trips).
                     _pending_measurements: list = []
@@ -3267,6 +3274,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             value_qty = observation['valueQuantity']
                             value_number = value_qty.get('value')
                             unit = value_qty.get('unit')
+                            if not unit and value_qty.get('system') == 'http://unitsofmeasure.org':
+                                unit = value_qty.get('code')
                         elif observation.get('valueInteger') is not None:
                             # FHIR integer type — used for ECOG (0-4), Karnofsky, grades, etc.
                             value_number = float(observation['valueInteger'])
@@ -3298,6 +3307,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             if _c.get('system') == 'http://loinc.org':
                                 obs_loinc = _c.get('code')
                                 break
+
+                        demo_code = next((c.get('code') for c in obs_code.get('coding', [])
+                                          if c.get('system') == demo_system
+                                          and str(c.get('code', '')).startswith(demo_prefix)
+                                          and str(c.get('code'))[len(demo_prefix):] in PROFILE_FIELDS), None)
 
                         # BP panel (85354-9) — expand components to individual measurements
                         # for systolic (8480-6) and diastolic (8462-4) so refresh_patient_record
@@ -3345,17 +3359,20 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             measurement_concept = _cc_by_loinc(obs_loinc)
                         if not measurement_concept and obs_name:
                             measurement_concept = _cc_by_name(obs_name[:50])
-                        if not measurement_concept:
+                        if demo_code:
+                            measurement_concept = demo_unmapped
+                            qualifier_source_value = 'synthetic demo source'
+                        elif not measurement_concept:
                             # Use pre-hoisted generic lab test concept if not found
                             measurement_concept = _concept_generic_lab
 
                         if measurement_concept:
                             # Use pre-hoisted Lab type concept (32856 = Lab)
-                            type_concept = _concept_lab_type or measurement_concept
+                            type_concept = demo_unmapped if demo_code else (_concept_lab_type or measurement_concept)
 
                             # Use LOINC code as source_value when available — it's short,
                             # unique, and avoids collisions from truncating long display names.
-                            source_value = obs_loinc if obs_loinc else obs_name[:50]
+                            source_value = demo_code or obs_loinc or obs_name[:50]
                             # LOINC 21889-1 is officially Size Tumor.  A
                             # legacy lymph-node feed may reuse that code, but
                             # only its explicit text/context can authorize the
@@ -3372,9 +3389,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 # Only UPDATE if value actually changed — avoids
                                 # pointless writes on every re-import of the same bundle.
                                 if (existing_m.value_as_number != value_number
-                                        or existing_m.value_as_string != value_string):
+                                        or existing_m.value_as_string != value_string
+                                        or existing_m.unit_source_value != (unit[:50] if unit else None)):
                                     existing_m.value_as_number = value_number
                                     existing_m.value_as_string = value_string
+                                    existing_m.unit_source_value = unit[:50] if unit else None
                                     existing_m.qualifier_source_value = qualifier_source_value
                                     existing_m._skip_patient_record_refresh = True
                                     existing_m.save()

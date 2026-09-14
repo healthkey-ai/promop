@@ -6,6 +6,9 @@ below follow that journey: establish identity and access, normalize source data,
 store clinical facts, build and edit PatientRecord, then expose and operate the
 result. Each linked guide owns the details of its part of the system.
 
+Start with the [PRomop Developer Guide (PowerPoint)](../PRomop_Developer_Guide.pptx)
+for a presentation overview, then use the guides below for implementation details.
+
 For a working local installation, begin with the [repository README](../README.md)
 and continue through the [load-and-query quickstart](quickstart.md).
 [Docker](../BUILDING_WITH_DOCKER.md) and [Linux setup](linux-setup.md) cover alternate
@@ -40,7 +43,7 @@ defines interactive saves, mapping-approval backfill, and preservation of pendin
 edits during refresh. Direct saves recompute dependent values without a full OMOP
 refresh. Computed fields and structured resources have specific ownership rules;
 for example, treatment-course dialogs and Genomics own their discrete records.
-The [field mapping reference](../field_to_concept_mapping.md) connects UI controls,
+The [field mapping reference](../field_concept_mapping_architecture.md) connects UI controls,
 PatientRecord keys, OMOP destinations, and remaining mapping gaps.
 
 ## 1. Establish who can act on which records
@@ -77,10 +80,10 @@ Three related mapping concerns have distinct responsibilities:
 | Concern | Purpose | Primary reference |
 | --- | --- | --- |
 | Source-code mapping | Resolve an incoming code to an effective OMOP destination | [Code Mapping API](code-mapping-api.md) |
-| Field mapping | Describe how an editable/displayed patient field relates to stored facts | [Field mapping reference](../field_to_concept_mapping.md) |
+| Field mapping | Describe how an editable/displayed patient field relates to stored facts | [Field mapping reference](../field_concept_mapping_architecture.md) |
 | Therapy mapping | Relate regimens, components, classes, diseases, and treatment rounds | [Therapy reference tables](therapy-reference-tables-architecture.md) |
 
-The active [field-and-answer mapping plan](../field_concept_mapping_enhancements.md)
+The active [field-and-answer mapping plan](../field_concept_mapping_plan.md)
 tracks the inventory, scoped choices, coded-answer projection and remaining
 disease-specific repairs. Its next prerequisite is the complete field/value
 inventory in #1223.
@@ -137,16 +140,14 @@ For inference rationale, the [LOT design](superpowers/specs/2026-05-16-lot-infer
 [Athena/ARTEMIS design](superpowers/specs/2026-05-17-athena-vocabulary-artemis-design.md),
 and [HemOnc classification design](superpowers/specs/2026-05-17-artemis-hemonc-lot-design.md)
 record the algorithm's development. Use [HemOnc status and roadmap](hemonc-roadmap.md)
-for the remaining program and [ADR 0002](adr/0002-omop-therapy-types.md) for therapy
-class semantics and cross-application decisions. Its [feasibility output](adr/0002-phase0-coverage.txt)
-is supporting evidence.
+for the wider program and [ADR 0002](adr/0002-omop-therapy-types.md) for therapy
+class semantics. The [field/value plan](../field_concept_mapping_plan.md#therapy-type-consumer-delivery)
+tracks consumer delivery and rollout. The ADR's
+[feasibility output](adr/0002-phase0-coverage.txt) is historical supporting evidence.
 
 [Implemented Genomics architecture](genomics_architecture.md) is the current
 storage and ownership reference. [Genomics implementation](genomics_implementation.md)
 separately tracks remaining requirements, acceptance criteria, and deployment work.
-[Legacy cytogenetic storage](cytogenetic-markers.md) and
-[aggregate summary coding](cytogenetic-marker-coding.md) explain retained evidence
-and historical recipes; new discrete entry belongs to Genomics.
 
 ## 5. Deliver patient and integration workflows
 
@@ -161,7 +162,9 @@ Applications consume patient state through the [API surface](../API_SURFACE.md).
 [FHIR export](fhir-export-architecture.md) describes patient download and integration
 exports. Consumers that need a local vocabulary mirror use the
 [vocabulary cache protocol](vocab-consumer-cache-protocol.md); [ADR 0001](adr/0001-vocabulary-source-of-truth.md)
-records the proposed source-of-truth and publication decisions behind it.
+records vocabulary authority and distribution decisions. The
+[field/value plan](../field_concept_mapping_plan.md#vocabulary-distribution-and-mapping-provenance)
+tracks delivery and shared ratification.
 
 The PHR functional-model documents have distinct purposes:
 [oncology profile](phrs-fm-onco-profile.md) defines the intended scope,

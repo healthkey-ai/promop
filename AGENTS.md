@@ -1,8 +1,10 @@
 # Environment conventions
 
-- Staging always means Render: https://promop-staging.onrender.com.
-- The staging web service is `promop-staging`; its worker is `promop-staging-worker`.
-- Do not use the old Google Cloud / Cloud Run staging deployment to investigate or verify staging unless the user explicitly asks for it.
+- Render staging and Google Cloud Run staging are both supported. Name the target explicitly when reporting deployments or verification.
+- Render staging is https://promop-staging.onrender.com: web service `promop-staging`, worker `promop-staging-worker`.
+- Render production is `promop` with worker `promop-worker`. The unused legacy Render web service has been retired; do not include it in active readiness work.
+- Cloud Run staging remains managed by `.github/workflows/deploy-staging.yml` and `Dockerfile.gcp`. Preserve its existing service, image, bucket and integration identifiers.
+- `STAGING_DATABASE_URL` identifies Render staging. Do not assume it targets Cloud Run staging. Verify each deployment's configured database separately.
 - See `docs/render-staging-celery.md` for Render staging configuration and verification.
 
 # Pull request reviews
@@ -27,3 +29,19 @@
   data and continue to require CI.
 - Unrecognized paths, an unavailable diff, or detector failure retain normal CI.
   GitHub-managed CodeQL scanning is separate from the application CI workflow.
+
+## Backend CI scope
+
+- Frontend-only changes (including recognized frontend assets/configuration and
+  accompanying documentation) skip the backend suites. Backend, dependency,
+  runtime-data, shared configuration, mixed, and unknown changes run them.
+- Django and pytest run in isolated parallel jobs. The required `Backend tests`
+  check succeeds only when both pass; detector failures retain full coverage.
+
+## Documentation naming and ownership
+
+- Use `_architecture.md` for implemented architecture and `_plan.md` for future
+  work, delivery status, dependencies and acceptance gates.
+- Keep field/value inventories in generated reference artifacts. Architecture
+  documents explain behavior; plans link to inventory evidence instead of
+  duplicating per-field tables or deployment receipts.
