@@ -8,10 +8,12 @@ implementation work; it does not approve mappings or change staging data.
 
 ## Current checkpoint and next action — 2026-09-14
 
-Reviewed against `origin/dev` at `de61b7a` and the implementation issues on
-2026-09-14. This is an active delivery plan. The staging counts and candidate
-lookups below remain the **2026-09-13 snapshot**; this checkpoint did not rerun
-staging queries or approve any clinical mapping.
+Implementation checkpoint: [PR #1271](https://github.com/healthkey-ai/promop/pull/1271),
+based on `dev` through `144cd98`, delivers the first reproducible inventory slice.
+The checked-in inventory was refreshed read-only on **2026-09-14**. Section 2's
+original baseline counts and candidate tables remain the **2026-09-13 snapshot**;
+use the linked inventory report for the later reference export. No clinical
+mapping was approved and no staging reference or patient data was changed.
 
 All nine implementation issues (#1223–#1231) remain open. The current schema
 still keys `FieldChoice` by field name and display text; `FieldChoiceCode` has
@@ -21,8 +23,8 @@ readback selects number/text. The shared answer-mapping work is still required.
 
 **Next: complete [#1223](https://github.com/healthkey-ai/promop/issues/1223), the
 field-and-value inventory, before starting the dependent schema change #1224.**
-The first implementation slice is a reproducible reference-data inventory and
-reconciliation report, with no patient-data export or mapping approval:
+The inventory acceptance requirements below remain the guide for completing
+#1223; the first generator/report slice is implemented, not the entire issue:
 
 1. Define a versioned manifest format using the row requirements in section 3.
    Keep fields and values distinguishable, with stable source keys, typed values,
@@ -37,6 +39,79 @@ reconciliation report, with no patient-data export or mapping approval:
 4. Investigate the captured SNOMED provenance inconsistency and revalidate
    vocabulary/code, dates and domains before treating any candidate as reviewed.
    Commit the generator, safe reference artifacts and a repeatable coverage report.
+
+**First inventory slice implemented on 2026-09-14:** the
+[reproducible reference inventory](docs/field-mapping-inventory/README.md) now
+exports staging reference tables, typed source rows, frontend constants/control
+bindings, the frozen Genomics catalog, CancerBot static fragments, exact
+candidate evidence and both vocabulary release mechanisms. The
+[coverage report](docs/field-mapping-inventory/coverage.md) accounts for 2,801
+source occurrences, including 414 fields, without dropping unresolved rows.
+The SNOMED provenance investigation traced the metadata string to a historical
+benchmark helper; this does not certify individual staging concepts.
+
+The user confirmed that staging's therapies, components, classes and regimen/
+disease mappings were generated from CancerBot. They are the authoritative
+therapy inventory source: 34 public lists are covered by the staging catalogs,
+25 lists by complete static source, and 20 planned lists have catalog coverage
+with picker context pending. No duplicate therapy export is required.
+
+**#1223 remains open.** Of 172 public option-list bindings, 93 need further
+source/provider reconciliation; database-driven lists in that remainder need
+live reference coverage. No live CancerBot database connection was configured.
+Dynamic provider reconciliation, retired-option history, destination/context
+crosswalks and semantic review also remain. Continue those inventory tasks;
+do not treat this first slice as completing the prerequisite for #1224.
+
+### Handoff: continue on another machine
+
+**Completed in PR #1271:** versioned reference manifest and coverage report;
+typed field/value identities; frontend and CancerBot source extraction; staging
+therapy catalog/disease-round coverage; exact code/name/synonym/Maps-to evidence;
+SNOMED provenance investigation; and regression coverage for the inventory.
+The merge-review fixes use psycopg SQL composition, keep dynamically transformed
+literal lists unresolved, and update live-import bindings/provider counts
+consistently (including empty lists and planned-list coverage).
+
+The focused suite has **22 passing tests**. The refreshed staging export exercises
+the read-only SQL path; CI and merge status are recorded on PR #1271. The final
+merge commit is discoverable from that PR, so this checkpoint does not depend on
+a machine-local worktree or temporary runner.
+
+After PR #1271 is merged, start a new branch from current `origin/dev` in a clean
+checkout. For example, from an existing clone:
+
+```sh
+git fetch origin
+git worktree add ../promop-field-inventory-next -b feat/1223-next origin/dev
+```
+
+Read [inventory instructions](docs/field-mapping-inventory/README.md),
+[coverage](docs/field-mapping-inventory/coverage.md), and
+[manifest](docs/field-mapping-inventory/manifest.json). The manifest contains the
+source revisions/file hashes, reference rows, candidate evidence, per-list
+coverage states, validation flags and implementation owners. It can be reviewed
+without access to either live database. To refresh it, configure the intended
+reference database locally and follow the portable command in the inventory
+instructions; never copy credentials into the repository. Staging remains Render.
+
+**Next work, in order:**
+
+1. Reconcile the 93 outstanding CancerBot public lists: establish which are
+   static/provider-resolvable, which are trial/admin exclusions, and which need
+   live reference coverage. Use `cancerbot_bindings` and
+   `totals.source_coverage.cancerbot_public_lists` in the manifest. Do not request
+   another therapy catalog export: staging already supplies that CancerBot data.
+2. Resolve the 20 planned-picker contexts, remaining dynamic frontend providers,
+   and nested genetic relationships. Preserve planned versus administered
+   status, staging-system/basis, marker polarity and typed unknown values.
+3. Finish destination/context crosswalks, aliases and retirement/replacement
+   history. Review the manifest's domain/table and read-recipe conflicts and
+   expand semantic candidate evidence where exact searches are insufficient.
+   Coordinate vocabulary lineage repair with #461/#623 before bulk approval.
+4. Reconcile complete source/disposition totals and representation decisions;
+   only then close #1223 and start #1224. #1225–#1231 remain subsequent work,
+   with dependencies unchanged in section 9. Parent #21 and #26 remain open.
 
 The inventory can begin with available reference sources, but #1223 is complete
 only when its full source coverage, totals and representation decisions are
