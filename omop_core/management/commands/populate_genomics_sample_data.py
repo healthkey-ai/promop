@@ -31,7 +31,7 @@ _HGVS_VARIANTS = {
     'pik3ca': ['c.3140A>G', 'c.1633G>A'],
     'tp53':   ['c.743G>A', 'c.818G>A'],
     'esr1':   ['c.1610A>G', 'c.1613A>G'],
-    'palb1':  ['c.3113G>A', 'c.509_510delGA'],
+    'palb2':  ['c.3113G>A', 'c.509_510delGA'],
     'kras':   ['c.35G>T', 'c.35G>A', 'c.34G>T'],
     'nras':   ['c.181C>A', 'c.182A>G'],
     'braf':   ['c.1799T>A'],
@@ -64,7 +64,7 @@ _DISEASE_POOLS = {
         {'marker_key': 'pik3ca', 'gene': 'PIK3CA', 'kind': 'gene', 'prevalence': 0.35},
         {'marker_key': 'tp53',   'gene': 'TP53',   'kind': 'gene', 'prevalence': 0.30},
         {'marker_key': 'esr1',   'gene': 'ESR1',   'kind': 'gene', 'prevalence': 0.20},
-        {'marker_key': 'palb1',  'gene': 'PALB1',  'kind': 'gene', 'prevalence': 0.08},
+        {'marker_key': 'palb2',  'gene': 'PALB2',  'kind': 'gene', 'prevalence': 0.08},
     ],
     'MM': [
         {'marker_key': 'kras',         'gene': 'KRAS',           'kind': 'gene',        'prevalence': 0.25},
@@ -125,7 +125,7 @@ _SLUG_TO_CODE = {v: k for k, v in _SLUG_MAP.items()}
 
 # Reference annotations for the paired examples above. Coordinates are only
 # supplied where checked; do not invent a genomic position from a c.HGVS.
-# See docs/genomics_architecture.md for reference sources and the legacy PALB1 limitation.
+# See docs/genomics_architecture.md for reference sources and the unvalidated PALB2 example annotations.
 _GENE_ANNOTATIONS = {
     'brca1': ('17', '17q21.31', 'NM_007294.4', 'NC_000017.11'),
     'brca2': ('13', '13q13.1', 'NM_000059.4', 'NC_000013.11'),
@@ -230,8 +230,8 @@ def _build_gene_payload(entry, *, person_id=None, disease=None):
         ), annotation))
     if (key, variant) in _GENOMIC_CHANGES:
         payload['genomic_dna_change'] = _GENOMIC_CHANGES[key, variant]
-    if key == 'palb1':
-        payload['variant_description'] += ' PALB1 is an unresolved legacy catalog label; no reference annotation assigned.'
+    if key == 'palb2':
+        payload['variant_description'] += ' PALB2 naming is reviewed; example reference annotations remain unvalidated and are not assigned.'
     return payload
 
 

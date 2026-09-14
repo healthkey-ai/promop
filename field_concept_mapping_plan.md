@@ -1,4 +1,9 @@
-# Field and field-value concept mapping enhancements
+# Field concept mapping plan
+
+Future work and delivery tracking for field and field-value concept mapping.
+Implemented behavior is documented in the
+[field concept mapping architecture](field_concept_mapping_architecture.md);
+field-by-field evidence lives in the [generated inventory](docs/field-mapping-inventory/README.md).
 
 Plan for [#26](https://github.com/healthkey-ai/promop/issues/26) and
 [#21](https://github.com/healthkey-ai/promop/issues/21). Prepared 2026-09-13
@@ -123,8 +128,9 @@ Genomics has advanced since the original snapshot: use the
 [remaining Genomics work](docs/genomics_implementation.md) for current ownership.
 Issue #1229 adds contextual value mapping to that finding/component model;
 it must preserve the frozen catalog, structured findings and reviewed recipes.
-The [current field mapping reference](field_to_concept_mapping.md) supplies the
-UI-to-PatientRecord-to-OMOP baseline, but is not the exhaustive answer inventory.
+The [field mapping architecture](field_concept_mapping_architecture.md) describes
+implemented model and writer behavior. Use the generated inventory for individual
+field/value evidence rather than a second manually maintained baseline table.
 
 ## 1. Intended result
 
@@ -641,6 +647,34 @@ Acceptance must distinguish shipped server capabilities from consumer guarantees
   reconciliation evidence. Publication does not authorize historical fact rewrites.
   Genomics-specific acceptance belongs to its
   [mapping coordination section](docs/genomics_implementation.md#fieldvalue-mapping-coordination).
+
+### Remaining audit topics and reconciliation
+
+The former manual field reference repeated per-field recipes under issue headings
+#1069–#1079. Those dated tables are retained in
+[repository history](https://github.com/healthkey-ai/promop/blob/4302c975dfd0098209c2b0a53e7b06548041cd5b/field_to_concept_mapping.md#issue-coverage-and-remaining-work).
+Use the generated inventory's source keys, existing mappings, validation flags and
+coverage gaps for current evidence; do not copy the old rows forward as approved
+or still-current mappings. The original issue numbers below identify audit
+lineage, not a claim that all earlier implementation remains unfinished.
+
+| Audit topic | Reconciliation in the active work |
+|---|---|
+| Canonical aliases and shared facts (#1069) | #1223/#1224/#1231: preserve canonical identities and historic aliases; avoid two editors overwriting one fact. Check virtual/nonexistent fields against the descriptor before proposing a mapping. |
+| Treatment assertions and episode linkage (#1070/#1072) | #1230 plus #252/#253/#1072/#230: reconcile existing clinical writers and episode-dated answers. Preserve planned versus administered therapies, supportive-care intervals and line context. |
+| Computed fields (#1071) | #1223/#1225: report computed, alias and structured fields explicitly in coverage; do not invent scalar recipes for formulas, therapy summaries or wearable aggregates. |
+| Concept availability (#1073) | #1223: inspect the installed vocabulary and existing largest-node support; retain missing-vocabulary/domain evidence without declaring implemented work unbuilt. |
+| Units and companion dates (#1074) | #1224/#1226/#1231: attach units/dates to the intended event and validate conversion/round trips. A companion must not create a second measurement with a date or unit as its clinical answer. |
+| Behavior semantics (#1075) | #1223/#1228: review dependency/support, sleep, smoking, stress, household/dependent counts, polarity and duration meanings. Similar labels such as cigarettes/day versus pack-years do not establish equivalent concepts. |
+| Disease questions and answers (#1076) | #1227/#1228/#1229: use the disease-specific repair matrices and scoped answer model, including TNM context, receptor/assay identity and structured Genomics. |
+| Profile, language and general fields (#1077) | #1223/#1228: retain Person/Location and dedicated language-resource ownership; review infection/hepatitis polarity and multi-diagnosis assertions without fabricating affirmative occurrences. |
+| Labs and remaining legacy contracts (#1078/#1079) | #1223/#1227/#1228/#1231: distinguish questions, numeric results and categorical answers; retain unresolved structured lists, source text and clinical dates until their representation is reviewed. |
+
+Retire a concern only after the receiving issue's acceptance is met or the
+inventory records a reviewed disposition. The September 11 staging application
+receipt and initial approval table are historical evidence, not an outstanding
+deployment checklist or permission to replay approvals. Their immutable JSON
+artifact is linked from the architecture.
 
 ## 9. Implementation issues
 

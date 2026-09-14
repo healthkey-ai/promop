@@ -151,7 +151,7 @@ def test_shared_files_only_run_for_async_changes(monkeypatch, path, before, afte
 
 @pytest.mark.parametrize("paths", [
     ["README.md", "docs/guide.md", "AGENTS.md", "CLAUDE.md"],
-    ["field_concept_mapping_enhancements.md", "field_to_concept_mapping.md"],
+    ["field_concept_mapping_plan.md", "field_concept_mapping_architecture.md"],
     ["docs/utah-rhtp-technical-architecture-brief.md", "docs/utah-rhtp-brief.pdf"],
     ["docs/diagram.svg", "docs/screenshot.png", "docs/adr/evidence.txt"],
     [".github/PULL_REQUEST_TEMPLATE.md", "LICENSE"],

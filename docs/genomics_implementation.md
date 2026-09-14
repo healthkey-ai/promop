@@ -1,13 +1,13 @@
 # PRomop Genomics: Implementation Plan
 
-Current baseline: `dev` at `25133b7`, including merged [#1249](https://github.com/healthkey-ai/promop/pull/1249) and [#1259](https://github.com/healthkey-ai/promop/pull/1259). Updated 2026-09-14 with the schema audit implementation below. The [implemented architecture](genomics_architecture.md) describes runtime behavior; this plan records delivery status, remaining requirements and acceptance criteria. The supplied Word documents are retained as requirements through these two canonical documents.
+Current baseline: `dev` at `4302c97`, including merged [#1249](https://github.com/healthkey-ai/promop/pull/1249), [#1259](https://github.com/healthkey-ai/promop/pull/1259) and [schema audit #1263](https://github.com/healthkey-ai/promop/pull/1263). Updated 2026-09-14 with the reviewed PALB2 implementation below. The [implemented architecture](genomics_architecture.md) describes runtime behavior; this plan records delivery status, remaining requirements and acceptance criteria. The supplied Word documents are retained as requirements through these two canonical documents.
 
 ## Delivery status
 
 | Work | Issue | Current state |
 | --- | --- | --- |
 | Owned NOTE references and bounded projection reads | [#1236](https://github.com/healthkey-ai/promop/issues/1236) | Closed; merged in #1249 |
-| Shared text-column schema reconciliation | [#1237](https://github.com/healthkey-ai/promop/issues/1237) | Open; read-only audit implemented; staging evidence recorded; deployment inventory and any required remediation remain |
+| Shared text-column schema reconciliation | [#1237](https://github.com/healthkey-ai/promop/issues/1237) | Open; read-only audit merged in #1263; all three Render databases have narrow columns and zero overflow; no current width remediation indicated |
 | Complete component/curation registry | [#1238](https://github.com/healthkey-ai/promop/issues/1238) | Closed; merged in #1249 |
 | Portable variant-name recipe and conclusive domain audit | [#1239](https://github.com/healthkey-ai/promop/issues/1239) | Closed; merged in #1249; installed-vocabulary audits remain an operational requirement |
 | Effective finding state and shared dialog | [#1240](https://github.com/healthkey-ai/promop/issues/1240) | Core implementation merged in #1249; clinical applicability, TP53/del(17p) aggregation and consumer review remain |
@@ -16,9 +16,10 @@ Current baseline: `dev` at `25133b7`, including merged [#1249](https://github.co
 | BIDMC test/specimen/scope/volume agreement | [#1243](https://github.com/healthkey-ai/promop/issues/1243) | Open; source examples and decisions required |
 | Shared tests, specimens and bounded sequencing projections | [#1244](https://github.com/healthkey-ai/promop/issues/1244) | Open; implementation depends on #1243 |
 | Idempotent source import and extraction provenance | [#1245](https://github.com/healthkey-ai/promop/issues/1245) | Open; identity and report-version contract depends on #1243; live imports remain gated |
-| Reviewed clinical catalog and derivation decisions | [#1246](https://github.com/healthkey-ai/promop/issues/1246) | Open; expert/source decisions required |
+| Reviewed PALB2 naming and compatibility | [#1275](https://github.com/healthkey-ai/promop/issues/1275) | Implemented: catalog v2, forward projection/curation migration and source-preserving aliases |
+| Reviewed clinical catalog and derivation decisions | [#1246](https://github.com/healthkey-ai/promop/issues/1246) | Open; PALB2 naming approved and implemented in #1275; other expert/source decisions remain |
 
-Keep Measurement finding parents, linked CDM components, approved mappings, the 42 marker projections and the frozen source catalog. Test/specimen support will extend existing CDM tables. Do not introduce G-CDM tables, replay retired branch instructions, or change PALB1/source examples without reviewed decisions. Storage approval does not confer clinical validation.
+Keep Measurement finding parents, linked CDM components, approved mappings, the 42 marker projections and the frozen source catalog. Test/specimen support will extend existing CDM tables. Do not introduce G-CDM tables, replay retired branch instructions, or change source examples without reviewed decisions. PALB2 naming now has an explicit reviewed decision; its implementation preserves the historical source spelling. Storage approval does not confer clinical validation.
 
 ## Next implementation and operational work
 
@@ -28,11 +29,19 @@ The owned-NOTE writer and batched reader are complete. Migration `0222_genomics_
 
 Implemented now: `python manage.py audit_genomics_schema --environment <deployment> --check` reports the actual Measurement/Observation `value_as_string` types, character limits, complete row/overflow counts, maximum lengths and the recorded migration timestamp. It uses one database-enforced read-only, repeatable-read transaction with a configurable statement timeout. JSON contains metadata and aggregate counts, not patient identifiers or source text. Missing/unsupported columns fail `--check`; query failures or row-security restrictions produce no partial success report. A passing width check does not verify NOTE ownership or historical migration operations. See the [architecture's operator procedure](genomics_architecture.md#long-text-and-schema).
 
-[Render staging evidence](https://github.com/healthkey-ai/promop/issues/1237#issuecomment-5658503062), captured 2026-09-14 03:17 UTC, found both columns already `varchar(60)` and zero oversized values across 320,262 Measurements and 314,262 Observations. No narrowing/backfill is indicated for those observed columns. This result does not establish another deployment's state.
+Read-only Render audits at 2026-09-14 07:09 UTC resolved all five services to three databases. Every Measurement/Observation `value_as_string` column is `varchar(60)` with zero oversized values:
+
+| Database | Services | Measurements / Observations | Maximum lengths | Migration 0222 recorded |
+| --- | --- | --- | --- | --- |
+| `promop-dev` | `promop-staging`, `promop-staging-worker` | 330,310 / 327,811 | 36 / 60 | 2026-09-12 10:51:35 UTC |
+| `promop-db` | `promop`, `promop-worker` | 0 / 0 | empty / empty | No |
+| `ctomop` | `ctomop` | 2,411 / 0 | 8 / empty | No |
+
+No narrowing/backfill is indicated for these observed columns. The staging database was verified against Render's internal/external connection identity. These results supersede the [earlier staging snapshot](https://github.com/healthkey-ai/promop/issues/1237#issuecomment-5658503062); they do not prove which historical migration operations ran or certify NOTE ownership.
 
 Remaining work:
 
-1. Complete the inventory of affected deployments and retain an audit report for each. Review recorded migration history alongside actual widths and overflow counts.
+1. Repeat the inventory and audits when deployments or schemas change. The current Render inventory is complete: `promop` / `promop-worker` track `main`; staging and `ctomop` track `dev`. [Retained reports](https://github.com/healthkey-ai/promop/issues/1237#issuecomment-5660440818) cover all three verified databases. Review recorded migration history alongside actual widths and overflow counts.
 2. If a formerly widened deployment is found, identify every consumer of affected genomic and non-genomic text before choosing an owned-NOTE encoding. The shared columns contain more than genomics; rewriting them to references before their readers support those references would lose usable source text.
 3. Implement and test a forward, resumable backfill only for the evidenced schema/data paths. Preserve original values and dates, patient/fact/context ownership, ambiguous or missing legacy references, and historical notes. Do not manufacture clinical assertions to hold overflow.
 4. Narrow only after lossless readback, reader compatibility and a final zero-overflow check are demonstrated under a strategy that handles concurrent writes. Apply deployment remediation as an explicit operational step; do not edit deployed migration history again.
@@ -42,6 +51,10 @@ Acceptance remaining: fresh and formerly widened paths converge without losing 6
 ### 2. Verify installed recipes and vocabulary
 
 The effective registry exposes 31 components; all 73 parent/component recipes seed idempotently. Recipe v3 promotes only exact untouched variant-name seeds to LOINC 81253-7 while preserving curator decisions and local source identity. Domain resolution and audit tooling are implemented.
+
+The 2026-09-14 07:09 UTC read-only staging component audit passed: 17 resolved standard mappings, 14 intentionally local, zero incomplete and zero domain mismatches. Installed metadata reports LOINC 2.80, vocabulary release `v5.0 29-AUG-26`, and UCUM 1.8.2. SNOMED identifies itself as a synthetic benchmark seed; the component audit is not broad clinical vocabulary certification.
+
+Production `promop-db` and `ctomop` passed the width audit but could not run the component audit. Metadata inspection confirmed that production lacks `field_concept_mapping.provenance` and `ctomop` lacks the mapping table entirely. Their component readiness is unverified; [#1286](https://github.com/healthkey-ai/promop/issues/1286) tracks migration/mapping prerequisites and verification before enabling genomics there. Production metadata reports LOINC 2.82 and `v5.0 29-AUG-26`; `ctomop` reports LOINC 2.76 / SNOMED 2023-07. No vocabulary, mapping, migration or clinical-data changes were made on these deployments.
 
 For each deployment, run `audit_genomics_domains` after vocabulary loading and retain its output with the vocabulary version. Resolve incomplete/ambiguous codes and table/domain mismatches through field-mapping curation, retaining source/value/unit settings. Rerun until verified. Curation changes future writes; moving existing clinical facts between tables requires a separately reviewed repair.
 
@@ -95,7 +108,7 @@ A specialized whole-finding review/hold adapter must gate live imports until rec
 [ADR 0001](adr/0001-vocabulary-source-of-truth.md) defines vocabulary authority
 and the separation of vocabulary release, reviewed mapping revision and source
 catalog/recipe version. The
-[field/value plan](../field_concept_mapping_enhancements.md#vocabulary-distribution-and-mapping-provenance)
+[field/value plan](../field_concept_mapping_plan.md#vocabulary-distribution-and-mapping-provenance)
 owns shared distribution and answer-mapping delivery. This section owns the
 Genomics-specific acceptance; ADR 0002's therapy-class overlap rules do not
 establish genomic eligibility semantics.
@@ -130,12 +143,13 @@ source receiving capabilities retain their existing gates above.
 
 ## Clinical and external coordination
 
-Track on #1246: definitions of both complex-karyotype markers and counting/grouping by test/date; marker-specific absence; PALB1 and source example validity; disease subsets; TP53/del(17p) evidence aggregation; dated interpretation history; FISH/karyotype/clone-fraction validation. Distinguish pathogenicity, somatic evidence tier and therapeutic actionability if the source requires them.
+Track on #1246: definitions of both complex-karyotype markers and counting/grouping by test/date; marker-specific absence; source example validity; disease subsets; TP53/del(17p) evidence aggregation; dated interpretation history; FISH/karyotype/clone-fraction validation. Distinguish pathogenicity, somatic evidence tier and therapeutic actionability if the source requires them.
 
 Coordinates/alleles/external identifiers, copy number, fusion breakpoints and read counts depend on source requirements. TMB/MSI/HRD should be assay results when required. A read-only G-CDM projection remains deferred and does not replace canonical storage.
 
 - CDEW [design PR #101](https://github.com/healthkey-ai/cdew/pull/101): coordinate the receiving contract with `vtrv101` (Vlad). Its merge/deployment is separate from PRomop delivery.
-- CancerBot [PALB naming #4812](https://github.com/cancerbot-org/cancerbot/issues/4812), [example validation #5297](https://github.com/cancerbot-org/cancerbot/issues/5297) and [disease subsets #5298](https://github.com/cancerbot-org/cancerbot/issues/5298): assigned to `SamarElkassas`; preserve source strings pending reviewed answers.
+- CancerBot [PALB naming #4812](https://github.com/cancerbot-org/cancerbot/issues/4812): Samar [approved Option A on 2026-09-11](https://github.com/cancerbot-org/cancerbot/issues/4812#issuecomment-5633297037). PRomop #1275 implements the canonical PALB2 field/code, legacy aliases and migration of patient projections/curation identities while preserving original clinical source rows. CancerBot's own patient/trial migration is separate and remains open.
+- CancerBot [example validation #5297](https://github.com/cancerbot-org/cancerbot/issues/5297): Samar has begun review but has not posted findings. [Disease subsets #5298](https://github.com/cancerbot-org/cancerbot/issues/5298): she confirmed disease-specific lists and will provide explicit subsets. Neither reply supplies the outstanding example corrections or subset membership; retain current values.
 - PRomop [#1229](https://github.com/healthkey-ai/promop/issues/1229): coordinate reviewed result concepts and its #1223/#1224/#1226 dependencies. Component-question curation must not flatten structured findings into answer labels.
 
 ## Verification and delivery
@@ -145,3 +159,5 @@ Use explicitly configured isolated local PostgreSQL databases for tests. Staging
 Retain meaningful regressions for event/patient isolation, owned NOTE history, state transitions, independent components, source-preserving legacy reads, assertion/derivation separation and query budgets. For migration/backfill changes, exercise fresh and affected prior schema/data plus interrupted retries. Complete required GitHub CI before merge and update these two documents as capabilities land.
 
 Merged verification is attached to [#1249](https://github.com/healthkey-ai/promop/pull/1249) and [#1259](https://github.com/healthkey-ai/promop/pull/1259), including full required CI. The new schema audit is covered by [PostgreSQL schema-variant tests](../tests/test_genomics_schema_audit.py): actual narrow/widened/missing/unsupported columns, character counts, read-only enforcement, rejection of row-filtered counts, repeatable-read isolation, safe retries, timeout configuration and sanitized failures. These tests do not certify live vocabulary or uninspected deployments.
+
+PALB2 verification covers legacy and canonical field/marker inputs, conflicting lists, original-gene metadata, unchanged echoes, repeated finding IDs, rejected/curated mappings and idempotent seeding. The naming correction does not validate source examples, backfill CancerBot trial data or activate clinical derivations.

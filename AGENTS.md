@@ -35,3 +35,11 @@
   runtime-data, shared configuration, mixed, and unknown changes run them.
 - Django and pytest run in isolated parallel jobs. The required `Backend tests`
   check succeeds only when both pass; detector failures retain full coverage.
+
+## Documentation naming and ownership
+
+- Use `_architecture.md` for implemented architecture and `_plan.md` for future
+  work, delivery status, dependencies and acceptance gates.
+- Keep field/value inventories in generated reference artifacts. Architecture
+  documents explain behavior; plans link to inventory evidence instead of
+  duplicating per-field tables or deployment receipts.
