@@ -180,13 +180,13 @@ print(json.dumps(bool(calls)))
     return json.loads(result.stdout)
 
 
-def test_dotenv_loads_by_default_for_local_development():
+def test_settings_import_calls_load_dotenv_by_default():
     assert _loaded_dotenv() is True
 
 
-def test_python_dotenv_disabled_keeps_a_developer_dotenv_out_of_these_assertions():
-    # Every assertion in this module about shipped defaults depends on the flag
-    # being honoured: .env.example sets ALLOWED_REDIRECT_URI_SCHEMES=https,http,
-    # and the docs tell developers to copy it. This pins our own check, which is
-    # what covers installs older than python-dotenv 1.2.0.
+def test_settings_import_skips_load_dotenv_when_the_flag_is_set():
+    # Narrow by construction: the stub hides python-dotenv's own check, which
+    # has honoured the flag since 1.2.0, leaving only settings.py's. So this is
+    # the regression test for deleting that line — but not for the padded
+    # values it alone catches, since the flag here is a bare '1'.
     assert _loaded_dotenv(PYTHON_DOTENV_DISABLED='1') is False

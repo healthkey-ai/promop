@@ -30,10 +30,10 @@ def _env_list(name, default=''):
 
 # Load environment variables from .env file (for local development).
 # python-dotenv honours PYTHON_DOTENV_DISABLED itself from 1.2.0 on, and we pin
-# 1.2.2; repeating the check here keeps tests/test_debug_security_settings.py
-# honest on an older install, where the flag it sets would do nothing. The two
-# truthy sets overlap rather than nest — upstream also takes "t"/"y", we also
-# take padded values — but on 1.2.2 either one disabling is enough.
+# 1.2.2, but this check still earns its place: the two truthy sets overlap
+# rather than nest — upstream casefolds without stripping, we strip — so a
+# padded " 1 " is disabled by this line and by nothing else, as is any value
+# on a pre-1.2.0 install.
 if not _env_bool('PYTHON_DOTENV_DISABLED'):
     load_dotenv()
 
