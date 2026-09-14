@@ -18,6 +18,7 @@ jobs:
     outputs:
       async_e2e: ${{ steps.filter.outputs.async_e2e }}
       docs_only: ${{ steps.filter.outputs.docs_only }}
+      backend: ${{ steps.filter.outputs.backend }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -28,14 +29,18 @@ jobs:
       - id: filter
         run: python3 .github/scripts/async_e2e_changes.py
 
-  backend:
-    name: Backend tests
+  backend_suites:
+    name: Backend suite (${{ matrix.suite }})
     needs: changes
     # A skipped job satisfies its required check. Detection errors run full CI.
     if: >-
       !cancelled() &&
-      (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true')
+      (needs.changes.result != 'success' || needs.changes.outputs.backend != 'false')
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [django, pytest]
 
     services:
       postgres:
@@ -99,16 +104,30 @@ jobs:
         run: python manage.py check --deploy --fail-level ERROR
 
       - name: Run tests (Django runner)
+        if: matrix.suite == 'django'
         run: python manage.py test omop_core patient_portal --verbosity=2 --noinput
 
-      # The tests/ package is pytest-based (pytest.ini sets testpaths = tests,
-      # conftest.py does session-level DB setup that --no-migrations skips).
-      # Django's runner does not discover it, so these 166 tests ran in CI for
-      # the first time here — they had been green-by-omission, and were in fact
-      # 14-of-15 red in tests/test_enrich_breast_cancer_omop_data.py after #413
-      # expanded WEARABLE_CONCEPT_CODE without anyone noticing.
+      # These suites discover different tests. Separate runners give each its
+      # own PostgreSQL/test database while retaining migrations and deploy checks.
       - name: Run tests (pytest)
-        run: pytest -q
+        if: matrix.suite == 'pytest'
+        run: pytest -q --durations=20
+
+
+  backend:
+    name: Backend tests
+    needs: [changes, backend_suites]
+    # Keep the existing required check. Never turn a failed/cancelled matrix
+    # into a skipped green gate; only a recognized frontend/docs diff skips it.
+    if: >-
+      always() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.backend != 'false')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require both backend suites to pass
+        env:
+          BACKEND_RESULT: ${{ needs.backend_suites.result }}
+        run: test "$BACKEND_RESULT" = success
 
   e2e:
     name: Async derivation e2e

@@ -27,3 +27,11 @@
   data and continue to require CI.
 - Unrecognized paths, an unavailable diff, or detector failure retain normal CI.
   GitHub-managed CodeQL scanning is separate from the application CI workflow.
+
+## Backend CI scope
+
+- Frontend-only changes (including recognized frontend assets/configuration and
+  accompanying documentation) skip the backend suites. Backend, dependency,
+  runtime-data, shared configuration, mixed, and unknown changes run them.
+- Django and pytest run in isolated parallel jobs. The required `Backend tests`
+  check succeeds only when both pass; detector failures retain full coverage.
