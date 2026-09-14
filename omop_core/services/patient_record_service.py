@@ -257,7 +257,7 @@ PATIENT_RECORD_OMOP_MAPPED_FIELDS = frozenset(_OMOP_DERIVED_FIELDS) | frozenset(
     'tp53_disruption',
     # These clinical projection columns include pending OMOP derivations.
     # API editability is determined by the write descriptor; this registry
-    # records derivation coverage. See field_to_concept_mapping.md and
+    # records derivation coverage. See field_concept_mapping_architecture.md and
     # docs/patient-record-first-writes.md.
     'no_other_active_malignancies', 'preexisting_conditions', 'myeloma_type',
     'progression', 'condition_code_icd_10', 'condition_code_snomed_ct',
