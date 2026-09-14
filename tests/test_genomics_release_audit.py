@@ -47,6 +47,9 @@ def test_pending_migration_blocks_release_even_with_usable_writer(ready, setting
     from django.db.migrations.loader import MigrationLoader
     settings.MIGRATION_MODULES = {}  # Exercise the real graph despite pytest --no-migrations.
     recorder = MigrationRecorder(connection)
+    # A fresh --no-migrations database has no recorder table. Reused local
+    # databases may already have one, so initialize it explicitly for both.
+    recorder.ensure_schema()
     original = list(recorder.migration_qs.values())
     for app, migration in MigrationLoader(connection).disk_migrations:
         recorder.record_applied(app, migration)
