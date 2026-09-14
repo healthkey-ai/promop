@@ -8,7 +8,7 @@ export default function PageTitle({ children, className = '' }: {
 }) {
   return (
     <div className="flex min-w-0 items-center gap-3 sm:gap-4">
-      <BrandLogo compact />
+      <BrandLogo />
       <h1 className={`min-w-0 ${className}`}>{children}</h1>
     </div>
   );

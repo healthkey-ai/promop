@@ -1,3 +1,4 @@
+import PageTitle from '@/components/Branding/PageTitle';
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import api from "@/api/axios";
@@ -152,9 +153,9 @@ export function Login() {
     <div className="flex min-h-screen items-center justify-center bg-muted/40">
       <div className="w-full max-w-md space-y-8 rounded-lg bg-background p-8 shadow-lg">
         <div>
-          <h2 className="mt-6 text-center text-3xl font-extrabold text-foreground">
+          <PageTitle className="text-left text-3xl font-extrabold text-foreground">
             {mode === "signin" ? "Sign in" : "Create your account"}
-          </h2>
+          </PageTitle>
           <p className="mt-2 text-center text-sm text-muted-foreground">
             {branding.tagline || "An Open Source Personal Health Record from HealthKey.ai"}
           </p>

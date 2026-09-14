@@ -1,4 +1,3 @@
-import BrandHeader from "@/components/Branding/BrandHeader";
 import { useEffect, type ReactNode } from "react";
 import {
   Routes,
@@ -97,7 +96,7 @@ function AppRoutes() {
     currentUser?.must_change_password &&
     !isForceChangeExempt(location.pathname)
   ) {
-    return <><BrandHeader /><ChangePassword onChanged={refresh} onLogout={logout} /></>;
+    return <ChangePassword onChanged={refresh} onLogout={logout} />;
   }
 
   const isPatient = !!currentUser?.is_patient;
@@ -127,12 +126,7 @@ function AppRoutes() {
     return element;
   };
 
-  const showMasthead = isPublicPath(location.pathname) || (isPatient && location.pathname !== '/profile')
-    || location.pathname.startsWith('/patient/');
-
   return (
-    <>
-      {showMasthead && <BrandHeader />}
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/auth/callback" element={<AuthCallback />} />
@@ -185,7 +179,6 @@ function AppRoutes() {
 
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
-    </>
   );
 }
 

@@ -1,3 +1,4 @@
+import BrandLogo from '@/components/Branding/BrandLogo';
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, AlertCircle, ChevronDown, Download, ShieldCheck } from "lucide-react";
@@ -678,8 +679,9 @@ export default function PatientDetail({
   return (
     <div className="min-h-screen bg-[#f5f7fa]">
       <div className="sticky top-0 z-20 border-b border-border bg-background/90 shadow-[0_1px_3px_rgba(0,0,0,0.05)] backdrop-blur-md">
-        <div className="mx-auto flex h-14 max-w-5xl items-center justify-between gap-4 px-6">
-          <div className="flex shrink-0 items-center gap-3">
+        <div className="mx-auto flex min-h-14 max-w-5xl flex-wrap items-center justify-between gap-x-4 gap-y-2 px-6 py-2 sm:flex-nowrap">
+          <div className="flex min-w-0 items-center gap-3">
+            <BrandLogo size="toolbar" />
             {!patientMode && (
               <button
                 onClick={() => navigate("/")}
