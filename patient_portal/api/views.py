@@ -8955,7 +8955,7 @@ class TrialSearchPreferencesViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
         * Removal is spelled by **absence**. There is no delete sentinel:
           `{"sponsor": null}` stores the value `null`, it does not drop the
           key. (A top-level `{"preferences": null}` is a 400 — the
-          serializer field does not allow null. Clearing is `{}`, or the
+          serializer field does not allow null. Clearing is `{"preferences": {}}`, or the
           `reset` action. Note the row is still created by that refused
           call, because `get_or_create` runs before validation.)
         * A body that **omits** `preferences` leaves the stored object

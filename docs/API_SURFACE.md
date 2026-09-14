@@ -681,7 +681,7 @@ reading, and a client built on that reading lost saved filters to it
   applies at the field level, and that is the only level at which anything merges. It is
   not a no-op on the row: it creates one if there was none, and `updated_at` moves either
   way.
-- `{"preferences": null}` is a **400**; send `{}` or call `reset` to clear.
+- `{"preferences": null}` is a **400**; send `{"preferences": {}}` or call `reset` to clear.
 - So **a client holding part of the set must read-modify-write**: GET, merge its own
   edits over what came back, PATCH the result.
 

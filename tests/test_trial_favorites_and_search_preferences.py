@@ -333,7 +333,7 @@ class TestPreferencesAreReplacedNotMerged:
         """`{"preferences": null}` is not "clear it" — the column is not nullable.
 
         Worth pinning next to the nested case: the two nulls are one
-        keystroke apart and mean different things. Clearing is `{}` or the
+        keystroke apart and mean different things. Clearing is `{"preferences": {}}` or the
         `reset` action.
         """
         response = client.patch(
