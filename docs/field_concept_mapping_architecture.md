@@ -10,14 +10,14 @@ Future schema, mapping review, repairs and delivery gates belong to the
 | Reference | What it owns |
 |---|---|
 | This architecture | Implemented mapping models, runtime resolution and field ownership |
-| [PatientRecord-first writes](docs/patient-record-first-writes.md) | Detailed PATCH, projection, clear and refresh contracts |
-| [Generated field/value inventory](docs/field-mapping-inventory/README.md) | Reproducible source rows, mappings, candidates, context and coverage evidence |
+| [PatientRecord-first writes](patient-record-first-writes.md) | Detailed PATCH, projection, clear and refresh contracts |
+| [Generated field/value inventory](field-mapping-inventory/README.md) | Reproducible source rows, mappings, candidates, context and coverage evidence |
 | [Mapping plan](field_concept_mapping_plan.md) | Unresolved meanings, proposed capabilities, dependencies and acceptance |
 
 The generated inventory is the field-by-field evidence source. Its
-[manifest](docs/field-mapping-inventory/manifest.json) includes source revisions,
+[manifest](field-mapping-inventory/manifest.json) includes source revisions,
 field and option identities, existing recipes, candidate evidence and validation
-flags; its [coverage report](docs/field-mapping-inventory/coverage.md) states the
+flags; its [coverage report](field-mapping-inventory/coverage.md) states the
 export date and omissions. It is incomplete and does not clinically approve
 candidates. Deployment-specific recipes must be checked against that deployment's
 current mapping and vocabulary tables. Do not copy snapshot concept IDs into a
@@ -33,7 +33,7 @@ second manually maintained UI-to-concept table.
 | `CustomPatientField` / `FieldFormula` | Dynamic field definitions and computed values using the existing mapping/formula services |
 | Therapy reference models | Regimen, component, class and disease/round relationships, resolved by their dedicated authoring paths |
 
-The models are in [omop_core/models.py](omop_core/models.py). The current choice
+The models are in [omop_core/models.py](../omop_core/models.py). The current choice
 schema does not provide stable scoped answer identity or a reviewed
 `FieldValueConceptMapping` model. The plan owns that extension.
 
@@ -45,7 +45,7 @@ is fact provenance, not this curation-origin label.
 
 ## Runtime field ownership
 
-The backend [writable descriptor](omop_core/services/write_descriptor.py) resolves
+The backend [writable descriptor](../omop_core/services/write_descriptor.py) resolves
 field ownership, allowed values and available projections from code and installed
 mappings. Frontends consume that contract instead of selecting an OMOP table or
 hardcoding a vocabulary ID. Patient authorization still constrains each operation;
@@ -73,12 +73,12 @@ or that the presence of an enum supplies a coded-answer projection.
 Clinical and profile editors PATCH
 `/api/v1/patient-records/{person_id}/` (the provider UI also uses the
 `/api/patient-info/{person_id}/` alias). The
-[serializer](patient_portal/api/serializers.py) saves validated values and records
+[serializer](../patient_portal/api/serializers.py) saves validated values and records
 pending user edits. Direct saves recompute dependent values from PatientRecord;
 they do not run a full OMOP refresh.
 
 Supported built-in or approved curated recipes provide the descriptor's
-projection. [project_single_value](omop_core/services/omop_projection.py) matches
+projection. [project_single_value](../omop_core/services/omop_projection.py) matches
 a non-erroneous fact by patient, concept, source key and **current local date**.
 Repeated same-day saves reuse that row, including a matching imported row while
 retaining its provenance. Earlier facts remain history. A date picker does not
@@ -101,27 +101,27 @@ unsupported projections preserve them. Full OMOP refresh reads supported curated
 scalar values and restores pending user values when necessary. Mapping approval
 backfills pending edits for that field through the same projection service; it
 does not rewrite every historical derived value. See
-[signals](omop_core/signals.py), the
-[projection service](omop_core/services/omop_projection.py) and the
-[PatientRecord service](omop_core/services/patient_record_service.py).
+[signals](../omop_core/signals.py), the
+[projection service](../omop_core/services/omop_projection.py) and the
+[PatientRecord service](../omop_core/services/patient_record_service.py).
 
 ## Structured and vocabulary boundaries
 
-The [therapy architecture](docs/therapy-reference-tables-architecture.md) owns
+The [therapy architecture](therapy-reference-tables-architecture.md) owns
 regimen/component/class catalogs and disease/round scope. Episode-linked intent,
 outcome and discontinuation values retain their event context; a planned therapy
 must not be treated as administered merely because its label maps to a drug.
-[ADR 0002](docs/adr/0002-omop-therapy-types.md) defines class matching and the
+[ADR 0002](adr/0002-omop-therapy-types.md) defines class matching and the
 limitations of aggregate later-line projections.
 
-The [Genomics architecture](docs/genomics_architecture.md) owns Measurement finding
+The [Genomics architecture](genomics_architecture.md) owns Measurement finding
 parents, linked Measurement/Observation components, source-preserving history,
 state validation and the frozen catalog. It is implemented, not an unmerged
 exception to the field-mapping architecture. Approved recipes govern supported
 parents/components; the generic answer-mapping proposal does not replace this
 structured writer.
 
-[ADR 0001](docs/adr/0001-vocabulary-source-of-truth.md) separates vocabulary release,
+[ADR 0001](adr/0001-vocabulary-source-of-truth.md) separates vocabulary release,
 reviewed mapping revision and source catalog/recipe version. Curation uses the
 installed concept/domain and preserves portable vocabulary/code plus source
 identity. A proposed or even previously approved row in an inventory export is
@@ -129,7 +129,7 @@ not a fresh clinical validation of its meaning.
 
 ## Verification and historical evidence
 
-Use the [inventory generator](omop_core/management/commands/export_field_mapping_inventory.py)
+Use the [inventory generator](../omop_core/management/commands/export_field_mapping_inventory.py)
 and its documented read-only export to inspect field/value coverage. Runtime
 sources above establish behavior; the [plan](field_concept_mapping_plan.md)
 records what remains unresolved. These references do not certify a deployment's
@@ -137,6 +137,6 @@ vocabulary or migration state.
 
 The former September 11 manual audit, duplicated issue tables and staging receipt
 remain in [repository history](https://github.com/healthkey-ai/promop/blob/4302c975dfd0098209c2b0a53e7b06548041cd5b/field_to_concept_mapping.md).
-The [initial approval artifact](docs/patient_field_mapping_initial_approvals.json)
+The [initial approval artifact](patient_field_mapping_initial_approvals.json)
 retains its original audit notes and filename references as historical evidence;
 it is not rewritten by documentation renames or used as current approval status.

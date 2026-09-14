@@ -1076,6 +1076,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=True, methods=['get'], url_path='genomics-catalog')
     def genomics_catalog(self, request, pk=None):
         from omop_core.models import FieldConceptMapping
+        from omop_core.services.genomics import mapping_is_usable
         from omop_core.services.genomics_catalog import catalog, disease_code, markers
         person, error = self._genomics_access(request, pk)
         if error is not None:
@@ -1083,9 +1084,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         record = PatientRecord.objects.get(person=person)
         disease = request.query_params.get('disease', record.disease)
         code = disease_code(disease)
-        approved = set(FieldConceptMapping.objects.filter(status='approved').values_list('field_name', flat=True))
+        selected = [m for m in markers() if code in m['diseases']]
+        mappings = {m.field_name: m for m in FieldConceptMapping.objects.filter(
+            field_name__in=[m['field_name'] for m in selected],
+        ).only('field_name', 'status', 'omop_table', 'source_value')}
         return Response({'version': catalog()['version'], 'disease': code,
-            'markers': [{**m, 'writable': m['field_name'] in approved} for m in markers() if code in m['diseases']]})
+            'markers': [{**m, 'writable': mapping_is_usable(mappings.get(m['field_name']), parent=True)}
+                        for m in selected]})
 
     @action(detail=True, methods=['get', 'patch', 'delete'], url_path=r'genomics/(?P<variant_id>[0-9]+)', permission_classes=[GenomicsCrudPermission, PatientSelfScopePermission])
     def genomic_variant(self, request, pk=None, variant_id=None):

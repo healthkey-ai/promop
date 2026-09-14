@@ -20,7 +20,7 @@ PRomop relies on three Athena vocabulary tables loaded into PostgreSQL:
 
 These tables are populated by downloading vocabulary files from [OHDSI Athena](https://athena.ohdsi.org)
 and loading them with the `load_athena_vocabularies` management command. See
-[SYNTHETIC_PATIENT_GENERATION.md](../SYNTHETIC_PATIENT_GENERATION.md) for instructions.
+[SYNTHETIC_PATIENT_GENERATION.md](SYNTHETIC_PATIENT_GENERATION.md) for instructions.
 
 ### Key concept fields
 
@@ -48,7 +48,7 @@ CREATE INDEX ix_concept_name_trgm ON concept USING gin (concept_name gin_trgm_op
 ### Concept search API
 
 The supported API for searching and browsing OMOP concepts is documented in
-[API_SURFACE.md](../API_SURFACE.md#vocabulary--concept-lookup-endpoints):
+[API_SURFACE.md](API_SURFACE.md#vocabulary--concept-lookup-endpoints):
 
 | Endpoint | Use |
 |---|---|
@@ -91,7 +91,7 @@ Common HemOnc patterns:
 | Component drug → class | `GET /api/v1/concepts/{drug_id}/ancestors/?max_levels=1&vocabulary_id=HemOnc` |
 | Batch expand multiple trial regimen ids | `GET /api/v1/concepts/graph/?direction=descendants&concept_id=...&relationship_id=...` |
 
-The canonical endpoint contract is documented in [API_SURFACE.md](../API_SURFACE.md#concept-graph-endpoints).
+The canonical endpoint contract is documented in [API_SURFACE.md](API_SURFACE.md#concept-graph-endpoints).
 
 ---
 

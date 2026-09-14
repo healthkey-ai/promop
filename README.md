@@ -11,9 +11,12 @@ See [paper.md](paper.md) for the full research description.
 
 **Architecture and documentation:** [Read the overview](docs/README.md) for the data flow, current contracts, and a guided route through the documentation.
 
+Field concept mapping: [implemented architecture](docs/field_concept_mapping_architecture.md)
+and [enhancements plan](docs/field_concept_mapping_plan.md).
+
 **New here?** → [**Load and query patient data in 10 minutes**](docs/quickstart.md)
 
-Not on a Mac? See the [Linux setup guide](docs/linux-setup.md). Prefer Docker? See [BUILDING_WITH_DOCKER.md](BUILDING_WITH_DOCKER.md).
+Not on a Mac? See the [Linux setup guide](docs/linux-setup.md). Prefer Docker? See [BUILDING_WITH_DOCKER.md](docs/BUILDING_WITH_DOCKER.md).
 
 ---
 
@@ -21,7 +24,7 @@ Not on a Mac? See the [Linux setup guide](docs/linux-setup.md). Prefer Docker? S
 
 - **FHIR R4 ingestion** — Bundle uploads mapped to OMOP tables (observations → `Measurement`, conditions → `ConditionOccurrence`, medications → `DrugExposure` + `Episode`)
 - **PatientRecord projection** — 300+ column decision-ready view, auto-rebuilt via signal chain on every OMOP write
-- **Versioned REST API** — `/api/v1/` with [OpenAPI 3.0 schema](API_SURFACE.md) and Swagger UI at `/api/v1/docs/`
+- **Versioned REST API** — `/api/v1/` with [OpenAPI 3.0 schema](docs/API_SURFACE.md) and Swagger UI at `/api/v1/docs/`
 - **Multi-tenant access control** — OAuth2 and SMART on FHIR authorization, org-scoped role-based access
 - **Synthetic FHIR generator** — reproducible patient bundles for multiple diseases (MM, FL, breast cancer)
 
@@ -32,7 +35,7 @@ Not on a Mac? See the [Linux setup guide](docs/linux-setup.md). Prefer Docker? S
 - Interactive Swagger UI: `http://localhost:8000/api/v1/docs/`
 - OpenAPI schema: `GET /api/v1/schema/`
 - SODAP role hierarchy and privileges: **[docs/application-roles.md](docs/application-roles.md)**
-- Full API surface reference: **[API_SURFACE.md](API_SURFACE.md)**
+- Full API surface reference: **[API_SURFACE.md](docs/API_SURFACE.md)**
 - LOINC / SNOMED / HemOnc concept mapping: **[docs/concept-mapping.md](docs/concept-mapping.md)**
 - Required Athena vocabulary download and selection scope: **[docs/vocabularies.md](docs/vocabularies.md)**
 
@@ -146,7 +149,7 @@ The UI is available at `http://localhost:5173`.
 
 ## Docker
 
-See [BUILDING_WITH_DOCKER.md](BUILDING_WITH_DOCKER.md) for the full guide including dev mode,
+See [BUILDING_WITH_DOCKER.md](docs/BUILDING_WITH_DOCKER.md) for the full guide including dev mode,
 common tasks, environment variables, and troubleshooting. The short version:
 
 ```bash
@@ -190,7 +193,7 @@ PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U postgres -d template1 \
 
 ## Populating Sample Patient Data
 
-See [Synthetic patient generation](SYNTHETIC_PATIENT_GENERATION.md) for instructions on generating and loading synthetic FHIR patient bundles for multiple disease types.
+See [Synthetic patient generation](docs/SYNTHETIC_PATIENT_GENERATION.md) for instructions on generating and loading synthetic FHIR patient bundles for multiple disease types.
 
 ---
 

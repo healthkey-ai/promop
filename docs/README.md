@@ -11,7 +11,7 @@ for a presentation overview, then use the guides below for implementation detail
 
 For a working local installation, begin with the [repository README](../README.md)
 and continue through the [load-and-query quickstart](quickstart.md).
-[Docker](../BUILDING_WITH_DOCKER.md) and [Linux setup](linux-setup.md) cover alternate
+[Docker](BUILDING_WITH_DOCKER.md) and [Linux setup](linux-setup.md) cover alternate
 local environments. The [paper](../paper.md) explains the research motivation;
 [benchmark reproduction](reproducing-benchmark-results.md) supplies the methods,
 commands, and derivation field reference behind the reported results.
@@ -43,7 +43,7 @@ defines interactive saves, mapping-approval backfill, and preservation of pendin
 edits during refresh. Direct saves recompute dependent values without a full OMOP
 refresh. Computed fields and structured resources have specific ownership rules;
 for example, treatment-course dialogs and Genomics own their discrete records.
-The [field mapping reference](../field_concept_mapping_architecture.md) connects UI controls,
+The [field mapping reference](field_concept_mapping_architecture.md) connects UI controls,
 PatientRecord keys, OMOP destinations, and remaining mapping gaps.
 
 ## 1. Establish who can act on which records
@@ -59,8 +59,9 @@ administration workflows. [Patient role and organization access](patient-role-or
 explains patient invitations, signup, and own-record routing. For credentials,
 use [service application administration](service-application-admin.md) and the
 [service-token migration guide](service-token-migration.md). The
-[legacy bearer-token policy](../bearer_token_security.md) covers the retained
-shared-token configuration.
+[legacy bearer-token policy](bearer_token_security.md) covers the retained
+shared-token configuration. The [login reference](LOGIN_INFO.md) lists login,
+logout and health-check endpoints.
 
 The identity document includes original cross-service designs and future work.
 Use the current role and credential references above for implemented privileges
@@ -80,10 +81,10 @@ Three related mapping concerns have distinct responsibilities:
 | Concern | Purpose | Primary reference |
 | --- | --- | --- |
 | Source-code mapping | Resolve an incoming code to an effective OMOP destination | [Code Mapping API](code-mapping-api.md) |
-| Field mapping | Describe how an editable/displayed patient field relates to stored facts | [Field mapping reference](../field_concept_mapping_architecture.md) |
+| Field mapping | Describe how an editable/displayed patient field relates to stored facts | [Field mapping reference](field_concept_mapping_architecture.md) |
 | Therapy mapping | Relate regimens, components, classes, diseases, and treatment rounds | [Therapy reference tables](therapy-reference-tables-architecture.md) |
 
-The active [field-and-answer mapping plan](../field_concept_mapping_plan.md)
+The active [field-and-answer mapping plan](field_concept_mapping_plan.md)
 tracks the inventory, scoped choices, coded-answer projection and remaining
 disease-specific repairs. Its next prerequisite is the complete field/value
 inventory in #1223.
@@ -118,12 +119,12 @@ provides the longer clinical and product narrative behind that implementation.
 
 Refresh builds the reusable patient projection from these facts.
 [Async derivation](async-derivation-celery-plan.md) explains queued refresh and
-status polling; [the API reference](../API_SURFACE.md) describes the public calls.
-The [derivation changelog](../DERIVATION_CHANGELOG.md) records versioned changes.
+status polling; [the API reference](API_SURFACE.md) describes the public calls.
+The [derivation changelog](DERIVATION_CHANGELOG.md) records versioned changes.
 [Legacy projection reconciliation](patient-record-projection-reconciliation.md)
 is a narrowly scoped repair runbook for old numeric values with independently
 verified event dates. Current editor behavior belongs to the PatientRecord-first
-write guide, and [adding fields](../adding_fields.md) is the delivery checklist
+write guide, and [adding fields](adding_fields.md) is the delivery checklist
 for extending it.
 
 ## 4. Add the clinical detail that a flat summary cannot carry
@@ -141,7 +142,7 @@ For inference rationale, the [LOT design](superpowers/specs/2026-05-16-lot-infer
 and [HemOnc classification design](superpowers/specs/2026-05-17-artemis-hemonc-lot-design.md)
 record the algorithm's development. Use [HemOnc status and roadmap](hemonc-roadmap.md)
 for the wider program and [ADR 0002](adr/0002-omop-therapy-types.md) for therapy
-class semantics. The [field/value plan](../field_concept_mapping_plan.md#therapy-type-consumer-delivery)
+class semantics. The [field/value plan](field_concept_mapping_plan.md#therapy-type-consumer-delivery)
 tracks consumer delivery and rollout. The ADR's
 [feasibility output](adr/0002-phase0-coverage.txt) is historical supporting evidence.
 
@@ -158,12 +159,12 @@ describes the current survey runner and migration from the old survey feature.
 the [organization disease-statistics design](superpowers/specs/2026-06-20-org-disease-stats-design.md)
 provides the original reporting design context.
 
-Applications consume patient state through the [API surface](../API_SURFACE.md).
+Applications consume patient state through the [API surface](API_SURFACE.md).
 [FHIR export](fhir-export-architecture.md) describes patient download and integration
 exports. Consumers that need a local vocabulary mirror use the
 [vocabulary cache protocol](vocab-consumer-cache-protocol.md); [ADR 0001](adr/0001-vocabulary-source-of-truth.md)
 records vocabulary authority and distribution decisions. The
-[field/value plan](../field_concept_mapping_plan.md#vocabulary-distribution-and-mapping-provenance)
+[field/value plan](field_concept_mapping_plan.md#vocabulary-distribution-and-mapping-provenance)
 tracks delivery and shared ratification.
 
 The PHR functional-model documents have distinct purposes:
@@ -182,7 +183,7 @@ covers production startup and environment requirements. [Security settings](secu
 controls and monitoring. The [security remediation plan](promop-security-soc2-remediation-plan.md)
 tracks implemented controls and outstanding operator evidence.
 
-For representative test data, use [synthetic patient generation](../SYNTHETIC_PATIENT_GENERATION.md),
+For representative test data, use [synthetic patient generation](SYNTHETIC_PATIENT_GENERATION.md),
 including stage backfill, and [sample disease-status backfill](sample-patient-disease-status.md).
 [mCODE/Synthea import](mcode-synthea-import.md) documents the separate Synthea cohort
 route. [Benchmark reproduction](reproducing-benchmark-results.md) connects those
@@ -196,3 +197,7 @@ deployed revision. Repository working conventions are in [AGENTS.md](../AGENTS.m
 and agent implementation guidance is in [CLAUDE.md](../CLAUDE.md).
 [Code of conduct](../CODE_OF_CONDUCT.md) and [third-party notices](../THIRD_PARTY_NOTICES.md)
 cover participation and attribution.
+
+Reference guides and implementation plans live in `docs/`. Repository entry
+points, agent instructions (`AGENTS.md` and `CLAUDE.md`), contribution and policy
+files, and the research paper remain at the root for discovery and tooling.
