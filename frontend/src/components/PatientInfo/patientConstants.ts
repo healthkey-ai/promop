@@ -94,19 +94,14 @@ export const MENOPAUSAL_OPTIONS = ['Pre-menopausal', 'Peri-menopausal', 'Post-me
 export const FLIPI_RISK_OPTIONS = ['Low', 'Intermediate', 'High'];
 export const FLIPI_FACTOR_OPTIONS = ['Age ≥ 60', 'Stage III/IV', 'Hgb < 12 g/dL', 'Nodal areas > 4', 'Elevated LDH'];
 export const GELF_OPTIONS = ['Met', 'Not Met', 'Unknown'];
-export const FL_TUMOR_GRADE_OPTIONS = [
-  'Grade 1 (0–5 centroblasts/HPF)',
-  'Grade 2 (6–15 centroblasts/HPF)',
-  'Grade 3a (>15 centroblasts/HPF, centrocytes present)',
-  'Grade 3b (solid sheets of centroblasts)',
-];
+export const FL_TUMOR_GRADE_OPTIONS = ['1', '2', '3A', '3B', '3'];
 export const MYELOMA_TYPE_OPTIONS = [
   'IgG kappa', 'IgG lambda', 'IgA kappa', 'IgA lambda',
   'IgD kappa', 'IgD lambda', 'IgE kappa', 'IgE lambda',
   'IgM kappa', 'IgM lambda',
   'Light-chain kappa', 'Light-chain lambda',
 ];
-export const ISS_STAGE_OPTIONS = ['Stage I', 'Stage II', 'Stage III'];
+export const ISS_STAGE_OPTIONS = ['ISS I', 'ISS II', 'ISS III', 'R-ISS I', 'R-ISS II', 'R-ISS III'];
 export const MRD_STATUS_OPTIONS = [
   'MRD Negative (10⁻⁵)',
   'MRD Negative (10⁻⁶)',

@@ -11,7 +11,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 ENV = {
-    'DJANGO_SETTINGS_MODULE': 'ctomop.settings',
+    'DJANGO_SETTINGS_MODULE': 'promop.settings',
     'PYTHON_DOTENV_DISABLED': '1',
     'DEBUG': 'False',
     'SECRET_KEY': 'test-production-settings-secret',

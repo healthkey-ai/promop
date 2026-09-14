@@ -86,7 +86,9 @@ def _build_provenance(
         derivation_version = None
         derived_at = None
 
-    if entry.selection_rule == "composite" and entry.constituent_fields:
+    if entry.lookup_strategy == "genomics":
+        source_rows = _lookup_genomics(person, field_name)
+    elif entry.selection_rule == "composite" and entry.constituent_fields:
         source_rows = _lookup_composite(person, entry)
     else:
         source_rows = _lookup_simple(person, entry)
@@ -105,6 +107,52 @@ def _build_provenance(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _lookup_genomics(person: Person, field_name: str) -> list[dict]:
+    """Trace canonical finding parents and correctly typed component links."""
+    from omop_core.services.genomics import (
+        _component_codes, _component_field, _measurement_event_concepts, _note_reader, _read_note_text,
+    )
+    from omop_core.services.patient_record_service import _build_snapshot, _get_genetic_mutations
+
+    snapshot = _build_snapshot(person)
+    projection = _get_genetic_mutations(person, snapshot)
+    parent_ids = {v['id'] for v in projection.get(field_name, [])
+                  if v.get('provenance') == 'asserted' and 'id' in v}
+    if not parent_ids:
+        return []  # A derived row is not a stored clinical assertion.
+    event_ids = set(_measurement_event_concepts().values_list('pk', flat=True))
+    reader = _note_reader(snapshot, person.pk)
+    codes = _component_codes(snapshot)
+    result = []
+    for rows, prefix, event_field in (
+        (snapshot.measurements, 'measurement', 'meas_event_field_concept_id'),
+        (snapshot.observations, 'observation', 'obs_event_field_concept_id'),
+    ):
+        for row in rows:
+            is_parent = prefix == 'measurement' and row.pk in parent_ids
+            parent_id = row.pk if is_parent else getattr(row, f'{prefix}_event_id')
+            if (not is_parent and (parent_id not in parent_ids
+                                   or getattr(row, event_field) not in event_ids)):
+                continue
+            if not is_parent and not _component_field(row, prefix, codes):
+                continue
+            concept = getattr(row, f'{prefix}_concept')
+            value = row.value_as_number
+            if value is None:
+                value = _read_note_text(row, parent_id, reader)
+            if value is None and row.value_as_concept_id:
+                value = row.value_as_concept.concept_name
+            result.append({
+                'table': prefix.title(), 'id': row.pk,
+                'concept_id': concept.pk, 'concept_name': concept.concept_name,
+                'value': value, 'unit': row.unit_source_value,
+                'date': str(getattr(row, f'{prefix}_date')),
+                'selected': True, 'finding_id': parent_id,
+                'source_value': getattr(row, f'{prefix}_source_value'),
+            })
+    return result
 
 
 def _lookup_simple(person: Person, entry: FieldProvenance) -> list[dict]:
@@ -325,7 +373,8 @@ def _lookup_composite(person: Person, entry: FieldProvenance) -> list[dict]:
         sub_entry = registry.get(sub_field)
         if sub_entry is None:
             continue
-        rows = _lookup_simple(person, sub_entry)
+        rows = (_lookup_genomics(person, sub_field)
+                if sub_entry.lookup_strategy == "genomics" else _lookup_simple(person, sub_entry))
         # Tag each row with the constituent field it belongs to.
         for row in rows:
             row["constituent_field"] = sub_field

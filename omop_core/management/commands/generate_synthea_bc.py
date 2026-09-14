@@ -1292,6 +1292,8 @@ class Command(BaseCommand):
         selected = [copy.deepcopy(b) for b in (bc_alive[:n_alive_target] + bc_deceased[:n_deceased_target])]
         for idx, bundle in enumerate(selected, start=1):
             _enrich_patient_bundle(bundle, idx)
+            from omop_core.services.sample_disease_profiles import complete_demo_fhir_bundle
+            complete_demo_fhir_bundle(bundle, 'BC')
         all_entries = []
         for bundle in selected:
             all_entries.extend(bundle.get('entry', []))

@@ -29,7 +29,9 @@ from rest_framework.views import APIView
 from omop_core.models import Organization, Person, PatientRecord
 from omop_core.services.pk import next_pk
 from patient_portal.models import Identity, PatientUser
-from .permissions import ScopedTokenPermission, get_request_org, is_service_token
+from .permissions import (
+    ScopedTokenPermission, get_request_org, is_service_token, reject_machine_actor_claims,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +69,8 @@ class PatientSignupView(APIView):
         email = (request.data.get('email') or '').strip().lower()
         password = request.data.get('password') or ''
         name = (request.data.get('name') or '').strip()
+
+        reject_machine_actor_claims(request, actor_iss, actor_sub)
 
         if actor_iss and actor_sub:
             identity, created = Identity.objects.get_or_create(

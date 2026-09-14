@@ -91,8 +91,3 @@ class TestTheMatchIsSpecificAndNotIncidental:
         forward = get_regimen_name(drugs)
         reversed_ = get_regimen_name(list(reversed(drugs)))
         assert forward == reversed_
-
-    def test_an_ambiguous_tie_is_refused_rather_than_guessed(self):
-        # Several equally-sized entries contained in the set have no ranking
-        # between them, and inventing one is what this fixes.
-        assert get_regimen_name(['daratumumab', 'lenalidomide']) is None

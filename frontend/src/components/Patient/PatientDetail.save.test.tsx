@@ -1,3 +1,4 @@
+import { MemoryRouter } from 'react-router-dom';
 /**
  * PatientRecord-first writes: every edit goes through the PatientRecord PATCH.
  *
@@ -12,7 +13,7 @@
  * columns are never sent, aliases are never sent, and unchanged values are never
  * sent.
  */
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render as baseRender, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import PatientDetail from './PatientDetail';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
@@ -21,7 +22,8 @@ vi.mock('@/api/axios', () => ({
   default: { get: vi.fn(), patch: vi.fn(), post: vi.fn() },
 }));
 
-vi.mock('react-router-dom', () => ({
+vi.mock('react-router-dom', async importOriginal => ({
+  ...await importOriginal<typeof import("react-router-dom")>(),
   useParams: () => ({ personId: '261' }),
   useNavigate: () => vi.fn(),
 }));
@@ -226,3 +228,7 @@ describe('PatientDetail save — the edit, not the record', () => {
     expect(patchBody()).toEqual({ email: 'a.howell@example.org' });
   });
 });
+
+function render(ui: React.ReactElement) {
+  return baseRender(<MemoryRouter>{ui}</MemoryRouter>);
+}

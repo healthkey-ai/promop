@@ -1,6 +1,6 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .webhook_views import InboundWebhookView, WebhookSubscriptionViewSet
+from .treating_institutions import TreatingInstitutionListView
 from .views import (
     SurveyViewSet, PatientSurveyResponseViewSet,
     CurrentUserViewSet, PatientRecordViewSet, login_view, logout_view, auth_test,
@@ -29,7 +29,6 @@ from .org_views import (
 )
 
 router = DefaultRouter()
-router.register(r'webhooks/subscriptions', WebhookSubscriptionViewSet, basename='webhook-subscription')
 
 # Core PatientRecord
 router.register(r'user', CurrentUserViewSet, basename='user')
@@ -62,7 +61,7 @@ router.register(r'survey-responses', PatientSurveyResponseViewSet, basename='sur
 # Patient surveys
 
 urlpatterns = [
-    path('webhooks/inbound/', InboundWebhookView.as_view(), name='webhook-inbound'),
+    path('treating-institutions/', TreatingInstitutionListView.as_view(), name='treating-institutions'),
     path('', include(router.urls)),
     path('auth/login/', login_view, name='login'),
     path('auth/logout/', logout_view, name='logout'),

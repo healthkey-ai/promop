@@ -8,9 +8,13 @@ This file tells LLMs (Claude, Copilot, etc.) how to work on this codebase consis
 
 ### Staging deployment
 
-Staging is Render service `promop-staging` in Oregon, at
-https://promop-staging.onrender.com, deployed from `dev`. It is not GCP.
-Use `STAGING_DATABASE_URL` from `.env` for staging database access; Render
+There are two supported staging deployments: Render and Google Cloud Run.
+Render staging is service `promop-staging` in Oregon, at
+https://promop-staging.onrender.com, deployed from `dev`. Cloud Run staging
+continues through `.github/workflows/deploy-staging.yml` and `Dockerfile.gcp`;
+preserve its existing resource and integration identifiers. Name the target
+explicitly when deploying or verifying it.
+Use `STAGING_DATABASE_URL` from `.env` for Render staging database access; Render
 web and worker processes use `DATABASE_URL` for that same existing database.
 Never put the database connection string or credentials in Git or tool output.
 `render.yaml` declares both production and staging; staging has its own worker
@@ -416,11 +420,11 @@ without anyone noticing.
 
 ### Rule: Run Tests Before Every Push
 
-**Always run both test suites before pushing to any branch.** Do not push if any test is failing.
+**For changes to code, tests, configuration, dependencies or runtime data, run both test suites before pushing.** Do not push if any test is failing. Documentation-only changes follow the exception in `AGENTS.md`: review content, links and `git diff --check`; application suites are not required.
 
 ### Rule: Run Full Backend Test Suite After Every PR Merge into `dev`
 
-After merging any PR into `dev`, immediately run the full backend test suite against the **local test database** (`promop_test`) to catch any integration regressions:
+After merging a PR that changes code, tests, configuration, dependencies or runtime data into `dev`, immediately run the full backend test suite against the **local test database** (`promop_test`) to catch any integration regressions:
 
 ```bash
 DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" \
@@ -1134,7 +1138,7 @@ patch Celery or run it eager.
 Run a worker with:
 
 ```bash
-celery -A ctomop worker --loglevel=info
+celery -A promop worker --loglevel=info
 ```
 
 The task is idempotent — derivation clears and rebuilds every field — so a

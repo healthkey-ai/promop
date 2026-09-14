@@ -9,6 +9,8 @@ Deployed across approximately 17,500 real oncology patients, with trial matching
 
 See [paper.md](paper.md) for the full research description.
 
+**Architecture and documentation:** [Read the overview](docs/README.md) for the data flow, current contracts, and a guided route through the documentation.
+
 **New here?** → [**Load and query patient data in 10 minutes**](docs/quickstart.md)
 
 Not on a Mac? See the [Linux setup guide](docs/linux-setup.md). Prefer Docker? See [BUILDING_WITH_DOCKER.md](BUILDING_WITH_DOCKER.md).
@@ -29,6 +31,7 @@ Not on a Mac? See the [Linux setup guide](docs/linux-setup.md). Prefer Docker? S
 
 - Interactive Swagger UI: `http://localhost:8000/api/v1/docs/`
 - OpenAPI schema: `GET /api/v1/schema/`
+- SODAP role hierarchy and privileges: **[docs/application-roles.md](docs/application-roles.md)**
 - Full API surface reference: **[API_SURFACE.md](API_SURFACE.md)**
 - LOINC / SNOMED / HemOnc concept mapping: **[docs/concept-mapping.md](docs/concept-mapping.md)**
 - Required Athena vocabulary download and selection scope: **[docs/vocabularies.md](docs/vocabularies.md)**
@@ -187,7 +190,7 @@ PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U postgres -d template1 \
 
 ## Populating Sample Patient Data
 
-See [docs/sample-patient-data.md](docs/sample-patient-data.md) for instructions on generating and loading synthetic FHIR patient bundles for multiple disease types.
+See [Synthetic patient generation](SYNTHETIC_PATIENT_GENERATION.md) for instructions on generating and loading synthetic FHIR patient bundles for multiple disease types.
 
 ---
 
@@ -240,3 +243,17 @@ by University of Nottingham Health Informatics under the MIT License. See
 [semantic retrieval setup](docs/semantic-retrieval.md).
 
 If you use PRomop in research, please cite it using [CITATION.cff](CITATION.cff) or via GitHub's "Cite this repository" button.
+
+## Project package and deployment compatibility
+
+`promop` is the canonical Django project package. Use `promop.settings`,
+`gunicorn promop.wsgi:application`, and `celery -A promop worker` for new
+configuration. The `ctomop` modules remain compatibility aliases to the same
+settings, URL configuration, WSGI/ASGI applications and Celery app, so existing
+deployment commands and imports continue to work without duplicate applications.
+Database tables, Django app labels and migration history are unchanged.
+
+Render staging, Render production and Google Cloud Run staging remain supported.
+The unused legacy Render web service has been retired. Existing OAuth client IDs,
+bridge environment variables, and Cloud Run service/image/bucket identifiers are
+preserved; a Python package rename does not migrate external integration IDs.

@@ -11,6 +11,6 @@ set -euo pipefail
 export CELERY_WORKER_CONCURRENCY="${CELERY_WORKER_CONCURRENCY:-1}"
 export CELERY_WORKER_PREFETCH_MULTIPLIER="${CELERY_WORKER_PREFETCH_MULTIPLIER:-1}"
 if [[ "${CELERY_EMBEDDED_BEAT:-true}" == "true" ]]; then
-    exec celery -A ctomop worker --loglevel=info --beat --schedule=/tmp/promop-celerybeat-schedule
+    exec celery -A promop worker --loglevel=info --beat --schedule=/tmp/promop-celerybeat-schedule
 fi
-exec celery -A ctomop worker --loglevel=info
+exec celery -A promop worker --loglevel=info

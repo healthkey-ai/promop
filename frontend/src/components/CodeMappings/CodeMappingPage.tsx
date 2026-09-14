@@ -1,3 +1,4 @@
+import PageTitle from '@/components/Branding/PageTitle';
 import IndividualSuggestCandidates from "./IndividualSuggestCandidates";
 import SuggestCandidates, { type CandidateActivity } from "./SuggestCandidates";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -1447,7 +1448,7 @@ export default function CodeMappingPage() {
               <ArrowLeft size={16} />
             </button>
             <div>
-              <h1 className="text-2xl font-semibold text-slate-950">Code Mapping</h1>
+              <PageTitle className="text-2xl font-semibold text-slate-950">Code Mapping</PageTitle>
               <p className="text-sm text-slate-600">
                 Source codes from FHIR, paper labs and notes, mapped to destination OMOP concepts
               </p>

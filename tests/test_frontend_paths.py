@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from django.test import Client, override_settings
 
-from ctomop.frontend_paths import resolve_frontend_root
+from promop.frontend_paths import resolve_frontend_root
 
 
 class TestResolveFrontendRoot:

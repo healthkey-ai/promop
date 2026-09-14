@@ -103,6 +103,7 @@ _EPISODE_COMPUTED_FIELDS = frozenset(
 
 # Computed fields (derived from other fields, not directly from OMOP).
 _COMPUTED_FIELDS = frozenset({
+    'flipi_score', 'flipi_risk_category', 'gelf_criteria_status',
     # Flattened language capabilities (#827) -- derived from
     # PersonLanguageSkill, so editing them here would be overwritten by
     # the next refresh.
@@ -683,8 +684,8 @@ def get_all_field_descriptors() -> list[dict]:
 
     # Nested variant attributes are mappings within genetic_mutations, not
     # independent patient-level scalars. Expose them for curator review too.
-    from omop_core.services.genomics_catalog import catalog
-    for attribute in catalog()['attributes']:
+    from omop_core.services.genomics_components import components
+    for attribute in components():
         name = 'genetic_mutations.' + attribute['key']
         mapping = mappings_by_field.get(name)
         result.append({

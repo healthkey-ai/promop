@@ -69,7 +69,7 @@ def test_worker_start_defaults_to_one_child(tmp_path, embedded_beat):
            'CELERY_EMBEDDED_BEAT': embedded_beat}
     result = subprocess.run(['bash', str(ROOT / 'start-worker.sh')], env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-    expected = '1 1 -A ctomop worker --loglevel=info'
+    expected = '1 1 -A promop worker --loglevel=info'
     if embedded_beat == 'true':
         expected += ' --beat --schedule=/tmp/promop-celerybeat-schedule'
     assert result.stdout == expected

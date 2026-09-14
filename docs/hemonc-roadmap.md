@@ -9,9 +9,8 @@ governed source of coded therapy and vocabulary data." The original P0/P0b items
 mostly implemented; the remaining work is narrower and should be tracked as focused
 issues rather than a broad implementation plan.
 
-Source-code/source-to-concept mapping work is in flight separately in
-`source-code-mapping-plan.md`; this document should be updated again after that branch
-lands.
+The implemented source-code resolution contract is maintained separately in
+[Code Mapping API](code-mapping-api.md).
 
 ## Implemented
 
@@ -120,11 +119,11 @@ LOT inference uses OMOP vocabulary graph data where available:
 
 ## Remaining Work
 
-### 1. Finish Source-Code / Source-to-Concept Mapping
+### 1. Align the roadmap with implemented source-code mapping
 
-This is in flight in `source-code-mapping-plan.md`. After it lands, update this document
-and issue #236 to reflect what remains around `source_to_concept_map`, local source-code
-curation, and release metadata.
+Use [Code Mapping API](code-mapping-api.md) for the implemented SCCM resolver and
+curation lifecycle. Reconcile issue #236 with that contract to identify any
+remaining work around `source_to_concept_map` and release metadata.
 
 ### 2. Tighten Release Semantics
 
@@ -143,8 +142,11 @@ Track in #236 and the ADR update issues.
 
 ### 3. Ratify ADR 0001
 
-ADR 0001 still needs to match the implemented direction: release-pinned vocabulary mirror,
-not ad hoc API result caching. Track in #337 and #254.
+The [revised ADR 0001](adr/0001-vocabulary-source-of-truth.md) records the
+release-pinned mirror direction requested by #337. Shared ratification remains
+#254. Current vocabulary and therapy-consumer delivery tracking lives in the
+[field/value mapping plan](../field_concept_mapping_plan.md#vocabulary-distribution-and-mapping-provenance);
+this roadmap retains the wider HemOnc program context.
 
 ### 4. Graph-Based Regimen Resolution
 
@@ -199,7 +201,7 @@ outside PROMOP and should be tracked in the consumer repos.
 | #252 | Open | Coded intent + discontinuation reason |
 | #253 | Open | Coded treatment outcomes |
 | #254 | Open | Ratify ADR 0001 |
-| #337 | Open | Rewrite ADR 0001 around release-pinned mirror |
+| #337 | Rewrite documented | Release-pinned mirror decision recorded; ratification remains #254 |
 
 ## Retired From The Roadmap
 

@@ -1,3 +1,4 @@
+import PageTitle from '@/components/Branding/PageTitle';
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowLeft, ChevronDown, ChevronRight, Search, BookOpen, Check, X, Pencil, Plus, Sparkles } from "lucide-react";
@@ -588,7 +589,7 @@ export default function FieldMappingPage() {
           <ArrowLeft size={14} />
           Back
         </button>
-        <h1 className="text-xl font-semibold">Field Concept Mappings</h1>
+        <PageTitle className="text-xl font-semibold">Field Concept Mappings</PageTitle>
         <button
           onClick={() => setAddFieldDialogOpen(true)}
           className="ml-auto inline-flex items-center gap-1 rounded border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"

@@ -1,19 +1,74 @@
-"""Select async e2e from PR changes or the full deployment push diff."""
+"""Select CI suites from PR changes or the full deployment push diff."""
 
 import ast
 import fnmatch
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
+
+
+# These Markdown files are consumed by import/build commands as runtime data.
+# Keep them under full CI even though their extension and directory look like docs.
+RUNTIME_DOCUMENTS = {
+    "docs/code-concept-mappings.md",
+    "docs/ht-code-concept-mapping.md",
+    "docs/ht-fhir-code-concept-mapping.md",
+}
+DOC_EXTENSIONS = {".md", ".rst", ".adoc"}
+DOC_ASSET_EXTENSIONS = {".txt", ".pdf", ".png", ".jpg", ".jpeg", ".svg", ".webp"}
+
+
+def is_docs_only(paths):
+    """An empty or unrecognized change set must retain normal CI."""
+    if not paths:
+        return False
+    for name in paths:
+        path = PurePosixPath(name)
+        if name in RUNTIME_DOCUMENTS:
+            return False
+        if name in {"LICENSE", "NOTICE"}:
+            continue
+        if path.suffix in DOC_EXTENSIONS and (
+            path.parent == PurePosixPath(".") or name.startswith(("docs/", ".github/"))
+        ):
+            continue
+        if name.startswith("docs/") and path.suffix in DOC_ASSET_EXTENSIONS:
+            continue
+        return False
+    return True
+
+
+FRONTEND_EXTENSIONS = {
+    ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".css", ".scss",
+    ".html", ".json", ".svg", ".png", ".jpg", ".jpeg", ".webp", ".ico",
+    ".woff", ".woff2", ".ttf", ".map", ".md",
+}
+FRONTEND_CONFIG_NAMES = {".gitignore", ".npmrc", ".nvmrc", ".browserslistrc"}
+
+
+def requires_backend(paths):
+    """Skip only recognized frontend/doc paths; unknown or mixed changes run."""
+    if not paths:
+        return True
+    for name in paths:
+        path = PurePosixPath(name)
+        if is_docs_only([name]):
+            continue
+        if name.startswith("frontend/") and (
+            path.suffix in FRONTEND_EXTENSIONS or path.name in FRONTEND_CONFIG_NAMES
+        ):
+            continue
+        return True
+    return False
 
 
 # Deliberately scoped to async execution, not all code a task might call.
 # Synchronous derivation/ranking/model changes remain covered by backend tests.
 ASYNC_PATHS = (
     "**/tasks.py", "**/tasks/*.py", "**/celery.py",
-    "ctomop/__init__.py", "start-worker.sh",
+    "promop/__init__.py", "ctomop/**", "start-worker.sh",
     "omop_core/services/derivation_jobs.py",
     "omop_core/services/suggest_jobs.py",
     "omop_core/services/embedding_jobs.py",
@@ -77,7 +132,7 @@ def async_signature(path, source):
                     elif isinstance(node, ast.ClassDef):
                         visit(node.body, name + ".")
         visit(ast.parse(source).body)
-    elif path == "ctomop/settings.py":
+    elif path == "promop/settings.py":
         # Include whole multi-line settings expressions, not just CELERY_*'s
         # first line. Worker-specific boot guards are also covered.
         for node in ast.parse(source).body:
@@ -112,10 +167,16 @@ def file_at(revision, path):
         "utf-8", errors="replace")
 
 
-def select_range(base, head, *, merge_base=True):
+def select_checks(base, head, *, merge_base=True):
     if merge_base:
         base = subprocess.check_output(["git", "merge-base", base, head], text=True).strip()
-    return requires_async_e2e(changed_paths(base, head, merge_base=False), base, head)
+    paths = changed_paths(base, head, merge_base=False)
+    docs_only = is_docs_only(paths)
+    return (False if docs_only else requires_async_e2e(paths, base, head)), docs_only, requires_backend(paths)
+
+
+def select_range(base, head, *, merge_base=True):
+    return select_checks(base, head, merge_base=merge_base)[0]
 
 
 def changed_paths(base, head, *, merge_base=True):
@@ -132,20 +193,20 @@ def changed_paths(base, head, *, merge_base=True):
 
 
 def main():
-    run = True
+    run, docs_only, backend = True, False, True
     event_name = os.environ["GITHUB_EVENT_NAME"]
     if event_name in {"pull_request", "push"}:
         event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
     if event_name == "pull_request":
         pr = event["pull_request"]
-        run = select_range(pr["base"]["sha"], pr["head"]["sha"])
+        run, docs_only, backend = select_checks(pr["base"]["sha"], pr["head"]["sha"])
     elif event_name == "push":
         # Reusable workflows keep the caller's push event. Compare both ends
         # of the entire push, not HEAD^ (which would miss multi-commit pushes).
         before, after = event.get("before"), event.get("after")
         if before and after and before != "0" * 40 and after != "0" * 40:
-            run = select_range(before, after, merge_base=False)
-    output = f"async_e2e={str(run).lower()}"
+            run, docs_only, backend = select_checks(before, after, merge_base=False)
+    output = f"async_e2e={str(run).lower()}\ndocs_only={str(docs_only).lower()}\nbackend={str(backend).lower()}"
     print(output)
     with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
         stream.write(output + "\n")

@@ -2185,6 +2185,14 @@ class PlateletCountUnits(models.TextChoices):
     CELLS_L = 'CELLS/L', '10^9/L'
 
 
+class BloodCountUnits(models.TextChoices):
+    """Explicit scales for ANC and platelet compatibility values."""
+    K_PER_UL = '10*3/uL', '10^3/μL'
+    G_PER_L = '10*9/L', '10^9/L'
+    CELLS_UL = 'CELLS/UL', 'cells/μL'
+    CELLS_L = 'CELLS/L', 'cells/L'
+
+
 class WhiteBloodCellCountUnits(models.TextChoices):
     """WBC units; US oncology is the default for new records."""
     K_PER_UL = '10*3/uL', '10^3/μL (US oncology)'
@@ -2847,7 +2855,7 @@ class PatientRecord(models.Model):
     absolute_neutrophile_count = models.DecimalField(decimal_places=2, max_digits=10, blank=True, null=True)
     absolute_neutrophile_count_units = models.CharField(
         max_length=10,
-        choices=PlateletCountUnits.choices,
+        choices=BloodCountUnits.choices,
         blank=True,
         null=True,
         default='CELLS/UL'
@@ -2855,7 +2863,7 @@ class PatientRecord(models.Model):
     platelet_count = models.IntegerField(blank=True, null=True)
     platelet_count_units = models.CharField(
         max_length=10,
-        choices=PlateletCountUnits.choices,
+        choices=BloodCountUnits.choices,
         blank=True,
         null=True,
         default='CELLS/UL'
@@ -3167,7 +3175,7 @@ class PatientRecord(models.Model):
     genomics_pik3ca = models.JSONField(blank=True, default=list)
     genomics_tp53 = models.JSONField(blank=True, default=list)
     genomics_esr1 = models.JSONField(blank=True, default=list)
-    genomics_palb1 = models.JSONField(blank=True, default=list)
+    genomics_palb2 = models.JSONField(blank=True, default=list)
     genomics_kras = models.JSONField(blank=True, default=list)
     genomics_nras = models.JSONField(blank=True, default=list)
     genomics_braf = models.JSONField(blank=True, default=list)
@@ -3262,7 +3270,13 @@ class PatientRecord(models.Model):
     gelf_criteria_status = models.TextField(blank=True, null=True)
     flipi_score = models.IntegerField(blank=True, null=True)
     flipi_score_options = models.TextField(blank=True, null=True)
-    tumor_grade = models.IntegerField(blank=True, null=True)
+    tumor_grade = models.CharField(max_length=10, blank=True, null=True)
+    flipi_risk_category = models.CharField(max_length=20, blank=True, null=True)
+    number_of_nodal_sites = models.PositiveSmallIntegerField(blank=True, null=True)
+    bulky_disease = models.BooleanField(blank=True, null=True)
+    b_symptoms = models.BooleanField(blank=True, null=True)
+    gelf_criteria_options = models.TextField(blank=True, null=True)
+    ldh_upper_limit_normal = models.PositiveIntegerField(blank=True, null=True)
     # Histologic transformation of FL to DLBCL — derived from OMOP (DLBCL
     # ConditionOccurrence, or a transformation Observation as fallback).
     transformed_to_dlbcl = models.BooleanField(blank=True, null=True)

@@ -1,7 +1,7 @@
 # PRomop API Surface
 
 > **Canonical base URL:** `https://promop.onrender.com/api/v1/` (production) | `http://localhost:8000/api/v1/` (dev)
-> Last revised: 2026-08-18
+> Architecture and mutation policy revised: 2026-09-14; other endpoint sections retain their individual implementation context.
 
 > **Versioning note:** All new integrations should target `/api/v1/` paths. The legacy
 > unversioned `/api/` paths still work but return `Deprecation: true` / `Sunset: Tue, 01 Dec 2026 00:00:00 GMT`
@@ -9,52 +9,45 @@
 
 ---
 
-## Architecture: OMOP-first, mapped PatientRecord clinical fields are read-only
+## Architecture: OMOP ingestion and PatientRecord-first editing
 
-**The authoritative clinical record lives in OMOP tables.**
+PRomop keeps imported clinical facts in OMOP tables and derives a shared
+`PatientRecord` projection for the application and downstream consumers.
+Interactive edits use the PatientRecord-first save path:
 
-```
-Client writes → OMOP tables (Measurement, ConditionOccurrence, DrugExposure, …)
-                     │
-                     └── post_save / post_delete signal fires automatically
-                               │
-                               └── refresh_patient_record(person)
-                                       re-derives PatientRecord from OMOP
-                                       PatientRecord.save()
+```text
+FHIR / OMOP imports → dated OMOP facts → refresh → PatientRecord
+Patient editor → PatientRecord PATCH → approved mappings → OMOP facts
+                                    → profile fields → Person / Location
 ```
 
-`PatientRecord` (Django model: `PatientInfo`, API path: `/api/v1/patient-records/`) is a
-**denormalized read model**. Its clinical fields are regenerated automatically whenever
-their OMOP source records change, and its profile/admin compatibility fields are copied
-from HealthKey extension columns on `Person`. The API rejects writes to
-**OMOP-mapped** PatientRecord fields; OMOP APIs, FHIR imports, and `Person`
-profile updates own those writes, then the projection refreshes. Unmapped
-projection-owned compatibility fields remain temporarily writable only where
-the implementation explicitly permits them; new integrations must not use that
-exception.
+A direct save records validated writable fields immediately. The backend projects
+supported mapped values into OMOP and preserves pending user edits when projection
+is unavailable or fails. Direct saves recompute aliases and calculations without
+running a full OMOP refresh. External imports and explicit refreshes still derive
+from OMOP while preserving pending edits.
 
-The field-by-field ownership and migration plan is
-[`docs/omop_to_patientrecord.md`](docs/omop_to_patientrecord.md). It is the authoritative
-answer to which OMOP record supplies each output column; a PatientRecord field name is
-never a substitute for a clinical concept, event date, unit, or provenance.
+Use [PatientRecord-first writes](docs/patient-record-first-writes.md) for save,
+projection, and refresh semantics, and [the field mapping reference](field_concept_mapping_architecture.md)
+for field destinations and exceptions. Mapping availability alone does not determine
+editability. Computed fields, structured clinical resources, and retired summaries
+have their own contracts; [Genomics](docs/genomics_architecture.md) owns new discrete
+genomic findings.
 
 > **Legacy SQL compatibility only:** `public.patient_info` is a read-only database view
 > retained solely for existing consumers. New integrations must not query it or depend on
 > its column set; use `public.patient_record` for SQL access or `/api/v1/patient-records/`
 > for supported application access.
 
-The sanctioned write paths are:
-
 | Path | Use case |
 |---|---|
+| `PATCH /api/v1/patient-records/{person_id}/` | Interactive clinical and profile edits; backend handles onward projection |
 | `POST /api/v1/patient-records/upload_fhir/` | Bulk ingest from an EHR / FHIR R4 Bundle |
-| `POST/PATCH/DELETE /api/v1/conditions/`, `/api/v1/measurements/`, etc. | Granular OMOP record writes |
-| `PATCH /api/v1/persons/{person_id}/` | Person demographic/profile extension updates |
+| `POST/PATCH/DELETE /api/v1/conditions/`, `/api/v1/measurements/`, etc. | Granular clinical facts with explicit concepts, dates, units, and provenance |
+| `PATCH /api/v1/persons/{person_id}/` | Supported direct Person demographic/profile updates |
 
-Mapped PatientRecord fields are read-only. New integrations must use granular OMOP APIs or FHIR
-for clinical writes, where concept, time, unit, and provenance are explicit; use
-`PATCH /api/v1/persons/{person_id}/` for supported Person profile fields such as email,
-phone number, validation metadata, facility name, and demographic redaction preference.
+Authorization and patient/organization scope apply to every path. Use
+[application roles](docs/application-roles.md) for the implemented privilege model.
 
 ---
 
@@ -70,7 +63,7 @@ phone number, validation metadata, facility name, and demographic redaction pref
    - [Concept graph endpoints](#concept-graph-endpoints)
    - [Vocabulary release & snapshot (consumer mirror)](#vocabulary-release--snapshot-consumer-mirror)
    - [OAuth2 endpoints](#oauth2-endpoints)
-5. [OMOP write internals](#omop-write-internals) — _upsert_omop_measurement, _LAB_FIELD_TO_LOINC, FHIR pipeline, signal chain
+5. [OMOP write internals](#omop-write-and-derivation-internals) — _upsert_omop_measurement, _LAB_FIELD_TO_LOINC, FHIR pipeline, signal chain
 6. [Provenance tagging](#provenance-tagging)
 7. [Multi-tenant org scoping](#multi-tenant-org-scoping)
 
@@ -267,39 +260,32 @@ same, so a client needs one code path.
 
 ### PatientRecord mutation policy
 
-`PATCH /api/v1/patient-records/{person_id}/` returns **405 Method Not Allowed** for every
-OMOP-mapped clinical field. It returns the rejected names so callers can migrate without
-guessing:
+`PATCH /api/v1/patient-records/{person_id}/` accepts validated writable clinical
+and profile fields. For example, an authorized editor can submit:
 
 ```json
 {
-  "detail": "OMOP-mapped PatientRecord fields are read-only. Write a complete clinical fact to the appropriate OMOP resource, then rederive the record.",
-  "fields": ["hemoglobin_g_dl"]
+  "hemoglobin_g_dl": 12.4
 }
 ```
 
-Clinical values must be written through their OMOP resources (or FHIR import), after
-which the signal chain refreshes `PatientRecord` from OMOP. Profile/admin values that are
-displayed on PatientRecord, such as email and validation metadata, are written to HealthKey
-extension columns on `Person` via `PATCH /api/v1/persons/{person_id}/` and then projected back.
+The saved PatientRecord value is available immediately. A supported projection
+recipe writes the mapped OMOP fact; unmapped or failed projections remain pending
+and protected during later derivation. Profile fields project onward to Person or
+Location. See [PatientRecord-first writes](docs/patient-record-first-writes.md)
+for same-day updates, clears, pending-edit acknowledgement, and approval backfill.
 
-| PatientRecord output category | Write the source fact to | Required source detail |
-|---|---|---|
-| Laboratory, vital, tumour-marker, or numeric pathology value | `/api/v1/measurements/` or FHIR `Observation` | clinical concept, known event date, value, unit, provenance |
-| Coded clinical, eligibility, disease-state, imaging, or social assertion | `/api/v1/observations/`, `/api/v1/conditions/`, or equivalent FHIR resource | standard concept, known event date, coded/value assertion, provenance |
-| Medication or line-of-therapy fact | `/api/v1/drug-exposures/`, `/api/v1/episodes/`, `/api/v1/episode-events/`, or FHIR | medication/episode concept, known dates, provenance |
-| Demographic or supported profile value | `PATCH /api/v1/persons/{person_id}/` | the Person source attribute; refresh projects it |
+Consult `GET /api/v1/patient-records/writable-fields/` before building an editor.
+Computed and other serializer read-only inputs are generally ignored; a successful
+response alone does not establish that such a field changed. Specific retired or
+structured fields can explicitly reject changes, including legacy genomic summaries.
+Use their dedicated resource APIs and the [field mapping reference](field_concept_mapping_architecture.md)
+to determine ownership. The former blanket 405 rejection of mapped clinical edits
+no longer describes this endpoint.
 
-The target state has no writable concrete PatientRecord clinical columns. At
-runtime, only fields outside `PATIENT_RECORD_OMOP_MAPPED_FIELDS` may still be
-accepted as projection-owned compatibility fields; this temporary exception is
-not available to new integrations. The field-level mapping and migration status
-are maintained in [`docs/omop_to_patientrecord.md`](docs/omop_to_patientrecord.md).
-
-New integrations should write semantically complete OMOP facts to their own resource
-endpoint—for example a dated `Measurement` with its LOINC and unit—or use FHIR ingest.
-Include source/provenance on that fact. The PatientRecord API is a read surface, not a
-write model for new consumers.
+FHIR and granular OMOP APIs remain the ingestion paths for source clinical events.
+They carry the actual concept, event date, unit, and provenance; the generic scalar
+UI projection uses today's local date and cannot replace a source-event import.
 
 ---
 
@@ -1062,7 +1048,8 @@ karnofsky_performance_score        89243-0    {score}         Karnofsky Performa
 
 ### FHIR upload pipeline
 
-Every FHIR resource maps to an OMOP table. PatientRecord is never a direct write target.
+FHIR ingestion maps resources to OMOP tables and refreshes PatientRecord.
+Interactive edits follow the separate [PatientRecord-first write path](docs/patient-record-first-writes.md).
 
 ```
 FHIR Bundle
