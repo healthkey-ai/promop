@@ -63,7 +63,10 @@ Cloud / Cloud Run staging deployment for this work.
 - [ ] **PHR authentication — [#750](https://github.com/healthkey-ai/promop/issues/750).**
   PROMOP audience validation is implemented and fails closed. Partner
   [phr#65](https://github.com/healthkey-ai/phr/issues/65) was still open at triage.
-  **Decision (2026-09-14): PHR ships in 1.3.** Ship the partner capability,
+  **Decision (2026-09-14): PHR ships in 1.3. Vlad owns phr#65 and phr#66.**
+  Partner [phr#66](https://github.com/healthkey-ai/phr/issues/66) must supply
+  actual verified-email evidence before existing-record/invitation linking.
+  Do not infer verification from the default `ial1` label. Ship the partner capability,
   confirm matching service-specific audience configuration, and prove
   authentication works end to end on Render. Reject missing/wrong audiences
   and sibling-service token replay. Do not weaken validation to make login work.
@@ -134,8 +137,8 @@ critical path. Keep their existing issues open.
 | --- | --- |
 | Supported release scope | PHR federation included by release-owner instruction on 2026-09-14. Confirmed mapping corrections included; broader coded-value interoperability deferred by release-owner instruction on 2026-09-14. |
 | Candidate branch and SHA | Pending |
-| Priority fixes and PRs | Breast mapping corrections belong to the separate `feat/field-value-concept-mappings` workstream; do not duplicate or close its parent issues. Unit normalization: [PR #1289](https://github.com/healthkey-ai/promop/pull/1289), head `92e12e35c51d9ea506b9788566eab207199818a6`, awaiting backend CI. Browser auth: [PR #1216](https://github.com/healthkey-ai/promop/pull/1216), head `2a850b249b19df4e9ecce052c2d4e911f2395a6c`, conflicts resolved against dev `7a9e808`; integration CI pending. Disease work merged through #1267 and #1280; Render coverage evidence still required. |
-| Remaining known limitations | PHR issuer lacks audience claims ([phr#65](https://github.com/healthkey-ai/phr/issues/65)); now a required gate. TP53/del(17p) evidence semantics and downstream-consumer agreement remain open. Genomics upgrade prerequisites in [#1286](https://github.com/healthkey-ai/promop/issues/1286) and NOTE integrity remain open. |
+| Priority fixes and PRs | Breast mapping corrections belong to the separate `feat/field-value-concept-mappings` workstream; do not duplicate or close its parent issues. Unit normalization: [PR #1289](https://github.com/healthkey-ai/promop/pull/1289), merged to dev as `05cc776b7b7bc2296006994055ed8295cf5c2485` after all required CI passed. Browser auth: [PR #1216](https://github.com/healthkey-ai/promop/pull/1216), head `2a850b249b19df4e9ecce052c2d4e911f2395a6c`, conflicts resolved against dev `7a9e808`; integration CI pending. Disease work merged through #1267 and #1280; Render coverage evidence still required. |
+| Remaining known limitations | Vlad owns PHR audience claims ([phr#65](https://github.com/healthkey-ai/phr/issues/65)) and verified-email evidence ([phr#66](https://github.com/healthkey-ai/phr/issues/66)); both are required gates. Local unpublished prototypes are paused and are not delivery evidence. TP53/del(17p) evidence semantics and downstream-consumer agreement remain open. Genomics upgrade prerequisites in [#1286](https://github.com/healthkey-ai/promop/issues/1286) and NOTE integrity remain open. |
 | CI and migration evidence | #1289 local: 2,531 pytest passed, five skipped; Django 2,000 tests OK, one skipped; fresh migrations passed. #1216 after dev merge: 588 frontend passed, four skipped; lint/build passed; 50 auth/service-identity and 27 PHR/security tests passed. These are branch checks, not exact-candidate release certification. |
 | Render deployment and smoke evidence | Read-only unit audit at 2026-09-14 07:20 UTC: 1,000 latest ANC and 1,000 latest platelet rows lack source units/UCUM evidence and would become unknown under #1289; no pending canonical edits in that scope. No backfill performed; do not infer units. Exact-candidate deployment, login/federation, edit, import and worker smoke checks remain pending. |
 | Final 1.3.0 release URL | Pending |
