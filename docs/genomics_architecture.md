@@ -1,6 +1,6 @@
 # PRomop Genomics: Implemented Architecture
 
-Baseline `dev` through `4302c97`, including [#1249](https://github.com/healthkey-ai/promop/pull/1249), [#1259](https://github.com/healthkey-ai/promop/pull/1259) and the [schema audit #1263](https://github.com/healthkey-ai/promop/pull/1263). Updated 2026-09-14 with the reviewed PALB2 correction ([#1275](https://github.com/healthkey-ai/promop/issues/1275)). Remaining requirements and deployment work are in [the implementation plan](genomics_implementation.md).
+Baseline `dev` through `4302c97`, including [#1249](https://github.com/healthkey-ai/promop/pull/1249), [#1259](https://github.com/healthkey-ai/promop/pull/1259) and the [schema audit #1263](https://github.com/healthkey-ai/promop/pull/1263). Updated 2026-09-14 with the reviewed PALB2 correction ([#1275](https://github.com/healthkey-ai/promop/issues/1275)). Remaining requirements and deployment work are in [the genomics plan](genomics_plan.md).
 
 ## Storage decision
 
@@ -255,3 +255,11 @@ Patient and event-table boundaries remain enforced.
 Each patient's variant writes are atomic: a failure also rolls back that
 patient's overwrite. Successful patients are refreshed, failures are reported,
 and any write failure causes a nonzero command exit with committed counts.
+
+## Release verification tools
+
+`audit_genomics_release --environment NAME --check` combines the existing text-width audit with migration consistency/pending-plan checks, physical columns required by the writer, and the complete mapping/concept prerequisite audit. Metadata queries run read-only; missing columns fail even when migration names are recorded. It reports readiness of the inspected database for the checked code, not a deployment or clinical validation.
+
+`reconcile_tp53_cache` performs a scoped preview/apply of the existing true/unknown rule from current source findings, holding pending genomics edits and leaving overall derivation metadata and other fields unchanged. See the [TP53 rollout](tp53_aggregate_plan.md).
+
+`scripts/genomics_release_smoke.py` exercises authenticated CRUD, state transitions, source provenance, priority/aggregate readback and deletion on Render staging. It requires a provisioned synthetic record with a matching run marker, never replaces an existing findings list, and retires its own unique finding during cleanup, including after an interrupted response. Retired source history and the synthetic record remain identifiable test artifacts. Deployment SHAs and retained-history counts are verified separately by the operator.

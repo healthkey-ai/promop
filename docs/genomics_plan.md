@@ -2,6 +2,18 @@
 
 The implemented baseline includes [#1249](https://github.com/healthkey-ai/promop/pull/1249), [#1259](https://github.com/healthkey-ai/promop/pull/1259), [schema audit #1263](https://github.com/healthkey-ai/promop/pull/1263), [PALB2 naming #1281](https://github.com/healthkey-ai/promop/pull/1281), and [project compatibility #1294](https://github.com/healthkey-ai/promop/pull/1294). Updated 2026-09-14 with catalog/write validation consistency and Render staging verification scope. The [implemented architecture](genomics_architecture.md) describes runtime behavior; this plan records delivery status, remaining requirements and acceptance criteria. The supplied Word documents are retained as requirements through these two canonical documents.
 
+## Release 1.3 requirements
+
+The 1.3 scope is manual genomic finding entry, editing, state readback and source provenance. Reports/specimens/scope (#1243/#1244), incremental imports (#1245), expanded result mappings (#1229), and new clinical derivation rules (#1246) are deferred until after 1.3. Existing unvalidated derivations remain inactive. The schema backfill in #1237 is conditional; current active Render audits do not indicate a need for it.
+
+| Required gate | Issue | Current evidence and remaining work |
+| --- | --- | --- |
+| TP53 consumer compatibility and cache reconciliation | [#1315](https://github.com/healthkey-ai/promop/issues/1315) | EXACT is the only downstream consumer in scope. [EXACT #483](https://github.com/healthkey-ai/exact/pull/483) merged after all backend CI groups passed; it preserves explicit true/null through adaptation, normalization and eligibility matching. PRomop's scoped reconciliation command and tests are implemented in the release-gate branch; staging preview/apply receipts and compatible production rollout remain. |
+| Production upgrade and writer prerequisites | [#1316](https://github.com/healthkey-ai/promop/issues/1316), [#1286](https://github.com/healthkey-ai/promop/issues/1286) | Render staging passes the combined release preflight. Production has 53 pending migrations, including genomics fields and mapping provenance. The chain applied successfully to an isolated copy of production schema and selected reference metadata, with no clinical rows copied. Production also lacks required EHR actor concept 32817, confirmed by a read-only vocabulary query. Load it from the approved Athena release through the vocabulary maintenance process; do not fabricate a replacement. Production deployment and its final combined audit remain; a rehearsal is not a live upgrade. |
+| Final candidate smoke verification | [#1317](https://github.com/healthkey-ai/promop/issues/1317) | The authenticated smoke runner passes locally, including interrupted-write cleanup. Run against a dedicated synthetic record on Render staging after the final candidate is deployed to both web and worker; retain SHA, CRUD/state/provenance/readback results and artifact accounting. |
+
+These three gates are required before declaring genomics ready for 1.3. A code merge alone does not complete an operational gate. Verify EXACT's deployed consumer revision includes its fix before enabling the new aggregate there. Cloud Run verification is outside this release work.
+
 ## Delivery status
 
 | Work | Issue | Current state |

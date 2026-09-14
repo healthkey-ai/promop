@@ -130,7 +130,7 @@ individual checks; each gate requires the completion evidence in its row.
 | Production migration and writer prerequisites — [#1316](https://github.com/healthkey-ai/promop/issues/1316), following [#1286](https://github.com/healthkey-ai/promop/issues/1286) | **Open 1.3 Genomics gate.** Production compatibility/deployment must be demonstrated separately from local and staging results. | Record Render production web/worker revisions and migration state; resolve the missing `field_concept_mapping.provenance` through the compatible chain. Retain schema-width and `audit_genomics_domains --include-writer-prerequisites` evidence for required parent/component recipes and actor/event concepts before enabling the current writer. State any remaining production deployment step explicitly. |
 | Authenticated release-candidate workflow verification — [#1317](https://github.com/healthkey-ai/promop/issues/1317) | **Open 1.3 Genomics gate.** A passing receipt for the intended release candidate is required. | On Render staging, verify exact web/worker candidate identity and authenticated create/edit/delete, present/absent/indeterminate transitions, readback, priority catalogs and provenance/history on a dedicated synthetic record. Retain local tests of the smoke mechanism, the staging receipt and cleanup/accounting of artifacts. Failed checks require repair and a rerun. |
 
-Use [the Genomics plan](genomics_implementation.md) and
+Use [the Genomics plan](genomics_plan.md) and
 [the TP53 rollout contract](tp53_aggregate_plan.md) for the detailed acceptance
 behind #1315–#1317. Staging is **Render** (`promop-staging` and
 `promop-staging-worker`); full automated test suites run against local databases.
@@ -684,7 +684,7 @@ Acceptance must distinguish shipped server capabilities from consumer guarantees
 - Record the vocabulary, mapping and catalog/recipe revisions used in scoped
   reconciliation evidence. Publication does not authorize historical fact rewrites.
   Genomics-specific acceptance belongs to its
-  [mapping coordination section](genomics_implementation.md#fieldvalue-mapping-coordination).
+  [mapping coordination section](genomics_plan.md#fieldvalue-mapping-coordination).
 
 ### Remaining audit topics and reconciliation
 

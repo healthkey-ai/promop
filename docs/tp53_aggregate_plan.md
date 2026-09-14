@@ -29,11 +29,21 @@ label. A negative eligibility criterion is not satisfied by this null value.
 External consumer validation remains required before claiming the genomics
 release gate complete. No clinical thresholds are introduced.
 
+## EXACT compatibility for 1.3
+
+The owner selected EXACT as the only downstream consumer for this release gate. [EXACT PR #483](https://github.com/healthkey-ai/exact/pull/483) preserves an explicitly supplied Boolean or null through snake/camel-case inline input, source-row adaptation, repeated normalization and the attribute service used by eligibility matching. Unknown remains an unresolved candidate criterion; it cannot produce a confirmed negative match. Omitted aggregates retain EXACT's previous legacy derivation. All three EXACT backend CI groups passed. Verify the deployed consumer includes the merge before rollout.
+
+## Scoped reconciliation
+
+`reconcile_tp53_cache` previews by default. Choose `--organization SLUG`, `--person-id ID`, or explicitly `--all`. After reviewing the JSON receipt, repeat with `--apply` to recompute only `tp53_disruption` from current source findings under the same rule used by version 8. It holds records with pending TP53, general-genomics or priority-genomics edits. Apply takes the same PatientRecord lock as the structured writer, commits each record separately, and is idempotent on retry.
+
+The receipt reports before/after states, transitions, held records and partial completion without patient identifiers or source text. Retain it with the deployed revision. This scoped operation does not change source facts, other cached fields, `derived_at`, or the overall derivation version; it does not claim that version 7's blood-unit refresh has occurred. Held records require separate review. A failed run reports committed progress before exiting unsuccessfully. Recovery uses preserved source facts and a reviewed compatible rule; do not treat historical cached false values as negative evidence.
+
 ## Deployment and reconciliation
 
 No column/schema change is needed for the TP53 correction. Version 8 marks older derivations stale; source
 OMOP rows remain unchanged. Review the aggregate impact report and
-`backfill_patient_records --dry-run` output before scheduling rederivation. The full derivation includes version 7's unit
+`backfill_patient_records --dry-run` output before scheduling a full rederivation. The scoped command above avoids that wider refresh. The full derivation includes version 7's unit
 normalization, so also review [the blood-count rollout](clinical-unit-policy.md#anc-and-platelet-rollout-640).
 Do not run a blanket update replacing every stored false: refresh from current
 source evidence, preserving the normal pending-edit rules.
