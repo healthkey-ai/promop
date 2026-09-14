@@ -8,9 +8,13 @@ This file tells LLMs (Claude, Copilot, etc.) how to work on this codebase consis
 
 ### Staging deployment
 
-Staging is Render service `promop-staging` in Oregon, at
-https://promop-staging.onrender.com, deployed from `dev`. It is not GCP.
-Use `STAGING_DATABASE_URL` from `.env` for staging database access; Render
+There are two supported staging deployments: Render and Google Cloud Run.
+Render staging is service `promop-staging` in Oregon, at
+https://promop-staging.onrender.com, deployed from `dev`. Cloud Run staging
+continues through `.github/workflows/deploy-staging.yml` and `Dockerfile.gcp`;
+preserve its existing resource and integration identifiers. Name the target
+explicitly when deploying or verifying it.
+Use `STAGING_DATABASE_URL` from `.env` for Render staging database access; Render
 web and worker processes use `DATABASE_URL` for that same existing database.
 Never put the database connection string or credentials in Git or tool output.
 `render.yaml` declares both production and staging; staging has its own worker
@@ -1134,7 +1138,7 @@ patch Celery or run it eager.
 Run a worker with:
 
 ```bash
-celery -A ctomop worker --loglevel=info
+celery -A promop worker --loglevel=info
 ```
 
 The task is idempotent — derivation clears and rebuilds every field — so a

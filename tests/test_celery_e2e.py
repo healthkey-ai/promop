@@ -7,6 +7,7 @@ cannot run at the same time.
 
 import os
 import subprocess
+import sys
 import time
 
 import pytest
@@ -34,8 +35,8 @@ def _test_database_url() -> str:
     return f"postgresql://{user}{password}@{host}:{port}/{cfg['NAME']}"
 
 
-@pytest.fixture
-def celery_worker_process():
+@pytest.fixture(params=['promop', 'ctomop'])
+def celery_worker_process(request):
     broker = os.environ.get('CELERY_BROKER_URL', '')
     if not broker:
         pytest.skip('CELERY_BROKER_URL is not set')
@@ -44,7 +45,7 @@ def celery_worker_process():
     # solo pool: one process, so a failure surfaces in this worker's own output
     # instead of in a forked child nobody is reading.
     worker = subprocess.Popen(
-        ['celery', '-A', 'ctomop', 'worker', '--loglevel=info', '--pool=solo',
+        [sys.executable, '-m', 'celery', '-A', request.param, 'worker', '--loglevel=info', '--pool=solo',
          '--without-gossip', '--without-mingle', '--without-heartbeat'],
         env=env,
     )
