@@ -3,15 +3,15 @@
 This is the first reproducible inventory slice of
 [`field_concept_mapping_plan.md`](../field_concept_mapping_plan.md).
 The [coverage report](coverage.md) summarizes the [manifest](manifest.json).
-**#1223 remains open:** dynamic frontend bindings, destination/context crosswalks,
-retirement history and semantic reconciliation remain unfinished.
+**#1223 remains open:** destination semantics, missing fields, retirement history
+and semantic reconciliation remain unfinished.
 Do not start dependent schema work on the assumption that this export completes
 the inventory prerequisite.
 
 ## Regenerate
 
-The refreshed manifest contains **6,986 source occurrences**: 420 fields and
-6,566 values. All 172 CancerBot public bindings have source accounting:
+The refreshed manifest contains **7,373 source occurrences**: 420 fields and
+6,953 values. All 172 CancerBot public bindings have source accounting:
 118 reference-backed lists, 51 deterministic static lists, and three trial-search
 exclusions. There are zero public lists awaiting live reference access and zero
 planned lists awaiting source eligibility. These counts are not clinical approval.
@@ -126,11 +126,39 @@ meanings**. Constants and their rendered controls are separate evidence.
   `needs_review`, `ambiguous`, `no_equivalent`, `not_applicable`,
   `requires_structured_representation`, and `verified_mapping` are separate
   states. Export never promotes candidates to verified or reviewed mappings.
+- `destination_route_keys`: references into `destination_crosswalk.bindings` by
+  public option-list name. Source routing records disease, line and representation
+  conflicts separately from immutable source scope; it does not approve aliases
+  or replace canonical values. All 172 bindings have entries, including eight
+  missing MCL destinations. Shared literal rows may have several routes.
 
 `reference_tables` retains safe source records and therapy/gene relationships.
 `source_revisions` records Git revisions, relevant source-file hashes and dirty
 state. Release identities, full vocabulary metadata and version history are
 recorded separately. The snapshot date controls validity checks.
+
+`base_descriptors` captures the current backend's base writable descriptors and
+211 options, with no patient-specific authorization or patient reads. Lookup
+model names must belong to the exported reference-table allowlist. Custom-field
+definitions are included without creator identity. The frontend parser retains
+nested gene groups, criterion storage keys/labels and General-tab helper calls;
+reviewed dynamic providers have pinned source hashes and remain unresolved on
+drift. Descriptor options take precedence over frontend fallback values.
+
+`source_history` indexes CancerBot migration definitions without executing them.
+Field renames/removals and historical choices are source evidence, not value
+equivalence. Reviewed catalog rules retain conditional i/s/t replacements,
+component-only St. John's Wort deduplication and removal of NSAIDs as a regimen.
+Other data operations remain explicit review items; no execution receipt or
+historical row membership is inferred.
+
+`priority_field_coverage` implements the per-disease audit in
+[#1311](https://github.com/healthkey-ai/promop/issues/1311). All 42 effective
+priority gene/marker fields have approved storage recipes across 51 disease
+memberships. The current parent code resolves to Observation, so the established
+Measurement-parent writer uses concept 0. The report distinguishes supported
+source-only storage from compatible standard parent candidates and incomplete
+recipes. It does not approve exact variants or gene answer concepts.
 
 ## Live CancerBot reference export
 
@@ -213,7 +241,7 @@ clinical approval; this inventory changes no vocabulary or mapping rows.
 
 ## Remaining acceptance work
 
-1. Resolve dynamic frontend providers and each catalog's destination/context.
+1. Reconcile each catalog's destination/context and recorded semantic conflicts.
    Reconcile all #26 values and the #21 matrix against the source occurrences.
 2. Record source aliases, retirement and replacement evidence from source history.
    Missing live membership must remain distinct from a reviewed retirement.

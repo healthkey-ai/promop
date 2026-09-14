@@ -361,6 +361,16 @@ def render_report(manifest):
             providers = binding.get('static_resolution', {}).get('provider_models', [])
             lines.append(f"| {binding['option_list']} | {', '.join(providers) or 'unresolved source expression'} |")
     therapy = manifest.get('therapy_source_coverage')
+    crosswalk = manifest.get('destination_crosswalk')
+    if crosswalk:
+        lines += ['', '## CancerBot destination routing', '',
+                  'Routes retain source disease, line, nested keys and representation warnings separately from immutable source identity. '
+                  'A recorded route is not clinical equivalence or an approved answer mapping.', '',
+                  '| Route status | Bindings |', '|---|---:|']
+        lines += [f'| {key} | {count} |' for key, count in crosswalk.get('counts', {}).items()]
+        lines += ['', '| Source list | Missing PRomop destination |', '|---|---|']
+        lines += [f"| {r['option_list']} | {', '.join(r['missing_destinations'])} |"
+                  for r in crosswalk.get('bindings', []) if r['status'] == 'destination_missing']
     if therapy:
         lines += ['', '## CancerBot-derived staging therapy catalogs', '',
                   'Staging is the authoritative source for these catalogs, as confirmed by the user. '
@@ -375,6 +385,25 @@ def render_report(manifest):
                   'its disease/round eligibility never proves administration or a mapping to a PRomop regimen. '
                   f"Planned lists still awaiting source eligibility: {len(therapy['context_pending_lists'])}. "
                   'Unknown/Other sentinels are recorded separately from catalog counts.', '']
+    source_history = manifest.get('source_history')
+    if source_history:
+        lines += ['', '## CancerBot source history', '', source_history.get('limitation', 'Source history unavailable.'), '',
+                  '| History evidence | Count |', '|---|---:|']
+        lines += [f'| {key} | {count} |' for key, count in source_history.get('counts', {}).items()]
+        lines += ['', '| Catalog scope | Old code | Replacement | Rule |', '|---|---|---|---|']
+        lines += [f"| {', '.join(r['models'])} | `{r['old_code']}` | `{r['replacement_code'] or '(none)'}` | {r['condition']} |"
+                  for r in source_history.get('catalog_events', [])]
+    priority = manifest.get('priority_field_coverage')
+    if priority:
+        lines += ['', '## Priority gene and marker field mappings (#1311)', '',
+                  f"{priority['total_fields']} distinct fields across {priority['disease_memberships']} disease memberships. "
+                  + priority['limitation'], '',
+                  '| Disease | Fields | Storage incomplete | Source-only parent | Standard parent candidate requiring review |',
+                  '|---|---:|---:|---:|---:|']
+        for disease, data in priority['by_disease'].items():
+            counts = data['counts']
+            lines.append(f"| {disease} | {len(data['field_names'])} | {counts.get('storage_recipe_incomplete', 0)} | "
+                         f"{counts.get('source_only_parent', 0)} | {counts.get('standard_parent_candidate_requires_review', 0)} |")
     lines += ['', '## Reconciliation', '',
               f"Duplicate source identities: {len(totals['duplicate_source_ids'])}. "
               f"Shared destination/value/context groups: {len(totals['shared_destination_identities'])}. "

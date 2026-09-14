@@ -34,6 +34,7 @@ REFERENCE_COLUMNS = {
     'type_concept_id', 'value_vocabulary', 'multiple', 'status', 'provenance',
     'reviewed_at', 'formula', 'is_active', 'synonym_text', 'source',
     'regimen_id', 'component_id', 'therapy_class_id', 'disease_id', 'round_id', 'therapyoutcome_id',
+    'display_name', 'field_type', 'tab', 'mode', 'mapping_id',
 }
 RELEASE_COLUMNS = {
     'id', 'release_id', 'schema_version', 'scope', 'corpus_scope', 'build_timestamp',
@@ -49,8 +50,8 @@ CONCEPT_COLUMNS = (
 DECISIONS = [
     {'scope': 'bone_lesions', 'fields': ['bone_lesions'], 'owner': '#1228',
      'decision': 'Keep count and >2 comparator separate from presence; do not equate source counts with Yes/No.'},
-    {'scope': 'GELF / FLIPI', 'fields': ['gelf_criteria_status', 'flipi_score_options', 'flipi_risk_category'], 'owner': '#1228',
-     'decision': 'Retain seven GELF criteria and aggregate separately; retain five FLIPI inputs, numeric score and risk separately.'},
+    {'scope': 'GELF / FLIPI', 'fields': ['gelf_criteria_options', 'gelf_criteria_status', 'flipi_score_options', 'flipi_risk_category'], 'owner': '#1228',
+     'decision': 'Retain CancerBot seven and PRomop eight GELF criteria with threshold conflicts explicit; aggregate is separate. Retain five FLIPI inputs, numeric score and risk separately.'},
     {'scope': 'TNM and staging basis', 'fields': ['tumor_stage', 'nodes_stage', 'distant_metastasis_stage', 'staging_modalities'], 'owner': '#1227',
      'decision': 'Retain tumor, system, edition and c/p/yp basis. Imaging modality is a separate event.'},
     {'scope': 'ISS / R-ISS / legacy stage; Rai / Binet', 'fields': ['stage', 'r_iss_stage', 'binet_stage'], 'owner': '#1228',
@@ -87,6 +88,7 @@ def collect_reference_tables():
     reference_models = [*lookup_models, models.ToxicityGrade, models.TherapyOutcome,
                         models.FieldConceptMapping, models.FieldChoice, models.FieldChoiceCode,
                         models.FieldSynonym, models.FieldFormula,
+                        models.CustomPatientField,
                         models.TherapyRegimenComponent, models.TherapyComponentClassLink,
                         models.DiseaseTherapyRegimen, models.TherapyOutcome.diseases.through]
     tables = {m._meta.db_table: read_table(m._meta.db_table, REFERENCE_COLUMNS) for m in reference_models}
@@ -100,11 +102,12 @@ def collect_rows(tables, lookups, frontend):
     registry = get_registry()
     mappings = {r['field_name']: r for r in tables['field_concept_mapping']}
     formulas = {r['field_name']: r for r in tables['field_formula']}
+    custom_fields = {r['field_name']: r for r in tables.get('custom_patient_field', [])}
     synonyms = defaultdict(list)
     for row in tables['field_synonym']:
         synonyms[row['field_name']].append(row['synonym_text'])
     rows, fields = [], {f.name: f for f in models.PatientRecord._meta.concrete_fields}
-    for name in sorted(set(fields) | set(mappings) | set(registry) | set(formulas)):
+    for name in sorted(set(fields) | set(mappings) | set(registry) | set(formulas) | set(custom_fields)):
         category = _classify_field(name)
         disposition = 'not_applicable' if category in {'internal', 'profile', 'location', 'unit', 'computed', 'alias'} else 'needs_review'
         row = inventory_row('promop_field', 'PatientRecord', name, name, field=name, kind='field',
@@ -114,6 +117,9 @@ def collect_rows(tables, lookups, frontend):
         row['model_type'] = fields[name].get_internal_type() if name in fields else None
         row['recipe'] = asdict(registry[name]) if name in registry else None
         row['formula'] = formulas.get(name)
+        if name in custom_fields:
+            row['custom_field_definition'] = custom_fields[name]
+            row['destination_path'] = 'custom_fields.' + name
         row['existing_mappings'] = [mappings[name]] if name in mappings else []
         rows.append(row)
         if name in fields:
@@ -150,7 +156,13 @@ def collect_rows(tables, lookups, frontend):
     constants = {r['name']: r for r in frontend['constants']}
     for const in frontend['constants']:
         for index, value in enumerate(const['values']):
-            rows.append(inventory_row('frontend_constant', f"{const['file']}:{const['name']}", value, str(value), value=value,
+            label = value.get('label', value.get('value')) if isinstance(value, dict) else value
+            value = value.get('value') if isinstance(value, dict) else value
+            scope = {'parent_keys': const['parent_keys']} if const.get('parent_keys') else {}
+            if const.get('disease'):
+                scope['disease'] = const['disease']
+            rows.append(inventory_row('frontend_constant', f"{const['file']}:{const['name']}", value, str(label), value=value,
+                field=const.get('destination_field'), scope=scope,
                 evidence=[{'file': const['file'], 'line': const['line'], 'index': index}]))
     for control in frontend['controls']:
         if not control['field']:
@@ -175,6 +187,40 @@ def collect_rows(tables, lookups, frontend):
                 row['owning_issue'] = decision['owner']
                 row['disposition'] = 'requires_structured_representation'
     return rows
+
+
+def collect_descriptor_options(tables):
+    """Capture the existing base descriptor using only reference-table reads.
+
+    The descriptor's dynamic lookup model names are checked before invocation;
+    a mapping cannot make this inventory read an unrelated model's rows.
+    Patient-specific authorization is deliberately outside this snapshot.
+    """
+    for mapping in tables.get('field_concept_mapping', []):
+        model_name = mapping.get('value_vocabulary')
+        if mapping.get('status') != 'approved' or not model_name:
+            continue
+        model = getattr(models, model_name, None)
+        if model is not None and (not hasattr(model, '_meta') or model._meta.db_table not in tables):
+            return [], {'status': 'unresolved_lookup_model', 'model': model_name}
+    from omop_core.services.write_descriptor import build_writable_field_descriptor
+    descriptors = build_writable_field_descriptor()
+    permitted = {'kind', 'writable', 'target', 'projection_target', 'person_field', 'payload_field',
+                 'value_kind', 'multiple', 'canonical', 'curated', 'projection', 'options'}
+    records = {name: {k: v for k, v in descriptor.items() if k in permitted}
+               for name, descriptor in descriptors.items()}
+    rows = []
+    for field, descriptor in records.items():
+        for option in descriptor.get('options', []):
+            value = option['value']
+            row = inventory_row('descriptor_option', field, value, str(value), field=field, value=value,
+                                role='reference' if descriptor.get('projection_target') == 'person' else 'answer',
+                                evidence=[{'method': 'base_writable_descriptor', 'option_code': option.get('code')}],
+                                reason='Current base descriptor option; source code and projection do not approve an answer concept.')
+            row['field_projection'] = descriptor.get('projection')
+            rows.append(row)
+    return rows, {'status': 'base_descriptors_captured', 'authorization': 'Patient-specific authorization not captured.',
+                  'fields': records}
 
 
 def attach_candidates(rows, vocabularies, as_of):
@@ -264,6 +310,10 @@ def build_inventory(root, cancerbot_root, frontend, live_export=None, search=Fal
     vocabularies = {r['vocabulary_id']: r for r in models.Vocabulary.objects.values(
         'vocabulary_id', 'vocabulary_name', 'vocabulary_reference', 'vocabulary_version', 'is_deprecated')}
     rows = collect_rows(tables, lookups, frontend)
+    from omop_core.services.field_inventory_frontend import reconcile_frontend_providers
+    rows += reconcile_frontend_providers(root, frontend, tables)
+    descriptor_rows, descriptor_source = collect_descriptor_options(tables)
+    rows += descriptor_rows
     source = cancerbot_source(cancerbot_root / 'trials/services/value_options.py') if cancerbot_root else {'rows': [], 'bindings': []}
     rows += source['rows']
     therapy_coverage = staging_therapy_coverage(tables, source['bindings'])
@@ -287,19 +337,33 @@ def build_inventory(root, cancerbot_root, frontend, live_export=None, search=Fal
             reason='Versioned marker catalog; use structured finding/components.', owner='#1229',
             evidence=[{'catalog_version': catalog['version'], 'source_commit': catalog['source_commit'],
                        'naming_decision': catalog['naming_decision']}]))
+    from omop_core.services.field_inventory_crosswalk import reconcile_cancerbot_destinations, SOURCES as CROSSWALK_SOURCES
+    destination_crosswalk = reconcile_cancerbot_destinations(cancerbot_root, source['bindings'], rows, tables)
+    from omop_core.services.field_inventory_history import collect_cancerbot_history
+    source_history = collect_cancerbot_history(cancerbot_root)
     candidates = attach_candidates(rows, vocabularies, now.date())
     if search:
         search_candidates(rows, candidates, vocabularies, now.date())
     relationships = attach_relationships(candidates, vocabularies, now.date())
+    from omop_core.services.field_inventory_priority import priority_field_coverage
+    priority_coverage = priority_field_coverage(catalog['markers'], rows, candidates)
     sources = {
+        'cancerbot_destination_routes': {'coverage': destination_crosswalk['status'],
+                                        'counts': destination_crosswalk.get('counts', {})},
+        'cancerbot_history': {'coverage': source_history['status'], 'counts': source_history.get('counts', {})},
+        'priority_fields': {'total_fields': priority_coverage['total_fields'], 'counts': priority_coverage['counts']},
+        'base_descriptors': {'coverage': descriptor_source['status'], 'option_rows': len(descriptor_rows)},
         'promop_reference': {'coverage': 'exported', 'tables': {k: len(v) for k, v in tables.items()}},
         'cancerbot_public_lists': {'coverage': ('source_membership_accounted_for' if source['bindings'] and not missing_lists and not therapy_coverage['context_pending_lists'] else 'partial'),
                                  'by_provider': dict(sorted(Counter(b['coverage'] for b in source['bindings']).items())),
                                  'missing_live_lists': missing_lists, 'live_metadata': live_metadata},
         'frontend': {'coverage': 'partial', 'controls': len(frontend['controls']),
-                     'unresolved_constants': frontend['unresolved'],
-                     'dynamic_controls': [c for c in frontend['controls'] if c['expression'] and c['options'] is None and c['constant'] not in {r['name'] for r in frontend['constants']}]},
+                     'unresolved_constants': [c for c in frontend['unresolved'] if not c.get('provider_resolution')],
+                     'dynamic_controls': [c for c in frontend['controls'] if c['expression'] and c['options'] is None and not c.get('provider_resolution') and c['constant'] not in {r['name'] for r in frontend['constants']}]},
     }
+    if (not sources['frontend']['unresolved_constants'] and not sources['frontend']['dynamic_controls']
+            and descriptor_source['status'] == 'base_descriptors_captured'):
+        sources['frontend']['coverage'] = 'source_providers_accounted_for'
     release_tables = connection.introspection.table_names()
     releases = {t: read_table(t, RELEASE_COLUMNS) if t in release_tables else None
                 for t in ('vocabulary_release', 'vocab_release')}
@@ -308,6 +372,11 @@ def build_inventory(root, cancerbot_root, frontend, live_export=None, search=Fal
              'omop_core/services/field_descriptor.py', 'omop_core/services/provenance_registry.py',
              'omop_core/services/field_inventory.py',
              'omop_core/services/cancerbot_static_options.py',
+             'omop_core/services/field_inventory_frontend.py', 'omop_core/data/field_inventory_frontend_providers.json',
+             'omop_core/services/field_inventory_crosswalk.py',
+             'omop_core/services/field_inventory_history.py',
+             'omop_core/services/field_inventory_priority.py',
+             'omop_core/services/demographics.py', 'omop_core/services/treatment_catalog.py',
              'omop_core/services/cancerbot_reference_options.py',
              'omop_core/management/commands/export_cancerbot_reference_options.py',
              'omop_core/management/commands/import_field_inventory_reference_options.py',
@@ -316,8 +385,8 @@ def build_inventory(root, cancerbot_root, frontend, live_export=None, search=Fal
              'omop_core/data/genomics_catalog_v1.json', 'omop_core/services/genomics_catalog.py', *frontend['files']]
     limitations = [
         f'CancerBot: {len(missing_lists)} public lists lack reference coverage; {len(therapy_coverage["context_pending_lists"])} planned lists lack source eligibility coverage. Reference membership is distinct from destination and clinical mapping approval.',
-        'CancerBot seed/migration retirement history and source-to-destination crosswalk still require reconciliation.',
-        'Dynamic frontend expressions and dependent genetics lists require explicit provider reconciliation; see source_coverage.',
+        'CancerBot source routes are recorded separately from immutable source context; missing destinations and clinical equivalence remain review items. Seed/migration retirement history still requires reconciliation.',
+        f"Frontend: {len(sources['frontend']['dynamic_controls'])} controls and {len(sources['frontend']['unresolved_constants'])} constants lack provider accounting. Descriptor source: {descriptor_source['status']}. Source routing does not certify destination semantics.",
         'Reference catalogs preserve codes, links and destination candidates; unresolved destination/context is never inferred from labels.',
         'Exact labels and synonyms are lexical evidence only; case-sensitive search is not exhaustive and no-equivalent requires separate review.',
         'Existing approved statuses are preserved; candidate semantic meaning, destination domains and vocabulary lineage still require review.',
@@ -328,10 +397,14 @@ def build_inventory(root, cancerbot_root, frontend, live_export=None, search=Fal
         'schema_version': SCHEMA_VERSION, 'generated_at': now.isoformat(), 'complete': False,
         'scope': 'Reference data and source schema only; no patient values or identity tables queried.',
         'source_revisions': {'promop': source_revision(root, paths),
-            'cancerbot': source_revision(cancerbot_root, ['trials/services/value_options.py']) if cancerbot_root else None},
+            'cancerbot': source_revision(cancerbot_root, [p for p in CROSSWALK_SOURCES if (cancerbot_root / p).is_file()]) if cancerbot_root else None},
         'rows': sorted(rows, key=lambda r: (r['source'], r['option_list'], r['id'])),
         'totals': coverage(rows, sources), 'limitations': limitations,
         'reference_tables': tables, 'cancerbot_bindings': source['bindings'], 'frontend': frontend,
+        'base_descriptors': descriptor_source,
+        'destination_crosswalk': destination_crosswalk,
+        'source_history': source_history,
+        'priority_field_coverage': priority_coverage,
         'therapy_source_coverage': therapy_coverage,
         'candidates': {str(k): v for k, v in sorted(candidates.items())}, 'maps_to': relationships,
         'vocabulary_metadata': vocabularies, 'vocabulary_releases': releases,
