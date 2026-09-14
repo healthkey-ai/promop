@@ -1,6 +1,6 @@
 # PRomop Genomics: Implementation Plan
 
-Current baseline: `dev` at `4302c97`, including merged [#1249](https://github.com/healthkey-ai/promop/pull/1249), [#1259](https://github.com/healthkey-ai/promop/pull/1259) and [schema audit #1263](https://github.com/healthkey-ai/promop/pull/1263). Updated 2026-09-14 with the reviewed PALB2 implementation below. The [implemented architecture](genomics_architecture.md) describes runtime behavior; this plan records delivery status, remaining requirements and acceptance criteria. The supplied Word documents are retained as requirements through these two canonical documents.
+The implemented baseline includes [#1249](https://github.com/healthkey-ai/promop/pull/1249), [#1259](https://github.com/healthkey-ai/promop/pull/1259), [schema audit #1263](https://github.com/healthkey-ai/promop/pull/1263), [PALB2 naming #1281](https://github.com/healthkey-ai/promop/pull/1281), and [project compatibility #1294](https://github.com/healthkey-ai/promop/pull/1294). Updated 2026-09-14 with writer-prerequisite verification below. The [implemented architecture](genomics_architecture.md) describes runtime behavior; this plan records delivery status, remaining requirements and acceptance criteria. The supplied Word documents are retained as requirements through these two canonical documents.
 
 ## Delivery status
 
@@ -8,6 +8,7 @@ Current baseline: `dev` at `4302c97`, including merged [#1249](https://github.co
 | --- | --- | --- |
 | Owned NOTE references and bounded projection reads | [#1236](https://github.com/healthkey-ai/promop/issues/1236) | Closed; merged in #1249 |
 | Shared text-column schema reconciliation | [#1237](https://github.com/healthkey-ai/promop/issues/1237) | Open; read-only audit merged in #1263; both active Render databases have narrow columns and zero overflow; Cloud Run verification remains; no current width remediation indicated |
+| Writer mapping/concept prerequisite audit | [#1300](https://github.com/healthkey-ai/promop/issues/1300) | Implemented; explicit audit option covers 42 parent mappings and required concepts; deployment runs remain |
 | Complete component/curation registry | [#1238](https://github.com/healthkey-ai/promop/issues/1238) | Closed; merged in #1249 |
 | Portable variant-name recipe and conclusive domain audit | [#1239](https://github.com/healthkey-ai/promop/issues/1239) | Closed; merged in #1249; installed-vocabulary audits remain an operational requirement |
 | Effective finding state and shared dialog | [#1240](https://github.com/healthkey-ai/promop/issues/1240) | Core implementation merged in #1249; clinical applicability, TP53/del(17p) aggregation and consumer review remain |
@@ -50,7 +51,9 @@ The 2026-09-14 07:09 UTC read-only staging component audit passed: 17 resolved s
 
 Render production `promop-db` passed the width audit but could not run the component audit because it lacks `field_concept_mapping.provenance`. [#1286](https://github.com/healthkey-ai/promop/issues/1286) tracks that migration prerequisite and verification before enabling the current genomics writer there. Its metadata reports LOINC 2.82 and `v5.0 29-AUG-26`. The unused legacy Render deployment is outside this work. Cloud Run staging's mapping/vocabulary readiness remains to be verified against its own database. No live database, mapping or vocabulary changes were made during these audits.
 
-For each deployment, run `audit_genomics_domains` after vocabulary loading and retain its output with the vocabulary version. Resolve incomplete/ambiguous codes and table/domain mismatches through field-mapping curation, retaining source/value/unit settings. Rerun until verified. Curation changes future writes; moving existing clinical facts between tables requires a separately reviewed repair.
+For each deployment, run `audit_genomics_domains --include-writer-prerequisites` after vocabulary loading and retain its output with the vocabulary version. The new option also checks all 42 effective priority parent recipes, active concept 0, the default clinical/service (32817) and patient/representative (32865) actor concepts, and the same CDM event identity used by the writer. Missing/rejected/incomplete parent recipes, non-Measurement parents and missing/retired required concepts fail the combined audit. Without the option, the command retains its component-only scope. Existing deployment receipts above predate this option and do not establish writer prerequisites. Resolve incomplete/ambiguous codes and table/domain mismatches through field-mapping curation, retaining source/value/unit settings. Rerun until verified. Curation changes future writes; moving existing clinical facts between tables requires a separately reviewed repair.
+
+The prerequisite check performs metadata reads only and does not certify database permissions, sequences, schema completeness, custom service type IDs, every possible write payload, clinical semantics or a deployment. Parent concept 0 remains supported when the installed standard concept is in Observation or no usable Measurement concept exists; source identity is retained. Complete the width audit and deployment migration checks separately. #1286 stays open until the required deployment evidence exists.
 
 Retain independent transcript DNA change (48004-6), genomic DNA change (81290-9), protein change (48005-3), protein change type (48006-1), and raw variant text. Coverage depth (82121-5) currently belongs to each finding; source granularity remains to be agreed. Clone fraction has a local numeric recipe, independent of VAF. Obtain the source's actual status answer set for 69548-6. Retain chromosome 48000-4 rather than substituting the supplied 73822-9 identifier.
 
@@ -61,7 +64,7 @@ Effective state, contradiction rejection, inherited-component clearing, unknown 
 Remaining decisions and implementation:
 
 - Agree marker-specific absence and no-call/not-tested/below-threshold semantics, including clone-fraction applicability. Review the complete absent-component matrix rather than assuming one gene-negative result establishes structural absence.
-- Define evidence-aware TP53/del(17p) aggregation. The current legacy aggregate still returns false without qualifying evidence, including an empty record; it is not yet an evidence-aware unknown/negative contract.
+- Define evidence-aware TP53/del(17p) aggregation. The current legacy aggregate still returns false without qualifying evidence, including an empty record. [PR #1297](https://github.com/healthkey-ai/promop/pull/1297) separately implements an approved true/unknown correction and remains in progress at this update; do not duplicate that work or treat it as approval of negative-result or del(17p) rules.
 - Inventory and update downstream trial/eligibility consumers against the agreed contract. Validate absent, indeterminate, no-evidence and contradictory-source cases before closing #1240.
 
 Do not add clinical thresholds or activate complex-karyotype derivation before review. Retain existing assertions, source wording and superseded history through any approved transition.
