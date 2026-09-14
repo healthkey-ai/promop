@@ -82,8 +82,14 @@ def request_password_reset(request):
 
     success_msg = {'detail': 'If an account exists with that email, a reset link has been sent.'}
     try:
-        identity = Identity.objects.get(email__iexact=email)
+        # Email is not globally unique: a local login and federated identities
+        # can legitimately share it. Match the email/password login account.
+        identity = Identity.objects.get(email__iexact=email, issuer='urn:local', is_active=True)
     except Identity.DoesNotExist:
+        return Response(success_msg)
+    except Identity.MultipleObjectsReturned:
+        # Never choose an arbitrary account when local identities are ambiguous.
+        logger.warning('Password reset skipped: multiple active local identities match.')
         return Response(success_msg)
 
     if not identity.has_usable_password():
