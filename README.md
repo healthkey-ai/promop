@@ -9,6 +9,8 @@ Deployed across approximately 17,500 real oncology patients, with trial matching
 
 See [paper.md](paper.md) for the full research description.
 
+**Architecture and documentation:** [Read the overview](docs/README.md) for the data flow, current contracts, and a guided route through the documentation.
+
 **New here?** → [**Load and query patient data in 10 minutes**](docs/quickstart.md)
 
 Not on a Mac? See the [Linux setup guide](docs/linux-setup.md). Prefer Docker? See [BUILDING_WITH_DOCKER.md](BUILDING_WITH_DOCKER.md).
@@ -188,7 +190,7 @@ PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U postgres -d template1 \
 
 ## Populating Sample Patient Data
 
-See [docs/sample-patient-data.md](docs/sample-patient-data.md) for instructions on generating and loading synthetic FHIR patient bundles for multiple disease types.
+See [Synthetic patient generation](SYNTHETIC_PATIENT_GENERATION.md) for instructions on generating and loading synthetic FHIR patient bundles for multiple disease types.
 
 ---
 

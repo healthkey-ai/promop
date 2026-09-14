@@ -11,12 +11,13 @@ concurrency:
 
 jobs:
   changes:
-    name: Detect async e2e changes
+    name: Detect CI changes
     runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
       async_e2e: ${{ steps.filter.outputs.async_e2e }}
+      docs_only: ${{ steps.filter.outputs.docs_only }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -29,6 +30,11 @@ jobs:
 
   backend:
     name: Backend tests
+    needs: changes
+    # A skipped job satisfies its required check. Detection errors run full CI.
+    if: >-
+      !cancelled() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true')
     runs-on: ubuntu-latest
 
     services:
@@ -170,6 +176,11 @@ jobs:
 
   frontend:
     name: Frontend lint & build
+    needs: changes
+    # A skipped job satisfies its required check. Detection errors run full CI.
+    if: >-
+      !cancelled() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true')
     runs-on: ubuntu-latest
 
     steps:
@@ -199,6 +210,11 @@ jobs:
 
   security:
     name: Security gates
+    needs: changes
+    # A skipped job satisfies its required check. Detection errors run full CI.
+    if: >-
+      !cancelled() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true')
     runs-on: ubuntu-latest
 
     steps:

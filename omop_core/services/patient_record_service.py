@@ -255,10 +255,10 @@ PATIENT_RECORD_OMOP_MAPPED_FIELDS = frozenset(_OMOP_DERIVED_FIELDS) | frozenset(
     'measurable_disease_imwg', 'measurable_disease_iwcll',
     'protein_expressions', 'richter_transformation', 'tobacco_use_details',
     'tp53_disruption',
-    # These are clinical projection columns whose OMOP derivation is still
-    # pending. They are deliberately API read-only now: allowing a temporary
-    # PatientRecord PATCH would create a second clinical write authority and
-    # make later re-derivation ambiguous. See docs/omop_to_patientrecord.md.
+    # These clinical projection columns include pending OMOP derivations.
+    # API editability is determined by the write descriptor; this registry
+    # records derivation coverage. See field_to_concept_mapping.md and
+    # docs/patient-record-first-writes.md.
     'no_other_active_malignancies', 'preexisting_conditions', 'myeloma_type',
     'progression', 'condition_code_icd_10', 'condition_code_snomed_ct',
     'supportive_therapies', 'supportive_therapy_date',

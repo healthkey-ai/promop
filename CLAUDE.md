@@ -416,11 +416,11 @@ without anyone noticing.
 
 ### Rule: Run Tests Before Every Push
 
-**Always run both test suites before pushing to any branch.** Do not push if any test is failing.
+**For changes to code, tests, configuration, dependencies or runtime data, run both test suites before pushing.** Do not push if any test is failing. Documentation-only changes follow the exception in `AGENTS.md`: review content, links and `git diff --check`; application suites are not required.
 
 ### Rule: Run Full Backend Test Suite After Every PR Merge into `dev`
 
-After merging any PR into `dev`, immediately run the full backend test suite against the **local test database** (`promop_test`) to catch any integration regressions:
+After merging a PR that changes code, tests, configuration, dependencies or runtime data into `dev`, immediately run the full backend test suite against the **local test database** (`promop_test`) to catch any integration regressions:
 
 ```bash
 DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" \
