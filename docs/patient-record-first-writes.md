@@ -1,7 +1,6 @@
 # PatientRecord-First Write Architecture
 
-This is the current architecture, superseding the historical
-[`writable-ui-plan.md`](writable-ui-plan.md). UI edits save to PatientRecord;
+This is the current architecture for interactive edits. UI edits save to PatientRecord;
 OMOP-derived values are not read-only merely because they were imported.
 Explicit computations such as BMI remain read-only for authorized editors.
 

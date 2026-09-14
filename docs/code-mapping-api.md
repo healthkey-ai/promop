@@ -116,6 +116,16 @@ Mapping UI. Approval makes the row effective and can re-point already stored
 clinical rows; that governed decision is why importers must never promote a
 proposal themselves.
 
+### Why curation lives in SCCM
+
+SCCM can represent uncoded source text without requiring a source Concept, and
+stores review state, provenance, and encounter counts independently of Athena
+vocabulary releases. `ConceptRelationship` remains the vocabulary graph; it
+cannot substitute for a source-code curation record. See the
+[architecture record](superpowers/plans/2026-08-30-code-mapping-direction.md) for
+source/destination design rationale and [semantic retrieval](semantic-retrieval.md)
+for the maintained suggestion pipeline and embedding setup.
+
 ### Live Suggest candidates
 
 The main mapping page requests `include_activity: true` when posting to
