@@ -142,8 +142,11 @@ Track in #236 and the ADR update issues.
 
 ### 3. Ratify ADR 0001
 
-ADR 0001 still needs to match the implemented direction: release-pinned vocabulary mirror,
-not ad hoc API result caching. Track in #337 and #254.
+The [revised ADR 0001](adr/0001-vocabulary-source-of-truth.md) records the
+release-pinned mirror direction requested by #337. Shared ratification remains
+#254. Current vocabulary and therapy-consumer delivery tracking lives in the
+[field/value mapping plan](../field_concept_mapping_plan.md#vocabulary-distribution-and-mapping-provenance);
+this roadmap retains the wider HemOnc program context.
 
 ### 4. Graph-Based Regimen Resolution
 
@@ -198,7 +201,7 @@ outside PROMOP and should be tracked in the consumer repos.
 | #252 | Open | Coded intent + discontinuation reason |
 | #253 | Open | Coded treatment outcomes |
 | #254 | Open | Ratify ADR 0001 |
-| #337 | Open | Rewrite ADR 0001 around release-pinned mirror |
+| #337 | Rewrite documented | Release-pinned mirror decision recorded; ratification remains #254 |
 
 ## Retired From The Roadmap
 

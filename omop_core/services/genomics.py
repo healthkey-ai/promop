@@ -71,6 +71,10 @@ def normalize_variant(payload, existing=None):
                 or payload[key] != 'asserted' or existing.get(key) != 'asserted'):
             raise ValidationError({key: 'Read-only projection metadata; derived findings cannot be written.'})
         payload.pop(key)
+    if 'source_gene' in payload:
+        if not existing or payload['source_gene'] != existing.get('source_gene'):
+            raise ValidationError({'source_gene': 'Read-only original gene text.'})
+        payload.pop('source_gene')
     allowed = set(FIELDS) | {'id', 'variant', 'mutation', 'test_date', 'assay_method', 'allelic_frequency_unit', 'clone_fraction_unit', 'marker_key'}
     unknown = set(payload) - allowed
     if unknown:
@@ -91,6 +95,10 @@ def normalize_variant(payload, existing=None):
         if len(data[key]) > 10000:
             raise ValidationError({key: 'Use at most 10000 characters.'})
     data['gene'] = data['gene'].upper()
+    if data['gene'] == 'PALB1':
+        data['gene'] = 'PALB2'
+    if data.get('marker_key') == 'palb1':
+        data['marker_key'] = 'palb2'
     if not data['gene'] or len(data['gene']) > 50:
         raise ValidationError({'gene': 'Enter a gene symbol (at most 50 characters).'})
     # A gene-only result is allowed (e.g. a test with no specific variant).
@@ -458,7 +466,8 @@ def replace_variants(person, payload, type_concept_id=32817):
 def replace_priority_fields(person, values, type_concept_id=32817):
     """PatientRecord edits replace only the named marker's list of findings."""
     PatientRecord.objects.select_for_update().get(person=person)
-    for field, rows in values.items():
+    from omop_core.services.genomics_catalog import canonicalize_fields
+    for field, rows in canonicalize_fields(values).items():
         marker = patient_fields()[field]
         approved_mapping(field)
         if not isinstance(rows, list):
@@ -471,6 +480,9 @@ def replace_priority_fields(person, values, type_concept_id=32817):
             variant_id = row.get('id')
             if variant_id is not None and (isinstance(variant_id, bool) or not isinstance(variant_id, int) or variant_id not in before or variant_id in keep):
                 raise ValidationError({field: 'Finding ID must belong to this marker and patient, without duplicates.'})
+            if variant_id is not None and row == before[variant_id]:
+                keep.add(variant_id)
+                continue
             result = save_variant(person, {**row, 'gene': row.get('gene') or marker['gene'], 'marker_key': marker['key']}, variant_id, type_concept_id)
             keep.add(result['id'])
         for variant_id in before.keys() - keep:

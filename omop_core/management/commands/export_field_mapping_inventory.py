@@ -278,13 +278,15 @@ def build_inventory(root, cancerbot_root, frontend, live_export=None, search=Fal
             if b['coverage'] == 'staging_catalog_available_context_pending']
         rows += live_rows
         live_metadata = {k: v for k, v in payload.items() if k != 'options'}
-    catalog = json.loads((root / 'omop_core/data/genomics_catalog_v1.json').read_text())
+    from omop_core.services.genomics_catalog import catalog as effective_catalog
+    catalog = effective_catalog()
     for marker in catalog['markers']:
         rows.append(inventory_row('genomics_catalog', 'markers', marker['key'], marker['label'],
             field=marker['field_name'], value=marker['gene'], aliases=marker['aliases'], role='reference',
             scope={'diseases': marker['diseases']}, disposition='requires_structured_representation',
-            reason='Frozen marker catalog; use structured finding/components.', owner='#1229',
-            evidence=[{'catalog_version': catalog['version'], 'source_commit': catalog['source_commit']}]))
+            reason='Versioned marker catalog; use structured finding/components.', owner='#1229',
+            evidence=[{'catalog_version': catalog['version'], 'source_commit': catalog['source_commit'],
+                       'naming_decision': catalog['naming_decision']}]))
     candidates = attach_candidates(rows, vocabularies, now.date())
     if search:
         search_candidates(rows, candidates, vocabularies, now.date())
@@ -307,7 +309,7 @@ def build_inventory(root, cancerbot_root, frontend, live_export=None, search=Fal
              'omop_core/services/field_inventory.py',
              'omop_core/management/commands/export_field_mapping_inventory.py',
              'scripts/inventory-frontend-options.cjs',
-             'omop_core/data/genomics_catalog_v1.json', *frontend['files']]
+             'omop_core/data/genomics_catalog_v1.json', 'omop_core/services/genomics_catalog.py', *frontend['files']]
     limitations = [
         f'CancerBot: {len(missing_lists)} public lists need further source/provider reconciliation; database-driven lists need live reference coverage. Therapy catalogs/disease links use authoritative staging exports; literal lists and planned picker context are tracked separately.',
         'CancerBot seed/migration retirement history and source-to-destination crosswalk still require reconciliation.',

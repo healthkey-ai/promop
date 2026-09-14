@@ -81,11 +81,12 @@ logger = logging.getLogger(__name__)
 # KNOWN DEFECT, deliberately not fixed here: the four response codes are
 # semantically wrong. SNOMED 182840001-182843004 mean "Drug treatment stopped -
 # medical advice / ineffective / side effect / inconvenient", not Complete /
-# Partial / Progressive / Stable response. They are left in place because six
+# Partial / Progressive / Stable response. They are left in place because five
 # consumers read them (views.py, episode_service, patient_record_service,
-# bulk_import_fhir_bundle, fill_org_analytics_gaps, field_to_concept_mapping.md) and
+# bulk_import_fhir_bundle, fill_org_analytics_gaps) and
 # because the correct fix is per-disease outcome value sets, not a like-for-like
-# swap: of the five diseases supported here only breast cancer uses RECIST.
+# swap (tracked in field_concept_mapping_plan.md): of the five diseases
+# supported here only breast cancer uses RECIST.
 # Lymphoma uses Lugano, myeloma IMWG, CLL iwCLL — and IMWG's VGPR/sCR and
 # iwCLL's CRi/PR-L have no RECIST equivalent, so one four-value set cannot
 # express them. Tracked separately; see the hemonc roadmap's P5.

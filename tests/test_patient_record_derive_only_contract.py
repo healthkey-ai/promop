@@ -42,7 +42,7 @@ def test_public_contract_documents_patient_record_first_writes_and_legacy_policy
     api_surface = (REPOSITORY_ROOT / "API_SURFACE.md").read_text()
 
     assert "docs/patient-record-first-writes.md" in api_surface
-    assert "field_to_concept_mapping.md" in api_surface
+    assert "field_concept_mapping_architecture.md" in api_surface
     assert "PATCH /api/v1/patient-records/{person_id}/" in api_surface
     assert "Legacy SQL compatibility only:" in api_surface
     assert "New integrations must not query it" in api_surface

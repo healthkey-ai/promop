@@ -7,9 +7,10 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.db.models import Q
 
-from omop_core.models import FieldConceptMapping, Measurement, Observation, PatientRecord, ProcedureOccurrence
+from omop_core.models import FieldConceptMapping, Measurement, Observation, PatientRecord, ProcedureOccurrence, ConditionOccurrence
 from omop_core.services.flipi import calculate_flipi
 from omop_core.services.pk import next_pk_batch
+from omop_core.services.write_descriptor import mapping_target_for
 from omop_core.services.sample_disease_profiles import (
     PREFIX, PROFILE_FIELDS, PROFILE_UNITS, missing, profile_values, recover_sample_source_fields,
 )
@@ -44,7 +45,7 @@ class Command(BaseCommand):
         ids = list(PatientRecord.objects.filter(scope).order_by('pk').values_list('pk', flat=True))
         if options['limit']: ids = ids[:options['limit']]
         mapping_rows = FieldConceptMapping.objects.filter(status='approved', field_name__in=PROFILE_FIELDS).exclude(field_name='cytogenetic_markers', vocabulary_id='SNOMED', concept_code='107675007').select_related('concept')
-        mappings = {m.field_name: m for m in mapping_rows if m.omop_table in {'measurement', 'observation'} and m.concept_id}
+        mappings = {m.field_name: m for m in mapping_rows if mapping_target_for(m.omop_table) in {'measurement', 'observation'} and m.concept_id}
         fields = {f.name: f for f in PatientRecord._meta.fields}
         counts = Counter()
         self.stdout.write(f'{"Previewing" if dry else "Applying"} disease profiles for {len(ids)} sample patients')
@@ -62,6 +63,7 @@ class Command(BaseCommand):
                 transplants = {}
                 for proc in ProcedureOccurrence.objects.filter(person_id__in=people, is_erroneous=False).filter(Q(procedure_source_value='58336002') | Q(procedure_concept__concept_code='58336002')).order_by('-procedure_date', '-pk'):
                     transplants.setdefault(proc.person_id, proc.procedure_date)
+                documented_mm = set(ConditionOccurrence.objects.filter(person_id__in=people, is_erroneous=False, condition_concept__concept_name__icontains='myeloma').values_list('person_id', flat=True))
                 creates = {Measurement: [], Observation: []}
                 changed_records, changed_fields = [], set()
                 for record in records:
@@ -71,6 +73,9 @@ class Command(BaseCommand):
                         continue
                     prior = {field: getattr(record, field) for field in PROFILE_FIELDS}
                     prior['stage'] = record.stage
+                    prior['disease'], prior['disease_slug'] = record.disease, record.disease_slug
+                    if disease == 'MM' and record.person_id in documented_mm and 'screening' in (record.disease or '').lower() and 'disease' not in (record.user_edited_fields or []):
+                        record.disease, record.disease_slug = 'Multiple Myeloma', 'multiple-myeloma'
                     protected = set(record.user_edited_fields or [])
                     recovered = recover_sample_source_fields(record, rows[record.person_id], disease)
                     if disease == 'MM' and record.person_id in transplants:
@@ -90,13 +95,15 @@ class Command(BaseCommand):
                     # previously unreadable legacy values durable under a valid local key.
                     for field, value in delta.items():
                         counts[f'{disease}:{field}'] += 1
-                        if field == 'stage': continue
+                        if field in {'stage', 'disease', 'disease_slug'}: continue
                         mapping = mappings.get(field)
                         kind = fields[field].get_internal_type()
-                        target = mapping.omop_table if mapping else ('measurement' if kind in {'DecimalField', 'FloatField', 'IntegerField', 'PositiveIntegerField', 'PositiveSmallIntegerField'} else 'observation')
+                        target = mapping_target_for(mapping.omop_table) if mapping else ('measurement' if kind in {'DecimalField', 'FloatField', 'IntegerField', 'PositiveIntegerField', 'PositiveSmallIntegerField'} else 'observation')
                         model = Measurement if target == 'measurement' else Observation
                         numeric = kind in {'DecimalField', 'FloatField', 'IntegerField', 'PositiveIntegerField', 'PositiveSmallIntegerField', 'BooleanField'}
                         text_value = None if numeric else json.dumps(value) if kind == 'JSONField' else str(value)
+                        if kind == 'JSONField' and mapping and mapping.value_kind != 'json':
+                            text_value = ','.join(str(v) for v in value)
                         if text_value is not None and len(text_value) > model._meta.get_field('value_as_string').max_length:
                             raise CommandError(f'{field} exceeds OMOP scalar width; refusing to truncate.')
                         source = (mapping.source_value or mapping.concept.concept_code) if mapping else PREFIX+field

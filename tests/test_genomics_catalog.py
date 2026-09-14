@@ -18,7 +18,7 @@ def client_for(staff):
 
 
 @pytest.mark.parametrize('disease,expected', [
-    ('BC', {'brca1', 'brca2', 'pik3ca', 'tp53', 'esr1', 'palb1'}),
+    ('BC', {'brca1', 'brca2', 'pik3ca', 'tp53', 'esr1', 'palb2'}),
     ('FL', {'bcl2', 'ezh2', 'kmt2d', 'crebbp', 'bcl6'}),
     ('MM', {'tp53', 'kras', 'nras', 'braf', 'del17p', 't414', 't1114', 'gain1q'}),
     ('MCL', {'tp53', 'notch1', 'notch2', 'nsd2', 'ccnd1', 'bcl2_amplification'}),

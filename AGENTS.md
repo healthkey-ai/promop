@@ -27,3 +27,11 @@
   data and continue to require CI.
 - Unrecognized paths, an unavailable diff, or detector failure retain normal CI.
   GitHub-managed CodeQL scanning is separate from the application CI workflow.
+
+## Documentation naming and ownership
+
+- Use `_architecture.md` for implemented architecture and `_plan.md` for future
+  work, delivery status, dependencies and acceptance gates.
+- Keep field/value inventories in generated reference artifacts. Architecture
+  documents explain behavior; plans link to inventory evidence instead of
+  duplicating per-field tables or deployment receipts.
