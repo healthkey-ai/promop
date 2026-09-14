@@ -19,8 +19,23 @@ from corsheaders.defaults import default_headers
 from promop.frontend_paths import resolve_frontend_root
 from promop.sentry import init_sentry
 
-# Load environment variables from .env file (for local development)
-load_dotenv()
+
+def _env_bool(name, default=False):
+    return os.environ.get(name, str(default)).strip().lower() in ('1', 'true', 'yes')
+
+
+def _env_list(name, default=''):
+    return [value.strip() for value in os.environ.get(name, default).split(',') if value.strip()]
+
+
+# Load environment variables from .env file (for local development).
+# python-dotenv honours PYTHON_DOTENV_DISABLED itself from 1.2.0 on, and we pin
+# 1.2.2, but this check still earns its place: the two truthy sets overlap
+# rather than nest — upstream casefolds without stripping, we strip — so a
+# padded " 1 " is disabled by this line and by nothing else, as is any value
+# on a pre-1.2.0 install.
+if not _env_bool('PYTHON_DOTENV_DISABLED'):
+    load_dotenv()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -35,14 +50,6 @@ SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-your-default-key-chan
 
 # DEBUG controls diagnostics, not the security defaults below.
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
-
-
-def _env_bool(name, default=False):
-    return os.environ.get(name, str(default)).strip().lower() in ('1', 'true', 'yes')
-
-
-def _env_list(name, default=''):
-    return [value.strip() for value in os.environ.get(name, default).split(',') if value.strip()]
 
 
 # Render workers lack a public URL, but receive RENDER=true. Other platforms
