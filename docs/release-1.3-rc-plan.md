@@ -137,12 +137,35 @@ critical path. Keep their existing issues open.
 | --- | --- |
 | Supported release scope | PHR federation included by release-owner instruction on 2026-09-14. Confirmed mapping corrections included; broader coded-value interoperability deferred by release-owner instruction on 2026-09-14. |
 | Candidate branch and SHA | Pending |
-| Priority fixes and PRs | Breast mapping corrections belong to the separate `feat/field-value-concept-mappings` workstream; do not duplicate or close its parent issues. Unit normalization: [PR #1289](https://github.com/healthkey-ai/promop/pull/1289), merged to dev as `05cc776b7b7bc2296006994055ed8295cf5c2485` after all required CI passed. Browser auth: [PR #1216](https://github.com/healthkey-ai/promop/pull/1216), head `2a850b249b19df4e9ecce052c2d4e911f2395a6c`, conflicts resolved against dev `7a9e808`; integration CI pending. Disease work merged through #1267 and #1280; Render coverage evidence still required. |
-| Remaining known limitations | Vlad owns PHR audience claims ([phr#65](https://github.com/healthkey-ai/phr/issues/65)) and verified-email evidence ([phr#66](https://github.com/healthkey-ai/phr/issues/66)); both are required gates. Local unpublished prototypes are paused and are not delivery evidence. TP53/del(17p) evidence semantics and downstream-consumer agreement remain open. Genomics upgrade prerequisites in [#1286](https://github.com/healthkey-ai/promop/issues/1286) and NOTE integrity remain open. |
-| CI and migration evidence | #1289 local: 2,531 pytest passed, five skipped; Django 2,000 tests OK, one skipped; fresh migrations passed. #1216 after dev merge: 588 frontend passed, four skipped; lint/build passed; 50 auth/service-identity and 27 PHR/security tests passed. These are branch checks, not exact-candidate release certification. |
-| Render deployment and smoke evidence | Read-only unit audit at 2026-09-14 07:20 UTC: 1,000 latest ANC and 1,000 latest platelet rows lack source units/UCUM evidence and would become unknown under #1289; no pending canonical edits in that scope. No backfill performed; do not infer units. Exact-candidate deployment, login/federation, edit, import and worker smoke checks remain pending. |
+| Priority fixes and PRs | Breast mapping corrections belong to the separate `feat/field-value-concept-mappings` workstream; do not duplicate or close its parent issues. Unit normalization: [PR #1289](https://github.com/healthkey-ai/promop/pull/1289), merged to dev as `05cc776b7b7bc2296006994055ed8295cf5c2485` after all required CI passed. Browser auth: [PR #1216](https://github.com/healthkey-ai/promop/pull/1216), merged after required CI passed as `2951caf82e57c8ad9ecdaeadd4161a891ded2c48`; Render login/logout acceptance pending. Disease work merged through #1267 and #1280; read-only Render coverage and consistency verification passed on 2026-09-14. |
+| Remaining known limitations | Vlad owns PHR audience claims ([phr#65](https://github.com/healthkey-ai/phr/issues/65)) and verified-email evidence ([phr#66](https://github.com/healthkey-ai/phr/issues/66)); both are required gates. Local unpublished prototypes are paused and are not delivery evidence. Release owner approved a conservative TP53 unknown correction on 2026-09-14; [draft PR #1297](https://github.com/healthkey-ai/promop/pull/1297), commit `4278c3d`, passes 230 targeted tests; integration awaits #1296 and CI. Negative-result criteria, del(17p), source conflicts and downstream-consumer acceptance remain open. Genomics upgrade prerequisites in [#1286](https://github.com/healthkey-ai/promop/issues/1286) remain open. Render staging NOTE audit passed: 9,110 active and 11,956 retired legacy references, zero unresolved ownership/missing references; other supported deployments still need evidence. |
+| CI and migration evidence | #1289 local: 2,531 pytest passed, five skipped; Django 2,000 tests OK, one skipped; fresh migrations passed. #1216 after dev merge: 588 frontend passed, four skipped; lint/build passed; 50 auth/service-identity and 27 PHR/security tests passed. Integrated dev `2951caf`: 101 blood-count, edit, browser-auth and import regressions passed locally. TP53 correction: 230 derivation, canonical-state, API-null and provenance tests passed. These are branch checks, not exact-candidate release certification. |
+| Render deployment and smoke evidence | Read-only unit audit at 2026-09-14 07:20 UTC: 1,000 latest ANC and 1,000 latest platelet rows lack source units/UCUM evidence and would become unknown under #1289; no pending canonical edits in that scope. No backfill performed; do not infer units. Current rollout is blocked by independently introduced 0233 migration leaves; [repair #1296](https://github.com/healthkey-ai/promop/pull/1296) awaits CI. Web and worker deployment SHAs differ, so staging is not candidate-ready. Exact-candidate deployment, login/federation, edit, import and worker smoke checks remain pending. |
 | Final 1.3.0 release URL | Pending |
 
 - [ ] After the **final 1.3.0 release** ships, preserve useful evidence in the
   release notes/PR, transfer unfinished tasks to their issues, and **delete this
   temporary document and any links to it**.
+
+
+### Read-only Render acceptance evidence, 2026-09-14
+
+The disease-profile recheck found 1,000 records per synthetic cohort. FL had
+999 assessed FLIPI/GELF/grade/marrow profiles, preserving the one MCL exclusion;
+FLIPI arithmetic, GELF and marrow/stage consistency passed. MM had 1,000 myeloma
+types, kappa/lambda ratios and transplant-eligibility entries, 662 recorded
+transplant dates and 73 MRD entries. BC had 1,000 grade/menopause/ECOG entries,
+158 Oncotype results and three PD-L1 CPS/22C3 results; existing applicability
+checks passed. Non-sample profile fingerprints matched the preserved baseline.
+Presence counts do not establish clinical validity beyond the listed checks.
+
+The staging genomics NOTE audit at 08:23 UTC found 21,066 references with valid
+legacy ownership, including 9,110 active and 11,956 retired facts, with no missing
+or unresolved references. It checked table/fact ownership, patient, parent/event,
+date, uniqueness and legacy prefix encoding. No notes or source rows were changed.
+
+The TP53 cache-based impact estimate at 08:32 UTC found 3,000 stored false values
+would become unknown, with no qualifying positives in the cached findings and
+no pending edits on the aggregate/mutation inputs. This is not a source refresh.
+No rederivation/backfill was performed; versions 7 and 8 must be evaluated
+alongside their combined unit/disease effects before rollout.
