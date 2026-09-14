@@ -131,6 +131,6 @@ and are exposed through provider adapters; they are not recreated as flat enums.
 
 The [Genomics architecture](../genomics_architecture.md) owns finding parents,
 linked components and source-preserving storage. Its
-[implementation plan](../genomics_implementation.md#fieldvalue-mapping-coordination)
+[implementation plan](../genomics_plan.md#fieldvalue-mapping-coordination)
 owns recipe audits, catalog/value review and import provenance. This ADR neither
 flattens findings into answer labels nor changes their storage model.
