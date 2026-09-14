@@ -104,8 +104,3 @@
   from { opacity: 0; }
   to { opacity: 1; }
 }
-
-/* Full-height route screens account for the shared 6rem application masthead. */
-.app-page-content > .min-h-screen {
-  min-height: calc(100dvh - 6rem);
-}

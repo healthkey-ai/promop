@@ -1,3 +1,4 @@
+import PageTitle from '@/components/Branding/PageTitle';
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, Braces, ClipboardList, Database, FlaskConical } from 'lucide-react';
@@ -66,7 +67,7 @@ export default function MappingHubPage() {
   const stat = (content: ReactNode) => loading ? <span className="text-sm text-muted-foreground">Loading...</span> : content;
 
   return <div className="mx-auto max-w-7xl p-6">
-    <div className="mb-6 flex items-center gap-3"><button onClick={() => navigate('/')} className="rounded p-1 text-muted-foreground hover:bg-accent" aria-label="Back to patients"><ArrowLeft size={20} /></button><div><h1 className="text-2xl font-bold text-foreground">Mapping Administration</h1><p className="text-sm text-muted-foreground">See how clinical fields, source codes, and therapies connect to OMOP.</p></div></div>
+    <div className="mb-6 flex items-center gap-3"><button onClick={() => navigate('/')} className="rounded p-1 text-muted-foreground hover:bg-accent" aria-label="Back to patients"><ArrowLeft size={20} /></button><div><PageTitle className="text-2xl font-bold text-foreground">Mapping Administration</PageTitle><p className="text-sm text-muted-foreground">See how clinical fields, source codes, and therapies connect to OMOP.</p></div></div>
     {error && <div className="mb-4 rounded-md bg-destructive/10 p-4 text-sm text-destructive">{error}</div>}
     <div className="space-y-6">
       <button onClick={() => navigate('/field-mappings')} className={cardClass}><div className="flex flex-wrap items-start justify-between gap-4"><div className="flex items-center gap-3"><div className="rounded-lg bg-blue-50 p-2.5 text-blue-600"><Database size={22} /></div><div><h2 className="text-lg font-semibold text-foreground">Field Mapping</h2><p className="text-sm text-muted-foreground">Map PatientRecord fields to their OMOP destinations.</p></div></div>{stat(stats && <div className="flex gap-3 text-sm"><span>{stats.field_mappings.total} fields</span><span className="text-green-600">{stats.field_mappings.approved} approved</span><span className="text-amber-600">{stats.field_mappings.proposed} proposed</span><span className="text-gray-400">{stats.field_mappings.unmapped} unmapped</span></div>)}</div><FieldMappingDiagram /></button>
