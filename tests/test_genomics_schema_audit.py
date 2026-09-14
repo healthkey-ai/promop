@@ -176,3 +176,35 @@ def test_invalid_timeout_and_unknown_database_are_rejected(schema):
             command(statement_timeout_ms=timeout)
     with pytest.raises(CommandError, match='not configured'):
         command(database='not_configured')
+
+
+def test_row_security_cannot_silently_hide_overflow_from_counts(schema):
+    with connection.cursor() as cursor:
+        cursor.execute('SELECT rolsuper FROM pg_roles WHERE rolname = current_user')
+        if not cursor.fetchone()[0]:
+            pytest.skip('Creating an isolated restricted audit role requires the local/CI PostgreSQL superuser.')
+        role = sql.Identifier('genomics_auditor_' + uuid4().hex)
+        cursor.execute(sql.SQL('CREATE ROLE {} NOLOGIN NOBYPASSRLS').format(role))
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute('ALTER TABLE measurement ALTER COLUMN value_as_string TYPE text')
+            cursor.execute('INSERT INTO measurement VALUES (%s)', ['private overflow' * 10])
+            cursor.execute('ALTER TABLE measurement ENABLE ROW LEVEL SECURITY')
+            cursor.execute('CREATE POLICY hide_rows ON measurement USING (false)')
+            cursor.execute(sql.SQL('GRANT USAGE ON SCHEMA {} TO {}').format(sql.Identifier(schema), role))
+            cursor.execute(sql.SQL('GRANT SELECT ON ALL TABLES IN SCHEMA {} TO {}').format(sql.Identifier(schema), role))
+            cursor.execute(sql.SQL('SET ROLE {}').format(role))
+            cursor.execute('SELECT count(*) FROM measurement')
+            assert cursor.fetchone()[0] == 0  # A normal SELECT hides the overflow.
+        output = StringIO()
+        with pytest.raises(CommandError, match='audit incomplete'):
+            call_command('audit_genomics_schema', environment='test', stdout=output)
+        assert output.getvalue() == ''
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute('RESET ROLE')
+            cursor.execute(sql.SQL('DROP OWNED BY {}').format(role))
+            cursor.execute(sql.SQL('DROP ROLE {}').format(role))
+    with connection.cursor() as cursor:
+        cursor.execute('SELECT count(*) FROM measurement WHERE length(value_as_string) > 60')
+        assert cursor.fetchone()[0] == 1

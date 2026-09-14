@@ -24,6 +24,9 @@ def audit_schema(connection, *, statement_timeout_ms=30000):
         # Must precede every query, including metadata reads. The database
         # enforces read-only access and all counts share one consistent snapshot.
         cursor.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
+        # This does not bypass row security: PostgreSQL raises an error if a
+        # policy would filter the query. Never publish partial-table counts.
+        cursor.execute('SET LOCAL row_security = off')
         cursor.execute("SELECT set_config('statement_timeout', %s, true)", [str(statement_timeout_ms)])
         cursor.execute('SELECT CURRENT_TIMESTAMP')
         captured_at = cursor.fetchone()[0].isoformat()

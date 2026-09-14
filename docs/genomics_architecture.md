@@ -1,6 +1,6 @@
 # PRomop Genomics: Implemented Architecture
 
-As implemented on `dev` through `b8d0ef8` ([#1249](https://github.com/healthkey-ai/promop/pull/1249), [#1259](https://github.com/healthkey-ai/promop/pull/1259)), updated 2026-09-13 with the read-only schema audit below. Remaining requirements and deployment work are in [the implementation plan](genomics_implementation.md).
+As implemented on `dev` through `25133b7` ([#1249](https://github.com/healthkey-ai/promop/pull/1249), [#1259](https://github.com/healthkey-ai/promop/pull/1259)), updated 2026-09-14 with the read-only schema audit below. Remaining requirements and deployment work are in [the implementation plan](genomics_implementation.md).
 
 ## Storage decision
 
@@ -99,7 +99,7 @@ The field-provenance registry describes the general list and all 42 named lists 
 
 Both model `value_as_string` fields are `CharField(max_length=60)`. `0222_genomics_text_values` is a no-op on fresh installations. No implemented migration/backfill narrows a formerly widened database. A recorded migration name cannot reveal which historical contents of that edited migration ran.
 
-The [schema audit command](../omop_core/management/commands/audit_genomics_schema.py) reads the actual PostgreSQL column types, limits, total rows, counts exceeding 60 characters, maximum lengths and the recorded migration timestamp. It resolves the same tables as the application's search path and counts all shared facts, including non-genomics and erroneous rows. It does not retrieve patient IDs or source strings. One database-enforced read-only, repeatable-read transaction provides a consistent snapshot; each statement defaults to a 30-second timeout.
+The [schema audit command](../omop_core/management/commands/audit_genomics_schema.py) reads the actual PostgreSQL column types, limits, total rows, counts exceeding 60 characters, maximum lengths and the recorded migration timestamp. It resolves the same tables as the application's search path and counts all shared facts, including non-genomics and erroneous rows. It does not retrieve patient IDs or source strings. PostgreSQL rejects the audit if row-security policies would filter its counts; the command does not bypass those policies. One database-enforced read-only, repeatable-read transaction provides a consistent snapshot; each statement defaults to a 30-second timeout.
 
 In the intended deployment's configured shell, run:
 
@@ -111,7 +111,7 @@ python manage.py audit_genomics_schema --environment render-staging --check > ge
 
 The report uses `report_version: 1`. `columns_match` means both selected columns are exactly `varchar(60)`. With `--check`, a missing, unsupported, narrower or wider column exits nonzero after writing the diagnostic JSON. Without `--check`, completed mismatch reports return normally for inventory collection. Database failures/timeouts exit nonzero without a partial report; the error includes only the exception class. Operators can set `--statement-timeout-ms` from 1 to 300000 and rerun safely. The audit performs no schema repair or NOTE rewriting. Width verification does not certify NOTE ownership, vocabulary or historical migration operations; the report marks those limits explicitly.
 
-Observed Render staging evidence from [2026-09-13 16:00 UTC](https://github.com/healthkey-ai/promop/issues/1237#issuecomment-5654380575):
+Observed Render staging evidence from [2026-09-14 03:17 UTC](https://github.com/healthkey-ai/promop/issues/1237#issuecomment-5658503062):
 
 | Column | Actual type | Rows inspected | Values over 60 characters | Maximum length |
 | --- | --- | ---: | ---: | ---: |
