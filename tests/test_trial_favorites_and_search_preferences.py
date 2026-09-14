@@ -301,6 +301,31 @@ class TestPreferencesAreReplacedNotMerged:
         # it does get the badge it wanted, just not the deletion.
         assert row.non_default_filter_count == 0
 
+    def test_the_detail_route_replaces_the_same_way(self, client, person):
+        """The third write path, which the contract has to cover too.
+
+        `http_method_names` allows PATCH, so the ModelViewSet's own detail
+        route is live alongside the two actions — same serializer, so the
+        same wholesale replace. Worth pinning because a reader looking for
+        "how do I write this" finds `upsert` and may never notice that the
+        plain route exists and behaves identically.
+        """
+        seed = client.patch(
+            self.url(person),
+            {'preferences': {'searchTitle': 'myeloma', 'phase': 'PHASE3'}},
+            format='json',
+        )
+        assert seed.status_code == 200
+        row = TrialSearchPreferences.objects.get(person=person)
+        response = client.patch(
+            f'/api/v1/trial-search-preferences/{row.pk}/',
+            {'preferences': {'sponsor': 'Acme'}},
+            format='json',
+        )
+        assert response.status_code == 200
+        row.refresh_from_db()
+        assert row.preferences == {'sponsor': 'Acme'}
+
     def test_a_write_after_a_reset_holds_only_the_new_keys(self, client, person):
         """The cleared state, pinned rather than inferred.
 
