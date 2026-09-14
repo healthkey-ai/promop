@@ -305,6 +305,7 @@ def build_inventory(root, cancerbot_root, frontend, live_export=None, search=Fal
     paths = ['omop_core/models.py', 'omop_core/services/mappings.py', 'omop_core/services/write_descriptor.py',
              'omop_core/services/field_descriptor.py', 'omop_core/services/provenance_registry.py',
              'omop_core/services/field_inventory.py',
+             'omop_core/services/cancerbot_static_options.py',
              'omop_core/management/commands/export_field_mapping_inventory.py',
              'scripts/inventory-frontend-options.cjs',
              'omop_core/data/genomics_catalog_v1.json', *frontend['files']]

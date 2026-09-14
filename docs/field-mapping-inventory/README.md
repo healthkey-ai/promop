@@ -10,6 +10,40 @@ the inventory prerequisite.
 
 ## Regenerate
 
+Source reconciliation now covers 51 deterministic public lists, including 26
+previously unresolved combinations (82 additional source-option rows). Three
+trial-search lists (`register`, `trialPurpose`, `trialType`) are outside patient
+clinical mapping scope; their source fragments remain visible. Together with
+34 staging therapy lists and 20 planned-context lists, this leaves 64 public
+lists requiring live reference coverage. The manifest has 2,883 rows. These
+counts describe source coverage, not completed clinical mappings.
+
+Reproduce the source-only update from the checked-in reference snapshot:
+
+```sh
+python manage.py reconcile_field_inventory_sources \
+  --inventory docs/field-mapping-inventory/manifest.json \
+  --cancerbot-root /path/to/cancerbot \
+  --output docs/field-mapping-inventory/manifest.json \
+  --report docs/field-mapping-inventory/coverage.md
+```
+
+This command makes no database connection. It requires the CancerBot source
+hash to match the original snapshot, preserves reference/candidate/release
+evidence and the snapshot date, and records a separate reconciliation timestamp
+and tool-source hashes. Repeated reconciliation preserves source identities and
+totals. If source changed or a live export was previously supplied, use the full
+exporter below with those original inputs instead.
+
+The static interpreter handles only a bounded set of dictionary/list operations,
+declared properties, local assignments and deterministic conditionals. It never
+imports or executes CancerBot. Unsupported calls, database providers, recursion,
+custom decorators and budget exhaustion remain unresolved. Dependency hashes
+and provider model imports are attached to each newly analyzed binding.
+Empty lists and explicit blank/Unknown options stay distinct. Disease context
+comes from explicit provider arguments; stage system/edition is not inferred.
+Additional static rows do not inherit candidates or approvals by label.
+
 Use the existing Python environment and install the frontend's locked dependencies
 with `npm ci` in `frontend/`. Configure `DATABASE_URL` separately for the intended
 reference database. Render staging uses `STAGING_DATABASE_URL` from the local
@@ -35,9 +69,9 @@ Frontend extraction uses the installed TypeScript parser, without executing app
 code. CancerBot extraction uses Python AST, without importing CancerBot. Both
 record unsupported expressions as coverage gaps. Static fallback values are
 retained separately from runtime catalogs; shared labels are not merged.
-Only a direct literal-list reference/call, optionally wrapped in
-`to_value_and_label`, counts as a complete static binding. Passing a literal list
-through a filter, conditional, merge or other transformation remains unresolved.
+Direct literal-list bindings and transformations fully resolved by the bounded
+static interpreter count as complete source bindings. A literal fragment inside
+an unsupported filter, conditional or transformation remains unresolved.
 
 For machines without frontend dependencies in the backend checkout, run
 `node scripts/inventory-frontend-options.cjs /path/to/promop` in a checkout with
@@ -85,8 +119,8 @@ recorded separately. The snapshot date controls validity checks.
 ## Live CancerBot reference export
 
 All 172 public list bindings in `ValueOptions.get_all_options()` are enumerated,
-including trial/admin lists. Of these, 25 complete literal lists are covered
-directly by static source, and 34 therapy lists use the authoritative staging
+including trial/admin lists. Of these, 51 deterministic lists are covered
+by static source, three are trial-search exclusions, and 34 therapy lists use the authoritative staging
 catalogs. The user confirmed that the staging therapies, components, classes
 and regimen/disease mappings were generated from CancerBot. The export includes
 244 regimens, 187 components, 91 classes and 681 disease/round links. It records
@@ -95,7 +129,7 @@ therapy export or new catalog is required.
 
 Twenty planned-therapy lists have catalog coverage with picker context pending:
 the staging disease/round link schema does not distinguish planned eligibility
-or administration status. The remaining 93 public lists require source/provider
+or administration status. The remaining 64 public lists require source/provider
 reconciliation. Database-driven lists within that remainder need live reference
 coverage; no live CancerBot database connection was configured locally. Partial
 literal fragments do not prove the contents of a dynamic list.

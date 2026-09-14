@@ -136,6 +136,14 @@ def cancerbot_source(path):
     for binding in bindings:
         if binding['coverage'] == 'covered_by_static_source':
             binding['source_row_ids'] = [r['id'] for r in rows if r['option_list'] == f"{binding['source_method']}:literal:0"]
+    from omop_core.services.cancerbot_static_options import reconcile_static_bindings
+    rows += reconcile_static_bindings(Path(path).read_text(), bindings, inventory_row)
+    excluded_methods = {'register': 'registers', 'trialPurpose': 'trial_purposes', 'trialType': 'trial_types'}
+    excluded = {excluded_methods[b['option_list']] for b in bindings if b['coverage'] == 'excluded_trial_search'}
+    for row in rows:
+        if row['option_list'].split(':')[0] in excluded:
+            row.update(disposition='not_applicable',
+                       reason='Trial search metadata; outside patient clinical field/value mapping scope.')
     return {'bindings': bindings, 'rows': rows, 'literal_methods': sorted(set(fragments))}
 
 
@@ -240,6 +248,20 @@ def validate_manifest(manifest):
     rows, totals = manifest['rows'], manifest['totals']
     if totals != coverage(rows, totals['source_coverage']):
         raise ValueError('Manifest totals do not reconcile with source rows.')
+    if totals['duplicate_source_ids']:
+        raise ValueError('Manifest contains duplicate source identities.')
+    if 'cancerbot_bindings' in manifest:
+        bindings = manifest['cancerbot_bindings']
+        ids = {r['id'] for r in rows}
+        for binding in bindings:
+            if any(pk not in ids for key in ('source_row_ids', 'live_source_row_ids') for pk in binding.get(key, [])):
+                raise ValueError('CancerBot binding references a missing source row.')
+        providers = totals['source_coverage']['cancerbot_public_lists']
+        if providers['by_provider'] != dict(Counter(b['coverage'] for b in bindings)):
+            raise ValueError('CancerBot provider totals do not reconcile with bindings.')
+        missing = sorted(b['option_list'] for b in bindings if b['coverage'] == 'requires_live_export')
+        if sorted(providers['missing_live_lists']) != missing:
+            raise ValueError('CancerBot outstanding lists do not reconcile with bindings.')
     for row in rows:
         if any(str(key) not in manifest['candidates'] for key in row['candidate_ids']):
             raise ValueError('Candidate reference missing from manifest.')
@@ -325,6 +347,18 @@ def render_report(manifest):
     lines += [f'| {key} | {value} |' for key, value in totals['by_disposition'].items()]
     lines += ['', '## Coverage gaps', '']
     lines += [f'- {gap}' for gap in manifest['limitations']]
+    lines += ['', '## CancerBot public-list reconciliation', '',
+              '| Coverage | Lists |', '|---|---:|']
+    providers = totals['source_coverage'].get('cancerbot_public_lists', {}).get('by_provider', {})
+    lines += [f'| {key} | {count} |' for key, count in sorted(providers.items())]
+    lines += ['', 'Static results describe the checked-in source definitions, including empty and blank-only lists. '
+              'They do not certify a deployed CancerBot version. Trial-search exclusions retain their source evidence. '
+              'Unresolved providers below require reference data; model names come from source imports, not label matching.', '',
+              '| Unresolved list | Source models |', '|---|---|']
+    for binding in manifest.get('cancerbot_bindings', []):
+        if binding['coverage'] == 'requires_live_export':
+            providers = binding.get('static_resolution', {}).get('provider_models', [])
+            lines.append(f"| {binding['option_list']} | {', '.join(providers) or 'unresolved source expression'} |")
     therapy = manifest.get('therapy_source_coverage')
     if therapy:
         lines += ['', '## CancerBot-derived staging therapy catalogs', '',

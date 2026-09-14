@@ -56,14 +56,30 @@ therapy inventory source: 34 public lists are covered by the staging catalogs,
 25 lists by complete static source, and 20 planned lists have catalog coverage
 with picker context pending. No duplicate therapy export is required.
 
-**#1223 remains open.** Of 172 public option-list bindings, 93 need further
-source/provider reconciliation; database-driven lists in that remainder need
-live reference coverage. No live CancerBot database connection was configured.
+**#1223 remains open.** The first slice left 93 of 172 public bindings requiring
+source/provider reconciliation. The source reconciliation below reduces that
+remainder to 64 requiring live reference coverage. No live CancerBot database connection was configured.
 Dynamic provider reconciliation, retired-option history, destination/context
 crosswalks and semantic review also remain. Continue those inventory tasks;
 do not treat this first slice as completing the prerequisite for #1224.
 
 ### Handoff: continue on another machine
+
+**Next inventory slice, 2026-09-14:** source reconciliation resolves 26 more
+deterministic public lists and records three trial-search exclusions. Coverage
+is now 51 static lists, 34 staging therapy lists, 20 planned-context lists, and
+64 lists requiring live reference coverage. The 2,883-row manifest preserves
+the original staging snapshot and adds 82 source-option rows with dependency
+hashes, explicit disease context and unreviewed dispositions. The source-only
+reconciliation command reproduces these changes without database access; see
+the inventory instructions below. Earlier feature implementation remains
+preserved separately on `feat/field-value-concept-mappings`; inventory work
+continues on `feat/1223-next`. No associated issue is closed.
+
+Verification of this source reconciliation: full local pytest **2,446 passed,
+4 skipped**; Django **1,999 tests OK, 1 skipped**; frontend **574 passed,
+4 skipped**. All original 2,801 source rows and all reference/candidate/release
+evidence are retained. No staging reads or writes were needed for this update.
 
 **Completed in PR #1271:** versioned reference manifest and coverage report;
 typed field/value identities; frontend and CancerBot source extraction; staging
@@ -97,7 +113,7 @@ instructions; never copy credentials into the repository. Staging remains Render
 
 **Next work, in order:**
 
-1. Reconcile the 93 outstanding CancerBot public lists: establish which are
+1. Reconcile the 64 outstanding CancerBot public lists: establish which are
    static/provider-resolvable, which are trial/admin exclusions, and which need
    live reference coverage. Use `cancerbot_bindings` and
    `totals.source_coverage.cancerbot_public_lists` in the manifest. Do not request
