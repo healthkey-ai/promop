@@ -574,8 +574,11 @@ categorical fields, `value_as_number` for numeric.
 
 Result is a JSON array: `[{gene, origin, interpretation}, …]`
 
-`_compute_derived_fields` adds `tp53_disruption` (boolean) derived from
-`genetic_mutations` without further DB queries.
+`_compute_derived_fields` adds `tp53_disruption` (nullable boolean) derived from
+`genetic_mutations` without further DB queries. It is true for a qualifying
+present pathogenic TP53 finding under the existing assessment/status rule,
+and null otherwise. Null is unknown, not a negative result; del(17p) is not
+aggregated. See the [consumer contract](tp53_aggregate_plan.md).
 
 ### Wearable / device data — `_get_wearable_data`
 
@@ -680,7 +683,7 @@ Metrics require ≥ 7 valid days (`WEARABLE_MIN_VALID_DAYS`) to be emitted.
 | PatientRecord field | Source |
 |---------------------|--------|
 | `bmi` | Derived from `weight` (kg) and `height` (cm): weight / (height/100)² |
-| `tp53_disruption` | Boolean: true if `genetic_mutations` contains a TP53 entry |
+| `tp53_disruption` | Nullable boolean: true for qualifying present pathogenic TP53; null otherwise (unknown, not negative) |
 
 ---
 

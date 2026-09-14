@@ -64,7 +64,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 7
+DERIVATION_VERSION = 8
 
 # Fields that are entirely derived from OMOP tables and must be reset before
 # each refresh so deletions are reflected (not just additions).
@@ -4015,13 +4015,15 @@ def _compute_derived_fields(patient_info: PatientRecord, *, apply_formulas=True)
         patient_info.measurable_disease_iwcll = None
 
     mutations = patient_info.genetic_mutations or []
-    patient_info.tp53_disruption = any(
+    # This aggregate has an existing positive rule, but no rule establishing
+    # a negative TP53/del(17p) result. Missing/nonqualifying evidence is unknown.
+    patient_info.tp53_disruption = True if any(
         m.get('gene', '').lower() == 'tp53'
         and (m.get('interpretation') or '').lower() == 'pathogenic'
         and m.get('assessment') in (None, '', 'present')
         and m.get('status', 'present') == 'present'
         for m in mutations
-    )
+    ) else None
 
     # BMI — computed from weight and height when units are known
     weight = patient_info.weight
