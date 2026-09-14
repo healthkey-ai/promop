@@ -139,3 +139,5 @@ def test_local_debug_needs_explicit_identity_config_and_does_not_trust_proxy():
     assert posture['PHR_AUDIENCE_CONFIGURED'] is False
     assert posture['FIREBASE_PROJECT_ID_CONFIGURED'] is False
     assert posture['SECURE_PROXY_SSL_HEADER'] is None
+    # Local HTTP callbacks need the explicit override, never just a local env.
+    assert posture['ALLOWED_REDIRECT_URI_SCHEMES'] == ['https']
