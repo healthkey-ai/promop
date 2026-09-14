@@ -240,3 +240,11 @@ describe('administrative upload routes', () => {
     expect(screen.getByRole('link', { name: /^CSV/ })).toHaveAttribute('href', '/upload-csv');
   });
 });
+
+
+it('uses the inline profile heading without a second masthead for patient users', () => {
+  mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 1, is_patient: true, person_id: 5 } });
+  renderAt('/profile');
+  expect(screen.getByText('USER_PROFILE')).toBeInTheDocument();
+  expect(screen.queryByRole('banner')).not.toBeInTheDocument();
+});

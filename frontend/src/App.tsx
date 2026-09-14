@@ -127,7 +127,7 @@ function AppRoutes() {
     return element;
   };
 
-  const showMasthead = isPublicPath(location.pathname) || isPatient
+  const showMasthead = isPublicPath(location.pathname) || (isPatient && location.pathname !== '/profile')
     || location.pathname.startsWith('/patient/');
 
   return (
