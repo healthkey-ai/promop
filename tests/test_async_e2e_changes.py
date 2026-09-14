@@ -262,6 +262,7 @@ def test_required_backend_gate_rejects_incomplete_matrix(result, passes):
     import os
     import yaml
     workflow = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
+    assert workflow['permissions'] == {'contents': 'read'}
     jobs = workflow['jobs']
     gate = jobs['backend']
     assert gate['name'] == 'Backend tests'
