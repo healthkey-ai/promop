@@ -15206,6 +15206,57 @@ class SelfServicePasswordResetTest(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(len(mail.outbox), 0)
 
+    def test_shared_federated_email_resets_only_the_active_local_account(self):
+        from django.core import mail
+        from django.contrib.auth.tokens import default_token_generator
+        from django.utils.encoding import force_bytes
+        from django.utils.http import urlsafe_base64_encode
+        from urllib.parse import parse_qs, urlsplit
+        for active in (True, False):
+            federated = Identity(
+                issuer='https://identity.example.test', sub=f'federated-{active}',
+                email=self.identity.email.upper(), is_active=active,
+            )
+            federated.set_unusable_password()
+            federated.save()
+        response = APIClient().post('/api/v1/auth/request-reset/', {
+            'email': self.identity.email.upper(),
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(mail.outbox), 1)
+        uid = urlsafe_base64_encode(force_bytes(self.identity.pk))
+        link = next(line.strip() for line in mail.outbox[0].body.splitlines() if '/reset-password?' in line)
+        query = parse_qs(urlsplit(link).query)
+        self.assertEqual(query['uid'], [uid])
+        self.assertTrue(default_token_generator.check_token(self.identity, query['token'][0]))
+
+    def test_inactive_and_federated_accounts_receive_the_same_response_without_email(self):
+        from django.core import mail
+        self.identity.is_active = False
+        self.identity.save(update_fields=['is_active'])
+        federated = Identity(
+            issuer='https://identity.example.test', sub='federated-only',
+            email=self.identity.email,
+        )
+        federated.set_password('Zr7-quokka-vale')
+        federated.save()
+        client = APIClient()
+        known = client.post('/api/v1/auth/request-reset/', {'email': self.identity.email})
+        unknown = client.post('/api/v1/auth/request-reset/', {'email': 'absent@example.test'})
+        self.assertEqual(known.status_code, 200)
+        self.assertEqual(known.data, unknown.data)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_ambiguous_local_accounts_do_not_send_an_arbitrary_reset(self):
+        from django.core import mail
+        Identity.objects.create_user(
+            email=self.identity.email,
+            password='Zr7-quokka-vale',
+        )
+        response = APIClient().post('/api/v1/auth/request-reset/', {'email': self.identity.email})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(mail.outbox), 0)
+
     def test_missing_email_returns_400(self):
         resp = APIClient().post('/api/v1/auth/request-reset/', {
             'email': '',
