@@ -2185,6 +2185,14 @@ class PlateletCountUnits(models.TextChoices):
     CELLS_L = 'CELLS/L', '10^9/L'
 
 
+class BloodCountUnits(models.TextChoices):
+    """Explicit scales for ANC and platelet compatibility values."""
+    K_PER_UL = '10*3/uL', '10^3/μL'
+    G_PER_L = '10*9/L', '10^9/L'
+    CELLS_UL = 'CELLS/UL', 'cells/μL'
+    CELLS_L = 'CELLS/L', 'cells/L'
+
+
 class WhiteBloodCellCountUnits(models.TextChoices):
     """WBC units; US oncology is the default for new records."""
     K_PER_UL = '10*3/uL', '10^3/μL (US oncology)'
@@ -2847,7 +2855,7 @@ class PatientRecord(models.Model):
     absolute_neutrophile_count = models.DecimalField(decimal_places=2, max_digits=10, blank=True, null=True)
     absolute_neutrophile_count_units = models.CharField(
         max_length=10,
-        choices=PlateletCountUnits.choices,
+        choices=BloodCountUnits.choices,
         blank=True,
         null=True,
         default='CELLS/UL'
@@ -2855,7 +2863,7 @@ class PatientRecord(models.Model):
     platelet_count = models.IntegerField(blank=True, null=True)
     platelet_count_units = models.CharField(
         max_length=10,
-        choices=PlateletCountUnits.choices,
+        choices=BloodCountUnits.choices,
         blank=True,
         null=True,
         default='CELLS/UL'

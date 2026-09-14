@@ -67,6 +67,7 @@ def test_overflowing_measurement_does_not_abort_other_derived_values(caplog):
         person=person, measurement_concept=platelets,
         measurement_source_value='777-3', measurement_date=date(2026, 8, 18),
         value_as_number=251_000_000,
+        unit_source_value='10*3/uL',
     )
     MeasurementFactory(
         person=person, measurement_concept=qtcf,
