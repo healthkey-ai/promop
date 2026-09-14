@@ -154,3 +154,51 @@ def test_generated_assessments_survive_real_fhir_import(tmp_path, monkeypatch):
     assert record.gelf_criteria_status=='Met'
     assert record.bone_marrow_involvement is True
     assert record.number_of_nodal_sites==6
+
+
+def test_backfill_honors_capitalized_approved_mapping_table_and_sct_roundtrip():
+    from omop_core.models import FieldConceptMapping
+    record=PatientRecordFactory(organization=OrganizationFactory(slug='synthea-mm'),disease='Multiple Myeloma')
+    concept=ConceptFactory(concept_name='Recorded myeloma subtype')
+    FieldConceptMapping.objects.create(field_name='myeloma_type',status='approved',omop_table='Observation',concept=concept,source_value='demo-myelo-type')
+    history=ConceptFactory(concept_name='Recorded transplant history')
+    FieldConceptMapping.objects.create(field_name='sct_eligibility',status='approved',omop_table='Observation',concept=history,source_value='mm-sct-eligibility',value_kind='string')
+    call_command('backfill_sample_disease_profiles',confirm=True,stdout=StringIO())
+    assert Observation.objects.filter(person=record.person,observation_concept=concept).exists()
+    record.refresh_from_db()
+    eligibility=record.sct_eligibility
+    assert refresh_patient_record(record.person).sct_eligibility==eligibility
+
+
+def test_screening_is_not_selected_as_primary_cancer_diagnosis():
+    from tests.factories import ConditionOccurrenceFactory
+    record=PatientRecordFactory()
+    with suppress_patient_record_refresh():
+        ConditionOccurrenceFactory(person=record.person,condition_start_date=date(2023,1,1),condition_concept=ConceptFactory(concept_name='Multiple myeloma'))
+        ConditionOccurrenceFactory(person=record.person,condition_start_date=date(2024,1,1),condition_concept=ConceptFactory(concept_name='Breast cancer screening not done'),condition_source_value='Breast Cancer')
+    assert refresh_patient_record(record.person).disease=='Multiple Myeloma'
+
+
+def test_latest_demo_fact_wins_across_omop_tables():
+    from types import SimpleNamespace
+    from omop_core.services.sample_disease_profiles import read_profile_rows
+    old = SimpleNamespace(pk=10, measurement_date=date(2023, 1, 1), measurement_source_value='demo:myeloma_type', value_source_value='', value_as_number=None, value_as_string='IgG kappa')
+    new = SimpleNamespace(pk=1, observation_date=date(2024, 1, 1), observation_source_value='demo:myeloma_type', value_source_value='', value_as_number=None, value_as_string='IgA lambda')
+    assert read_profile_rows([old, new])['myeloma_type'] == 'IgA lambda'
+
+
+@pytest.mark.django_db(transaction=True)
+def test_import_http_failure_raises_command_error(tmp_path, monkeypatch):
+    import json
+    from django.core.management.base import CommandError
+    from rest_framework.response import Response
+    from patient_portal.models import Identity
+    from patient_portal.api.views import PatientRecordViewSet
+    from omop_core.management.commands import import_fhir_bundle
+    Identity.objects.create_user(email='failed-import@example.test', is_staff=True)
+    monkeypatch.setattr(import_fhir_bundle, '_patch_db_timeouts', lambda: None)
+    monkeypatch.setattr(PatientRecordViewSet, 'upload_fhir', lambda *args: Response({'detail': 'Tenant access denied'}, status=403))
+    file = tmp_path / 'rejected.json'
+    file.write_text(json.dumps({'resourceType': 'Bundle', 'entry': [{'resource': {'resourceType': 'Patient', 'id': 'rejected'}}]}))
+    with pytest.raises(CommandError, match='1 error'):
+        call_command('import_fhir_bundle', file=str(file), stdout=StringIO(), stderr=StringIO())

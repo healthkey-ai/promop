@@ -201,6 +201,8 @@ class Command(BaseCommand):
                 created = data.get('created_count', 0) or 0
                 updated = data.get('updated_count', 0) or 0
                 errors = data.get('errors', [])
+                if getattr(response, 'status_code', 200) >= 400 and not errors:
+                    errors = [str(data.get('error') or data.get('detail') or data)]
             except Exception as exc:
                 created = updated = 0
                 errors = [str(exc)]
@@ -239,6 +241,8 @@ class Command(BaseCommand):
                 self._print(f'  refresh failed for person {pi.person_id}: {exc}', err=True)
         self._print(f'Refreshed {refreshed} patients.')
 
+        if total_errors:
+            raise CommandError(f'Import completed with {total_errors} error(s); see batch errors above.')
         self._print(self.style.SUCCESS(
             f'Done. Total: created={total_created} updated={total_updated} errors={total_errors}'
         ))

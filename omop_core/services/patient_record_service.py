@@ -1329,6 +1329,9 @@ def _get_disease_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     def _is_oncologic(cond):
         cname = (cond.condition_concept.concept_name or '').lower() if cond.condition_concept else ''
         src = (cond.condition_source_value or '').lower()
+        # A screening encounter is not a cancer diagnosis.
+        if 'screening' in cname or (not cond.condition_concept_id and 'screening' in src):
+            return False
         return any(kw in cname or kw in src for kw in _ONCO_KEYWORDS)
 
     # snapshot.conditions is already ordered -condition_start_date
