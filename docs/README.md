@@ -193,22 +193,3 @@ deployed revision. Repository working conventions are in [AGENTS.md](../AGENTS.m
 and agent implementation guidance is in [CLAUDE.md](../CLAUDE.md).
 [Code of conduct](../CODE_OF_CONDUCT.md) and [third-party notices](../THIRD_PARTY_NOTICES.md)
 cover participation and attribution.
-
-## Reading plans and dated evidence
-
-A date, checked box, or historical deployment receipt describes the state observed
-then. It does not establish current deployment status. The maintained architecture,
-API, and operational guides above should lead implementation decisions.
-
-Some remaining documents deliberately preserve unfinished scope or dated evidence:
-
-- [Apple wearable field proposal](apple-wearable-patientinfo-fields.md): original
-  requirements and acceptance criteria; compare with the implemented wearable guide.
-- [Synthea import completeness audit](issues/synthea-bc-import-completeness-gaps.md):
-  captured data and pipeline gaps, useful when assessing cohort quality.
-- [Gaps and defects response](gaps-and-defects-response.md): the response and fix
-  evidence associated with the v1.1 assessment.
-
-Keep future changes in the guide that owns the behavior, link it here, and retain
-only unique rationale or outstanding work in a separate plan. Superseded versions
-remain available in Git history.
