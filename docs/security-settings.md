@@ -68,3 +68,26 @@ checks also run on debug-enabled deployments. Warnings remain warnings so
 operators can choose staging diagnostics deliberately; configuration errors
 still fail startup. `start.sh` already runs this command before migrations,
 so the report also appears in deployment logs.
+
+### Browser authentication and retired OAuth clients (#141)
+
+The SPA uses the existing Django login/logout endpoints and server-side sessions.
+Session cookies are HttpOnly, SameSite=Lax, and Secure by default (local HTTP
+requires the documented `SESSION_COOKIE_SECURE=false` override). The SPA no
+longer requests `offline_access`, exchanges authorization codes, stores bearer
+credentials, or retries API calls with refresh tokens. Old browser credentials
+are removed from sessionStorage/localStorage on startup and before API calls.
+The legacy `/auth/callback` URL returns to the session-authenticated app, or login
+when no session exists. Users who only had browser tokens must sign in again.
+
+The OAuth validator rejects authorization requests, token grants (including
+refresh), and already-issued access tokens for the retired `ctomop-smart-app`
+client. This takes effect immediately on backend deployment without a database
+migration or waiting for 30-day refresh tokens to expire. Other SMART and service
+OAuth clients retain their existing behavior.
+
+If a deployment previously built the SPA with a custom `VITE_OAUTH_CLIENT_ID`,
+add that ID to the backend's comma-separated `OAUTH2_RETIRED_BROWSER_CLIENT_IDS`
+environment variable **before deploying this change**. The built-in client ID is
+always retired. Remove the old `VITE_OAUTH_CLIENT_ID` and
+`VITE_OAUTH_REDIRECT_URI` frontend settings; they are no longer used.

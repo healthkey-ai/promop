@@ -3,7 +3,6 @@ import { useState, useEffect, useMemo, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { Upload, Trash2, LogOut, Settings, Globe } from "lucide-react";
 import api from "@/api/axios";
-import { clearTokens } from "@/utils/oauth";
 import { useAuth, type User } from "@/hooks/useAuth";
 import { PaginationControls } from "@/components/labs/PaginationControls";
 import { useLocalPagination } from "@/lib/pagination";
@@ -70,12 +69,12 @@ const getErrorMessage = (err: unknown, fallback: string) => {
 };
 
 export default function PatientList() {
-  const { currentUser, loading } = useAuth();
+  const { currentUser, loading, logout } = useAuth();
   if (loading) return <div role="status" className="p-6">Loading patient list…</div>;
-  return <PatientListContent key={currentUser?.id ?? 'session'} currentUser={currentUser} />;
+  return <PatientListContent key={currentUser?.id ?? 'session'} currentUser={currentUser} logout={logout} />;
 }
 
-function PatientListContent({ currentUser }: { currentUser: User | null }) {
+function PatientListContent({ currentUser, logout }: { currentUser: User | null; logout: () => Promise<void> }) {
   const navigate = useNavigate();
   const preferenceKey = `promop-patient-list:${currentUser?.id ?? 'session'}`;
   const [preferences, setPreferences] = useState(() => loadPreferences(preferenceKey));
@@ -88,6 +87,7 @@ function PatientListContent({ currentUser }: { currentUser: User | null }) {
   useEffect(() => {
     try { localStorage.setItem(preferenceKey, JSON.stringify(preferences)); } catch { /* Storage may be disabled. */ }
   }, [preferenceKey, preferences]);
+
   const [patients, setPatients] = useState<Patient[]>([]);
   const [patientCount, setPatientCount] = useState(0);
   const [filterOptions, setFilterOptions] = useState<FilterOptions>({
@@ -240,8 +240,7 @@ function PatientListContent({ currentUser }: { currentUser: User | null }) {
   const canManageMappings = !!(currentUser?.is_staff || currentUser?.is_org_admin);
 
   const handleLogout = () => {
-    clearTokens();
-    navigate("/login");
+    void logout();
   };
 
   return (
