@@ -1,3 +1,4 @@
+import PageTitle from '@/components/Branding/PageTitle';
 import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Upload, ArrowLeft } from "lucide-react";
@@ -68,7 +69,7 @@ export default function UploadCSV() {
         <button onClick={() => navigate("/")} className="inline-flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground">
           <ArrowLeft size={16} /> Back to Patient List
         </button>
-        <h1 className="text-2xl font-bold">Upload CSV</h1>
+        <PageTitle className="text-2xl font-bold">Upload CSV</PageTitle>
       </div>
 
       <div className="max-w-xl rounded-lg border border-border bg-background p-6 shadow-sm">

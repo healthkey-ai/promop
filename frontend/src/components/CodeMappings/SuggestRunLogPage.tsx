@@ -1,3 +1,4 @@
+import PageTitle from '@/components/Branding/PageTitle';
 import type { SuggestCandidate } from "./SuggestCandidates";
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
@@ -86,7 +87,7 @@ export default function SuggestRunLogPage() {
 
   return <div className="min-h-screen bg-slate-50 p-6"><main className="mx-auto max-w-5xl">
     <Link to="/code-mappings" className="text-sm text-slate-700 underline">← Code Mapping</Link>
-    <h1 className="mt-4 text-2xl font-semibold text-slate-950">Suggestion run log</h1>
+    <PageTitle className="mt-4 text-2xl font-semibold text-slate-950">Suggestion run log</PageTitle>
     <p className="mt-1 break-all text-xs text-slate-500">Run {runId}</p>
     {error && <div role="alert" className="mt-4 text-sm text-rose-700">{error} <button
       className="underline" onClick={() => setRetry(value => value + 1)}>Retry</button></div>}

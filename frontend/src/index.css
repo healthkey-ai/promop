@@ -106,6 +106,6 @@
 }
 
 /* Full-height route screens account for the shared 6rem application masthead. */
-.app-page-content > .min-h-screen {
+.app-page-content:has(> .brand-masthead) > .min-h-screen {
   min-height: calc(100dvh - 6rem);
 }

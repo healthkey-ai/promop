@@ -1,3 +1,4 @@
+import PageTitle from '@/components/Branding/PageTitle';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, Trash2, X } from 'lucide-react';
 import api from '@/api/axios';
@@ -422,7 +423,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
         <button onClick={onBack} className="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-800">
           <ArrowLeft size={14} /> Back
         </button>
-        <h1 className="text-xl font-semibold text-gray-900">{org.name}</h1>
+        <PageTitle className="text-xl font-semibold text-gray-900">{org.name}</PageTitle>
         <span className={`text-xs px-2 py-0.5 rounded font-medium ${org.is_active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
           {org.is_active ? 'Active' : 'Inactive'}
         </span>

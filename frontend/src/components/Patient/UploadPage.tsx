@@ -1,10 +1,11 @@
+import PageTitle from '@/components/Branding/PageTitle';
 import { Link } from 'react-router-dom';
 
 export default function UploadPage() {
   return (
     <div className="p-6">
       <Link to="/" className="text-sm text-muted-foreground hover:text-foreground">Back to Patient List</Link>
-      <h1 className="mt-4 text-2xl font-bold">Upload patient data</h1>
+      <PageTitle className="mt-4 text-2xl font-bold">Upload patient data</PageTitle>
       <p className="mt-2 text-muted-foreground">Choose the format of your file.</p>
       <div className="mt-6 flex flex-wrap gap-4">
         <Link to="/upload-fhir" className="rounded-lg border border-input p-6 hover:bg-accent">
