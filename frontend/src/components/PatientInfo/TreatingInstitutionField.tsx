@@ -22,6 +22,10 @@ export default function TreatingInstitutionField({ value, descriptor, onChange }
   useEffect(() => {
     let canceled = false;
     clinicalClient().get(clinicalUrl('/treating-institutions/')).then(({ data }) => {
+      if (!Array.isArray(data?.institutions) || !data.institutions.every((c: Institution) =>
+        c && typeof c.id === 'string' && typeof c.label === 'string' && typeof c.state_code === 'string')) {
+        throw new Error('Invalid institution directory');
+      }
       if (!canceled) setCenters(data.institutions);
     }).catch(() => { if (!canceled) setUnavailable(true); });
     return () => { canceled = true; };

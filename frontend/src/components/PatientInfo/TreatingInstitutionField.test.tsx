@@ -51,8 +51,9 @@ it('honors the caller permission and leaves the current institution visible', as
   expect(screen.queryByRole('button')).toBeNull();
 });
 
-it('allows a custom center when the directory fails to load', async () => {
-  get.mockRejectedValue(new Error('offline'));
+it.each(['offline', 'invalid'])('allows a custom center when the directory is %s', async (failure) => {
+  if (failure === 'offline') get.mockRejectedValue(new Error('offline'));
+  else get.mockResolvedValue({ data: {} });
   const onChange = vi.fn();
   render(<TreatingInstitutionField value="" descriptor={descriptor} onChange={onChange} />);
   await screen.findByText(/Directory unavailable/);
