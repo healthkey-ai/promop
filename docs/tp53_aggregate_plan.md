@@ -31,7 +31,7 @@ release gate complete. No clinical thresholds are introduced.
 
 ## Deployment and reconciliation
 
-No schema migration is needed. Version 8 marks older derivations stale; source
+No column/schema change is needed for the TP53 correction. Version 8 marks older derivations stale; source
 OMOP rows remain unchanged. Review the aggregate impact report and
 `backfill_patient_records --dry-run` output before scheduling rederivation. The full derivation includes version 7's unit
 normalization, so also review [the blood-count rollout](clinical-unit-policy.md#anc-and-platelet-rollout-640).
