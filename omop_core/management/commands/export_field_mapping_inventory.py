@@ -6,6 +6,8 @@ from collections import Counter, defaultdict
 from dataclasses import asdict
 from pathlib import Path
 
+from psycopg import sql
+
 from django.apps import apps
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
@@ -19,6 +21,7 @@ from omop_core.services.field_inventory import (
     render_report, screen_candidate, source_revision, validate_live_export,
     validate_manifest,
     staging_therapy_coverage,
+    apply_live_coverage,
 )
 
 
@@ -72,8 +75,9 @@ def read_table(table, allowed):
                    if c.name in allowed]
         if not columns:
             raise CommandError(f'No permitted reference columns in {table}')
-        quoted = ', '.join(connection.ops.quote_name(c) for c in columns)
-        cursor.execute(f'SELECT {quoted} FROM {connection.ops.quote_name(table)} ORDER BY 1')
+        query = sql.SQL('SELECT {} FROM {} ORDER BY 1').format(
+            sql.SQL(', ').join(map(sql.Identifier, columns)), sql.Identifier(table))
+        cursor.execute(query)
         return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 
@@ -221,8 +225,10 @@ def search_candidates(rows, candidates, vocabularies, as_of):
     found = defaultdict(set)
     for table, column in [('concept', 'concept_name'), ('concept_synonym', 'concept_synonym_name')]:
         with connection.cursor() as cursor:
-            # Identifiers are fixed above; terms stay query parameters.
-            cursor.execute(f'SELECT {column}, concept_id FROM {table} WHERE {column} = ANY(%s) ORDER BY 1, 2', [terms])
+            # Identifiers use composable SQL; terms stay query parameters.
+            query = sql.SQL('SELECT {column}, concept_id FROM {table} WHERE {column} = ANY(%s) ORDER BY 1, 2').format(
+                column=sql.Identifier(column), table=sql.Identifier(table))
+            cursor.execute(query, [terms])
             for term, concept_id in cursor.fetchall():
                 found[term].add(concept_id)
     selected = {term: sorted(ids)[:25] for term, ids in found.items()}
@@ -266,8 +272,10 @@ def build_inventory(root, cancerbot_root, frontend, live_export=None, search=Fal
     live_metadata = None
     if live_export:
         payload = json.loads(Path(live_export).read_text())
-        live_rows, live_missing = validate_live_export(payload, expected_lists)
-        missing_lists = sorted(set(missing_lists) & set(live_missing))
+        live_rows, _ = validate_live_export(payload, expected_lists)
+        missing_lists = apply_live_coverage(source['bindings'], payload, live_rows)
+        therapy_coverage['context_pending_lists'] = [b['option_list'] for b in source['bindings']
+            if b['coverage'] == 'staging_catalog_available_context_pending']
         rows += live_rows
         live_metadata = {k: v for k, v in payload.items() if k != 'options'}
     catalog = json.loads((root / 'omop_core/data/genomics_catalog_v1.json').read_text())

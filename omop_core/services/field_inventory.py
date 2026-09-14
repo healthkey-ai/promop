@@ -59,6 +59,31 @@ def inventory_row(source, option_list, key, label, *, field=None, value=None,
     }
 
 
+def literal_binding_method(expression, literal_methods):
+    """Recognize only direct lists and the known value/label wrapper.
+
+    Finding a literal list somewhere inside a call/conditional does not prove
+    that the expression returns that list unchanged.
+    """
+    node = ast.parse(expression, mode='eval').body
+    if not (isinstance(node, ast.Dict) and len(node.keys) == 1
+            and isinstance(node.keys[0], ast.Constant) and node.keys[0].value == 'options'):
+        return None
+    node = node.values[0]
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name) and node.func.value.id == 'self'
+            and node.func.attr == 'to_value_and_label' and len(node.args) == 1 and not node.keywords):
+        node = node.args[0]
+    if isinstance(node, ast.Call):
+        if node.args or node.keywords:
+            return None
+        node = node.func
+    if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+            and node.value.id == 'self' and node.attr in literal_methods):
+        return node.attr
+    return None
+
+
 def cancerbot_source(path):
     """Enumerate public list bindings and literal fragments, without executing code.
 
@@ -86,11 +111,9 @@ def cancerbot_source(path):
                         for k, v in zip(node.value.keys, node.value.values) if k is not None]
             break
     for binding in bindings:
-        attributes = [n.attr for n in ast.walk(ast.parse(binding['expression'], mode='eval'))
-                      if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == 'self']
-        matches = set(attributes) & literal_methods
-        if len(matches) == 1:
-            binding.update(coverage='covered_by_static_source', source_method=matches.pop())
+        method = literal_binding_method(binding['expression'], literal_methods)
+        if method:
+            binding.update(coverage='covered_by_static_source', source_method=method)
     for name, method in methods.items():
         if name in {'get_all_options', 'all_options'} or name.startswith('_'):
             continue
@@ -148,6 +171,22 @@ def validate_live_export(payload, expected_lists):
     for name, options in sorted(payload['options'].items()):
         visit(options, name)
     return rows, sorted(set(expected_lists) - set(payload['options']))
+
+
+def apply_live_coverage(bindings, payload, rows):
+    """Update per-list evidence and provider state, including empty live lists."""
+    by_list = defaultdict(list)
+    for row in rows:
+        by_list[row['option_list']].append(row['id'])
+    for binding in bindings:
+        name = binding['option_list']
+        if name in payload['options']:
+            binding['coverage_before_live_export'] = binding['coverage']
+            binding['coverage'] = 'covered_by_live_export'
+            binding['live_source_row_ids'] = sorted(by_list[name])
+            binding['live_source_revision'] = payload['source_revision']
+            binding['live_exported_at'] = payload['exported_at']
+    return sorted(b['option_list'] for b in bindings if b['coverage'] == 'requires_live_export')
 
 
 def screen_candidate(concept, vocabulary, as_of):

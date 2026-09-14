@@ -61,6 +61,33 @@ class ValueOptions:
     assert set(data['bindings'][0]['source_row_ids']) == {r['id'] for r in data['rows']}
 
 
+@pytest.mark.parametrize('expression', [
+    'self.filter_using_database(self.answers)',
+    'self.to_value_and_label(self.filter_using_database(self.answers))',
+    'self.answers if self.enabled else self.database_answers',
+    'self.answers | self.database_answers',
+    'self.to_value_and_label(self.answers, filter=self.current_disease)',
+])
+def test_dynamic_use_of_literal_list_stays_unresolved(tmp_path, expression):
+    source = tmp_path / 'options.py'
+    source.write_text(f'''class ValueOptions:
+    def answers(self):
+        return {{'positive': 'Positive', 'negative': 'Negative'}}
+    def get_all_options(self):
+        return {{'filteredAnswers': {{'options': {expression}}}}}
+''')
+    data = cancerbot_source(source)
+    assert data['bindings'][0]['coverage'] == 'requires_live_export'
+    assert 'source_row_ids' not in data['bindings'][0]
+    assert len(data['rows']) == 2  # Keep source evidence without asserting membership.
+
+
+@pytest.mark.parametrize('expression', ['self.answers', 'self.answers()', 'self.to_value_and_label(self.answers())'])
+def test_direct_literal_binding_forms(expression):
+    from omop_core.services.field_inventory import literal_binding_method
+    assert literal_binding_method("{'options': " + expression + '}', {'answers'}) == 'answers'
+
+
 def test_live_export_keeps_nested_gene_context_and_reports_missing_lists():
     payload = {'schema_version': 1, 'source_revision': 'abc', 'exported_at': '2026-09-14',
                'options': {'variants': {'BRCA1': {'options': [{'value': 'unknown', 'label': 'Unknown'}]},
@@ -185,3 +212,44 @@ def test_staging_therapy_adapter_uses_links_and_keeps_planned_context_distinct()
     assert result['context_pending_lists'] == ['plannedTherapiesMm']
     assert bindings[-1]['coverage'] == 'requires_live_export'
     assert not result['orphan_disease_round_links']
+
+
+def test_inventory_live_export_updates_bindings_provider_totals_and_pending_context(tmp_path, monkeypatch):
+    import json
+    from pathlib import Path
+    from omop_core.management.commands import export_field_mapping_inventory as command
+
+    source = {'rows': [], 'bindings': [
+        {'option_list': 'answers', 'coverage': 'requires_live_export'},
+        {'option_list': 'emptyAnswers', 'coverage': 'requires_live_export'},
+        {'option_list': 'missingAnswers', 'coverage': 'requires_live_export'},
+        {'option_list': 'plannedTherapiesMm', 'coverage': 'staging_catalog_available_context_pending'},
+    ]}
+    payload = {'schema_version': 1, 'source_revision': 'live-revision', 'exported_at': '2026-09-14T00:00:00Z',
+               'options': {'answers': {'options': [{'value': 'x', 'label': 'X'}]},
+                           'emptyAnswers': {'options': []},
+                           'plannedTherapiesMm': {'options': [{'value': 'regimen', 'label': 'Regimen'}]}}}
+    live = tmp_path / 'live.json'
+    live.write_text(json.dumps(payload))
+    monkeypatch.setattr(command, 'collect_reference_tables', lambda: ({}, []))
+    monkeypatch.setattr(command.models.Vocabulary.objects, 'values', lambda *args: [])
+    monkeypatch.setattr(command, 'collect_rows', lambda *args: [])
+    monkeypatch.setattr(command, 'cancerbot_source', lambda *args: source)
+    monkeypatch.setattr(command, 'staging_therapy_coverage', lambda *args: {'context_pending_lists': ['plannedTherapiesMm']})
+    monkeypatch.setattr(command, 'attach_candidates', lambda *args: {})
+    monkeypatch.setattr(command, 'attach_relationships', lambda *args: [])
+    monkeypatch.setattr(command.connection.introspection, 'table_names', lambda: [])
+    monkeypatch.setattr(command, 'read_table', lambda *args: [])
+    monkeypatch.setattr(command, 'source_revision', lambda *args: {})
+    result = command.build_inventory(Path(__file__).resolve().parent.parent, tmp_path,
+        {'files': {}, 'constants': [], 'controls': [], 'unresolved': []}, live)
+    coverage_data = result['totals']['source_coverage']['cancerbot_public_lists']
+    assert coverage_data['missing_live_lists'] == ['missingAnswers']
+    assert coverage_data['by_provider'] == {'covered_by_live_export': 3, 'requires_live_export': 1}
+    assert result['therapy_source_coverage']['context_pending_lists'] == []
+    bindings = {b['option_list']: b for b in result['cancerbot_bindings']}
+    assert bindings['emptyAnswers']['live_source_row_ids'] == []
+    assert bindings['answers']['live_source_revision'] == 'live-revision'
+    live_ids = {r['id'] for r in result['rows'] if r['source'] == 'cancerbot_live'}
+    assert live_ids == {i for b in bindings.values() for i in b.get('live_source_row_ids', [])}
+    command.validate_manifest(result)

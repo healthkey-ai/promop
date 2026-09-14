@@ -35,6 +35,9 @@ Frontend extraction uses the installed TypeScript parser, without executing app
 code. CancerBot extraction uses Python AST, without importing CancerBot. Both
 record unsupported expressions as coverage gaps. Static fallback values are
 retained separately from runtime catalogs; shared labels are not merged.
+Only a direct literal-list reference/call, optionally wrapped in
+`to_value_and_label`, counts as a complete static binding. Passing a literal list
+through a filter, conditional, merge or other transformation remains unresolved.
 
 For machines without frontend dependencies in the backend checkout, run
 `node scripts/inventory-frontend-options.cjs /path/to/promop` in a checkout with
@@ -119,6 +122,10 @@ Each option may contain only scalar `value` and string `label`. Unknown envelope
 fields, unknown public list names and extra option fields fail validation.
 Partial exports are accepted with missing lists explicitly reported. A supplied
 export does not automatically make inventory coverage complete.
+Imported list bindings become `covered_by_live_export`, with references to their
+live rows and export metadata; provider totals and missing-list counts use those
+same updated states. Empty live lists count as exported. Existing static/staging
+evidence is preserved, and supplied planned lists leave the pending-picker list.
 
 ## SNOMED provenance finding
 

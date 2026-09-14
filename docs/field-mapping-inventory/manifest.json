@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-09-14T04:57:13.195764+00:00",
+  "generated_at": "2026-09-14T05:30:47.610466+00:00",
   "complete": false,
   "scope": "Reference data and source schema only; no patient values or identity tables queried.",
   "source_revisions": {
     "promop": {
-      "revision": "de61b7acbc7ec19f73b7134ba0337815c43ff1eb",
+      "revision": "cfdc1fb65d13a3c61bc0998c7ff7bfe5388f439f",
       "dirty": true,
       "files": {
         "frontend/src/components/PatientInfo/ClinicalField.tsx": "cbe8d01ff077c12efc86360d94e7e25d832d27419641a546433c90e4f7bf79dc",
@@ -36,13 +36,13 @@
         "frontend/src/components/PatientInfo/tabs/WearableTab.tsx": "5fb8a4119093a52bfa9bf03307dac108645bc4118d74e5d0f0b9930787f3344f",
         "frontend/src/components/PatientInfo/utils.ts": "b5631d4c62194df11d490f0ec2a6b96004a29ec5bc97c3fd6ecc69e4b8aafa9d",
         "omop_core/data/genomics_catalog_v1.json": "38b688f271225c07fd43d4609c576e8abe1dd45f17803a5643b8aa024034bf83",
-        "omop_core/management/commands/export_field_mapping_inventory.py": "cba281e5227f7e55c0708b2904ef41e0510490b47f6b825f1d23b5591d21b86c",
+        "omop_core/management/commands/export_field_mapping_inventory.py": "04e611c82a2cb967bb0f7fe9ff5a02996f07defd39d379a14ebb669d4bcfd653",
         "omop_core/models.py": "ab81e001b73f83f9827c0c9ea1d434b66ef42d373b83e067544d11cdd3088a80",
         "omop_core/services/field_descriptor.py": "ed4aeb8300ce4c2dd23b857a6b9ab05aa954eea10e81d6a2d5b3567bbb92babc",
-        "omop_core/services/field_inventory.py": "aaa4fbd2f9bf647f8e1903feb5401ca58560c26972d330634a2a7b39f11045ac",
+        "omop_core/services/field_inventory.py": "46dc0c2c89d471db17ebaa2dee151225ffa32fd84c177a7649c7b6699c5a42f0",
         "omop_core/services/mappings.py": "5b72bcc4c23f336a1f4b603d1ac0f70013e1c3c57c5e4e8a24c4064f7c9b1b01",
         "omop_core/services/provenance_registry.py": "f2281d3fc6ff634738223110d4d97e46d064c379e9aab2cfe6e2d38781359363",
-        "omop_core/services/write_descriptor.py": "90e31f49f271f38965f2797770a3f74a8aad828fcb8da4f2e38bfc7f88601710",
+        "omop_core/services/write_descriptor.py": "df487cd65e0c074bd394681d89a15563dc9025d6edb052c4e28690826c97f745",
         "scripts/inventory-frontend-options.cjs": "9191d8c995b1dd89be97f778893e05025fd3b97c86b9ace406fe63f8f8317e60"
       }
     },
