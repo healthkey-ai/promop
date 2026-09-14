@@ -144,9 +144,6 @@ is supporting evidence.
 [Implemented Genomics architecture](genomics_architecture.md) is the current
 storage and ownership reference. [Genomics implementation](genomics_implementation.md)
 separately tracks remaining requirements, acceptance criteria, and deployment work.
-[Legacy cytogenetic storage](cytogenetic-markers.md) and
-[aggregate summary coding](cytogenetic-marker-coding.md) explain retained evidence
-and historical recipes; new discrete entry belongs to Genomics.
 
 ## 5. Deliver patient and integration workflows
 
