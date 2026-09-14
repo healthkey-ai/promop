@@ -136,11 +136,10 @@ function LymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onCha
       </Section>
 
       <Section title="Laboratory Markers">
+        <p className="mb-4 text-sm text-slate-500">Record hemoglobin in Blood and LDH in Labs.</p>
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <ClinicalField label="Bone Marrow Involvement" name="bone_marrow_involvement" descriptor={descriptors.bone_marrow_involvement} type="boolean" value={formData?.bone_marrow_involvement} onChange={onChange} />
           <ClinicalField label="Clonal Bone Marrow B Lymphocytes (%)" name="clonal_bone_marrow_b_lymphocytes" descriptor={descriptors.clonal_bone_marrow_b_lymphocytes} type="number" value={formData?.clonal_bone_marrow_b_lymphocytes} onChange={onChange} />
-          <ClinicalField label="Hemoglobin (g/dL)" name="hemoglobin_g_dl" descriptor={descriptors.hemoglobin_g_dl} type="number" value={formData?.hemoglobin_g_dl} onChange={onChange} />
-          <ClinicalField label="LDH (U/L)" name="ldh_u_l" descriptor={descriptors.ldh_u_l} type="number" value={formData?.ldh_u_l} onChange={onChange} />
           <ClinicalField label="LDH Upper Limit of Normal (U/L)" name="ldh_upper_limit_normal" descriptor={descriptors.ldh_upper_limit_normal} type="number" value={formData?.ldh_upper_limit_normal} onChange={onChange} />
           <ClinicalField label="Number of Nodal Sites" name="number_of_nodal_sites" descriptor={descriptors.number_of_nodal_sites} type="number" value={formData?.number_of_nodal_sites} onChange={onChange} />
         </div>

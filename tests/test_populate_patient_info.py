@@ -460,7 +460,7 @@ class TestLymphomaData:
         concept = ConceptFactory(concept_name='Lymphoma grade')
         MeasurementFactory(person=person, measurement_concept=concept, value_as_number=2)
         data = _cmd().get_lymphoma_data(person)
-        assert data['tumor_grade'] == 2
+        assert data['tumor_grade'] == '2'
 
     def test_no_lymphoma_data_empty_dict(self):
         person = PersonFactory()

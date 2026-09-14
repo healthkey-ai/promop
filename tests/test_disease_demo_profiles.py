@@ -137,7 +137,11 @@ def test_generated_assessments_survive_real_fhir_import(tmp_path):
     file=tmp_path/'generated.json'
     file.write_text(json.dumps({'resourceType':'Bundle','type':'collection','entry':[{'resource':r} for r in resources]}))
     output=StringIO()
+    from patient_portal.api import views
+    original_org_resolver = views.get_request_org
     call_command('import_fhir_bundle',file=str(file),org_slug='synthea-fl',stdout=output,stderr=output)
+    assert views.get_request_org is original_org_resolver
+    assert PatientRecord.objects.filter(organization__slug='synthea-fl').exists(), output.getvalue()
     record=PatientRecord.objects.get(organization__slug='synthea-fl')
     assert record.tumor_grade=='3A', (output.getvalue(), list(Measurement.objects.values('measurement_source_value','value_source_value','value_as_string','value_as_number')))
     assert record.flipi_score==3

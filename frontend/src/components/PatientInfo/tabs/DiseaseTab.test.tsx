@@ -447,6 +447,16 @@ describe('LymphomaSection — transformation to DLBCL fields', () => {
     expect(screen.getByText('Post-Transformation Outcome')).toBeInTheDocument();
   });
 
+  it('keeps shared lab editors in Blood and Labs while retaining FL assessment inputs', () => {
+    renderLymphoma({ hemoglobin_g_dl: 11.5, ldh_u_l: 250 });
+    expect(screen.getByText('Record hemoglobin in Blood and LDH in Labs.')).toBeInTheDocument();
+    expect(screen.queryByText('Hemoglobin (g/dL)')).not.toBeInTheDocument();
+    expect(screen.queryByText('LDH (U/L)')).not.toBeInTheDocument();
+    expect(screen.getByText('LDH Upper Limit of Normal (U/L)')).toBeInTheDocument();
+    expect(screen.getByText('Number of Nodal Sites')).toBeInTheDocument();
+    expect(screen.getByText('Bone Marrow Involvement')).toBeInTheDocument();
+  });
+
   it('renders dlbcl_transformation_date value in the date input', () => {
     renderLymphoma({ dlbcl_transformation_date: '2023-04-15' });
     expect(screen.getByDisplayValue('2023-04-15')).toBeInTheDocument();
