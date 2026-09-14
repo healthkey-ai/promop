@@ -1,14 +1,15 @@
 # PRomop Genomics: Implementation Plan
 
-The implemented baseline includes [#1249](https://github.com/healthkey-ai/promop/pull/1249), [#1259](https://github.com/healthkey-ai/promop/pull/1259), [schema audit #1263](https://github.com/healthkey-ai/promop/pull/1263), [PALB2 naming #1281](https://github.com/healthkey-ai/promop/pull/1281), and [project compatibility #1294](https://github.com/healthkey-ai/promop/pull/1294). Updated 2026-09-14 with writer-prerequisite verification below. The [implemented architecture](genomics_architecture.md) describes runtime behavior; this plan records delivery status, remaining requirements and acceptance criteria. The supplied Word documents are retained as requirements through these two canonical documents.
+The implemented baseline includes [#1249](https://github.com/healthkey-ai/promop/pull/1249), [#1259](https://github.com/healthkey-ai/promop/pull/1259), [schema audit #1263](https://github.com/healthkey-ai/promop/pull/1263), [PALB2 naming #1281](https://github.com/healthkey-ai/promop/pull/1281), and [project compatibility #1294](https://github.com/healthkey-ai/promop/pull/1294). Updated 2026-09-14 with catalog/write validation consistency and Render staging verification scope. The [implemented architecture](genomics_architecture.md) describes runtime behavior; this plan records delivery status, remaining requirements and acceptance criteria. The supplied Word documents are retained as requirements through these two canonical documents.
 
 ## Delivery status
 
 | Work | Issue | Current state |
 | --- | --- | --- |
 | Owned NOTE references and bounded projection reads | [#1236](https://github.com/healthkey-ai/promop/issues/1236) | Closed; merged in #1249 |
-| Shared text-column schema reconciliation | [#1237](https://github.com/healthkey-ai/promop/issues/1237) | Open; read-only audit merged in #1263; both active Render databases have narrow columns and zero overflow; Cloud Run verification remains; no current width remediation indicated |
-| Writer mapping/concept prerequisite audit | [#1300](https://github.com/healthkey-ai/promop/issues/1300) | Implemented; explicit audit option covers 42 parent mappings and required concepts; deployment runs remain |
+| Shared text-column schema reconciliation | [#1237](https://github.com/healthkey-ai/promop/issues/1237) | Open; read-only audit merged in #1263; both active Render databases have narrow columns and zero overflow; no current width remediation indicated |
+| Writer mapping/concept prerequisite audit | [#1300](https://github.com/healthkey-ai/promop/issues/1300) | Implemented; Render staging passed the combined check; production prerequisites remain in #1286 |
+| Catalog/write validation consistency | [#1310](https://github.com/healthkey-ai/promop/issues/1310) | Implemented; catalog flags share the writer’s parent storage checks; invalid mappings remain visible without edit controls |
 | Complete component/curation registry | [#1238](https://github.com/healthkey-ai/promop/issues/1238) | Closed; merged in #1249 |
 | Portable variant-name recipe and conclusive domain audit | [#1239](https://github.com/healthkey-ai/promop/issues/1239) | Closed; merged in #1249; installed-vocabulary audits remain an operational requirement |
 | Effective finding state and shared dialog | [#1240](https://github.com/healthkey-ai/promop/issues/1240) | Core implementation merged in #1249; true/unknown TP53 correction merged in #1297; clinical applicability, negative/combined aggregation and consumer review remain |
@@ -32,11 +33,11 @@ Implemented now: `python manage.py audit_genomics_schema --environment <deployme
 
 Read-only Render audits on 2026-09-14 verified that the two active deployment databases, `promop-dev` (Render staging) and `promop-db` (Render production), have `varchar(60)` Measurement/Observation columns and zero oversized values. [Retained audit evidence](https://github.com/healthkey-ai/promop/issues/1237#issuecomment-5660440818) includes an additional legacy deployment that the owner subsequently confirmed unused; its web service has been removed and it is excluded from active readiness work.
 
-No narrowing/backfill is indicated for the active Render databases. These audits do not certify historical migration operations, NOTE ownership, or the separately supported Cloud Run staging database. Verify Cloud Run's configured database and run the same audits there before claiming its readiness.
+No narrowing/backfill is indicated for the active Render databases. These audits do not certify historical migration operations or NOTE ownership. Use Render staging for verification; Cloud Run access is outside the current genomics delivery gates.
 
 Remaining work:
 
-1. Repeat the inventory and audits when deployments or schemas change. Active Render services are `promop` / `promop-worker` on `main` and `promop-staging` / `promop-staging-worker` on `dev`. Cloud Run staging remains supported by its existing workflow and needs separately identified database evidence. Review recorded migration history alongside actual widths and overflow counts.
+1. Repeat the inventory and audits when deployments or schemas change. Active Render services are `promop` / `promop-worker` on `main` and `promop-staging` / `promop-staging-worker` on `dev`. Review recorded migration history alongside actual widths and overflow counts.
 2. If a formerly widened deployment is found, identify every consumer of affected genomic and non-genomic text before choosing an owned-NOTE encoding. The shared columns contain more than genomics; rewriting them to references before their readers support those references would lose usable source text.
 3. Implement and test a forward, resumable backfill only for the evidenced schema/data paths. Preserve original values and dates, patient/fact/context ownership, ambiguous or missing legacy references, and historical notes. Do not manufacture clinical assertions to hold overflow.
 4. Narrow only after lossless readback, reader compatibility and a final zero-overflow check are demonstrated under a strategy that handles concurrent writes. Apply deployment remediation as an explicit operational step; do not edit deployed migration history again.
@@ -49,7 +50,7 @@ The effective registry exposes 31 components; all 73 parent/component recipes se
 
 The 2026-09-14 09:36 UTC read-only Render staging audit passed both component domains and the new writer-prerequisite checks. Both staging web and worker configurations were verified against the audited database. See the [retained audit evidence](https://github.com/healthkey-ai/promop/issues/1286#issuecomment-5661997210). Installed metadata reports LOINC 2.80, vocabulary release `v5.0 29-AUG-26`, and UCUM 1.8.2. SNOMED identifies itself as a synthetic benchmark seed; the component audit is not broad clinical vocabulary certification.
 
-Render production `promop-db` passed the width audit but could not run the component audit because it lacks `field_concept_mapping.provenance`. [#1286](https://github.com/healthkey-ai/promop/issues/1286) tracks that migration prerequisite and verification before enabling the current genomics writer there. Its metadata reports LOINC 2.82 and `v5.0 29-AUG-26`. The unused legacy Render deployment is outside this work. Cloud Run staging's mapping/vocabulary readiness remains to be verified against its own database. No live database, mapping or vocabulary changes were made during these audits.
+Render production `promop-db` passed the width audit but could not run the component audit because it lacks `field_concept_mapping.provenance`. [#1286](https://github.com/healthkey-ai/promop/issues/1286) tracks that migration prerequisite and verification before enabling the current genomics writer there. Its metadata reports LOINC 2.82 and `v5.0 29-AUG-26`. The unused legacy Render deployment is outside this work. No live database, mapping or vocabulary changes were made during these audits.
 
 For each deployment, run `audit_genomics_domains --include-writer-prerequisites` after vocabulary loading and retain its output with the vocabulary version. The new option also checks all 42 effective priority parent recipes, active concept 0, the default clinical/service (32817) and patient/representative (32865) actor concepts, and the same CDM event identity used by the writer. Missing/rejected/incomplete parent recipes, non-Measurement parents and missing/retired required concepts fail the combined audit. Without the option, the command retains its component-only scope. The latest Render staging receipt includes this option; older component-only receipts and the production width audit do not establish writer prerequisites. Resolve incomplete/ambiguous codes and table/domain mismatches through field-mapping curation, retaining source/value/unit settings. Rerun until verified. Curation changes future writes; moving existing clinical facts between tables requires a separately reviewed repair.
 
@@ -79,6 +80,24 @@ Obtain concrete deidentified examples and decisions for:
 - Coverage granularity, interpretation versus clinical significance, origin versus genomic source class, and actual status answer sets.
 
 Record the decisions on #1243 and link the receiving contract. Do not scaffold guessed test models or fabricate context while these requirements remain unresolved.
+
+#### Proposed source contract for review
+
+The following is a decision template for #1243, not an agreed BIDMC interface or an implemented receiving API. Store deidentified examples in an approved location and link them from the issue; do not put patient data in GitHub. For each row, record the source's actual field/path and example, the chosen rule, the decision owner and date, and the receiving acceptance test. Unresolved rows remain explicit blockers for the capabilities they affect.
+
+| Contract area | Proposed receiving behavior | Source decision/evidence needed |
+| --- | --- | --- |
+| Patient and source identity | Scope report identity by organization, source system and patient; reject cross-patient reassignment. | Authoritative patient matching, accession namespace, stable report ID and collision examples. |
+| Report versions and finding identity | Preserve prior versions; use stable source finding IDs within the agreed report identity. Replaying the same version should not duplicate facts; changed content under the same identity should require reconciliation. | Full replacement versus incremental amendments, version ordering, retractions, stable finding IDs and behavior when IDs are absent. |
+| Dates and specimen links | Keep collection, assay and report dates distinct; preserve available specimen and matched-normal identifiers. Hold findings without the clinical date required by the receiving contract. | Required dates, precision/timezone, specimen identity/type/site, pairing, and examples with missing or partial context. |
+| Finding state and assay scope | Preserve explicit source calls, including no-call and indeterminate wording. Retain zero-finding reports and scope separately; unreported scope members stay unknown unless a reviewed policy supports inference. | Actual status answer sets, explicit negative examples, versioned panel/probe/region definitions, callable evidence and reporting limitations. |
+| Numeric and interpretation context | Require numeric units; keep VAF and clone fraction separate, and preserve source interpretation without adding clinical thresholds. | Fraction versus percent conventions, coverage granularity, origin/source class and significance/tier/actionability fields. |
+| Payload and volume | Receive discrete report/finding content with bounded patient projections and access to findings outside those projections. | Ingest format, typical and largest report/patient counts, benign/reference-call inclusion, raw-file retention and readback requirements; agree numeric limits before implementation. |
+| Extraction and reconciliation | Retain source document/version and extraction/reviewer references; apply a whole finding atomically. Retry after a committed write should resolve to the same result. | Authoritative document identity, extractor rerun behavior, review/hold decisions, report-level transaction boundary and partial-failure response. |
+
+The minimum source example set should cover an ordinary positive report, an explicit negative report, a no-call or indeterminate result, a zero-finding report with scope, a multi-specimen or matched-normal report, an amendment and retraction, and a realistic high-volume report. Include missing-date/unit/identity cases and repeated deliveries to define rejection, hold and retry behavior. If a case is unsupported by the source, record that explicitly instead of inventing an example or a clinical rule.
+
+Convert the accepted examples into fixtures and contract tests under #1244/#1245. Until acceptance is recorded, existing interactive list replacement remains the only implemented list-write behavior; it must not be used as an incremental source import.
 
 ### 5. Implement tests, specimens and bounded projections (#1244)
 
@@ -151,7 +170,7 @@ Coordinates/alleles/external identifiers, copy number, fusion breakpoints and re
 
 ## Verification and delivery
 
-Use explicitly configured isolated local PostgreSQL databases for tests. Render staging and Cloud Run staging are both supported; name the target and verify its configured database for operational audits. Never inherit an unspecified remote `.env` database URL in tests.
+Use explicitly configured isolated local PostgreSQL databases for tests. Use Render staging for operational verification and confirm its configured database. Production promotion remains a separate release step. Never inherit an unspecified remote `.env` database URL in tests.
 
 Retain meaningful regressions for event/patient isolation, owned NOTE history, state transitions, independent components, source-preserving legacy reads, assertion/derivation separation and query budgets. For migration/backfill changes, exercise fresh and affected prior schema/data plus interrupted retries. Complete required GitHub CI before merge and update these two documents as capabilities land.
 

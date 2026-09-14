@@ -34,6 +34,52 @@ def test_catalog_is_disease_specific_without_patient_facts(setup, disease, expec
     assert not Observation.objects.filter(person=person).exists()
 
 
+@pytest.mark.parametrize('changes', [
+    None, {'status': 'rejected'}, {'status': 'proposed'},
+    {'source_value': ''}, {'source_value': 'x' * 51},
+    {'omop_table': 'observation'}, {'omop_table': 'condition_occurrence'},
+])
+def test_catalog_disables_parent_recipes_that_the_writer_rejects(setup, changes):
+    person, _, staff = setup
+    mapping = FieldConceptMapping.objects.filter(field_name='genomics_brca1')
+    if changes is None:
+        mapping.delete()
+    else:
+        mapping.update(**changes)
+    client = client_for(staff)
+    response = client.get(f'/api/v1/patient-records/{person.pk}/genomics-catalog/', {'disease': 'BC'})
+    assert response.status_code == 200
+    writable = {m['key']: m['writable'] for m in response.data['markers']}
+    assert writable['brca1'] is False
+    assert writable['tp53'] is True
+    response = client.patch(f'/api/v1/patient-records/{person.pk}/', {
+        'genomics_brca1': [{'gene': 'BRCA1', 'variant': 'source variant'}],
+    }, format='json')
+    assert response.status_code == 400, response.data
+    assert 'genomics_brca1' in response.data
+    assert not Measurement.objects.filter(person=person).exists()
+    assert not Observation.objects.filter(person=person).exists()
+
+
+@pytest.mark.parametrize('concept_id', [None, 0])
+def test_catalog_keeps_complete_source_only_parent_recipes_writable(setup, concept_id):
+    person, _, staff = setup
+    source = 'genomics:' + 'x' * 41  # Exact supported 50-character limit.
+    FieldConceptMapping.objects.filter(field_name='genomics_brca1').update(
+        concept_id=concept_id, vocabulary_id='', concept_code='', source_value=source,
+    )
+    client = client_for(staff)
+    response = client.get(f'/api/v1/patient-records/{person.pk}/genomics-catalog/', {'disease': 'BC'})
+    assert response.status_code == 200
+    assert next(m for m in response.data['markers'] if m['key'] == 'brca1')['writable'] is True
+    response = client.patch(f'/api/v1/patient-records/{person.pk}/', {
+        'genomics_brca1': [{'gene': 'BRCA1', 'variant': 'source variant'}],
+    }, format='json')
+    assert response.status_code == 200, response.data
+    parent = Measurement.objects.get(person=person, measurement_source_value=source)
+    assert parent.measurement_concept_id == 0
+
+
 def test_named_patientrecord_edits_project_both_directions(setup):
     person, record, staff = setup
     client = client_for(staff)
