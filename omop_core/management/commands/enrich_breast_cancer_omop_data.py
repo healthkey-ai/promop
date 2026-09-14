@@ -712,6 +712,13 @@ class Command(BaseCommand):
                 f'{counts["refreshed"]} records refreshed.'
             )
 
+        if not dry_run and processed_persons:
+            from django.core.management import call_command
+            sample_slugs = list(PatientRecord.objects.filter(person_id__in=processed_persons).exclude(organization=None).values_list('organization__slug', flat=True).distinct())
+            if sample_slugs:
+                call_command('backfill_sample_disease_profiles', org_slugs=','.join(sample_slugs), disease='BC',
+                             person_ids=','.join(str(person.pk) for person in processed_persons), confirm=True)
+
         total_elapsed = time.monotonic() - job_start
         self._write_progress(self.style.SUCCESS(
             f'\n{"-" * 60}\n'

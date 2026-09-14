@@ -569,12 +569,12 @@ describe('DiseaseTab — descriptor-driven', () => {
     expect(screen.queryByTestId('reason-tnbc_status')).not.toBeInTheDocument();
   });
 
-  it('says a field the API has no column for is not stored, not that it is derived', () => {
+  it('recognizes the now-stored B symptoms field', () => {
     // #646. "Derived from OMOP data" would send a reader looking for a value
     // that was never recorded anywhere.
     render(<DiseaseTab {...baseProps} diseaseType="lymphoma" formData={{}} />);
 
-    expect(screen.getByTestId('reason-b_symptoms')).toHaveTextContent(
+    expect(screen.getByTestId('reason-b_symptoms')).not.toHaveTextContent(
       /not stored on the patient record yet/i,
     );
   });
@@ -583,7 +583,7 @@ describe('DiseaseTab — descriptor-driven', () => {
     render(<DiseaseTab {...baseProps} diseaseType="myeloma" formData={{}} />);
 
     for (const name of ['r_iss_stage', 'hypercalcemia', 'cytogenetic_risk']) {
-      expect(screen.getByTestId(`reason-${name}`)).toBeInTheDocument();
+      expect(screen.queryByTestId(`reason-${name}`)).not.toBeInTheDocument();
     }
   });
 });
@@ -620,13 +620,19 @@ describe('DiseaseTab — shared staging and biomarkers', () => {
     await fetchWritableFields();
   });
 
-  it.each(['breast', 'lymphoma', 'myeloma', 'cll', 'other'] as const)(
-    'shows them for %s, not only one disease',
+  it.each(['breast'] as const)(
+    'shows solid-tumor staging for %s',
     (diseaseType) => {
       render(<DiseaseTab {...baseProps} diseaseType={diseaseType} formData={{}} />);
       expect(screen.getByText('Staging & Biomarkers')).toBeInTheDocument();
     },
   );
+
+  it.each(['lymphoma', 'myeloma', 'cll', 'mcl', 'other'] as const)('omits routine solid-tumor biomarkers for %s', diseaseType => {
+    render(<DiseaseTab {...baseProps} diseaseType={diseaseType} formData={{}} />);
+    expect(screen.queryByText('Staging & Biomarkers')).not.toBeInTheDocument();
+    expect(screen.queryByText('PD-L1 Combined Positive Score')).not.toBeInTheDocument();
+  });
 
   it('leaves all four editable, since all four are mapped', () => {
     render(<DiseaseTab {...baseProps} diseaseType="breast" formData={{}} />);

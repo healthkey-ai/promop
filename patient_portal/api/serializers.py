@@ -500,6 +500,30 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             obj.person.supportive_courses.select_related('regimen').all(), many=True,
         ).data
 
+    def validate_flipi_score_options(self, value):
+        from omop_core.services.flipi import parse_factors
+        try:
+            selected = parse_factors(value)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc)) from None
+        return None if selected is None else ','.join(selected)
+
+    def validate_gelf_criteria_options(self, value):
+        from omop_core.services.sample_disease_profiles import GELF_FACTORS
+        if value is None:
+            return None
+        selected = {part.strip() for part in value.split(',') if part.strip()}
+        if selected - GELF_FACTORS.keys():
+            raise serializers.ValidationError('Select recognized GELF criteria.')
+        return ','.join(key for key in GELF_FACTORS if key in selected)
+
+    def validate_tumor_grade(self, value):
+        from omop_core.services.flipi import normalize_grade
+        try:
+            return normalize_grade(value)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc)) from None
+
     def validate_death_date(self, value):
         if value and value > localdate():
             raise serializers.ValidationError('Death date cannot be in the future.')

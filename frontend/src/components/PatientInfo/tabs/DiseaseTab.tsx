@@ -2,15 +2,17 @@ import { useVocabulary } from '@/hooks/useVocabulary';
 import { useWritableFields } from '@/hooks/useWritableFields';
 import ClinicalField from '../ClinicalField';
 import Section from '../Section';
+import FlipiAssessment from '../FlipiAssessment';
+import GelfAssessment from '../GelfAssessment';
 import {
   STAGE_OPTIONS, HISTOLOGIC_TYPE_OPTIONS,
   MENOPAUSAL_OPTIONS, TUMOR_STAGE_OPTIONS, NODES_STAGE_OPTIONS,
   STAGING_MODALITIES_OPTIONS, DISTANT_METASTASIS_STAGE_OPTIONS,
   YES_NO_OPTIONS, ER_OPTIONS, PR_OPTIONS, HER2_OPTIONS, HR_OPTIONS, HRD_OPTIONS,
   DISEASE_OPTIONS,
-  FLIPI_RISK_OPTIONS, FLIPI_FACTOR_OPTIONS, GELF_OPTIONS, FL_TUMOR_GRADE_OPTIONS,
+  FL_TUMOR_GRADE_OPTIONS,
   ISS_STAGE_OPTIONS, MM_PROGRESSION_OPTIONS, STEM_CELL_TRANSPLANT_OPTIONS, SCT_ELIGIBILITY_OPTIONS, MYELOMA_TYPE_OPTIONS,
-  MRD_STATUS_OPTIONS, CYTOGENETIC_RISK_OPTIONS,
+  MRD_STATUS_OPTIONS,
   BINET_STAGE_OPTIONS, TUMOR_BURDEN_OPTIONS, DISEASE_ACTIVITY_OPTIONS,
   RICHTER_TRANSFORMATION_OPTIONS, PROTEIN_EXPRESSION_OPTIONS,
 } from '../patientConstants';
@@ -46,6 +48,7 @@ function BreastCancerSection({ formData, onChange }: Omit<Props, 'diseaseType'>)
           <div className="sm:col-span-2">
             <ClinicalField label="Histologic Type" name="histologic_type" descriptor={descriptors.histologic_type} type="select" value={formData?.histologic_type} options={histOptions} onChange={onChange} vocabSource={histologicSource} />
           </div>
+          <ClinicalField label="Histologic Grade" name="tumor_grade" descriptor={descriptors.tumor_grade} type="select" value={formData?.tumor_grade} options={['1', '2', '3']} onChange={onChange} />
           <ClinicalField label="Menopausal Status" name="menopausal_status" descriptor={descriptors.menopausal_status} type="select" value={formData?.menopausal_status} options={MENOPAUSAL_OPTIONS} onChange={onChange} />
           <ClinicalField label="Tumor Stage" name="tumor_stage" descriptor={descriptors.tumor_stage} type="select" value={formData?.tumor_stage} options={TUMOR_STAGE_OPTIONS} onChange={onChange} vocabSource={tumorStageSource} />
           <ClinicalField label="Nodes Stage" name="nodes_stage" descriptor={descriptors.nodes_stage} type="select" value={formData?.nodes_stage} options={NODES_STAGE_OPTIONS} onChange={onChange} vocabSource={nodesStageSource} />
@@ -107,8 +110,6 @@ function LymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onCha
   // asking and whose record it is, not only on whether the field is mapped.
   const personId = (formData?.person_id ?? formData?.person) as number | undefined;
   const { descriptors } = useWritableFields(personId);
-  const { source: gelfSource }    = useVocabulary('gelf-criteria', 'title');
-  const { source: flipiSource }   = useVocabulary('flipi-score', 'code');
   const { source: flGradeSource } = useVocabulary('follicular-lymphoma-grade', 'title');
   const { options: txOutcomeOptions, source: txOutcomeSource } = useVocabulary('post-transformation-outcome', 'title');
   return (
@@ -117,14 +118,12 @@ function LymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onCha
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <ClinicalField label="Ann Arbor Stage" name="stage" descriptor={descriptors.stage} type="select" value={formData?.stage} options={STAGE_OPTIONS} onChange={onChange} />
           <ClinicalField label="Tumor Grade" name="tumor_grade" descriptor={descriptors.tumor_grade} type="select" value={formData?.tumor_grade} options={FL_TUMOR_GRADE_OPTIONS} onChange={onChange} vocabSource={flGradeSource} />
-          <ClinicalField label="GELF Criteria" name="gelf_criteria_status" descriptor={descriptors.gelf_criteria_status} type="select" value={formData?.gelf_criteria_status} options={GELF_OPTIONS} onChange={onChange} vocabSource={gelfSource} />
-          <ClinicalField label="FLIPI Score" name="flipi_score" descriptor={descriptors.flipi_score} type="number" value={formData?.flipi_score} onChange={onChange} />
-          <ClinicalField label="FLIPI Risk Category" name="flipi_risk_category" descriptor={descriptors.flipi_risk_category} unknownField type="select" value={formData?.flipi_risk_category} options={FLIPI_RISK_OPTIONS} onChange={onChange} vocabSource={flipiSource} />
+          <div className="sm:col-span-2"><GelfAssessment value={formData?.gelf_criteria_options} descriptor={descriptors.gelf_criteria_options} onChange={onChange} /></div>
           <div className="sm:col-span-2">
-            <ClinicalField label="FLIPI Risk Factors" name="flipi_score_options" descriptor={descriptors.flipi_score_options} type="multiselect" value={formData?.flipi_score_options} options={FLIPI_FACTOR_OPTIONS} onChange={onChange} />
+            <FlipiAssessment value={formData?.flipi_score_options} descriptor={descriptors.flipi_score_options} onChange={onChange} />
           </div>
-          <ClinicalField label="Bulky Disease" name="bulky_disease" descriptor={descriptors.bulky_disease} unknownField type="select" value={formData?.bulky_disease} options={YES_NO_OPTIONS} onChange={onChange} />
-          <ClinicalField label="B Symptoms" name="b_symptoms" descriptor={descriptors.b_symptoms} unknownField type="select" value={formData?.b_symptoms} options={YES_NO_OPTIONS} onChange={onChange} />
+          <ClinicalField label="Bulky Disease" name="bulky_disease" descriptor={descriptors.bulky_disease} type="select" value={formData?.bulky_disease} options={YES_NO_OPTIONS} onChange={onChange} />
+          <ClinicalField label="B Symptoms" name="b_symptoms" descriptor={descriptors.b_symptoms} type="select" value={formData?.b_symptoms} options={YES_NO_OPTIONS} onChange={onChange} />
         </div>
       </Section>
 
@@ -138,9 +137,12 @@ function LymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onCha
 
       <Section title="Laboratory Markers">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <ClinicalField label="Bone Marrow Involvement" name="bone_marrow_involvement" descriptor={descriptors.bone_marrow_involvement} type="select" value={formData?.bone_marrow_involvement} options={YES_NO_OPTIONS} onChange={onChange} />
+          <ClinicalField label="Bone Marrow Involvement" name="bone_marrow_involvement" descriptor={descriptors.bone_marrow_involvement} type="boolean" value={formData?.bone_marrow_involvement} onChange={onChange} />
           <ClinicalField label="Clonal Bone Marrow B Lymphocytes (%)" name="clonal_bone_marrow_b_lymphocytes" descriptor={descriptors.clonal_bone_marrow_b_lymphocytes} type="number" value={formData?.clonal_bone_marrow_b_lymphocytes} onChange={onChange} />
-          <ClinicalField label="Number of Nodal Sites" name="number_of_nodal_sites" descriptor={descriptors.number_of_nodal_sites} unknownField type="number" value={formData?.number_of_nodal_sites} onChange={onChange} />
+          <ClinicalField label="Hemoglobin (g/dL)" name="hemoglobin_g_dl" descriptor={descriptors.hemoglobin_g_dl} type="number" value={formData?.hemoglobin_g_dl} onChange={onChange} />
+          <ClinicalField label="LDH (U/L)" name="ldh_u_l" descriptor={descriptors.ldh_u_l} type="number" value={formData?.ldh_u_l} onChange={onChange} />
+          <ClinicalField label="LDH Upper Limit of Normal (U/L)" name="ldh_upper_limit_normal" descriptor={descriptors.ldh_upper_limit_normal} type="number" value={formData?.ldh_upper_limit_normal} onChange={onChange} />
+          <ClinicalField label="Number of Nodal Sites" name="number_of_nodal_sites" descriptor={descriptors.number_of_nodal_sites} type="number" value={formData?.number_of_nodal_sites} onChange={onChange} />
         </div>
       </Section>
     </>
@@ -162,9 +164,7 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
       <Section title="Disease Characteristics">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <ClinicalField label="M-Protein Type" name="myeloma_type" descriptor={descriptors.myeloma_type} type="select" value={formData?.myeloma_type} options={myelomaTypeOptions.length ? myelomaTypeOptions.map((o: { value: string }) => o.value) : MYELOMA_TYPE_OPTIONS} onChange={onChange} vocabSource={myelomaTypeSource} />
-          <ClinicalField label="ISS Stage" name="stage" descriptor={descriptors.stage} type="select" value={formData?.stage} options={ISS_STAGE_OPTIONS} onChange={onChange} />
-          <ClinicalField label="R-ISS Stage" name="r_iss_stage" descriptor={descriptors.r_iss_stage} unknownField type="select" value={formData?.r_iss_stage} options={ISS_STAGE_OPTIONS} onChange={onChange} />
-          <ClinicalField label="Durie-Salmon Stage" name="durie_salmon_stage" descriptor={descriptors.durie_salmon_stage} unknownField type="text" value={formData?.durie_salmon_stage} onChange={onChange} />
+          <ClinicalField label="Recorded ISS / R-ISS Stage" name="stage" descriptor={descriptors.stage} type="select" value={formData?.stage} options={ISS_STAGE_OPTIONS} onChange={onChange} />
           <ClinicalField label="Progression Status" name="progression" descriptor={descriptors.progression} type="select" value={formData?.progression} options={MM_PROGRESSION_OPTIONS} onChange={onChange} vocabSource={progressionSource} />
           <ClinicalField label="Measurable Disease (IMWG)" name="measurable_disease_imwg" descriptor={descriptors.measurable_disease_imwg} type="boolean" value={formData?.measurable_disease_imwg} onChange={onChange} />
           <ClinicalField label="MRD Status" name="mrd_status" descriptor={descriptors.mrd_status} type="select" value={formData?.mrd_status} options={MRD_STATUS_OPTIONS} onChange={onChange} />
@@ -182,8 +182,6 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
 
       <Section title="Myeloma Markers">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          {/* OMOP derived, so read_only on the serializer. An editable input
-              here would silently drop the edit. */}
           <ClinicalField label="Serum M-Protein (g/dL)" name="monoclonal_protein_serum" descriptor={descriptors.monoclonal_protein_serum} type="number" value={formData?.monoclonal_protein_serum} onChange={onChange} />
           <ClinicalField label="Urine M-Protein (mg/24h)" name="monoclonal_protein_urine" descriptor={descriptors.monoclonal_protein_urine} type="number" value={formData?.monoclonal_protein_urine} onChange={onChange} />
           <ClinicalField label="Kappa Free Light Chains" name="kappa_flc" descriptor={descriptors.kappa_flc} type="number" value={formData?.kappa_flc} onChange={onChange} />
@@ -196,16 +194,12 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
       <Section title="Complications">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <ClinicalField label="Bone Lesions" name="bone_lesions" descriptor={descriptors.bone_lesions} type="select" value={formData?.bone_lesions} options={YES_NO_OPTIONS} onChange={onChange} />
-          <ClinicalField label="Hypercalcemia" name="hypercalcemia" descriptor={descriptors.hypercalcemia} unknownField type="select" value={formData?.hypercalcemia} options={YES_NO_OPTIONS} onChange={onChange} />
-          <ClinicalField label="Renal Impairment" name="renal_impairment" descriptor={descriptors.renal_impairment} unknownField type="select" value={formData?.renal_impairment} options={YES_NO_OPTIONS} onChange={onChange} />
-          <ClinicalField label="Anemia" name="anemia" descriptor={descriptors.anemia} unknownField type="select" value={formData?.anemia} options={YES_NO_OPTIONS} onChange={onChange} />
           <ClinicalField label="Bone Marrow Plasma Cells (%)" name="clonal_plasma_cells" descriptor={descriptors.clonal_plasma_cells} type="number" value={formData?.clonal_plasma_cells} onChange={onChange} />
         </div>
       </Section>
 
       <Section title="Cytogenetics">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <ClinicalField label="Cytogenetic Risk" name="cytogenetic_risk" descriptor={descriptors.cytogenetic_risk} unknownField type="select" value={formData?.cytogenetic_risk} options={CYTOGENETIC_RISK_OPTIONS} onChange={onChange} />
           <div className="sm:col-span-2">
             <div data-patient-field="cytogenetic_markers">
               <p className="text-sm font-medium">Legacy cytogenetic summary</p>
@@ -312,18 +306,7 @@ function OtherSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange
   );
 }
 
-/**
- * Staging and biomarker facts that are not specific to one disease.
- *
- * These four are mapped and writable, and no tab showed them — so the write path
- * existed and nothing could reach it. Nodal and metastasis status apply to any
- * solid tumour, and PD-L1 scoring drives checkpoint-inhibitor eligibility across
- * several, so they belong beside whichever disease section is on screen rather
- * than inside one of them.
- *
- * No option lists: the descriptor carries no curated set for these, and a list
- * invented here would offer values the server cannot code.
- */
+/** Solid-tumor staging and assay-specific PD-L1 results for breast cancer. */
 function StagingBiomarkersSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>) {
   // Ask about *this* patient: whether a field may be edited depends on who is
   // asking and whose record it is, not only on whether the field is mapped.
@@ -348,6 +331,7 @@ function StagingBiomarkersSection({ formData, onChange }: Pick<Props, 'formData'
         {field('Metastasis Status', 'metastasis_status', 'text')}
         {field('PD-L1 Combined Positive Score', 'pd_l1_combined_positive_score', 'number')}
         {field('PD-L1 IC (%)', 'pd_l1_ic_percentage', 'number')}
+        {field('PD-L1 Assay', 'pd_l1_assay', 'text')}
       </div>
     </Section>
   );
@@ -382,10 +366,7 @@ export default function DiseaseTab({ formData, onChange, diseaseType }: Props) {
         </div>
       </Section>
       {diseaseSection}
-      {/* Shown for every disease: nodal and metastasis status apply to any solid
-          tumour, and PD-L1 drives checkpoint-inhibitor eligibility across
-          several. */}
-      <StagingBiomarkersSection formData={formData} onChange={onChange} />
+      {diseaseType === 'breast' && <StagingBiomarkersSection formData={formData} onChange={onChange} />}
     </>
   );
 }

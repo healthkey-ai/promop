@@ -219,7 +219,8 @@ class FLBundleGenerator:
         bundle = {'resourceType': 'Bundle', 'type': 'collection', 'entry': []}
         for i in range(1, count + 1):
             self._add_patient(bundle, i)
-        return bundle
+        from omop_core.services.sample_disease_profiles import complete_demo_fhir_bundle
+        return complete_demo_fhir_bundle(bundle, 'FL')
 
     # ------------------------------------------------------------------
     # Bundle assembly
@@ -228,6 +229,13 @@ class FLBundleGenerator:
     def _add_patient(self, bundle, pid):
         p         = self._profile(pid)
         diag_date = self._random_date(2015, 2025)
+        p['birth_date'] = date(date.today().year-p['age'], random.randint(1,12), random.randint(1,28))
+        age_at_diagnosis = diag_date.year-p['birth_date'].year-((diag_date.month,diag_date.day)<(p['birth_date'].month,p['birth_date'].day))
+        factors = [key for key in p['flipi_score_options'].split(',') if key and key != 'age']
+        if age_at_diagnosis > 60: factors.insert(0, 'age')
+        p['flipi_score_options'] = ','.join(factors)
+        p['flipi_score'] = len(factors)
+        p['flipi_risk'] = 'low' if len(factors) <= 1 else 'intermediate' if len(factors) == 2 else 'high'
         lab_date  = datetime.now() - timedelta(days=random.randint(1, 60))
 
         def _entry(resource):
@@ -367,7 +375,7 @@ class FLBundleGenerator:
         p['nodal_sites'] = random.randint(1, 4) if p['early_stage'] else random.randint(1, 10)
 
         bm_prob = {'I': 0.05, 'II': 0.10, 'III': 0.35, 'IV': 0.55}[p['ann_arbor_stage']]
-        p['bone_marrow_involvement'] = random.random() < bm_prob
+        p['bone_marrow_involvement'] = p['ann_arbor_stage'] == 'IV' and random.random() < bm_prob
         p['bm_b_cells_pct'] = (round(random.uniform(10, 65), 1) if p['bone_marrow_involvement']
                                 else round(random.uniform(0.5, 8.0), 1))
 
@@ -407,11 +415,12 @@ class FLBundleGenerator:
             p['nodal_sites'] > 4,
             p['ldh_elevated'],
         ])
+        p['flipi_score_options'] = ','.join(key for key, yes in [('age', p['age'] > 60), ('stage', p['ann_arbor_stage'] in ('III', 'IV')), ('hemoglobin', p['hemoglobin'] < 12), ('nodalAreas', p['nodal_sites'] > 4), ('ldh', p['ldh_elevated'])] if yes)
         p['flipi_score'] = flipi
         p['flipi_risk']  = 'low' if flipi <= 1 else ('intermediate' if flipi == 2 else 'high')
 
-        gelf_met = (p['bulky_disease'] or p['b_symptoms'] or p['nodal_sites'] >= 3 or
-                    p['bone_marrow_involvement'] or p['ldh_elevated'] or p['b2m'] > 3.0)
+        p['gelf_factors'] = ','.join(key for key, yes in [('large_mass', p['bulky_disease']), ('b_symptoms', p['b_symptoms']), ('cytopenia', p['platelets'] < 100 or p['anc'] < 1)] if yes)
+        gelf_met = bool(p['gelf_factors'])
         p['gelf_criteria'] = 'meets GELF criteria' if gelf_met else 'does not meet GELF criteria'
 
         ecog_w = {'I': [55, 35, 8, 2, 0], 'II': [45, 40, 12, 3, 0],
@@ -419,7 +428,7 @@ class FLBundleGenerator:
         p['ecog'] = _wc([0, 1, 2, 3, 4], ecog_w[p['ann_arbor_stage']])
         p['kps']  = max(20, 100 - p['ecog'] * 20)
 
-        waw_eligible = (flipi <= 2 and not p['b_symptoms'] and not p['bulky_disease']
+        waw_eligible = (not gelf_met and not p['b_symptoms'] and not p['bulky_disease']
                         and p['grade'] <= 2)
         p['watch_and_wait'] = waw_eligible and (random.random() < self.watch_wait_ratio)
 
@@ -444,7 +453,7 @@ class FLBundleGenerator:
 
     def _patient_resource(self, p):
         birth_year = date.today().year - p['age']
-        birth_date = f"{birth_year}-{random.randint(1,12):02d}-{random.randint(1,28):02d}"
+        birth_date = str(p.get('birth_date') or date(birth_year, random.randint(1,12), random.randint(1,28)))
         base = 'https://healthkey.ai/fhir/StructureDefinition/'
         resource = {
             'resourceType': 'Patient',
@@ -608,17 +617,21 @@ class FLBundleGenerator:
         pid, dt = p['id'], diag_date.strftime('%Y-%m-%d')
         tx_dt = (transformation_date or diag_date).strftime('%Y-%m-%d')
         grade_text = f"Grade {p['grade']}{'b' if p['grade_3b'] else 'a' if p['grade'] == 3 else ''}"
-        return [
+        from omop_core.services.sample_disease_profiles import profile_fhir_observation
+        assessment = {
+            'tumor_grade': grade_text.replace('Grade ', ''), 'flipi_score_options': p['flipi_score_options'],
+            'gelf_criteria_options': p['gelf_factors'], 'gelf_criteria_status': 'Met' if p['gelf_factors'] else 'Not Met',
+            'number_of_nodal_sites': p['nodal_sites'], 'bulky_disease': p['bulky_disease'], 'b_symptoms': p['b_symptoms'],
+            'bone_marrow_involvement': p['bone_marrow_involvement'], 'ldh_upper_limit_normal': 225,
+        }
+        return [*[profile_fhir_observation(pid, key, value, dt) for key, value in assessment.items()],
             self._obs(pid, f"obs-{pid}-ann-arbor-stage", '21908-9',
                       'Ann Arbor stage', 'laboratory', dt, 'string',
                       f"Stage {p['ann_arbor_stage']}{'B' if p['b_symptoms'] else ''}"),
             self._q_obs(pid, 'bm-b-cells', _L['bm_b_cells'],
                         'Clonal B lymphocytes in bone marrow biopsy (%)', p['bm_b_cells_pct'], '%', dt),
             self._obs(pid, f"obs-{pid}-prior-lines", '21861-0', 'Prior lines of therapy', 'laboratory', dt, 'integer', p['prior_lines']),
-            self._obs(pid, f"obs-{pid}-fl-grade", '44648-4', 'Histologic grade', 'laboratory', dt, 'string', grade_text),
             self._obs(pid, f"obs-{pid}-fl-transformed", 'fl-transformed-dlbcl', 'Histologic transformation to DLBCL', 'laboratory', tx_dt, 'boolean', p['transformed']),
-            self._obs(pid, f"obs-{pid}-flipi", 'LP95826-0', 'FLIPI score', 'survey', dt, 'integer', p['flipi_score']),
-            self._obs(pid, f"obs-{pid}-nodal-sites", '21912-1', 'Number of involved nodal sites', 'laboratory', dt, 'integer', p['nodal_sites']),
         ]
 
     # ------------------------------------------------------------------
