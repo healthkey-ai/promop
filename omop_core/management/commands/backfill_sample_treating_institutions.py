@@ -29,11 +29,13 @@ class Command(BaseCommand):
         counts = Counter()
         for offset in range(0, len(ids), batch_size):
             with transaction.atomic():
-                records = PatientRecord.objects.filter(pk__in=ids[offset:offset + batch_size])
+                records = PatientRecord.objects.filter(pk__in=ids[offset:offset + batch_size]).only(
+                    'pk', 'person_id', 'facility_name', 'region', 'user_edited_fields',
+                )
                 if not dry:
                     records = records.select_for_update()
                 records = list(records)
-                people = Person.objects.filter(pk__in=[r.person_id for r in records]).order_by('pk')
+                people = Person.objects.filter(pk__in=[r.person_id for r in records]).only('pk', 'facility_name').order_by('pk')
                 if not dry:
                     people = people.select_for_update()
                 people = {p.pk: p for p in people}
