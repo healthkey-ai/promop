@@ -8939,6 +8939,32 @@ class TrialSearchPreferencesViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
         time a patient touches a filter is exactly when there is no row —
         so the client would have to POST-then-PATCH and handle the race
         between two tabs doing it at once. `get_or_create` here instead.
+
+        **This replaces `preferences`; it does not merge into it.** The
+        method is PATCH and the action is called `upsert`, so the opposite
+        is the natural reading and a client has already lost saved filters
+        to it (healthkey-ai/exact#444). In full:
+
+        * A body carrying `preferences` **replaces the whole object**. Any
+          key not in that body is gone from the stored set.
+        * Removal is spelled by **absence**. There is no delete sentinel:
+          `{"sponsor": null}` stores the value `null`, it does not drop the
+          key. (A top-level `{"preferences": null}` is a 400 — the
+          serializer field does not allow null. Clearing is `{}`, or the
+          `reset` action. Note the row is still created by that refused
+          call, because `get_or_create` runs before validation.)
+        * A body that **omits** `preferences` leaves the stored object
+          untouched — `partial=True` is field-level, and that is the only
+          level at which it merges. It is not a no-op on the row, though:
+          it creates one if there was none, and `updated_at` is bumped
+          either way, so that field does not answer "did anything change".
+        * So a client holding part of the set must **read-modify-write**:
+          GET, merge its own edits over what came back, PATCH the result.
+
+        Concurrent writers are therefore last-writer-wins, and two of them
+        silently delete each other's keys — two tabs or two devices running
+        the same client are enough. There is no precondition to make a
+        write conditional on what was read; see issue #1312 for that.
         """
         person_id = _person_id_param(request)
         if person_id is None:
@@ -8965,8 +8991,13 @@ class TrialSearchPreferencesViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     def reset(self, request):
         """Clear this person's filters.
 
-        Separate from a PATCH of `{}` on `upsert`: `partial=True` merges, so
-        every existing key would survive a "reset".
+        Separate from a PATCH of `{}` on `upsert` — but not for the reason
+        that reads naturally. `partial=True` does not merge key by key; it
+        merges at the field level, so a body omitting `preferences` leaves
+        the stored object untouched and an empty PATCH is a no-op rather
+        than a clear. (A PATCH of `{"preferences": {}}` does clear it. This
+        action exists so "reset" is one call the client cannot get subtly
+        wrong, and so it reads as an intent rather than as a payload.)
 
         PATCH rather than POST because `ScopedTokenPermission` allows a
         session-authenticated patient safe methods and PATCH only — POST

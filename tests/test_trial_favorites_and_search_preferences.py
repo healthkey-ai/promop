@@ -147,8 +147,13 @@ class TestSearchPreferences:
         assert TrialSearchPreferences.objects.filter(person=person).count() == 1
 
     def test_reset_clears_rather_than_merges(self, client, person):
-        """Distinct from a PATCH of `{}`: partial update merges, so every
-        existing key would survive a "reset"."""
+        """Distinct from a PATCH of `{}` on `upsert`.
+
+        Not because a partial update merges key by key — it does not, see
+        `TestPreferencesAreReplacedNotMerged` — but because a body that
+        omits `preferences` leaves the stored field untouched, so a PATCH
+        of `{}` clears nothing and clearing needs an action of its own.
+        """
         client.patch(
             self.url(person, 'upsert/'),
             {'preferences': {'searchTitle': 'myeloma', 'phase': 'PHASE3'}},
@@ -168,6 +173,177 @@ class TestSearchPreferences:
         assert client.patch(
             '/api/v1/trial-search-preferences/reset/', {}, format='json'
         ).status_code == 400
+
+
+class TestPreferencesAreReplacedNotMerged:
+    """What a PATCH of `preferences` does to the keys it does not mention.
+
+    It removes them. `preferences` is one JSON column and the serializer
+    has no custom `update`, so `partial=True` is field-level: a body that
+    omits the field leaves it alone, and a body that carries it replaces
+    the whole object. The endpoint is called `upsert` and takes a PATCH,
+    which reads like a merge, and EXACT's client was built against that
+    reading and lost saved filters by it (healthkey-ai/exact#444). These
+    tests pin the contract so the next client does not have to guess it.
+    """
+
+    def url(self, person):
+        return f'/api/v1/trial-search-preferences/upsert/?person_id={person.pk}'
+
+    def test_a_second_write_replaces_the_first(self, client, person):
+        """Two partial writes do not compose: the second wins outright."""
+        first = client.patch(
+            self.url(person), {'preferences': {'a': 1}}, format='json'
+        )
+        # Without this the claim is vacuous: had the first write been
+        # refused, the second would still leave `{'b': 2}` and every
+        # assertion below would pass against a merging server too.
+        assert first.status_code == 200
+        assert TrialSearchPreferences.objects.get(person=person).preferences == {
+            'a': 1
+        }
+        response = client.patch(
+            self.url(person), {'preferences': {'b': 2}}, format='json'
+        )
+        assert response.status_code == 200
+        assert response.json()['preferences'] == {'b': 2}
+        assert TrialSearchPreferences.objects.get(person=person).preferences == {
+            'b': 2
+        }
+
+    def test_a_body_without_preferences_leaves_the_object_untouched(
+        self, client, person
+    ):
+        """`partial=True` is field-level, and this is the half that merges.
+
+        A PATCH of `{}` — which is what `upsert` called with no payload
+        sends — leaves the stored object exactly as it was. This is why
+        `reset` exists as a separate action rather than as this call.
+
+        Scoped to the object deliberately: the call is not a no-op on the
+        row. `updated_at` moves, and `get_or_create` will have created the
+        row if there was none. See `test_an_empty_body_still_touches_the_row`.
+        """
+        seed = client.patch(
+            self.url(person), {'preferences': {'searchTitle': 'myeloma'}}, format='json'
+        )
+        assert seed.status_code == 200
+        response = client.patch(self.url(person), {}, format='json')
+        assert response.status_code == 200
+        assert TrialSearchPreferences.objects.get(person=person).preferences == {
+            'searchTitle': 'myeloma'
+        }
+
+    def test_an_empty_body_still_touches_the_row(self, client, person):
+        """The two side effects that survive an otherwise-empty PATCH.
+
+        A client reading `updated_at` to decide whether anything changed
+        would be misled, and a client that PATCHes `{}` to probe for a row
+        creates the row by asking. Both follow from `get_or_create` running
+        before the serializer, which is deliberate — see `upsert` — but
+        neither is visible from "a body without `preferences` is a no-op".
+        """
+        assert not TrialSearchPreferences.objects.filter(person=person).exists()
+        response = client.patch(self.url(person), {}, format='json')
+        assert response.status_code == 200
+        row = TrialSearchPreferences.objects.get(person=person)
+        assert row.preferences == {}
+
+        before = row.updated_at
+        assert client.patch(self.url(person), {}, format='json').status_code == 200
+        row.refresh_from_db()
+        assert row.updated_at > before
+
+    def test_an_empty_object_clears_the_row(self, client, person):
+        """The distinction clients get wrong, stated as a test.
+
+        An omitted field leaves the object alone; a field carrying `{}`
+        replaces it with `{}`. Were the server merging, this call would
+        leave every existing key in place.
+        """
+        seed = client.patch(
+            self.url(person),
+            {'preferences': {'searchTitle': 'myeloma', 'phase': 'PHASE3'}},
+            format='json',
+        )
+        # Else a refused seed leaves `get_or_create`'s empty row and the
+        # assertion below passes without the clear ever happening.
+        assert seed.status_code == 200
+        assert TrialSearchPreferences.objects.get(person=person).preferences != {}
+        response = client.patch(self.url(person), {'preferences': {}}, format='json')
+        assert response.status_code == 200
+        assert response.json()['preferences'] == {}
+        assert TrialSearchPreferences.objects.get(person=person).preferences == {}
+
+    def test_a_nested_null_is_a_value_not_a_delete_sentinel(self, client, person):
+        """There is no way to spell "delete this key" — absence is how.
+
+        A client migrating from a merge-shaped API may reach for an
+        explicit `null` to retire a filter. Under a replace it is stored as
+        the value `null`, which `non_default_filter_count` then reads as
+        unset. Removal is spelled by leaving the key out of the body.
+        """
+        seed = client.patch(
+            self.url(person),
+            {'preferences': {'sponsor': 'Acme', 'phase': 'PHASE3'}},
+            format='json',
+        )
+        assert seed.status_code == 200
+        response = client.patch(
+            self.url(person), {'preferences': {'sponsor': None}}, format='json'
+        )
+        assert response.status_code == 200
+        # `sponsor` kept as an explicit null rather than dropped, and
+        # `phase` gone because it was absent — one call showing both rules.
+        row = TrialSearchPreferences.objects.get(person=person)
+        assert row.preferences == {'sponsor': None}
+        # And the null reads as unset downstream, so a client reaching for
+        # it does get the badge it wanted, just not the deletion.
+        assert row.non_default_filter_count == 0
+
+    def test_a_write_after_a_reset_holds_only_the_new_keys(self, client, person):
+        """The cleared state, pinned rather than inferred.
+
+        Asked for by #1201. It does not discriminate replace from merge —
+        after a reset the row is `{}` and merging into `{}` looks the same
+        — but it is the sequence a reader actually performs (Reset, then
+        set one filter), and nothing pinned where it lands.
+        """
+        seed = client.patch(
+            self.url(person),
+            {'preferences': {'searchTitle': 'myeloma', 'phase': 'PHASE3'}},
+            format='json',
+        )
+        assert seed.status_code == 200
+        reset = client.patch(
+            f'/api/v1/trial-search-preferences/reset/?person_id={person.pk}',
+            {},
+            format='json',
+        )
+        assert reset.status_code == 200
+        response = client.patch(
+            self.url(person), {'preferences': {'distance': 50}}, format='json'
+        )
+        assert response.status_code == 200
+        assert TrialSearchPreferences.objects.get(person=person).preferences == {
+            'distance': 50
+        }
+
+    def test_a_top_level_null_is_refused(self, client, person):
+        """`{"preferences": null}` is not "clear it" — the column is not nullable.
+
+        Worth pinning next to the nested case: the two nulls are one
+        keystroke apart and mean different things. Clearing is `{}` or the
+        `reset` action.
+        """
+        response = client.patch(
+            self.url(person), {'preferences': None}, format='json'
+        )
+        assert response.status_code == 400
+        # Named, because this route answers 400 for a missing `person_id`
+        # too and a bare status code cannot tell the two apart — nor tell
+        # that `allow_null=False` is still what refuses this.
+        assert 'preferences' in response.json()
 
 
 class TestNonDefaultFilterCount:
