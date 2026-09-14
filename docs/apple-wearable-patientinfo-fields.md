@@ -110,7 +110,7 @@ Do not add these to `PatientInfo` unless a later use case justifies them:
   - SpO2 minimum artifact handling.
   - insufficient coverage behavior.
   - no regression for existing `heartrate`, `heartrate_variability`, `exercise_minutes_per_week`, and `sleep_hours_per_night`.
-- Documentation updates `OMOP2PatientInfo.md` with wearable mapping and derivation rules.
+- Documentation updates [PatientRecord field mapping](../field_to_concept_mapping.md) with wearable mapping and derivation rules.
 
 ## Implementation notes
 
@@ -122,7 +122,7 @@ Suggested file touch points:
 - `omop_core/services/patient_record_service.py`
 - `patient_portal/api/serializers.py`
 - `frontend/src/federation/patientInfoTypes.ts`
-- `OMOP2PatientInfo.md`
+- [PatientRecord field mapping](../field_to_concept_mapping.md)
 - tests in `tests/` or `patient_portal/tests.py`, following existing PatientInfo sync test patterns
 
 ## Why this is high priority

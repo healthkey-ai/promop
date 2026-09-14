@@ -34,7 +34,7 @@ from omop_core.services.patient_record_service import (
 # picker or because it is height and weight multiplied together.
 _NO_MAPPING_REASON = (
     'No reviewed concept set for this field yet — it cannot be written as a '
-    'complete OMOP fact. See docs/omop_to_patientrecord.md.'
+    'complete OMOP fact. See field_to_concept_mapping.md.'
 )
 
 KIND_EDITABLE = 'editable'      # write an OMOP fact; derivation follows

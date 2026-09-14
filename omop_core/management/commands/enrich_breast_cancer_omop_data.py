@@ -83,7 +83,7 @@ logger = logging.getLogger(__name__)
 # medical advice / ineffective / side effect / inconvenient", not Complete /
 # Partial / Progressive / Stable response. They are left in place because six
 # consumers read them (views.py, episode_service, patient_record_service,
-# bulk_import_fhir_bundle, fill_org_analytics_gaps, OMOP2PatientInfo.md) and
+# bulk_import_fhir_bundle, fill_org_analytics_gaps, field_to_concept_mapping.md) and
 # because the correct fix is per-disease outcome value sets, not a like-for-like
 # swap: of the five diseases supported here only breast cancer uses RECIST.
 # Lymphoma uses Lugano, myeloma IMWG, CLL iwCLL — and IMWG's VGPR/sCR and
