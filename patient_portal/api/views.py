@@ -3226,6 +3226,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _timing_hash, _time.monotonic() - _t_mfetch, len(_existing_measurements),
                     )
 
+                    from omop_core.services.sample_disease_profiles import PREFIX as demo_prefix, SYSTEM as demo_system, PROFILE_FIELDS
+                    demo_unmapped = Concept.objects.filter(pk=0).first() if any(
+                        c.get('system') == demo_system for obs in data['observations']
+                        for c in obs.get('code', {}).get('coding', [])
+                    ) else None
+
                     # Accumulate new Measurement objects for bulk_create after the loop
                     # (one INSERT instead of one per observation = eliminates ~48 round-trips).
                     _pending_measurements: list = []
@@ -3300,6 +3306,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 obs_loinc = _c.get('code')
                                 break
 
+                        demo_code = next((c.get('code') for c in obs_code.get('coding', [])
+                                          if c.get('system') == demo_system
+                                          and str(c.get('code', '')).startswith(demo_prefix)
+                                          and str(c.get('code'))[len(demo_prefix):] in PROFILE_FIELDS), None)
+
                         # BP panel (85354-9) — expand components to individual measurements
                         # for systolic (8480-6) and diastolic (8462-4) so refresh_patient_record
                         # can derive BP from the Measurement table.
@@ -3346,17 +3357,20 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             measurement_concept = _cc_by_loinc(obs_loinc)
                         if not measurement_concept and obs_name:
                             measurement_concept = _cc_by_name(obs_name[:50])
-                        if not measurement_concept:
+                        if demo_code:
+                            measurement_concept = demo_unmapped
+                            qualifier_source_value = 'synthetic demo source'
+                        elif not measurement_concept:
                             # Use pre-hoisted generic lab test concept if not found
                             measurement_concept = _concept_generic_lab
 
                         if measurement_concept:
                             # Use pre-hoisted Lab type concept (32856 = Lab)
-                            type_concept = _concept_lab_type or measurement_concept
+                            type_concept = demo_unmapped if demo_code else (_concept_lab_type or measurement_concept)
 
                             # Use LOINC code as source_value when available — it's short,
                             # unique, and avoids collisions from truncating long display names.
-                            source_value = obs_loinc if obs_loinc else obs_name[:50]
+                            source_value = demo_code or obs_loinc or obs_name[:50]
                             # LOINC 21889-1 is officially Size Tumor.  A
                             # legacy lymph-node feed may reuse that code, but
                             # only its explicit text/context can authorize the

@@ -513,6 +513,45 @@ values attach to their therapy episode and date; planned therapies must not
 become administered drug exposures. Coordinate #252/#253/#1072/#230 and the
 existing loader/API tickets rather than porting the catalogs again.
 
+### Therapy-type consumer delivery
+
+This section owns the delivery tracking moved from
+[ADR 0002](docs/adr/0002-omop-therapy-types.md). The ADR retains matching semantics;
+this plan coordinates catalog coverage and consumer rollout without duplicating
+those decisions. Status checked against current PRomop code and GitHub on
+**2026-09-14**; merged code does not establish deployment or flag activation.
+
+| Work / owner | Verified checkpoint | Remaining acceptance / tracking |
+|---|---|---|
+| Patient class projection — PRomop | `*_therapy_type_ids`, structured `type_ids`, regimen provenance and aggregate `therapy_release_id` are implemented. Both Episode and inferred-LOT paths derive classes. | Preserve both paths and serializer consistency in changes; later-line class/component sets remain aggregate. Per-later-line criteria require actual per-line sets before use. |
+| Catalog mapping and question/answer integration — PRomop | Existing therapy tables and the first #1223 inventory slice are available. | #1230 depends on #1223/#1224. Reconcile catalog class links with the graph-derived patient classes; an approved reference link alone does not alter `_expand_class_ids`. Keep #252/#253/#1072/#230 for episode answers and supportive therapy work. |
+| Trial authoring — CancerBot | [#4635](https://github.com/cancerbot-org/cancerbot/pull/4635), [#4637](https://github.com/cancerbot-org/cancerbot/pull/4637) and recovery [#4645](https://github.com/cancerbot-org/cancerbot/pull/4645) merged. #4645 replaced the closed #4636/#4638 stack and carries #4632–#4634. | Verify deployed authored data preserves lossless mappings and explicit `no_omop`/legacy cases; no dropped required or excluded category. |
+| Consumer and matcher — EXACT | Consumer [#289](https://github.com/healthkey-ai/exact/pull/289) and matcher recovery [#292](https://github.com/healthkey-ai/exact/pull/292) merged. #292 replaced closed #290. | Epic [#283](https://github.com/healthkey-ai/exact/issues/283) remains open; #285 is also still open despite its replacement PR merging. Verify acceptance and issue reconciliation rather than calling the old stack “in review.” |
+| Release consistency — EXACT / PRomop | PRomop's aggregate serializer returns a release only for a fully certified class union, otherwise null. | EXACT [#286](https://github.com/healthkey-ai/exact/issues/286) remains open: verify patient/trial/mirror consistency, per-concept staleness and exclusion behavior. Patient provenance alone does not close the consumer gate. |
+| Validation and rollout — EXACT / clinical reviewers | No rollout completion is established by the merged PRs. | [#287](https://github.com/healthkey-ai/exact/issues/287) shadow comparison and [#288](https://github.com/healthkey-ai/exact/issues/288) hybrid activation remain open. |
+
+Complete the remaining gates in dependency order:
+
+1. Validate the intended class subset against the deployed release and actual
+   patient component identifiers. The [historical spike](docs/adr/0002-phase0-coverage.txt)
+   established 18 HemOnc classes in one export, not universal coverage. Resolve
+   the two ATC gaps explicitly (retain legacy or approve a supported equivalent)
+   and verify any RxNorm bridge needed by real inputs. Record release and evidence.
+2. Reconcile authored category mappings, source values and patient expansion.
+   Preserve broad/non-drug modalities on the legacy path when no lossless class
+   representation exists. Keep regimen identity, component matching and class
+   overlap distinct. Regimen expansion used for matching must remain separate
+   from authored component requirements; do not expand excluded regimens.
+3. Verify the consumer's required/excluded rules, release gates, unknown handling
+   and queryset/matcher parity. `EXACT_OMOP_THERAPY_TYPES` activation must respect
+   its `EXACT_OMOP_THERAPY` dependency. Aggregate 3L+ sets cannot prove a particular
+   later regimen; 1L/2L line-level data already exists, but its consumer use still
+   needs verification.
+4. Shadow-compare requirements and exclusions, review semantic divergences, and
+   stop on any weakened exclusion. Verify that no unresolved required criterion
+   becomes an empty requirement. Activate the hybrid per environment only after
+   these gates pass; retain explicit legacy coverage and an observable fallback.
+
 ## 8. Delivery, rollout and acceptance
 
 Implement in this order:
@@ -555,6 +594,53 @@ Close #21 only when every row of its field matrix is supported or explicitly
 resolved as a documented alias/linked/computed representation, its BC regression
 tests pass, and scoped reconciliation verifies the repaired extraction. Creating
 this plan and child issues does not itself close either implementation issue.
+
+### Vocabulary distribution and mapping provenance
+
+This section owns delivery tracking moved from
+[ADR 0001](docs/adr/0001-vocabulary-source-of-truth.md). The shared infrastructure
+work is coordinated with existing vocabulary issues; it does not replace the
+#1223 inventory prerequisite or make all cross-repository rollout work a new
+prerequisite for #1224.
+
+**Implemented baseline, reviewed 2026-09-14:** `VocabularyRelease` manifests,
+latest/detail/list APIs, release-based concept/graph ETags, latest-only NDJSON
+snapshots and byte-verifiable SHA-256 checksums exist. The loader upserts and
+uses guarded replacement, with ancestry filtered to loaded endpoints across its
+configured vocabulary scope. It no longer uses destructive `TRUNCATE CASCADE`
+or limits ancestry to HemOnc. Follow the
+[consumer protocol](docs/vocab-consumer-cache-protocol.md) for exact HTTP and
+checksum behavior. This code review does not certify a deployed corpus.
+
+The implementation remains a live-table publication model. Release IDs are
+local database primary keys, and existing older manifests may lack verifiable
+hashes. Checksumming publication is not an atomic switch of every loaded table;
+ETags do not freeze graph queries or make historical row data available.
+
+| Work / owner | Tracking | Remaining acceptance |
+|---|---|---|
+| Publication consistency — PRomop | [#236](https://github.com/healthkey-ai/promop/issues/236), [#623](https://github.com/healthkey-ai/promop/issues/623) | Define the supported corpus and concurrency boundary. Verify clients cannot activate mixed live-table generations. Retain latest-only snapshot semantics unless a separately designed historical row store is delivered. Specify rollback and release identity without claiming existing PKs are content-addressed. |
+| Namespace and mapping validity — PRomop curators | [#461](https://github.com/healthkey-ai/promop/issues/461), #1223/#1224/#1231 | Audit local namespaces and source/target validity. Retain source data and explicit unresolved outcomes; do not invent licensed concepts. Validate replacement/retirement semantics and invalidate relationship-derived values when their supporting graph changes. |
+| Mapping provenance and transfer — field mapper | #1224/#1226/#1231 | Record vocabulary release separately from approved mapping revision and source catalog/recipe version. Distinguish `vocabulary_release` from any separately reported `vocab_release` mechanism in inventory exports. Re-resolve vocabulary/code in the receiving environment; do not treat a PK from another database as a portable release identity. |
+| Consumer generations — EXACT / SoC / other maintainers | [EXACT consistency ADR](https://github.com/healthkey-ai/exact/blob/691a93b215be9e5b238cf00156886f3b3849fb43/docs/adr/0002-vocab-mirror-consumer-consistency.md), [#623](https://github.com/healthkey-ai/promop/issues/623) | One coordinated sync writer; immutable verified generations; atomic active pointer; pin once per operation; reject missing sentinel/count/checksum, stale or incompatible releases. Verify all tables needed for the consumer's workload before activation and retain a tested last-known-good policy. |
+| Shared governance — PRomop / source owners / consumers | [#254](https://github.com/healthkey-ai/promop/issues/254) | Ratify reviewer authority, release cadence, compatibility and retirement rules; confirm consumer ADR supersession and adoption. The rewrite requested by [#337](https://github.com/healthkey-ai/promop/issues/337) is documented, not evidence of cross-repository ratification. |
+| CB bridge retirement — CancerBot / EXACT | ADR 0001 retirement gate; EXACT [#283](https://github.com/healthkey-ai/exact/issues/283) | Inventory active `cb_code` criteria and their source versions, approved replacements, owner and expiry. Preserve exclusions and ambiguity; demonstrate zero production bridge reads/writes for two publications before archive-only retirement. |
+
+Acceptance must distinguish shipped server capabilities from consumer guarantees:
+
+- Exercise publication during multi-table sync and query/derivation operations;
+  mismatches cause retry or explicit failure, never activation under a stale label.
+  Capture verified release identity and age on downstream decisions.
+- Classify referenced identifiers as retained, invalidated, uniquely replaced,
+  ambiguous or unmapped across publications. No blind identifier rewriting.
+- Verify cache bootstrap, maximum staleness, outage and rollback behavior. Missing
+  valid vocabulary evidence must not yield a positive eligibility decision.
+- Preserve asserted versus inferred regimen provenance and complete line context.
+  No aggregate component superset may manufacture a regimen a patient never had.
+- Record the vocabulary, mapping and catalog/recipe revisions used in scoped
+  reconciliation evidence. Publication does not authorize historical fact rewrites.
+  Genomics-specific acceptance belongs to its
+  [mapping coordination section](docs/genomics_implementation.md#fieldvalue-mapping-coordination).
 
 ## 9. Implementation issues
 
