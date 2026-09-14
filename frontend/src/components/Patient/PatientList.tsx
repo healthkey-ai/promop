@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { Upload, FileText, Trash2, LogOut, Settings, Globe } from "lucide-react";
+import { Upload, Trash2, LogOut, Settings, Globe } from "lucide-react";
 import api from "@/api/axios";
 import { clearTokens } from "@/utils/oauth";
 import { useAuth, type User } from "@/hooks/useAuth";
@@ -246,7 +246,7 @@ function PatientListContent({ currentUser }: { currentUser: User | null }) {
   return (
     <div className="p-6">
       <div className="mb-6 flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-foreground">PROMOP Admin</h1>
+        <h1 className="text-2xl font-bold text-foreground">Patients</h1>
         <div className="flex gap-2">
           {(selectedIds.size > 0 || selectAllMode) && (
             <button
@@ -257,29 +257,23 @@ function PatientListContent({ currentUser }: { currentUser: User | null }) {
               Delete ({selectAllMode ? `All ${patientCount}` : selectedIds.size})
             </button>
           )}
-          <button
-            onClick={() => navigate("/upload-csv")}
-            className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-foreground hover:bg-accent"
-          >
-            <Upload size={16} />
-            Upload CSV
-          </button>
-          {canManageMappings ? (
-            <button
-              onClick={() => navigate("/mappings")}
-              className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-            >
-              <Globe size={16} />
-              Mappings
-            </button>
-          ) : (
-            <button
-              onClick={() => navigate("/upload-fhir")}
-              className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-            >
-              <FileText size={16} />
-              Upload FHIR
-            </button>
+          {canManageMappings && (
+            <>
+              <button
+                onClick={() => navigate("/mappings")}
+                className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+              >
+                <Globe size={16} />
+                Mappings
+              </button>
+              <button
+                onClick={() => navigate("/upload")}
+                className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-foreground hover:bg-accent"
+              >
+                <Upload size={16} />
+                Upload
+              </button>
+            </>
           )}
           <div className="ml-auto flex gap-2">
             {canManageMappings && (

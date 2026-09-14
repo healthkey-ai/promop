@@ -1,3 +1,4 @@
+import BrandHeader from "@/components/Branding/BrandHeader";
 import { useEffect, type ReactNode } from "react";
 import {
   Routes,
@@ -15,6 +16,7 @@ import ChangePassword from "@/components/Auth/ChangePassword";
 import PatientList from "@/components/Patient/PatientList";
 import PatientDetail from "@/components/Patient/PatientDetail";
 import PatientHome from "@/components/Patient/PatientHome";
+import UploadPage from "@/components/Patient/UploadPage";
 import UploadFHIR from "@/components/Patient/UploadFHIR";
 import UploadCSV from "@/components/Patient/UploadCSV";
 import OrgAdminPage from "@/components/OrgAdmin/OrgAdminPage";
@@ -119,6 +121,12 @@ function AppRoutes() {
     return element;
   };
 
+  const uploadRoute = (element: ReactNode) => {
+    if (!currentUser) return <Navigate to="/login" replace />;
+    if (!(currentUser.is_staff || currentUser.is_org_admin)) return <Navigate to="/" replace />;
+    return element;
+  };
+
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
@@ -151,8 +159,9 @@ function AppRoutes() {
         }
       />
       <Route path="/patient/:personId" element={providerRoute(<PatientDetail user={currentUser} />)} />
-      <Route path="/upload-fhir" element={providerRoute(<UploadFHIR />)} />
-      <Route path="/upload-csv" element={providerRoute(<UploadCSV />)} />
+      <Route path="/upload" element={uploadRoute(<UploadPage />)} />
+      <Route path="/upload-fhir" element={uploadRoute(<UploadFHIR />)} />
+      <Route path="/upload-csv" element={uploadRoute(<UploadCSV />)} />
       <Route path="/stats" element={<Navigate to="/org-admin" replace />} />
       <Route path="/service-applications" element={currentUser?.is_staff ? <ServiceApplicationsPage /> : <Navigate to={currentUser ? "/" : "/login"} replace />} />
       <Route path="/org-admin" element={providerRoute(<OrgAdminPage />)} />
@@ -175,5 +184,12 @@ function AppRoutes() {
 }
 
 export default function App() {
-  return <AppRoutes />;
+  return (
+    <div className="min-h-dvh">
+      <BrandHeader />
+      <div className="app-page-content">
+        <AppRoutes />
+      </div>
+    </div>
+  );
 }
