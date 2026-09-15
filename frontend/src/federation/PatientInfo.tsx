@@ -304,17 +304,33 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
     );
   }
 
-  const tabLabels = ["General", getDiseaseTabLabel(), "Treatment", "Blood", "Labs", "Behavior", "Wearable", "Genomics", "History"];
+  const diseaseType = getDiseaseType();
+  const showDiseaseTab = diseaseType !== "other";
+  const tabLabels = [
+    "General",
+    ...(showDiseaseTab ? [getDiseaseTabLabel()] : []),
+    "Treatment", "Blood", "Labs", "Behavior", "Wearable", "Genomics", "History",
+  ];
+
+  const diseaseIdx = showDiseaseTab ? 1 : -1;
+  const treatmentIdx = showDiseaseTab ? 2 : 1;
+  const bloodIdx = treatmentIdx + 1;
+  const labsIdx = bloodIdx + 1;
+  const behaviorIdx = labsIdx + 1;
+  const wearableIdx = behaviorIdx + 1;
+  const genomicsIdx = wearableIdx + 1;
+  const historyIdx = genomicsIdx + 1;
+
   const tabDescriptions: Record<number, string> = {
     0: "Keep patient details up to date for accurate personalisation.",
-    1: "Disease-specific clinical information.",
-    2: "Therapy history, treatment lines, and planned therapies.",
-    3: "Blood counts and differential.",
-    4: "Chemistry, liver function, coagulation, cardiac and tumour markers.",
-    5: "Lifestyle, socioeconomic, and behavioural health factors.",
-    6: "Apple wearable 30-day summaries derived from synced OMOP data.",
-    7: "Genes, variants, origins, interpretations, and test details.",
-    8: "Clinical timeline with conditions, treatments, labs, and procedures.",
+    ...(diseaseIdx >= 0 ? { [diseaseIdx]: "Disease-specific clinical information." } : {}),
+    [treatmentIdx]: "Therapy history, treatment lines, and planned therapies.",
+    [bloodIdx]: "Blood counts and differential.",
+    [labsIdx]: "Chemistry, liver function, coagulation, cardiac and tumour markers.",
+    [behaviorIdx]: "Lifestyle, socioeconomic, and behavioural health factors.",
+    [wearableIdx]: "Apple wearable 30-day summaries derived from synced OMOP data.",
+    [genomicsIdx]: "Genes, variants, origins, interpretations, and test details.",
+    [historyIdx]: "Clinical timeline with conditions, treatments, labs, and procedures.",
   };
 
   return (
@@ -359,33 +375,30 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
               onZipcodeChange={handleZipcodeChange}
             />
           )}
-          {activeTab === 1 && (
+          {activeTab === diseaseIdx && (
             <DiseaseTab
               formData={editedInfo}
               onChange={handleFieldChange}
-              diseaseType={getDiseaseType()}
+              diseaseType={diseaseType}
             />
           )}
-          {activeTab === 2 && (
+          {activeTab === treatmentIdx && (
             <TreatmentTab
               formData={editedInfo}
               onChange={handleFieldChange}
-              diseaseType={getDiseaseType()}
+              diseaseType={diseaseType}
               onRecordRefreshed={(info) => {
-                // Same reason as the provider editor: the derived values have
-                // moved, so the save baseline has to move with them or the next
-                // autosave sends them back as edits.
                 setEditedInfo(info);
                 serverInfoRef.current = { ...info };
               }}
             />
           )}
-          {activeTab === 3 && <BloodTab formData={editedInfo} onChange={handleFieldChange} />}
-          {activeTab === 4 && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
-          {activeTab === 5 && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} />}
-          {activeTab === 6 && <WearableTab formData={editedInfo} onChange={handleFieldChange} />}
-          {activeTab === 7 && <GenomicsTab formData={editedInfo} readOnly={readOnly} />}
-          {activeTab === 8 && <ClinicalSummaryTab formData={editedInfo} onNavigateToLabs={() => setActiveTab(4)} />}
+          {activeTab === bloodIdx && <BloodTab formData={editedInfo} onChange={handleFieldChange} />}
+          {activeTab === labsIdx && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
+          {activeTab === behaviorIdx && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} />}
+          {activeTab === wearableIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} />}
+          {activeTab === genomicsIdx && <GenomicsTab formData={editedInfo} readOnly={readOnly} />}
+          {activeTab === historyIdx && <ClinicalSummaryTab formData={editedInfo} onNavigateToLabs={() => setActiveTab(labsIdx)} />}
         </div>
       </div>
     </div>
