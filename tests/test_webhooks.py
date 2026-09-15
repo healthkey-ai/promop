@@ -6,10 +6,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, PropertyMock, patch
 
 import pytest
-from django.db import close_old_connections, transaction
+from django.db import close_old_connections, connection, transaction
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -872,22 +873,88 @@ def test_disclosed_secret_is_not_cacheable(setup):
     assert response['Pragma'] == 'no-cache'
 
 
-def test_unverified_inbound_traffic_is_metered(setup):
+def test_unverified_inbound_traffic_is_metered(setup, settings):
     """The source quota keys on a verified source, so it cannot bound traffic
-    that never verifies. Without an anonymous bucket, bad signatures are free."""
+    that never verifies. Without an ingress bucket, bad signatures are free."""
     from django.core.cache import cache
 
+    settings.WEBHOOK_INGRESS_RATE = '5/minute'
     cache.clear()
-    seen = {inbound(signature='wrong').status_code for _ in range(70)}
-    assert 429 in seen, seen
+    try:
+        seen = [inbound(signature='wrong').status_code for _ in range(8)]
+        assert 429 in seen, seen
+        assert seen.index(429) >= 5, seen
+        # A caller cannot mint a fresh bucket by prepending to a header it
+        # controls: the key counts back from the end of the chain.
+        spoofed = inbound(signature='wrong',
+                          HTTP_X_FORWARDED_FOR='9.9.9.9, 127.0.0.1').status_code
+        assert spoofed == 429, spoofed
+    finally:
+        cache.clear()
+
+
+def test_a_verified_source_meets_its_own_quota_first(setup, settings):
+    """The ingress bucket sits above the per-source rate on purpose: metering
+    unverified traffic must not cap a legitimate sender below its quota."""
+    from django.core.cache import cache
+
+    settings.WEBHOOK_INGRESS_RATE = '1200/minute'
+    settings.WEBHOOK_INBOUND_RATE = '600/minute'
+    cache.clear()
+    try:
+        codes = set()
+        for i in range(70):
+            codes.add(inbound(payload={
+                'id': f'quota-{i}', 'type': 'lab.updated', 'data': {'person_id': 420001},
+            }).status_code)
+        assert codes == {202}, codes
+    finally:
+        cache.clear()
+
+
+def test_csrf_protected_endpoint_still_serves_its_real_callers(setup):
+    """The CSRF fix must deny the cross-site POST without denying the two ways
+    this endpoint is legitimately called."""
+    org, other, person, user, subscription = setup
+
+    # 1. A session caller that does send the token — same pattern as
+    #    test_session_admin_upload_with_csrf_succeeds.
+    from django.middleware.csrf import _get_new_csrf_string
+
+    session = APIClient(enforce_csrf_checks=True)
+    session.force_login(user)
+    csrf = _get_new_csrf_string()
+    session.cookies['csrftoken'] = csrf
+    session.credentials(HTTP_X_CSRFTOKEN=csrf)
+    with patch('patient_portal.api.webhook_views.validate_webhook_url'):
+        created = session.post(
+            '/api/v1/webhooks/subscriptions/',
+            {'organization': org.pk, 'url': 'https://legit.example/events',
+             'event_types': ['lab.updated']},
+            format='json',
+        )
+    assert created.status_code == 201, created.data
+
+    # 2. A header-authenticated caller, which carries no cookie and so is not
+    #    subject to CSRF at all.
+    user.is_staff = True
+    user.save(update_fields=['is_staff'])
+    bearer = APIClient(enforce_csrf_checks=True)
+    bearer.force_authenticate(user, token='service-token')
+    assert bearer.get('/api/v1/webhooks/subscriptions/').status_code == 200
 
 
 def test_oversized_body_is_refused_before_it_is_read(setup):
-    """Refused on the declared length, so a 2.5MB body is neither buffered nor
-    hashed before the answer. Signed with a wrong key on purpose: answering 413
-    rather than 401 is what proves the size check ran first."""
+    """Refused on the declared length, so a 2.5MB body is never buffered.
+
+    Asserting the status alone is not enough — a size check placed after
+    `request.body` also answers 413 — so this makes reading the body an error
+    and shows the request is refused without it.
+    """
     big = b'{"id": "e", "type": "lab.updated", "data": {"person_id": 420001}, "pad": "' + b'x' * 70000 + b'"}'
-    assert inbound(payload=big, signature='sha256=' + '0' * 64).status_code == 413
+    boom = PropertyMock(side_effect=AssertionError('the body was buffered'))
+    with patch('django.http.HttpRequest.body', new_callable=lambda: property(boom)):
+        assert inbound(payload=big, signature='sha256=' + '0' * 64).status_code == 413
     # And a correctly signed oversized body is refused too.
     assert inbound(payload=big).status_code == 413
 
@@ -964,6 +1031,16 @@ def test_prune_walks_forward_instead_of_rescanning(setup):
         WebhookDelivery.objects.filter(pk=delivery.pk).update(
             created_at=stale, next_attempt_at=stale, delivered_at=stale)
     out = StringIO()
-    call_command('prune_webhooks', batch_size=2, stdout=out)
+    with CaptureQueriesContext(connection) as queries:
+        call_command('prune_webhooks', batch_size=2, stdout=out)
     assert 'pruned 5' in out.getvalue()
     assert not WebhookDelivery.objects.exists()
+    # The batch SELECTs must carry an advancing lower bound. Without it every
+    # batch re-runs LIMIT from the start of the same scan, which is what makes
+    # the old version quadratic — and deleting the rows looks identical.
+    selects = [q['sql'] for q in queries.captured_queries
+               if q['sql'].lstrip().upper().startswith('SELECT')
+               and 'webhookdelivery' in q['sql'].lower()]
+    bounded = [sql for sql in selects if '"id" > ' in sql]
+    assert len(selects) >= 3, selects
+    assert len(bounded) >= 2, selects

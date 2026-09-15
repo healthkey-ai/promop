@@ -13,7 +13,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.settings import api_settings
-from rest_framework.throttling import AnonRateThrottle, SimpleRateThrottle
+from rest_framework.throttling import SimpleRateThrottle
 from drf_spectacular.utils import extend_schema
 
 from omop_core.models import Organization, PatientRecord
@@ -67,11 +67,14 @@ class WebhookManagementPermission(ScopedTokenPermission):
     entire point of the endpoint. Scopes cannot substitute: TokenClaims
     (Firebase/SAML) has no scope field at all, and a session has no token.
 
-    So the gate is the org_admin grant, checked first and applying to every
-    caller including OAuth and service tokens; those two additionally go
-    through the scope model below. That is a real gate — get_admin_orgs
-    requires a live org_admin GroupAccess row — and it is the same authority
-    that decides which subscriptions the caller can see at all. CSRF
+    So the gate is get_admin_orgs, checked first and applying to every caller
+    including OAuth and service tokens; those two additionally go through the
+    scope model below. Note what that set actually contains: platform staff get
+    every organization, a live org_admin grant gets its own, and a non-patient
+    professional role reaches further organizations through organization and
+    domain trusts. It is the same authority that decides which subscriptions
+    the caller can see, so read and write do not diverge — but a trust is an
+    egress authority here, which is worth knowing when granting one. CSRF
     enforcement on the viewset covers the session case, which is the one an
     attacker can drive from a page the admin visits.
     """
@@ -157,6 +160,43 @@ class InboundEventSerializer(serializers.Serializer):
 _DUMMY_SECRET = 'no-such-source'
 
 
+class InboundIngressThrottle(SimpleRateThrottle):
+    """Meter by IP in front of signature verification.
+
+    Not the project's `anon` bucket: this view sets `authentication_classes =
+    []`, so DRF counts every caller as anonymous — a correctly signed source
+    would be cut off at 60/minute, far below its own 600/minute quota, and
+    several sources behind one NAT would share that. This bucket therefore
+    sits deliberately ABOVE the per-source rate, so a verified sender always
+    meets its own quota first and this only bounds traffic that never
+    verifies.
+    """
+
+    scope = 'webhook_ingress'
+
+    def get_rate(self):
+        return settings.WEBHOOK_INGRESS_RATE
+
+    def get_ident(self, request):
+        # DRF's default returns the WHOLE X-Forwarded-For chain when
+        # NUM_PROXIES is unset, and that header is client-supplied: prepending
+        # a random value per request would mint a fresh bucket every time and
+        # leave this metering only the senders who are not trying to evade it.
+        # Count back from the end instead, past the hops we actually run, so
+        # the key is the address the nearest trusted proxy observed.
+        depth = settings.WEBHOOK_TRUSTED_PROXY_DEPTH
+        forwarded = request.META.get('HTTP_X_FORWARDED_FOR')
+        if depth < 1 or not forwarded:
+            return request.META.get('REMOTE_ADDR')
+        addresses = [part.strip() for part in forwarded.split(',') if part.strip()]
+        if not addresses:
+            return request.META.get('REMOTE_ADDR')
+        return addresses[-min(depth, len(addresses))]
+
+    def get_cache_key(self, request, view):
+        return self.cache_format % {'scope': self.scope, 'ident': self.get_ident(request)}
+
+
 class InboundWebhookThrottle(SimpleRateThrottle):
     scope = 'webhook_inbound'
 
@@ -173,10 +213,10 @@ class InboundWebhookView(APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
     # The source quota below is keyed on a verified source, so it cannot meter
-    # traffic that fails verification. An anonymous bucket in front of the
-    # signature check does that: without it, bad-signature traffic is unlimited
-    # and each request still costs a body read and an HMAC.
-    throttle_classes = [AnonRateThrottle]
+    # traffic that fails verification. This bucket does, in front of the
+    # signature check, without capping a legitimate sender — see
+    # InboundIngressThrottle.
+    throttle_classes = [InboundIngressThrottle]
 
     @extend_schema(request=InboundEventSerializer, responses={202: dict, 200: dict})
     def post(self, request):

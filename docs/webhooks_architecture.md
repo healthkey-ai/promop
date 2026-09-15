@@ -57,10 +57,13 @@ Authenticated inbound requests share a per-source quota, default 600/minute,
 configured with `WEBHOOK_INBOUND_RATE` (DRF rate syntax, e.g. `1200/minute`).
 Different sources behind one IP have separate quotas. Invalid signatures do not
 consume a source quota. A 429 includes `Retry-After`; wait that many seconds,
-then retry with a fresh signature/timestamp and the same ID/body. The generic
-anonymous throttle also applies, in front of signature verification, so that
-traffic which never verifies is still metered; a correctly signed sender is
-bounded by its own source quota well before that. Use a shared Django cache across
+then retry with a fresh signature/timestamp and the same ID/body. A per-IP ingress bucket
+(`WEBHOOK_INGRESS_RATE`, default 1,200/minute) also applies, in front of
+signature verification, so traffic that never verifies is still metered. It is
+deliberately set above the per-source quota so a correctly signed sender always
+meets its own limit first; the project's generic 60/minute anonymous bucket is
+not used here, because this endpoint authenticates by signature rather than by
+session and every caller would otherwise count as anonymous. Use a shared Django cache across
 web instances for a shared quota; DRF cache throttling is approximate under
 concurrency.
 
@@ -75,12 +78,16 @@ Content-Type: application/json
 {"organization":42,"url":"https://subscriber.example/events","event_types":["patient.changed","lab.updated"],"active":true}
 ```
 
-Organization access follows the existing administrator grants and trusts: the
-caller needs a live `org_admin` grant on the organization, and that grant is
-also what bounds which subscriptions it can see. OAuth and service tokens must
+Organization access is whatever `get_admin_orgs` returns, and that is wider
+than a direct grant: platform staff administer every organization, a live
+`org_admin` grant covers its own organization, and a non-patient professional
+role reaches further organizations through organization and domain trusts.
+The same set bounds which subscriptions a caller can see, so the read and
+write authorities do not diverge — but it does mean a trust relationship is
+an egress authority here, not only a read one. OAuth and service tokens must
 additionally hold the relevant read/write scope. Partner tokens (Firebase,
-SAML) carry no scopes, so for them the administrator grant is the whole gate;
-session callers are covered by CSRF enforcement on the endpoint. The 201 response includes
+SAML) carry no scopes at all, so for them that administrative set is the whole
+gate; session callers are covered by CSRF enforcement on the endpoint. The 201 response includes
 the generated `secret` once: store it at the subscriber. List, detail, update,
 and delivery-log responses never expose the secret. Subscriptions cannot be
 transferred between organizations. `PATCH /api/v1/webhooks/subscriptions/{id}/`
@@ -119,7 +126,15 @@ inbound endpoint verifies, so a subscriber can and should reject deliveries
 whose timestamp is outside its own tolerance — five minutes is what this
 service uses inbound. `X-HealthKey-Delivery` is a stable delivery UUID and is
 **not** covered by the signature, so treat it as a retry hint, not as
-authentication. Consumers should
+authentication.
+
+> **Signature format change.** Outbound deliveries were originally signed over
+> the body alone. Any subscriber provisioned against that construction must be
+> updated to verify `<timestamp>.<body>` before this is enabled for it — the
+> old form no longer verifies. The feature ships disabled
+> (`WEBHOOKS_ENABLED=false`), so there is no live subscriber to migrate today;
+> this note exists so nobody provisions one against the wrong scheme.
+ Consumers should
 deduplicate this UUID: delivery is at least once, including when a subscriber
 accepts a request but its response is lost. Only public HTTPS URLs on port 443
 are allowed for delivery. Subscription creation/update validates URL syntax and

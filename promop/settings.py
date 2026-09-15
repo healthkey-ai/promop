@@ -675,6 +675,15 @@ def _webhook_inbound_sources(raw):
 WEBHOOK_INBOUND_SOURCES = _webhook_inbound_sources(
     os.environ.get('WEBHOOK_INBOUND_SOURCES', '{}'))
 WEBHOOK_INBOUND_RATE = os.environ.get('WEBHOOK_INBOUND_RATE', '600/minute')
+# Per-IP, applied before signature verification so unverifiable traffic is
+# bounded too. Deliberately above WEBHOOK_INBOUND_RATE: a verified sender must
+# hit its own source quota first, not this one.
+WEBHOOK_INGRESS_RATE = os.environ.get('WEBHOOK_INGRESS_RATE', '1200/minute')
+# How many proxies of our own sit in front of the inbound endpoint. The ingress
+# bucket counts back this far from the end of X-Forwarded-For, so a caller
+# cannot mint a fresh bucket by prepending values to a header it controls.
+# Render terminates with one; set 0 to key on REMOTE_ADDR instead.
+WEBHOOK_TRUSTED_PROXY_DEPTH = int(os.environ.get('WEBHOOK_TRUSTED_PROXY_DEPTH', '1'))
 WEBHOOK_RETENTION_DAYS = int(os.environ.get('WEBHOOK_RETENTION_DAYS', '30'))
 CELERY_BEAT_SCHEDULE = {
     'recover-webhook-deliveries': {
