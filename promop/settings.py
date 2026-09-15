@@ -77,15 +77,15 @@ if _render_hostname and _render_hostname not in ALLOWED_HOSTS:
 # Preserve validation for unmarked legacy production processes too.
 if IS_DEPLOYED or not DEBUG:
     import sys as _sys
-    # Skip the production guard for management commands that must run before the
-    # app server is fully initialised (migrate, test, collectstatic, check, etc.)
-    # so that Render deploys (which call `migrate` in start.sh) and CI test runs
-    # are not broken when DATABASE_URL is absent at import time.
-    _management_commands = {
-        'migrate', 'test', 'collectstatic', 'check', 'makemigrations',
-        'copy_curation',
-    }
-    _running_mgmt = len(_sys.argv) > 1 and _sys.argv[1] in _management_commands
+    # Management commands don't serve HTTP — skip host/origin checks for all of
+    # them except `check --deploy` (which intentionally validates runtime config)
+    # and HTTP servers.  Render jobs run `python manage.py …` in the worker
+    # service, which has no RENDER_EXTERNAL_HOSTNAME.
+    _http_commands = {'runserver', 'runserver_plus', 'run_gunicorn'}
+    _is_manage_py = os.path.basename(_sys.argv[0] if _sys.argv else '') == 'manage.py'
+    _running_mgmt = _is_manage_py and (
+        len(_sys.argv) < 2 or _sys.argv[1] not in _http_commands
+    )
     # start.sh runs this before migrations. Validate the real runtime settings
     # here too, rather than allowing a warning followed by a later boot failure.
     if len(_sys.argv) > 1 and _sys.argv[1] == 'check' and '--deploy' in _sys.argv:

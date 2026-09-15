@@ -120,6 +120,17 @@ def test_render_build_commands_remain_exempt(command):
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.parametrize('command', ['reconcile_tp53_cache', 'audit_genomics_release',
+                                     'populate_sct_sample_data', 'shell'])
+def test_render_jobs_run_any_management_command_without_http_config(command):
+    """Render jobs run `python manage.py <command>` in the worker service, which
+    has no RENDER_EXTERNAL_HOSTNAME.  Every management command must boot without
+    ALLOWED_HOSTS or CORS_ALLOWED_ORIGINS — not just a hardcoded allowlist."""
+    result = boot(True, ['manage.py', command], RENDER='true',
+                  ALLOWED_HOSTS='', CORS_ALLOWED_ORIGINS='')
+    assert result.returncode == 0, result.stderr
+
+
 def test_render_worker_requires_secret_and_database_but_not_http_config():
     env = dict(RENDER='true', ALLOWED_HOSTS='', CORS_ALLOWED_ORIGINS='')
     result = boot(True, ['/usr/local/bin/celery'], **env)
