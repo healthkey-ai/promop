@@ -204,6 +204,87 @@ def test_lab_sync_bulk_write_emits_one_notification(setup, django_capture_on_com
     assert delivery.payload['data']['count'] == 1
 
 
+def test_tp53_reconciliation_notifies_only_when_it_applies_a_change(setup):
+    """`reconcile_tp53_cache --apply` writes with QuerySet.update(), which no
+    post_save receiver sees. Without an explicit publish the subscriber keeps a
+    stale tp53_disruption until some unrelated save happens to touch the row."""
+    from io import StringIO
+
+    from django.core.management import call_command
+
+    org, other, person, user, subscription = setup
+    # No source findings, so the reconciled value is None; the stored False is
+    # what the command has to correct, and correcting it is the change event.
+    record = PatientRecord.objects.get(person=person)
+    PatientRecord.objects.filter(pk=record.pk).update(tp53_disruption=False)
+
+    WebhookDelivery.objects.all().delete()
+    call_command('reconcile_tp53_cache', person_id=person.pk, stdout=StringIO())
+    assert not WebhookDelivery.objects.exists(), 'preview changes nothing and must stay silent'
+
+    call_command('reconcile_tp53_cache', person_id=person.pk, apply=True, stdout=StringIO())
+    delivery = WebhookDelivery.objects.get()
+    assert delivery.subscription_id == subscription.pk
+    assert delivery.payload['type'] == 'patient.changed'
+    assert delivery.payload['data'] == {
+        'person_id': person.pk, 'resource_id': str(record.pk),
+        'resource_type': 'omop_core.patientrecord', 'operation': 'saved',
+    }
+    record.refresh_from_db()
+    assert record.tp53_disruption is None
+
+    WebhookDelivery.objects.all().delete()
+    call_command('reconcile_tp53_cache', person_id=person.pk, apply=True, stdout=StringIO())
+    assert not WebhookDelivery.objects.exists(), 'a no-op re-run must not notify again'
+
+
+def test_tp53_reconciliation_holds_pending_edits_without_notifying(setup):
+    from io import StringIO
+
+    from django.core.management import call_command
+
+    org, other, person, user, subscription = setup
+    PatientRecord.objects.filter(person=person).update(
+        tp53_disruption=False, user_edited_fields=['tp53_disruption'])
+    WebhookDelivery.objects.all().delete()
+    call_command('reconcile_tp53_cache', person_id=person.pk, apply=True, stdout=StringIO())
+    assert not WebhookDelivery.objects.exists()
+    assert PatientRecord.objects.get(person=person).tp53_disruption is False
+
+
+@pytest.mark.django_db(transaction=True)
+def test_clinical_write_rolls_back_when_the_outbox_insert_fails(setup):
+    """The outbox row has to commit with the row it describes.
+
+    Without a transaction around the DRF write the document is already
+    committed when the receiver runs, so a failing insert would leave a
+    persisted document that no subscriber ever hears about.
+    """
+    org, other, person, user, subscription = setup
+    user.is_staff = True
+    user.save(update_fields=['is_staff'])
+    client = APIClient()
+    client.force_authenticate(user)
+
+    before = PatientDocument.objects.count()
+    with patch('patient_portal.webhooks.WebhookDelivery.objects.create',
+               side_effect=RuntimeError('outbox unavailable')):
+        with pytest.raises(RuntimeError):
+            client.post('/api/v1/documents/', {
+                'person': person.pk, 'doc_type': 'OTHER', 'title': 'Atomic boundary',
+            }, format='json')
+
+    assert PatientDocument.objects.count() == before, 'the document must not survive a failed outbox insert'
+    assert not WebhookDelivery.objects.exists()
+
+    response = client.post('/api/v1/documents/', {
+        'person': person.pk, 'doc_type': 'OTHER', 'title': 'Atomic boundary',
+    }, format='json')
+    assert response.status_code == 201, response.data
+    assert PatientDocument.objects.count() == before + 1
+    assert WebhookDelivery.objects.get().payload['type'] == 'document.received'
+
+
 @pytest.mark.parametrize('operation', ['update', 'delete'])
 def test_bulk_changes_notify_even_when_refresh_is_skipped(setup, operation):
     user = setup[3]
