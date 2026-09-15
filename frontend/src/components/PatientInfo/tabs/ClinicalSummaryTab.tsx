@@ -128,7 +128,10 @@ function groupMeasurements(rows: MeasurementRow[]): MeasurementGroup[] {
     const first = items[0];
     groups.push({
       key,
-      label: first.measurement_source_value || `Concept ${first.measurement_concept}`,
+      label:
+        first.concept_name ||
+        first.measurement_source_value ||
+        `Concept ${first.measurement_concept}`,
       unit: first.unit_source_value ?? "",
       values: items.map(measurementToLabValue),
     });
@@ -291,7 +294,7 @@ export default function ClinicalSummaryTab({ formData, onNavigateToLabs }: Props
               {conditions.allResults.map((c) => (
                 <tr key={c.condition_occurrence_id}>
                   <td className="px-3 py-2 text-foreground">
-                    {c.condition_source_value || `Concept ${c.condition_concept}`}
+                    {c.concept_name || c.condition_source_value || `Concept ${c.condition_concept}`}
                   </td>
                   <td className="px-3 py-2 text-muted-foreground">{fmtDate(c.condition_start_date)}</td>
                   <td className="px-3 py-2 text-muted-foreground">{fmtDate(c.condition_end_date)}</td>
@@ -321,7 +324,7 @@ export default function ClinicalSummaryTab({ formData, onNavigateToLabs }: Props
               {drugs.allResults.map((d) => (
                 <tr key={d.drug_exposure_id}>
                   <td className="px-3 py-2 text-foreground">
-                    {d.drug_source_value || `Concept ${d.drug_concept}`}
+                    {d.concept_name || d.drug_source_value || `Concept ${d.drug_concept}`}
                   </td>
                   <td className="px-3 py-2 text-muted-foreground">{fmtDate(d.drug_exposure_start_date)}</td>
                   <td className="px-3 py-2 text-muted-foreground">{fmtDate(d.drug_exposure_end_date)}</td>
@@ -349,7 +352,7 @@ export default function ClinicalSummaryTab({ formData, onNavigateToLabs }: Props
               {procedures.allResults.map((p) => (
                 <tr key={p.procedure_occurrence_id}>
                   <td className="px-3 py-2 text-foreground">
-                    {p.procedure_source_value || `Concept ${p.procedure_concept}`}
+                    {p.concept_name || p.procedure_source_value || `Concept ${p.procedure_concept}`}
                   </td>
                   <td className="px-3 py-2 text-muted-foreground">{fmtDate(p.procedure_date)}</td>
                   <td className="px-3 py-2 text-muted-foreground">{fmtDate(p.procedure_end_date)}</td>
@@ -412,7 +415,7 @@ export default function ClinicalSummaryTab({ formData, onNavigateToLabs }: Props
               {observations.allResults.map((o) => (
                 <tr key={o.observation_id}>
                   <td className="px-3 py-2 text-foreground">
-                    {o.observation_source_value || `Concept ${o.observation_concept}`}
+                    {o.concept_name || o.observation_source_value || `Concept ${o.observation_concept}`}
                   </td>
                   <td className="px-3 py-2 text-muted-foreground">{fmtDate(o.observation_date)}</td>
                   <td className="px-3 py-2 text-foreground">
