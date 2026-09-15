@@ -35,10 +35,20 @@ class Command(BaseCommand):
                 self.stdout.write(f'{query.model.__name__}: would prune {query.count()}')
                 continue
             deleted = 0
+            # Walk forward on pk rather than re-running LIMIT from the start
+            # each time. The rows this deletes are exactly the ones the partial
+            # index in 0019 excludes — it covers active deliveries — so an
+            # unbounded re-scan per batch is quadratic at the size retention
+            # exists to handle.
+            after = 0
             while True:
-                ids = list(query.order_by('pk').values_list('pk', flat=True)[:options['batch_size']])
+                ids = list(
+                    query.filter(pk__gt=after).order_by('pk')
+                    .values_list('pk', flat=True)[:options['batch_size']]
+                )
                 if not ids:
                     break
+                after = ids[-1]
                 count, _ = query.filter(pk__in=ids).delete()
                 deleted += count
             self.stdout.write(f'{query.model.__name__}: pruned {deleted}')

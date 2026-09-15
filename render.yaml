@@ -205,6 +205,11 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: bash start-worker.sh
     envVars:
+      # Exactly one scheduler per deployment. Safe here because this service
+      # runs a single replica; scaling it up means moving beat to its own
+      # service rather than raising the replica count.
+      - key: CELERY_EMBEDDED_BEAT
+        value: "true"
       - key: SECRET_KEY
         fromService:
           name: promop-staging

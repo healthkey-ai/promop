@@ -85,6 +85,14 @@ def resolve_webhook_url(url):
 def send_webhook(url, payload, secret, delivery_id):
     parsed, address = resolve_webhook_url(url)
     body = encode_payload(payload)
+    # Bind a timestamp into the signed bytes, exactly as the inbound path does.
+    # A body-only signature is replayable forever, and the documented mitigation
+    # — dedup on X-HealthKey-Delivery — cannot carry that weight on its own: the
+    # header is outside the signature, and a retry legitimately reuses the same
+    # id, so a replay is indistinguishable from one. No cross-direction forgery
+    # risk from sharing the scheme: an outbound body always starts with '{', so
+    # it can never be read as the inbound 'digits.' prefix.
+    timestamp = str(int(timezone.now().timestamp()))
     # Pin the validated address while retaining the original hostname for SNI
     # and certificate checks, so DNS rebinding cannot bypass network validation.
     pool = urllib3.HTTPSConnectionPool(
@@ -101,7 +109,8 @@ def send_webhook(url, payload, secret, delivery_id):
             'POST', target,
             body=body, headers={
                 'Host': parsed.netloc, 'Content-Type': 'application/json',
-                'X-HealthKey-Signature': compute_hmac_signature(body, secret),
+                'X-HealthKey-Signature': compute_hmac_signature(body, secret, timestamp),
+                'X-HealthKey-Timestamp': timestamp,
                 'X-HealthKey-Delivery': str(delivery_id),
             }, redirect=False, retries=False, preload_content=False,
         )

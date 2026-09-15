@@ -57,8 +57,13 @@ Authenticated inbound requests share a per-source quota, default 600/minute,
 configured with `WEBHOOK_INBOUND_RATE` (DRF rate syntax, e.g. `1200/minute`).
 Different sources behind one IP have separate quotas. Invalid signatures do not
 consume a source quota. A 429 includes `Retry-After`; wait that many seconds,
-then retry with a fresh signature/timestamp and the same ID/body. The generic
-anonymous 60/minute throttle does not apply. Use a shared Django cache across
+then retry with a fresh signature/timestamp and the same ID/body. A per-IP ingress bucket
+(`WEBHOOK_INGRESS_RATE`, default 1,200/minute) also applies, in front of
+signature verification, so traffic that never verifies is still metered. It is
+deliberately set above the per-source quota so a correctly signed sender always
+meets its own limit first; the project's generic 60/minute anonymous bucket is
+not used here, because this endpoint authenticates by signature rather than by
+session and every caller would otherwise count as anonymous. Use a shared Django cache across
 web instances for a shared quota; DRF cache throttling is approximate under
 concurrency.
 
@@ -73,8 +78,16 @@ Content-Type: application/json
 {"organization":42,"url":"https://subscriber.example/events","event_types":["patient.changed","lab.updated"],"active":true}
 ```
 
-Organization access follows the existing administrator grants and trusts. OAuth
-tokens must also hold the relevant read/write scope. The 201 response includes
+Organization access is whatever `get_admin_orgs` returns, and that is wider
+than a direct grant: platform staff administer every organization, a live
+`org_admin` grant covers its own organization, and a non-patient professional
+role reaches further organizations through organization and domain trusts.
+The same set bounds which subscriptions a caller can see, so the read and
+write authorities do not diverge — but it does mean a trust relationship is
+an egress authority here, not only a read one. OAuth and service tokens must
+additionally hold the relevant read/write scope. Partner tokens (Firebase,
+SAML) carry no scopes at all, so for them that administrative set is the whole
+gate; session callers are covered by CSRF enforcement on the endpoint. The 201 response includes
 the generated `secret` once: store it at the subscriber. List, detail, update,
 and delivery-log responses never expose the secret. Subscriptions cannot be
 transferred between organizations. `PATCH /api/v1/webhooks/subscriptions/{id}/`
@@ -95,9 +108,33 @@ its write transaction because Django does not emit model signals for these.
 Unassigned patients do not produce tenant notifications. A clinical save may
 also refresh PatientRecord and consequently emit a separate `patient.changed`.
 
+The outbox insert is deliberately part of the writer's transaction and is not
+wrapped in a try/except: that is what makes "the row exists" and "a
+notification for it exists" one fact rather than two. The cost is real and
+should be understood before enabling this in production — with
+`WEBHOOKS_ENABLED=true`, a failure to insert the outbox row (lock contention,
+a statement timeout, webhook tables missing on a lagging replica) rolls back
+the clinical write that triggered it, and each signalled row costs one
+subscription lookup plus one insert. Swallowing those errors would trade a
+visible failure for silent, permanent notification loss, which is the worse
+side for an audit-relevant egress path.
+
 Delivery bodies contain `id`, `type`, `occurred_at`, and `data` with identifiers
 and operation metadata. Outbound `X-HealthKey-Signature` uses the subscription
-secret, and `X-HealthKey-Delivery` is a stable delivery UUID. Consumers should
+secret over `<X-HealthKey-Timestamp>.<raw body>`, the same construction the
+inbound endpoint verifies, so a subscriber can and should reject deliveries
+whose timestamp is outside its own tolerance — five minutes is what this
+service uses inbound. `X-HealthKey-Delivery` is a stable delivery UUID and is
+**not** covered by the signature, so treat it as a retry hint, not as
+authentication.
+
+> **Signature format change.** Outbound deliveries were originally signed over
+> the body alone. Any subscriber provisioned against that construction must be
+> updated to verify `<timestamp>.<body>` before this is enabled for it — the
+> old form no longer verifies. The feature ships disabled
+> (`WEBHOOKS_ENABLED=false`), so there is no live subscriber to migrate today;
+> this note exists so nobody provisions one against the wrong scheme.
+ Consumers should
 deduplicate this UUID: delivery is at least once, including when a subscriber
 accepts a request but its response is lost. Only public HTTPS URLs on port 443
 are allowed for delivery. Subscription creation/update validates URL syntax and
@@ -127,8 +164,11 @@ Celery messages from sending concurrently. HTTP sends have 5-second connect and
 10-second read timeouts; this task alone has 45/60-second soft/hard limits and a
 120-second recovery lease. Lost worker attempts count toward the same limit.
 
-`start-worker.sh` starts embedded Celery beat by default, with its schedule in
-`/tmp/promop-celerybeat-schedule`. Every minute it queues up to 1,000 due outbox
+`start-worker.sh` starts embedded Celery beat when `CELERY_EMBEDDED_BEAT=true`,
+with its schedule in `/tmp/promop-celerybeat-schedule`. It is off unless asked
+for, because beat is a singleton and the default must stay safe when a worker
+service is scaled to more than one replica; `render.yaml` sets it on the
+single-replica staging worker. Every minute it queues up to 1,000 due outbox
 rows, recovering broker outages, lost tasks, and expired leases. The existing
 Render `promop-staging-worker` is a single worker service; staging is
 https://promop-staging.onrender.com (see [Render configuration](render-staging-celery.md)).
