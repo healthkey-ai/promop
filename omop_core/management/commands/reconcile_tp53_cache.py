@@ -56,6 +56,21 @@ class Command(BaseCommand):
                         # Do not claim a full version-8 refresh or trigger unrelated
                         # derivations, dates, source writes or pending-edit changes.
                         PatientRecord.objects.filter(pk=pk).update(tp53_disruption=value)
+                        # That deliberate `update()` is also invisible to post_save,
+                        # so the webhook receiver never sees this write and a
+                        # subscriber would keep a stale tp53_disruption until some
+                        # unrelated save happened to touch the row. Publish the same
+                        # event the receiver would have, inside this transaction, so
+                        # the outbox row commits with the value it describes. Held
+                        # and preview rows change nothing and stay silent.
+                        from patient_portal.webhooks import publish_event
+                        if record.organization_id is not None:
+                            publish_event(record.organization_id, 'patient.changed', {
+                                'person_id': record.person_id,
+                                'resource_id': str(pk),
+                                'resource_type': 'omop_core.patientrecord',
+                                'operation': 'saved',
+                            })
                 report['processed'] += 1
                 report['held_pending_edits'] += int(held)
                 report['changed'] += int(changed)

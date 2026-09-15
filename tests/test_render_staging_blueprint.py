@@ -58,13 +58,18 @@ def test_worker_refuses_missing_required_configuration(missing):
     assert missing in result.stderr
 
 
-def test_worker_start_defaults_to_one_child(tmp_path):
+@pytest.mark.parametrize('embedded_beat', ['true', 'false'])
+def test_worker_start_defaults_to_one_child(tmp_path, embedded_beat):
     celery = tmp_path / 'celery'
     celery.write_text('#!/bin/bash\nprintf "%s %s %s" "$CELERY_WORKER_CONCURRENCY" "$CELERY_WORKER_PREFETCH_MULTIPLIER" "$*"\n')
     celery.chmod(0o755)
     env = {'PATH': f'{tmp_path}:{os.environ["PATH"]}',
            'CELERY_BROKER_URL': 'redis://example.invalid',
-           'DATABASE_URL': 'postgresql://example.invalid', 'SECRET_KEY': 'test-only'}
+           'DATABASE_URL': 'postgresql://example.invalid', 'SECRET_KEY': 'test-only',
+           'CELERY_EMBEDDED_BEAT': embedded_beat}
     result = subprocess.run(['bash', str(ROOT / 'start-worker.sh')], env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-    assert result.stdout == '1 1 -A promop worker --loglevel=info'
+    expected = '1 1 -A promop worker --loglevel=info'
+    if embedded_beat == 'true':
+        expected += ' --beat --schedule=/tmp/promop-celerybeat-schedule'
+    assert result.stdout == expected

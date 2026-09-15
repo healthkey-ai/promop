@@ -7,3 +7,5 @@ class PatientPortalConfig(AppConfig):
 
     def ready(self):
         import patient_portal.checks  # noqa: F401
+        from patient_portal.webhooks import connect_patient_signals
+        connect_patient_signals()
