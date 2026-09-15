@@ -3984,14 +3984,30 @@ def _parse_date_value(v):
 
 
 def tp53_disruption_from_findings(findings):
-    """Version 8's positive/unknown rule, shared with scoped reconciliation."""
-    return True if any(
-        m.get('gene', '').lower() == 'tp53'
-        and (m.get('interpretation') or '').lower() == 'pathogenic'
+    """Ternary TP53 aggregate: True (disrupted), False (tested negative), None (unknown).
+
+    True  — at least one qualifying positive (pathogenic, present status).
+    False — TP53 findings exist but none qualify as positive (e.g. absent).
+    None  — no TP53 findings at all, or only indeterminate/not-tested results.
+    """
+    tp53_findings = [
+        m for m in (findings or [])
+        if m.get('gene', '').lower() == 'tp53'
+    ]
+    if not tp53_findings:
+        return None
+    if any(
+        (m.get('interpretation') or '').lower() == 'pathogenic'
         and m.get('assessment') in (None, '', 'present')
         and m.get('status', 'present') == 'present'
-        for m in (findings or [])
-    ) else None
+        for m in tp53_findings
+    ):
+        return True
+    # TP53 findings exist; return False only when at least one has a definitive
+    # negative status, otherwise remain unknown.
+    if any(m.get('status') == 'absent' for m in tp53_findings):
+        return False
+    return None
 
 
 def _compute_derived_fields(patient_info: PatientRecord, *, apply_formulas=True) -> None:
