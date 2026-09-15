@@ -18,6 +18,7 @@ from pathlib import Path
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
+from django.conf import settings
 from patient_portal.models import Identity
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.test import RequestFactory, TestCase, TransactionTestCase, override_settings
@@ -26706,3 +26707,109 @@ class FhirConditionStagePersistenceTest(FhirUploadBase):
             ['Stage IIA'],
         )
         self.assertEqual(refresh_patient_record(person).stage, 'IIA')
+
+
+class CreateSmartAppRedirectSchemeTest(TestCase):
+    """Provisioning must enforce the redirect schemes the docs promise.
+
+    Application.clean() is the only thing that checks them, and Model.save()
+    never calls it — so the command has to ask before it writes.
+    """
+
+    def setUp(self):
+        self.owner = Identity.objects.create(
+            issuer='https://issuer.example.invalid', sub='smart-owner',
+            uid='https://issuer.example.invalid:smart-owner',
+            email='owner@example.invalid', is_staff=True,
+        )
+
+    def _application(self, client_id='test-smart-app'):
+        from oauth2_provider.models import get_application_model
+        return get_application_model().objects.filter(client_id=client_id).first()
+
+    def test_http_redirect_is_refused_under_the_https_only_default(self):
+        with override_settings(OAUTH2_PROVIDER={
+            **settings.OAUTH2_PROVIDER, 'ALLOWED_REDIRECT_URI_SCHEMES': ['https'],
+        }):
+            with self.assertRaises(CommandError) as ctx:
+                call_command(
+                    'create_smart_app', '--client-id', 'test-smart-app',
+                    '--redirect-uris', 'http://client.example.invalid/callback',
+                )
+        self.assertIn('Refusing to provision', str(ctx.exception))
+        # The message must say what is allowed, or the operator is left guessing.
+        self.assertIn('https', str(ctx.exception))
+        self.assertIsNone(self._application())
+
+    def test_https_redirect_is_provisioned(self):
+        with override_settings(OAUTH2_PROVIDER={
+            **settings.OAUTH2_PROVIDER, 'ALLOWED_REDIRECT_URI_SCHEMES': ['https'],
+        }):
+            call_command(
+                'create_smart_app', '--client-id', 'test-smart-app',
+                '--redirect-uris', 'https://client.example.invalid/callback',
+            )
+        app = self._application()
+        self.assertIsNotNone(app)
+        self.assertEqual(app.redirect_uris, 'https://client.example.invalid/callback')
+
+    def test_http_redirect_is_allowed_once_the_override_is_set(self):
+        with override_settings(OAUTH2_PROVIDER={
+            **settings.OAUTH2_PROVIDER, 'ALLOWED_REDIRECT_URI_SCHEMES': ['https', 'http'],
+        }):
+            call_command(
+                'create_smart_app', '--client-id', 'test-smart-app',
+                '--redirect-uris', 'http://localhost:3000/callback',
+            )
+        self.assertEqual(self._application().redirect_uris, 'http://localhost:3000/callback')
+
+    def test_an_unknown_owner_exits_non_zero(self):
+        """Previously stderr + return, which exits 0 and reads as success."""
+        with self.assertRaises(CommandError) as ctx:
+            call_command(
+                'create_smart_app', '--client-id', 'test-smart-app',
+                '--redirect-uris', 'https://client.example.invalid/callback',
+                '--owner-username', 'nobody@example.invalid',
+            )
+        self.assertIn('not found', str(ctx.exception))
+        self.assertIsNone(self._application())
+
+    def test_no_staff_user_exits_non_zero(self):
+        Identity.objects.filter(is_staff=True).update(is_staff=False)
+        with self.assertRaises(CommandError) as ctx:
+            call_command(
+                'create_smart_app', '--client-id', 'test-smart-app',
+                '--redirect-uris', 'https://client.example.invalid/callback',
+            )
+        self.assertIn('No staff user found', str(ctx.exception))
+        self.assertIsNone(self._application())
+
+    def test_an_empty_allowlist_fails_with_a_message_not_a_traceback(self):
+        """clean() raises AttributeError there, so the guard has to come first."""
+        with override_settings(OAUTH2_PROVIDER={
+            **settings.OAUTH2_PROVIDER, 'ALLOWED_REDIRECT_URI_SCHEMES': [],
+        }):
+            with self.assertRaises(CommandError) as ctx:
+                call_command(
+                    'create_smart_app', '--client-id', 'test-smart-app',
+                    '--redirect-uris', 'https://client.example.invalid/callback',
+                )
+        self.assertIn('ALLOWED_REDIRECT_URI_SCHEMES is empty', str(ctx.exception))
+        self.assertIsNone(self._application())
+
+    def test_a_refused_update_leaves_the_existing_application_untouched(self):
+        """The command is idempotent, so a refusal must not half-apply."""
+        with override_settings(OAUTH2_PROVIDER={
+            **settings.OAUTH2_PROVIDER, 'ALLOWED_REDIRECT_URI_SCHEMES': ['https'],
+        }):
+            call_command(
+                'create_smart_app', '--client-id', 'test-smart-app',
+                '--redirect-uris', 'https://client.example.invalid/callback',
+            )
+            with self.assertRaises(CommandError):
+                call_command(
+                    'create_smart_app', '--client-id', 'test-smart-app',
+                    '--redirect-uris', 'http://client.example.invalid/callback',
+                )
+        self.assertEqual(
+            self._application().redirect_uris, 'https://client.example.invalid/callback')
