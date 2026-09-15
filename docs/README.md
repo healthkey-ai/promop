@@ -90,7 +90,7 @@ disease-specific repairs. Its next prerequisite is the complete field/value
 inventory in #1223. The plan's [1.3RC gates](field_concept_mapping_plan.md#13-release)
 distinguish current RC verification from the deferred mapping backlog and
 production rollout. Its [terminal handoff](field_concept_mapping_plan.md#resume-in-this-terminal)
-identify the pushed checkpoint and the next inventory acceptance work.
+identifies active worktrees, test evidence and remaining RC work.
 
 The [Mapping component](mapping-component-plan.md) defines the shared Python
 service boundary and remaining refactoring work. The [code-mapping architecture
