@@ -23,6 +23,9 @@ from omop_core.services.field_inventory import (
     staging_therapy_coverage,
     apply_live_coverage,
 )
+from omop_core.services.field_inventory_repairs import (
+    attach_repair_contracts, question_evidence_requests, record_question_evidence,
+)
 
 
 # Only explicit reference columns can leave the database. Never export reviewer
@@ -229,6 +232,8 @@ def attach_candidates(rows, vocabularies, as_of):
     ids, pairs = set(), set()
     for row in rows:
         row['validation_flags'] = []
+        pairs.update((request['vocabulary_id'], request['concept_code'])
+                     for request in question_evidence_requests(row))
         for mapping in row['existing_mappings']:
             if mapping.get('concept_id'):
                 ids.add(mapping['concept_id'])
@@ -240,6 +245,9 @@ def attach_candidates(rows, vocabularies, as_of):
     candidates = {c['concept_id']: screen_candidate(c, vocabularies.get(c['vocabulary_id']), as_of)
                   for c in models.Concept.objects.filter(query).values(*CONCEPT_COLUMNS)}
     by_pair = {(c['vocabulary_id'], c['concept_code']): c['concept_id'] for c in candidates.values()}
+    question_ids = defaultdict(list)
+    for concept in candidates.values():
+        question_ids[(concept['vocabulary_id'], concept['concept_code'])].append(concept['concept_id'])
     for row in rows:
         for mapping in row['existing_mappings']:
             pair = (mapping.get('vocabulary_id'), mapping.get('concept_code') or mapping.get('code'))
@@ -263,7 +271,7 @@ def attach_candidates(rows, vocabularies, as_of):
             recipe_codes = recipe.get('concept_codes') or []
             if recipe_codes and mapping.get('concept_code') and mapping['concept_code'] not in recipe_codes:
                 row['validation_flags'].append('existing_mapping_code_differs_from_read_recipe')
-        row['candidate_ids'] = sorted(set(row['candidate_ids']))
+        record_question_evidence(row, candidates, question_ids)
     return candidates
 
 
@@ -346,6 +354,7 @@ def build_inventory(root, cancerbot_root, frontend, live_export=None, search=Fal
     rows += historical_option_rows(source_history, {r['destination_path'] for r in rows if r['source'] == 'promop_field'})
     from omop_core.services.field_inventory_contracts import implementation_contracts
     contracts = implementation_contracts(rows, destination_crosswalk, source['bindings'], frontend, DECISIONS)
+    attach_repair_contracts(rows)
     candidates = attach_candidates(rows, vocabularies, now.date())
     if search:
         search_candidates(rows, candidates, vocabularies, now.date())
@@ -380,6 +389,8 @@ def build_inventory(root, cancerbot_root, frontend, live_export=None, search=Fal
              'omop_core/services/field_inventory_frontend.py', 'omop_core/data/field_inventory_frontend_providers.json',
              'omop_core/services/field_inventory_crosswalk.py',
              'omop_core/services/field_inventory_contracts.py',
+             'omop_core/services/field_inventory_repairs.py',
+             'omop_core/services/field_inventory_acceptance.py',
              'omop_core/services/field_inventory_history.py',
              'omop_core/services/field_inventory_history_seeds.py',
              'omop_core/services/field_inventory_history_review.py',
@@ -400,8 +411,8 @@ def build_inventory(root, cancerbot_root, frontend, live_export=None, search=Fal
         'Existing approved statuses are preserved; candidate semantic meaning, destination domains and vocabulary lineage still require review.',
     ]
     if not search:
-        limitations.append('Candidate search not requested; only existing code/FK references were resolved.')
-    return {
+        limitations.append('Lexical candidate search not requested; existing code/FK, read-recipe and repair-plan codes were resolved.')
+    manifest = {
         'schema_version': SCHEMA_VERSION, 'generated_at': now.isoformat(), 'complete': False,
         'scope': 'Reference data and source schema only; no patient values or identity tables queried.',
         'source_revisions': {'promop': source_revision(root, paths),
@@ -419,6 +430,9 @@ def build_inventory(root, cancerbot_root, frontend, live_export=None, search=Fal
         'vocabulary_metadata': vocabularies, 'vocabulary_releases': releases,
         'vocabulary_history': history, 'representation_decisions': DECISIONS,
     }
+    from omop_core.services.field_inventory_acceptance import inventory_acceptance
+    manifest['inventory_acceptance'] = inventory_acceptance(manifest)
+    return manifest
 
 
 class Command(BaseCommand):

@@ -347,6 +347,18 @@ def render_report(manifest):
     lines += [f'| {key} | {value} |' for key, value in totals['by_source'].items()]
     lines += ['', '| Disposition | Rows |', '|---|---:|']
     lines += [f'| {key} | {value} |' for key, value in totals['by_disposition'].items()]
+    acceptance = manifest.get('inventory_acceptance')
+    if acceptance:
+        lines += ['', '## Inventory acceptance evidence', '', acceptance['limitation'], '',
+                  f"Accounting checks pass: {acceptance['accounting_checks_pass']}. Review status: `{acceptance['review_status']}`.", '',
+                  '| #21 field | Representation | Disposition | Validation flags |', '|---|---|---|---|']
+        lines += [f"| `{r['field']}` | {r['representation']} | {r['disposition']} | {', '.join(r['validation_flags']) or 'None recorded'} |"
+                  for r in acceptance['issue_21']]
+        lines += ['', '| #26 scope | Source bindings | Source occurrences | Missing runtime fields | Owner |', '|---|---:|---:|---|---|']
+        lines += [f"| {r['scope']} | {len(r['source_bindings'])} | {len(r['source_row_ids'])} | {', '.join(r['missing_runtime_destinations']) or 'None recorded'} | {r['owner']} |"
+                  for r in acceptance['issue_26']]
+        if acceptance['problems']:
+            lines += ['', 'Accounting gaps:', '', *['- ' + problem for problem in acceptance['problems']]]
     lines += ['', '## Coverage gaps', '']
     lines += [f'- {gap}' for gap in manifest['limitations']]
     lines += ['', '## CancerBot public-list reconciliation', '',

@@ -93,6 +93,9 @@ def merge_reference_options(manifest, payload):
         'Live reference rows use checked-in provider semantics, not a verified deployed application revision. '
         'Source-to-destination relationships and clinical mappings still require reconciliation.')
     manifest['complete'] = False
+    if 'inventory_acceptance' in manifest:
+        from omop_core.services.field_inventory_acceptance import inventory_acceptance
+        manifest['inventory_acceptance'] = inventory_acceptance(manifest)
     validate_manifest(manifest)
     return manifest
 
@@ -119,6 +122,8 @@ class Command(BaseCommand):
             'tool_source': source_revision(Path(settings.BASE_DIR), [
                 'omop_core/services/field_inventory.py',
                 'omop_core/services/field_inventory_contracts.py',
+                'omop_core/services/field_inventory_acceptance.py',
+                'omop_core/services/field_inventory_repairs.py',
                 'omop_core/services/cancerbot_reference_options.py',
                 'omop_core/management/commands/export_cancerbot_reference_options.py',
                 'omop_core/management/commands/import_field_inventory_reference_options.py',
