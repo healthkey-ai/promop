@@ -1,8 +1,20 @@
 import { useState } from 'react';
+import { LineChart } from 'lucide-react';
 import ClinicalField from '../ClinicalField';
 import Section from '../Section';
 import { useWritableFields } from '@/hooks/useWritableFields';
+import { useLabMeasurements } from '@/hooks/useLabMeasurements';
+import { LabTrendChart } from '@/components/labs/LabTrendChart';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from '@/components/ui-labs/dialog';
 import { today } from '@/api/clinicalFacts';
+import type { FieldDescriptor } from '@/hooks/useWritableFields';
+import type { LabMeasurementGroup } from '@/hooks/useLabMeasurements';
 
 interface Props {
   formData: Record<string, unknown>;
@@ -87,12 +99,49 @@ const DIAGNOSTIC: Array<[string, string]> = [
   ['Bone Imaging Normal', 'bone_imaging_result'],
 ];
 
+const MIN_CHART_POINTS = 3;
+
+function ChartIconButton({
+  label,
+  group,
+  onClick,
+}: {
+  label: string;
+  group: LabMeasurementGroup;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={`View trend (${group.values.length} data points)`}
+      className="ml-1 inline-flex items-center rounded p-0.5 text-portal-brand hover:bg-muted transition-colors"
+      aria-label={`View trend chart for ${label}`}
+    >
+      <LineChart className="h-4 w-4" />
+    </button>
+  );
+}
+
 export default function LabsTab({ formData, onChange }: Props) {
   // Ask about *this* patient: whether a field may be edited depends on who is
   // asking and whose record it is, not only on whether the field is mapped.
   const personId = (formData?.person_id ?? formData?.person) as number | undefined;
   const { descriptors, loading } = useWritableFields(personId);
+  const { grouped: measurementGroups } = useLabMeasurements(personId);
   const [date, setDate] = useState(today());
+  const [chartDialog, setChartDialog] = useState<{
+    label: string;
+    group: LabMeasurementGroup;
+  } | null>(null);
+
+  /** Look up measurement group for a field by its descriptor's source_value. */
+  const getGroup = (name: string): LabMeasurementGroup | undefined => {
+    const desc: FieldDescriptor | undefined = descriptors[name];
+    const sv = desc?.projection?.source_value ?? desc?.source_value;
+    if (!sv) return undefined;
+    return measurementGroups.get(sv);
+  };
 
   const section = (
     title: string,
@@ -101,19 +150,37 @@ export default function LabsTab({ formData, onChange }: Props) {
   ) => (
     <Section title={title}>
       <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-        {fields.map(([label, name]) => (
-          <ClinicalField
-            key={name}
-            label={label}
-            name={name}
-            type={type}
-            value={formData?.[name]}
-            descriptor={descriptors[name]}
-            onChange={onChange}
-            date={date}
-            onDateChange={setDate}
-          />
-        ))}
+        {fields.map(([label, name]) => {
+          const group = getGroup(name);
+          const hasChart = !!group && group.values.length >= MIN_CHART_POINTS;
+          return (
+            <div key={name} className="relative">
+              <div className="flex items-start gap-1">
+                <div className="flex-1 min-w-0">
+                  <ClinicalField
+                    label={label}
+                    name={name}
+                    type={type}
+                    value={formData?.[name]}
+                    descriptor={descriptors[name]}
+                    onChange={onChange}
+                    date={date}
+                    onDateChange={setDate}
+                  />
+                </div>
+                {hasChart && (
+                  <div className="mt-6 shrink-0">
+                    <ChartIconButton
+                      label={label}
+                      group={group}
+                      onClick={() => setChartDialog({ label, group })}
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
       </div>
     </Section>
   );
@@ -134,6 +201,20 @@ export default function LabsTab({ formData, onChange }: Props) {
       {section('Cardiac', CARDIAC)}
       {section('Tumor Markers', TUMOR_MARKERS)}
       {section('Diagnostic Tests', DIAGNOSTIC, 'boolean')}
+
+      <Dialog open={!!chartDialog} onOpenChange={(open) => { if (!open) setChartDialog(null); }}>
+        <DialogContent className="max-w-[40rem]">
+          <DialogHeader>
+            <DialogTitle>{chartDialog?.label}</DialogTitle>
+            <DialogDescription>
+              {chartDialog ? `${chartDialog.group.values.length} measurements over time` : ''}
+            </DialogDescription>
+          </DialogHeader>
+          {chartDialog && (
+            <LabTrendChart values={chartDialog.group.values} unit={chartDialog.group.unit} />
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

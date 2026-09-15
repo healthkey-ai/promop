@@ -645,7 +645,7 @@ export default function PatientDetail({
   const canViewOmop = !patientMode && !!(user?.is_staff || user?.is_org_admin);
   const coreTabs = ["General", getDiseaseTabLabel(), "Treatment", "Blood", "Labs", "Genomics"];
   const afterLabsTabs = patientMode ? ["Allergies"] : [];
-  const trailingTabs = ["Behavior", "Wearables", "Summary"];
+  const trailingTabs = ["Behavior", "Wearables", "History"];
   const surveyTabs = patientMode ? ["Surveys"] : [];
   const adminTabs = canViewOmop ? ["OMOP"] : [];
   const tabLabels = [...coreTabs, ...afterLabsTabs, ...trailingTabs, ...surveyTabs, ...adminTabs];
