@@ -115,7 +115,7 @@ and diff checks pass. Checkpoint `bb0fb17` additionally verified frontend
 a fresh local migration chain, system checks and migration drift. Those runtime
 paths are unchanged by the latest inventory update. PR #1284 remains a draft.
 
-### 1.3 release gates
+## 1.3 Release
 
 **The full FCM implementation is not a prerequisite for naming a 1.3 staging
 release candidate.** This corrects the earlier table that grouped the entire
@@ -127,15 +127,111 @@ answer mappings (#1229) and their shared mapping dependencies are after 1.3.
 Keep all unfinished FCM issues open; a supported workflow defect can still
 block RC independently of the larger enhancement issue.
 
-As checked on **2026-09-14 after `d1035ab` merged**, the operational receipts below
-remain necessary. Prior source counts and passing tests do not substitute for
-verification of the intended deployed candidate.
+**Status at the 2026-09-15 terminal handoff: RC is not yet accepted.** No work
+was done on another machine. Claude should continue the local worktrees below;
+the earlier cross-machine instructions are reference instructions only.
+The checked deployed baseline is `837ff6dd7951e72d15689bf2ede099fdfe41702c`
+(docs PR #1327, including #1321). The new breast mapping repair is uncommitted,
+unpushed and undeployed. No unfinished issue has been closed.
+
+### Verified today
+
+- Render staging web and worker both ran `837ff6d` before and after the smoke;
+  their database configurations and private `STAGING_DATABASE_URL` matched the
+  same Render database. Read-only combined preflight passed at **05:50 UTC**:
+  no pending migrations, no missing columns, no width overflow, all **42**
+  priority parent recipes usable with source identity/concept 0, and no
+  incomplete or mismatched component/writer prerequisites. These are supported
+  source-only parents, not 42 standard Measurement mappings.
+- Authenticated smoke passed at **05:52 UTC** on a newly provisioned synthetic
+  record: catalog, create/positive, absent, indeterminate, present, source
+  provenance, and delete/unknown readback. Cleanup passed; 14 retired synthetic
+  Measurements and 7 Observations were retained as history. This validates the
+  deployed baseline, not the uncommitted breast mapping repair.
+- The new repair's focused local tests passed: **112 passed** across
+  `test_breast_wrong_codes.py`, `test_patient_record_service_bc_fallbacks.py`,
+  `test_blood_count_units.py`, and `test_enrich_breast_cancer_omop_data.py`.
+  Both full backend suites subsequently passed on separate local databases:
+  **pytest 2,743 passed, 5 skipped, 4 e2e deselected** (411 seconds) and
+  **Django 2,003 tests OK, 1 skipped** (198 seconds). Frontend and async e2e were
+  not rerun for this repair; CI/final candidate checks and code review remain.
+
+### Outstanding FCM work that affects the RC
+
+| Item | Current state | Required next action |
+|---|---|---|
+| Confirmed wrong breast-question codes — #1227 / supported-workflow gate #1317 | Local repair replaces HER2-as-Ki-67 with LOINC 29593-1 and ER-as-method with 85069-3; removes ER-to-Oncotype and perineural-to-nodal derivation. Matching wrong field recipes are blocked at runtime without deleting facts or changing curator status. Generators/static seed targets and provenance are updated. | Review the diff and remaining source-mapping risks, review/open a bounded repair PR against dev, and deploy/verify the accepted candidate. This does **not** complete all #1227/#21 event, staging, Oncotype or answer-mapping requirements. |
+| Clear and readback safety | Focused tests cover zero, pending edits/clears, repeated refresh, mapped versus source-only ordering, wrong-code FHIR imports, preserved reviewed nodal recipes and ER/PR/HER2/TNBC behavior. The new helper retains clear markers for the two corrected questions so older mapped values cannot resurface. | Full backend suites pass, including existing cytogenetic/genomics coverage. Review the new snapshot/curated-read precedence before merge. The old cytogenetic implementation is already on current dev; do not restore obsolete branch code. |
+| Existing mapping/data reconciliation | Read-only staging impact report found **1,000** records with a stored Ki-67 value and a suspect HER2/ER-coded Measurement, no pending Ki-67 edits; one approved wrong nodal recipe; and **two** Ki-67 source-code mappings targeting HER2/ER. Method/Oncotype/perineural fact exposure was zero in this receipt. Counts indicate potential exposure, not proven corruption. | Review source evidence and determine the affected cohort before any correction/backfill. Historical facts are **not** automatically relabeled. Review the two existing `SourceCodeConceptMapping` rows and governed import/lookup paths: changing `_CATALOG_LOINC` alone does not repair existing approved rows or contradictory external `loinc_common.json` inputs. This follow-up is **not implemented**. Keep curator history and raw clinical facts. |
+| Final candidate / operational gates | Baseline preflight and seven API smoke checks pass; TP53 reconciliation and deployed EXACT evidence remain separate. | Complete the #1315/#1316/#1317 table below, retain final-candidate receipts, and complete Samar's supported-workflow checklist. Do not mark 1.3RC ready solely from the baseline smoke or focused tests. |
+
+### Resume in this terminal
+
+Read `AGENTS.md`, `CLAUDE.md`, this section, the field mapping architecture and
+[Genomics RC gates](genomics_plan.md#release-13-rc-gates). Preserve regimen,
+component and class tables, relationships, curation/mapping tools and authoring.
+Use local PostgreSQL 18 on port **5433** for all application suites; staging is
+Render only. Private credentials are in the main checkout's `.env` and Render
+configuration. CancerBot is at `~/cancerbot`; reference snapshots are already
+pushed. No credentials belong in commits or handoff text.
+
+| Purpose | Existing worktree / state |
+|---|---|
+| **Next: RC breast mapping repair** | `/private/tmp/promop-fcm-rc-safety`, branch `fix/fcm-rc-wrong-question-codes`, based on `837ff6d`; **uncommitted** tracked changes plus `breast_mapping_safety.py`, `report_breast_mapping_impact.py`, and `tests/test_breast_wrong_codes.py`. No implementation PR yet. Reuse this worktree; do not overwrite it. |
+| Full inventory / draft PR #1284 | `/private/tmp/promop-field-inventory-next`, branch `feat/1223-next`; pushed checkpoint `0572098`, local HEAD `1863d76`. Preserve uncommitted exporter/importer/field-inventory changes and untracked `field_inventory_repairs.py` / `field_inventory_acceptance.py`. Those exploratory acceptance changes remain unverified. |
+| Older breast repair | `/private/tmp/promop-1227`; preserved for comparison only. The new RC worktree ports selected changes onto current dev. **Do not copy its old rejection migration**: it changes curator decisions and its migration number is obsolete. |
+| Main checkout | `/Users/adamblum/promop`; local dev was still `29f521d` when this handoff began, with a modified `PRomop_Developer_Guide.pptx` and untracked `artifacts/`. Preserve both; upstream also changes the presentation, so do not blindly fast-forward/reset this checkout. An identical handoff copy was placed at `docs/field_concept_mapping_plan.md` here; it is untracked on this old local dev revision. The canonical committed copy is on the docs branch/dev. |
+
+Both backend suites completed successfully in the RC safety worktree. Read
+the final summaries before deciding whether subsequent changes require a rerun
+(Django writes its summary before buffered management-command output):
+
+```sh
+cd /private/tmp/promop-fcm-rc-safety
+git status --short
+tail -30 /private/tmp/promop-fcm-rc-full-pytest.log
+rg '^Ran |^OK|^FAILED|^FAIL:|^ERROR:' /private/tmp/promop-fcm-rc-full-django.log
+```
+
+Exact invocations, if a rerun is required after changes:
+
+```sh
+DATABASE_URL=postgresql://postgres@localhost:5433/promop_fcm_rc DEBUG=True \
+  /Users/adamblum/promop/.venv/bin/python -m pytest -q \
+  > /private/tmp/promop-fcm-rc-full-pytest.log 2>&1
+DATABASE_URL=postgresql://postgres@localhost:5433/promop_fcm_rc_django DEBUG=True \
+  /Users/adamblum/promop/.venv/bin/python manage.py test omop_core patient_portal --verbosity=1 --noinput \
+  > /private/tmp/promop-fcm-rc-full-django.log 2>&1
+```
+
+Local evidence/scripts retained for Claude (inspect before running; deployment
+identity is part of the receipt):
+
+- `/private/tmp/promop-fcm-rc-focused.log` — 112 focused tests passed.
+- `/private/tmp/promop-fcm-rc-staging-preflight.json` and matching `.py` runner —
+  read-only Render identity/preflight receipt.
+- `/private/tmp/promop-fcm-rc-breast-mapping-impact.json` and matching `.py`
+  runner — read-only aggregate exposure report from the uncommitted command.
+- `/private/tmp/genomics-13-live-smoke.json` — passing seven-check baseline
+  receipt, synthetic record/run identity and retained-history accounting.
+- `/private/tmp/genomics-13-live-smoke.py` — verifies exact web/worker SHA and
+  database identity, reads authentication privately from Render, provisions a
+  fresh marked synthetic record, then calls the checked-in smoke runner.
+- `/private/tmp/genomics-13-staging-preview.py` — existing source-based TP53
+  preview runner; a preview alone is not the required reviewed apply and repeat
+  preview. No TP53 apply was performed during today's FCM continuation.
+
+The runtime diff is intentionally left available for review, not bundled into
+this documentation update. Docs-only publication requires only content/link/diff
+review and GitHub's lightweight docs gates; it does not require application tests.
+
+### Remaining shared RC gates
 
 | RC gate | Implemented evidence | Work still required for 1.3RC |
 |---|---|---|
 | TP53 consumers and scoped cache reconciliation — [#1315](https://github.com/healthkey-ai/promop/issues/1315) | Conservative true/unknown rule and `reconcile_tp53_cache` are merged. [EXACT #483](https://github.com/healthkey-ai/exact/pull/483) is merged with backend CI passing; EXACT is the only downstream consumer in RC scope. | Verify any EXACT instance used for RC testing contains #483. On the intended Render staging candidate, retain source-based preview/apply receipts, account for held pending edits, and repeat preview until no unexplained changes remain. Null must survive API/UI/eligibility and cannot satisfy a negative criterion. Preserve positive behavior. |
 | Upgrade and writer readiness — readiness portion of [#1316](https://github.com/healthkey-ai/promop/issues/1316) | `audit_genomics_release --check` is merged. All 53 pending migrations passed a local rehearsal using production schema and selected reference metadata, without clinical rows. The combined audit passed after restoring missing actor concept 32817 locally from authoritative Athena evidence. | Retain the rehearsal and the plan for supplying every writer prerequisite; final RC staging must pass the combined preflight. Verify exact web/worker revisions and database configuration. The rehearsal does not certify transformations of existing clinical data or complete production rollout. |
-| Final authenticated staging smoke — [#1317](https://github.com/healthkey-ai/promop/issues/1317) | `scripts/genomics_release_smoke.py` and local regression coverage are merged. The earlier `0c655fa` candidate passed preflight and seven authenticated API checks; its synthetic finding was retired with history retained. | Deploy the intended final candidate to Render staging web and worker, then rerun preflight and the synthetic smoke. Retain the receipt and deployment identity; the `0c655fa` receipt predates #1321 and is not final-candidate evidence. Complete [Samar's checklist](curator_smoke_test.md), account for test artifacts, and repair/rerun any blocking failures. |
+| Final authenticated staging smoke — [#1317](https://github.com/healthkey-ai/promop/issues/1317) | `scripts/genomics_release_smoke.py` and local regression coverage are merged. The `837ff6d` baseline passed preflight and all seven authenticated API checks on 2026-09-15; synthetic history and cleanup are accounted for above. | Deploy the intended final candidate to Render staging web and worker, then rerun preflight and the synthetic smoke. Retain the receipt and deployment identity; today’s `837ff6d` receipt does not include the uncommitted breast mapping repair. Complete [Samar's checklist](curator_smoke_test.md), account for test artifacts, and repair/rerun any blocking failures. |
 | Existing supported field, choice, treatment and genomics workflows | Current curation/editor and manual finding capabilities are already implemented; [the curator checklist](curator_smoke_test.md) distinguishes them from proposed answer-mapping capabilities. | Wrong patient/value/unit, lost findings, unknown becoming negative, unjustified positives, or broken supported save/readback block RC. Record concrete failures under #1317 or linked bug issues. Missing future capabilities and cosmetic requests do not automatically block RC. |
 
 **Next RC operational steps, in order:**
@@ -201,9 +297,9 @@ Staging always means Render. Automated application suites for implementation
 changes run against local databases; documentation-only changes use the standing
 AGENTS.md rule and require no application tests. Keep unfinished issues open.
 
-### Continue implementation on another machine
+### Inventory continuation reference
 
-Use the latest `dev` copy of this plan and the pushed **`0572098`** checkpoint on
+For the deferred inventory expansion, use the latest `dev` copy of this plan and the pushed **`0572098`** checkpoint on
 `origin/feat/1223-next` in [draft PR #1284](https://github.com/healthkey-ai/promop/pull/1284).
 All generated inventory and CancerBot reference evidence described above is
 pushed and linked at that immutable revision. The older

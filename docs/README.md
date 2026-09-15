@@ -87,9 +87,9 @@ Three related mapping concerns have distinct responsibilities:
 The active [field-and-answer mapping plan](field_concept_mapping_plan.md)
 tracks the inventory, scoped choices, coded-answer projection and remaining
 disease-specific repairs. Its next prerequisite is the complete field/value
-inventory in #1223. The plan's [1.3RC gates](field_concept_mapping_plan.md#13-release-gates)
+inventory in #1223. The plan's [1.3RC gates](field_concept_mapping_plan.md#13-release)
 distinguish current RC verification from the deferred mapping backlog and
-production rollout. Its [continuation instructions](field_concept_mapping_plan.md#continue-implementation-on-another-machine)
+production rollout. Its [terminal handoff](field_concept_mapping_plan.md#resume-in-this-terminal)
 identify the pushed checkpoint and the next inventory acceptance work.
 
 The [Mapping component](mapping-component-plan.md) defines the shared Python
