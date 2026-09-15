@@ -616,7 +616,7 @@ export default function PatientDetail({
   };
 
   const getDiseaseTabLabel = () =>
-    ({ breast: "Breast Cancer", lymphoma: "Follicular Lymphoma", myeloma: "Multiple Myeloma", cll: "CLL", mcl: "Mantle Cell Lymphoma", other: "Disease Specific" })[getDiseaseType()];
+    ({ breast: "Disease (BC)", lymphoma: "Disease (FL)", myeloma: "Disease (MM)", cll: "Disease (CLL)", mcl: "Disease (MCL)", other: "Disease" })[getDiseaseType()];
 
   if (loading) return <PatientDetailSkeleton />;
 
