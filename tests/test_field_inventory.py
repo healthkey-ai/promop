@@ -234,6 +234,7 @@ def test_inventory_live_export_updates_bindings_provider_totals_and_pending_cont
     monkeypatch.setattr(command, 'collect_reference_tables', lambda: ({}, []))
     monkeypatch.setattr(command.models.Vocabulary.objects, 'values', lambda *args: [])
     monkeypatch.setattr(command, 'collect_rows', lambda *args: [])
+    monkeypatch.setattr(command, 'collect_descriptor_options', lambda *args: ([], {'status': 'base_descriptors_captured'}))
     monkeypatch.setattr(command, 'cancerbot_source', lambda *args: source)
     monkeypatch.setattr(command, 'staging_therapy_coverage', lambda *args: {'context_pending_lists': ['plannedTherapiesMm']})
     monkeypatch.setattr(command, 'attach_candidates', lambda *args: {})
