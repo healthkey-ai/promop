@@ -113,11 +113,28 @@ def test_deployed_debug_requires_hosts_without_render_hostname():
     assert 'ALLOWED_HOSTS must be set' in result.stderr
 
 
-@pytest.mark.parametrize('command', ['collectstatic', 'migrate', 'check'])
-def test_render_build_commands_remain_exempt(command):
+@pytest.mark.parametrize('command', ['collectstatic', 'makemigrations'])
+def test_build_commands_skip_all_validation(command):
+    """Build-time commands run before DATABASE_URL is available."""
     result = boot(True, ['manage.py', command], RENDER='true', SECRET_KEY='',
                   DATABASE_URL='', ALLOWED_HOSTS='', CORS_ALLOWED_ORIGINS='')
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize('command', ['migrate', 'check', 'reconcile_tp53_cache',
+                                     'audit_genomics_release',
+                                     'populate_sct_sample_data', 'shell'])
+def test_management_commands_skip_http_config_but_require_secrets(command):
+    """Management commands don't serve HTTP, so they skip ALLOWED_HOSTS/CORS.
+    They still need SECRET_KEY and DATABASE_URL — Render jobs run
+    `python manage.py …` in the worker service without RENDER_EXTERNAL_HOSTNAME."""
+    result = boot(True, ['manage.py', command], RENDER='true',
+                  ALLOWED_HOSTS='', CORS_ALLOWED_ORIGINS='')
+    assert result.returncode == 0, result.stderr
+    for missing in ('SECRET_KEY', 'DATABASE_URL'):
+        result = boot(True, ['manage.py', command], RENDER='true',
+                      ALLOWED_HOSTS='', CORS_ALLOWED_ORIGINS='', **{missing: ''})
+        assert result.returncode != 0, f'{command} should require {missing}'
 
 
 def test_render_worker_requires_secret_and_database_but_not_http_config():
