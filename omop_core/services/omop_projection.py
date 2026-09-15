@@ -9,6 +9,7 @@ from omop_core.models import (
     ConditionOccurrence, DrugExposure, FieldConceptMapping, Measurement, Observation,
     PatientRecord, Person, ProcedureOccurrence,
 )
+from omop_core.services.breast_mapping_safety import wrong_breast_field_mappings
 from omop_core.services.pk import next_pk
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,7 @@ def curated_values_from_snapshot(snapshot):
     """
     from omop_core.services.patient_record_service import (
         PATIENT_RECORD_OMOP_MAPPED_FIELDS, _latest_blood_count_measurements,
+        _latest_loinc_measurement,
     )
     from omop_core.services.clinical_units import blood_count_projection
     from omop_core.services.write_descriptor import (
@@ -105,7 +107,7 @@ def curated_values_from_snapshot(snapshot):
     # not need and that would exceed the full-refresh query budget.
     mappings = FieldConceptMapping.objects.filter(
         status='approved', field_name__in=readable_fields,
-    ).exclude(value_kind='json').exclude(field_name='cytogenetic_markers', vocabulary_id='SNOMED', concept_code='107675007').values(
+    ).exclude(wrong_breast_field_mappings()).exclude(value_kind='json').exclude(field_name='cytogenetic_markers', vocabulary_id='SNOMED', concept_code='107675007').values(
         'field_name', 'omop_table', 'concept_id', 'concept__concept_code', 'source_value',
     )
     for mapping in mappings:
@@ -117,6 +119,17 @@ def curated_values_from_snapshot(snapshot):
         row = indexed[target].get((mapping['concept_id'], source_value))
         if row is None:
             continue
+        question = {
+            'ki67_proliferation_index': '29593-1',
+            'test_methodology': '85069-3',
+        }.get(name)
+        if question:
+            latest = _latest_loinc_measurement(snapshot, question)
+            row_date = getattr(row, 'measurement_date', None) or row.observation_date
+            if latest and (latest.measurement_date, latest.pk) >= (row_date, row.pk):
+                # The extractor has already handled this question, including
+                # coded answers, newer source-only results, and explicit clears.
+                continue
         count_field = {
             'absolute_neutrophile_count': 'anc_thousand_per_ul',
             'platelet_count': 'platelet_count_thousand_per_ul',
