@@ -139,3 +139,54 @@ def test_local_debug_needs_explicit_identity_config_and_does_not_trust_proxy():
     assert posture['PHR_AUDIENCE_CONFIGURED'] is False
     assert posture['FIREBASE_PROJECT_ID_CONFIGURED'] is False
     assert posture['SECURE_PROXY_SSL_HEADER'] is None
+    # Local HTTP callbacks need the explicit override, never just a local env.
+    assert posture['ALLOWED_REDIRECT_URI_SCHEMES'] == ['https']
+
+
+def _loaded_dotenv(**overrides):
+    """Report whether importing settings called load_dotenv().
+
+    find_dotenv reaches the repo-root .env either way: it falls back to cwd
+    under `python -c`, which has no __main__.__file__, and otherwise walks up
+    from promop/settings.py. Scrubbing the environment above never touches the
+    file, so only PYTHON_DOTENV_DISABLED keeps it out. Stubbing the module
+    measures our own check rather than python-dotenv's, which honours the flag
+    from 1.2.0 on, and avoids writing a real .env over a developer's own.
+    """
+    code = '''
+import json
+import sys
+import types
+
+calls = []
+stub = types.ModuleType('dotenv')
+stub.load_dotenv = lambda *args, **kwargs: calls.append(1)
+sys.modules['dotenv'] = stub
+
+from django.conf import settings
+settings.DEBUG  # force settings import
+print(json.dumps(bool(calls)))
+'''
+    env = {key: os.environ[key] for key in ('PATH', 'SYSTEMROOT') if key in os.environ}
+    env.update(BASE_ENV, DEBUG='False')
+    # BASE_ENV arms the guard for every other test here; this helper sets it.
+    env.pop('PYTHON_DOTENV_DISABLED')
+    env.update(overrides)
+    result = subprocess.run(
+        [sys.executable, '-c', code], cwd=ROOT, env=env,
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_settings_import_calls_load_dotenv_by_default():
+    assert _loaded_dotenv() is True
+
+
+def test_settings_import_skips_load_dotenv_when_the_flag_is_set():
+    # Narrow by construction: the stub hides python-dotenv's own check, which
+    # has honoured the flag since 1.2.0, leaving only settings.py's. So this is
+    # the regression test for deleting that line — but not for the padded
+    # values it alone catches, since the flag here is a bare '1'.
+    assert _loaded_dotenv(PYTHON_DOTENV_DISABLED='1') is False

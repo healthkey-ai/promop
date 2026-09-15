@@ -37,6 +37,11 @@ exemptions remain; `check --deploy` validates the full web configuration.
 | `SECURE_SSL_REDIRECT` | `false`; Render redirects at its edge |
 | `TRUST_PROXY_SSL_HEADER` | `true` on Render, otherwise `false` |
 
+OAuth applications accept only HTTPS redirect URIs by default, including when
+`DEBUG=True`. For local HTTP callbacks, explicitly set
+`ALLOWED_REDIRECT_URI_SCHEMES=https,http`; keep that override out of staging and
+production. Enabling debug diagnostics never opts a deployment into HTTP redirects.
+
 Proxy trust enables Django's `SECURE_PROXY_SSL_HEADER` with
 `HTTP_X_FORWARDED_PROTO,https`. Enable it only behind a proxy that strips
 client-supplied values. See [Django's proxy-header requirements](https://docs.djangoproject.com/en/5.2/ref/settings/#secure-proxy-ssl-header).
