@@ -1,6 +1,6 @@
 # PRomop Genomics: Implementation Plan
 
-The implemented baseline includes [#1249](https://github.com/healthkey-ai/promop/pull/1249), [#1259](https://github.com/healthkey-ai/promop/pull/1259), [schema audit #1263](https://github.com/healthkey-ai/promop/pull/1263), [PALB2 naming #1281](https://github.com/healthkey-ai/promop/pull/1281), and [project compatibility #1294](https://github.com/healthkey-ai/promop/pull/1294). Updated 2026-09-14 with catalog/write validation consistency and Render staging verification scope. The [implemented architecture](genomics_architecture.md) describes runtime behavior; this plan records delivery status, remaining requirements and acceptance criteria. The supplied Word documents are retained as requirements through these two canonical documents.
+Updated **2026-09-14** for cross-machine continuation after [PR #1321](https://github.com/healthkey-ai/promop/pull/1321) merged to `dev` as `d1035ab330f3c36a343715be92d63fadaec295b3`. Both Render staging web and worker are live on that revision. The release preflight, scoped TP53 reconciliation, authenticated smoke runner and curator checklist are implemented; the remaining operational RC work is listed below. The [implemented architecture](genomics_architecture.md) describes runtime behavior; this plan owns delivery status and acceptance gates. The supplied Word documents are retained as requirements through these two canonical documents.
 
 ## Release 1.3 RC gates
 
@@ -10,9 +10,9 @@ The 1.3 scope is manual genomic finding entry, editing, state readback and sourc
 
 | Issue | Blocks 1.3 RC? | Required RC evidence and current status |
 | --- | --- | --- |
-| [#1315](https://github.com/healthkey-ai/promop/issues/1315) — TP53 compatibility and cache reconciliation | **Yes — pending** | EXACT is the only downstream consumer in scope. [EXACT #483](https://github.com/healthkey-ai/exact/pull/483) merged with all backend CI groups passing; explicit true/null survives adaptation, normalization and eligibility matching. PRomop's scoped reconciliation is in [PR #1321](https://github.com/healthkey-ai/promop/pull/1321). Merge with required CI, retain staging source-based preview/apply receipts, account for held edits, and verify a repeat preview has no unexplained changes. Any EXACT instance used for RC integration testing must include #483; merge/build success alone is not deployed-consumer evidence. Production reconciliation remains a release step. |
-| [#1316](https://github.com/healthkey-ai/promop/issues/1316) — upgrade and writer readiness | **Yes — readiness portion only** | Demonstrate the upgrade path and identify how every missing writer prerequisite will be supplied. All 53 pending migrations applied to an isolated copy of production schema and the required reference metadata, with no clinical rows copied. The combined audit passed after restoring the missing EHR actor concept 32817 locally from the downloaded Athena source. The source row and fingerprint are retained in the issue evidence. Final RC staging must also pass the combined preflight. This rehearsal establishes schema/reference readiness; it does not certify transformations of existing clinical data or perform the production rollout. |
-| [#1317](https://github.com/healthkey-ai/promop/issues/1317) — final staging smoke | **Yes — pending** | Deploy the final candidate to Render staging web and worker; retain matching revisions, a passing preflight, and authenticated create/edit/delete, state, aggregate and provenance readback evidence. Candidate `0c655fa` passed all seven API checks; repeat after #1321 lands. Account for synthetic history and fix any release-blocking bugs found by Samar before accepting the RC. |
+| [#1315](https://github.com/healthkey-ai/promop/issues/1315) — TP53 compatibility and cache reconciliation | **Yes — pending** | PRomop code is merged in #1321. **Full staging preview, apply and repeat-preview receipts are still outstanding; no full reconciliation has run.** A read-only preview of the single dedicated synthetic record passed with no changes. EXACT #483 merged to `main`, but the Render consumers use other branches. The clean forward-port [EXACT #488](https://github.com/healthkey-ai/exact/pull/488), targeting `dev`, is open with `LeoMo42` assigned and requested as reviewer. Per owner instruction, leave that PR for him and do not deploy EXACT. Verify the RC's actual consumer includes the fix before claiming the integration gate passed. |
+| [#1316](https://github.com/healthkey-ai/promop/issues/1316) — upgrade and writer readiness | **Yes — readiness portion only; final staging audit pending** | The upgrade rehearsal is complete: all 53 pending migrations applied to an isolated copy of production schema and required reference metadata, with no clinical rows copied. The combined audit passed after restoring the missing EHR actor concept 32817 locally from Athena. [Retained rehearsal evidence](https://github.com/healthkey-ai/promop/issues/1316#issuecomment-5666199241) includes the source row fingerprint and limits. **Rerun the combined preflight on the final staging candidate.** Production upgrade and vocabulary maintenance remain separate release work. |
+| [#1317](https://github.com/healthkey-ai/promop/issues/1317) — final staging smoke | **Yes — pending** | Both staging services are live on merged candidate `d1035ab`. **The authenticated smoke has not yet been repeated on that candidate.** Candidate `0c655fa` passed all seven API checks previously. Retain final web/worker revisions, preflight, CRUD/state/aggregate/provenance results and synthetic artifact accounting. Samar's checklist is available; no curator results have been recorded here. Fix any release-blocking findings before accepting the RC. |
 | [#1286](https://github.com/healthkey-ai/promop/issues/1286) — live production prerequisites | **No, once #1316's RC evidence passes; blocks production release** | Production still needs its migration chain, authoritative actor concept 32817 restoration through vocabulary maintenance, and a passing combined audit on the deployed revision. Preserve curator decisions and handle vocabulary publication metadata consistently. Do not close this issue based on staging or rehearsal evidence. |
 
 The remaining open issues **do not gate 1.3 RC in their full scope**:
@@ -28,6 +28,55 @@ The remaining open issues **do not gate 1.3 RC in their full scope**:
 Wrong patient/value/unit, lost findings, unknown becoming negative, unjustified positive results, or broken supported save/readback are RC blockers. Track concrete findings under #1317 or linked bug issues; cosmetic issues and requests for deferred capabilities do not automatically block RC.
 
 Before the production 1.3 release, additionally complete the live-production portions of #1315/#1316 and #1286: compatible EXACT deployment, vocabulary prerequisites, application/migration rollout, combined audit and scoped reconciliation. A code merge alone does not complete an operational gate. Cloud Run verification is outside this release work.
+
+### Next actions from another machine
+
+Start from current `origin/dev`; #1321 is already merged. There is no remaining unmerged PRomop runtime patch needed to use these commands. Verify the intended candidate again if `dev` has advanced since this handoff.
+
+1. **#1316 — final staging preflight.** Confirm `promop-staging` and `promop-staging-worker` use the same intended revision and Render staging database. Run in the confirmed staging service environment:
+
+   ```bash
+   python manage.py audit_genomics_release --environment render-staging --check
+   ```
+
+   Retain the complete JSON and deployed revision. The earlier passing staging audit and production-schema rehearsal do not replace this candidate receipt.
+
+2. **#1315 — preview the full staging TP53 reconciliation.** Use the deployed command in the staging service environment; a Render one-off job can avoid laptop-to-database latency for the full population:
+
+   ```bash
+   python manage.py reconcile_tp53_cache --all
+   ```
+
+   Review before/after counts, transitions, completion and held pending edits. The historical estimate of 3,000 false-to-null changes used cached input, so it is not the required source-based preview. The 2026-09-14 16:35 UTC read-only synthetic preview processed one record (`null->null`, zero changes, zero held edits); it does not cover the rest of staging. **No one-off reconciliation job or apply run has been started.**
+
+3. **#1315 — EXACT handoff.** [PR #488](https://github.com/healthkey-ai/exact/pull/488) contains the fix for `dev`; `LeoMo42` owns review and deployment selection. Do not merge/deploy it on his behalf under the current instruction. The inspected Render services were `exact-2` on `dev` at `41d27e8` and `exact` on `fix/legacy-trials-schema` at `2edbe62`; neither contained the explicit TP53 handling from #483. `#488` does not by itself update the legacy-schema branch. Obtain evidence for the actual RC consumer: explicit null remains unknown through normalization and required/excluded eligibility checks, and an explicit positive remains positive. CancerBot is outside this gate.
+
+4. **#1315 — apply and verify staging reconciliation.** After reviewing the preview and coordinating compatible consumer use, run:
+
+   ```bash
+   python manage.py reconcile_tp53_cache --all --apply
+   python manage.py reconcile_tp53_cache --all
+   ```
+
+   Retain both receipts with scope and deployed SHA. Require no unexplained remaining changes; account for held edits separately. Apply changes only `tp53_disruption`, preserves source facts and unrelated projections, and supports retry after partial completion. Do not substitute a blanket false-to-null update or the broader `backfill_patient_records` command. See [the TP53 rollout contract](tp53_aggregate_plan.md).
+
+5. **#1317 — repeat the authenticated smoke against the final candidate.** The committed runner is [scripts/genomics_release_smoke.py](../scripts/genomics_release_smoke.py). Supply `GENOMICS_SMOKE_USERNAME` and `GENOMICS_SMOKE_PASSWORD` through the operator environment. Dedicated synthetic patient **7092** was provisioned with run ID **`1dd2b6775746405dbbd66c03a918c712`**; it had no active findings after the earlier smoke. Confirm it remains designated for testing, then run:
+
+   ```bash
+   python scripts/genomics_release_smoke.py \
+     --person-id 7092 --run-id 1dd2b6775746405dbbd66c03a918c712
+   ```
+
+   The runner refuses an unmarked record or one with active findings. It verifies catalog, create/positive readback, absent/indeterminate/present readback, source provenance and delete/unknown readback, and cleans up its uniquely marked finding. Check web/worker revisions before and after separately; the runner does not certify deployment identity. The prior run retained 14 retired Measurements and 7 retired Observations for synthetic patient 7092; repeat runs add retired history, which must be accounted for rather than reported as completely erased test data. If the synthetic guard fails, provision another dedicated record instead of clearing an existing patient's list.
+
+6. **#1317 — curator findings and final status.** Have Samar use [the clinician checklist](curator_smoke_test.md). Record results and link concrete bugs, distinguishing wrong/lost clinical data or broken supported workflows from cosmetic issues and deferred clinical-policy requests. Attach candidate receipts to #1315/#1316/#1317 and update this section as each criterion passes. Keep issues open where production or external-consumer work remains.
+
+### Evidence already available
+
+- [PRomop #1321](https://github.com/healthkey-ai/promop/pull/1321) is merged. [Final CI](https://github.com/healthkey-ai/promop/actions/runs/34869448734) passed Django, pytest (2,711 passed, 5 skipped, 4 deselected), frontend, security and the required aggregate gate. CodeQL also passed. Local targeted coverage previously passed 100 backend and 52 UI tests; the fresh migration-recorder fixture fix passed its four audit tests.
+- Render staging web deployment `dep-dak2fdjtqb8s73ekd6ng` and worker deployment `dep-dak2fdjtqb8s73ekd760` were observed live on `d1035ab330f3c36a343715be92d63fadaec295b3`. These deployments followed the authorized merge automatically; no manual deployment was triggered.
+- [EXACT #483](https://github.com/healthkey-ai/exact/pull/483) merged to `main` with all three backend CI groups passing. [EXACT #488](https://github.com/healthkey-ai/exact/pull/488) is the separate, open `dev` handoff; its CI/review and delivery status must be read from that PR.
+- Production web and worker remain on `f8730186d54bf297e7aab9435bb12c938af9ee8f`. No production migrations, vocabulary restoration or TP53 reconciliation were applied. #1286 and the production portion of #1316 remain open; actor concept 32817 was restored only in the local rehearsal. The [rehearsal evidence](https://github.com/healthkey-ai/promop/issues/1316#issuecomment-5666199241) is retained in GitHub so continuation does not depend on another machine's temporary files.
 
 ## Delivery status
 
