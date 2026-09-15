@@ -14,6 +14,7 @@ import BloodTab from "@/components/PatientInfo/tabs/BloodTab";
 import LabsTab from "@/components/PatientInfo/tabs/LabsTab";
 import BehaviorTab from "@/components/PatientInfo/tabs/BehaviorTab";
 import WearableTab from "@/components/PatientInfo/tabs/WearableTab";
+import ClinicalSummaryTab from "@/components/PatientInfo/tabs/ClinicalSummaryTab";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
@@ -303,7 +304,7 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
     );
   }
 
-  const tabLabels = ["General", getDiseaseTabLabel(), "Treatment", "Blood", "Labs", "Behavior", "Wearable", "Genomics"];
+  const tabLabels = ["General", getDiseaseTabLabel(), "Treatment", "Blood", "Labs", "Behavior", "Wearable", "Genomics", "History"];
   const tabDescriptions: Record<number, string> = {
     0: "Keep patient details up to date for accurate personalisation.",
     1: "Disease-specific clinical information.",
@@ -313,6 +314,7 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
     5: "Lifestyle, socioeconomic, and behavioural health factors.",
     6: "Apple wearable 30-day summaries derived from synced OMOP data.",
     7: "Genes, variants, origins, interpretations, and test details.",
+    8: "Clinical timeline with conditions, treatments, labs, and procedures.",
   };
 
   return (
@@ -383,6 +385,7 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
           {activeTab === 5 && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} />}
           {activeTab === 6 && <WearableTab formData={editedInfo} onChange={handleFieldChange} />}
           {activeTab === 7 && <GenomicsTab formData={editedInfo} readOnly={readOnly} />}
+          {activeTab === 8 && <ClinicalSummaryTab formData={editedInfo} onNavigateToLabs={() => setActiveTab(4)} />}
         </div>
       </div>
     </div>
