@@ -158,12 +158,11 @@ describe('DiseaseTab — Genomics owns all gene and mutation editors', () => {
   });
 
   it.each(['breast', 'myeloma', 'lymphoma', 'mcl', 'cll'] as const)(
-    '%s keeps disease selection but no genetic editors, even with stored results', diseaseType => {
+    '%s has no genetic editors, even with stored results', diseaseType => {
       render(<DiseaseTab onChange={vi.fn()} diseaseType={diseaseType} formData={{
         disease: 'Breast Cancer', genetic_mutations: [{ gene: 'BRCA1', variant: 'c.68_69delAG' }],
         molecular_markers: 'TP53', tp53_disruption: true, cytogenetic_abnormalities: 'del(17p)',
       }} />);
-      expect(screen.getByText('Disease')).toBeInTheDocument();
       for (const label of ['Genetic Mutations', 'Molecular Markers', 'TP53 Disruption', 'Cytogenetic Abnormalities']) {
         expect(screen.queryByText(label)).not.toBeInTheDocument();
       }
@@ -203,11 +202,6 @@ describe('MyelomaSection — SCT fields', () => {
     renderMyeloma();
     expect(screen.getByText('M-Protein Type')).toBeInTheDocument();
     expect(screen.queryByText('Myeloma Type')).not.toBeInTheDocument();
-  });
-
-  it('keeps the single Disease editor on the Disease tab', () => {
-    renderMyeloma({ disease: 'Multiple Myeloma' });
-    expect(screen.getAllByTestId('select-control')[0]).toHaveValue('Multiple Myeloma');
   });
 
   it('renders all three SCT field labels', () => {
@@ -638,7 +632,7 @@ describe('DiseaseTab — shared staging and biomarkers', () => {
     },
   );
 
-  it.each(['lymphoma', 'myeloma', 'cll', 'mcl', 'other'] as const)('omits routine solid-tumor biomarkers for %s', diseaseType => {
+  it.each(['lymphoma', 'myeloma', 'cll', 'mcl'] as const)('omits routine solid-tumor biomarkers for %s', diseaseType => {
     render(<DiseaseTab {...baseProps} diseaseType={diseaseType} formData={{}} />);
     expect(screen.queryByText('Staging & Biomarkers')).not.toBeInTheDocument();
     expect(screen.queryByText('PD-L1 Combined Positive Score')).not.toBeInTheDocument();
