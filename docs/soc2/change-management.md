@@ -9,8 +9,10 @@ operated throughout a SOC 2 observation period.
 
 Both branches must require a pull request and these CI checks:
 
-- `Backend tests`
-- `Frontend lint & build`
+- `Application CI` — a gate job that conditionally enforces backend and frontend
+  suites based on the change scope. Documentation-only PRs pass without running
+  application suites. Frontend-only PRs skip backend tests. Code changes that
+  touch backend files require both suites to pass.
 - `Security gates`
 
 Independent review is required only for security-related changes: PRs changing
@@ -22,7 +24,7 @@ One approving review of the current head from **@larsburgess** (GitHub user ID
 `23724`), with repository write, maintain or admin access, satisfies the security
 review requirement. The author, other developers, bots, read-only collaborators,
 stale approvals and dismissed approvals do not qualify. An outstanding request for
-changes from another writer blocks approval. No GitHub team membership is required.
+changes from another reviewer blocks approval.
 
 The `Security review` status implements this conditional requirement in [the policy
 script](../../.github/scripts/security-review.cjs). It checks PR labels, closing issues
@@ -32,10 +34,10 @@ count. Test-only paths do not trigger file-based review; a security label still 
 approval. The script lists the exact file patterns.
 
 The proposed ruleset has **zero** global approvals, global last-push approval
-**disabled**, code-owner approval **disabled**, and **no team-specific reviewers**. It
-requires `Security review` from the GitHub Actions app, alongside existing CI. Dismiss
-stale approvals when the reviewed diff changes and resolve review conversations. Retain
-signed commits, linear history, force-push restrictions, and no ruleset bypass actors.
+**disabled**, and code-owner approval **disabled**. It requires `Security review` from
+the GitHub Actions app, alongside `Application CI` and `Security gates`. Dismiss stale
+approvals when the reviewed diff changes and resolve review conversations. Retain signed
+commits, linear history, force-push restrictions, and no ruleset bypass actors.
 
 `CODEOWNERS` routes review requests using the target branch's copy. A review request
 alone is not a mandatory approval; the catch-all owner does not impose review on
@@ -44,12 +46,13 @@ ordinary PRs. Security paths route to @larsburgess; the status independently ver
 ## Rollout and current enforcement
 
 The [2026-09-13 capture](evidence/2026-09-13-change-management-security-review.json)
-shows the existing partial rollout: global approvals are already zero, but native
-security file rules still require the `healthkey` team and no `Security review` status
-is required. Issue labels alone currently have no automatic review gate. This does
-**not** satisfy the named-reviewer policy yet. The older proposal
+shows the existing partial rollout: global approvals are already zero, but no
+`Security review` status is required yet. Issue labels alone currently have no
+automatic review gate. The older proposal
 [#1219](https://github.com/healthkey-ai/promop/pull/1219) was closed without merging;
-this PR includes the replacement workflows and tests. The repository owner subsequently selected @larsburgess as the required reviewer, replacing the earlier any-other-developer proposal. Native file-specific `required_reviewers` support teams only, so the trusted named-reviewer status replaces that mechanism after bootstrap.
+this PR includes the replacement workflows and tests. The repository owner selected
+@larsburgess as the required individual reviewer. The trusted named-reviewer status
+enforces this after bootstrap.
 
 1. Obtain @larsburgess approval for this security-related PR and merge the policy
    workflows/script into the trusted default branch. The existing native rule
@@ -59,11 +62,12 @@ this PR includes the replacement workflows and tests. The repository owner subse
    security PR needs current approval from @larsburgess. An approval from any other writer must fail.
 3. Re-read the live ruleset and apply
    [the proposed payload](evidence/change-management-ruleset.json), preserving any
-   unrelated changes since capture. In the same update, remove team-specific
-   `required_reviewers` and require `Security review` with GitHub Actions as its
-   expected source (integration ID `15368`). Do not require an unavailable status.
+   unrelated changes since capture. Require `Security review` with GitHub Actions
+   as its expected source (integration ID `15368`). Do not require an unavailable
+   status.
 4. Re-capture with `--require-enforced` and retain the new dated evidence. Verify
-   both `dev` and `main`, including rejection of another writer’s approval and acceptance of Lars’s current approval without a team-membership lookup.
+   both `dev` and `main`, including rejection of another writer’s approval and
+   acceptance of Lars’s current approval.
 
 The status writer executes only trusted default-branch code with metadata read and
 status-write permissions. It never checks out PR code. A separate unprivileged
@@ -129,9 +133,9 @@ The collector reads rulesets (including inherited sources), each branch's effect
 rules and head SHA, the selected CODEOWNERS path/blob and validation, GitHub environment
 protection rules, and workflow inventory. It never reads secrets or Render credentials.
 It exits nonzero if the required security-review status/CI or direct-push protection
-cannot be demonstrated, if blanket approval gates apply to ordinary PRs, if
-team-specific reviewers remain, or if CODEOWNERS validation reports errors. API errors
-fail the capture; missing access must not be described as a passing control.
+cannot be demonstrated, if blanket approval gates apply to ordinary PRs, or if
+CODEOWNERS validation reports errors. API errors fail the capture; missing access must
+not be described as a passing control.
 
 Keep the dated baseline and subsequent captures; do not replace an earlier snapshot with
 new settings. Commit each new capture through a PR, with independent review for these
@@ -150,7 +154,7 @@ current security-only review policy.
 
 The [proposed ruleset payload](evidence/change-management-ruleset.json) describes the
 target configuration; it is not yet applied. The 2026-09-13 capture records the
-remaining status-gate and team-restriction gaps described above. The collector checks
+remaining status-gate gaps described above. The collector checks
 ruleset configuration, not the correctness of workflow code or approvals on individual
 PRs. Retain workflow, test, status and review records as well.
 

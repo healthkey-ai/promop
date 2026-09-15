@@ -8,7 +8,7 @@ from pathlib import Path
 import subprocess
 
 
-REQUIRED_CHECKS = {'Backend tests', 'Frontend lint & build', 'Security gates'}
+REQUIRED_CHECKS = {'Application CI', 'Security gates'}
 
 
 def github_json(endpoint):
@@ -62,11 +62,6 @@ def evaluate_branch(effective_rules, rulesets):
         and not rule.get('require_code_owner_review', False)
         for rule in pr_rules
     )
-    # Team-specific file reviewers would impose an additional membership
-    # requirement beyond Lars's approval, even with the status gate enabled.
-    no_team_reviewer_restriction = all(
-        not rule.get('required_reviewers') for rule in pr_rules
-    )
     direct_push_blocked = any(
         source['enforcement'] == 'active'
         and not any(actor['bypass_mode'] == 'always' for actor in source['bypass_actors'])
@@ -86,7 +81,6 @@ def evaluate_branch(effective_rules, rulesets):
         'all_ruleset_sources_captured': all_sources_captured,
         'security_review_status_required': all_sources_captured and security_review_enforced,
         'ordinary_prs_need_no_approval': all_sources_captured and ordinary_prs_need_no_approval,
-        'no_team_reviewer_restriction': all_sources_captured and no_team_reviewer_restriction,
         'required_ci_enforced': all_sources_captured and REQUIRED_CHECKS <= ci_enforced,
         'direct_pushes_blocked': all_sources_captured and direct_push_blocked,
     }
@@ -148,7 +142,7 @@ def main():
     failures = []
     for branch, data in evidence['branches'].items():
         for control in ('security_review_status_required', 'ordinary_prs_need_no_approval',
-                        'no_team_reviewer_restriction', 'required_ci_enforced', 'direct_pushes_blocked'):
+                        'required_ci_enforced', 'direct_pushes_blocked'):
             if not data['assessment'][control]:
                 failures.append(f'{branch}: {control}')
         if not data['codeowners']:

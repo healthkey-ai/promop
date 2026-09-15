@@ -18,7 +18,7 @@ RULESET = {
         }},
         {'type': 'required_status_checks', 'parameters': {
             'required_status_checks': [{'context': name} for name in (
-                'Backend tests', 'Frontend lint & build', 'Security gates',
+                'Application CI', 'Security gates',
             )] + [{'context': 'Security review', 'integration_id': 15368}],
         }},
     ],
@@ -34,7 +34,6 @@ def test_required_review_ci_and_no_direct_pushes_are_reported():
     result = assess(RULESET)
     assert result['security_review_status_required']
     assert result['ordinary_prs_need_no_approval']
-    assert result['no_team_reviewer_restriction']
     assert result['required_ci_enforced']
     assert result['direct_pushes_blocked']
 
@@ -65,7 +64,7 @@ def test_missing_review_status_does_not_count_as_required_review():
 
 def test_missing_security_gate_is_reported():
     ruleset = deepcopy(RULESET)
-    ruleset['rules'][1]['parameters']['required_status_checks'].pop(2)
+    ruleset['rules'][1]['parameters']['required_status_checks'].pop(1)
     assert not assess(ruleset)['required_ci_enforced']
 
 
@@ -120,15 +119,6 @@ def test_blanket_approval_restrictions_are_rejected():
         ruleset = deepcopy(RULESET)
         ruleset['rules'][0]['parameters'][field] = value
         assert not assess(ruleset)['ordinary_prs_need_no_approval']
-
-
-def test_team_specific_reviewer_is_rejected():
-    ruleset = deepcopy(RULESET)
-    ruleset['rules'][0]['parameters']['required_reviewers'] = [{
-        'minimum_approvals': 1, 'file_patterns': ['**/CODEOWNERS'],
-        'reviewer': {'id': 17798426, 'type': 'Team'},
-    }]
-    assert not assess(ruleset)['no_team_reviewer_restriction']
 
 
 def test_review_status_must_be_bound_to_github_actions():

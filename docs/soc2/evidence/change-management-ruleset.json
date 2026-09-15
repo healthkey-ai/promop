@@ -50,10 +50,7 @@
         "do_not_enforce_on_create": true,
         "required_status_checks": [
           {
-            "context": "Backend tests"
-          },
-          {
-            "context": "Frontend lint & build"
+            "context": "Application CI"
           },
           {
             "context": "Security gates"
