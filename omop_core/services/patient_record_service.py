@@ -64,7 +64,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 8
+DERIVATION_VERSION = 9
 
 # Fields that are entirely derived from OMOP tables and must be reset before
 # each refresh so deletions are reflected (not just additions).
@@ -667,6 +667,9 @@ class OmopSnapshot:
     cytogenetic_observations: list = dataclasses.field(default_factory=list)
     # Per-refresh memoization only; never cache database mappings process-wide.
     genomics_cache: dict = dataclasses.field(default_factory=dict, compare=False)
+    # Keep clear markers for the corrected breast questions: a source-only
+    # clear must also suppress an older vocabulary-resolved result.
+    breast_measurements: list | None = None
 
 
 def _first_by_code(snapshot: OmopSnapshot, code: str, table: str = 'measurement'):
@@ -772,6 +775,9 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
         (o.observation_source_value or '').startswith(SOURCE_PREFIX)
         or o.observation_source_value == LEGACY_SOURCE]
     from omop_core.services.omop_projection import without_cleared_history
+    breast_measurements = [m for m in measurements if
+        m.measurement_source_value in ('29593-1', '85069-3')
+        or getattr(m.measurement_concept, 'concept_code', None) in ('29593-1', '85069-3')]
     measurements = without_cleared_history(measurements, 'measurement')
     observations = without_cleared_history(observations, 'observation')
 
@@ -805,6 +811,7 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
         death=death,
         death_date_assertion=death_date_assertion,
         cytogenetic_observations=cytogenetic_observations,
+        breast_measurements=breast_measurements,
         meas_by_code=dict(meas_by_code),
         obs_by_code=dict(obs_by_code),
         meas_by_source=dict(meas_by_source),
@@ -2338,7 +2345,7 @@ _BIOMARKER_MEASUREMENT_LOINCS = frozenset({
     '16112-5',  # Estrogen receptor
     '16113-3',  # Progesterone receptor
     '48676-1',  # HER2
-    '85319-2',  # Ki-67
+    '29593-1',  # Ki-67 nuclear antigen cell fraction (%)
     '83055-4',  # PD-L1 by clone 28-8 [Presence] in Tissue by Immune stain
     '83054-7',  # PD-L1 by clone 22C3 [Interpretation] in Tissue Narrative
     '44648-4',  # Biopsy/Nottingham grade
@@ -2369,7 +2376,7 @@ _GENETIC_MUTATION_LOINCS = {
 # ids: Athena reloads may change concept ids, while the source code is the
 # durable vocabulary contract.
 _GENOMICS_PATHOLOGY_LOINCS = frozenset({
-    '85337-4',  # genomic/test methodology (also carries numeric Oncotype score)
+    '85069-3',  # Lab test method [Type]
     '31208-2',  # specimen source
     '69548-6',  # pathology test interpretation
     # Androgen receptor. 49457-5 ("Androgen receptor Ag [Presence] in Tissue by
@@ -2380,7 +2387,6 @@ _GENOMICS_PATHOLOGY_LOINCS = frozenset({
     # one still projects; nothing new is written under it.
     '49457-5',
     '82185-1',
-    '92837-4',  # lymph-node involvement
     '21907-1',  # distant-metastasis status (not TNM M category)
     '44648-4',  # Nottingham biopsy grade
 })
@@ -2490,8 +2496,8 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         """Return the most recent Measurement for a LOINC code, checking concept first then source_value."""
         return _first_by_code(snapshot, concept_code) or _first_by_source(snapshot, concept_code)
 
-    # Ki-67 proliferation index — LOINC 85319-2
-    ki67_m = _first_m('85319-2')
+    # 85319-2 is HER2 presence, not Ki-67. Do not retain it as an alias.
+    ki67_m = _latest_loinc_measurement(snapshot, '29593-1')
     if ki67_m and ki67_m.value_as_number is not None:
         data['ki67_proliferation_index'] = int(ki67_m.value_as_number)
 
@@ -2622,6 +2628,21 @@ def _coded_value(row):
     )
 
 
+def _latest_loinc_measurement(snapshot, code):
+    """Select across mapped and unmapped imports without trusting conflicting codes."""
+    rows = snapshot.breast_measurements
+    if rows is None:
+        rows = _union_by_code_and_source(snapshot, [code])
+    rows = [row for row in rows if (
+        (row.measurement_concept_id in (None, 0)
+         and row.measurement_source_value == code)
+        or (row.measurement_concept is not None
+            and row.measurement_concept.vocabulary_id == 'LOINC'
+            and row.measurement_concept.concept_code == code)
+    )]
+    return max(rows, key=lambda row: (row.measurement_date, row.pk), default=None)
+
+
 def _get_genomics_pathology_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     """Derive report-level genomics/pathology fields from dated OMOP facts.
 
@@ -2636,13 +2657,14 @@ def _get_genomics_pathology_data(person: Person, snapshot: OmopSnapshot = None) 
     def latest(code):
         return _first_by_code(snapshot, code) or _first_by_source(snapshot, code)
 
-    methodology = latest('85337-4')
-    if methodology:
+    # 85337-4 is ER presence. Neither its label nor a numeric payload makes
+    # it a method or an Oncotype score. Score/event selection remains #1227.
+    methodology = _latest_loinc_measurement(snapshot, '85069-3')
+    from omop_core.services.omop_projection import CLEAR_VALUE
+    if methodology and methodology.value_source_value != CLEAR_VALUE:
         value = _coded_value(methodology)
         if value:
             data['test_methodology'] = value[:50]
-        if methodology.value_as_number is not None:
-            data['oncotype_dx_score'] = int(methodology.value_as_number)
 
     specimen = latest('31208-2')
     if specimen:
@@ -2672,11 +2694,9 @@ def _get_genomics_pathology_data(person: Person, snapshot: OmopSnapshot = None) 
         if value:
             data['androgen_receptor_status'] = value[:50]
 
-    lymph_node = latest('92837-4')
-    if lymph_node:
-        value = _coded_value(lymph_node)
-        if value:
-            data['lymph_node_status'] = value[:50]
+    # 92837-4 is perineural invasion, not nodal involvement. Do not infer
+    # nodal negativity from its absence; reviewed nodal/event mappings remain
+    # available through the curated projection path.
 
     metastasis = latest('21907-1')
     if metastasis:

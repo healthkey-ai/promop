@@ -62,7 +62,7 @@ LAB_FIELD_TO_LOINC = {
     'beta2_microglobulin':            ('1952-1',   'mg/L',            'Beta-2-Microglobulin [Mass/volume] in Serum or Plasma'),
     'c_reactive_protein':             ('1988-5',   'mg/L',            'C reactive protein [Mass/volume] in Serum or Plasma'),
     'esr':                            ('30341-2',  'mm/h',            'Erythrocyte sedimentation rate'),
-    'ki67_proliferation_index':       ('85319-2',  '%',               'Ki-67 Ag [Presence] in Tissue by Immune stain'),
+    'ki67_proliferation_index':       ('29593-1',  '%',               'Cells.Ki-67 nuclear Ag/cells in Tissue by Immune stain'),
     # Vital signs
     'weight':                         ('29463-7',  'kg',              'Body weight'),
     'height':                         ('8302-2',   'cm',              'Body height'),
@@ -411,12 +411,10 @@ def get_gender_concept(gender_str):
 # PatientRecord field → the concept its derivation reads, recovered from the
 # extractors rather than chosen by hand.
 #
-# Provenance. If derivation reads code X into field F, then writing X is correct
-# by construction: a round trip through derivation returns the same value. That
-# makes these mappings auditable — the third element names the extractor the
-# attribution came from, so a reviewer can check the claim at its source instead
-# of re-deriving it. They were found by AST-walking patient_record_service.py for
-# `data['field'] = ...` assignments and the code literal governing them.
+# These entries document runtime attribution, not clinical validation. A
+# successful round trip alone cannot establish that a code asks the right
+# clinical question; vocabulary definitions and event context require review.
+# The third element identifies the extractor for that review.
 #
 # The one rule that governs membership: a code here must be claimed by exactly
 # one field, across this table AND LAB_FIELD_TO_LOINC. Ten further fields were
@@ -429,8 +427,7 @@ def get_gender_concept(gender_str):
 #                      44648-4 with biopsy_grade
 #   two parts of one   pd_l1_assay and pd_l1_tumor_cells are the assay and the
 #   fact               numeric result of ONE 83052-1 measurement, as are
-#                      test_methodology and oncotype_dx_score of one 85337-4
-#                      report, and ecog_assessment_date is the date of the
+#                      ecog_assessment_date is the date of the
 #                      ecog_performance_status observation
 #   resolved (#785)    btk_inhibitor_refractory and bcl2_inhibitor_refractory
 #                      both read SNOMED 182842009, which cannot say which drug
@@ -457,7 +454,7 @@ DERIVED_FIELD_TO_CODE = {
     # Derivation now reads 49457-5 first and 82185-1 second, so the round trip
     # holds and any pre-existing row still projects.
     'androgen_receptor_status':      ('49457-5',   'LOINC',  '_get_genomics_pathology_data'),
-    'lymph_node_status':             ('92837-4',   'LOINC',  '_get_genomics_pathology_data'),
+    'test_methodology':              ('85069-3',   'LOINC',  '_get_genomics_pathology_data'),
     'metastasis_status':             ('21907-1',   'LOINC',  '_get_genomics_pathology_data'),
     'report_interpretation':         ('69548-6',   'LOINC',  '_get_genomics_pathology_data'),
     'test_specimen_type':            ('31208-2',   'LOINC',  '_get_genomics_pathology_data'),
@@ -508,7 +505,7 @@ SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
     # Breast cancer
     'tnbc_status':                   ('706886006', 'SNOMED'),
     'hr_status':                     ('416053008', 'SNOMED'),
-    'oncotype_dx_score':             ('85337-4',   'LOINC'),
+    # Oncotype invasive/DCIS score selection requires reviewed event context (#1227).
     'menopausal_status':             ('276498001', 'SNOMED'),
     # Lymphoma
     'flipi_score':                   ('444723004', 'SNOMED'),
@@ -634,7 +631,7 @@ SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
     'molecular_markers':             ('55232-3',   'LOINC'),   # Genetic analysis summary panel
     # cytogenetic_markers is a local multi-marker summary, not LOINC 69548-6
     # (genetic variant assessment/status). Its explicit concept-0 recipe is seeded.
-    'protein_expressions':           ('85337-4',   'LOINC'),   # Gene expression panel
+    # Protein-expression panels require a reviewed panel question; 85337-4 is ER.
 
     # Demographics / profile
     'date_of_birth':                 ('21112-8',   'LOINC'),   # Birth date

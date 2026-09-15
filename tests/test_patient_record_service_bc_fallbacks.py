@@ -90,7 +90,7 @@ def test_genomics_pathology_fields_use_dated_loinc_measurements():
     # source values so the contract does not depend on an installed Athena DB.
     MeasurementFactory(
         person=person, measurement_date=date(2024, 5, 1),
-        measurement_source_value='85337-4', value_as_string='NGS', value_as_number=17,
+        measurement_concept_id=0, measurement_source_value='85069-3', value_as_string='NGS', value_as_number=17,
     )
     MeasurementFactory(
         person=person, measurement_date=date(2024, 5, 2),
@@ -121,12 +121,10 @@ def test_genomics_pathology_fields_use_dated_loinc_measurements():
 
     assert data == {
         'test_methodology': 'NGS',
-        'oncotype_dx_score': 17,
         'test_date': date(2024, 5, 3),
         'test_specimen_type': 'Primary biopsy',
         'report_interpretation': 'Indeterminate',
         'androgen_receptor_status': 'Positive',
-        'lymph_node_status': 'Positive',
         'metastasis_status': 'Negative',
         'biopsy_grade_depr': '2',
     }
@@ -164,13 +162,13 @@ def test_refresh_clears_removed_genomics_pathology_facts():
         mrd_status='Positive',
     )
     measurement = MeasurementFactory(
-        person=person, measurement_source_value='85337-4',
+        person=person, measurement_concept_id=0, measurement_source_value='85069-3',
         value_as_string='IHC', value_as_number=12,
     )
 
     refreshed = refresh_patient_record(person)
     assert refreshed.test_methodology == 'IHC'
-    assert refreshed.oncotype_dx_score == 12
+    assert refreshed.oncotype_dx_score is None
 
     measurement.delete()
     refreshed = refresh_patient_record(person)

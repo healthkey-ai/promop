@@ -930,9 +930,9 @@ class Command(BaseCommand):
             histology = _BC_HISTOLOGY_TYPES[person.person_id % len(_BC_HISTOLOGY_TYPES)]
             _queue_measurement('59847-4', value_as_string=histology)
 
-        has_numeric_ki67 = any(value_num is not None for value_num, _ in existing_by_code.get('85319-2', []))
+        has_numeric_ki67 = any(value_num is not None for value_num, _ in existing_by_code.get('29593-1', []))
         if not has_numeric_ki67:
-            _queue_measurement('85319-2', value_as_number=rng.randint(5, 75))
+            _queue_measurement('29593-1', value_as_number=rng.randint(5, 75))
 
         has_mutation = any(existing_by_code.get(code) for code, _gene in _BC_MUTATION_LOINCS)
         if not has_mutation:

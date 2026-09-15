@@ -380,11 +380,13 @@ def _curated_writes(choice_options=None):
     after the PATCH lands.
     """
     from omop_core.models import FieldConceptMapping
+    from omop_core.services.breast_mapping_safety import wrong_breast_field_mappings
 
     entries = {}
     rows = list(
         FieldConceptMapping.objects
         .filter(status='approved')
+        .exclude(wrong_breast_field_mappings())
         .exclude(omop_table='')
         .select_related('concept')
     )
