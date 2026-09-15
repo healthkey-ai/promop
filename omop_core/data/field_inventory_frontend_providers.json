@@ -26,7 +26,7 @@
       "expression": "extra.options",
       "kind": "helper_calls",
       "sources": {
-        "frontend/src/components/PatientInfo/tabs/GeneralTab.tsx": "edf146208f4e4645fa907f935a7c4c1bb9c1b4d5721a17c6fe151d66cb7d9ac4"
+        "frontend/src/components/PatientInfo/tabs/GeneralTab.tsx": "6877a5ea610b7a671124bc71a1e450e60b040057d891902ffb070d2245c0e22c"
       },
       "reason": "The field helper passes literal call-site name/type/options to ClinicalField. Call sites are enumerated separately by the TypeScript parser."
     },
@@ -35,7 +35,7 @@
       "expression": "histOptions",
       "kind": "lookup_titles",
       "sources": {
-        "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+        "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
         "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
       },
       "field": "histologic_type",
@@ -48,7 +48,7 @@
       "expression": "txOutcomeOptions.length ? txOutcomeOptions.map((o: { value: string }) => o.value) : []",
       "kind": "lookup_titles",
       "sources": {
-        "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+        "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
         "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
       },
       "field": "post_transformation_outcome",
@@ -61,7 +61,7 @@
       "expression": "myelomaTypeOptions.length ? myelomaTypeOptions.map((o: { value: string }) => o.value) : MYELOMA_TYPE_OPTIONS",
       "kind": "lookup_titles",
       "sources": {
-        "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+        "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
         "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
       },
       "field": "myeloma_type",
@@ -74,7 +74,7 @@
       "expression": "sctTypeOptions.length ? sctTypeOptions.map((o: { value: string }) => o.value) : STEM_CELL_TRANSPLANT_OPTIONS",
       "kind": "lookup_titles",
       "sources": {
-        "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+        "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
         "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
       },
       "field": "stem_cell_transplant_history",
@@ -87,7 +87,7 @@
       "expression": "sctEligibilityOptions.length ? sctEligibilityOptions.map((o: { value: string }) => o.value) : SCT_ELIGIBILITY_OPTIONS",
       "kind": "lookup_titles",
       "sources": {
-        "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+        "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
         "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
       },
       "field": "sct_eligibility",
