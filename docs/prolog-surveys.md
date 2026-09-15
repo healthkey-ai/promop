@@ -168,6 +168,18 @@ this project's, so a PRomop dependency bump does not need a matching PROlog
 release. The reverse is not true: PROlog's floor is Django 5.2.6 / DRF 3.15.2 and
 Python 3.12, and its ceiling excludes Django 6.
 
+### What v0.4.0 added
+
+Two definition capabilities, no migration:
+
+- **`not_contains`** — a `visible_if` operator on a multi-select or ranking
+  answer: answered, and without this option. False until answered, so a
+  follow-up gated on it opens on an answer, never on silence.
+- **`scale.not_applicable`** on a matrix — a non-scored "not applicable"
+  column. A row rated with it is stored as `"na"`, counts as answered, and is
+  written as `NA` by `export_responses` — distinct from `SKIPPED` and blank,
+  and never a number in a numeric column.
+
 ### What v0.3.0 added
 
 An **administration console**, in this project's own Django admin at
