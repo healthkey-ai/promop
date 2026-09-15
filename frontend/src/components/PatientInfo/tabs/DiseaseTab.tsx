@@ -9,7 +9,6 @@ import {
   MENOPAUSAL_OPTIONS, TUMOR_STAGE_OPTIONS, NODES_STAGE_OPTIONS,
   STAGING_MODALITIES_OPTIONS, DISTANT_METASTASIS_STAGE_OPTIONS,
   YES_NO_OPTIONS, ER_OPTIONS, PR_OPTIONS, HER2_OPTIONS, HR_OPTIONS, HRD_OPTIONS,
-  DISEASE_OPTIONS,
   FL_TUMOR_GRADE_OPTIONS,
   ISS_STAGE_OPTIONS, MM_PROGRESSION_OPTIONS, STEM_CELL_TRANSPLANT_OPTIONS, SCT_ELIGIBILITY_OPTIONS, MYELOMA_TYPE_OPTIONS,
   MRD_STATUS_OPTIONS,
@@ -288,23 +287,6 @@ function MCLSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>
   );
 }
 
-function OtherSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>) {
-  // Ask about *this* patient: whether a field may be edited depends on who is
-  // asking and whose record it is, not only on whether the field is mapped.
-  const personId = (formData?.person_id ?? formData?.person) as number | undefined;
-  const { descriptors } = useWritableFields(personId);
-  return (
-    <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-      <ClinicalField label="Stage" name="stage" descriptor={descriptors.stage} type="select" value={formData?.stage} options={STAGE_OPTIONS} onChange={onChange} />
-      <div className="sm:col-span-2">
-        <p className="text-sm text-portal-text-secondary">
-          Disease-specific fields are available for Breast Cancer, Follicular Lymphoma, Multiple Myeloma, CLL, and Mantle Cell Lymphoma.
-        </p>
-      </div>
-    </div>
-  );
-}
-
 /** Solid-tumor staging and assay-specific PD-L1 results for breast cancer. */
 function StagingBiomarkersSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>) {
   // Ask about *this* patient: whether a field may be edited depends on who is
@@ -337,9 +319,6 @@ function StagingBiomarkersSection({ formData, onChange }: Pick<Props, 'formData'
 }
 
 export default function DiseaseTab({ formData, onChange, diseaseType }: Props) {
-  const personId = (formData?.person_id ?? formData?.person) as number | undefined;
-  const { descriptors } = useWritableFields(personId);
-  const { source: diseaseSource } = useVocabulary('disease', 'title');
   const diseaseSection = (() => {
     switch (diseaseType) {
       case 'breast':
@@ -353,17 +332,12 @@ export default function DiseaseTab({ formData, onChange, diseaseType }: Props) {
       case 'mcl':
         return <MCLSection formData={formData} onChange={onChange} />;
       default:
-        return <OtherSection formData={formData} onChange={onChange} />;
+        return null;
     }
   })();
 
   return (
     <>
-      <Section title="Diagnosis">
-        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <ClinicalField label="Disease" name="disease" descriptor={descriptors.disease} type="select" value={formData?.disease} options={DISEASE_OPTIONS} onChange={onChange} vocabSource={diseaseSource} />
-        </div>
-      </Section>
       {diseaseSection}
       {diseaseType === 'breast' && <StagingBiomarkersSection formData={formData} onChange={onChange} />}
     </>
