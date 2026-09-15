@@ -87,9 +87,10 @@ Three related mapping concerns have distinct responsibilities:
 The active [field-and-answer mapping plan](field_concept_mapping_plan.md)
 tracks the inventory, scoped choices, coded-answer projection and remaining
 disease-specific repairs. Its next prerequisite is the complete field/value
-inventory in #1223. The plan's [1.3 release gates](field_concept_mapping_plan.md#13-release-gates)
-record outstanding delivery and rollout checks, their status and the evidence
-required before release.
+inventory in #1223. The plan's [1.3RC gates](field_concept_mapping_plan.md#13-release-gates)
+distinguish current RC verification from the deferred mapping backlog and
+production rollout. Its [continuation instructions](field_concept_mapping_plan.md#continue-implementation-on-another-machine)
+identify the pushed checkpoint and the next inventory acceptance work.
 
 The [Mapping component](mapping-component-plan.md) defines the shared Python
 service boundary and remaining refactoring work. The [code-mapping architecture
@@ -149,7 +150,7 @@ tracks consumer delivery and rollout. The ADR's
 [feasibility output](adr/0002-phase0-coverage.txt) is historical supporting evidence.
 
 [Implemented Genomics architecture](genomics_architecture.md) is the current
-storage and ownership reference. [Genomics implementation](genomics_implementation.md)
+storage and ownership reference. [Genomics implementation](genomics_plan.md)
 separately tracks remaining requirements, acceptance criteria, and deployment work.
 
 ## 5. Deliver patient and integration workflows

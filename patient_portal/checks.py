@@ -148,19 +148,33 @@ def security_posture_check(app_configs, **kwargs):
         'rest_framework.authentication.BasicAuthentication'
         in settings.REST_FRAMEWORK['DEFAULT_AUTHENTICATION_CLASSES']
     )
-    posture['ALLOWED_REDIRECT_URI_SCHEMES'] = settings.OAUTH2_PROVIDER['ALLOWED_REDIRECT_URI_SCHEMES']
+    # Default to the toolkit's own, because an absent key is not an empty one:
+    # it falls back to ["http", "https"], so reporting [] here would claim E006
+    # "empty" for a configuration that in fact accepts http, and suppress E005.
+    # Subscripting instead would raise inside a registered check and abort the
+    # whole run, hiding E001-E004 behind a traceback.
+    posture['ALLOWED_REDIRECT_URI_SCHEMES'] = settings.OAUTH2_PROVIDER.get(
+        'ALLOWED_REDIRECT_URI_SCHEMES', ['http', 'https'])
     for name in ('PHR_AUDIENCE', 'PHR_BASE_URL', 'FIREBASE_PROJECT_ID'):
         posture[f'{name}_CONFIGURED'] = bool(getattr(settings, name))
     issues = [Info(
         'Effective security posture: ' + json.dumps(posture, sort_keys=True),
         id='patient_portal.I001',
     )]
+    # Compare the way django-oauth-toolkit does: it lowercases the allowed
+    # schemes (Application.clean), while _env_list only strips. Without this,
+    # ALLOWED_REDIRECT_URI_SCHEMES=https,HTTP accepts plaintext redirects while
+    # reporting nothing here. Posture keeps the raw value it was configured with.
+    schemes = [scheme.lower() for scheme in posture['ALLOWED_REDIRECT_URI_SCHEMES']]
+    http_redirects = 'http' in schemes
     for enabled, label in (
         (posture['WILDCARD_HOSTS'], 'Wildcard ALLOWED_HOSTS'),
         (settings.CORS_ALLOW_ALL_ORIGINS, 'All-origin CORS'),
         (posture['BASIC_AUTH_ENABLED'], 'HTTP Basic authentication'),
         (settings.FIREBASE_SKIP_REVOCATION_CHECK, 'Skipped Firebase revocation checks'),
-        ('http' in posture['ALLOWED_REDIRECT_URI_SCHEMES'], 'HTTP OAuth redirects'),
+        # Deployed hosts get E005 below instead: there the override is not a
+        # reviewable choice, it is a plaintext authorization-code redirect.
+        (http_redirects and not posture['IS_DEPLOYED'], 'HTTP OAuth redirects'),
     ):
         if enabled:
             issues.append(Warning(
@@ -168,4 +182,21 @@ def security_posture_check(app_configs, **kwargs):
                 hint='Review this security override before deploying.',
                 id='patient_portal.W006',
             ))
+    if http_redirects and posture['IS_DEPLOYED']:
+        issues.append(Error(
+            'HTTP OAuth redirect URIs are accepted on a deployed service.',
+            hint='Drop http from ALLOWED_REDIRECT_URI_SCHEMES. It exists for local '
+                 'callbacks; on a deployed host it lets an authorization code be '
+                 'returned over plaintext.',
+            id='patient_portal.E005',
+        ))
+    if not schemes:
+        issues.append(Error(
+            'ALLOWED_REDIRECT_URI_SCHEMES is empty.',
+            hint='django-oauth-toolkit treats the setting as mandatory and raises '
+                 'AttributeError from inside Application.clean() at first use, so an '
+                 'empty value surfaces as a 500 rather than a configuration error. '
+                 'Set https, or https,http for local HTTP callbacks.',
+            id='patient_portal.E006',
+        ))
     return issues

@@ -1254,7 +1254,14 @@ class TrialSearchPreferencesSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = TrialSearchPreferences
-        fields = ['person', 'preferences', 'non_default_filter_count', 'updated_at']
+        # `id` is here so the detail routes are reachable by an API client
+        # at all: the read every client uses is the LIST, and without the id
+        # in it there is no way to learn the pk that `/{id}/` needs. Adding
+        # it is additive — no migration, no existing key changes meaning.
+        fields = [
+            'id', 'person', 'preferences', 'non_default_filter_count',
+            'updated_at',
+        ]
         read_only_fields = ['person', 'updated_at']
 
     def validate_preferences(self, value):

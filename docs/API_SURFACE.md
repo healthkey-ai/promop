@@ -673,7 +673,7 @@ Three write paths, all with the same replace semantics:
 |---|---|
 | `PATCH /api/v1/trial-search-preferences/upsert/?person_id=` | Save filters, creating the row on first use |
 | `PATCH /api/v1/trial-search-preferences/reset/?person_id=` | Clear filters |
-| `PATCH /api/v1/trial-search-preferences/{id}/` | The plain detail route. Writes the same way; it just cannot create the row, and it does not authorize a `person_id` |
+| `PATCH /api/v1/trial-search-preferences/{id}/` | The plain detail route. Writes the same way; it just cannot create the row, and it does not authorize a `person_id`. The `id` comes from the list payload |
 
 **A request carrying `preferences` replaces the whole object; it does not merge into it.**
 The method is PATCH and the action is called `upsert`, so the opposite is the natural
@@ -692,9 +692,67 @@ reading, and a client built on that reading lost saved filters to it
 - So **a client holding part of the set must read-modify-write**: GET, merge its own
   edits over what came back, PATCH the result.
 
-Concurrent writers are last-writer-wins and silently delete each other's keys — two tabs
-running the same client are enough. There is no precondition making a write conditional
-on what was read; see [issue #1312](https://github.com/healthkey-ai/promop/issues/1312).
+### Not losing a concurrent update
+
+Because replacing obliges a read-modify-write, two writers racing would silently delete
+each other's keys — two tabs running the same client are enough. `If-Match` is how a
+client opts out of that, on all three write paths above:
+
+| Request | Result |
+|---|---|
+| no `If-Match` | Unconditional write, exactly as before. Every client written before this sent no header, so the safety is opt-in rather than a flag day |
+| `If-Match: "<etag>"` matching | 200, and the response carries a **new** `ETag` — spend it, do not reuse the one you sent |
+| `If-Match: "<etag>"` stale | **412**, nothing written. The current ETag comes back in both the `ETag` header and the body's `etag`, so the retry needs no extra round trip |
+| `If-Match: "<etag>"`, no row at all | **412**, and no row is created. There is no entity-tag to return here: **the `ETag` header is absent and the body's `etag` is null** — a client that reads the header on every 412 must handle this case |
+| `If-Match: *` | "provided a row exists". Against a person with no stored preferences it is a **412**, and no row is created |
+| `If-Match: *` alongside other tags | **412**. The grammar is `"*" / #entity-tag` — a `*` in a list is a malformed header, not a wildcard |
+| `If-Match:` unparseable or empty | **412**. Refused rather than silently downgraded to an unconditional write, which is the outcome the client used the header to avoid. One malformed member condemns the whole header, even if another member matches — `"<tag>", garbage` is refused, while `"no-such-tag", "<tag>"` matches and a trailing comma is an ignorable empty element |
+| `If-Match: W/"<etag>"` | **412**. `If-Match` takes RFC 9110's *strong* comparison, so a weak validator never authorizes a write |
+| `If-None-Match: *` (upsert only) | Write only if this person has **no** stored preferences yet; **412** if they do. See below |
+| `If-None-Match:` anything else, or on `reset` / the detail route | **412**. Refused rather than ignored — ignoring it would be an unconditional write the client believed was conditional |
+| both `If-Match` and `If-None-Match` | `If-Match` decides, per RFC 9110 §13.2.2; `If-None-Match` is not consulted |
+
+The 412 body is `{"error": ..., "etag": ...}`, and `error` says **which** precondition
+failed, because they call for different things. Header shape is judged first — unreadable,
+then weak-only — then whether a row exists, then whether it changed. "Re-read and re-apply"
+is the answer to the last one alone; given to a client whose header is unreadable it would
+loop forever, and given to one with no row it would send it looking for a row that is not
+there. `*` sharing the header with anything else counts as unreadable, not as stale.
+
+The check and the write happen in one transaction with the row locked, so two writers
+holding the same ETag cannot both be told 200 — one gets the write, the other a 412.
+That relies on row-level locking, so it holds on PostgreSQL, which every deployment and
+CI run uses; on the SQLite fallback `settings.py` takes when `DATABASE_URL` is unset, the
+precondition is best-effort and the concurrency tests skip.
+
+### The first write
+
+`If-Match` cannot protect it: before the row exists there is no ETag to quote, so two
+tabs bootstrapping the same new patient would both write unconditionally and the second
+would replace the first. `If-None-Match: *` on `upsert` covers that one case — it writes
+only when there is no row, and 412s when there is. Unique-constrained on `person`, so the
+two tabs cannot both win.
+
+A rejected payload (400) leaves no row behind, so a corrected retry with the same header
+still succeeds — the row is created and validated in one transaction.
+
+**The ETag is `updated_at`, quoted verbatim** — not a hash of it, unlike the vocabulary
+release ETags elsewhere in this document. Clients read this endpoint as a *list*, and a
+list response carries no `ETag` header, so the value has to be one that can be rebuilt
+from the body:
+
+```
+GET  /api/v1/trial-search-preferences/?person_id=5
+  → [{"preferences": {...}, "updated_at": "2026-09-14T13:46:38.625960Z", ...}]
+
+PATCH /api/v1/trial-search-preferences/upsert/?person_id=5
+  If-Match: "2026-09-14T13:46:38.625960Z"
+  → 200 + ETag: "2026-09-14T13:52:01.118334Z"
+  → or 412 + ETag: <whatever the row holds now>  — re-read, re-apply, retry
+```
+
+A detail GET (`/api/v1/trial-search-preferences/{id}/`) also returns the `ETag` header
+directly. The `id` it needs is in the list payload.
 
 `non_default_filter_count` is computed server-side so every client's "Filters (N)" badge
 agrees; `sort` and `type` are not filters and are not counted.

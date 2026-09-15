@@ -2,6 +2,9 @@ import functools
 from collections import defaultdict
 from typing import Any, Callable, ContextManager
 
+from drf_spectacular.utils import (
+    OpenApiParameter, OpenApiResponse, extend_schema, inline_serializer,
+)
 from rest_framework import serializers, viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.exceptions import ValidationError
@@ -8919,6 +8922,201 @@ class PatientTrialEnrollmentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
         return Response({'trial_ids': trial_ids, 'count': len(trial_ids)})
 
 
+#: `If-Match` and the 412 it can produce are invisible to schema generation —
+#: drf-spectacular reads serializers and docstrings, not header handling — so a
+#: client generated from the schema would not know the precondition exists.
+#: `extend_schema` is used sparingly in this repo (see
+#: `treating_institutions.py`); it is here because the alternative is a
+#: contract that only prose describes.
+_IF_MATCH_PARAMETER = OpenApiParameter(
+    name='If-Match',
+    type=str,
+    location=OpenApiParameter.HEADER,
+    required=False,
+    description=(
+        'Make the write conditional on the row still being the one that was '
+        'read. The value is `updated_at` quoted verbatim, as the payload '
+        'spells it — `"2026-09-14T13:46:38.625960Z"` — or `*` for "provided a '
+        'row exists". Omit the header for an unconditional write.'
+    ),
+)
+
+_IF_NONE_MATCH_PARAMETER = OpenApiParameter(
+    name='If-None-Match',
+    type=str,
+    location=OpenApiParameter.HEADER,
+    required=False,
+    description=(
+        'Only `*` is honoured, and only on `upsert`: write only if this '
+        'person has no stored preferences yet. This is the one write '
+        '`If-Match` cannot protect, because there is no entity-tag to quote '
+        'before the row exists. 412 if a row already exists.'
+    ),
+)
+
+#: The `ETag` a write hands back. Declared so a generated client can bind to
+#: it: the description tells the client to send this value back as
+#: `If-Match`, which is no use if the header is not in the schema.
+_ETAG_RESPONSE_HEADER = OpenApiParameter(
+    name='ETag',
+    type=str,
+    location=OpenApiParameter.HEADER,
+    response=True,
+    description=(
+        'The row\'s entity-tag as of this response. Send it back as '
+        '`If-Match` on the next write. Absent only when there is no row to '
+        'describe.'
+    ),
+)
+
+_PRECONDITION_FAILED_RESPONSE = OpenApiResponse(
+    response=inline_serializer(
+        name='TrialSearchPreferencesPreconditionFailed',
+        fields={
+            'error': serializers.CharField(
+                help_text='Which precondition failed, and what to do about it.',
+            ),
+            'etag': serializers.CharField(
+                allow_null=True,
+                help_text=(
+                    'The row\'s current entity-tag, or null when there is no '
+                    'row to describe.'
+                ),
+            ),
+        },
+    ),
+    description=(
+        'The precondition did not hold and NOTHING was written. The body\'s '
+        '`error` says which, because they call for different things: the '
+        'If-Match header could not be read (retrying it unchanged fails the '
+        'same way — a `*` sharing the header with anything else is one of '
+        'these); it carried only weak validators, which never authorize a '
+        'write; there is no stored row to match against; or the row changed '
+        'since it was read, which is the one where re-read, re-apply and '
+        'retry is the answer. On the upsert action two more: an '
+        '`If-None-Match` this endpoint does not honour, and `If-None-Match: '
+        '*` against a person who already has preferences. The current '
+        'entity-tag comes back in both the `ETag` header and the body\'s '
+        '`etag` — except when there is no row to describe, where the header '
+        'is absent and `etag` is null.'
+    ),
+)
+
+
+def _if_match_tokens(request):
+    """The entity-tags an `If-Match` header names, or None if it has none.
+
+    None and an empty list are different answers: no header at all means an
+    unconditional write, which every client sends today and must keep
+    working; a header present but unparseable means the client asked for a
+    precondition and deserves a refusal rather than a silent write.
+    """
+    raw = request.META.get('HTTP_IF_MATCH')
+    if raw is None:
+        return None
+    # Splitting on the comma makes an entity-tag that CONTAINS one
+    # unreadable, which RFC 9110 §8.8.3 does permit (`etagc` is %x23-7E).
+    # Harmless here and left simple on purpose: this server's tags are
+    # ISO-8601 timestamps, which have no comma in them.
+    return [token.strip() for token in raw.split(',') if token.strip()]
+
+
+def _if_match_satisfied(tokens, etag):
+    """RFC 9110 §13.1.1 STRONG comparison, which `If-Match` requires.
+
+    Deliberately not `_etag_matches`, which this module already has: that
+    one implements the WEAK comparison `If-None-Match` takes on a GET, and
+    it strips the `W/` prefix before comparing. Reusing it here would let a
+    weak validator authorize a write, which is the one thing the strong
+    comparison exists to prevent.
+
+    `*` means "provided the row exists at all", so it is satisfied by any
+    real etag and by none when there is no row. The grammar is
+    `If-Match = "*" / #entity-tag` — `*` is the whole header or it is not a
+    `*`, so `"nope", *` is a malformed header and not a wildcard. Honouring
+    the star inside a list would turn a request that should be refused into
+    one that writes.
+    """
+    if etag is None:
+        return False
+    if _if_match_malformed(tokens):
+        # One bad member condemns the header. A list where a good tag sits
+        # beside `garbage` is a client with a bug, and honouring it because
+        # something in there matched would write for a request we only
+        # half understood — while the documented contract says an
+        # unreadable header is refused. `*` in a list is one of those bad
+        # members; see `_if_match_malformed`.
+        return False
+    if tokens == ['*']:
+        return True
+    # A weak validator can never satisfy a strong comparison, so tokens
+    # spelled `W/"…"` are dropped rather than normalized.
+    return any(token == etag for token in tokens if not token.startswith('W/'))
+
+
+def _if_match_malformed(tokens):
+    """Whether the header is unreadable as a whole, not merely unmatched.
+
+    Three ways. No members at all. A member that is not an entity-tag —
+    `"bogus"` is a well-formed tag that simply does not match, `bogus` is
+    not a tag. And a `*` sharing the header with anything else, including
+    another `*`: the grammar is `"*" / #entity-tag`, so a star in a list
+    is a syntax error rather than a wildcard.
+
+    That last case has to be decided HERE rather than only at the point of
+    comparison. Left to fall through, it reaches the "stale" answer, and
+    the 412 then tells a client whose row has not changed that it has —
+    handing back the client's own tag as the evidence, and prescribing a
+    re-read-and-retry that cannot terminate. Which is the exact loop the
+    split into causes exists to prevent.
+
+    Empty list elements are not members: RFC 9110 §5.6.1 says a recipient
+    ignores them, and `_if_match_tokens` already dropped them, so a
+    trailing comma is legal and stays legal.
+    """
+    if not tokens:
+        return True
+    if '*' in tokens and tokens != ['*']:
+        return True
+    return not all(_looks_like_entity_tag(t) for t in tokens)
+
+
+def _if_none_match_value(request):
+    """The raw `If-None-Match`, stripped, or None when there is no header.
+
+    Returned rather than reduced to a boolean because "absent" and
+    "present but not something we honour" must lead to different answers.
+    Only `*` is honoured, and only on `upsert`. A list of entity-tags is
+    the caching idiom, which on a write would mean "unless it is currently
+    one of these" — a question no client of this endpoint asks, and
+    guessing at it would be worse than refusing. Refusing is what happens:
+    ignoring it would silently downgrade a conditional write to an
+    unconditional one, which is exactly what the sibling `If-Match` path
+    refuses to do.
+    """
+    raw = request.META.get('HTTP_IF_NONE_MATCH')
+    return None if raw is None else raw.strip()
+
+
+def _looks_like_entity_tag(tag):
+    """Whether a header member is syntactically an entity-tag at all.
+
+    Used only to tell a stale precondition from an unreadable one, so a
+    412 can say which. `W/"…"` is well-formed — it is refused for being
+    weak, not for being malformed.
+
+    The parameter is `tag` rather than `token` because bandit's B105 reads
+    a variable called `token` compared against a string literal as a
+    hardcoded-credential check and fails the security gate on it. The
+    spec's word for these is "entity-tag" anyway.
+    """
+    if tag == '*':
+        return True
+    if tag.startswith('W/'):
+        tag = tag[2:]
+    return len(tag) >= 2 and tag.startswith('"') and tag.endswith('"')
+
+
 class TrialSearchPreferencesViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     """The filters a patient last used on the trial-search page.
 
@@ -8936,6 +9134,208 @@ class TrialSearchPreferencesViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     queryset = TrialSearchPreferences.objects.all()
     http_method_names = ['get', 'patch', 'head', 'options']
 
+    @staticmethod
+    def _etag(prefs):
+        """This row's version, quoted, or None when there is no row.
+
+        It is `updated_at` spelled exactly as the payload already spells
+        it, and not a hash of it the way `get_release_etag` does for
+        vocabulary releases. That difference is the point: clients read
+        this endpoint as a LIST (`?person_id=`), a list response carries no
+        ETag header, and so the value a client quotes back has to be one it
+        can find inside the body. `updated_at` is already there, rendered
+        by this same field class, so a client copies a string rather than
+        reconstructing one — and the comparison is against our own output
+        rather than against a format the client had to guess.
+
+        `REST_FRAMEWORK` sets no `DATETIME_FORMAT`, so both sides render
+        ISO-8601 with microseconds. That setting is load-bearing here in a
+        way it is nowhere else: truncate the format to whole seconds and
+        this stops being a version token at all — two writes milliseconds
+        apart produce the same string, and a stale conditional write is
+        accepted. Changing it is a breaking change to the concurrency
+        contract, not a formatting preference.
+        """
+        if prefs is None or prefs.updated_at is None:
+            return None
+        return '"{}"'.format(
+            serializers.DateTimeField().to_representation(prefs.updated_at)
+        )
+
+    def _precondition_failed(self, tokens, prefs):
+        """Refuse a conditional write whose `If-Match` no longer holds.
+
+        Returns a Response to return, or None to proceed. Carries the
+        current ETag both ways — header and body — so the client's next
+        step (re-read, re-apply, retry) does not need another round trip
+        just to learn what it is racing.
+
+        The `error` distinguishes the causes, because they call for
+        different things from the client and one 412 text cannot serve
+        both. "Re-read and re-apply" is right for a stale tag and useless
+        for an unreadable header: obeying it would re-send the same broken
+        header and 412 forever.
+        """
+        etag = self._etag(prefs)
+        if _if_match_satisfied(tokens, etag):
+            return None
+        # Header shape is judged BEFORE row existence. The other way round,
+        # an unreadable header sent at a person with no row was answered
+        # "there are no stored preferences" — so a client whose header
+        # handling is broken is told its ROW is missing, and the natural
+        # next move is `If-None-Match: *`, which succeeds and creates a row
+        # on behalf of a client we could not understand.
+        if _if_match_malformed(tokens):
+            reason = (
+                'the If-Match header could not be read as an entity-tag; '
+                'retrying it unchanged will fail the same way'
+            )
+        elif all(token.startswith('W/') for token in tokens):
+            reason = (
+                'If-Match takes the strong comparison, so a weak validator '
+                '(W/"...") never authorizes a write'
+            )
+        elif prefs is None:
+            reason = 'there are no stored preferences to match against'
+        else:
+            reason = (
+                'preferences have changed since they were read; re-read and '
+                're-apply the edit'
+            )
+        return self._refuse(reason, etag)
+
+    def _refuse(self, reason, etag):
+        """A 412 carrying the row's current entity-tag, when there is one."""
+        response = Response(
+            {'error': reason, 'etag': etag},
+            status=status.HTTP_412_PRECONDITION_FAILED,
+        )
+        if etag is not None:
+            response['ETag'] = etag
+        return response
+
+    def _unsupported_if_none_match(self, value, prefs):
+        """Refuse an `If-None-Match` this endpoint does not honour.
+
+        Refused rather than ignored. Ignoring would answer 200 to a request
+        that asked for a condition and got none — the silent downgrade the
+        `If-Match` path exists to avoid, and the client has no way to tell
+        the two apart.
+        """
+        return self._refuse(
+            f'If-None-Match: {value} is not supported here. Only `*` is, and '
+            'only on the upsert action, where it means "write only if this '
+            'person has no stored preferences yet".',
+            self._etag(prefs),
+        )
+
+    def _precondition_failed_existing(self, prefs):
+        """Refuse an `If-None-Match: *` against a row that already exists."""
+        return self._refuse(
+            'preferences already exist for this person; read them and write '
+            'with If-Match instead',
+            self._etag(prefs),
+        )
+
+    def _with_etag(self, response, prefs):
+        """Stamp a write's own response with the version it just produced."""
+        etag = self._etag(prefs)
+        if etag is not None:
+            response['ETag'] = etag
+        return response
+
+    @extend_schema(
+        # An override's docstring REPLACES the class docstring in the
+        # generated schema, so without this the public description of this
+        # route becomes the note below — private helper name, issue number
+        # and all — and the only description of what the endpoint holds is
+        # gone. The docstring stays for the next reader of the code; the
+        # client-facing text is here.
+        description=(
+            'The filters a patient last used on the trial-search page, as a '
+            'single row. Returns the row\'s entity-tag in the `ETag` header, '
+            'for use as an `If-Match` on a later write. See the `upsert` '
+            'action for what a write does.'
+        ),
+        parameters=[_ETAG_RESPONSE_HEADER],
+    )
+    def retrieve(self, request, *args, **kwargs):
+        """The one read that can carry an ETag header.
+
+        The list cannot — one header cannot describe a collection — which
+        is why `_etag` is built from a field the body carries.
+        """
+        instance = self.get_object()
+        return self._with_etag(
+            Response(self.get_serializer(instance).data), instance
+        )
+
+    @extend_schema(
+        description=(
+            'Write this person\'s filters by row id. `preferences` is '
+            'REPLACED wholesale, exactly as on the `upsert` action — see '
+            'that action for the contract in full. Unlike `upsert` this '
+            'route cannot create the row, and it does not take a '
+            '`person_id`.'
+        ),
+        parameters=[_IF_MATCH_PARAMETER, _ETAG_RESPONSE_HEADER],
+        responses={
+            200: TrialSearchPreferencesSerializer,
+            412: _PRECONDITION_FAILED_RESPONSE,
+        },
+    )
+    def partial_update(self, request, *args, **kwargs):
+        """The plain detail write, conditional on `If-Match` like the rest.
+
+        A precondition only some write paths honour is not a precondition:
+        a second writer coming through this route would clobber a
+        conditional one silently, which is the failure #1312 is about.
+        """
+        instance = self.get_object()
+        none_match = _if_none_match_value(request)
+        tokens = _if_match_tokens(request)
+        if tokens is None and none_match is not None:
+            return self._unsupported_if_none_match(none_match, instance)
+        if tokens is None:
+            # Serialize from the instance this request wrote rather than
+            # re-reading the row. A `refresh_from_db` here is a SECOND read,
+            # and a writer landing between the two would have the returned
+            # `ETag` describe THEIR version while the body is ours — a
+            # client spending that tag as `If-Match` would then be told the
+            # precondition held while overwriting content it never read.
+            serializer = self.get_serializer(instance, data=request.data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            return self._with_etag(Response(serializer.data), instance)
+
+        with transaction.atomic():
+            # `get_object` above did the permission check and the 404; this
+            # re-reads the same row under a lock, because the instance it
+            # returned was read outside one and is already stale by the time
+            # the comparison runs.
+            locked = (
+                TrialSearchPreferences.objects
+                .select_for_update()
+                .filter(pk=instance.pk)
+                .first()
+            )
+            failure = self._precondition_failed(tokens, locked)
+            if failure is not None:
+                return failure
+            serializer = self.get_serializer(locked, data=request.data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            return self._with_etag(Response(serializer.data), locked)
+
+    @extend_schema(
+        parameters=[
+            _IF_MATCH_PARAMETER, _IF_NONE_MATCH_PARAMETER, _ETAG_RESPONSE_HEADER,
+        ],
+        responses={
+            200: TrialSearchPreferencesSerializer,
+            412: _PRECONDITION_FAILED_RESPONSE,
+        },
+    )
     @action(detail=False, methods=['patch'], url_path='upsert')
     def upsert(self, request):
         """Save this person's filters, creating the row on first use.
@@ -8966,10 +9366,43 @@ class TrialSearchPreferencesViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
         * So a client holding part of the set must **read-modify-write**:
           GET, merge its own edits over what came back, PATCH the result.
 
-        Concurrent writers are therefore last-writer-wins, and two of them
-        silently delete each other's keys — two tabs or two devices running
-        the same client are enough. There is no precondition to make a
-        write conditional on what was read; see issue #1312 for that.
+        Because replacing obliges a read-modify-write, two writers racing
+        would silently delete each other's keys — two tabs or two devices
+        running the same client are enough. `If-Match` is how a client opts
+        out of that:
+
+        * **Omit it** and the write is unconditional, exactly as before.
+          This is what every client sent before the precondition existed
+          and it must keep working, so the safety is opt-in rather than a
+          flag day.
+        * **Send it** carrying the row's ETag and the write lands only if
+          the row is still the one you read; otherwise **412**, with the
+          current ETag in both the header and the body so the retry does
+          not need an extra round trip. Re-read, re-apply the edit, retry.
+        * The ETag is `updated_at` **quoted verbatim**, so a client reading
+          the list — which carries no ETag header — can still build one:
+          `If-Match: "2026-09-14T13:46:38.625960Z"`.
+        * `If-Match: *` means "provided there is a row". Against a person
+          with no stored preferences it is a 412, and no row is created —
+          a refused precondition must not be the thing that makes itself
+          true next time.
+
+        The same precondition is honoured by `reset` and by the plain
+        detail PATCH, because one a writer could route around would not be
+        a precondition at all. The check and the write are one transaction
+        with the row locked — checking outside one would leave the very
+        race this closes, just narrowed to the width of a request.
+
+        Serialized by a row lock, so two writers holding the same etag
+        cannot both be told 200. That needs a backend with row-level
+        locking — PostgreSQL, which is what every deployment and CI uses;
+        on the SQLite dev fallback the check is best-effort.
+
+        `If-Match` cannot protect the FIRST write, because there is no etag
+        to quote before the row exists. **`If-None-Match: *`** covers that
+        one: it writes only if this person has no stored preferences yet,
+        and 412s if they do. Unique-constrained, so two tabs bootstrapping
+        the same patient cannot both win.
         """
         person_id = _person_id_param(request)
         if person_id is None:
@@ -8986,12 +9419,101 @@ class TrialSearchPreferencesViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
         self.check_object_permissions(
             request, TrialSearchPreferences(person_id=person_id)
         )
-        prefs, _ = TrialSearchPreferences.objects.get_or_create(person_id=person_id)
-        serializer = self.get_serializer(prefs, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
-        return Response(serializer.data)
+        none_match = _if_none_match_value(request)
+        tokens = _if_match_tokens(request)
 
+        # RFC 9110 §13.2.2 evaluates `If-Match` FIRST, and does not consult
+        # `If-None-Match` at all when it is present. Taking them the other
+        # way round inverted the precedence: a request carrying both, aimed
+        # at a person with no row, had its `If-Match` discarded and CREATED
+        # the row its `If-Match` said must already exist.
+        if tokens is None and none_match is not None:
+            if none_match != '*':
+                return self._unsupported_if_none_match(
+                    none_match,
+                    TrialSearchPreferences.objects.filter(
+                        person_id=person_id
+                    ).first(),
+                )
+            # The one write `If-Match` cannot protect: the first one. There
+            # is no etag to quote yet, so two tabs bootstrapping the same
+            # new patient would both write unconditionally and the second
+            # would replace the first. `get_or_create` reports which of the
+            # two it was, and the loser is told rather than silently
+            # overwritten.
+            #
+            # Inside a transaction because `get_or_create` commits the row
+            # before the payload is validated: a rejected payload used to
+            # leave an empty row behind, and every later `If-None-Match: *`
+            # — from this tab or any other — then 412'd forever against a
+            # row nobody meant to create. A refused precondition must not
+            # be the thing that makes itself true next time, and a 400 is
+            # not a write.
+            with transaction.atomic():
+                prefs, created = TrialSearchPreferences.objects.get_or_create(
+                    person_id=person_id
+                )
+                if not created:
+                    return self._precondition_failed_existing(prefs)
+                serializer = self.get_serializer(
+                    prefs, data=request.data, partial=True
+                )
+                # Raises straight through the atomic block on a bad payload,
+                # which is what rolls the fresh row back.
+                serializer.is_valid(raise_exception=True)
+                serializer.save()
+                return self._with_etag(Response(serializer.data), prefs)
+
+        if tokens is None:
+            prefs, _ = TrialSearchPreferences.objects.get_or_create(
+                person_id=person_id
+            )
+            serializer = self.get_serializer(prefs, data=request.data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            return self._with_etag(Response(serializer.data), prefs)
+
+        with transaction.atomic():
+            # The lock is the precondition. Checking outside one leaves
+            # exactly the race `If-Match` exists to close: two writers
+            # holding the same etag both read it, both pass, and the second
+            # save silently destroys the first — measured with two threads
+            # against a real database before this was here, and it happened
+            # on the first try. Narrowing the window is not closing it.
+            #
+            # `select_for_update` is a no-op on SQLite, which `settings.py`
+            # falls back to when DATABASE_URL is unset. Every deployment and
+            # CI run is PostgreSQL, and CLAUDE.md sends local work there too,
+            # so the guarantee holds everywhere it is claimed — but on that
+            # dev fallback the precondition degrades to best-effort, and the
+            # concurrency tests skip rather than pretend to prove otherwise.
+            #
+            # Locking also does the looking-before-creating: `get_or_create`
+            # first would leave a row behind after a failed precondition,
+            # and worse, an `If-Match: *` would then be satisfied by the row
+            # the request had just caused, telling a client its stale view
+            # was current.
+            prefs = (
+                TrialSearchPreferences.objects
+                .select_for_update()
+                .filter(person_id=person_id)
+                .first()
+            )
+            failure = self._precondition_failed(tokens, prefs)
+            if failure is not None:
+                return failure
+            serializer = self.get_serializer(prefs, data=request.data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            return self._with_etag(Response(serializer.data), prefs)
+
+    @extend_schema(
+        parameters=[_IF_MATCH_PARAMETER, _ETAG_RESPONSE_HEADER],
+        responses={
+            200: TrialSearchPreferencesSerializer,
+            412: _PRECONDITION_FAILED_RESPONSE,
+        },
+    )
     @action(detail=False, methods=['patch'], url_path='reset')
     def reset(self, request):
         """Clear this person's filters.
@@ -9023,10 +9545,38 @@ class TrialSearchPreferencesViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
         self.check_object_permissions(
             request, TrialSearchPreferences(person_id=person_id)
         )
-        prefs, _ = TrialSearchPreferences.objects.get_or_create(person_id=person_id)
-        prefs.preferences = {}
-        prefs.save(update_fields=['preferences', 'updated_at'])
-        return Response(self.get_serializer(prefs).data)
+        none_match = _if_none_match_value(request)
+        tokens = _if_match_tokens(request)
+        if tokens is None and none_match is not None:
+            # `If-None-Match` means "only if absent", and a reset of a row
+            # that is absent is not a thing to ask for. Refused rather than
+            # ignored, so it cannot become a silent unconditional clear.
+            return self._unsupported_if_none_match(
+                none_match,
+                TrialSearchPreferences.objects.filter(person_id=person_id).first(),
+            )
+        if tokens is None:
+            prefs, _ = TrialSearchPreferences.objects.get_or_create(
+                person_id=person_id
+            )
+            prefs.preferences = {}
+            prefs.save(update_fields=['preferences', 'updated_at'])
+            return self._with_etag(Response(self.get_serializer(prefs).data), prefs)
+
+        # Same lock, same reason as `upsert`. A clear is a write.
+        with transaction.atomic():
+            prefs = (
+                TrialSearchPreferences.objects
+                .select_for_update()
+                .filter(person_id=person_id)
+                .first()
+            )
+            failure = self._precondition_failed(tokens, prefs)
+            if failure is not None:
+                return failure
+            prefs.preferences = {}
+            prefs.save(update_fields=['preferences', 'updated_at'])
+            return self._with_etag(Response(self.get_serializer(prefs).data), prefs)
 
 
 class SurveyViewSet(_ListQueryParamsMixin, viewsets.ReadOnlyModelViewSet):

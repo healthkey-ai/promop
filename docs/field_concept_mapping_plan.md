@@ -11,19 +11,25 @@ against PRomop `a5e42c5`, the local CancerBot option definitions, and read-only
 queries of staging reference/vocabulary tables. This document specifies the
 implementation work; it does not approve mappings or change staging data.
 
-## Current delivery status — 2026-09-14
+## Current delivery status — 2026-09-14, after PR #1321
 
 The active inventory work is [draft PR #1284](https://github.com/healthkey-ai/promop/pull/1284),
 on `feat/1223-next`, at checkpoint `0572098`. The status and inventory evidence
 below describe that draft branch. This documentation update does not merge its
-implementation or generated inventory into `dev`. Work has continued on the current
-machine throughout September 14; the previous machine-transfer handoff is
-superseded by this status and the release gates below. The branch integrates
-dev through `0c655fa`, including
+implementation or generated inventory into `dev`. The portable implementation
+checkpoint integrates dev through `0c655fa`, including
 FLIPI/GELF assessments, the PALB2 naming correction and the deployment migration
 repairs. Earlier schema/runtime work remains preserved separately on
 `feat/field-value-concept-mappings`; do not replace upstream ownership contracts
 with that older implementation without review.
+
+Current `dev` also includes [PR #1321](https://github.com/healthkey-ai/promop/pull/1321),
+merged as `d1035ab`: the release preflight, scoped TP53 cache reconciliation,
+authenticated smoke runner and updated RC scope are implemented. Its canonical
+Genomics plan is now [genomics_plan.md](genomics_plan.md). Integrate current dev
+into the FCM branch before further implementation; the inventory checkpoint
+above predates these runtime changes. The release gates below distinguish the
+1.3 staging RC from the broader FCM backlog and live production rollout.
 
 The [generated inventory](https://github.com/healthkey-ai/promop/blob/0572098af4debbab93569842b10d8dd1d08a1ad0/docs/field-mapping-inventory/README.md) now records
 **7,767 source occurrences**, including 420 fields and 4,105 live CancerBot
@@ -111,14 +117,78 @@ paths are unchanged by the latest inventory update. PR #1284 remains a draft.
 
 ### 1.3 release gates
 
-**1.3 is not ready to release from this work yet.** The rest of the release is
-considered ready by the release owner; the table below records the outstanding
-field/value delivery work and the existing 1.3 Genomics release gates. Status is
-based on the pushed checkpoint and open issues checked on **2026-09-14**.
-Source counts, passing local tests and a merged prerequisite are evidence for
-individual checks; each gate requires the completion evidence in its row.
+**The full FCM implementation is not a prerequisite for naming a 1.3 staging
+release candidate.** This corrects the earlier table that grouped the entire
+field/value backlog with RC blockers. Follow the scope decision merged in
+[PR #1321](https://github.com/healthkey-ai/promop/pull/1321) and the canonical
+[Genomics RC gates](genomics_plan.md#release-13-rc-gates): manual finding
+entry/editing, state readback and source provenance are in scope. Expanded
+answer mappings (#1229) and their shared mapping dependencies are after 1.3.
+Keep all unfinished FCM issues open; a supported workflow defect can still
+block RC independently of the larger enhancement issue.
 
-| Gate / tracking | Current status | Evidence required to clear the gate |
+As checked on **2026-09-14 after `d1035ab` merged**, the operational receipts below
+remain necessary. Prior source counts and passing tests do not substitute for
+verification of the intended deployed candidate.
+
+| RC gate | Implemented evidence | Work still required for 1.3RC |
+|---|---|---|
+| TP53 consumers and scoped cache reconciliation — [#1315](https://github.com/healthkey-ai/promop/issues/1315) | Conservative true/unknown rule and `reconcile_tp53_cache` are merged. [EXACT #483](https://github.com/healthkey-ai/exact/pull/483) is merged with backend CI passing; EXACT is the only downstream consumer in RC scope. | Verify any EXACT instance used for RC testing contains #483. On the intended Render staging candidate, retain source-based preview/apply receipts, account for held pending edits, and repeat preview until no unexplained changes remain. Null must survive API/UI/eligibility and cannot satisfy a negative criterion. Preserve positive behavior. |
+| Upgrade and writer readiness — readiness portion of [#1316](https://github.com/healthkey-ai/promop/issues/1316) | `audit_genomics_release --check` is merged. All 53 pending migrations passed a local rehearsal using production schema and selected reference metadata, without clinical rows. The combined audit passed after restoring missing actor concept 32817 locally from authoritative Athena evidence. | Retain the rehearsal and the plan for supplying every writer prerequisite; final RC staging must pass the combined preflight. Verify exact web/worker revisions and database configuration. The rehearsal does not certify transformations of existing clinical data or complete production rollout. |
+| Final authenticated staging smoke — [#1317](https://github.com/healthkey-ai/promop/issues/1317) | `scripts/genomics_release_smoke.py` and local regression coverage are merged. The earlier `0c655fa` candidate passed preflight and seven authenticated API checks; its synthetic finding was retired with history retained. | Deploy the intended final candidate to Render staging web and worker, then rerun preflight and the synthetic smoke. Retain the receipt and deployment identity; the `0c655fa` receipt predates #1321 and is not final-candidate evidence. Complete [Samar's checklist](curator_smoke_test.md), account for test artifacts, and repair/rerun any blocking failures. |
+| Existing supported field, choice, treatment and genomics workflows | Current curation/editor and manual finding capabilities are already implemented; [the curator checklist](curator_smoke_test.md) distinguishes them from proposed answer-mapping capabilities. | Wrong patient/value/unit, lost findings, unknown becoming negative, unjustified positives, or broken supported save/readback block RC. Record concrete failures under #1317 or linked bug issues. Missing future capabilities and cosmetic requests do not automatically block RC. |
+
+**Next RC operational steps, in order:**
+
+1. Select and record the intended candidate after current dev and any RC bug
+   fixes are integrated. Verify Render `promop-staging` and
+   `promop-staging-worker` run that candidate against the intended staging
+   database; verify the deployed EXACT instance used for integration tests.
+2. Run the read-only combined preflight with the correct private environment:
+   `python manage.py audit_genomics_release --environment render-staging --check`.
+   Resolve actual missing migrations, schema or writer prerequisites before
+   smoke/reconciliation. Existing valid source-only parent fallback is supported;
+   do not invent a standard Measurement concept to make the audit pass.
+3. Use `reconcile_tp53_cache --organization SLUG` (or an explicitly chosen
+   person/all scope) to preview. Review its counts, repeat with `--apply`, and
+   retain a repeat-preview receipt. This scoped command holds pending edits and
+   changes only TP53 cache; it does not perform the broader blood-unit/version-7
+   refresh or rewrite source findings. Follow [the TP53 rollout contract](tp53_aggregate_plan.md).
+4. Provision a dedicated synthetic record as required by the smoke runner,
+   privately set `GENOMICS_SMOKE_USERNAME` and `GENOMICS_SMOKE_PASSWORD`, and run
+   `python scripts/genomics_release_smoke.py --person-id ID --run-id RUN_ID`.
+   The record must have the matching `custom_fields.genomics_release_smoke`
+   marker and no existing findings. Retain cleanup/history accounting. Record
+   deployed web/worker and consumer identity alongside the script output; the
+   script does not by itself establish all deployed revisions.
+5. Complete the clinician/curator checklist and resolve concrete RC-blocking
+   bugs. Keep new clinical rules and deferred enhancement requests separate.
+   Record the final candidate, receipts and remaining production steps on the
+   tracking issues and in [the Genomics plan](genomics_plan.md).
+
+**Production release is a later gate.** [#1286](https://github.com/healthkey-ai/promop/issues/1286)
+and the live-production portions of #1315/#1316 remain open. The last production
+assessment found 53 pending migrations and missing EHR actor concept 32817;
+the local restoration was a rehearsal only. Production needs authoritative
+vocabulary maintenance with consistent publication metadata, compatible
+application/migration rollout, matching web/worker and EXACT deployments, a
+passing combined audit and scoped cache reconciliation. An issue may remain open
+for production after its RC acceptance passes. Do not delay naming the staging
+RC solely because live production has not yet been upgraded.
+
+Reports/specimens/source agreement and imports (#1243–#1245), further clinical
+negative/TP53-del(17p)/derivation rules (#1246), and expanded answer mappings
+remain deferred. Existing unvalidated derivations stay inactive. #1237 requires
+remediation only if a new schema/overflow defect is evidenced.
+
+### Field/value implementation backlog after 1.3RC
+
+Continue this work in dependency order; these are completion criteria for the
+FCM feature, not blanket RC gates. If an item reveals a defect in a supported
+RC workflow, extract and track that concrete repair without claiming the entire
+parent enhancement is complete.
+
+| Work / tracking | Current status | Evidence required for feature completion |
 |---|---|---|
 | Complete field **and value** inventory — [#1223](https://github.com/healthkey-ai/promop/issues/1223), PR #1284 | **Open; active work.** 7,767 occurrences, all 172 CancerBot bindings and all 98 data-migration definition scopes are accounted for. Destination semantics and clinical reconciliation of historical evidence remain unfinished. | Account for every #26 field/value and every #21 field with an explicit disposition and implementation owner; reconcile totals, source/history references and destination context. Resolve count/presence, criteria/aggregate, staging-system, polarity, response-system and planned/administered conflicts explicitly. Retain unreviewed, ambiguous and structured cases as distinct states. Update the inventory acceptance report before dependent schema work. |
 | Stable choices, curation and save/readback — [#1224](https://github.com/healthkey-ai/promop/issues/1224), [#1225](https://github.com/healthkey-ai/promop/issues/1225), [#1226](https://github.com/healthkey-ai/promop/issues/1226) | **Open; depends on #1223.** Earlier implementation is preserved for review against current dev. | Stable typed/scoped choices, reviewed nullable answer mappings, curation permissions/history, and server-side projection/reverse resolution pass migration, concurrency, compatibility and round-trip tests. Unknown, unmapped and cleared values survive without fabricated standard concepts. |
@@ -126,25 +196,100 @@ individual checks; each gate requires the completion evidence in its row.
 | Priority gene/marker fields in every disease — [#1311](https://github.com/healthkey-ai/promop/issues/1311) | **Storage coverage verified; final acceptance open.** All 42 effective fields across 51 disease memberships have approved storage recipes. All currently use the supported source-only parent fallback. | Retain per-disease coverage, idempotent seeding and curator preservation. Validate multiple-JSON Measurement parents and compatible parent/component domains. Record standard versus source-only outcomes explicitly; never count concept 0 as a standard mapping or substitute a gene concept for an exact variant. |
 | Vocabulary provenance and portable mapping validation — [#461](https://github.com/healthkey-ai/promop/issues/461), [#623](https://github.com/healthkey-ai/promop/issues/623), #1223/#1231 | **Open for affected candidates.** SNOMED lineage is uncertain; missing/invalid/domain-conflicting targets are reported. | Every mapping approved for release has exact vocabulary/code, validity, role/domain and release/provenance evidence on its destination. Resolve affected lineage before bulk approval. Values intentionally retained as source-only or structured must have explicit dispositions and tested behavior; a failed search never establishes no equivalent. |
 | Transfer, bounded reconciliation and integrated validation — [#1231](https://github.com/healthkey-ai/promop/issues/1231) | **Open; follows implementation gates above.** The passing inventory checkpoint is not final runtime/rollout verification. | Complete portable field-plus-values transfer; preview/apply/resume/recovery for the scoped pending, alias and historical-fact repairs; preserve source values, clinical dates and pending clears. Run full local suites on the integrated candidate and retain deployment/reconciliation evidence. Mapping approval alone must not rewrite history. |
-| TP53 consumer and derived-cache readiness — [#1315](https://github.com/healthkey-ai/promop/issues/1315), under [#1240](https://github.com/healthkey-ai/promop/issues/1240) | **Open 1.3 Genomics gate.** The conservative true/unknown correction is merged; consumer/reconciliation acceptance remains. | Preserve null through API, UI and trial/eligibility consumers so it cannot satisfy a negative criterion; preserve current positive behavior. Retain reviewed cache preview/apply counts, derivation version, retry/recovery evidence and Render staging validation. Review the blood-unit rollout before broad refresh; identify outstanding external-consumer checks. |
-| Production migration and writer prerequisites — [#1316](https://github.com/healthkey-ai/promop/issues/1316), following [#1286](https://github.com/healthkey-ai/promop/issues/1286) | **Open 1.3 Genomics gate.** Production compatibility/deployment must be demonstrated separately from local and staging results. | Record Render production web/worker revisions and migration state; resolve the missing `field_concept_mapping.provenance` through the compatible chain. Retain schema-width and `audit_genomics_domains --include-writer-prerequisites` evidence for required parent/component recipes and actor/event concepts before enabling the current writer. State any remaining production deployment step explicitly. |
-| Authenticated release-candidate workflow verification — [#1317](https://github.com/healthkey-ai/promop/issues/1317) | **Open 1.3 Genomics gate.** A passing receipt for the intended release candidate is required. | On Render staging, verify exact web/worker candidate identity and authenticated create/edit/delete, present/absent/indeterminate transitions, readback, priority catalogs and provenance/history on a dedicated synthetic record. Retain local tests of the smoke mechanism, the staging receipt and cleanup/accounting of artifacts. Failed checks require repair and a rerun. |
 
-Use [the Genomics plan](genomics_implementation.md) and
-[the TP53 rollout contract](tp53_aggregate_plan.md) for the detailed acceptance
-behind #1315–#1317. Staging is **Render** (`promop-staging` and
-`promop-staging-worker`); full automated test suites run against local databases.
+Staging always means Render. Automated application suites for implementation
+changes run against local databases; documentation-only changes use the standing
+AGENTS.md rule and require no application tests. Keep unfinished issues open.
 
-The separate Phase 2 source/report/import work (#1243–#1245), clinical negative
-and combined TP53/del(17p) rules, and derivation activation decisions (#1246) retain
-their existing gates. The current 1.3 manual-workflow verification must preserve
-unknown evidence and must not imply those capabilities or clinical decisions
-have been completed.
+### Continue implementation on another machine
 
-Before release, record the exact candidate SHA, required CI results, deployed
-web/worker revisions, migration and prerequisite audits, and the relevant smoke
-and reconciliation receipts. Keep unfinished issues open; remove no gate merely
-because its implementation PR was pushed or merged.
+Use the latest `dev` copy of this plan and the pushed **`0572098`** checkpoint on
+`origin/feat/1223-next` in [draft PR #1284](https://github.com/healthkey-ai/promop/pull/1284).
+All generated inventory and CancerBot reference evidence described above is
+pushed and linked at that immutable revision. The older
+`feat/field-value-concept-mappings` branch is preserved for later review;
+informational PR #1235 remains closed and unmerged.
+
+On a fresh machine where the local feature branch does not yet exist:
+
+```sh
+git fetch origin
+git worktree add --track -b feat/1223-next ../promop-fcm-next origin/feat/1223-next
+cd ../promop-fcm-next
+git merge origin/dev
+```
+
+If the branch already exists, use its existing worktree and preserve local
+changes. Resolve the plan overlap by keeping current dev's RC scope, current
+status and standing docs-only rules. Review #1321's changes to
+`patient_record_service.py`, the TP53 commands and renamed Genomics plan before
+reusing older runtime work. Update the existing draft PR #1284; do not merge its
+unfinished implementation merely to transfer context.
+
+Read `AGENTS.md`, `CLAUDE.md`, this plan, the field mapping architecture, the
+pinned inventory README/coverage/manifest and `docs/genomics_plan.md` first.
+CancerBot source is available at `~/cancerbot` on the prior machine; its pinned
+revision and hashes are in the manifest. The checked-in reference snapshot is
+replayable without a fresh database capture. A full candidate refresh needs the
+privately configured reference/vocabulary connection. Credentials and `.env`
+are not committed; request missing credentials if a needed environment is not
+available. Tests must use local PostgreSQL, never CancerBot or staging.
+
+**Immediate next FCM task: finish the #1223 acceptance evidence.** The pushed
+snapshot accounts for sources and routing, but the following review additions
+are unfinished:
+
+1. Add an explicit repair contract for all **21 fields in #21**: representation,
+   question versus answer role, required tumor/test/specimen/date/system/basis
+   context, known wrong question codes, and implementation owner #1227. Preserve
+   existing mapping decisions and immutable source identities.
+2. Resolve both current read-recipe codes and the plan's exact corrective
+   question codes against the captured vocabulary, not only existing mapping
+   FKs/codes or lexical answer labels. Retain missing, ambiguous, invalid,
+   provenance-uncertain and domain-conflicting outcomes without approving them.
+   Make Ki-67's 85319-2/HER2 conflict and Oncotype's assay-answer/ER confusion
+   visible alongside their corrective candidates. Section 4 provides the
+   reviewed candidate references; section 6 supplies all field contracts.
+3. Generate a traceable acceptance matrix for the **22 scope rows in section 3**
+   and all #21 fields. Link source row IDs, actual public bindings, dispositions,
+   owners, required context and missing runtime destinations. Recompute checks
+   from evidence rather than trusting saved totals or a saved success flag.
+   Known missing MCL fields remain owned by #468/#542/#1149 and the shared
+   implementation; counting their source rows does not create those fields.
+4. Keep reference replays from retaining stale acceptance evidence: recompute
+   accounting after partial imports and invalidate source routing on revision
+   drift. Test omitted fields despite reconciled totals, wrong/missing exact
+   candidates, stale routes, preserved curator decisions and distinct typed
+   unknown values. A passing accounting report is not clinical approval.
+5. Regenerate the inventory, review semantic conflicts and the #21/#26
+   acceptance criteria, then explicitly record whether the inventory
+   prerequisite is met. Unreviewed/ambiguous/structured dispositions are valid
+   inventory outcomes with reasons and owners; do not conflate inventory
+   completion with all downstream clinical mappings being approved. Proceed to
+   #1224 only after inventory acceptance is recorded.
+
+Exploratory implementations of `field_inventory_repairs.py` and
+`field_inventory_acceptance.py`, plus exporter/importer/report wiring, were
+started locally after the pushed checkpoint. **They are uncommitted, unpushed
+and unverified; the planned focused tests did not run.** They are not required
+inputs for the next machine: implement and review the requirements above from
+the pushed checkpoint. Do not assume those modules, an acceptance report or new
+test results are present on dev or PR #1284. Local exploratory files are being
+preserved on the prior machine, separate from this documentation-only merge.
+
+The validated inventory checkpoint remains: pytest **2,761 passed, 4 skipped**;
+Django **2,003 tests OK, 1 skipped**. Frontend **595 passed, 4 skipped** and async
+end-to-end **4 passed** were verified at `bb0fb17` on unchanged runtime paths.
+These results predate #1321 integration and do not validate the exploratory
+acceptance changes or the eventual RC candidate.
+
+After #1223, deliver #1224 (stable scoped choices and proposals), #1225/#1226
+(curation and server projection/readback), #1227–#1230 (disease/genetic/therapy
+integration), and #1231 (transfer and bounded reconciliation). Preserve all
+managed regimen/component/class tables, relationships, mapping tools and
+clinical authoring. Run the appropriate local implementation tests and required
+CI before advancing those changes. Keep #21/#26, #1223–#1231 and #1311 open until
+their own acceptance is actually complete.
 
 ### Priority gene and marker field mappings — #1311
 
@@ -684,7 +829,7 @@ Acceptance must distinguish shipped server capabilities from consumer guarantees
 - Record the vocabulary, mapping and catalog/recipe revisions used in scoped
   reconciliation evidence. Publication does not authorize historical fact rewrites.
   Genomics-specific acceptance belongs to its
-  [mapping coordination section](genomics_implementation.md#fieldvalue-mapping-coordination).
+  [mapping coordination section](genomics_plan.md#fieldvalue-mapping-coordination).
 
 ### Remaining audit topics and reconciliation
 

@@ -37,6 +37,38 @@ exemptions remain; `check --deploy` validates the full web configuration.
 | `SECURE_SSL_REDIRECT` | `false`; Render redirects at its edge |
 | `TRUST_PROXY_SSL_HEADER` | `true` on Render, otherwise `false` |
 
+OAuth applications accept only HTTPS redirect URIs by default, including when
+`DEBUG=True`. For local HTTP callbacks, explicitly set
+`ALLOWED_REDIRECT_URI_SCHEMES=https,http`. Enabling debug diagnostics never opts a
+deployment into HTTP redirects.
+
+On a deployed host that override is an error rather than advice: `check --deploy`
+reports `patient_portal.E005`, which fails at the `--fail-level ERROR` that
+`start.sh` uses before migrations, so the deploy stops. An empty value reports
+`E006` — django-oauth-toolkit treats the setting as mandatory and would otherwise
+raise `AttributeError` at first use. Both comparisons lowercase the configured
+schemes, because the toolkit does; `https,HTTP` is not a way around them.
+
+`create_smart_app` validates the redirect URIs it is given against the setting and
+refuses to provision rather than storing a scheme the setting does not allow.
+`Model.save()` never calls `full_clean()`, so nothing else on that path would.
+
+Three limits worth knowing. The check runs where `start.sh` runs — the Render web
+services, which receive `RENDER=true` and are therefore always `IS_DEPLOYED`
+whatever `ENVIRONMENT` says. A deployment whose entrypoint is gunicorn directly,
+such as the Cloud Run staging image, never executes it.
+
+Tightening the setting does not rewrite applications already stored with an
+`http://` redirect URI, and those do not keep working either: django-oauth-toolkit
+re-checks the scheme when it emits the redirect, so such a client's `/o/authorize/`
+starts raising `DisallowedRedirect`. Audit and clean up those rows rather than
+assuming the config change was enough — see issue #1332.
+
+Note that `E005` treats any `http` as fatal on a deployed host, which also rules
+out the RFC 8252 loopback redirect (`http://127.0.0.1:<port>`) that native clients
+use. Nothing here needs one today; a native client would require the check to
+distinguish loopback URIs rather than the scheme alone.
+
 Proxy trust enables Django's `SECURE_PROXY_SSL_HEADER` with
 `HTTP_X_FORWARDED_PROTO,https`. Enable it only behind a proxy that strips
 client-supplied values. See [Django's proxy-header requirements](https://docs.djangoproject.com/en/5.2/ref/settings/#secure-proxy-ssl-header).
@@ -61,13 +93,15 @@ python manage.py check --deploy --fail-level ERROR
 
 `patient_portal.I001` prints JSON with the effective controls and presence flags
 for identity-provider configuration; it never dumps secrets, URLs, or audiences.
-`patient_portal.W006` highlights permissive authentication/origin/redirect
-choices. Django's own checks report debug tracebacks, insecure cookies, HSTS,
-and other HTTP controls. Audit/export key separation and shared throttle-cache
-checks also run on debug-enabled deployments. Warnings remain warnings so
-operators can choose staging diagnostics deliberately; configuration errors
-still fail startup. `start.sh` already runs this command before migrations,
-so the report also appears in deployment logs.
+`patient_portal.W006` highlights permissive authentication and origin choices.
+Django's own checks report debug tracebacks, insecure cookies, HSTS, and other
+HTTP controls. Audit/export key separation and shared throttle-cache checks also
+run on debug-enabled deployments. Warnings remain warnings so operators can
+choose staging diagnostics deliberately; configuration errors still fail
+startup. The redirect-scheme override is the exception: `W006` locally, where it
+is a real choice, and `E005` on a deployed host, where it is not. `start.sh`
+already runs this command before migrations, so the report also appears in
+deployment logs.
 
 ### Browser authentication and retired OAuth clients (#141)
 
