@@ -252,6 +252,90 @@ def test_tp53_reconciliation_holds_pending_edits_without_notifying(setup):
     assert PatientRecord.objects.get(person=person).tp53_disruption is False
 
 
+_SYNC_BUNDLE = {
+    'resourceType': 'Bundle', 'type': 'collection',
+    'entry': [
+        {'resource': {'resourceType': 'Patient', 'id': 'p1'}},
+        {'resource': {
+            'resourceType': 'Observation', 'subject': {'reference': 'Patient/p1'},
+            'code': {'coding': [{'system': 'http://loinc.org', 'code': '718-7',
+                                 'display': 'Hemoglobin'}]},
+            'effectiveDateTime': '2026-02-01',
+            'valueQuantity': {'value': 13.2, 'unit': 'g/dL'},
+        }},
+        {'resource': {
+            'resourceType': 'Condition', 'subject': {'reference': 'Patient/p1'},
+            'code': {'coding': [{'system': 'http://snomed.info/sct', 'code': '254837009'}],
+                     'text': 'Malignant neoplasm of breast'},
+            'onsetDateTime': '2025-11-15',
+        }},
+    ],
+}
+
+
+@pytest.fixture
+def sync_client(setup, settings):
+    settings.SERVICE_AUTH_SCOPES = 'patient/*.write'
+    service_user = Identity.objects.create(issuer='urn:service', sub='webhook-fhir-sync')
+    service_user.set_unusable_password()
+    service_user.save(update_fields=['password'])
+    client = APIClient()
+    client.force_authenticate(user=service_user, token='service-token')
+    return client
+
+
+def _sync(client, person, bundle=None):
+    return client.post('/api/v1/fhir/sync/', {
+        'person_id': person.pk, 'bundle': bundle or _SYNC_BUNDLE,
+    }, format='json')
+
+
+def test_fhir_sync_notifies_once_per_table_and_stays_quiet_when_idempotent(setup, sync_client):
+    """The sync view writes with bulk_create, which fires no signal, so these
+    ingested rows reach a subscriber only if the path publishes explicitly."""
+    org, other, person, user, subscription = setup
+    WebhookDelivery.objects.all().delete()
+
+    assert _sync(sync_client, person).status_code == 201
+    by_type = {}
+    for delivery in WebhookDelivery.objects.all():
+        by_type.setdefault(delivery.payload['type'], []).append(delivery.payload['data'])
+    assert set(by_type) == {'lab.updated', 'patient.changed'}
+    assert by_type['lab.updated'][0]['resource_type'] == 'omop_core.measurement'
+    assert by_type['lab.updated'][0]['count'] == 1
+    assert [d['resource_type'] for d in by_type['patient.changed']] == ['omop_core.conditionoccurrence']
+    assert by_type['patient.changed'][0]['count'] == 1
+
+    WebhookDelivery.objects.all().delete()
+    assert _sync(sync_client, person).status_code == 201
+    assert not WebhookDelivery.objects.exists(), 'an idempotent re-sync changes nothing and must stay silent'
+
+
+def test_fhir_sync_collapse_of_stacked_duplicates_is_not_a_patient_event(setup, sync_client):
+    """Collapsing internal stacked rows is bookkeeping. Before the fix it was
+    the only thing the sync path notified about: one event per deleted
+    duplicate, and none for the rows actually ingested."""
+    from omop_core.models import ConditionOccurrence
+
+    org, other, person, user, subscription = setup
+    assert _sync(sync_client, person).status_code == 201
+    original = ConditionOccurrence.objects.get(person=person)
+
+    duplicate = ConditionOccurrence.objects.get(pk=original.pk)
+    duplicate.pk = None
+    duplicate.condition_occurrence_id = original.condition_occurrence_id + 10_000
+    duplicate.save()
+    assert ConditionOccurrence.objects.filter(person=person).count() == 2
+
+    WebhookDelivery.objects.all().delete()
+    assert _sync(sync_client, person).status_code == 201
+
+    assert ConditionOccurrence.objects.filter(person=person).count() == 1, 'the duplicate should be collapsed'
+    payloads = [d.payload for d in WebhookDelivery.objects.all()]
+    assert all(p['data'].get('operation') != 'deleted' for p in payloads), payloads
+    assert len(payloads) == 1 and payloads[0]['data']['count'] == 1
+
+
 @pytest.mark.django_db(transaction=True)
 def test_clinical_write_rolls_back_when_the_outbox_insert_fails(setup):
     """The outbox row has to commit with the row it describes.

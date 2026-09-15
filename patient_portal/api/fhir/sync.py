@@ -73,6 +73,31 @@ _FALLBACK_CONCEPTS = {
 }
 
 
+def _suppress_webhook_events():
+    """Silence the per-row webhook receiver for a bookkeeping block.
+
+    Imported lazily, like every other webhook call site, so importing this
+    module never drags the outbox models in.
+    """
+    from patient_portal.webhooks import suppress_webhook_events
+
+    return suppress_webhook_events()
+
+
+def _publish_sync_change(person, model, count):
+    """One notification per patient and table for a sync batch.
+
+    The bulk API paths in patient_portal.api.views already publish this way;
+    the sync view writes the same OMOP tables and owes subscribers the same
+    event. No-op when nothing changed, and when webhooks are off.
+    """
+    if not count:
+        return
+    from patient_portal.webhooks import publish_patient_bulk_change
+
+    publish_patient_bulk_change(person.pk, model._meta.model_name, count)
+
+
 def _ensure_concept(concept_id):
     """Return a Concept by id, creating an HK-Labs fallback if vocabularies aren't loaded."""
     concept = Concept.objects.filter(concept_id=concept_id).first()
@@ -639,7 +664,12 @@ class FhirSyncView(APIView):
                 range_low=o['range_low'],
                 range_high=o['range_high'],
             ))
-        return self._bulk_insert(Measurement, 'measurement_id', rows, source_user_id, person, org)
+        inserted = self._bulk_insert(
+            Measurement, 'measurement_id', rows, source_user_id, person, org)
+        # bulk_create fires no signal, so without this the newly ingested labs
+        # reach no subscriber at all.
+        _publish_sync_change(person, Measurement, len(inserted))
+        return inserted
 
     def _upsert_rollup_observations(self, person, observations, ehr_type, cache, source_user_id, org, skipped):
         """Replace any prior row for (person, concept, date) with the new daily
@@ -660,7 +690,11 @@ class FhirSyncView(APIView):
         meas_ct = ContentType.objects.get_for_model(Measurement)
         touched, new_rows = [], []
         staged = set()   # (concept, date) already queued for insert this bundle
-        with suppress_patient_record_refresh():
+        # suppress_patient_record_refresh only silences the derivation receiver.
+        # Without the webhook one too, collapsing a stacked duplicate emits a
+        # notification per internal housekeeping row while the inserts — which
+        # are what the subscriber actually wants — emit none.
+        with suppress_patient_record_refresh(), _suppress_webhook_events():
             for (sv_key, obs_date), o in desired.items():
                 cid = o['cid']
                 # Either match counts. Source value finds the row after a
@@ -746,6 +780,7 @@ class FhirSyncView(APIView):
                     touched.append(keep.measurement_id)
             inserted = self._bulk_insert(
                 Measurement, 'measurement_id', new_rows, source_user_id, person, org)
+        _publish_sync_change(person, Measurement, len(touched) + len(inserted))
         return touched + inserted
 
     def _ingest_conditions(self, person, conditions, ehr_type, no_match, cache, source_user_id, org, skipped):
@@ -997,7 +1032,10 @@ class FhirSyncView(APIView):
         desired = {(getattr(r, sv_field), getattr(r, date_field)): r for r in rows}  # last wins
         ct = ContentType.objects.get_for_model(model)
         touched, new_rows = [], []
-        with suppress_patient_record_refresh():
+        # See _upsert_rollup_observations: the collapse delete and the concept
+        # repair below are internal bookkeeping, and bulk_create is silent, so
+        # the per-row events have to give way to one batch notification.
+        with suppress_patient_record_refresh(), _suppress_webhook_events():
             for (sv, date), inst in desired.items():
                 existing = list(model.objects.filter(**{
                     'person': person, sv_field: sv, date_field: date}).order_by(pk_field))
@@ -1018,6 +1056,7 @@ class FhirSyncView(APIView):
                 elif extras:
                     touched.append(getattr(keep, pk_field))
             inserted = self._bulk_insert(model, pk_field, new_rows, source_user_id, person, org)
+        _publish_sync_change(person, model, len(touched) + len(inserted))
         return touched + inserted
 
     def _bulk_insert(self, model, pk_field, rows, source_user_id, person, org):
