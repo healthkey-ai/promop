@@ -7215,7 +7215,7 @@ class _ProvenanceMixin:
 class ConditionOccurrenceViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ConditionOccurrenceSerializer
     permission_classes = [EtlPatientCrudPermission, PatientSelfScopePermission]
-    queryset = ConditionOccurrence.objects.all()
+    queryset = ConditionOccurrence.objects.select_related('condition_concept').all()
     clinical_filter_fields = {
         'concept_param': 'condition_concept_id',
         'concept_field': 'condition_concept_id',
@@ -7232,7 +7232,7 @@ class ConditionOccurrenceViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _
 class DrugExposureViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = DrugExposureSerializer
     permission_classes = [EtlPatientCrudPermission, PatientSelfScopePermission]
-    queryset = DrugExposure.objects.all()
+    queryset = DrugExposure.objects.select_related('drug_concept').all()
     clinical_filter_fields = {
         'concept_param': 'drug_concept_id',
         'concept_field': 'drug_concept_id',
@@ -7249,7 +7249,7 @@ class DrugExposureViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _Provena
 class MeasurementViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = MeasurementSerializer
     permission_classes = [EtlPatientCrudPermission, PatientSelfScopePermission]
-    queryset = Measurement.objects.all()
+    queryset = Measurement.objects.select_related('measurement_concept').all()
     clinical_filter_fields = {
         'concept_param': 'measurement_concept_id',
         'concept_field': 'measurement_concept_id',
@@ -7268,7 +7268,7 @@ class MeasurementViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _Provenan
 class ObservationViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ObservationSerializer
     permission_classes = [EtlPatientCrudPermission, PatientSelfScopePermission]
-    queryset = Observation.objects.all()
+    queryset = Observation.objects.select_related('observation_concept').all()
     clinical_filter_fields = {
         'concept_param': 'observation_concept_id',
         'concept_field': 'observation_concept_id',
@@ -7285,7 +7285,7 @@ class ObservationViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _Provenan
 class ProcedureOccurrenceViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ProcedureOccurrenceSerializer
     permission_classes = [EtlPatientCrudPermission, PatientSelfScopePermission]
-    queryset = ProcedureOccurrence.objects.all()
+    queryset = ProcedureOccurrence.objects.select_related('procedure_concept').all()
     clinical_filter_fields = {
         'concept_param': 'procedure_concept_id',
         'concept_field': 'procedure_concept_id',

@@ -1012,10 +1012,13 @@ class PatientRecordSerializer(serializers.ModelSerializer):
 # ---------------------------------------------------------------------------
 
 class ConditionOccurrenceSerializer(serializers.ModelSerializer):
+    concept_name = serializers.SerializerMethodField()
+
     class Meta:
         model = ConditionOccurrence
         fields = [
             'condition_occurrence_id', 'person', 'condition_concept',
+            'concept_name',
             'condition_start_date', 'condition_start_datetime',
             'condition_end_date', 'condition_end_datetime',
             'condition_type_concept', 'condition_status_concept',
@@ -1025,12 +1028,21 @@ class ConditionOccurrenceSerializer(serializers.ModelSerializer):
         ]
         extra_kwargs = {'condition_occurrence_id': {'required': False}}
 
+    def get_concept_name(self, obj):
+        concept = getattr(obj, 'condition_concept', None)
+        if concept and getattr(concept, 'concept_name', None):
+            return concept.concept_name
+        return None
+
 
 class DrugExposureSerializer(serializers.ModelSerializer):
+    concept_name = serializers.SerializerMethodField()
+
     class Meta:
         model = DrugExposure
         fields = [
             'drug_exposure_id', 'person', 'drug_concept',
+            'concept_name',
             'drug_exposure_start_date', 'drug_exposure_start_datetime',
             'drug_exposure_end_date', 'drug_exposure_end_datetime',
             'drug_type_concept', 'stop_reason', 'quantity', 'days_supply',
@@ -1041,12 +1053,21 @@ class DrugExposureSerializer(serializers.ModelSerializer):
         ]
         extra_kwargs = {'drug_exposure_id': {'required': False}}
 
+    def get_concept_name(self, obj):
+        concept = getattr(obj, 'drug_concept', None)
+        if concept and getattr(concept, 'concept_name', None):
+            return concept.concept_name
+        return None
+
 
 class MeasurementSerializer(serializers.ModelSerializer):
+    concept_name = serializers.SerializerMethodField()
+
     class Meta:
         model = Measurement
         fields = [
             'measurement_id', 'person', 'measurement_concept',
+            'concept_name',
             'measurement_date', 'measurement_datetime',
             'measurement_type_concept', 'operator_concept',
             'value_as_number', 'value_as_string', 'value_as_concept',
@@ -1056,6 +1077,12 @@ class MeasurementSerializer(serializers.ModelSerializer):
             'is_erroneous', 'erroneous_reason',
         ]
         extra_kwargs = {'measurement_id': {'required': False}}
+
+    def get_concept_name(self, obj):
+        concept = getattr(obj, 'measurement_concept', None)
+        if concept and getattr(concept, 'concept_name', None):
+            return concept.concept_name
+        return None
 
     def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
         attrs = super().validate(attrs)
@@ -1091,10 +1118,13 @@ class MeasurementSerializer(serializers.ModelSerializer):
 
 
 class ObservationSerializer(serializers.ModelSerializer):
+    concept_name = serializers.SerializerMethodField()
+
     class Meta:
         model = Observation
         fields = [
             'observation_id', 'person', 'observation_concept',
+            'concept_name',
             'observation_date', 'observation_datetime',
             'observation_type_concept',
             'value_as_number', 'value_as_string', 'value_as_concept',
@@ -1104,6 +1134,12 @@ class ObservationSerializer(serializers.ModelSerializer):
             'is_erroneous', 'erroneous_reason',
         ]
         extra_kwargs = {'observation_id': {'required': False}}
+
+    def get_concept_name(self, obj):
+        concept = getattr(obj, 'observation_concept', None)
+        if concept and getattr(concept, 'concept_name', None):
+            return concept.concept_name
+        return None
 
     def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
         attrs = super().validate(attrs)
@@ -1139,10 +1175,13 @@ class ObservationSerializer(serializers.ModelSerializer):
 
 
 class ProcedureOccurrenceSerializer(serializers.ModelSerializer):
+    concept_name = serializers.SerializerMethodField()
+
     class Meta:
         model = ProcedureOccurrence
         fields = [
             'procedure_occurrence_id', 'person', 'procedure_concept',
+            'concept_name',
             'procedure_date', 'procedure_datetime',
             'procedure_end_date', 'procedure_end_datetime',
             'procedure_type_concept', 'modifier_concept', 'quantity',
@@ -1151,6 +1190,12 @@ class ProcedureOccurrenceSerializer(serializers.ModelSerializer):
             'is_erroneous', 'erroneous_reason',
         ]
         extra_kwargs = {'procedure_occurrence_id': {'required': False}}
+
+    def get_concept_name(self, obj):
+        concept = getattr(obj, 'procedure_concept', None)
+        if concept and getattr(concept, 'concept_name', None):
+            return concept.concept_name
+        return None
 
 
 class EpisodeSerializer(serializers.ModelSerializer):
