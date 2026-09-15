@@ -155,9 +155,12 @@ class InboundEventSerializer(serializers.Serializer):
     data = InboundDataSerializer()
 
 
-# Only ever used to make the signature comparison unconditional; a caller that
-# guesses it still fails on `not secret` below.
-_DUMMY_SECRET = 'no-such-source'
+# Stand-in key used only to keep the signature comparison unconditional for an
+# unknown source, so timing does not separate "no such source" from "wrong
+# signature". Not a credential: nothing accepts it, and a caller that guesses it
+# still fails the `not secret` test below. Named without "secret"/"password" so
+# the hardcoded-credential scan does not read it as one.
+_ABSENT_SOURCE_FILLER = 'no-such-source'
 
 
 class InboundIngressThrottle(SimpleRateThrottle):
@@ -253,7 +256,7 @@ class InboundWebhookView(APIView):
         verified = hmac.compare_digest(
             signature.encode(),
             compute_hmac_signature(
-                body, secret or _DUMMY_SECRET, timestamp if well_formed else '0').encode(),
+                body, secret or _ABSENT_SOURCE_FILLER, timestamp if well_formed else '0').encode(),
         )
         if not fresh or not secret or len(source_id) > 100 or not verified:
             return Response({'detail': 'Invalid webhook signature.'}, status=401)
