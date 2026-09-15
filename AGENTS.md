@@ -23,10 +23,21 @@
 - Documentation-only changes do not require application CI or local application
   test suites before push or merge. Review the content and check links and
   `git diff --check` instead.
+- This is a standing user preference: do not run pytest, Django, frontend or
+  async e2e suites for documentation-only changes, and do not ask the user to
+  approve skipping them again.
+- For an authorized documentation-only merge, run any lightweight docs-only
+  status gates GitHub requires and complete the merge without asking for another
+  confirmation. These status gates do not require application test results.
+- Do not use `[skip ci]` for a protected-branch PR when it would leave required
+  statuses missing and block the merge. Let the existing docs-only detector
+  skip the application jobs and satisfy the required status gates instead.
 - CI runs a lightweight file-change detector and skips backend, frontend,
   security, and async e2e jobs when every changed path is documentation. Keep
-  the named required jobs so GitHub records them as skipped instead of leaving
-  required checks pending.
+  the named suite jobs so GitHub records them as skipped. The required
+  `Application CI` gate passes documentation-only PRs without requiring frontend
+  or backend test results; code changes must pass the applicable application
+  suites. `Security gates` remains a separate required check.
 - Root Markdown/reStructuredText/AsciiDoc, documentation under `docs/`, and
   Markdown documentation under `.github/` qualify. Code, tests, configuration,
   dependency files, and runtime data do not qualify, even when changed alongside

@@ -27,11 +27,11 @@ is unavailable or fails. Direct saves recompute aliases and calculations without
 running a full OMOP refresh. External imports and explicit refreshes still derive
 from OMOP while preserving pending edits.
 
-Use [PatientRecord-first writes](docs/patient-record-first-writes.md) for save,
+Use [PatientRecord-first writes](patient-record-first-writes.md) for save,
 projection, and refresh semantics, and [the field mapping reference](field_concept_mapping_architecture.md)
 for field destinations and exceptions. Mapping availability alone does not determine
 editability. Computed fields, structured clinical resources, and retired summaries
-have their own contracts; [Genomics](docs/genomics_architecture.md) owns new discrete
+have their own contracts; [Genomics](genomics_architecture.md) owns new discrete
 genomic findings.
 
 > **Legacy SQL compatibility only:** `public.patient_info` is a read-only database view
@@ -47,7 +47,7 @@ genomic findings.
 | `PATCH /api/v1/persons/{person_id}/` | Supported direct Person demographic/profile updates |
 
 Authorization and patient/organization scope apply to every path. Use
-[application roles](docs/application-roles.md) for the implemented privilege model.
+[application roles](application-roles.md) for the implemented privilege model.
 
 ---
 
@@ -272,7 +272,7 @@ and profile fields. For example, an authorized editor can submit:
 The saved PatientRecord value is available immediately. A supported projection
 recipe writes the mapped OMOP fact; unmapped or failed projections remain pending
 and protected during later derivation. Profile fields project onward to Person or
-Location. See [PatientRecord-first writes](docs/patient-record-first-writes.md)
+Location. See [PatientRecord-first writes](patient-record-first-writes.md)
 for same-day updates, clears, pending-edit acknowledgement, and approval backfill.
 
 Consult `GET /api/v1/patient-records/writable-fields/` before building an editor.
@@ -386,7 +386,7 @@ Result caps: each source concept returns at most **1000** nodes; when more exist
 
 Direction semantics: without `relationship_id`, traversal uses the `concept_ancestor` closure table (true hierarchy). With `relationship_id`, traversal follows stored edge direction — `ancestors` returns in-neighbors (concepts with an edge pointing *at* the source) and `descendants` returns out-neighbors. For OMOP hierarchical relationships authored child → parent (e.g. `Is a`), use closure mode for true ancestor traversal. Edges with `invalid_reason` set are excluded from relationship-mode traversal.
 
-For background on how PRomop loads and uses `concept`, `concept_relationship`, and `concept_ancestor`, see [docs/concept-mapping.md](docs/concept-mapping.md#concept-graph-api).
+For background on how PRomop loads and uses `concept`, `concept_relationship`, and `concept_ancestor`, see [docs/concept-mapping.md](concept-mapping.md#concept-graph-api).
 
 ### GET /api/v1/concepts/{concept_id}/ancestors/
 
@@ -573,7 +573,7 @@ All support: GET (list + retrieve), POST (create), PUT/PATCH (update), DELETE.
 
 ### Detailed FHIR-to-OMOP CRUD sample
 
-See [`docs/examples/fhir_omop_crud.py`](docs/examples/fhir_omop_crud.py) for a
+See [`docs/examples/fhir_omop_crud.py`](examples/fhir_omop_crud.py) for a
 small, runnable example that parses a minimal FHIR bundle shape and exercises
 create/retrieve/update/delete for ConditionOccurrence, DrugExposure,
 Measurement, Observation, and ProcedureOccurrence. It shows the required event
@@ -655,12 +655,56 @@ Fill-if-empty patch on Person demographic fields. Each field is only written whe
 
 Full CRUD. Org-scoped. These do not feed into PatientRecord.
 
+### Trial search preferences
+
+`/api/v1/trial-search-preferences/?person_id=` — the filters a patient last searched
+with. One row per person. Reads are org-scoped like the two above, and it does not feed
+into PatientRecord either; what differs is the method set — GET and PATCH only, no POST,
+PUT or DELETE — and that the two write actions below authorize the `person_id` they are
+given, which the object-level permission alone does not do.
+
+Also served at the legacy `/api/trial-search-preferences/` path, under the deprecation
+note at the top of this document. Everything below applies to both paths.
+
+`preferences` is one opaque JSON object, whose filter vocabulary belongs to EXACT.
+Three write paths, all with the same replace semantics:
+
+| Call | Effect |
+|---|---|
+| `PATCH /api/v1/trial-search-preferences/upsert/?person_id=` | Save filters, creating the row on first use |
+| `PATCH /api/v1/trial-search-preferences/reset/?person_id=` | Clear filters |
+| `PATCH /api/v1/trial-search-preferences/{id}/` | The plain detail route. Writes the same way; it just cannot create the row, and it does not authorize a `person_id` |
+
+**A request carrying `preferences` replaces the whole object; it does not merge into it.**
+The method is PATCH and the action is called `upsert`, so the opposite is the natural
+reading, and a client built on that reading lost saved filters to it
+(healthkey-ai/exact#444). In full:
+
+- A key **absent** from the body is **removed**. That is the only way to remove one:
+  a null *inside* the object is stored as the value `null`, not treated as a delete.
+- A body that **omits** `preferences` leaves the stored object untouched — `partial=True`
+  applies at the field level, and that is the only level at which anything merges. It is
+  not a no-op on the row: it creates one if there was none, and `updated_at` moves either
+  way.
+- `{"preferences": null}` is a **400**. To clear, send the field carrying an empty
+  object — `{"preferences": {}}` — or call `reset`. A body that is merely `{}`, with no
+  `preferences` key in it at all, is the previous bullet and clears nothing.
+- So **a client holding part of the set must read-modify-write**: GET, merge its own
+  edits over what came back, PATCH the result.
+
+Concurrent writers are last-writer-wins and silently delete each other's keys — two tabs
+running the same client are enough. There is no precondition making a write conditional
+on what was read; see [issue #1312](https://github.com/healthkey-ai/promop/issues/1312).
+
+`non_default_filter_count` is computed server-side so every client's "Filters (N)" badge
+agrees; `sort` and `type` are not filters and are not counted.
+
 ---
 
 ## Vocabulary & concept lookup endpoints
 
 For a full explanation of how LOINC, SNOMED, and HemOnc codes are resolved to OMOP Concept IDs,
-see [docs/concept-mapping.md](docs/concept-mapping.md).
+see [docs/concept-mapping.md](concept-mapping.md).
 
 ### GET /api/v1/concepts/lookup/
 
@@ -942,8 +986,8 @@ means the stream was truncated (fail closed). Note the following:
 Clinical write APIs operate on OMOP resources, not on projection fields. A numeric
 observation must carry its clinical concept, event time, value, and unit; terminology
 mapping and canonical-unit policy are documented in
-[`docs/concept-mapping.md`](docs/concept-mapping.md) and
-[`docs/clinical-unit-policy.md`](docs/clinical-unit-policy.md). This prevents a
+[`docs/concept-mapping.md`](concept-mapping.md) and
+[`docs/clinical-unit-policy.md`](clinical-unit-policy.md). This prevents a
 lossy projection update from being mistaken for a source clinical fact.
 
 ---
@@ -1049,7 +1093,7 @@ karnofsky_performance_score        89243-0    {score}         Karnofsky Performa
 ### FHIR upload pipeline
 
 FHIR ingestion maps resources to OMOP tables and refreshes PatientRecord.
-Interactive edits follow the separate [PatientRecord-first write path](docs/patient-record-first-writes.md).
+Interactive edits follow the separate [PatientRecord-first write path](patient-record-first-writes.md).
 
 ```
 FHIR Bundle

@@ -1217,6 +1217,40 @@ class TrialSearchPreferencesSerializer(serializers.ModelSerializer):
     # Filters button, and a count computed client-side drifts from the one
     # the server would compute.
     non_default_filter_count = serializers.IntegerField(read_only=True)
+    # Spelled out here rather than on the model: a `help_text` change on the
+    # field would be an AlterField migration, and this is a statement about
+    # the API contract, not about the column. It also reaches the detail
+    # route's schema, where the only other description is this class's
+    # docstring and that says nothing about replacing.
+    #
+    # Declaring the field decouples it from the model's `null`, `blank`,
+    # `default` and `validators`, which a model-derived field would inherit.
+    # Every one of those is a no-op today — `validators` is empty and the
+    # column is NOT NULL — but a future model-level validator or `null=True`
+    # would stop reaching the API silently. `allow_null` is therefore stated
+    # rather than left to the default, so the 400 on a null has a reason a
+    # reader can see.
+    preferences = serializers.JSONField(
+        required=False,
+        allow_null=False,
+        # Keeps the textarea the model-derived field rendered with in the
+        # browsable API; declaring the field would otherwise drop it.
+        style={'base_template': 'textarea.html'},
+        help_text=(
+            "Opaque filter payload, camelCase as EXACT's query params spell "
+            "it (searchTitle, trialType, phase, …). Not validated against a "
+            "schema here. Written WHOLESALE: a request carrying this field "
+            "replaces the entire object, so a key absent from the body is "
+            "removed, and removal of a key has no sentinel — a null INSIDE "
+            "the object is stored as the value null. (The field itself may "
+            "not be null; to clear, send it carrying an empty object, or use "
+            "the reset action — a request body that is merely {}, with no "
+            "preferences key in it, clears nothing.) "
+            "Omitting the field entirely leaves the stored object untouched. "
+            "A client holding part of the set must read-modify-write. See "
+            "the upsert action for the contract in full."
+        ),
+    )
 
     class Meta:
         model = TrialSearchPreferences

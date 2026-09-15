@@ -514,4 +514,4 @@ by having one, and being rigorous about what it means.
   Garmin source fields, artifact bounds, row shape, and open gaps
 - [concept-mapping.md](concept-mapping.md) — general LOINC/SNOMED/HemOnc → OMOP concept resolution
 - [reproducing-benchmark-results.md](reproducing-benchmark-results.md) — benchmark methodology
-- [PatientRecord field mapping](../field_concept_mapping_architecture.md) — UI fields, `PatientRecord` keys, OMOP destinations, and mapping gaps
+- [PatientRecord field mapping](field_concept_mapping_architecture.md) — UI fields, `PatientRecord` keys, OMOP destinations, and mapping gaps

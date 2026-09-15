@@ -3963,6 +3963,17 @@ def _parse_date_value(v):
     return None
 
 
+def tp53_disruption_from_findings(findings):
+    """Version 8's positive/unknown rule, shared with scoped reconciliation."""
+    return True if any(
+        m.get('gene', '').lower() == 'tp53'
+        and (m.get('interpretation') or '').lower() == 'pathogenic'
+        and m.get('assessment') in (None, '', 'present')
+        and m.get('status', 'present') == 'present'
+        for m in (findings or [])
+    ) else None
+
+
 def _compute_derived_fields(patient_info: PatientRecord, *, apply_formulas=True) -> None:
     """Compute fields that depend on other PatientRecord fields being set."""
     if patient_info.active_infection_status is not None:
@@ -4014,16 +4025,7 @@ def _compute_derived_fields(patient_info: PatientRecord, *, apply_formulas=True)
     else:
         patient_info.measurable_disease_iwcll = None
 
-    mutations = patient_info.genetic_mutations or []
-    # This aggregate has an existing positive rule, but no rule establishing
-    # a negative TP53/del(17p) result. Missing/nonqualifying evidence is unknown.
-    patient_info.tp53_disruption = True if any(
-        m.get('gene', '').lower() == 'tp53'
-        and (m.get('interpretation') or '').lower() == 'pathogenic'
-        and m.get('assessment') in (None, '', 'present')
-        and m.get('status', 'present') == 'present'
-        for m in mutations
-    ) else None
+    patient_info.tp53_disruption = tp53_disruption_from_findings(patient_info.genetic_mutations)
 
     # BMI — computed from weight and height when units are known
     weight = patient_info.weight

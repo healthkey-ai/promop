@@ -8,7 +8,7 @@ remain CB-only because patient records cannot carry class concept IDs.
 **Deciders:** PRomop, EXACT/CancerBot and SoC maintainers.
 
 Delivery status, cross-repository tickets, coverage verification and rollout
-gates live in [the field/value mapping plan](../../field_concept_mapping_plan.md#therapy-type-consumer-delivery).
+gates live in [the field/value mapping plan](../field_concept_mapping_plan.md#therapy-type-consumer-delivery).
 The [therapy architecture](../therapy-reference-tables-architecture.md) owns
 curated reference tables and authoring relationships.
 

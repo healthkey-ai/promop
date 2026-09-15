@@ -620,7 +620,7 @@ attribution requires end-user authentication. See
 generation, caller changes, and rollout ordering. Use organization-linked OAuth2
 service clients when row-level organization isolation is required.
 The complete interim threat model and rollout are in
-[`bearer_token_security.md`](../bearer_token_security.md).
+[`bearer_token_security.md`](bearer_token_security.md).
 
 ### Request Identity
 
