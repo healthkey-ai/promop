@@ -3,7 +3,7 @@
 Idempotent — safe to re-run. Uses get_or_create for all rows.
 
 Usage:
-    DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \\
+    DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" DEBUG=True \\
       .venv/bin/python manage.py load_therapy_reference_data
 """
 import csv
