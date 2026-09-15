@@ -282,10 +282,10 @@ _MANUAL_ENTRIES: dict[str, FieldProvenance] = {
     "ki67_proliferation_index": FieldProvenance(
         omop_table="Measurement",
         lookup_strategy="loinc",
-        concept_codes=["85319-2"],
+        concept_codes=["29593-1"],
         extractor="_get_biomarker_data",
         selection_rule="latest",
-        description="Ki-67 proliferation index by LOINC 85319-2",
+        description="Ki-67 proliferation index by LOINC 29593-1",
     ),
     "pd_l1_tumor_cells": FieldProvenance(
         omop_table="Measurement",

@@ -3015,11 +3015,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                     value_number = float(value_codeable)
                                 except (ValueError, TypeError):
                                     pass
-                        elif loinc_code == '85337-4':  # Test Methodology
+                        elif loinc_code == '85069-3':  # Lab test method [Type]
                             test_methodology = value_codeable[:50] if value_codeable else value_codeable
-                            # Also check if this is Oncotype DX score
-                            if value_number is not None:
-                                oncotype_dx_score = value_number
                         elif loinc_code == '31208-2':  # Specimen Source
                             test_specimen_type = value_codeable[:50] if value_codeable else value_codeable
                             if observation.get('effectiveDateTime'):
@@ -3084,7 +3081,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         
                         # Check for lymph node status — exclude TNM N-stage LOINC (21906-3)
                         # which carries AJCC notation, not a binary status
-                        elif ('lymph node' in obs_text or 'lymph nodes' in obs_text) and loinc_code != '21906-3':
+                        elif ('lymph node' in obs_text or 'lymph nodes' in obs_text) and loinc_code not in ('21906-3', '92837-4'):
                             if observation.get('valueCodeableConcept'):
                                 value_concept = observation['valueCodeableConcept']
                                 raw = (value_concept.get('text') or
@@ -3160,7 +3157,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                     her2_status = value_concept['coding'][0].get('display')
                         
                         # Check for Ki67
-                        elif 'ki67' in obs_text or 'ki-67' in obs_text:
+                        elif loinc_code == '29593-1':
                             if observation.get('valueQuantity'):
                                 ki67_index = observation['valueQuantity'].get('value')
                         
