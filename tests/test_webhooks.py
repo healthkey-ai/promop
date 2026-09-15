@@ -13,6 +13,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from omop_core.models import GroupAccess, Organization, PatientDocument, PatientRecord, Person
+from patient_portal.api.fhir.sync import AGGREGATION_EXT_URL
 from patient_portal.models import Identity, InboundWebhookEvent, WebhookDelivery, WebhookSubscription
 from patient_portal.tasks import deliver_webhook, dispatch_pending_webhooks
 from patient_portal.webhooks import (
@@ -311,6 +312,110 @@ def test_fhir_sync_notifies_once_per_table_and_stays_quiet_when_idempotent(setup
     assert not WebhookDelivery.objects.exists(), 'an idempotent re-sync changes nothing and must stay silent'
 
 
+def test_fhir_sync_emits_one_event_per_table_across_ingest_helpers(setup, sync_client):
+    """Measurement is written by both the discrete and the daily-rollup helper,
+    and DrugExposure by both medications and immunizations. Publishing inside
+    each helper would split one bundle into two events per table, each with a
+    partial count."""
+    org, other, person, user, subscription = setup
+    bundle = {
+        'resourceType': 'Bundle', 'type': 'collection',
+        'entry': [
+            {'resource': {'resourceType': 'Patient', 'id': 'p1'}},
+            # discrete lab
+            {'resource': {
+                'resourceType': 'Observation', 'subject': {'reference': 'Patient/p1'},
+                'code': {'coding': [{'system': 'http://loinc.org', 'code': '718-7',
+                                     'display': 'Hemoglobin'}]},
+                'effectiveDateTime': '2026-02-01',
+                'valueQuantity': {'value': 13.2, 'unit': 'g/dL'},
+            }},
+            # daily rollup — same table, different helper
+            {'resource': {
+                'resourceType': 'Observation', 'subject': {'reference': 'Patient/p1'},
+                'extension': [{'url': AGGREGATION_EXT_URL, 'valueCode': 'daily'}],
+                'code': {'coding': [{'system': 'http://loinc.org', 'code': '55423-8',
+                                     'display': 'Step count'}]},
+                'effectivePeriod': {'start': '2026-02-02T00:00:00Z',
+                                    'end': '2026-02-02T23:59:59Z'},
+                'valueQuantity': {'value': 8000, 'unit': 'steps'},
+            }},
+            # medication and immunization — both DrugExposure, different helpers
+            {'resource': {
+                'resourceType': 'MedicationStatement', 'subject': {'reference': 'Patient/p1'},
+                'medicationCodeableConcept': {'text': 'AC-T'},
+                'effectivePeriod': {'start': '2025-12-01'},
+            }},
+            {'resource': {
+                'resourceType': 'Immunization', 'patient': {'reference': 'Patient/p1'},
+                'status': 'completed',
+                'vaccineCode': {'text': 'Influenza vaccine'},
+                'occurrenceDateTime': '2025-10-01',
+            }},
+        ],
+    }
+    WebhookDelivery.objects.all().delete()
+    assert _sync(sync_client, person, bundle).status_code == 201
+
+    per_table = {}
+    for delivery in WebhookDelivery.objects.all():
+        data = delivery.payload['data']
+        per_table.setdefault(data['resource_type'], []).append(data['count'])
+    assert all(len(counts) == 1 for counts in per_table.values()), per_table
+    assert per_table.get('omop_core.measurement') == [2], per_table
+    assert per_table.get('omop_core.drugexposure') == [2], per_table
+
+
+def test_fhir_sync_counts_a_twice_matched_rollup_row_once(setup, sync_client):
+    """Two bundle entries under different display text can resolve to the same
+    stored daily row — the rollup path matches on source value OR concept. It
+    is then saved twice but changed once, so the count must not report two."""
+    from omop_core.models import Measurement
+    from tests.factories import ConceptFactory, DomainFactory, VocabularyFactory
+
+    # Without a resolvable concept every display string is its own row and the
+    # OR-match never fires, so the concept has to exist for this to be the
+    # scenario it claims to be.
+    ConceptFactory(
+        concept_name='Step count', concept_code='55423-8', standard_concept='S',
+        vocabulary=VocabularyFactory(vocabulary_id='LOINC', vocabulary_name='LOINC'),
+        domain=DomainFactory(domain_id='Measurement', domain_name='Measurement'),
+    )
+
+    org, other, person, user, subscription = setup
+
+    def rollup(display, value):
+        return {'resource': {
+            'resourceType': 'Observation', 'subject': {'reference': 'Patient/p1'},
+            'extension': [{'url': AGGREGATION_EXT_URL, 'valueCode': 'daily'}],
+            'code': {'coding': [{'system': 'http://loinc.org', 'code': '55423-8',
+                                 'display': display}]},
+            'effectivePeriod': {'start': '2026-02-02T00:00:00Z',
+                                'end': '2026-02-02T23:59:59Z'},
+            'valueQuantity': {'value': value, 'unit': 'steps'},
+        }}
+
+    seed = {'resourceType': 'Bundle', 'type': 'collection',
+            'entry': [{'resource': {'resourceType': 'Patient', 'id': 'p1'}},
+                      rollup('Step count', 8000)]}
+    assert _sync(sync_client, person, seed).status_code == 201
+    stored = Measurement.objects.filter(person=person).count()
+
+    # Same concept and day, two different display strings, both differing from
+    # what is stored: each resolves to the one existing row.
+    again = {'resourceType': 'Bundle', 'type': 'collection',
+             'entry': [{'resource': {'resourceType': 'Patient', 'id': 'p1'}},
+                       rollup('Steps', 9000), rollup('Step Count (daily)', 9500)]}
+    WebhookDelivery.objects.all().delete()
+    assert _sync(sync_client, person, again).status_code == 201
+
+    measurement_events = [d.payload['data'] for d in WebhookDelivery.objects.all()
+                          if d.payload['data']['resource_type'] == 'omop_core.measurement']
+    assert Measurement.objects.filter(person=person).count() == stored, 'no new row: both entries match the stored one'
+    assert len(measurement_events) == 1, measurement_events
+    assert measurement_events[0]['count'] == 1, measurement_events
+
+
 def test_fhir_sync_collapse_of_stacked_duplicates_is_not_a_patient_event(setup, sync_client):
     """Collapsing internal stacked rows is bookkeeping. Before the fix it was
     the only thing the sync path notified about: one event per deleted
@@ -334,6 +439,32 @@ def test_fhir_sync_collapse_of_stacked_duplicates_is_not_a_patient_event(setup, 
     payloads = [d.payload for d in WebhookDelivery.objects.all()]
     assert all(p['data'].get('operation') != 'deleted' for p in payloads), payloads
     assert len(payloads) == 1 and payloads[0]['data']['count'] == 1
+
+
+def test_write_boundary_is_only_taken_when_webhooks_are_on(settings):
+    """The transaction is not free — a single-row POST runs the patient-record
+    derivation inside it — and it buys nothing with no outbox to protect, so
+    a deployment with webhooks off keeps the behaviour that shipped before."""
+    from contextlib import nullcontext
+
+    from patient_portal.api.views import _webhook_write_atomic
+
+    settings.WEBHOOKS_ENABLED = False
+    assert isinstance(_webhook_write_atomic(), nullcontext)
+    settings.WEBHOOKS_ENABLED = True
+    assert not isinstance(_webhook_write_atomic(), nullcontext)
+
+
+def test_bulk_publish_honours_the_suppressor(setup):
+    from patient_portal.webhooks import publish_patient_bulk_change, suppress_webhook_events
+
+    org, other, person, user, subscription = setup
+    WebhookDelivery.objects.all().delete()
+    with suppress_webhook_events():
+        publish_patient_bulk_change(person.pk, 'measurement', 3)
+    assert not WebhookDelivery.objects.exists()
+    publish_patient_bulk_change(person.pk, 'measurement', 3)
+    assert WebhookDelivery.objects.count() == 1
 
 
 @pytest.mark.django_db(transaction=True)

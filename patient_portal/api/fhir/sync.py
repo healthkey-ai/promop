@@ -84,18 +84,6 @@ def _suppress_webhook_events():
     return suppress_webhook_events()
 
 
-def _publish_sync_change(person, model, count):
-    """One notification per patient and table for a sync batch.
-
-    The bulk API paths in patient_portal.api.views already publish this way;
-    the sync view writes the same OMOP tables and owes subscribers the same
-    event. No-op when nothing changed, and when webhooks are off.
-    """
-    if not count:
-        return
-    from patient_portal.webhooks import publish_patient_bulk_change
-
-    publish_patient_bulk_change(person.pk, model._meta.model_name, count)
 
 
 def _ensure_concept(concept_id):
@@ -363,6 +351,9 @@ class FhirSyncView(APIView):
             observations, conditions, medications, allergies, immunizations,
             procedures, diagnostic_reports)
 
+        # Changed row ids per table, filled by the ingest helpers below and
+        # published as one notification per table once the bundle is done.
+        self._sync_changes = {}
         result = {
             'person_id': person.person_id,
             'demographics_updated': bool(patient_res) and self._update_demographics(person, patient_res),
@@ -388,6 +379,7 @@ class FhirSyncView(APIView):
                 person, document_references, source_user_id, org, skipped),
         }
         result['skipped'] = self._skipped_summary(skipped)
+        self._publish_sync_changes(person)
 
         # The person's CURRENT record totals after this ingest — the accurate
         # "records on file" the connector displays (immune to re-sync dedup or
@@ -668,7 +660,7 @@ class FhirSyncView(APIView):
             Measurement, 'measurement_id', rows, source_user_id, person, org)
         # bulk_create fires no signal, so without this the newly ingested labs
         # reach no subscriber at all.
-        _publish_sync_change(person, Measurement, len(inserted))
+        self._record_sync_change(Measurement, inserted)
         return inserted
 
     def _upsert_rollup_observations(self, person, observations, ehr_type, cache, source_user_id, org, skipped):
@@ -780,7 +772,7 @@ class FhirSyncView(APIView):
                     touched.append(keep.measurement_id)
             inserted = self._bulk_insert(
                 Measurement, 'measurement_id', new_rows, source_user_id, person, org)
-        _publish_sync_change(person, Measurement, len(touched) + len(inserted))
+        self._record_sync_change(Measurement, touched + inserted)
         return touched + inserted
 
     def _ingest_conditions(self, person, conditions, ehr_type, no_match, cache, source_user_id, org, skipped):
@@ -1017,6 +1009,31 @@ class FhirSyncView(APIView):
                 )
         return ids
 
+    def _record_sync_change(self, model, ids):
+        """Collect the rows one helper changed, for the batch notification."""
+        if ids:
+            self._sync_changes.setdefault(model._meta.model_name, set()).update(ids)
+
+    def _publish_sync_changes(self, person):
+        """One notification per patient and table, after the whole bundle.
+
+        Publishing inside each helper would split a batch: Measurement is
+        written by both the discrete and the daily-rollup path, and
+        DrugExposure by both medications and immunizations, so one bundle
+        would produce two events per table, each with a partial count. Ids
+        are a set because a rollup row matched by two bundle entries under
+        different display text is saved twice but changed once.
+
+        The bulk API paths in patient_portal.api.views publish the same way;
+        the sync view writes the same OMOP tables and owes subscribers the
+        same event. publish_patient_bulk_change is a no-op when webhooks are
+        off, and post() is atomic, so the outbox row commits with its rows.
+        """
+        from patient_portal.webhooks import publish_patient_bulk_change
+
+        for model_name, ids in self._sync_changes.items():
+            publish_patient_bulk_change(person.pk, model_name, len(ids))
+
     def _upsert_clinical(self, model, pk_field, cid_field, date_field, sv_field,
                          person, rows, source_user_id, org):
         """Idempotent upsert for clinical rows, keyed by (source_value, date) —
@@ -1056,7 +1073,7 @@ class FhirSyncView(APIView):
                 elif extras:
                     touched.append(getattr(keep, pk_field))
             inserted = self._bulk_insert(model, pk_field, new_rows, source_user_id, person, org)
-        _publish_sync_change(person, model, len(touched) + len(inserted))
+        self._record_sync_change(model, touched + inserted)
         return touched + inserted
 
     def _bulk_insert(self, model, pk_field, rows, source_user_id, person, org):

@@ -20,6 +20,8 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
 from django.utils.dateparse import parse_date
+from contextlib import nullcontext
+
 from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -5583,11 +5585,16 @@ class PersonViewSet(viewsets.GenericViewSet):
         http_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
         return Response({'person_id': person.person_id, 'created': created}, status=http_status)
 
-    # Person.save() below fires the webhook receiver, which inserts the outbox
-    # row. Same boundary as _AtomicWriteMixin, spelled here because this view
-    # routes PATCH through its own method rather than DRF's perform_update.
-    @transaction.atomic
     def partial_update(self, request, person_id=None):
+        """Thin wrapper: this view routes PATCH through its own method rather
+        than DRF's perform_update, so it takes the same conditional boundary as
+        `_AtomicWriteMixin`. Note the guarantee is narrower than it looks — an
+        early `return Response(4xx)` is not an exception, so a write already
+        made before it still commits."""
+        with _webhook_write_atomic():
+            return self._partial_update(request, person_id)
+
+    def _partial_update(self, request, person_id=None):
         """
         PATCH /api/persons/{person_id}/
         Fill-if-empty Person fields + profile field writes.
@@ -7155,8 +7162,8 @@ class _OmopBulkDeleteMixin:
         return ids
 
 
-class _AtomicWriteMixin:
-    """Put the row write, its provenance, and the webhook outbox row in one transaction.
+def _webhook_write_atomic():
+    """A transaction for the single-row write paths, only when it buys something.
 
     `patient_data_changed` runs inside `Model.save()`, and `publish_event`
     inserts the outbox row from there. Without a surrounding transaction the
@@ -7167,22 +7174,39 @@ class _AtomicWriteMixin:
 
     The bulk paths already reason this way — see `_OmopBulkCreateMixin`, where
     the derivation is deliberately left unguarded inside the transaction so a
-    failure rolls the batch back instead of leaving a stale read model. This
-    extends the same boundary to the single-row DRF paths. `atomic` nests as a
-    savepoint, so mixing it with those bulk blocks is safe.
+    failure rolls the batch back instead of leaving a stale read model.
+
+    It is conditional because the cost is not free and lands on every
+    deployment while the benefit only exists when webhooks are on.
+    `_OmopDeferRefreshMixin` suppresses the derivation for update and destroy
+    but not for create, so a single-row POST runs `refresh_patient_record` —
+    12-32s on a bulk-loaded patient — inside this block, holding its
+    `select_for_update` on `patient_record` until the outer commit instead of
+    releasing it at the derivation's own commit. WEBHOOKS_ENABLED defaults to
+    False, so by default this is exactly the behaviour that shipped before.
+    """
+    return transaction.atomic() if settings.WEBHOOKS_ENABLED else nullcontext()
+
+
+class _AtomicWriteMixin:
+    """Commit the row write, its provenance and the outbox row together.
+
+    See `_webhook_write_atomic` for why the boundary exists and why it is
+    conditional. `atomic` nests as a savepoint, so mixing it with the bulk
+    blocks that already open one is safe.
     """
 
-    @transaction.atomic
     def perform_create(self, serializer):
-        return super().perform_create(serializer)
+        with _webhook_write_atomic():
+            return super().perform_create(serializer)
 
-    @transaction.atomic
     def perform_update(self, serializer):
-        return super().perform_update(serializer)
+        with _webhook_write_atomic():
+            return super().perform_update(serializer)
 
-    @transaction.atomic
     def perform_destroy(self, instance):
-        return super().perform_destroy(instance)
+        with _webhook_write_atomic():
+            return super().perform_destroy(instance)
 
 
 class _ProvenanceMixin:
