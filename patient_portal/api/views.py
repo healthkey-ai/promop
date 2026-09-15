@@ -20,6 +20,8 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
 from django.utils.dateparse import parse_date
+from contextlib import nullcontext
+
 from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -5584,6 +5586,15 @@ class PersonViewSet(viewsets.GenericViewSet):
         return Response({'person_id': person.person_id, 'created': created}, status=http_status)
 
     def partial_update(self, request, person_id=None):
+        """Thin wrapper: this view routes PATCH through its own method rather
+        than DRF's perform_update, so it takes the same conditional boundary as
+        `_AtomicWriteMixin`. Note the guarantee is narrower than it looks — an
+        early `return Response(4xx)` is not an exception, so a write already
+        made before it still commits."""
+        with _webhook_write_atomic():
+            return self._partial_update(request, person_id)
+
+    def _partial_update(self, request, person_id=None):
         """
         PATCH /api/persons/{person_id}/
         Fill-if-empty Person fields + profile field writes.
@@ -7151,6 +7162,53 @@ class _OmopBulkDeleteMixin:
         return ids
 
 
+def _webhook_write_atomic():
+    """A transaction for the single-row write paths, only when it buys something.
+
+    `patient_data_changed` runs inside `Model.save()`, and `publish_event`
+    inserts the outbox row from there. Without a surrounding transaction the
+    clinical row is already committed by the time that insert runs: a failure
+    (or a worker killed between the two) leaves a persisted row that no
+    subscriber will ever hear about, and `transaction.on_commit` degrades to
+    "run it now" rather than "run it after the commit that made it true".
+
+    The bulk paths already reason this way — see `_OmopBulkCreateMixin`, where
+    the derivation is deliberately left unguarded inside the transaction so a
+    failure rolls the batch back instead of leaving a stale read model.
+
+    It is conditional because the cost is not free and lands on every
+    deployment while the benefit only exists when webhooks are on.
+    `_OmopDeferRefreshMixin` suppresses the derivation for update and destroy
+    but not for create, so a single-row POST runs `refresh_patient_record` —
+    12-32s on a bulk-loaded patient — inside this block, holding its
+    `select_for_update` on `patient_record` until the outer commit instead of
+    releasing it at the derivation's own commit. WEBHOOKS_ENABLED defaults to
+    False, so by default this is exactly the behaviour that shipped before.
+    """
+    return transaction.atomic() if settings.WEBHOOKS_ENABLED else nullcontext()
+
+
+class _AtomicWriteMixin:
+    """Commit the row write, its provenance and the outbox row together.
+
+    See `_webhook_write_atomic` for why the boundary exists and why it is
+    conditional. `atomic` nests as a savepoint, so mixing it with the bulk
+    blocks that already open one is safe.
+    """
+
+    def perform_create(self, serializer):
+        with _webhook_write_atomic():
+            return super().perform_create(serializer)
+
+    def perform_update(self, serializer):
+        with _webhook_write_atomic():
+            return super().perform_update(serializer)
+
+    def perform_destroy(self, instance):
+        with _webhook_write_atomic():
+            return super().perform_destroy(instance)
+
+
 class _ProvenanceMixin:
     """Record provenance on create/update when source headers/body fields are present."""
     def _prov(self, obj):
@@ -7230,7 +7288,7 @@ class _ProvenanceMixin:
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class ConditionOccurrenceViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class ConditionOccurrenceViewSet(_AtomicWriteMixin, _OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ConditionOccurrenceSerializer
     permission_classes = [EtlPatientCrudPermission, PatientSelfScopePermission]
     queryset = ConditionOccurrence.objects.all()
@@ -7247,7 +7305,7 @@ class ConditionOccurrenceViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class DrugExposureViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class DrugExposureViewSet(_AtomicWriteMixin, _OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = DrugExposureSerializer
     permission_classes = [EtlPatientCrudPermission, PatientSelfScopePermission]
     queryset = DrugExposure.objects.all()
@@ -7264,7 +7322,7 @@ class DrugExposureViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _Provena
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class MeasurementViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class MeasurementViewSet(_AtomicWriteMixin, _OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = MeasurementSerializer
     permission_classes = [EtlPatientCrudPermission, PatientSelfScopePermission]
     queryset = Measurement.objects.all()
@@ -7283,7 +7341,7 @@ class MeasurementViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _Provenan
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class ObservationViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class ObservationViewSet(_AtomicWriteMixin, _OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ObservationSerializer
     permission_classes = [EtlPatientCrudPermission, PatientSelfScopePermission]
     queryset = Observation.objects.all()
@@ -7300,7 +7358,7 @@ class ObservationViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _Provenan
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class ProcedureOccurrenceViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class ProcedureOccurrenceViewSet(_AtomicWriteMixin, _OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ProcedureOccurrenceSerializer
     permission_classes = [EtlPatientCrudPermission, PatientSelfScopePermission]
     queryset = ProcedureOccurrence.objects.all()
@@ -7343,7 +7401,7 @@ class V1ProcedureOccurrenceViewSet(
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class EpisodeViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class EpisodeViewSet(_AtomicWriteMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = EpisodeSerializer
     permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = Episode.objects.all()
@@ -8703,7 +8761,7 @@ def disease_therapy_regimen_detail(request, pk):
 # =============================================================================
 
 @method_decorator(csrf_exempt, name='dispatch')
-class PatientDocumentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
+class PatientDocumentViewSet(_AtomicWriteMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = PatientDocumentSerializer
     permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = PatientDocument.objects.all()
@@ -8800,7 +8858,7 @@ def _deny_unless_may_write_person(request, person_id):
     return None
 
 
-class PatientTrialEnrollmentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
+class PatientTrialEnrollmentViewSet(_AtomicWriteMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     """CRUD for a patient's clinical trial enrollment status.
 
     Trial metadata (title, phase, eligibility, etc.) is NOT stored here.

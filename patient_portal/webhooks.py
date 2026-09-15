@@ -162,7 +162,11 @@ INBOUND_HANDLERS = {
 
 
 def publish_patient_bulk_change(person_id, model_name, count, operation='bulk_saved'):
-    if not settings.WEBHOOKS_ENABLED or not count:
+    # Honour the suppressor too: a caller that wraps an ingest in
+    # suppress_webhook_events() expecting silence would otherwise still get the
+    # aggregate. Every current call site publishes outside the block, so this
+    # only closes the trap for the next one.
+    if not settings.WEBHOOKS_ENABLED or not count or _suppress_events.get():
         return
     organization_id = (PatientRecord.objects.filter(person_id=person_id)
                        .values_list('organization_id', flat=True).first())

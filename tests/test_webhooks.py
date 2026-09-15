@@ -13,6 +13,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from omop_core.models import GroupAccess, Organization, PatientDocument, PatientRecord, Person
+from patient_portal.api.fhir.sync import AGGREGATION_EXT_URL
 from patient_portal.models import Identity, InboundWebhookEvent, WebhookDelivery, WebhookSubscription
 from patient_portal.tasks import deliver_webhook, dispatch_pending_webhooks
 from patient_portal.webhooks import (
@@ -202,6 +203,301 @@ def test_lab_sync_bulk_write_emits_one_notification(setup, django_capture_on_com
     delivery = WebhookDelivery.objects.get()
     assert delivery.payload['type'] == 'lab.updated'
     assert delivery.payload['data']['count'] == 1
+
+
+def test_tp53_reconciliation_notifies_only_when_it_applies_a_change(setup):
+    """`reconcile_tp53_cache --apply` writes with QuerySet.update(), which no
+    post_save receiver sees. Without an explicit publish the subscriber keeps a
+    stale tp53_disruption until some unrelated save happens to touch the row."""
+    from io import StringIO
+
+    from django.core.management import call_command
+
+    org, other, person, user, subscription = setup
+    # No source findings, so the reconciled value is None; the stored False is
+    # what the command has to correct, and correcting it is the change event.
+    record = PatientRecord.objects.get(person=person)
+    PatientRecord.objects.filter(pk=record.pk).update(tp53_disruption=False)
+
+    WebhookDelivery.objects.all().delete()
+    call_command('reconcile_tp53_cache', person_id=person.pk, stdout=StringIO())
+    assert not WebhookDelivery.objects.exists(), 'preview changes nothing and must stay silent'
+
+    call_command('reconcile_tp53_cache', person_id=person.pk, apply=True, stdout=StringIO())
+    delivery = WebhookDelivery.objects.get()
+    assert delivery.subscription_id == subscription.pk
+    assert delivery.payload['type'] == 'patient.changed'
+    assert delivery.payload['data'] == {
+        'person_id': person.pk, 'resource_id': str(record.pk),
+        'resource_type': 'omop_core.patientrecord', 'operation': 'saved',
+    }
+    record.refresh_from_db()
+    assert record.tp53_disruption is None
+
+    WebhookDelivery.objects.all().delete()
+    call_command('reconcile_tp53_cache', person_id=person.pk, apply=True, stdout=StringIO())
+    assert not WebhookDelivery.objects.exists(), 'a no-op re-run must not notify again'
+
+
+def test_tp53_reconciliation_holds_pending_edits_without_notifying(setup):
+    from io import StringIO
+
+    from django.core.management import call_command
+
+    org, other, person, user, subscription = setup
+    PatientRecord.objects.filter(person=person).update(
+        tp53_disruption=False, user_edited_fields=['tp53_disruption'])
+    WebhookDelivery.objects.all().delete()
+    call_command('reconcile_tp53_cache', person_id=person.pk, apply=True, stdout=StringIO())
+    assert not WebhookDelivery.objects.exists()
+    assert PatientRecord.objects.get(person=person).tp53_disruption is False
+
+
+_SYNC_BUNDLE = {
+    'resourceType': 'Bundle', 'type': 'collection',
+    'entry': [
+        {'resource': {'resourceType': 'Patient', 'id': 'p1'}},
+        {'resource': {
+            'resourceType': 'Observation', 'subject': {'reference': 'Patient/p1'},
+            'code': {'coding': [{'system': 'http://loinc.org', 'code': '718-7',
+                                 'display': 'Hemoglobin'}]},
+            'effectiveDateTime': '2026-02-01',
+            'valueQuantity': {'value': 13.2, 'unit': 'g/dL'},
+        }},
+        {'resource': {
+            'resourceType': 'Condition', 'subject': {'reference': 'Patient/p1'},
+            'code': {'coding': [{'system': 'http://snomed.info/sct', 'code': '254837009'}],
+                     'text': 'Malignant neoplasm of breast'},
+            'onsetDateTime': '2025-11-15',
+        }},
+    ],
+}
+
+
+@pytest.fixture
+def sync_client(setup, settings):
+    settings.SERVICE_AUTH_SCOPES = 'patient/*.write'
+    service_user = Identity.objects.create(issuer='urn:service', sub='webhook-fhir-sync')
+    service_user.set_unusable_password()
+    service_user.save(update_fields=['password'])
+    client = APIClient()
+    client.force_authenticate(user=service_user, token='service-token')
+    return client
+
+
+def _sync(client, person, bundle=None):
+    return client.post('/api/v1/fhir/sync/', {
+        'person_id': person.pk, 'bundle': bundle or _SYNC_BUNDLE,
+    }, format='json')
+
+
+def test_fhir_sync_notifies_once_per_table_and_stays_quiet_when_idempotent(setup, sync_client):
+    """The sync view writes with bulk_create, which fires no signal, so these
+    ingested rows reach a subscriber only if the path publishes explicitly."""
+    org, other, person, user, subscription = setup
+    WebhookDelivery.objects.all().delete()
+
+    assert _sync(sync_client, person).status_code == 201
+    by_type = {}
+    for delivery in WebhookDelivery.objects.all():
+        by_type.setdefault(delivery.payload['type'], []).append(delivery.payload['data'])
+    assert set(by_type) == {'lab.updated', 'patient.changed'}
+    assert by_type['lab.updated'][0]['resource_type'] == 'omop_core.measurement'
+    assert by_type['lab.updated'][0]['count'] == 1
+    assert [d['resource_type'] for d in by_type['patient.changed']] == ['omop_core.conditionoccurrence']
+    assert by_type['patient.changed'][0]['count'] == 1
+
+    WebhookDelivery.objects.all().delete()
+    assert _sync(sync_client, person).status_code == 201
+    assert not WebhookDelivery.objects.exists(), 'an idempotent re-sync changes nothing and must stay silent'
+
+
+def test_fhir_sync_emits_one_event_per_table_across_ingest_helpers(setup, sync_client):
+    """Measurement is written by both the discrete and the daily-rollup helper,
+    and DrugExposure by both medications and immunizations. Publishing inside
+    each helper would split one bundle into two events per table, each with a
+    partial count."""
+    org, other, person, user, subscription = setup
+    bundle = {
+        'resourceType': 'Bundle', 'type': 'collection',
+        'entry': [
+            {'resource': {'resourceType': 'Patient', 'id': 'p1'}},
+            # discrete lab
+            {'resource': {
+                'resourceType': 'Observation', 'subject': {'reference': 'Patient/p1'},
+                'code': {'coding': [{'system': 'http://loinc.org', 'code': '718-7',
+                                     'display': 'Hemoglobin'}]},
+                'effectiveDateTime': '2026-02-01',
+                'valueQuantity': {'value': 13.2, 'unit': 'g/dL'},
+            }},
+            # daily rollup — same table, different helper
+            {'resource': {
+                'resourceType': 'Observation', 'subject': {'reference': 'Patient/p1'},
+                'extension': [{'url': AGGREGATION_EXT_URL, 'valueCode': 'daily'}],
+                'code': {'coding': [{'system': 'http://loinc.org', 'code': '55423-8',
+                                     'display': 'Step count'}]},
+                'effectivePeriod': {'start': '2026-02-02T00:00:00Z',
+                                    'end': '2026-02-02T23:59:59Z'},
+                'valueQuantity': {'value': 8000, 'unit': 'steps'},
+            }},
+            # medication and immunization — both DrugExposure, different helpers
+            {'resource': {
+                'resourceType': 'MedicationStatement', 'subject': {'reference': 'Patient/p1'},
+                'medicationCodeableConcept': {'text': 'AC-T'},
+                'effectivePeriod': {'start': '2025-12-01'},
+            }},
+            {'resource': {
+                'resourceType': 'Immunization', 'patient': {'reference': 'Patient/p1'},
+                'status': 'completed',
+                'vaccineCode': {'text': 'Influenza vaccine'},
+                'occurrenceDateTime': '2025-10-01',
+            }},
+        ],
+    }
+    WebhookDelivery.objects.all().delete()
+    assert _sync(sync_client, person, bundle).status_code == 201
+
+    per_table = {}
+    for delivery in WebhookDelivery.objects.all():
+        data = delivery.payload['data']
+        per_table.setdefault(data['resource_type'], []).append(data['count'])
+    assert all(len(counts) == 1 for counts in per_table.values()), per_table
+    assert per_table.get('omop_core.measurement') == [2], per_table
+    assert per_table.get('omop_core.drugexposure') == [2], per_table
+
+
+def test_fhir_sync_counts_a_twice_matched_rollup_row_once(setup, sync_client):
+    """Two bundle entries under different display text can resolve to the same
+    stored daily row — the rollup path matches on source value OR concept. It
+    is then saved twice but changed once, so the count must not report two."""
+    from omop_core.models import Measurement
+    from tests.factories import ConceptFactory, DomainFactory, VocabularyFactory
+
+    # Without a resolvable concept every display string is its own row and the
+    # OR-match never fires, so the concept has to exist for this to be the
+    # scenario it claims to be.
+    ConceptFactory(
+        concept_name='Step count', concept_code='55423-8', standard_concept='S',
+        vocabulary=VocabularyFactory(vocabulary_id='LOINC', vocabulary_name='LOINC'),
+        domain=DomainFactory(domain_id='Measurement', domain_name='Measurement'),
+    )
+
+    org, other, person, user, subscription = setup
+
+    def rollup(display, value):
+        return {'resource': {
+            'resourceType': 'Observation', 'subject': {'reference': 'Patient/p1'},
+            'extension': [{'url': AGGREGATION_EXT_URL, 'valueCode': 'daily'}],
+            'code': {'coding': [{'system': 'http://loinc.org', 'code': '55423-8',
+                                 'display': display}]},
+            'effectivePeriod': {'start': '2026-02-02T00:00:00Z',
+                                'end': '2026-02-02T23:59:59Z'},
+            'valueQuantity': {'value': value, 'unit': 'steps'},
+        }}
+
+    seed = {'resourceType': 'Bundle', 'type': 'collection',
+            'entry': [{'resource': {'resourceType': 'Patient', 'id': 'p1'}},
+                      rollup('Step count', 8000)]}
+    assert _sync(sync_client, person, seed).status_code == 201
+    stored = Measurement.objects.filter(person=person).count()
+
+    # Same concept and day, two different display strings, both differing from
+    # what is stored: each resolves to the one existing row.
+    again = {'resourceType': 'Bundle', 'type': 'collection',
+             'entry': [{'resource': {'resourceType': 'Patient', 'id': 'p1'}},
+                       rollup('Steps', 9000), rollup('Step Count (daily)', 9500)]}
+    WebhookDelivery.objects.all().delete()
+    assert _sync(sync_client, person, again).status_code == 201
+
+    measurement_events = [d.payload['data'] for d in WebhookDelivery.objects.all()
+                          if d.payload['data']['resource_type'] == 'omop_core.measurement']
+    assert Measurement.objects.filter(person=person).count() == stored, 'no new row: both entries match the stored one'
+    assert len(measurement_events) == 1, measurement_events
+    assert measurement_events[0]['count'] == 1, measurement_events
+
+
+def test_fhir_sync_collapse_of_stacked_duplicates_is_not_a_patient_event(setup, sync_client):
+    """Collapsing internal stacked rows is bookkeeping. Before the fix it was
+    the only thing the sync path notified about: one event per deleted
+    duplicate, and none for the rows actually ingested."""
+    from omop_core.models import ConditionOccurrence
+
+    org, other, person, user, subscription = setup
+    assert _sync(sync_client, person).status_code == 201
+    original = ConditionOccurrence.objects.get(person=person)
+
+    duplicate = ConditionOccurrence.objects.get(pk=original.pk)
+    duplicate.pk = None
+    duplicate.condition_occurrence_id = original.condition_occurrence_id + 10_000
+    duplicate.save()
+    assert ConditionOccurrence.objects.filter(person=person).count() == 2
+
+    WebhookDelivery.objects.all().delete()
+    assert _sync(sync_client, person).status_code == 201
+
+    assert ConditionOccurrence.objects.filter(person=person).count() == 1, 'the duplicate should be collapsed'
+    payloads = [d.payload for d in WebhookDelivery.objects.all()]
+    assert all(p['data'].get('operation') != 'deleted' for p in payloads), payloads
+    assert len(payloads) == 1 and payloads[0]['data']['count'] == 1
+
+
+def test_write_boundary_is_only_taken_when_webhooks_are_on(settings):
+    """The transaction is not free — a single-row POST runs the patient-record
+    derivation inside it — and it buys nothing with no outbox to protect, so
+    a deployment with webhooks off keeps the behaviour that shipped before."""
+    from contextlib import nullcontext
+
+    from patient_portal.api.views import _webhook_write_atomic
+
+    settings.WEBHOOKS_ENABLED = False
+    assert isinstance(_webhook_write_atomic(), nullcontext)
+    settings.WEBHOOKS_ENABLED = True
+    assert not isinstance(_webhook_write_atomic(), nullcontext)
+
+
+def test_bulk_publish_honours_the_suppressor(setup):
+    from patient_portal.webhooks import publish_patient_bulk_change, suppress_webhook_events
+
+    org, other, person, user, subscription = setup
+    WebhookDelivery.objects.all().delete()
+    with suppress_webhook_events():
+        publish_patient_bulk_change(person.pk, 'measurement', 3)
+    assert not WebhookDelivery.objects.exists()
+    publish_patient_bulk_change(person.pk, 'measurement', 3)
+    assert WebhookDelivery.objects.count() == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_clinical_write_rolls_back_when_the_outbox_insert_fails(setup):
+    """The outbox row has to commit with the row it describes.
+
+    Without a transaction around the DRF write the document is already
+    committed when the receiver runs, so a failing insert would leave a
+    persisted document that no subscriber ever hears about.
+    """
+    org, other, person, user, subscription = setup
+    user.is_staff = True
+    user.save(update_fields=['is_staff'])
+    client = APIClient()
+    client.force_authenticate(user)
+
+    before = PatientDocument.objects.count()
+    with patch('patient_portal.webhooks.WebhookDelivery.objects.create',
+               side_effect=RuntimeError('outbox unavailable')):
+        with pytest.raises(RuntimeError):
+            client.post('/api/v1/documents/', {
+                'person': person.pk, 'doc_type': 'OTHER', 'title': 'Atomic boundary',
+            }, format='json')
+
+    assert PatientDocument.objects.count() == before, 'the document must not survive a failed outbox insert'
+    assert not WebhookDelivery.objects.exists()
+
+    response = client.post('/api/v1/documents/', {
+        'person': person.pk, 'doc_type': 'OTHER', 'title': 'Atomic boundary',
+    }, format='json')
+    assert response.status_code == 201, response.data
+    assert PatientDocument.objects.count() == before + 1
+    assert WebhookDelivery.objects.get().payload['type'] == 'document.received'
 
 
 @pytest.mark.parametrize('operation', ['update', 'delete'])
