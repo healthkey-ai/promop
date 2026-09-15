@@ -18,37 +18,51 @@ from django.core.management.base import BaseCommand
 from omop_core.models import PatientRecord
 
 # Disease-specific base prevalence of TP53 disruption (approximate real-world rates).
-_DISEASE_PREVALENCE = {
-    'Breast Cancer': 0.30,
-    'Chronic Lymphocytic Leukemia': 0.10,
-    'Multiple Myeloma': 0.10,
-    'Follicular Lymphoma': 0.05,
-}
+# Keys are lowercase substrings matched against PatientRecord.disease.
+_DISEASE_PREVALENCE = [
+    ('breast', 0.30),
+    ('lymphocytic leukemia', 0.10),   # CLL
+    ('myeloma', 0.10),
+    ('follicular', 0.05),
+    ('large b-cell', 0.15),           # DLBCL
+    ('mantle cell', 0.15),
+]
 _DEFAULT_PREVALENCE = 0.10
+
+
+def _disease_key(disease):
+    """Return lowercase disease string for matching."""
+    return (disease or '').lower()
+
+
+def _base_prevalence(disease):
+    """Look up base TP53 prevalence by substring match on disease name."""
+    key = _disease_key(disease)
+    for substr, rate in _DISEASE_PREVALENCE:
+        if substr in key:
+            return rate
+    return _DEFAULT_PREVALENCE
 
 
 def _tp53_probability(pr):
     """Return the probability that this patient has TP53 disruption,
     adjusted by disease and clinical indicators."""
-    base = _DISEASE_PREVALENCE.get(pr.disease, _DEFAULT_PREVALENCE)
+    base = _base_prevalence(pr.disease)
+    key = _disease_key(pr.disease)
 
     # CLL-specific boosters
-    if pr.disease == 'Chronic Lymphocytic Leukemia':
-        # Advanced Binet stage (B or C) correlates with TP53 disruption
+    if 'lymphocytic leukemia' in key:
         if getattr(pr, 'binet_stage', None) in ('B', 'C'):
             base += 0.15
-        # BTK inhibitor refractory suggests aggressive biology
         if getattr(pr, 'btk_inhibitor_refractory', None) is True:
             base += 0.15
-        # BCL2 inhibitor refractory
         if getattr(pr, 'bcl2_inhibitor_refractory', None) is True:
             base += 0.10
-        # Richter transformation is strongly associated with TP53
         if getattr(pr, 'richter_transformation', None) is True:
             base += 0.25
 
     # Multiple Myeloma: high beta-2 microglobulin and ISS stage III
-    if pr.disease == 'Multiple Myeloma':
+    if 'myeloma' in key:
         b2m = getattr(pr, 'serum_beta2_microglobulin_level', None)
         if b2m is not None:
             try:
@@ -61,7 +75,7 @@ def _tp53_probability(pr):
             base += 0.10
 
     # Breast Cancer: triple-negative subtype strongly linked to TP53
-    if pr.disease == 'Breast Cancer':
+    if 'breast' in key:
         er = getattr(pr, 'er_status', None)
         pr_status = getattr(pr, 'pr_status', None)
         her2 = getattr(pr, 'her2_status', None)
