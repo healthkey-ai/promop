@@ -385,12 +385,29 @@ describe('LabsTab - new_field', () => {
 
 ### Running Tests
 
+`promop/settings.py` enforces the production configuration when `DEBUG` is not
+true, so passing only `DATABASE_URL` exits before the suite starts — under the
+Django runner with this exact error:
+
+```
+django.core.exceptions.ImproperlyConfigured: Missing required production settings:
+  - SECRET_KEY must be set to a strong random value (current value is the insecure default)
+```
+
+`DEBUG=True` skips that guard and is what CI uses. A real `SECRET_KEY` satisfies
+it instead, but only for `manage.py`: the host checks are skipped for management
+commands and not under pytest, so that route additionally needs `ALLOWED_HOSTS`
+and `CORS_ALLOWED_ORIGINS`. `DEBUG=True` is the simpler of the two, and the
+commands below use it. Worth knowing because the suite does not *fail* without
+it, it does not *start*, so the error reads like a broken environment rather
+than a missing variable.
+
 ```bash
 # Backend tests, Django runner — omop_core + patient_portal
-DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" DEBUG=True \
   .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput
 
-# Backend tests, pytest — the tests/ package (18 files, 166 tests)
+# Backend tests, pytest — the tests/ package
 DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" DEBUG=True \
   .venv/bin/python -m pytest -q
 
@@ -401,7 +418,7 @@ cd frontend && npm test -- --run
 **Both backend suites must be run.** Django's test runner discovers only
 `omop_core.tests` and `patient_portal.tests`; the `tests/` package is
 pytest-based and is invisible to it. CI runs both as of PR #426 — before that
-those 166 tests had never run in CI and sat at 14 failures for some time
+the pytest package had never run in CI and sat at 14 failures for some time
 without anyone noticing.
 
 ### Rule: Feature Branch + PR for Every Code Change
@@ -426,7 +443,7 @@ without anyone noticing.
 After merging a PR that changes code, tests, configuration, dependencies or runtime data into `dev`, immediately run the full backend test suite against the **local test database** (`promop_test`) to catch any integration regressions:
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" DEBUG=True \
   .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput
 ```
 
@@ -434,7 +451,7 @@ DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" \
 
 ```bash
 # One-liner to run everything from the repo root:
-DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" DEBUG=True \
   .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput \
   && (cd frontend && npm test -- --run)
 ```
@@ -483,7 +500,7 @@ psql -p 5433 -U postgres -d template1 \
   -c "CREATE EXTENSION IF NOT EXISTS vector"
 
 # Apply migrations
-DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" DEBUG=True \
   .venv/bin/python manage.py migrate --noinput
 
 # Connect (use @18 bin directly — the system psql binary has an OpenSSL crash

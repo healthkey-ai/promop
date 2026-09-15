@@ -98,7 +98,7 @@ release PR description or release notes.
   `0185`, `0200`) and data migrations (`0156`–`0201`). Confirm one graph leaf:
 
   ```bash
-  DATABASE_URL="postgresql://postgres@localhost:5432/<release_db>" \
+  DATABASE_URL="postgresql://postgres@localhost:5432/<release_db>" DEBUG=True \
     .venv/bin/python manage.py showmigrations omop_core --plan
   ```
 
@@ -132,9 +132,9 @@ these commands at a shared development, staging, or production database.
 - [ ] Prove migrations are generated and graph-consistent before executing:
 
   ```bash
-  DATABASE_URL="postgresql://postgres@localhost:5432/<release_db>" \
+  DATABASE_URL="postgresql://postgres@localhost:5432/<release_db>" DEBUG=True \
     .venv/bin/python manage.py makemigrations --check --dry-run
-  DATABASE_URL="postgresql://postgres@localhost:5432/<release_db>" \
+  DATABASE_URL="postgresql://postgres@localhost:5432/<release_db>" DEBUG=True \
     .venv/bin/python manage.py showmigrations omop_core --plan
   ```
 
@@ -142,7 +142,7 @@ these commands at a shared development, staging, or production database.
   list:
 
   ```bash
-  DATABASE_URL="postgresql://postgres@localhost:5432/<release_db>" \
+  DATABASE_URL="postgresql://postgres@localhost:5432/<release_db>" DEBUG=True \
     .venv/bin/python manage.py migrate omop_core 0200 --noinput
   ```
 
@@ -151,7 +151,7 @@ these commands at a shared development, staging, or production database.
   the bundle/version and loader result:
 
   ```bash
-  DATABASE_URL="postgresql://postgres@localhost:5432/<release_db>" \
+  DATABASE_URL="postgresql://postgres@localhost:5432/<release_db>" DEBUG=True \
     .venv/bin/python manage.py load_athena_vocabularies --path <athena_dir>
   ```
 
@@ -161,9 +161,9 @@ these commands at a shared development, staging, or production database.
   ```bash
   psql -U postgres -d <release_db> -c \
     "SELECT count(*) AS loinc_concepts FROM concept WHERE vocabulary_id = 'LOINC';"
-  DATABASE_URL="postgresql://postgres@localhost:5432/<release_db>" \
+  DATABASE_URL="postgresql://postgres@localhost:5432/<release_db>" DEBUG=True \
     .venv/bin/python manage.py migrate --noinput
-  DATABASE_URL="postgresql://postgres@localhost:5432/<release_db>" \
+  DATABASE_URL="postgresql://postgres@localhost:5432/<release_db>" DEBUG=True \
     .venv/bin/python manage.py showmigrations omop_core --plan
   ```
 
@@ -197,7 +197,7 @@ has no unexpected null, missing, non-LOINC, or duplicate target rows.
 - [ ] Run the backend Django suite against isolated local PostgreSQL:
 
   ```bash
-  DATABASE_URL="postgresql://postgres@localhost:5432/<release_test_db>" \
+  DATABASE_URL="postgresql://postgres@localhost:5432/<release_test_db>" DEBUG=True \
     .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput
   ```
 

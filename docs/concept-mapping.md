@@ -316,12 +316,12 @@ name-based matching, which is functional but loses semantic precision.
 unzip athena_download.zip -d /tmp/athena_vocab
 
 # Run the loader (uses PostgreSQL COPY for fast bulk insert)
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py load_athena_vocabularies \
     --path /tmp/athena_vocab
 
 # Verify
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py shell -c "
 from omop_core.models import Concept
 print('LOINC:', Concept.objects.filter(vocabulary_id='LOINC').count())

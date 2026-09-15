@@ -81,10 +81,6 @@ if IS_DEPLOYED or not DEBUG:
     # them except `check --deploy` (which intentionally validates runtime config)
     # and HTTP servers.  Render jobs run `python manage.py …` in the worker
     # service, which has no RENDER_EXTERNAL_HOSTNAME.
-    # Management commands don't serve HTTP — skip host/origin checks for all of
-    # them except `check --deploy` (which intentionally validates runtime config)
-    # and HTTP servers.  Render jobs run `python manage.py …` in the worker
-    # service, which has no RENDER_EXTERNAL_HOSTNAME.
     _http_commands = {'runserver', 'runserver_plus', 'run_gunicorn'}
     _is_manage_py = os.path.basename(_sys.argv[0] if _sys.argv else '') == 'manage.py'
     _no_http = _is_manage_py and (
