@@ -1,0 +1,15 @@
+name: Security review updates
+
+on:
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions: {}
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      # This event uses the PR workflow. It has no token permissions and checks
+      # out no code; workflow_run evaluates the review from the trusted branch.
+      - run: 'true'
