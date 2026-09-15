@@ -1,39 +1,45 @@
 # Code owners for healthkey-ai/promop.
 #
-# Purpose is SOC2 CC8.1 change management: an auditor asks who reviews changes to
-# security-relevant code, and this file is the answer that GitHub enforces rather
-# than a convention people remember. Paths below are ordered least- to
+# Purpose is SOC2 CC8.1 change management: declare who should review changes to
+# security-relevant code. The Security review status requires approval from
+# @larsburgess for security-related changes once rollout is complete. Paths below are ordered least- to
 # most-specific; the LAST matching pattern wins, so the security paths at the
 # bottom override the catch-all at the top.
 #
-# This file only requests review. It becomes a control once branch protection on
-# `dev` and `main` requires review from code owners — see issue #752.
+# This file routes review; it does not itself enforce approval. The target
+# branch's copy is authoritative, and authors cannot approve their own PRs.
+# Security review scope and evidence: docs/soc2/change-management.md.
 
 # Default owner for everything not matched below.
 *                                   @adamblum
 
 # ── Authorization and identity ────────────────────────────────────────────────
 # Every P0 finding in the security audit lived in one of these paths.
-/omop_core/authorization.py         @adamblum
-/patient_portal/api/permissions.py  @adamblum
-/patient_portal/api/authentication.py  @adamblum
-/patient_portal/api/providers/      @adamblum
-/patient_portal/services.py         @adamblum
-/patient_portal/api/break_glass.py  @adamblum
+/omop_core/authorization.py         @larsburgess
+/patient_portal/api/permissions.py  @larsburgess
+/patient_portal/api/authentication.py  @larsburgess
+/patient_portal/api/providers/      @larsburgess
+/patient_portal/services.py         @larsburgess
+/patient_portal/api/break_glass.py  @larsburgess
 
 # ── Deployment, configuration and secrets ─────────────────────────────────────
 # Changes here alter what runs in production or what guards it.
-/promop/settings.py                 @adamblum
-/patient_portal/checks.py           @adamblum
-/start.sh                           @adamblum
-/Dockerfile                         @adamblum
-/Dockerfile.gcp                     @adamblum
-/requirements.txt                   @adamblum
+/promop/settings.py                 @larsburgess
+/ctomop/settings.py                 @larsburgess
+/patient_portal/checks.py           @larsburgess
+/start.sh                           @larsburgess
+/Dockerfile                         @larsburgess
+/Dockerfile.gcp                     @larsburgess
+/requirements.txt                   @larsburgess
 
 # ── CI and the security gates themselves ──────────────────────────────────────
 # A change that weakens a gate should be as visible as a change that trips it.
-/.github/                           @adamblum
-/.gitleaks.toml                     @adamblum
-/.bandit-baseline.json              @adamblum
+/.github/                           @larsburgess
+/.gitleaks.toml                     @larsburgess
+/.bandit-baseline.json              @larsburgess
 
-/ctomop/settings.py                 @adamblum
+# ── Ownership, Render infrastructure, and change-management evidence ──────────
+/CODEOWNERS                         @larsburgess
+/render.yaml                        @larsburgess
+/docs/soc2/                         @larsburgess
+/scripts/capture_change_management_evidence.py  @larsburgess
