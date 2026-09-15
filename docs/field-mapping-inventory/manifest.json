@@ -29,27 +29,27 @@
         "frontend/src/components/PatientInfo/tabs/BehaviorTab.tsx": "252cc1e2c142d66caf94ef1701b8048c11c4c648160ad90c4d7625eb45268853",
         "frontend/src/components/PatientInfo/tabs/BloodTab.tsx": "b87f4ab6baae52865adeeaa838ced7aa7aa1f8c5e8ec09cb70900107d27debed",
         "frontend/src/components/PatientInfo/tabs/ClinicalSummaryTab.tsx": "a47cc397443a78b24d2698cb0838e7a215824e2499dfdab25c0c5eb11dafe08f",
-        "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
-        "frontend/src/components/PatientInfo/tabs/GeneralTab.tsx": "edf146208f4e4645fa907f935a7c4c1bb9c1b4d5721a17c6fe151d66cb7d9ac4",
+        "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
+        "frontend/src/components/PatientInfo/tabs/GeneralTab.tsx": "6877a5ea610b7a671124bc71a1e450e60b040057d891902ffb070d2245c0e22c",
         "frontend/src/components/PatientInfo/tabs/GenomicsTab.tsx": "383e4b5f0dee9b449ec6a8a9e63a9dfcb1f7efa165c4bf2ef9586abbe4492ee7",
-        "frontend/src/components/PatientInfo/tabs/LabsTab.tsx": "615859ee4a9d80d41c87aef6c309a3476623bb87528b886b8a68bd075205f194",
+        "frontend/src/components/PatientInfo/tabs/LabsTab.tsx": "1a5b75f9c8c91ec19df39ed89abd74f5518009202ef6262fb3e73775f9ee8e87",
         "frontend/src/components/PatientInfo/tabs/LegacyCytogeneticHistory.tsx": "1d7bb4452d9a4f5d174aa85da0bc4b9422ff2a09c00ee6cb314a846e0be5abf9",
         "frontend/src/components/PatientInfo/tabs/Step5.roundtrip.itest.tsx": "d7ade56804c3cff1f2638f4af4e679c0071a33619f72a23505f31ca28bf44924",
         "frontend/src/components/PatientInfo/tabs/TreatmentTab.tsx": "95ced60557f772d5cbc1bc18ac39a450000cb53f7c75e2f7baa88890be677c6a",
         "frontend/src/components/PatientInfo/tabs/WearableTab.roundtrip.itest.tsx": "2db01883c8a062f4a4a55d46291d0f94de9e9664b93c914a4aeb89f471a33f79",
         "frontend/src/components/PatientInfo/tabs/WearableTab.tsx": "5fb8a4119093a52bfa9bf03307dac108645bc4118d74e5d0f0b9930787f3344f",
         "frontend/src/components/PatientInfo/utils.ts": "b5631d4c62194df11d490f0ec2a6b96004a29ec5bc97c3fd6ecc69e4b8aafa9d",
-        "omop_core/data/field_inventory_frontend_providers.json": "6b0e40f55cac6cf21ecb8b946d57abf3bb3fd0fb18037b60840972a8cf79866b",
+        "omop_core/data/field_inventory_frontend_providers.json": "38639e58702a2f35fa33f4799eee30129f90b6595dd84f110f90991d30b1321d",
         "omop_core/data/genomics_catalog_v1.json": "38b688f271225c07fd43d4609c576e8abe1dd45f17803a5643b8aa024034bf83",
         "omop_core/management/commands/export_cancerbot_reference_options.py": "7f02d74d67345501b30a31a381122abeac3e7e49185cedf70c52d191f05f7973",
-        "omop_core/management/commands/export_field_mapping_inventory.py": "4c4829a46126ac90deebf524f3f2f1e792fda5f38d138595069f89bc132cc5e6",
-        "omop_core/management/commands/import_field_inventory_reference_options.py": "205e14cd6e13f165ea1f4ed9eb6ca83f4250b77ed2aba6a215bc9fd112073591",
+        "omop_core/management/commands/export_field_mapping_inventory.py": "aad88c494eaf218277a9aa93b77cc38376c01baff6b95850168b48c872d5dd26",
+        "omop_core/management/commands/import_field_inventory_reference_options.py": "379ddb7c08139b876924f0d20b5c141ed68979b5aaaa35b2e81780ce7310c753",
         "omop_core/models.py": "d276f2e929ba815c8b0a5eed9ad30bc4921258d136eb04eb59c68e7ef402a573",
         "omop_core/services/cancerbot_reference_options.py": "c7a87ab88f784835d1b2ba7ff1afeb474e37fe32510beabad5dbb0235905ba2c",
         "omop_core/services/cancerbot_static_options.py": "356bd0c683db12d89c8d94bc93bf8df4aa19a6b0a5a4746f35ecf035c72cd030",
         "omop_core/services/demographics.py": "3cc6cc4f658cff3b82dae4e71d8268a56aaf713cc13b7d360923a4b044966bb4",
         "omop_core/services/field_descriptor.py": "cdc0630086fa3d46796598d939da9d9db9c8bdaef57f74ff090f4a23cafc30fb",
-        "omop_core/services/field_inventory.py": "dfe7d5c10e11f0bf78d002ad224c0c7619553ea06d20629b2bdab93cd4b95697",
+        "omop_core/services/field_inventory.py": "b2da92d988335492e5d0b2cfcb7bc3968ff8081c2372431d221b31be89cf190a",
         "omop_core/services/field_inventory_contracts.py": "42d7026f0f1ffa16a35794be372f9ccee0e3219016206ddee6346503249fac0c",
         "omop_core/services/field_inventory_crosswalk.py": "f5ccdcd00a9c603d16daf42d40f3a64064e73db2e228148d6a9d723a55529ea9",
         "omop_core/services/field_inventory_frontend.py": "0c037f032fb03368cc9325cbf13c535d0fd0b9499c160bab0be267d659a6271b",
@@ -58,10 +58,10 @@
         "omop_core/services/field_inventory_history_seeds.py": "6f9f5ccb28b79f10ed4860be271fb0c00c1788d1228e095e88774ebf93a0d2c2",
         "omop_core/services/field_inventory_priority.py": "27f323cadc8ffbede4a3900352fd60bdaa27be00bb1c956cd5c7bc3677281e1a",
         "omop_core/services/genomics_catalog.py": "075041c212eebebaa7253711d403d05fc4dd59d25fe1ff4a0bd332cf00a01ff7",
-        "omop_core/services/mappings.py": "5b72bcc4c23f336a1f4b603d1ac0f70013e1c3c57c5e4e8a24c4064f7c9b1b01",
-        "omop_core/services/provenance_registry.py": "71a7f9a64b52460356ec4564b61c88399ae4e11fbcae74f6fa42e6e6d2ec40d6",
+        "omop_core/services/mappings.py": "e66e52339894f95b12a8d76c6162dd5440911772b389dc7df1373c8ee12b7133",
+        "omop_core/services/provenance_registry.py": "5477c9be09a2d5139f3874cc31c34632160c36b3e4e6f6b0f32613569aac49f8",
         "omop_core/services/treatment_catalog.py": "c949c9a725d8b68caf176bc0e645d3bb3a4fab79e5fa7cd34ed7b0ef2a711183",
-        "omop_core/services/write_descriptor.py": "574d57656fef8bfbfd5c45f7976c784239cac77d5309f162d61874646ef9641c",
+        "omop_core/services/write_descriptor.py": "c5f1103dffe95f7e7da569c0dcba5ce056ad76560853e7d1ddcc1ed414b07b8f",
         "scripts/inventory-frontend-options.cjs": "766ac92e1df3872295694e289d8444f7cdb6ad822227cd1da5a362c6afeb90fe"
       }
     },
@@ -403281,7 +403281,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_histologic_type",
@@ -403353,7 +403353,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_histologic_type",
@@ -403423,7 +403423,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_histologic_type",
@@ -403493,7 +403493,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_histologic_type",
@@ -403566,7 +403566,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_histologic_type",
@@ -403638,7 +403638,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_histologic_type",
@@ -403708,7 +403708,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_histologic_type",
@@ -403778,7 +403778,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_histologic_type",
@@ -403848,7 +403848,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_histologic_type",
@@ -403921,7 +403921,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_histologic_type",
@@ -403993,7 +403993,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_histologic_type",
@@ -404063,7 +404063,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_histologic_type",
@@ -404133,7 +404133,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_myeloma_type",
@@ -404203,7 +404203,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_myeloma_type",
@@ -404273,7 +404273,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_myeloma_type",
@@ -404343,7 +404343,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_myeloma_type",
@@ -404413,7 +404413,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_myeloma_type",
@@ -404483,7 +404483,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_myeloma_type",
@@ -404553,7 +404553,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_myeloma_type",
@@ -404623,7 +404623,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_myeloma_type",
@@ -404693,7 +404693,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_myeloma_type",
@@ -404763,7 +404763,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_myeloma_type",
@@ -404833,7 +404833,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_myeloma_type",
@@ -404903,7 +404903,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_myeloma_type",
@@ -404973,7 +404973,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_sct_eligibility",
@@ -405043,7 +405043,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_sct_eligibility",
@@ -405113,7 +405113,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_sct_eligibility",
@@ -405183,7 +405183,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_sct_eligibility",
@@ -405253,7 +405253,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_stem_cell_transplant",
@@ -405323,7 +405323,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_stem_cell_transplant",
@@ -405393,7 +405393,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_stem_cell_transplant",
@@ -405489,7 +405489,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_post_transformation_outcome",
@@ -405559,7 +405559,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_post_transformation_outcome",
@@ -405629,7 +405629,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_post_transformation_outcome",
@@ -405699,7 +405699,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_post_transformation_outcome",
@@ -405771,7 +405771,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_post_transformation_outcome",
@@ -405843,7 +405843,7 @@
         {
           "method": "reviewed_source_provider",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reference_table": "vocabulary_post_transformation_outcome",
@@ -575371,10 +575371,10 @@
       "frontend/src/components/PatientInfo/tabs/BehaviorTab.tsx": "252cc1e2c142d66caf94ef1701b8048c11c4c648160ad90c4d7625eb45268853",
       "frontend/src/components/PatientInfo/tabs/BloodTab.tsx": "b87f4ab6baae52865adeeaa838ced7aa7aa1f8c5e8ec09cb70900107d27debed",
       "frontend/src/components/PatientInfo/tabs/ClinicalSummaryTab.tsx": "a47cc397443a78b24d2698cb0838e7a215824e2499dfdab25c0c5eb11dafe08f",
-      "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
-      "frontend/src/components/PatientInfo/tabs/GeneralTab.tsx": "edf146208f4e4645fa907f935a7c4c1bb9c1b4d5721a17c6fe151d66cb7d9ac4",
+      "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
+      "frontend/src/components/PatientInfo/tabs/GeneralTab.tsx": "6877a5ea610b7a671124bc71a1e450e60b040057d891902ffb070d2245c0e22c",
       "frontend/src/components/PatientInfo/tabs/GenomicsTab.tsx": "383e4b5f0dee9b449ec6a8a9e63a9dfcb1f7efa165c4bf2ef9586abbe4492ee7",
-      "frontend/src/components/PatientInfo/tabs/LabsTab.tsx": "615859ee4a9d80d41c87aef6c309a3476623bb87528b886b8a68bd075205f194",
+      "frontend/src/components/PatientInfo/tabs/LabsTab.tsx": "1a5b75f9c8c91ec19df39ed89abd74f5518009202ef6262fb3e73775f9ee8e87",
       "frontend/src/components/PatientInfo/tabs/LegacyCytogeneticHistory.tsx": "1d7bb4452d9a4f5d174aa85da0bc4b9422ff2a09c00ee6cb314a846e0be5abf9",
       "frontend/src/components/PatientInfo/tabs/Step5.roundtrip.itest.tsx": "d7ade56804c3cff1f2638f4af4e679c0071a33619f72a23505f31ca28bf44924",
       "frontend/src/components/PatientInfo/tabs/TreatmentTab.tsx": "95ced60557f772d5cbc1bc18ac39a450000cb53f7c75e2f7baa88890be677c6a",
@@ -576998,7 +576998,7 @@
           "expression": "histOptions",
           "kind": "lookup_titles",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reason": "useVocabulary title values when the reference result is nonempty, otherwise the stated fallback; ClinicalField descriptor options have final precedence.",
@@ -577312,7 +577312,7 @@
           "expression": "txOutcomeOptions.length ? txOutcomeOptions.map((o: { value: string }) => o.value) : []",
           "kind": "lookup_titles",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reason": "useVocabulary title values when the reference result is nonempty, otherwise the stated fallback; ClinicalField descriptor options have final precedence.",
@@ -577386,7 +577386,7 @@
           "expression": "myelomaTypeOptions.length ? myelomaTypeOptions.map((o: { value: string }) => o.value) : MYELOMA_TYPE_OPTIONS",
           "kind": "lookup_titles",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reason": "useVocabulary title values when the reference result is nonempty, otherwise the stated fallback; ClinicalField descriptor options have final precedence.",
@@ -577486,7 +577486,7 @@
           "expression": "sctTypeOptions.length ? sctTypeOptions.map((o: { value: string }) => o.value) : STEM_CELL_TRANSPLANT_OPTIONS",
           "kind": "lookup_titles",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reason": "useVocabulary title values when the reference result is nonempty, otherwise the stated fallback; ClinicalField descriptor options have final precedence.",
@@ -577527,7 +577527,7 @@
           "expression": "sctEligibilityOptions.length ? sctEligibilityOptions.map((o: { value: string }) => o.value) : SCT_ELIGIBILITY_OPTIONS",
           "kind": "lookup_titles",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+            "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
             "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
           },
           "reason": "useVocabulary title values when the reference result is nonempty, otherwise the stated fallback; ClinicalField descriptor options have final precedence.",
@@ -577959,7 +577959,7 @@
           "expression": "extra.options",
           "kind": "helper_calls",
           "sources": {
-            "frontend/src/components/PatientInfo/tabs/GeneralTab.tsx": "edf146208f4e4645fa907f935a7c4c1bb9c1b4d5721a17c6fe151d66cb7d9ac4"
+            "frontend/src/components/PatientInfo/tabs/GeneralTab.tsx": "6877a5ea610b7a671124bc71a1e450e60b040057d891902ffb070d2245c0e22c"
           },
           "reason": "The field helper passes literal call-site name/type/options to ClinicalField. Call sites are enumerated separately by the TypeScript parser.",
           "status": "source_provider_accounted_for",
@@ -578630,7 +578630,7 @@
         "expression": "extra.options",
         "kind": "helper_calls",
         "sources": {
-          "frontend/src/components/PatientInfo/tabs/GeneralTab.tsx": "edf146208f4e4645fa907f935a7c4c1bb9c1b4d5721a17c6fe151d66cb7d9ac4"
+          "frontend/src/components/PatientInfo/tabs/GeneralTab.tsx": "6877a5ea610b7a671124bc71a1e450e60b040057d891902ffb070d2245c0e22c"
         },
         "reason": "The field helper passes literal call-site name/type/options to ClinicalField. Call sites are enumerated separately by the TypeScript parser.",
         "status": "source_provider_accounted_for",
@@ -578642,7 +578642,7 @@
         "expression": "histOptions",
         "kind": "lookup_titles",
         "sources": {
-          "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+          "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
           "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
         },
         "reason": "useVocabulary title values when the reference result is nonempty, otherwise the stated fallback; ClinicalField descriptor options have final precedence.",
@@ -578672,7 +578672,7 @@
         "expression": "txOutcomeOptions.length ? txOutcomeOptions.map((o: { value: string }) => o.value) : []",
         "kind": "lookup_titles",
         "sources": {
-          "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+          "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
           "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
         },
         "reason": "useVocabulary title values when the reference result is nonempty, otherwise the stated fallback; ClinicalField descriptor options have final precedence.",
@@ -578696,7 +578696,7 @@
         "expression": "myelomaTypeOptions.length ? myelomaTypeOptions.map((o: { value: string }) => o.value) : MYELOMA_TYPE_OPTIONS",
         "kind": "lookup_titles",
         "sources": {
-          "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+          "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
           "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
         },
         "reason": "useVocabulary title values when the reference result is nonempty, otherwise the stated fallback; ClinicalField descriptor options have final precedence.",
@@ -578726,7 +578726,7 @@
         "expression": "sctTypeOptions.length ? sctTypeOptions.map((o: { value: string }) => o.value) : STEM_CELL_TRANSPLANT_OPTIONS",
         "kind": "lookup_titles",
         "sources": {
-          "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+          "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
           "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
         },
         "reason": "useVocabulary title values when the reference result is nonempty, otherwise the stated fallback; ClinicalField descriptor options have final precedence.",
@@ -578747,7 +578747,7 @@
         "expression": "sctEligibilityOptions.length ? sctEligibilityOptions.map((o: { value: string }) => o.value) : SCT_ELIGIBILITY_OPTIONS",
         "kind": "lookup_titles",
         "sources": {
-          "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+          "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "95e97061f0becba9132c7d91cb766f69c3fd62d94ba905b2a0104b78292b5e01",
           "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
         },
         "reason": "useVocabulary title values when the reference result is nonempty, otherwise the stated fallback; ClinicalField descriptor options have final precedence.",
