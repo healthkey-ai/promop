@@ -76,15 +76,17 @@ class Command(BaseCommand):
         # store any redirect URI it is given — including a plaintext http:// one
         # under the https-only default. Ask the validator first, so the supported
         # provisioning path enforces what docs/security-settings.md promises.
-        candidate = Application(
-            name=name,
-            user=owner,
-            client_type=Application.CLIENT_PUBLIC,
-            authorization_grant_type=Application.GRANT_AUTHORIZATION_CODE,
-            redirect_uris=redirect_uris,
-            client_secret='',
-            skip_authorization=False,
-        )
+        defaults = {
+            'name': name,
+            'user': owner,
+            'client_type': Application.CLIENT_PUBLIC,
+            'authorization_grant_type': Application.GRANT_AUTHORIZATION_CODE,
+            'redirect_uris': redirect_uris,
+            # Public clients do not have a secret; PKCE is required instead
+            'client_secret': '',
+            'skip_authorization': False,
+        }
+        candidate = Application(**defaults)
         # The toolkit's own default for an absent key; see patient_portal/checks.py.
         allowed = settings.OAUTH2_PROVIDER.get(
             'ALLOWED_REDIRECT_URI_SCHEMES', ['http', 'https'])
@@ -105,18 +107,9 @@ class Command(BaseCommand):
                 'keep that override out of staging and production.'
             ) from exc
 
+        # Same dict the candidate was validated from, so the two cannot drift.
         app, created = Application.objects.update_or_create(
-            client_id=client_id,
-            defaults={
-                'name': name,
-                'user': owner,
-                'client_type': Application.CLIENT_PUBLIC,
-                'authorization_grant_type': Application.GRANT_AUTHORIZATION_CODE,
-                'redirect_uris': redirect_uris,
-                # Public clients do not have a secret; PKCE is required instead
-                'client_secret': '',
-                'skip_authorization': False,
-            },
+            client_id=client_id, defaults=defaults,
         )
 
         verb = 'Created' if created else 'Updated'
