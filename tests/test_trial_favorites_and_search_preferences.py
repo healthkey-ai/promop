@@ -6,7 +6,10 @@ deliberately stateless about patients, and the remote runs in two different
 hosts, so per-host storage would mean two implementations and no cross-device
 consistency.
 """
+import threading
+
 import pytest
+from django.db import connection, connections
 from rest_framework.test import APIClient
 
 from omop_core.models import PatientTrialEnrollment, TrialSearchPreferences
@@ -369,6 +372,720 @@ class TestPreferencesAreReplacedNotMerged:
         # too and a bare status code cannot tell the two apart — nor tell
         # that `allow_null=False` is still what refuses this.
         assert 'preferences' in response.json()
+
+
+class TestIfMatchPrecondition:
+    """Opting out of last-writer-wins (#1312).
+
+    Replacing the whole object obliges a client to read-modify-write, and a
+    read-modify-write with no precondition is a lost update: two writers
+    each read the same set, each merge their own edit over it, and the
+    second erases the first one's key with nobody seeing an error. One
+    client implementation is not one writer — two tabs instantiate it
+    twice.
+
+    `If-Match` is opt-in: absent, the write is unconditional, because every
+    client written before this sent no header and must keep working.
+    """
+
+    def url(self, person, action='upsert'):
+        return f'/api/v1/trial-search-preferences/{action}/?person_id={person.pk}'
+
+    def seed(self, client, person, preferences):
+        """Write an initial set and hand back the row's current ETag."""
+        response = client.patch(
+            self.url(person), {'preferences': preferences}, format='json'
+        )
+        assert response.status_code == 200
+        assert response['ETag']
+        return response['ETag']
+
+    def test_a_matching_etag_lets_the_write_through(self, client, person):
+        etag = self.seed(client, person, {'searchTitle': 'myeloma'})
+        response = client.patch(
+            self.url(person),
+            {'preferences': {'searchTitle': 'myeloma', 'phase': 'PHASE3'}},
+            format='json',
+            HTTP_IF_MATCH=etag,
+        )
+        assert response.status_code == 200
+        assert TrialSearchPreferences.objects.get(person=person).preferences == {
+            'searchTitle': 'myeloma',
+            'phase': 'PHASE3',
+        }
+
+    def test_a_stale_etag_is_refused_and_writes_nothing(self, client, person):
+        """The lost update, as the two tabs actually produce it.
+
+        Tab A reads, tab B writes, then tab A saves what it was holding.
+        Without the header A's stale set replaces B's; with it, A is told.
+        """
+        stale = self.seed(client, person, {'searchTitle': 'myeloma'})
+        other_tab = client.patch(
+            self.url(person), {'preferences': {'sponsor': 'Acme'}}, format='json'
+        )
+        assert other_tab.status_code == 200
+
+        response = client.patch(
+            self.url(person),
+            {'preferences': {'searchTitle': 'myeloma', 'phase': 'PHASE3'}},
+            format='json',
+            HTTP_IF_MATCH=stale,
+        )
+        assert response.status_code == 412
+        # The refusal has to be total: a 412 that still wrote would be the
+        # lost update wearing an error code.
+        assert TrialSearchPreferences.objects.get(person=person).preferences == {
+            'sponsor': 'Acme'
+        }
+
+    def test_a_refusal_carries_the_current_etag_for_the_retry(self, client, person):
+        """So re-read-and-retry does not need a round trip to learn it."""
+        stale = self.seed(client, person, {'searchTitle': 'myeloma'})
+        current = self.seed(client, person, {'sponsor': 'Acme'})
+
+        refused = client.patch(
+            self.url(person), {'preferences': {'phase': 'PHASE3'}},
+            format='json', HTTP_IF_MATCH=stale,
+        )
+        assert refused.status_code == 412
+        assert refused['ETag'] == current
+        assert refused.json()['etag'] == current
+
+        retried = client.patch(
+            self.url(person), {'preferences': {'phase': 'PHASE3'}},
+            format='json', HTTP_IF_MATCH=refused['ETag'],
+        )
+        assert retried.status_code == 200
+
+    def test_no_header_still_writes_unconditionally(self, client, person):
+        """The half that must not change: every client today sends none."""
+        self.seed(client, person, {'searchTitle': 'myeloma'})
+        response = client.patch(
+            self.url(person), {'preferences': {'sponsor': 'Acme'}}, format='json'
+        )
+        assert response.status_code == 200
+        assert TrialSearchPreferences.objects.get(person=person).preferences == {
+            'sponsor': 'Acme'
+        }
+
+    def test_the_etag_is_the_updated_at_a_list_read_hands_back(self, client, person):
+        """The whole reason the ETag is not a hash.
+
+        Clients read this endpoint as a list, and a list response carries
+        no ETag header. If the value could not be rebuilt from the body,
+        every writer would have to switch to a detail read first.
+        """
+        self.seed(client, person, {'searchTitle': 'myeloma'})
+        listed = client.get(
+            f'/api/v1/trial-search-preferences/?person_id={person.pk}'
+        )
+        assert listed.status_code == 200
+        row = rows(listed)[0]
+        built = '"{}"'.format(row['updated_at'])
+
+        response = client.patch(
+            self.url(person), {'preferences': {'phase': 'PHASE3'}},
+            format='json', HTTP_IF_MATCH=built,
+        )
+        assert response.status_code == 200
+
+    def test_a_detail_read_carries_the_etag_as_a_header(self, client, person):
+        self.seed(client, person, {'searchTitle': 'myeloma'})
+        row = TrialSearchPreferences.objects.get(person=person)
+        response = client.get(f'/api/v1/trial-search-preferences/{row.pk}/')
+        assert response.status_code == 200
+        assert response['ETag'] == self._etag_of(row)
+
+    @staticmethod
+    def _etag_of(row):
+        from rest_framework import serializers as drf
+
+        row.refresh_from_db()
+        return '"{}"'.format(drf.DateTimeField().to_representation(row.updated_at))
+
+    def test_a_star_requires_a_row_and_does_not_create_one(self, client, person):
+        """`If-Match: *` asks "provided there is a row" — there is not.
+
+        The order matters here: were the row created first, the `*` would
+        be satisfied by the row this very request produced, which would
+        tell a client its stale view was current. So a refused precondition
+        must also leave no row behind.
+        """
+        response = client.patch(
+            self.url(person), {'preferences': {'phase': 'PHASE3'}},
+            format='json', HTTP_IF_MATCH='*',
+        )
+        assert response.status_code == 412
+        assert not TrialSearchPreferences.objects.filter(person=person).exists()
+
+    def test_a_star_matches_once_a_row_exists(self, client, person):
+        self.seed(client, person, {'searchTitle': 'myeloma'})
+        response = client.patch(
+            self.url(person), {'preferences': {'phase': 'PHASE3'}},
+            format='json', HTTP_IF_MATCH='*',
+        )
+        assert response.status_code == 200
+
+    def test_a_weak_validator_never_satisfies_if_match(self, client, person):
+        """RFC 9110 §13.1.1: `If-Match` takes the STRONG comparison.
+
+        This module's other matcher, `_etag_matches`, strips `W/` before
+        comparing because `If-None-Match` on a GET is allowed to. Reusing
+        it here would let a weak validator authorize a write.
+        """
+        etag = self.seed(client, person, {'searchTitle': 'myeloma'})
+        response = client.patch(
+            self.url(person), {'preferences': {'phase': 'PHASE3'}},
+            format='json', HTTP_IF_MATCH='W/' + etag,
+        )
+        assert response.status_code == 412
+
+    def test_one_of_several_offered_etags_is_enough(self, client, person):
+        """A client that holds two candidate versions may offer both."""
+        stale = self.seed(client, person, {'searchTitle': 'myeloma'})
+        current = self.seed(client, person, {'sponsor': 'Acme'})
+        response = client.patch(
+            self.url(person), {'preferences': {'phase': 'PHASE3'}},
+            format='json', HTTP_IF_MATCH=f'{stale}, {current}',
+        )
+        assert response.status_code == 200
+
+    def test_an_unparseable_header_is_refused_not_ignored(self, client, person):
+        """A client that asked for a precondition gets one, or an error.
+
+        Treating a header we cannot read as "no header" would silently
+        downgrade a conditional write to an unconditional one — the exact
+        outcome the client used the header to avoid.
+        """
+        self.seed(client, person, {'searchTitle': 'myeloma'})
+        response = client.patch(
+            self.url(person), {'preferences': {'phase': 'PHASE3'}},
+            format='json', HTTP_IF_MATCH='not-a-valid-etag',
+        )
+        assert response.status_code == 412
+
+    def test_reset_honours_the_precondition_too(self, client, person):
+        stale = self.seed(client, person, {'searchTitle': 'myeloma'})
+        assert self.seed(client, person, {'sponsor': 'Acme'})
+        refused = client.patch(
+            self.url(person, 'reset'), {}, format='json', HTTP_IF_MATCH=stale
+        )
+        assert refused.status_code == 412
+        assert TrialSearchPreferences.objects.get(person=person).preferences == {
+            'sponsor': 'Acme'
+        }
+
+    def test_the_detail_route_honours_the_precondition_too(self, client, person):
+        """Else a second writer routes around the guarantee entirely."""
+        stale = self.seed(client, person, {'searchTitle': 'myeloma'})
+        assert self.seed(client, person, {'sponsor': 'Acme'})
+        row = TrialSearchPreferences.objects.get(person=person)
+        refused = client.patch(
+            f'/api/v1/trial-search-preferences/{row.pk}/',
+            {'preferences': {'phase': 'PHASE3'}},
+            format='json',
+            HTTP_IF_MATCH=stale,
+        )
+        assert refused.status_code == 412
+        assert TrialSearchPreferences.objects.get(person=person).preferences == {
+            'sponsor': 'Acme'
+        }
+
+
+class TestIfMatchGapsAndFirstWrite:
+    """The cases the first cut of #1312 left unpinned, and the first write.
+
+    Split from `TestIfMatchPrecondition` only to keep that class about the
+    refusals; these are the acceptances, the no-row shapes, and
+    `If-None-Match`.
+    """
+
+    def url(self, person, action='upsert'):
+        return f'/api/v1/trial-search-preferences/{action}/?person_id={person.pk}'
+
+    def seed(self, client, person, preferences):
+        response = client.patch(
+            self.url(person), {'preferences': preferences}, format='json'
+        )
+        assert response.status_code == 200
+        return response['ETag']
+
+    def test_a_successful_write_returns_a_different_etag(self, client, person):
+        """Else a client would retry with the one it just spent."""
+        first = self.seed(client, person, {'searchTitle': 'myeloma'})
+        second = client.patch(
+            self.url(person), {'preferences': {'phase': 'PHASE3'}},
+            format='json', HTTP_IF_MATCH=first,
+        )
+        assert second.status_code == 200
+        assert second['ETag'] != first
+        assert second['ETag'] == '"{}"'.format(second.json()['updated_at'])
+
+    def test_a_specific_etag_against_no_row_has_no_etag_to_return(
+        self, client, person
+    ):
+        """The 412 shape a client is likeliest to crash on.
+
+        There is no row, so there is no entity-tag — the header is absent
+        and the body's `etag` is null. A generated client that reads
+        `response.headers['ETag']` on every 412 breaks here, which is why
+        the schema's 412 description calls this case out separately.
+        """
+        response = client.patch(
+            self.url(person), {'preferences': {'phase': 'PHASE3'}},
+            format='json', HTTP_IF_MATCH='"2026-01-01T00:00:00Z"',
+        )
+        assert response.status_code == 412
+        assert 'ETag' not in response
+        assert response.json()['etag'] is None
+        assert not TrialSearchPreferences.objects.filter(person=person).exists()
+
+    def test_reset_accepts_a_matching_etag(self, client, person):
+        etag = self.seed(client, person, {'searchTitle': 'myeloma'})
+        response = client.patch(
+            self.url(person, 'reset'), {}, format='json', HTTP_IF_MATCH=etag
+        )
+        assert response.status_code == 200
+        assert TrialSearchPreferences.objects.get(person=person).preferences == {}
+        assert response['ETag'] != etag
+
+    def test_the_detail_route_accepts_a_matching_etag(self, client, person):
+        etag = self.seed(client, person, {'searchTitle': 'myeloma'})
+        row = TrialSearchPreferences.objects.get(person=person)
+        response = client.patch(
+            f'/api/v1/trial-search-preferences/{row.pk}/',
+            {'preferences': {'sponsor': 'Acme'}},
+            format='json',
+            HTTP_IF_MATCH=etag,
+        )
+        assert response.status_code == 200
+        row.refresh_from_db()
+        assert row.preferences == {'sponsor': 'Acme'}
+
+    def test_a_star_among_other_tokens_is_not_a_wildcard(self, client, person):
+        """RFC 9110: `If-Match = "*" / #entity-tag` — `*` is not a list member.
+
+        Honouring it inside a list would turn a header that is malformed
+        into one that writes, which is the dangerous direction. Refusing it
+        in the wrong PLACE is the other one: decided at comparison time
+        instead of as a syntax error, `"<current>", *` reaches the "row
+        changed" answer, so the 412 tells a client whose row did not change
+        that it did — and hands back the client's own tag as proof, which
+        makes re-read-and-retry loop forever.
+        """
+        etag = self.seed(client, person, {'searchTitle': 'myeloma'})
+        for header in ('"nope", *', f'{etag}, *', f'*, {etag}', '*, *'):
+            response = client.patch(
+                self.url(person), {'preferences': {'phase': 'PHASE3'}},
+                format='json', HTTP_IF_MATCH=header,
+            )
+            assert response.status_code == 412, header
+            assert 'could not be read' in response.json()['error'], header
+        assert TrialSearchPreferences.objects.get(person=person).preferences == {
+            'searchTitle': 'myeloma'
+        }
+
+    def test_the_detail_id_is_in_the_payload_a_client_reads(self, client, person):
+        """Without it the detail routes are documented but unreachable.
+
+        The read every client uses is the list; if the id is not in it,
+        there is no way to learn the pk that `/{id}/` needs.
+        """
+        self.seed(client, person, {'searchTitle': 'myeloma'})
+        listed = client.get(
+            f'/api/v1/trial-search-preferences/?person_id={person.pk}'
+        )
+        row = rows(listed)[0]
+        assert 'id' in row
+        assert client.get(
+            f'/api/v1/trial-search-preferences/{row["id"]}/'
+        ).status_code == 200
+
+    def test_a_rejected_first_write_leaves_no_row_to_block_the_retry(
+        self, client, person
+    ):
+        """A 400 is not a write, and must not act like one.
+
+        `get_or_create` runs before the payload is validated, so without a
+        transaction a rejected body committed an empty row — and every
+        later `If-None-Match: *`, from this tab or any other, then 412'd
+        forever against a row nobody meant to create. Same invariant the
+        `If-Match: *` path states: a refused precondition must not be the
+        thing that makes itself true next time.
+        """
+        rejected = client.patch(
+            self.url(person), {'preferences': 'not-an-object'},
+            format='json', HTTP_IF_NONE_MATCH='*',
+        )
+        assert rejected.status_code == 400
+        assert not TrialSearchPreferences.objects.filter(person=person).exists()
+
+        retried = client.patch(
+            self.url(person), {'preferences': {'searchTitle': 'myeloma'}},
+            format='json', HTTP_IF_NONE_MATCH='*',
+        )
+        assert retried.status_code == 200
+
+    def test_if_match_is_evaluated_before_if_none_match(self, client, person):
+        """RFC 9110 §13.2.2 order, which the first cut had inverted.
+
+        A request carrying both, aimed at a person with no row, had its
+        `If-Match` discarded and CREATED the row its `If-Match` said must
+        already exist — a must-refuse turned into a write.
+        """
+        response = client.patch(
+            self.url(person), {'preferences': {'phase': 'PHASE3'}},
+            format='json',
+            HTTP_IF_MATCH='"2020-01-01T00:00:00Z"',
+            HTTP_IF_NONE_MATCH='*',
+        )
+        assert response.status_code == 412
+        assert not TrialSearchPreferences.objects.filter(person=person).exists()
+
+    def test_an_if_none_match_this_endpoint_cannot_honour_is_refused(
+        self, client, person
+    ):
+        """Not ignored — ignored means an unconditional write in disguise.
+
+        A client that asked for a condition and silently got none has no
+        way to tell. Refusing is the same call the `If-Match` path makes
+        for a header it cannot read.
+        """
+        etag = self.seed(client, person, {'searchTitle': 'myeloma'})
+        # A list of entity-tags is the caching idiom; on a write it would
+        # mean something this endpoint does not implement.
+        response = client.patch(
+            self.url(person), {'preferences': {'phase': 'PHASE3'}},
+            format='json', HTTP_IF_NONE_MATCH=etag,
+        )
+        assert response.status_code == 412
+        assert TrialSearchPreferences.objects.get(person=person).preferences == {
+            'searchTitle': 'myeloma'
+        }
+
+    def test_if_none_match_is_refused_on_reset_and_on_the_detail_route(
+        self, client, person
+    ):
+        """`*` is honoured on `upsert` only, and the others say so."""
+        self.seed(client, person, {'searchTitle': 'myeloma'})
+        row = TrialSearchPreferences.objects.get(person=person)
+        assert client.patch(
+            self.url(person, 'reset'), {}, format='json', HTTP_IF_NONE_MATCH='*'
+        ).status_code == 412
+        assert client.patch(
+            f'/api/v1/trial-search-preferences/{row.pk}/',
+            {'preferences': {'sponsor': 'Acme'}},
+            format='json', HTTP_IF_NONE_MATCH='*',
+        ).status_code == 412
+        # Refused means nothing happened.
+        assert TrialSearchPreferences.objects.get(person=person).preferences == {
+            'searchTitle': 'myeloma'
+        }
+
+    def test_a_good_tag_beside_a_malformed_one_does_not_authorize(
+        self, client, person
+    ):
+        """One bad member condemns the header.
+
+        Accepting because something in the list matched would write for a
+        request we only half understood, and would contradict the
+        documented refusal of an unreadable header. `"bogus"` is a
+        well-formed tag that merely does not match, and is still fine; a
+        trailing comma is an empty list element, which RFC 9110 §5.6.1
+        says to ignore.
+        """
+        etag = self.seed(client, person, {'searchTitle': 'myeloma'})
+
+        refused = client.patch(
+            self.url(person), {'preferences': {'phase': 'PHASE3'}},
+            format='json', HTTP_IF_MATCH=f'{etag}, garbage',
+        )
+        assert refused.status_code == 412
+        assert TrialSearchPreferences.objects.get(person=person).preferences == {
+            'searchTitle': 'myeloma'
+        }
+
+        assert client.patch(
+            self.url(person), {'preferences': {'phase': 'PHASE3'}},
+            format='json', HTTP_IF_MATCH=f'"no-such-tag", {etag}',
+        ).status_code == 200
+
+        etag2 = '"{}"'.format(
+            rows(
+                client.get(
+                    f'/api/v1/trial-search-preferences/?person_id={person.pk}'
+                )
+            )[0]['updated_at']
+        )
+        assert client.patch(
+            self.url(person), {'preferences': {'sponsor': 'Acme'}},
+            format='json', HTTP_IF_MATCH=f'{etag2},',
+        ).status_code == 200
+
+    def test_a_412_says_which_precondition_failed(self, client, person):
+        """One 412 text cannot serve a stale tag and an unreadable header.
+
+        "Re-read and re-apply" is right for the first and useless for the
+        second: obeying it re-sends the same broken header and 412s again,
+        forever, with no signal that the header is the problem.
+        """
+        stale = self.seed(client, person, {'searchTitle': 'myeloma'})
+        self.seed(client, person, {'sponsor': 'Acme'})
+
+        changed = client.patch(
+            self.url(person), {'preferences': {'phase': 'PHASE3'}},
+            format='json', HTTP_IF_MATCH=stale,
+        )
+        assert changed.status_code == 412
+        assert 're-read' in changed.json()['error']
+
+        malformed = client.patch(
+            self.url(person), {'preferences': {'phase': 'PHASE3'}},
+            format='json', HTTP_IF_MATCH='not-an-entity-tag',
+        )
+        assert malformed.status_code == 412
+        assert 'could not be read' in malformed.json()['error']
+
+        weak = client.patch(
+            self.url(person), {'preferences': {'phase': 'PHASE3'}},
+            format='json', HTTP_IF_MATCH='W/"2020-01-01T00:00:00Z"',
+        )
+        assert weak.status_code == 412
+        assert 'weak' in weak.json()['error']
+
+    def test_a_broken_header_is_named_even_when_there_is_no_row(
+        self, client, person
+    ):
+        """Header shape is judged before row existence, and must be.
+
+        The other order answers "there are no stored preferences" to a
+        client whose header is simply unreadable — whose natural next move
+        is `If-None-Match: *`, which succeeds and creates a row on behalf
+        of a client we could not understand.
+        """
+        assert not TrialSearchPreferences.objects.filter(person=person).exists()
+        malformed = client.patch(
+            self.url(person), {'preferences': {'phase': 'PHASE3'}},
+            format='json', HTTP_IF_MATCH='garbage',
+        )
+        assert malformed.status_code == 412
+        assert 'could not be read' in malformed.json()['error']
+
+        weak = client.patch(
+            self.url(person), {'preferences': {'phase': 'PHASE3'}},
+            format='json', HTTP_IF_MATCH='W/"2020-01-01T00:00:00Z"',
+        )
+        assert weak.status_code == 412
+        assert 'weak' in weak.json()['error']
+
+        # And the genuinely-absent row still says so.
+        missing = client.patch(
+            self.url(person), {'preferences': {'phase': 'PHASE3'}},
+            format='json', HTTP_IF_MATCH='"2020-01-01T00:00:00Z"',
+        )
+        assert missing.status_code == 412
+        assert 'no stored preferences' in missing.json()['error']
+        assert not TrialSearchPreferences.objects.filter(person=person).exists()
+
+    def test_an_unconditional_detail_write_returns_its_own_etag(
+        self, client, person
+    ):
+        """The tag matches the body it came with.
+
+        Single-threaded, so this pins the agreement and not the reason for
+        it: the implementation builds the tag from the instance it just
+        serialized rather than re-reading the row, because a writer landing
+        between two reads would make the tag describe THEIR version. That
+        race is argued at the call site; nothing here can observe it.
+        """
+        self.seed(client, person, {'searchTitle': 'myeloma'})
+        row = TrialSearchPreferences.objects.get(person=person)
+        response = client.patch(
+            f'/api/v1/trial-search-preferences/{row.pk}/',
+            {'preferences': {'sponsor': 'Acme'}},
+            format='json',
+        )
+        assert response.status_code == 200
+        assert response['ETag'] == '"{}"'.format(response.json()['updated_at'])
+
+    def test_if_none_match_star_writes_only_when_there_is_no_row(
+        self, client, person
+    ):
+        """The write `If-Match` cannot cover: the first one.
+
+        Before the row exists there is no etag to quote, so two tabs
+        bootstrapping the same patient would both write unconditionally and
+        the second would replace the first.
+        """
+        created = client.patch(
+            self.url(person), {'preferences': {'searchTitle': 'myeloma'}},
+            format='json', HTTP_IF_NONE_MATCH='*',
+        )
+        assert created.status_code == 200
+        assert TrialSearchPreferences.objects.get(person=person).preferences == {
+            'searchTitle': 'myeloma'
+        }
+
+        second = client.patch(
+            self.url(person), {'preferences': {'sponsor': 'Acme'}},
+            format='json', HTTP_IF_NONE_MATCH='*',
+        )
+        assert second.status_code == 412
+        assert second['ETag'] == created['ETag']
+        # Refused means refused: the losing tab's payload is not written.
+        assert TrialSearchPreferences.objects.get(person=person).preferences == {
+            'searchTitle': 'myeloma'
+        }
+
+
+@pytest.mark.skipif(
+    connection.vendor != 'postgresql',
+    reason=(
+        'Needs row-level locking. `select_for_update` is a no-op on the '
+        'SQLite dev fallback, so these would fail there — not because the '
+        'code is wrong but because that backend cannot provide what they '
+        'assert. `SET lock_timeout` is PostgreSQL-only too.'
+    ),
+)
+@pytest.mark.django_db(transaction=True)
+class TestTwoWritersAtOnce:
+    """The feature's actual subject, with two real connections.
+
+    Every other test in this file runs one request at a time, and against a
+    check-then-write implementation they ALL pass while the lost update is
+    still there — it was reproduced on the first try with two threads
+    before the lock existed. So this is the test that distinguishes the
+    feature from its appearance.
+
+    Parametrized over all three conditional write paths, because a guard on
+    one of them lets a future refactor delete the other two locks with a
+    green suite — which was measured: removing the `reset` or detail lock
+    left the whole file passing.
+
+    `transaction=True` because the point is committed state seen across
+    connections, which the usual test-wrapping transaction hides.
+    """
+
+    def _actor(self):
+        person = PersonFactory()
+        identity = Identity.objects.create_user(
+            email=f'race{person.pk}@example.test', password=None
+        )
+        PatientUser.objects.create(identity=identity, person=person)
+        return person, identity
+
+    def _client(self, identity):
+        api = APIClient()
+        api.force_authenticate(user=identity)
+        return api
+
+    @pytest.mark.parametrize('path', ['upsert', 'reset', 'detail'])
+    def test_two_writers_holding_one_etag_cannot_both_win(self, path):
+        person, identity = self._actor()
+        upsert_url = (
+            f'/api/v1/trial-search-preferences/upsert/?person_id={person.pk}'
+        )
+        seeded = self._client(identity).patch(
+            upsert_url, {'preferences': {'seed': True}}, format='json'
+        )
+        assert seeded.status_code == 200
+        etag = seeded['ETag']
+        row_pk = TrialSearchPreferences.objects.get(person=person).pk
+
+        if path == 'upsert':
+            def send(client, name):
+                return client.patch(
+                    upsert_url, {'preferences': {name: 1}}, format='json',
+                    HTTP_IF_MATCH=etag,
+                )
+        elif path == 'reset':
+            def send(client, name):
+                return client.patch(
+                    f'/api/v1/trial-search-preferences/reset/?person_id={person.pk}',
+                    {}, format='json', HTTP_IF_MATCH=etag,
+                )
+        else:
+            def send(client, name):
+                return client.patch(
+                    f'/api/v1/trial-search-preferences/{row_pk}/',
+                    {'preferences': {name: 1}}, format='json',
+                    HTTP_IF_MATCH=etag,
+                )
+
+        start = threading.Barrier(2)
+        results = {}
+
+        def write(name):
+            try:
+                # A writer that blocks on the row lock must fail, not hang.
+                # Without this a deadlock leaves the thread holding a lock
+                # while `transaction=True` teardown TRUNCATEs the table,
+                # and CI hangs instead of reporting.
+                with connections['default'].cursor() as cursor:
+                    cursor.execute("SET lock_timeout = '10s'")
+                start.wait(timeout=10)
+                results[name] = send(self._client(identity), name).status_code
+            finally:
+                # Each thread gets its own connection; leaving them open
+                # makes the test database undroppable afterwards.
+                connections.close_all()
+
+        threads = [threading.Thread(target=write, args=(n,)) for n in ('A', 'B')]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        assert not any(t.is_alive() for t in threads), 'a writer deadlocked'
+
+        assert sorted(results.values()) == [200, 412], results
+        stored = TrialSearchPreferences.objects.get(person=person).preferences
+        if path == 'reset':
+            # Both writers asked for the same thing, so the winner is not
+            # identifiable from the row — what matters is that one was told
+            # no rather than both being told yes.
+            assert stored == {}
+        else:
+            # The row holds the winner's payload whole — not a blend, and
+            # not the loser's.
+            winner = next(name for name, code in results.items() if code == 200)
+            assert stored == {winner: 1}
+
+    def test_two_first_writers_cannot_both_create(self):
+        """`If-None-Match: *`, which the unique constraint arbitrates.
+
+        The first write has no etag to quote, so this is the only thing
+        standing between two tabs bootstrapping the same patient.
+        """
+        person, identity = self._actor()
+        url = f'/api/v1/trial-search-preferences/upsert/?person_id={person.pk}'
+        start = threading.Barrier(2)
+        results = {}
+
+        def write(name):
+            try:
+                with connections['default'].cursor() as cursor:
+                    cursor.execute("SET lock_timeout = '10s'")
+                start.wait(timeout=10)
+                results[name] = self._client(identity).patch(
+                    url, {'preferences': {name: 1}}, format='json',
+                    HTTP_IF_NONE_MATCH='*',
+                ).status_code
+            finally:
+                connections.close_all()
+
+        threads = [threading.Thread(target=write, args=(n,)) for n in ('A', 'B')]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        assert not any(t.is_alive() for t in threads), 'a writer deadlocked'
+
+        assert sorted(results.values()) == [200, 412], results
+        winner = next(name for name, code in results.items() if code == 200)
+        assert TrialSearchPreferences.objects.get(person=person).preferences == {
+            winner: 1
+        }
 
 
 class TestNonDefaultFilterCount:

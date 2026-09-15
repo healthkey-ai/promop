@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "review_basis": "Source review on 2026-09-14; literal values and declared provider routing only, no clinical mapping approval.",
+  "rules": [
+    {
+      "file": "frontend/src/components/PatientInfo/ClinicalField.tsx",
+      "expression": "choices",
+      "kind": "descriptor_or_prop",
+      "sources": {
+        "frontend/src/components/PatientInfo/ClinicalField.tsx": "cbe8d01ff077c12efc86360d94e7e25d832d27419641a546433c90e4f7bf79dc"
+      },
+      "reason": "descriptor.options (including an empty array) overrides caller options; all caller constants and referenced catalogs remain separate source evidence."
+    },
+    {
+      "file": "frontend/src/components/PatientInfo/Field.tsx",
+      "expression": "optionObjects",
+      "kind": "forwarded_options",
+      "sources": {
+        "frontend/src/components/PatientInfo/Field.tsx": "99f55c10825d0ec0b190dab093b69b690e1456f572c9c372a8c8c32e87d90d81",
+        "frontend/src/components/PatientInfo/utils.ts": "b5631d4c62194df11d490f0ec2a6b96004a29ec5bc97c3fd6ecc69e4b8aafa9d"
+      },
+      "reason": "stringsToOptions preserves string values and labels supplied by the caller; this wrapper owns no additional mutable catalog."
+    },
+    {
+      "file": "frontend/src/components/PatientInfo/tabs/GeneralTab.tsx",
+      "expression": "extra.options",
+      "kind": "helper_calls",
+      "sources": {
+        "frontend/src/components/PatientInfo/tabs/GeneralTab.tsx": "edf146208f4e4645fa907f935a7c4c1bb9c1b4d5721a17c6fe151d66cb7d9ac4"
+      },
+      "reason": "The field helper passes literal call-site name/type/options to ClinicalField. Call sites are enumerated separately by the TypeScript parser."
+    },
+    {
+      "file": "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx",
+      "expression": "histOptions",
+      "kind": "lookup_titles",
+      "sources": {
+        "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+        "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
+      },
+      "field": "histologic_type",
+      "table": "vocabulary_histologic_type",
+      "fallback_constant": "HISTOLOGIC_TYPE_OPTIONS",
+      "reason": "useVocabulary title values when the reference result is nonempty, otherwise the stated fallback; ClinicalField descriptor options have final precedence."
+    },
+    {
+      "file": "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx",
+      "expression": "txOutcomeOptions.length ? txOutcomeOptions.map((o: { value: string }) => o.value) : []",
+      "kind": "lookup_titles",
+      "sources": {
+        "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+        "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
+      },
+      "field": "post_transformation_outcome",
+      "table": "vocabulary_post_transformation_outcome",
+      "fallback_constant": null,
+      "reason": "useVocabulary title values when the reference result is nonempty, otherwise the stated fallback; ClinicalField descriptor options have final precedence."
+    },
+    {
+      "file": "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx",
+      "expression": "myelomaTypeOptions.length ? myelomaTypeOptions.map((o: { value: string }) => o.value) : MYELOMA_TYPE_OPTIONS",
+      "kind": "lookup_titles",
+      "sources": {
+        "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+        "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
+      },
+      "field": "myeloma_type",
+      "table": "vocabulary_myeloma_type",
+      "fallback_constant": "MYELOMA_TYPE_OPTIONS",
+      "reason": "useVocabulary title values when the reference result is nonempty, otherwise the stated fallback; ClinicalField descriptor options have final precedence."
+    },
+    {
+      "file": "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx",
+      "expression": "sctTypeOptions.length ? sctTypeOptions.map((o: { value: string }) => o.value) : STEM_CELL_TRANSPLANT_OPTIONS",
+      "kind": "lookup_titles",
+      "sources": {
+        "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+        "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
+      },
+      "field": "stem_cell_transplant_history",
+      "table": "vocabulary_stem_cell_transplant",
+      "fallback_constant": "STEM_CELL_TRANSPLANT_OPTIONS",
+      "reason": "useVocabulary title values when the reference result is nonempty, otherwise the stated fallback; ClinicalField descriptor options have final precedence."
+    },
+    {
+      "file": "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx",
+      "expression": "sctEligibilityOptions.length ? sctEligibilityOptions.map((o: { value: string }) => o.value) : SCT_ELIGIBILITY_OPTIONS",
+      "kind": "lookup_titles",
+      "sources": {
+        "frontend/src/components/PatientInfo/tabs/DiseaseTab.tsx": "fd234cf175d8e68bd40f253ad515b740947911f003df2d3852eaf3893fe8365f",
+        "frontend/src/hooks/useVocabulary.ts": "26391291c44ef0169c3d50b27594cdfe786210ffe6b3756fa067def44366af44"
+      },
+      "field": "sct_eligibility",
+      "table": "vocabulary_sct_eligibility",
+      "fallback_constant": "SCT_ELIGIBILITY_OPTIONS",
+      "reason": "useVocabulary title values when the reference result is nonempty, otherwise the stated fallback; ClinicalField descriptor options have final precedence."
+    },
+    {
+      "file": "frontend/src/components/PatientInfo/tabs/BehaviorTab.tsx",
+      "expression": "CAPABILITY_OPTIONS",
+      "kind": "language_capabilities",
+      "sources": {
+        "frontend/src/components/PatientInfo/tabs/BehaviorTab.tsx": "252cc1e2c142d66caf94ef1701b8048c11c4c648160ad90c4d7625eb45268853",
+        "frontend/src/api/clinicalFacts.ts": "bb06e69b192f751e2c15e9a92e0e789b03102c5d473eca473dd6d96a9144cec2"
+      },
+      "values": [
+        {
+          "value": "speak",
+          "label": "Speak"
+        },
+        {
+          "value": "read",
+          "label": "Read"
+        },
+        {
+          "value": "write",
+          "label": "Write"
+        },
+        {
+          "value": "understand",
+          "label": "Understand"
+        }
+      ],
+      "destination": "PersonLanguageSkill.skill_level",
+      "reason": "LANGUAGE_CAPABILITIES mapped through CAPABILITY_LABELS; per-language structured capability selections, not CancerBot fluency levels."
+    }
+  ]
+}

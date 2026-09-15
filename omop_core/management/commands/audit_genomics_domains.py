@@ -36,6 +36,10 @@ class Command(BaseCommand):
                 incomplete += 1
                 self.stdout.write(f'{field}: parent recipe must use measurement for event linking')
                 continue
+            if mapping.value_kind != 'json' or not mapping.multiple:
+                incomplete += 1
+                self.stdout.write(f'{field}: parent recipe must retain multiple JSON findings')
+                continue
             concept_id, _ = mapped_concept(mapping)
             parents += 1
             local += concept_id == 0

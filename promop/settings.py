@@ -78,25 +78,33 @@ if _render_hostname and _render_hostname not in ALLOWED_HOSTS:
 # Preserve validation for unmarked legacy production processes too.
 if IS_DEPLOYED or not DEBUG:
     import sys as _sys
-    # Skip the production guard for management commands that must run before the
-    # app server is fully initialised (migrate, test, collectstatic, check, etc.)
-    # so that Render deploys (which call `migrate` in start.sh) and CI test runs
-    # are not broken when DATABASE_URL is absent at import time.
-    _management_commands = {
-        'migrate', 'test', 'collectstatic', 'check', 'makemigrations',
-        'copy_curation',
-    }
-    _running_mgmt = len(_sys.argv) > 1 and _sys.argv[1] in _management_commands
-    # start.sh runs this before migrations. Validate the real runtime settings
-    # here too, rather than allowing a warning followed by a later boot failure.
+    # Management commands don't serve HTTP — skip host/origin checks for all of
+    # them except `check --deploy` (which intentionally validates runtime config)
+    # and HTTP servers.  Render jobs run `python manage.py …` in the worker
+    # service, which has no RENDER_EXTERNAL_HOSTNAME.
+    # Management commands don't serve HTTP — skip host/origin checks for all of
+    # them except `check --deploy` (which intentionally validates runtime config)
+    # and HTTP servers.  Render jobs run `python manage.py …` in the worker
+    # service, which has no RENDER_EXTERNAL_HOSTNAME.
+    _http_commands = {'runserver', 'runserver_plus', 'run_gunicorn'}
+    _is_manage_py = os.path.basename(_sys.argv[0] if _sys.argv else '') == 'manage.py'
+    _no_http = _is_manage_py and (
+        len(_sys.argv) < 2 or _sys.argv[1] not in _http_commands
+    )
+    # start.sh runs `check --deploy` before migrations.  Validate the real
+    # runtime settings there too, rather than allowing a warning followed by a
+    # later boot failure.
     if len(_sys.argv) > 1 and _sys.argv[1] == 'check' and '--deploy' in _sys.argv:
-        _running_mgmt = False
+        _no_http = False
+    # Build-time commands that must run before DATABASE_URL is available.
+    _build_commands = {'collectstatic', 'makemigrations'}
+    _running_build = _is_manage_py and len(_sys.argv) > 1 and _sys.argv[1] in _build_commands
     # A Celery worker serves no HTTP, so the host and origin checks below would
     # only stop it from booting. Its secret and database still have to be real.
     _running_worker = os.path.basename(_sys.argv[0] if _sys.argv else '') == 'celery'
-    if not _running_mgmt:
-        from django.core.exceptions import ImproperlyConfigured
-        _config_errors = []
+    from django.core.exceptions import ImproperlyConfigured
+    _config_errors = []
+    if not _running_build:
         if not SECRET_KEY.strip() or SECRET_KEY.startswith('django-insecure-'):
             _config_errors.append(
                 'SECRET_KEY must be set to a strong random value (current value is the insecure default)'
@@ -105,21 +113,21 @@ if IS_DEPLOYED or not DEBUG:
             _config_errors.append(
                 'DATABASE_URL must be set (SQLite is not supported in production)'
             )
-        if not _running_worker and not ALLOWED_HOSTS:
-            _config_errors.append(
-                'ALLOWED_HOSTS must be set to your domain(s), e.g. "app.example.com" '
-                '(or RENDER_EXTERNAL_HOSTNAME must be supplied by Render)'
-            )
-        if not _running_worker and not _env_list('CORS_ALLOWED_ORIGINS'):
-            _config_errors.append(
-                'CORS_ALLOWED_ORIGINS must be set to your frontend origin(s), '
-                'e.g. "https://app.example.com"'
-            )
-        if _config_errors:
-            raise ImproperlyConfigured(
-                'Missing required production settings:\n'
-                + '\n'.join(f'  - {e}' for e in _config_errors)
-            )
+    if not _no_http and not _running_worker and not ALLOWED_HOSTS:
+        _config_errors.append(
+            'ALLOWED_HOSTS must be set to your domain(s), e.g. "app.example.com" '
+            '(or RENDER_EXTERNAL_HOSTNAME must be supplied by Render)'
+        )
+    if not _no_http and not _running_worker and not _env_list('CORS_ALLOWED_ORIGINS'):
+        _config_errors.append(
+            'CORS_ALLOWED_ORIGINS must be set to your frontend origin(s), '
+            'e.g. "https://app.example.com"'
+        )
+    if _config_errors:
+        raise ImproperlyConfigured(
+            'Missing required production settings:\n'
+            + '\n'.join(f'  - {e}' for e in _config_errors)
+        )
 
 # Application definition
 INSTALLED_APPS = [
