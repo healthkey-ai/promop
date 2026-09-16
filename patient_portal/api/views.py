@@ -7941,39 +7941,14 @@ def _paginated_concept_response(queryset, request):
 
 @functools.lru_cache(maxsize=1)
 def _get_loinc_to_unit() -> dict[str, str]:
-    """Lazily build LOINC-code → unit mapping from LAB_FIELD_TO_LOINC."""
-    from omop_core.services.mappings import LAB_FIELD_TO_LOINC
-    return {
-        code: unit for code, unit, _display in LAB_FIELD_TO_LOINC.values() if unit
-    }
-
-
-_QUANTITATIVE_LOINC_NAME_MARKERS = (
-    'mass/', 'moles/', '#/', 'units/', 'volume fraction', 'catalytic activity',
-    'ratio', 'fraction', 'clearance', ' rate', ' score', ' time',
-)
-_QUALITATIVE_LOINC_NAME_MARKERS = (
-    '[presence]', '[ordinal]', '[narrative]', '[interpretation]', '[type]',
-    '[finding]', 'susceptibility',
-)
+    """Lazily build LOINC-code -> unit mapping from LAB_FIELD_TO_LOINC."""
+    from omop_core.services.concept_unit_info import get_loinc_to_unit
+    return get_loinc_to_unit()
 
 
 def _measurement_input_type(concept_name, suggested_unit):
-    """Return the safe qualitative/quantitative cue available in OMOP data.
-
-    OMOP's Concept table does not retain LOINC's Scale Type. A curated unit is
-    conclusive, and common LOINC display-name markers cover unitless numeric
-    measurements (for example, renal clearance) and qualitative Presence
-    results without pretending an unknown result has a known scale.
-    """
-    if suggested_unit:
-        return 'quantitative'
-    name = (concept_name or '').casefold()
-    if any(marker in name for marker in _QUANTITATIVE_LOINC_NAME_MARKERS):
-        return 'quantitative'
-    if any(marker in name for marker in _QUALITATIVE_LOINC_NAME_MARKERS):
-        return 'qualitative'
-    return ''
+    from omop_core.services.concept_unit_info import measurement_input_type
+    return measurement_input_type(concept_name, suggested_unit)
 
 
 @api_view(['GET'])
@@ -10193,6 +10168,11 @@ def _user_display(user):
     )
 
 
+def _concept_unit_fields(concept):
+    from omop_core.services.concept_unit_info import concept_unit_fields
+    return concept_unit_fields(concept)
+
+
 def _serialize_code_mapping_row(concept, mapping=None, source_metadata=None, destination_count=None):
     """One row of the Code Mapping list: a source code and where it lands.
 
@@ -10318,6 +10298,9 @@ def _serialize_code_mapping_row(concept, mapping=None, source_metadata=None, des
         'concept_code': concept.concept_code,
         'concept_vocabulary_id': concept.vocabulary_id,
         'concept_class_id': concept.concept_class_id,
+        # Unit info for LOINC Measurement concepts — helps curators assess
+        # mapping quality without opening a concept search.
+        **_concept_unit_fields(concept),
     }
 
 

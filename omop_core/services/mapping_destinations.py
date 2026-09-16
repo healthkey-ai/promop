@@ -3,6 +3,7 @@ from django.db.models import Case, Count, Exists, IntegerField, OuterRef, Q, Sub
 from django.db.models.functions import Coalesce
 
 from omop_core.models import MappingDestinationCandidate
+from omop_core.services.concept_unit_info import concept_unit_fields
 
 
 def with_destination_counts(mappings):
@@ -40,6 +41,7 @@ def destination_options(mapping):
             'selectable': selectable,
             'origins': candidate.origins,
             'selected': bool(concept and concept.pk == mapping.target_concept_id),
+            **concept_unit_fields(concept),
         })
         keys.add((candidate.target_vocabulary_id, candidate.target_concept_code))
     concept = mapping.target_concept
@@ -51,5 +53,6 @@ def destination_options(mapping):
             'standard_concept': concept.standard_concept, 'invalid_reason': concept.invalid_reason,
             'selectable': concept.standard_concept == 'S' and not concept.invalid_reason,
             'origins': [mapping.origin_system] if mapping.origin_system else [], 'selected': True,
+            **concept_unit_fields(concept),
         })
     return options
