@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     gnupg \
     gcc \
+    git \
     postgresql-client \
     libpq-dev \
     && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
@@ -58,7 +59,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 
 # Run migrations and start gunicorn
 CMD python manage.py migrate && \
-    gunicorn ctomop.wsgi:application \
+    gunicorn promop.wsgi:application \
     --bind 0.0.0.0:$PORT \
     --workers 4 \
     --threads 2 \

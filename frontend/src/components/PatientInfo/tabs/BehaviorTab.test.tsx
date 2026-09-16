@@ -36,9 +36,12 @@ const NEEDS_CONCEPT = {
 
 const DESCRIPTORS: Record<string, unknown> = {
   insurance_type: {
-    kind: 'editable', writable: true, target: 'observation',
-    concept_id: 4177416, code: '40766-3', value_kind: 'string',
-    type_concept_id: 32817, source_value: '40766-3', curated: true,
+    kind: 'direct', writable: true, target: 'patient_record',
+    value_kind: 'string', curated: true,
+    projection: {
+      omop_table: 'observation', concept_id: 4177416, code: '40766-3',
+      type_concept_id: 32817, source_value: '40766-3',
+    },
   },
   smoking_status: NEEDS_CONCEPT,
   alcohol_use: NEEDS_CONCEPT,
@@ -173,7 +176,7 @@ describe('BehaviorTab — language skills', () => {
     await userEvent.click(await screen.findByText('Speak'));
 
     await waitFor(() => expect(mockPatch).toHaveBeenCalledWith(
-      '/v1/persons/7/',
+      '/patient-info/7/',
       { language_skills: { english: ['speak'] } },
     ));
     await waitFor(() => expect(onRefresh).toHaveBeenCalled());

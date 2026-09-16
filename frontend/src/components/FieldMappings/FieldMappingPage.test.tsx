@@ -223,6 +223,17 @@ const renderPage = () =>
   );
 
 describe("FieldMappingPage", () => {
+  it('exposes priority and nested Genomics mappings in their own category', async () => {
+    mockGet.mockImplementation((url: string) => Promise.resolve({ data: url === '/v1/field-mappings/'
+      ? ['genomics_brca1', 'genetic_mutations.origin'].map(field_name => ({
+        ...MOCK_DESCRIPTORS[0], field_name, tab: 'genomics',
+      })) : {} }));
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /Genomics/ }));
+    expect(await screen.findByText('genomics_brca1')).toBeInTheDocument();
+    expect(screen.getByText('genetic_mutations.origin')).toBeInTheDocument();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockUseAuth.mockReturnValue({ currentUser: { is_staff: true, is_org_admin: false } });
@@ -242,6 +253,24 @@ describe("FieldMappingPage", () => {
       }
       return Promise.resolve({ data: {} });
     });
+  });
+
+  it("shows mapping provenance in the first column", async () => {
+    mockGet.mockImplementation((url: string) => Promise.resolve({ data:
+      url === "/v1/field-mappings/" ? ["system_generated", "curator", ""].map((provenance, i) => ({
+        ...MOCK_DESCRIPTORS[0], field_name: `origin_${i}`, tab: "general",
+        mapping: { id: i + 1, provenance, status: "proposed", concept_id: null,
+          concept_name: "", vocabulary_id: "", concept_code: "", omop_table: "measurement",
+          unit: "", reviewer: null, reviewed_at: null, notes: "" },
+      })) : {} }));
+    renderPage();
+    for (const [i, label] of ["System Generated", "Curator", "Unrecorded"].entries()) {
+      const field = await screen.findByText(`origin_${i}`);
+      const row = field.closest("tr")!;
+      expect(within(row).getAllByRole("cell")[0]).toHaveTextContent(label);
+      const table = row.closest("table")!;
+      expect(within(table).getAllByRole("columnheader")[0]).toHaveTextContent("Provenance");
+    }
   });
 
   it("renders field table with tab bar and category sections", async () => {
@@ -397,6 +426,7 @@ describe("FieldMappingPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Assign Concept")).toBeInTheDocument();
     });
+    expect(screen.getByRole("option", { name: "CDISC" })).toBeInTheDocument();
   });
 
   it("suggests field mappings for the active tab", async () => {

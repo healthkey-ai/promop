@@ -1,9 +1,9 @@
-"""Which PatientRecord fields a client may write, and the OMOP fact to write instead.
+"""Which PatientRecord fields a client may write and how they project to OMOP.
 
-`PatientRecord` is a derived read model with no writable clinical columns, so an
-editor cannot patch it. It has to write the underlying OMOP fact and let derivation
-follow. Doing that needs per-field knowledge the client does not have: which table,
-which concept, which unit.
+User-entered values land on `PatientRecord` first. When a reviewed mapping exists,
+the same PATCH also projects an OMOP fact with its table, concept, type, source and
+unit metadata. Computed projections remain read-only and direct fields without a
+complete mapping remain safely editable on PatientRecord.
 
 Serving that from the server rather than hardcoding it in the client is deliberate.
 `concept_id` is resolved from the vocabulary tables and moves with vocabulary
@@ -11,16 +11,18 @@ releases, so a TypeScript copy would drift silently and start writing facts agai
 stale concepts. It also means a field becomes editable the moment its mapping lands
 here — no frontend release.
 
-Coverage is partial and openly reported: most projection fields have no reviewed
-concept set yet (see docs/omop_to_patientrecord.md) and are returned as not
-writable with a reason, rather than omitted. A client that only sees writable
-fields cannot tell "you may not edit this" from "I forgot to send it".
+Coverage is openly reported: every projection field is classified, including
+computed values, aliases and values authored through a dedicated resource.
 """
 
-from omop_core.models import Concept, FieldChoice, PatientRecord
+from omop_core.models import (
+    Concept, ConditionOccurrence, DrugExposure, FieldChoice, Measurement,
+    Observation, PatientRecord, ProcedureOccurrence,
+)
 from omop_core.services.demographics import choices as demographic_choices
 from omop_core.services.mappings import (
-    CONCEPT_EHR_TYPE, CONCEPT_LAB_TYPE, DERIVED_FIELD_TO_CODE, LAB_FIELD_TO_LOINC,
+    CONCEPT_EHR_TYPE, CONCEPT_LAB_TYPE, CONCEPT_PATIENT_REPORTED_TYPE,
+    DERIVED_FIELD_TO_CODE, LAB_FIELD_TO_LOINC,
 )
 from omop_core.services.patient_record_service import (
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
@@ -32,7 +34,7 @@ from omop_core.services.patient_record_service import (
 # picker or because it is height and weight multiplied together.
 _NO_MAPPING_REASON = (
     'No reviewed concept set for this field yet — it cannot be written as a '
-    'complete OMOP fact. See docs/omop_to_patientrecord.md.'
+    'complete OMOP fact. See field_concept_mapping_architecture.md.'
 )
 
 KIND_EDITABLE = 'editable'      # write an OMOP fact; derivation follows
@@ -42,6 +44,11 @@ KIND_ALIAS = 'alias'            # mirrors a canonical field; edit that one inste
 KIND_PROFILE = 'profile'        # a Person attribute, written at the persons endpoint
 KIND_UNMAPPED = 'unmapped'      # no write path yet — grouped by WHY, not lumped
 KIND_AUTHORED = 'authored'      # written by authoring a different resource entirely
+KIND_DIRECT = 'direct'          # write to PatientRecord; no OMOP fact required yet
+
+# Athena Cancer Modifier: Dimension of Largest Lymph Node.  Unlike the generic
+# Size Tumor LOINC, this is the specific standard concept for the CLL field.
+CONCEPT_LARGEST_LYMPH_NODE_DIMENSION = 36769292
 
 # Why a field has no write path. Reported rather than omitted so the descriptor
 # documents the whole record: a reader can see every column and what stands
@@ -69,6 +76,27 @@ _THERAPY_PREFIXES = (
     'first_line', 'second_line', 'later_', 'supportive_', 'prior_therapy',
     'therapy_', 'line_of_therapy', 'planned_', 'relapse_',
     'treatment_refractory', 'reason_for_disc', 'washout', 'last_treatment',
+)
+
+# Fields that match a therapy prefix but are user-entered data, not episode-derived.
+# These should fall through to KIND_DIRECT rather than KIND_AUTHORED.
+_THERAPY_PREFIX_EXCEPTIONS = frozenset({
+    'planned_therapies', 'relapse_count', 'treatment_refractory_status',
+    'supportive_therapies',
+    'supportive_therapy_start_date',
+    'supportive_therapy_end_date',
+    'supportive_therapy_intent',
+})
+
+# Line projections are not writable PatientRecord facts.  ARTEMIS (or another
+# episode producer) writes the Episode/EpisodeEvent evidence; refresh reads it
+# back.  This list deliberately includes every current first/second/later line
+# column, rather than only the therapy name, so the UI cannot offer a stale
+# direct editor for a date, intent, outcome, or derived concept id.
+_EPISODE_COMPUTED_FIELDS = frozenset(
+    field.name
+    for field in PatientRecord._meta.concrete_fields
+    if field.name.startswith(('first_line_', 'second_line_', 'later_'))
 )
 
 # How a therapy line is authored. Not a missing mapping — the write path exists
@@ -102,7 +130,7 @@ _UNMAPPED_GROUP_REASONS = {
 def _unmapped_group(field):
     if field.startswith('wearable_'):
         return GROUP_WEARABLE_META
-    if field.startswith(_THERAPY_PREFIXES):
+    if field.startswith(_THERAPY_PREFIXES) and field not in _THERAPY_PREFIX_EXCEPTIONS:
         return GROUP_THERAPY
     return GROUP_NEEDS_CONCEPT
 
@@ -121,6 +149,7 @@ def _field_choice_options() -> dict[str, list[tuple[str, str | None]]]:
 # event, so they have no concept and no date. PATCH /api/v1/persons/{person_id}/
 # already writes them and derivation copies them forward.
 _PROFILE_REPLACEABLE = {
+    'date_of_birth': 'year_of_birth / month_of_birth / day_of_birth / birth_datetime',
     'email': 'email',
     'phone_number': 'phone_number',
     'facility_name': 'facility_name',
@@ -139,13 +168,6 @@ _PROFILE_DEMOGRAPHIC = {
     'ethnicity': ('ethnicity_concept + ethnicity_source_value', 'ethnicity'),
 }
 
-# Same endpoint, but fill-if-empty: it populates a blank and refuses to clobber an
-# existing value. Reported separately because "writable" would be a lie — a
-# clinician cannot correct one here, only supply a missing one.
-_PROFILE_FILL_IF_EMPTY = {
-    'date_of_birth': 'year_of_birth / month_of_birth / day_of_birth',
-}
-
 # Thirty-day aggregates over a stream of device readings. A clinician does not
 # type a median: the reading is the fact, and the aggregate follows from it.
 # Read-only serializer fields whose `source` is another PatientRecord column.
@@ -159,6 +181,7 @@ _SERIALIZER_ALIASES = {
 # method — and each is assembled at serialization time from data that lives
 # elsewhere.
 _SERIALIZER_COMPUTED = {
+    'supportive_therapy_courses': 'Entered supportive treatment courses; edit through the supportive-therapies endpoint.',
     'age': 'Calculated from the date of birth on the Person record.',
     'name': 'Assembled from the given and family names on the Person record.',
     'person_id': 'The Person identifier this record derives from.',
@@ -219,6 +242,9 @@ _ALIAS_TO_CANONICAL = {
 # Values computed during derivation from other projected fields, with the inputs
 # a UI needs in order to say why the box is not typeable.
 _COMPUTED_INPUTS = {
+    'gelf_criteria_status': ['gelf_criteria_options'],
+    'flipi_score': ['flipi_score_options'],
+    'flipi_risk_category': ['flipi_score_options'],
     'bmi': ['height', 'weight'],
     'tnbc_status': [
         'estrogen_receptor_status', 'progesterone_receptor_status', 'her2_status',
@@ -236,7 +262,7 @@ _COMPUTED_INPUTS = {
 # mapping state; they are excluded rather than reported as unwritable fields.
 _LIFECYCLE_FIELDS = frozenset({
     'id', 'person', 'organization', 'created_at', 'updated_at',
-    'derived_at', 'derivation_version', 'user_edited_fields',
+    'derived_at', 'derivation_version', 'user_edited_fields', 'therapy_overrides',
 })
 
 
@@ -306,6 +332,14 @@ _MAPPING_ENDPOINTS = {
     'procedure': 'POST /api/v1/procedures/',
 }
 
+_MAPPING_SOURCE_FIELDS = {
+    'measurement': Measurement._meta.get_field('measurement_source_value'),
+    'observation': Observation._meta.get_field('observation_source_value'),
+    'condition': ConditionOccurrence._meta.get_field('condition_source_value'),
+    'drug_exposure': DrugExposure._meta.get_field('drug_source_value'),
+    'procedure': ProcedureOccurrence._meta.get_field('procedure_source_value'),
+}
+
 
 def mapping_target_for(omop_table):
     return _MAPPING_TARGETS.get((omop_table or '').strip().lower())
@@ -323,12 +357,6 @@ def mapping_table_is_writable(omop_table):
 # recipe is incomplete the claim is false, and a box that accepts input and
 # silently drops it is worse than one that says why it is disabled.
 _WRITE_RECIPE_INCOMPLETE = {
-    'largest_lymph_node_size': (
-        'Derivation also requires qualifier_source_value="lymph-node" — LOINC '
-        '21889-1 "Size Tumor" is shared with tumor_size, and the qualifier is '
-        'what tells them apart. The descriptor cannot carry a qualifier yet, so '
-        'a write against the code alone is not read back.'
-    ),
     'bone_only_metastasis_status': (
         'Derivation looks for an Observation whose concept name contains "bone '
         'only metastas", while the mapping here names a Measurement with a '
@@ -337,22 +365,28 @@ _WRITE_RECIPE_INCOMPLETE = {
     ),
 }
 
-def _curated_writes():
+def _curated_writes(choice_options=None):
     """Editable entries built from reviewer-approved concept mappings.
 
     The curation interface records a decision per field; this is what acts on
-    it. A row qualifies only when it carries everything a write needs — an
-    approved status, a resolved concept, an OMOP table this can write to, and a
-    source value for derivation to match on. Anything short of that stays
-    advisory rather than becoming a box that writes somewhere unfindable.
+    it.  A row qualifies when it carries an approved status, a resolved concept,
+    and an OMOP table.  The source value for derivation to match on defaults to
+    the concept's own code when the curator hasn't set an explicit override —
+    which is the common case for LOINC and SNOMED mappings.
+
+    All fields write to PatientRecord (KIND_DIRECT, target='patient_record').
+    Fields with a complete approved mapping carry a ``projection`` key with
+    the OMOP routing info needed to project the value into a clinical table
+    after the PATCH lands.
     """
     from omop_core.models import FieldConceptMapping
+    from omop_core.services.breast_mapping_safety import wrong_breast_field_mappings
 
     entries = {}
     rows = list(
         FieldConceptMapping.objects
         .filter(status='approved')
-        .exclude(source_value='')
+        .exclude(wrong_breast_field_mappings())
         .exclude(omop_table='')
         .select_related('concept')
     )
@@ -363,29 +397,68 @@ def _curated_writes():
         name: _lookup_titles(name)
         for name in {r.value_vocabulary for r in rows if r.value_vocabulary}
     }
+    unit_ids = _resolve_concept_ids({row.unit for row in rows if row.unit}, 'UCUM')
     for row in rows:
         target = mapping_target_for(row.omop_table)
         concept_id = row.concept_id
         if target is None or concept_id is None:
             continue
+        # Fall back to the concept's own code when the curator hasn't set an
+        # explicit source_value.  Every hardcoded LOINC and DERIVED mapping
+        # already uses the concept code; curated rows should work the same way.
+        source_value = row.source_value or (
+            row.concept.concept_code if row.concept else None
+        )
+        if not source_value:
+            continue
+        source_field = _MAPPING_SOURCE_FIELDS[target]
+        width = source_field.max_length
+        if width is not None and len(source_value) > width:
+            # Preserve the curator's key: truncating it would break derivation's
+            # exact source-value match. Keep an entry so no fallback write recipe
+            # can hide this invalid approved mapping.
+            entries[row.field_name] = {
+                'kind': KIND_DIRECT,
+                'writable': False,
+                'curated': True,
+                'reason': (
+                    f'Approved mapping source_value exceeds the {width}-character '
+                    f'limit of {source_field.model._meta.db_table}.{source_field.name}. '
+                    'Shorten the mapping source_value before writing this field.'
+                ),
+            }
+            continue
+        type_concept_id = row.type_concept_id or CONCEPT_EHR_TYPE
         entry = {
-            'kind': KIND_EDITABLE,
+            'kind': KIND_DIRECT,
             'writable': True,
-            'target': target,
-            'endpoint': _MAPPING_ENDPOINTS[target],
-            'concept_id': concept_id,
-            'type_concept_id': row.type_concept_id or CONCEPT_LAB_TYPE,
-            'source_value': row.source_value,
+            'target': 'patient_record',
             'value_kind': row.value_kind or _value_kind(row.field_name),
             'curated': True,
+            'projection': {
+                'omop_table': target,
+                'endpoint': _MAPPING_ENDPOINTS[target],
+                'concept_id': concept_id,
+                'type_concept_id': type_concept_id,
+                'source_value': source_value,
+            },
         }
         if row.unit:
             entry['unit'] = row.unit
+            entry['projection']['unit'] = row.unit
+            entry['projection']['unit_concept_id'] = unit_ids.get(row.unit)
         if row.value_vocabulary:
             options = titles.get(row.value_vocabulary) or ()
             if options:
                 entry['options'] = [{'value': t} for t in options]
                 entry['multiple'] = row.multiple
+        elif choice_options and row.field_name in choice_options:
+            entry['options'] = choice_options[row.field_name]
+            entry['multiple'] = row.multiple
+        if (row.field_name == 'cytogenetic_markers' and row.multiple
+                and row.vocabulary_id == 'SNOMED' and row.concept_code == '107675007'):
+            from omop_core.services.cytogenetics import descriptor as cytogenetic_descriptor
+            entry = cytogenetic_descriptor(mapping_approved=True)
         entries[row.field_name] = entry
     return entries
 
@@ -404,6 +477,57 @@ def _lookup_titles(model_name):
     return list(model.objects.order_by('title').values_list('title', flat=True))
 
 
+# Process-lifetime cache.  Safe because inputs are static (model metadata +
+# constant dicts, no database queries).  If a database-dependent rule is ever
+# added, this must be replaced with per-request computation.
+_CACHED_SERIALIZER_READ_ONLY: frozenset | None = None
+
+
+def get_serializer_read_only_fields():
+    """Field names that must be read-only on PatientRecordSerializer.
+
+    Computable without database access from the field classification rules.
+    A field is read-only here when its write target is not PatientRecord
+    (profile fields target Person) or when it is computed/derived/authored.
+
+    The result depends only on model metadata and static dicts, so it is
+    computed once and cached for the lifetime of the process.
+    """
+    global _CACHED_SERIALIZER_READ_ONLY  # noqa: PLW0603
+    if _CACHED_SERIALIZER_READ_ONLY is not None:
+        return _CACHED_SERIALIZER_READ_ONLY
+
+    read_only = set()
+    # KIND_COMPUTED: episode-derived line fields
+    read_only |= _EPISODE_COMPUTED_FIELDS
+    # KIND_COMPUTED: wearable aggregates + KIND_UNMAPPED: wearable metadata
+    read_only |= set(_WEARABLE_METRIC)
+    read_only.add('wearable_coverage_ratio_30d')
+    for field in PatientRecord._meta.concrete_fields:
+        if field.name.startswith('wearable_') and field.name not in _WEARABLE_METRIC:
+            read_only.add(field.name)
+    # KIND_COMPUTED: derived from other fields (BMI, tnbc_status, etc.)
+    read_only |= set(_COMPUTED_INPUTS)
+    # KIND_ALIAS: mirrors of canonical fields
+    read_only |= set(_ALIAS_TO_CANONICAL)
+    # Profile fields now write through PatientRecord PATCH (KIND_DIRECT),
+    # so they are no longer read-only on the serializer.
+    # KIND_AUTHORED / KIND_UNMAPPED: therapy-prefix fields (minus exceptions)
+    for field in PatientRecord._meta.concrete_fields:
+        name = field.name
+        if (name.startswith(_THERAPY_PREFIXES)
+                and name not in _THERAPY_PREFIX_EXCEPTIONS
+                and name not in _EPISODE_COMPUTED_FIELDS):
+            read_only.add(name)
+    # KIND_SELECTABLE: unit fields
+    for field in PatientRecord._meta.concrete_fields:
+        if field.name.endswith('_units'):
+            read_only.add(field.name)
+    read_only -= {'relapse_count', 'treatment_refractory_status'}
+    _CACHED_SERIALIZER_READ_ONLY = frozenset(read_only)
+    return _CACHED_SERIALIZER_READ_ONLY
+
+
 def build_writable_field_descriptor():
     """Return {field: descriptor} for every mapped PatientRecord clinical field.
 
@@ -418,8 +542,10 @@ def build_writable_field_descriptor():
     derived_concepts = _resolve_concepts(
         {(vocab, code) for code, vocab, _fn in DERIVED_FIELD_TO_CODE.values()}
     )
+    largest_lymph_node_concept = Concept.objects.filter(
+        concept_id=CONCEPT_LARGEST_LYMPH_NODE_DIMENSION
+    ).only('concept_id', 'concept_code', 'concept_name', 'vocabulary_id').first()
 
-    curated = _curated_writes()
     choice_options = {
         field_name: [
             {'value': display, 'code': primary_code}
@@ -427,9 +553,46 @@ def build_writable_field_descriptor():
         ]
         for field_name, choices in _field_choice_options().items()
     }
+    curated = _curated_writes(choice_options)
 
     descriptor = {}
     for field in sorted(PATIENT_RECORD_OMOP_MAPPED_FIELDS - _LIFECYCLE_FIELDS):
+        if field.startswith('genomics_'):
+            mapping = curated.get(field, {})
+            writable = (mapping.get('writable', False) and mapping.get('value_kind') == 'json'
+                        and mapping.get('projection', {}).get('omop_table') == 'measurement')
+            descriptor[field] = {
+                'kind': KIND_EDITABLE, 'writable': bool(writable), 'target': 'patient_record',
+                'reason': 'Priority findings write through approved Genomics mappings.',
+            }
+            continue
+        if field == 'cytogenetic_markers':
+            descriptor[field] = {
+                'kind': KIND_COMPUTED, 'writable': False, 'target': 'genomics',
+                'reason': 'Legacy cytogenetic summary is read-only. Record individual findings in Genomics.',
+            }
+            continue
+        if field == 'genetic_mutations':
+            descriptor[field] = {
+                'kind': KIND_EDITABLE, 'writable': True, 'target': 'genomics',
+                'endpoint': '/api/v1/patient-records/{person_id}/genomics/',
+                'reason': 'Edit individual variants in the Genomics tab; each variant writes linked OMOP facts.',
+            }
+            continue
+        if field in _EPISODE_COMPUTED_FIELDS:
+            descriptor[field] = {
+                'kind': KIND_COMPUTED,
+                'writable': False,
+                'inputs': ['Episode', 'EpisodeEvent'],
+                'source_tables': ['Episode', 'EpisodeEvent'],
+                'authored_via': _THERAPY_RECIPE,
+                'reason': (
+                    'Code-computed from persisted Episode and EpisodeEvent '
+                    'records. Author a therapy line as an Episode grouping its '
+                    'events and this field follows.'
+                ),
+            }
+            continue
         if field in _ALIAS_TO_CANONICAL:
             canonical = _ALIAS_TO_CANONICAL[field]
             descriptor[field] = {
@@ -443,22 +606,13 @@ def build_writable_field_descriptor():
         if field in _PROFILE_DEMOGRAPHIC:
             person_field, kind = _PROFILE_DEMOGRAPHIC[field]
             descriptor[field] = {
-                'kind': KIND_PROFILE,
+                'kind': KIND_DIRECT,
                 'writable': True,
-                'target': 'person',
-                'endpoint': 'PATCH /api/v1/persons/{person_id}/',
+                'target': 'patient_record',
+                'projection_target': 'person',
                 'person_field': person_field,
-                # What to actually send. `person_field` documents the Person
-                # columns behind this and reads as prose ("gender_concept +
-                # gender_source_value", "Location.city"); the endpoint keys every
-                # profile field on the PatientRecord field name and resolves the
-                # rest itself. A client guessing from the prose would send neither.
                 'payload_field': field,
                 'value_kind': 'string',
-                # A curated set, not the whole vocabulary: OMOP's Race holds 1,409
-                # concepts and Ethnicity 150 nationality-style entries, which is
-                # not the question a clinical form asks. Anything sent is still
-                # preserved verbatim in the source value.
                 'options': [
                     {'value': display, 'code': code}
                     for code, display in demographic_choices(kind)
@@ -468,10 +622,10 @@ def build_writable_field_descriptor():
 
         if field in _PROFILE_LOCATION:
             descriptor[field] = {
-                'kind': KIND_PROFILE,
+                'kind': KIND_DIRECT,
                 'writable': True,
-                'target': 'person',
-                'endpoint': 'PATCH /api/v1/persons/{person_id}/',
+                'target': 'patient_record',
+                'projection_target': 'location',
                 'person_field': _PROFILE_LOCATION[field],
                 'payload_field': field,
                 'value_kind': _value_kind(field),
@@ -480,33 +634,25 @@ def build_writable_field_descriptor():
 
         if field in _PROFILE_REPLACEABLE:
             descriptor[field] = {
-                'kind': KIND_PROFILE,
+                'kind': KIND_DIRECT,
                 'writable': True,
-                'target': 'person',
-                'endpoint': 'PATCH /api/v1/persons/{person_id}/',
+                'target': 'patient_record',
+                'projection_target': 'person',
                 'person_field': _PROFILE_REPLACEABLE[field],
                 'payload_field': field,
                 'value_kind': _value_kind(field),
             }
             continue
 
-        if field in _PROFILE_FILL_IF_EMPTY:
+        if field == 'wearable_coverage_ratio_30d':
             descriptor[field] = {
-                'kind': KIND_PROFILE,
-                # Not writable in the sense the editor means. The endpoint fills a
-                # blank and silently leaves an existing value alone, so offering a
-                # box that appears to accept a correction would lie about the
-                # outcome — the save would succeed and change nothing.
+                'kind': KIND_COMPUTED,
                 'writable': False,
-                'fill_if_empty': True,
-                'target': 'person',
-                'endpoint': 'PATCH /api/v1/persons/{person_id}/',
-                'person_field': _PROFILE_FILL_IF_EMPTY[field],
-                'payload_field': field,
-                'value_kind': _value_kind(field),
+                'inputs': sorted(set(_WEARABLE_METRIC.values())),
+                'window_days': 30,
                 'reason': (
-                    'Set on the Person record, and only while it is empty — this '
-                    'endpoint never overwrites an existing value.'
+                    'Proportion of the 30-day window with any valid wearable '
+                    'reading, counting each day once across all device metrics.'
                 ),
             }
             continue
@@ -555,42 +701,78 @@ def build_writable_field_descriptor():
             }
             continue
 
+        if field == 'largest_lymph_node_size':
+            if largest_lymph_node_concept is None:
+                descriptor[field] = {
+                    'kind': KIND_DIRECT,
+                    'writable': True,
+                    'target': 'patient_record',
+                    'value_kind': 'number',
+                    'reason': (
+                        'Written directly to PatientRecord. Cancer Modifier '
+                        '36769292 (Dimension of Largest Lymph Node) is not '
+                        'loaded — no OMOP projection available.'
+                    ),
+                }
+                continue
+            descriptor[field] = {
+                'kind': KIND_DIRECT,
+                'writable': True,
+                'target': 'patient_record',
+                'value_kind': 'number',
+                'unit': 'cm',
+                'projection': {
+                    'omop_table': 'measurement',
+                    'concept_id': largest_lymph_node_concept.concept_id,
+                    'code': largest_lymph_node_concept.concept_code,
+                    'vocabulary': largest_lymph_node_concept.vocabulary_id,
+                    'display': largest_lymph_node_concept.concept_name,
+                    'unit': 'cm',
+                    'unit_concept_id': unit_ids.get('cm'),
+                    'type_concept_id': CONCEPT_PATIENT_REPORTED_TYPE,
+                    'source_value': largest_lymph_node_concept.concept_code,
+                },
+                'attributed_from': '_get_cll_data',
+            }
+            continue
+
         derived = DERIVED_FIELD_TO_CODE.get(field)
         if derived is not None:
             code, vocabulary, extractor = derived
             concept = derived_concepts.get((vocabulary, code))
             if concept is None:
                 descriptor[field] = {
-                    'kind': KIND_EDITABLE,
-                    'writable': False,
+                    'kind': KIND_DIRECT,
+                    'writable': True,
+                    'target': 'patient_record',
+                    'value_kind': _value_kind(field),
                     'reason': (
-                        f'{vocabulary} {code} is not loaded in this deployment\'s '
-                        'vocabulary.'
+                        f'Written directly to PatientRecord. {vocabulary} {code} '
+                        f'is not loaded — no OMOP projection available.'
                     ),
-                    'code': code,
-                    'vocabulary': vocabulary,
                     'attributed_from': extractor,
                 }
                 continue
+            omop_table = (
+                'observation' if concept.domain_id == 'Observation'
+                else 'measurement'
+            )
             descriptor[field] = {
-                'kind': KIND_EDITABLE,
+                'kind': KIND_DIRECT,
                 'writable': True,
-                # From the concept's own domain, not a guess: a code that moves
-                # domain in a vocabulary release moves table with it.
-                'target': (
-                    'observation' if concept.domain_id == 'Observation'
-                    else 'measurement'
-                ),
-                'concept_id': concept.concept_id,
-                'code': code,
-                'vocabulary': vocabulary,
-                'display': concept.concept_name,
+                'target': 'patient_record',
                 'value_kind': _value_kind(field),
-                'unit': None,
-                'unit_concept_id': None,
-                'type_concept_id': CONCEPT_LAB_TYPE,
-                'source_value': code,
-                # Provenance for review: the extractor this attribution came from.
+                'projection': {
+                    'omop_table': omop_table,
+                    'concept_id': concept.concept_id,
+                    'code': code,
+                    'vocabulary': vocabulary,
+                    'display': concept.concept_name,
+                    'unit': None,
+                    'unit_concept_id': None,
+                    'type_concept_id': CONCEPT_LAB_TYPE,
+                    'source_value': code,
+                },
                 'attributed_from': extractor,
             }
             continue
@@ -614,48 +796,68 @@ def build_writable_field_descriptor():
                     ),
                 }
                 continue
+            if group == GROUP_NEEDS_CONCEPT:
+                # No OMOP mapping yet, but the field is directly writable on
+                # PatientRecord.  User edits land there and are preserved
+                # across derivation until a FieldConceptMapping projects
+                # them into an OMOP table.
+                entry = {
+                    'kind': KIND_DIRECT,
+                    'writable': True,
+                    'target': 'patient_record',
+                    'value_kind': _value_kind(field),
+                    'reason': 'Written directly to PatientRecord. No OMOP mapping yet.',
+                }
+                opts = choice_options.get(field, [])
+                if opts:
+                    entry['options'] = opts
+                descriptor[field] = entry
+                continue
             descriptor[field] = {
                 'kind': KIND_UNMAPPED,
                 'writable': False,
                 'group': group,
                 'reason': _UNMAPPED_GROUP_REASONS[group],
-                'options': choice_options.get(field, []),
             }
             continue
 
         code, unit, display = mapping
         concept_id = loinc_ids.get(code)
         if concept_id is None:
-            # The mapping exists but this deployment's vocabulary does not carry
-            # the concept. Writing the fact would strand it against a concept that
-            # cannot be resolved, so report it as not writable here rather than
-            # letting the client discover it as a failed write.
+            # The mapping exists but the vocabulary doesn't carry the concept.
+            # Still directly writable on PatientRecord; no OMOP projection.
             descriptor[field] = {
-                'kind': KIND_EDITABLE,
-                'writable': False,
+                'kind': KIND_DIRECT,
+                'writable': True,
+                'target': 'patient_record',
+                'value_kind': 'number',
                 'reason': (
-                    f'LOINC {code} is not loaded in this deployment\'s vocabulary.'
+                    f'Written directly to PatientRecord. LOINC {code} is not '
+                    f'loaded — no OMOP projection available.'
                 ),
-                'code': code,
-                'vocabulary': 'LOINC',
             }
             continue
 
         descriptor[field] = {
-            'kind': KIND_EDITABLE,
+            'kind': KIND_DIRECT,
             'writable': True,
-            'target': 'measurement',
-            'concept_id': concept_id,
-            'code': code,
-            'vocabulary': 'LOINC',
-            'display': display,
+            'target': 'patient_record',
             'value_kind': 'number',
             'unit': unit,
-            'unit_concept_id': unit_ids.get(unit),
-            'type_concept_id': CONCEPT_LAB_TYPE,
-            'source_value': code,
+            'projection': {
+                'omop_table': 'measurement',
+                'concept_id': concept_id,
+                'code': code,
+                'vocabulary': 'LOINC',
+                'display': display,
+                'unit': unit,
+                'unit_concept_id': unit_ids.get(unit),
+                # This descriptor drives a clinician/patient edit, not a lab
+                # import. Keeping it distinct preserves same-day imported facts.
+                'type_concept_id': CONCEPT_PATIENT_REPORTED_TYPE,
+                'source_value': code,
+            },
         }
-
     # Fields the serializer adds that no PatientRecord column backs.
     #
     # The loop above walks PATIENT_RECORD_OMOP_MAPPED_FIELDS, so it can only
@@ -677,14 +879,17 @@ def build_writable_field_descriptor():
             'reason': f'Mirrors {canonical}; edit that field instead.',
         })
 
-    # Applied last, so it overrides whichever branch offered the field.
+    # Fields whose OMOP write recipe is broken — the curated mapping writes to
+    # the wrong table/concept.  They are still directly writable on PatientRecord;
+    # the OMOP recipe is just not usable for clinical-fact writes.
     for field, reason in _WRITE_RECIPE_INCOMPLETE.items():
         if field in descriptor:
             descriptor[field] = {
-                'kind': KIND_UNMAPPED,
-                'writable': False,
-                'group': GROUP_NEEDS_CONCEPT,
-                'reason': reason,
+                'kind': KIND_DIRECT,
+                'writable': True,
+                'target': 'patient_record',
+                'value_kind': _value_kind(field),
+                'reason': f'Written directly to PatientRecord. OMOP recipe issue: {reason}',
             }
 
     for computed, reason in _SERIALIZER_COMPUTED.items():
@@ -694,4 +899,21 @@ def build_writable_field_descriptor():
             'reason': reason,
         })
 
+    from omop_core.services.treatment_catalog import REFRACTORY_STATUSES
+    for field in ('relapse_count', 'treatment_refractory_status', 'refractory_status', 'death_date'):
+        descriptor[field] = {
+            'kind': KIND_DIRECT, 'writable': True, 'target': 'patient_record',
+            'value_kind': 'number' if field == 'relapse_count' else 'date' if field == 'death_date' else 'string',
+        }
+        if field in ('treatment_refractory_status', 'refractory_status'):
+            descriptor[field]['options'] = [{'value': value} for value in REFRACTORY_STATUSES]
+    descriptor['refractory_status']['canonical'] = 'treatment_refractory_status'
+    for field in ('relapse_count', 'treatment_refractory_status', 'death_date'):
+        descriptor[field]['reason'] = 'Inferred by default; enter a value to override, or clear to use the inferred value.'
+        descriptor[field]['projection'] = {
+            'omop_table': 'observation', 'concept_id': 0,
+            'type_concept_id': CONCEPT_EHR_TYPE,
+            'source_value': 'patient-record:' + field,
+        }
+    descriptor['death_date']['reason'] = 'Corrections are dated OMOP observations; earlier facts remain as history.'
     return descriptor

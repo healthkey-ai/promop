@@ -24,6 +24,7 @@ from datetime import date
 from django.core.management.base import BaseCommand, CommandError
 from django.db.models import (
     BooleanField,
+    Case,
     CharField,
     DecimalField,
     F,
@@ -32,10 +33,12 @@ from django.db.models import (
     Q,
     Subquery,
     Value,
+    When,
 )
-from django.db.models.functions import Coalesce
+from django.db.models.functions import Coalesce, JSONObject, NullIf
 
 from omop_core.models import ConditionOccurrence, Measurement, Observation, PatientRecord, Person
+from omop_core.services.clinical_units import blood_count_to_canonical
 
 
 TRIAL_ELIGIBILITY_FIELDS = [
@@ -115,6 +118,7 @@ def _latest_measurement_text_subquery(concept_codes):
                 'value_as_string',
                 'value_source_value',
                 'value_as_concept__concept_name',
+                output_field=CharField(),
             )
         )
         .order_by('-measurement_date', '-measurement_id')
@@ -138,6 +142,27 @@ def _latest_measurement_number_subquery(concept_codes, output_field):
     return Subquery(qs, output_field=output_field)
 
 
+def _latest_blood_count_subquery(code):
+    """Keep the source unit alongside the newest count, including unknowns."""
+    return Subquery(
+        Measurement.objects.filter(person=OuterRef('pk'), is_erroneous=False).filter(
+            Q(measurement_concept__concept_code=code) | Q(measurement_source_value=code)
+        ).order_by('-measurement_date', '-measurement_id').annotate(
+            count_payload=JSONObject(
+                value='value_as_number',
+                unit=Coalesce(
+                    NullIf('unit_source_value', Value('')),
+                    Case(When(unit_concept__vocabulary_id='UCUM', then='unit_concept__concept_code')),
+                ),
+            ),
+        ).values('count_payload')[:1]
+    )
+
+
+def _canonical_blood_count(payload):
+    return blood_count_to_canonical(payload['value'], payload['unit']) if payload else None
+
+
 def _latest_observation_text_subquery(concept_codes):
     qs = (
         Observation.objects
@@ -151,6 +176,7 @@ def _latest_observation_text_subquery(concept_codes):
                 'value_as_string',
                 'value_source_value',
                 'value_as_concept__concept_name',
+                output_field=CharField(),
             )
         )
         .order_by('-observation_date', '-observation_id')
@@ -259,8 +285,8 @@ def _fetch_omop_trial_row(person_id):
             ecog_performance_status=_latest_observation_number_name_subquery(['ecog'], IntegerField()),
             karnofsky_performance_score=_latest_observation_number_name_subquery(['karnofsky'], IntegerField()),
             hemoglobin_g_dl=_latest_measurement_number_subquery(['718-7'], DecimalField(max_digits=5, decimal_places=1)),
-            platelet_count_thousand_per_ul=_latest_measurement_number_subquery(['777-3'], DecimalField(max_digits=6, decimal_places=1)),
-            anc_thousand_per_ul=_latest_measurement_number_subquery(['751-8'], DecimalField(max_digits=6, decimal_places=1)),
+            platelet_count_thousand_per_ul=_latest_blood_count_subquery('777-3'),
+            anc_thousand_per_ul=_latest_blood_count_subquery('751-8'),
             wbc_count_thousand_per_ul=_latest_measurement_number_subquery(['6690-2'], DecimalField(max_digits=6, decimal_places=1)),
             serum_creatinine_mg_dl=_latest_measurement_number_subquery(['2160-0', '38483-4'], DecimalField(max_digits=5, decimal_places=2)),
             creatinine_clearance_ml_min=_latest_measurement_number_subquery(['2164-2'], DecimalField(max_digits=6, decimal_places=1)),
@@ -306,8 +332,8 @@ def _fetch_omop_trial_row(person_id):
         'ecog_performance_status': row['ecog_performance_status'],
         'karnofsky_performance_score': row['karnofsky_performance_score'],
         'hemoglobin_g_dl': row['hemoglobin_g_dl'],
-        'platelet_count_thousand_per_ul': row['platelet_count_thousand_per_ul'],
-        'anc_thousand_per_ul': row['anc_thousand_per_ul'],
+        'platelet_count_thousand_per_ul': _canonical_blood_count(row['platelet_count_thousand_per_ul']),
+        'anc_thousand_per_ul': _canonical_blood_count(row['anc_thousand_per_ul']),
         'wbc_count_thousand_per_ul': row['wbc_count_thousand_per_ul'],
         'serum_creatinine_mg_dl': row['serum_creatinine_mg_dl'],
         'creatinine_clearance_ml_min': row['creatinine_clearance_ml_min'],

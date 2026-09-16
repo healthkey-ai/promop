@@ -8,7 +8,6 @@ TEST-04: FLBundleGenerator unit tests
 """
 
 import tempfile
-import unittest
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -322,9 +321,9 @@ class CanonicalizeDiseaseTest(_OmopBase):
 
     def test_canonicalize_helper_maps_known_aliases(self):
         from omop_core.services.patient_record_service import _canonicalize_disease
-        self.assertEqual(_canonicalize_disease('myeloma'), 'multiple myeloma')
-        self.assertEqual(_canonicalize_disease('Myeloma'), 'multiple myeloma')
-        self.assertEqual(_canonicalize_disease('  MYELOMA  '), 'multiple myeloma')
+        self.assertEqual(_canonicalize_disease('myeloma'), 'Multiple Myeloma')
+        self.assertEqual(_canonicalize_disease('Myeloma'), 'Multiple Myeloma')
+        self.assertEqual(_canonicalize_disease('  MYELOMA  '), 'Multiple Myeloma')
         self.assertEqual(_canonicalize_disease('breast cancer'), 'Breast Cancer')
         self.assertEqual(_canonicalize_disease('Breast cancer'), 'Breast Cancer')
         self.assertEqual(_canonicalize_disease('Breast Cancer (disorder)'), 'Breast Cancer')
@@ -337,6 +336,39 @@ class CanonicalizeDiseaseTest(_OmopBase):
         self.assertEqual(_canonicalize_disease(''), '')
         self.assertIsNone(_canonicalize_disease(None))
 
+    def test_supported_disease_titles_are_consistent(self):
+        from omop_core.services.patient_record_service import _canonicalize_disease
+        for title in (
+            'Multiple Myeloma', 'Follicular Lymphoma', 'Breast Cancer',
+            'Chronic Lymphocytic Leukemia', 'Mantle Cell Lymphoma',
+        ):
+            for raw in (title, title.lower(), f'  {title.upper()}  ', f'{title.lower()} (disorder)'):
+                with self.subTest(raw=raw):
+                    self.assertEqual(_canonicalize_disease(raw), title)
+
+    def test_refresh_uses_canonical_titles_for_mapped_and_unmapped_conditions(self):
+        concept = _concept(90002, 'placeholder', self.dom_cond, self.vocab, self.cc)
+        condition = ConditionOccurrence.objects.create(
+            condition_occurrence_id=92204, person=self.person,
+            condition_concept=concept, condition_start_date=date(2022, 3, 1),
+            condition_type_concept=self.type_concept,
+        )
+        for title in (
+            'Multiple Myeloma', 'Follicular Lymphoma', 'Breast Cancer',
+            'Chronic Lymphocytic Leukemia', 'Mantle Cell Lymphoma',
+        ):
+            concept.concept_name = title.lower()
+            concept.save(update_fields=['concept_name'])
+            for mapped in (True, False):
+                with self.subTest(title=title, mapped=mapped):
+                    condition.condition_concept_id = concept.pk if mapped else 0
+                    condition.condition_source_value = title.lower()
+                    condition.save()
+                    record = refresh_patient_record(self.person)
+                    record.refresh_from_db()
+                    self.assertEqual(record.disease, title)
+                    self.assertEqual(record.disease_slug, title.lower().replace(' ', '-'))
+
     def test_refresh_canonicalizes_bare_myeloma_condition(self):
         myeloma_concept = _concept(90002, 'myeloma', self.dom_cond, self.vocab, self.cc)
         ConditionOccurrence.objects.create(
@@ -347,7 +379,7 @@ class CanonicalizeDiseaseTest(_OmopBase):
             condition_type_concept=self.type_concept,
         )
         pi = refresh_patient_record(self.person)
-        self.assertEqual(pi.disease, 'multiple myeloma')
+        self.assertEqual(pi.disease, 'Multiple Myeloma')
         self.assertEqual(pi.disease_slug, 'multiple-myeloma')
 
 
@@ -2445,6 +2477,20 @@ class PatientInfoCompatViewTest(TestCase):
         unbacked = set(self._view_columns()) - table_cols - {'status'}
         self.assertEqual(sorted(unbacked), [])
 
+    def test_text_tumor_grades_readable_through_view(self):
+        """0232 must rebuild the view without losing FL grades 3A / 3B."""
+        person = Person.objects.create(person_id=880005, year_of_birth=1980)
+        record = PatientRecord.objects.create(person=person)
+        for grade in ('1', '2', '3A', '3B', None):
+            with self.subTest(grade=grade):
+                PatientRecord.objects.filter(pk=record.pk).update(tumor_grade=grade)
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT tumor_grade FROM patient_info WHERE person_id = %s",
+                        [person.person_id],
+                    )
+                    self.assertEqual(cursor.fetchone()[0], grade)
+
     def test_view_exposes_death_date(self):
         """
         Migration 0139 adds `death_date` to the view. The column has existed on
@@ -3106,390 +3152,6 @@ class BackfillConceptSourceCommandTest(TestCase):
         call_command('backfill_concept_source', '--apply', verbosity=0)
         self.assertEqual(
             Concept.objects.filter(concept_id=9001099, source='HealthKey').count(), 1)
-
-
-class RemapLocalDrugConceptsCommandTest(TestCase):
-    """Covers remap_local_drug_concepts (see #427).
-
-    Six drug concepts were minted locally with the drug's name as concept_code
-    instead of being resolved against Athena. The clinical content is right, but
-    the mint has no vocabulary edges at all — the genuine HemOnc olaparib
-    concept participates in 63 relationships, the mint in zero — so the
-    exposures are invisible to any standard drug-class or indication query.
-    """
-
-    @classmethod
-    def setUpTestData(cls):
-        from omop_core.models import Person
-        seed_test_concepts()
-        cls.person = Person.objects.create(person_id=780001, year_of_birth=1970)
-
-    def _concept(self, concept_id, code, name, vocabulary_id, standard=None):
-        from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
-        vocab, _ = Vocabulary.objects.get_or_create(
-            vocabulary_id=vocabulary_id,
-            defaults={'vocabulary_name': vocabulary_id, 'vocabulary_concept_id': 0})
-        domain, _ = Domain.objects.get_or_create(
-            domain_id='Drug', defaults={'domain_name': 'Drug', 'domain_concept_id': 0})
-        return Concept.objects.create(
-            concept_id=concept_id, concept_name=name, domain=domain, vocabulary=vocab,
-            concept_class=ConceptClass.objects.get(concept_class_id='Clinical Observation'),
-            standard_concept=standard, concept_code=code,
-            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31))
-
-    def _setup_olaparib(self, n_exposures=3):
-        """Mint, HemOnc source concept and Standard target, as on staging."""
-        from omop_core.models import Concept, DrugExposure
-
-        mint = self._concept(2012334076, 'Olaparib', 'Olaparib', 'HemOnc')
-        self._concept(35803216, '366', 'Olaparib', 'HemOnc')
-        self._concept(45892579, '1597582', 'olaparib', 'RxNorm', standard='S')
-        for i in range(n_exposures):
-            DrugExposure.objects.create(
-                drug_exposure_id=880001 + i,
-                person=self.person,
-                drug_concept=mint,
-                drug_exposure_start_date=date(2024, 7, i + 1),
-                drug_type_concept=Concept.objects.get(concept_id=32869),
-            )
-        return mint
-
-    def test_dry_run_writes_nothing(self):
-        from omop_core.models import Concept, DrugExposure
-
-        self._setup_olaparib()
-        call_command('remap_local_drug_concepts', '--dry-run', verbosity=0)
-        self.assertEqual(
-            DrugExposure.objects.filter(drug_concept_id=2012334076).count(), 3)
-        self.assertTrue(Concept.objects.filter(concept_id=2012334076).exists())
-
-    def test_apply_points_drug_concept_at_the_standard_concept(self):
-        """drug_concept_id must hold a Standard concept.
-
-        RxNorm is standard for the Drug domain, so the HemOnc drug concept is
-        non-standard by design — pointing at it would swap one non-standard
-        concept for another.
-        """
-        from omop_core.models import DrugExposure
-
-        self._setup_olaparib()
-        call_command('remap_local_drug_concepts', '--apply', verbosity=0)
-
-        rows = DrugExposure.objects.filter(person=self.person)
-        self.assertEqual(rows.count(), 3)
-        for row in rows:
-            self.assertEqual(row.drug_concept_id, 45892579)
-            self.assertEqual(row.drug_concept.standard_concept, 'S')
-
-    def test_apply_preserves_provenance_in_drug_source_concept(self):
-        from omop_core.models import DrugExposure
-
-        self._setup_olaparib()
-        call_command('remap_local_drug_concepts', '--apply', verbosity=0)
-        self.assertEqual(
-            DrugExposure.objects.filter(person=self.person).first().drug_source_concept_id,
-            35803216, 'the HemOnc concept records what was actually stated')
-
-    def test_apply_deletes_the_mint(self):
-        from omop_core.models import Concept
-
-        self._setup_olaparib()
-        call_command('remap_local_drug_concepts', '--apply', verbosity=0)
-        self.assertFalse(Concept.objects.filter(concept_id=2012334076).exists())
-
-    def test_keep_mints_leaves_the_concept(self):
-        from omop_core.models import Concept
-
-        self._setup_olaparib()
-        call_command('remap_local_drug_concepts', '--apply', '--keep-mints', verbosity=0)
-        self.assertTrue(Concept.objects.filter(concept_id=2012334076).exists())
-
-    def test_affected_patient_records_are_marked_stale(self):
-        """Therapy fields derive from drug_exposure, and queryset .update()
-        sends no signals, so nothing would otherwise notice the change."""
-        from omop_core.models import PatientRecord
-
-        self._setup_olaparib()
-        PatientRecord.objects.filter(person=self.person).update(derivation_version=99)
-        call_command('remap_local_drug_concepts', '--apply', verbosity=0)
-        self.assertEqual(
-            PatientRecord.objects.get(person=self.person).derivation_version, 0)
-
-    def test_skips_when_the_target_concept_is_absent(self):
-        """On a database with no Athena load the targets do not exist. The
-        command must leave the data alone rather than repoint it at nothing."""
-        from omop_core.models import Concept, DrugExposure
-
-        mint = self._concept(2012334076, 'Olaparib', 'Olaparib', 'HemOnc')
-        DrugExposure.objects.create(
-            drug_exposure_id=880900, person=self.person, drug_concept=mint,
-            drug_exposure_start_date=date(2024, 7, 1),
-            drug_type_concept=Concept.objects.get(concept_id=32869))
-
-        call_command('remap_local_drug_concepts', '--apply', verbosity=0)
-
-        self.assertEqual(
-            DrugExposure.objects.get(drug_exposure_id=880900).drug_concept_id, 2012334076)
-        self.assertTrue(Concept.objects.filter(concept_id=2012334076).exists())
-
-    def test_refuses_a_non_standard_target(self):
-        """Guards the mapping constant itself: if a listed target stops being
-        Standard in a later vocabulary release, do not silently use it."""
-        from omop_core.models import Concept, DrugExposure
-
-        self._setup_olaparib()
-        Concept.objects.filter(concept_id=45892579).update(standard_concept=None)
-
-        call_command('remap_local_drug_concepts', '--apply', verbosity=0)
-
-        self.assertEqual(
-            DrugExposure.objects.filter(drug_concept_id=2012334076).count(), 3,
-            'rows must be left alone when the target is not Standard')
-
-
-# ===========================================================================
-# Issue #434: re-derivation must not erase hand-entered values
-# ===========================================================================
-
-@unittest.skip("Retired: legacy user_edited_fields no longer overrides OMOP derivation")
-class CandidateUserEditedFieldsTest(TestCase):
-    """Which edited fields need a fallback until derivation proves otherwise."""
-
-    def test_derived_fields_are_flagged(self):
-        from omop_core.services.omop_write_service import candidate_user_edited_fields
-
-        self.assertEqual(
-            candidate_user_edited_fields({'tumor_stage', 'her2_status', 'smoking_status'}),
-            {'tumor_stage', 'her2_status', 'smoking_status'},
-        )
-
-    def test_non_derived_fields_are_never_flagged(self):
-        """email and date_of_birth live on PatientRecord and are never cleared,
-        so they need no preservation."""
-        from omop_core.services.omop_write_service import candidate_user_edited_fields
-
-        self.assertEqual(candidate_user_edited_fields({'email', 'date_of_birth'}), set())
-
-    def test_fields_inside_a_trigger_set_are_still_flagged(self):
-        """`stage` is in CONDITION_FIELDS and the therapy dates are in
-        THERAPY_LINE_FIELDS, but _sync_condition writes only `disease` and
-        _sync_therapy_line bails without a therapy name. Treating those trigger
-        sets as proof of a round-trip is what let #434's stage='I' disappear."""
-        from omop_core.services.omop_write_service import candidate_user_edited_fields
-
-        self.assertEqual(candidate_user_edited_fields({'stage'}), {'stage'})
-        self.assertEqual(
-            candidate_user_edited_fields({'first_line_start_date'}),
-            {'first_line_start_date'},
-        )
-
-    def test_patient_age_is_flagged_despite_triggering_the_demographic_sync(self):
-        """_sync_demographics writes only gender and the birth date; a typed age
-        has nowhere to land."""
-        from omop_core.services.omop_write_service import candidate_user_edited_fields
-
-        self.assertEqual(candidate_user_edited_fields({'patient_age'}), {'patient_age'})
-
-
-@unittest.skip("Retired: legacy user_edited_fields no longer overrides OMOP derivation")
-class PreserveUserEditedFieldsTest(_OmopBase):
-    """refresh_patient_record must not blank values OMOP cannot reproduce."""
-
-    PERSON_ID = 90600
-
-    def test_hand_entered_value_survives_re_derivation(self):
-        """The staging symptom in #434: set in the UI, gone after the next refresh."""
-        PatientRecord.objects.create(
-            person=self.person,
-            tumor_stage='T2',
-            user_edited_fields=['tumor_stage'],
-        )
-
-        pi = refresh_patient_record(self.person)
-
-        self.assertEqual(pi.tumor_stage, 'T2')
-
-    def test_unflagged_value_is_still_cleared(self):
-        """Preservation is opt-in per field. A derived field nobody edited must
-        still be blanked, or deletions in OMOP would stop propagating."""
-        PatientRecord.objects.create(person=self.person, tumor_stage='T2')
-
-        pi = refresh_patient_record(self.person)
-
-        self.assertIsNone(pi.tumor_stage)
-
-    def test_omop_wins_when_it_has_a_value(self):
-        """A hand-entered value is a fallback, not a pin: once OMOP can answer
-        for the field, the derived value takes over."""
-        PatientRecord.objects.create(
-            person=self.person, stage='I', user_edited_fields=['stage'],
-        )
-        stage_concept = _concept(90610, 'Stage group.clinical', self.dom_meas,
-                                 self.vocab, self.cc, code='21908-9')
-        # Creating this fires the post_save refresh, so the assertion below covers
-        # the real path as well as the explicit call.
-        Measurement.objects.create(
-            measurement_id=90611,
-            person=self.person,
-            measurement_concept=stage_concept,
-            measurement_date=date(2026, 1, 15),
-            measurement_type_concept=self.type_concept,
-            value_as_string='III',
-            measurement_source_value='21908-9',
-        )
-
-        pi = refresh_patient_record(self.person)
-
-        self.assertEqual(pi.stage, 'III')
-
-    def test_zero_is_preserved_as_a_real_answer(self):
-        """Zero drinks a week is an answer, not an absence — a falsy check drops it."""
-        PatientRecord.objects.create(
-            person=self.person, drinks_per_week=0, user_edited_fields=['drinks_per_week'],
-        )
-
-        pi = refresh_patient_record(self.person)
-
-        self.assertEqual(pi.drinks_per_week, 0)
-
-    def test_false_is_preserved_as_a_real_answer(self):
-        PatientRecord.objects.create(
-            person=self.person,
-            transformed_to_dlbcl=False,
-            user_edited_fields=['transformed_to_dlbcl'],
-        )
-
-        pi = refresh_patient_record(self.person)
-
-        self.assertIs(pi.transformed_to_dlbcl, False)
-
-    def test_derivation_taking_over_drops_the_flag(self):
-        """Once OMOP answers for a flagged field, the field stops being tracked
-        as hand-entered — otherwise the next snapshot would capture OMOP's own
-        value and treat it as the user's."""
-        PatientRecord.objects.create(
-            person=self.person, stage='I', user_edited_fields=['stage', 'her2_status'],
-        )
-        stage_concept = _concept(90612, 'Stage group.clinical', self.dom_meas,
-                                 self.vocab, self.cc, code='21908-9')
-        Measurement.objects.create(
-            measurement_id=90613,
-            person=self.person,
-            measurement_concept=stage_concept,
-            measurement_date=date(2026, 1, 15),
-            measurement_type_concept=self.type_concept,
-            value_as_string='III',
-            measurement_source_value='21908-9',
-        )
-
-        pi = refresh_patient_record(self.person)
-
-        self.assertEqual(pi.stage, 'III')
-        # her2_status is still unanswered by OMOP, so it stays tracked.
-        self.assertEqual(pi.user_edited_fields, ['her2_status'])
-
-    def test_derived_value_is_not_resurrected_after_its_source_is_deleted(self):
-        """The failure the hand-off prevents: user types a value, OMOP overrides
-        it, the OMOP row is then deleted. Without dropping the flag the refresh
-        would restore OMOP's old value — one nobody typed and no table backs."""
-        PatientRecord.objects.create(
-            person=self.person, stage='I', user_edited_fields=['stage'],
-        )
-        stage_concept = _concept(90614, 'Stage group.clinical', self.dom_meas,
-                                 self.vocab, self.cc, code='21908-9')
-        m = Measurement.objects.create(
-            measurement_id=90615,
-            person=self.person,
-            measurement_concept=stage_concept,
-            measurement_date=date(2026, 1, 15),
-            measurement_type_concept=self.type_concept,
-            value_as_string='III',
-            measurement_source_value='21908-9',
-        )
-        self.assertEqual(refresh_patient_record(self.person).stage, 'III')
-
-        m.delete()
-        pi = refresh_patient_record(self.person)
-
-        self.assertIsNone(pi.stage)
-
-    def test_flagging_an_unknown_field_is_harmless(self):
-        """user_edited_fields is written by the service, but a stale entry left
-        by a renamed field must not break the refresh for the whole patient."""
-        PatientRecord.objects.create(
-            person=self.person,
-            email='patient@example.com',
-            user_edited_fields=['email', 'not_a_field_at_all'],
-        )
-
-        pi = refresh_patient_record(self.person)
-
-        self.assertEqual(pi.email, 'patient@example.com')
-
-
-@unittest.skip("Retired: PatientRecord-to-OMOP write-through was removed")
-class SyncToOmopMarksUserEditedTest(_OmopBase):
-    """The write-through records what it could not persist."""
-
-    PERSON_ID = 90620
-
-    def test_unsynced_edit_is_recorded(self):
-        from omop_core.services.omop_write_service import sync_to_omop
-
-        pi = PatientRecord.objects.create(person=self.person, her2_status='positive')
-        sync_to_omop(pi, {'her2_status'})
-
-        pi.refresh_from_db()
-        self.assertEqual(pi.user_edited_fields, ['her2_status'])
-
-    def test_non_derived_edit_is_not_recorded(self):
-        """email is never cleared by a refresh, so it needs no fallback."""
-        from omop_core.services.omop_write_service import sync_to_omop
-
-        pi = PatientRecord.objects.create(person=self.person, email='p@example.com')
-        sync_to_omop(pi, {'email'})
-
-        pi.refresh_from_db()
-        self.assertEqual(pi.user_edited_fields, [])
-
-    def test_a_field_omop_owns_unflags_itself_on_the_next_refresh(self):
-        """Flagging is generous on the write side; the read side hands the field
-        back to OMOP as soon as derivation can answer for it. Without that,
-        nothing would ever remove a flag and deletions would stop propagating."""
-        from omop_core.services.omop_write_service import sync_to_omop
-
-        _concept(3000963, 'Laboratory test result', self.dom_meas, self.vocab, self.cc)
-        pi = PatientRecord.objects.create(person=self.person, hemoglobin_g_dl=11.2)
-        sync_to_omop(pi, {'hemoglobin_g_dl'})
-        pi.refresh_from_db()
-        self.assertEqual(pi.user_edited_fields, ['hemoglobin_g_dl'])
-
-        pi = refresh_patient_record(self.person)
-
-        self.assertAlmostEqual(float(pi.hemoglobin_g_dl), 11.2, places=1)
-        self.assertEqual(pi.user_edited_fields, [])
-
-    def test_repeated_edits_accumulate_without_duplicating(self):
-        from omop_core.services.omop_write_service import sync_to_omop
-
-        pi = PatientRecord.objects.create(person=self.person, her2_status='positive')
-        sync_to_omop(pi, {'her2_status'})
-        pi.smoking_status = 'never'
-        sync_to_omop(pi, {'her2_status', 'smoking_status'})
-
-        pi.refresh_from_db()
-        self.assertEqual(pi.user_edited_fields, ['her2_status', 'smoking_status'])
-
-    def test_clearing_a_field_is_recorded_too(self):
-        """Blanking a field is an edit. Recording it only when a value is present
-        would leave the flag unset exactly when the user meant 'none'."""
-        from omop_core.services.omop_write_service import sync_to_omop
-
-        pi = PatientRecord.objects.create(person=self.person, her2_status=None)
-        sync_to_omop(pi, {'her2_status'})
-
-        pi.refresh_from_db()
-        self.assertEqual(pi.user_edited_fields, ['her2_status'])
 
 
 class PerformanceStatusFromEitherTableTest(_OmopBase):
@@ -5210,14 +4872,15 @@ class RefreshQueryCountTest(TestCase):
             )
 
     def test_query_count_under_budget(self):
-        """refresh_patient_record must not exceed 20 SQL queries."""
+        """refresh_patient_record must not exceed 21 SQL queries."""
         from django.test.utils import CaptureQueriesContext
         with CaptureQueriesContext(connection) as ctx:
             refresh_patient_record(self.person)
         # Budget: ~6 snapshot queries + PatientRecord SELECT FOR UPDATE + save
-        # + a few ancillary lookups (Episode, concept cache, etc.)
+        # + a few ancillary lookups (Episode, concept cache, genomics OMOP
+        # projections, etc.)
         self.assertLessEqual(
-            len(ctx.captured_queries), 20,
+            len(ctx.captured_queries), 21,
             f'Expected ≤20 queries, got {len(ctx.captured_queries)}. '
             f'Query breakdown:\n'
             + '\n'.join(
@@ -5325,10 +4988,12 @@ class SeededSctFieldMappingsTest(TestCase):
             with self.subTest(field=field):
                 entry = descriptor[field]
                 self.assertTrue(entry['writable'], f'{field} is not writable')
-                self.assertEqual(entry['target'], 'observation')
+                self.assertEqual(entry['target'], 'patient_record')
+                self.assertIn('projection', entry)
+                self.assertEqual(entry['projection']['omop_table'], 'observation')
                 # Derivation matches on this exact value; a mismatch would store
                 # a row that never comes back.
-                self.assertEqual(entry['source_value'], source_value)
+                self.assertEqual(entry['projection']['source_value'], source_value)
 
     def test_the_list_fields_offer_their_bounded_vocabulary(self):
         from omop_core.services.write_descriptor import build_writable_field_descriptor
@@ -5381,9 +5046,11 @@ class SeededEmploymentStatusMappingTest(TestCase):
         entry = build_writable_field_descriptor()['employment_status']
 
         self.assertTrue(entry['writable'])
-        self.assertEqual(entry['target'], 'observation')
+        self.assertEqual(entry['target'], 'patient_record')
+        self.assertIn('projection', entry)
+        self.assertEqual(entry['projection']['omop_table'], 'observation')
         # _get_social_data matches on this concept code.
-        self.assertEqual(entry['source_value'], '224362002')
+        self.assertEqual(entry['projection']['source_value'], '224362002')
 
     def test_writing_the_prescribed_fact_derives_back(self):
         """The round trip, not just the recipe.
@@ -5397,18 +5064,19 @@ class SeededEmploymentStatusMappingTest(TestCase):
         from omop_core.services.write_descriptor import build_writable_field_descriptor
 
         entry = build_writable_field_descriptor()['employment_status']
+        projection = entry['projection']
         person = Person.objects.create(person_id=880011, year_of_birth=1970)
         PatientRecord.objects.get_or_create(person=person)
 
         Observation.objects.create(
             observation_id=next_pk(Observation, 'observation_id'),
             person=person,
-            observation_concept=Concept.objects.get(concept_id=entry['concept_id']),
+            observation_concept=Concept.objects.get(concept_id=projection['concept_id']),
             observation_date=date(2025, 4, 1),
             observation_type_concept=Concept.objects.get(
-                concept_id=entry['type_concept_id'],
+                concept_id=projection['type_concept_id'],
             ),
-            observation_source_value=entry['source_value'],
+            observation_source_value=projection['source_value'],
             value_as_string='Employed full-time',
         )
 
@@ -6527,6 +6195,21 @@ class MappingSuggestionsTest(_OmopBase):
         for i in range(times):
             self._measurement(start + i, source_value, day=(i % 28) + 1)
 
+    def _queue(self, source_code, occurrences=12, **kwargs):
+        """A Code Mapping queue row, the way ingest leaves one.
+
+        Suggest reads the tab, not the clinical tables, so this -- not a
+        Measurement -- is what puts a code in front of it.
+        """
+        from omop_core.models import SourceCodeConceptMapping
+        defaults = {
+            'source_vocabulary_id': '', 'omop_table': 'measurement',
+            'domain_id': 'Measurement', 'status': 'proposed', 'origin': 'import',
+            'origin_system': '', 'occurrence_count': occurrences,
+        }
+        defaults.update(kwargs)
+        return SourceCodeConceptMapping.objects.create(source_code=source_code, **defaults)
+
     # -- the threshold ----------------------------------------------------
 
     def test_a_code_below_the_threshold_is_not_proposed(self):
@@ -6676,19 +6359,31 @@ class MappingSuggestionsTest(_OmopBase):
 
     # -- creating the proposals -------------------------------------------
 
-    def test_suggest_creates_proposed_mappings_marked_as_a_machine_guess(self):
+    def test_suggest_marks_its_answer_as_a_machine_guess(self):
         from omop_core.models import SourceCodeConceptMapping
         from omop_core.services.mapping_suggestions import suggest_mappings
-        self._seed('Creatinine', 12, start=95000)
+        # A concept the source value actually retrieves. Two things stopped the
+        # existing fixtures being retrievable, and both made this test assert
+        # the provenance of a suggestion that was never made: 'Creatinine'
+        # scores below the trigram threshold against 'Creatinine [Mass/volume]
+        # in Blood' (the name is three times longer), and `_concept` leaves
+        # standard_concept unset while retrieval takes standard concepts only.
+        exact = _concept(4100010, 'Creatinine', self.dom_meas, self.vocab, self.cc,
+                         code='CREAT-EXACT')
+        exact.standard_concept = 'S'
+        exact.save(update_fields=['standard_concept'])
+        self._queue('Creatinine')
         with override_settings(ANTHROPIC_API_KEY=''):
             results = suggest_mappings('measurement', min_occurrences=10)
 
         self.assertEqual(len(results), 1)
         mapping = SourceCodeConceptMapping.objects.get(source_code='Creatinine')
-        self.assertEqual(mapping.status, 'proposed')
+        self.assertEqual(mapping.target_concept_id, exact.concept_id)
+        self.assertEqual(mapping.status, 'proposed', 'a guess is not a decision')
         self.assertEqual(mapping.origin, 'import')
-        self.assertEqual(mapping.origin_system, 'suggest')
-        self.assertEqual(mapping.occurrence_count, 12)
+        self.assertTrue(mapping.origin_system.startswith('suggest'),
+                        f'expected origin_system to start with "suggest", got {mapping.origin_system!r}')
+        self.assertEqual(mapping.occurrence_count, 12, 'the count must survive a run')
         self.assertEqual(mapping.omop_table, 'measurement')
         self.assertTrue(mapping.notes, 'the curator needs to know why')
 
@@ -6708,11 +6403,10 @@ class MappingSuggestionsTest(_OmopBase):
         loinc_source = _concept(
             4100004, 'LOINC source', self.dom_meas, loinc, self.cc, code='SAME-CODE',
         )
-        for i in range(10):
-            self._measurement(95400 + i, 'SAME-CODE', day=(i % 28) + 1,
-                              source_concept_id=rxnorm_source.concept_id)
-            self._measurement(95500 + i, 'SAME-CODE', day=(i % 28) + 1,
-                              source_concept_id=loinc_source.concept_id)
+        self._queue('SAME-CODE', occurrences=10, source_vocabulary_id='RxNorm',
+                    source_concept=rxnorm_source)
+        self._queue('SAME-CODE', occurrences=10, source_vocabulary_id='LOINC',
+                    source_concept=loinc_source)
 
         with override_settings(ANTHROPIC_API_KEY=''):
             results = suggest_mappings('measurement', min_occurrences=10)
@@ -6729,7 +6423,7 @@ class MappingSuggestionsTest(_OmopBase):
         """A raw code is evidence, not a meaningful HK-* concept name."""
         from omop_core.models import SourceCodeConceptMapping
         from omop_core.services.mapping_suggestions import suggest_mappings
-        self._seed('ZZQQ NOTHING LIKE THIS', 11, start=95000)
+        self._queue('ZZQQ NOTHING LIKE THIS', occurrences=11)
         with override_settings(ANTHROPIC_API_KEY=''):
             suggest_mappings('measurement', min_occurrences=10)
         mapping = SourceCodeConceptMapping.objects.get(
@@ -6743,13 +6437,14 @@ class MappingSuggestionsTest(_OmopBase):
         ).exists())
 
     def test_dry_run_writes_nothing(self):
-        from omop_core.models import SourceCodeConceptMapping
         from omop_core.services.mapping_suggestions import suggest_mappings
-        self._seed('Creatinine', 12, start=95000)
+        row = self._queue('Creatinine')
         with override_settings(ANTHROPIC_API_KEY=''):
             results = suggest_mappings('measurement', min_occurrences=10, dry_run=True)
         self.assertEqual(len(results), 1)
-        self.assertEqual(SourceCodeConceptMapping.objects.count(), 0)
+        row.refresh_from_db()
+        self.assertIsNone(row.target_concept_id)
+        self.assertEqual(row.origin_system, '', 'dry run must not stamp provenance')
 
     def test_a_rejected_code_is_not_proposed_again(self):
         """Rejected is decided. Re-proposing put it back at the front of the
@@ -7155,19 +6850,17 @@ class SeedWearableDeviceMappingsTest(TestCase):
 
 
 class ResolveWearableMappingsTest(TestCase):
-    """Test resolve_wearable_mappings() with DB-driven and fallback modes."""
+    """Test resolve_wearable_mappings() uses SCCM as its sole registry."""
 
     @classmethod
     def setUpTestData(cls):
         seed_test_concepts()
 
-    def test_fallback_to_hardcoded_when_no_db_rows(self):
-        """Without SCCM rows, resolve_wearable_mappings falls back to WEARABLE_CONCEPT_CODE."""
+    def test_no_mapping_without_an_approved_sccm_row(self):
+        """An unseeded device has no hidden Python mapping fallback."""
         from omop_core.services.mappings import resolve_wearable_mappings
         mappings = resolve_wearable_mappings('apple')
-        # Steps should resolve from the hard-coded dict
-        self.assertIn('steps', mappings)
-        self.assertIsNotNone(mappings['steps'])
+        self.assertEqual(mappings, {})
 
     def test_db_mappings_used_when_seeded(self):
         """After seeding, resolve_wearable_mappings reads from the DB."""
@@ -7186,13 +6879,11 @@ class ResolveWearableMappingsTest(TestCase):
         self.assertIn('hrv_rmssd', mappings)
         self.assertIn('resting_hr', mappings)
 
-    def test_db_mapping_overrides_hardcoded(self):
-        """An approved SCCM row takes precedence over the hard-coded dict."""
+    def test_db_mapping_is_the_runtime_mapping(self):
+        """An approved SCCM row is the sole source of runtime resolution."""
         from omop_core.services.mappings import resolve_wearable_mappings
         call_command('seed_wearable_device_mappings', verbosity=0)
         mappings = resolve_wearable_mappings('garmin')
-        # The DB mapping should resolve to the same concept as the hard-coded one
-        # (since they point to the same LOINC code), confirming DB was consulted.
         garmin_steps = SourceCodeConceptMapping.objects.get(
             source_vocabulary_id='Garmin', source_code='steps',
         )

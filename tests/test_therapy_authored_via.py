@@ -30,11 +30,13 @@ DRUG_EXPOSURE_FIELD = 1147094
 
 
 class TestDescriptor:
-    def test_therapy_fields_are_authored_not_unmapped(self):
+    def test_therapy_line_fields_are_episode_computed_not_unmapped(self):
         d = build_writable_field_descriptor()
         for field in ('first_line_therapy', 'second_line_therapy',
-                      'later_therapies', 'line_of_therapy', 'relapse_count'):
-            assert d[field]['kind'] == 'authored', field
+                      'later_therapies', 'first_line_outcome',
+                      'second_line_start_date', 'later_end_date'):
+            assert d[field]['kind'] == 'computed', field
+            assert d[field]['inputs'] == ['Episode', 'EpisodeEvent']
 
     def test_each_carries_the_recipe_for_authoring_a_line(self):
         entry = build_writable_field_descriptor()['first_line_therapy']
@@ -136,24 +138,34 @@ class TestTheRecipeActuallyWorks:
         assert pr.therapy_lines_count == 2
         assert str(pr.line_of_therapy) == '2'
 
-    def test_removing_the_episode_falls_back_to_the_drugs(self, patient, concepts):
-        """The episode groups a line; it is not the only evidence one happened.
-
-        Deleting it leaves the drug exposures behind, and derivation still infers
-        a line from them. That is the ARTEMIS-style path the episode path takes
-        precedence over — so removing the grouping loses the assertion, not the
-        therapy.
-        """
+    def test_removing_the_episode_clears_the_projection_even_when_drugs_remain(self, patient, concepts):
+        """Drug exposures alone are not a persisted treatment-line assertion."""
         episode = self._author_line(patient, concepts, 1,
                                     date(2025, 3, 1), date(2025, 6, 1), 'cyclo')
         refresh_patient_record(patient)
-        assert PatientRecord.objects.get(person=patient).therapy_lines_count == 1
+        pr = PatientRecord.objects.get(person=patient)
+        assert pr.therapy_lines_count == 1
+        assert pr.first_line_therapy is not None
 
         EpisodeEvent.objects.filter(episode_id=episode.episode_id).delete()
         episode.delete()
         refresh_patient_record(patient)
 
-        assert PatientRecord.objects.get(person=patient).therapy_lines_count == 1
+        pr = PatientRecord.objects.get(person=patient)
+        assert pr.therapy_lines_count == 0
+        assert pr.first_line_therapy is None
+
+    def test_episode_without_episode_events_does_not_project_a_line(self, patient, concepts):
+        """Both sides of the persisted grouping are required evidence."""
+        episode = self._author_line(patient, concepts, 1,
+                                    date(2025, 3, 1), date(2025, 6, 1), 'cyclo')
+        EpisodeEvent.objects.filter(episode_id=episode.episode_id).delete()
+
+        refresh_patient_record(patient)
+
+        pr = PatientRecord.objects.get(person=patient)
+        assert pr.therapy_lines_count == 0
+        assert pr.first_line_therapy is None
 
     def test_removing_the_drugs_too_clears_the_projection(self, patient, concepts):
         """Derivation is a projection, not an accumulation."""

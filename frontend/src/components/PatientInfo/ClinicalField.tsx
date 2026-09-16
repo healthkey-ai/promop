@@ -112,7 +112,7 @@ export default function ClinicalField({
         vocabSource={vocabSource}
         onChange={onChange}
       />
-      {(onDateChange || descriptor?.target === 'measurement') && (
+      {(onDateChange || descriptor?.projection?.omop_table === 'measurement') && (
         <div className="mt-1 flex items-center gap-2">
           <label
             htmlFor={`${name}-date`}

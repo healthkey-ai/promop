@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Search, Sparkles, X } from "lucide-react";
 import api from "@/api/axios";
+import ConceptInputDetails from "@/components/UI/ConceptInputDetails";
 import { HelpTip, Field, ReadOnlyField, INPUT_CLASS } from "@/components/UI/MappingFormPrimitives";
 
 interface ConceptResult {
@@ -12,6 +13,7 @@ interface ConceptResult {
   concept_class_id: string;
   standard_concept: string | null;
   suggested_unit?: string;
+  measurement_type?: "qualitative" | "quantitative";
 }
 
 interface FieldChoiceInfo {
@@ -210,6 +212,13 @@ export function ConceptAssignDialog({
     }
   };
 
+  const handleSelectCandidate = (c: ConceptResult) => {
+    setSelected(c);
+    if (c.suggested_unit && !unit) {
+      setUnit(c.suggested_unit);
+    }
+  };
+
   return (
     <div
       ref={overlayRef}
@@ -287,6 +296,7 @@ export function ConceptAssignDialog({
                   <option value="">All vocabularies</option>
                   <option value="LOINC">LOINC</option>
                   <option value="SNOMED">SNOMED</option>
+                  <option value="CDISC">CDISC</option>
                   <option value="RxNorm">RxNorm</option>
                   <option value="HemOnc">HemOnc</option>
                 </select>
@@ -300,18 +310,16 @@ export function ConceptAssignDialog({
                   <button
                     key={c.concept_id}
                     type="button"
-                    onClick={() => {
-                      setSelected(c);
-                      if (c.suggested_unit && !unit) {
-                        setUnit(c.suggested_unit);
-                      }
-                    }}
+                    onClick={() => handleSelectCandidate(c)}
                     className={`grid w-full grid-cols-[8rem_1fr_6rem] gap-2 border-b border-slate-100 px-3 py-2 text-left text-xs last:border-0 hover:bg-slate-50 ${
                       selected?.concept_id === c.concept_id ? "bg-blue-50" : ""
                     }`}
                   >
                     <span className="font-mono text-slate-700">{c.concept_code}</span>
-                    <span className="text-slate-900">{c.concept_name}</span>
+                    <span className="text-slate-900">
+                      {c.concept_name}
+                      <ConceptInputDetails {...c} />
+                    </span>
                     <span className="font-mono text-slate-500">{c.vocabulary_id}</span>
                   </button>
                 ))}

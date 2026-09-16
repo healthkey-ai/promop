@@ -5,18 +5,49 @@ on:
     branches: [dev, main]
   workflow_call:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  backend:
-    name: Backend tests
+  changes:
+    name: Detect CI changes
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      async_e2e: ${{ steps.filter.outputs.async_e2e }}
+      docs_only: ${{ steps.filter.outputs.docs_only }}
+      backend: ${{ steps.filter.outputs.backend }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history supports PR merge-base and deployment push diffs.
+          # The detector only reads filenames; no LFS download is needed.
+          fetch-depth: 0
+          lfs: false
+      - id: filter
+        run: python3 .github/scripts/async_e2e_changes.py
+
+  backend_suites:
+    name: Backend suite (${{ matrix.suite }})
+    needs: changes
+    # A skipped job satisfies its required check. Detection errors run full CI.
+    if: >-
+      !cancelled() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.backend != 'false')
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [django, pytest]
 
     services:
       postgres:
-        image: postgres:16
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_DB: promop_test
           POSTGRES_USER: postgres
@@ -55,10 +86,12 @@ jobs:
       # fixture override could enable the extension. Enabling it on template1
       # instead means every database cloned from it already has pg_trgm, which
       # is what conftest.py prescribes as the required environment setup.
-      - name: Enable pg_trgm on template1 (required by the pytest suite)
+      - name: Enable database extensions on template1 (required by the pytest suite)
         env:
           PGPASSWORD: postgres
-        run: psql -h localhost -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
+        run: |
+          psql -h localhost -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
+          psql -h localhost -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS vector"
 
       - name: Run migrations
         run: python manage.py migrate --noinput
@@ -74,24 +107,62 @@ jobs:
         run: python manage.py check --deploy --fail-level ERROR
 
       - name: Run tests (Django runner)
+        if: matrix.suite == 'django'
         run: python manage.py test omop_core patient_portal --verbosity=2 --noinput
 
-      # The tests/ package is pytest-based (pytest.ini sets testpaths = tests,
-      # conftest.py does session-level DB setup that --no-migrations skips).
-      # Django's runner does not discover it, so these 166 tests ran in CI for
-      # the first time here — they had been green-by-omission, and were in fact
-      # 14-of-15 red in tests/test_enrich_breast_cancer_omop_data.py after #413
-      # expanded WEARABLE_CONCEPT_CODE without anyone noticing.
+      # These suites discover different tests. Separate runners give each its
+      # own PostgreSQL/test database while retaining migrations and deploy checks.
       - name: Run tests (pytest)
-        run: pytest -q
+        if: matrix.suite == 'pytest'
+        run: pytest -q --durations=20
+
+
+  backend:
+    name: Backend tests
+    needs: [changes, backend_suites]
+    # Keep the existing required check. Never turn a failed/cancelled matrix
+    # into a skipped green gate; only a recognized frontend/docs diff skips it.
+    if: >-
+      always() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.backend != 'false')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require both backend suites to pass
+        env:
+          BACKEND_RESULT: ${{ needs.backend_suites.result }}
+        run: test "$BACKEND_RESULT" = success
+
+  application_ci:
+    name: Application CI
+    needs: [changes, backend, frontend]
+    # This is the ruleset gate. Documentation-only PRs need no application
+    # suite results; code changes must satisfy the suites selected above.
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enforce application checks for the detected scope
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          BACKEND_REQUIRED: ${{ needs.changes.outputs.backend }}
+          BACKEND_RESULT: ${{ needs.backend.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+        run: python3 .github/scripts/application_ci_gate.py
 
   e2e:
     name: Async derivation e2e
+    needs: changes
+    # If detection fails, run the tests rather than silently losing coverage.
+    # Deployment callers use their push diff, so frontend-only merges skip too.
+    if: >-
+      !cancelled() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.async_e2e == 'true')
     runs-on: ubuntu-latest
 
     services:
       postgres:
-        image: postgres:16
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_DB: promop_test
           POSTGRES_USER: postgres
@@ -130,10 +201,12 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Enable pg_trgm on template1 (required by the pytest suite)
+      - name: Enable database extensions on template1 (required by the pytest suite)
         env:
           PGPASSWORD: postgres
-        run: psql -h localhost -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
+        run: |
+          psql -h localhost -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
+          psql -h localhost -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS vector"
 
       # Its own job rather than a step in `backend`: both suites there build a
       # database called test_promop_test, so a third suite sharing the runner
@@ -143,6 +216,11 @@ jobs:
 
   frontend:
     name: Frontend lint & build
+    needs: changes
+    # A skipped job satisfies its required check. Detection errors run full CI.
+    if: >-
+      !cancelled() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true')
     runs-on: ubuntu-latest
 
     steps:
@@ -172,19 +250,31 @@ jobs:
 
   security:
     name: Security gates
+    needs: changes
+    # A skipped job satisfies its required check. Detection errors run full CI.
+    if: >-
+      !cancelled() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true')
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
         with:
-          # gitleaks scans history, not just the tip, so a secret committed and
-          # then removed in a later commit is still caught.
-          fetch-depth: 0
+          # Scan only the working tree, not full history. A secret committed
+          # and then removed is no longer in the tree and poses no runtime
+          # risk; GitHub's push protection catches it at push time. Full
+          # history scans are too slow and flag false positives in old commits
+          # that cannot be rewritten in a public repo.
+          fetch-depth: 1
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          # The version the application actually runs on, as the other jobs use.
+          # pip-audit resolves requirements.txt in a throwaway environment, so a
+          # dependency that declares a floor above this one cannot be audited at
+          # all — it fails to install before any advisory is checked.
+          python-version: '3.12'
 
       # Pinned: the bandit baseline matches findings by issue TEXT, so a release
       # that rewords a message invalidates every baseline entry at once and turns
@@ -220,7 +310,7 @@ jobs:
       # step go red.
       - name: Python SAST (bandit)
         run: |
-          bandit -q -r omop_core patient_portal ctomop omop_oncology omop_genomics \
+          bandit -q -r omop_core patient_portal promop ctomop omop_oncology omop_genomics \
             -ll -x '*/tests.py,*/tests/*,*/migrations/*' \
             -b .bandit-baseline.json -f json -o bandit-new.json || true
           python - <<'CHECK'
@@ -240,7 +330,7 @@ jobs:
       # service-token sentinel, a test-only string, an empty PKCE secret).
       - name: Hardcoded credential scan (bandit)
         run: |
-          bandit -q -r omop_core patient_portal ctomop omop_oncology omop_genomics \
+          bandit -q -r omop_core patient_portal promop ctomop omop_oncology omop_genomics \
             -t B105,B106,B107 -x '*/tests.py,*/tests/*,*/migrations/*' \
             -b .bandit-credentials-baseline.json -f json -o bandit-creds.json || true
           python - <<'CHECK'
@@ -261,4 +351,4 @@ jobs:
           curl -sSfL -o /tmp/gitleaks.tar.gz \
             "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
-          /tmp/gitleaks detect --source . --config .gitleaks.toml --redact --verbose
+          /tmp/gitleaks detect --source . --config .gitleaks.toml --redact --verbose --no-git

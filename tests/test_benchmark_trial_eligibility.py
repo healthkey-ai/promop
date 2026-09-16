@@ -85,12 +85,14 @@ def _seed_trial_eligibility_patient(org):
         measurement_concept=ConceptFactory(concept_name='Platelet count', concept_code='777-3'),
         measurement_source_value='777-3',
         value_as_number=180.0,
+        unit_source_value='10*3/uL',
     )
     MeasurementFactory(
         person=person,
         measurement_concept=ConceptFactory(concept_name='Absolute neutrophil count', concept_code='751-8'),
         measurement_source_value='751-8',
         value_as_number=2.1,
+        unit_source_value='10*3/uL',
     )
     MeasurementFactory(
         person=person,
@@ -191,4 +193,3 @@ class TestBenchmarkTrialEligibility:
     def test_empty_cohort_raises_command_error(self):
         with pytest.raises(CommandError):
             call_command('benchmark_trial_eligibility', person_ids='999999999')
-

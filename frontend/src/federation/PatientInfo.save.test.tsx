@@ -1,16 +1,9 @@
 /**
- * The federated view saves through the same split as the provider editor.
+ * PatientRecord-first writes in the federated view.
  *
- * It renders the very same tab components — BloodTab, LabsTab — but had its own
- * `doSave` that PATCHed the whole record and never wrote an OMOP fact at all. So
- * every clinical edit here was a write to an OMOP-mapped column:
- *
- *   OMOP-mapped PatientRecord fields are read-only. Write a complete clinical
- *   fact to the appropriate OMOP resource, then rederive the record.
- *
- * Sharing the tabs but not the write path is what let one half get fixed while
- * the other stayed broken, so these pin the behaviour independently rather than
- * trusting that the two implementations stay in step.
+ * All edits go through the PatientRecord PATCH. The backend handles OMOP
+ * projection for fields with approved mappings. Profile fields (person target)
+ * go to the persons endpoint.
  */
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -26,9 +19,12 @@ vi.mock('@/hooks/useVocabulary', () => ({
 
 const DESCRIPTORS = {
   anc_thousand_per_ul: {
-    kind: 'editable', writable: true, target: 'measurement',
-    concept_id: 3013650, code: '751-8', value_kind: 'number',
-    type_concept_id: 32856, source_value: '751-8',
+    kind: 'direct', writable: true, target: 'patient_record',
+    value_kind: 'number',
+    projection: {
+      omop_table: 'measurement', concept_id: 3013650, code: '751-8',
+      type_concept_id: 32856, source_value: '751-8',
+    },
   },
   absolute_neutrophile_count: {
     kind: 'alias', writable: false, canonical: 'anc_thousand_per_ul',
@@ -87,7 +83,15 @@ beforeEach(() => {
     }),
     patch: vi.fn((url: string, body: unknown) => {
       patches.push([url, body]);
-      return Promise.resolve({ data: {} });
+      // The /me/ PATCH returns the same wrapped shape as GET: the full record
+      // under patient_info plus the display name at the top level.
+      const merged = { ...PATIENT_INFO, ...(body as Record<string, unknown>) };
+      return Promise.resolve({
+        data: {
+          patient_info: merged,
+          patient_name: 'Alishia Tawny Howell',
+        },
+      });
     }),
   } as unknown as AxiosInstance;
 });
@@ -117,10 +121,6 @@ async function editAndSave(displayValue: string, next: string) {
 
 describe('federated PatientInfo save', () => {
   it('fetches the descriptor through the host client, not the app singleton', async () => {
-    // The host injects a client carrying its own auth and origin. Reaching for
-    // the standalone app's axios instance would send the request unauthenticated
-    // to whatever origin the remote was served from — and a descriptor that fails
-    // to load renders every clinical field read-only.
     await renderAndLoad();
     await openBloodTab();
     await waitFor(() =>
@@ -131,34 +131,33 @@ describe('federated PatientInfo save', () => {
     );
   });
 
-  it('writes a clinical edit as an OMOP measurement', async () => {
+  it('writes a clinical edit through the PatientRecord PATCH', async () => {
     await renderAndLoad();
     await openBloodTab();
     await editAndSave('3.1', '5.5');
 
-    await waitFor(() => expect(posts.length).toBeGreaterThan(0));
-    const [url, body] = posts.at(-1)!;
-    expect(url).toBe('/api/v1/measurements/');
-    expect(body).toMatchObject({
-      person: 261,
-      measurement_source_value: '751-8',
-      value_as_number: 5.5,
-    });
+    await waitFor(() =>
+      expect(patches.some(([u]) => u.includes('/patient-info/me/'))).toBe(true),
+    );
+    const [, body] = patches.find(([u]) => u.includes('/patient-info/me/'))!;
+    expect(body).toMatchObject({ anc_thousand_per_ul: 5.5 });
+    // No separate OMOP endpoint post
+    expect(posts).toEqual([]);
   });
 
-  it('does not PATCH the record for a clinical-only edit', async () => {
-    // This is the bug: the whole record went into the PATCH, so the edited
-    // column — OMOP-mapped — was refused with a 405.
+  it('sends the clinical edit in the PATCH, not to a separate OMOP endpoint', async () => {
     await renderAndLoad();
     await openBloodTab();
     await editAndSave('3.1', '5.5');
 
-    await waitFor(() => expect(posts.length).toBeGreaterThan(0));
-    const recordPatches = patches.filter(([u]) => u.includes('/patient-info/me/'));
-    expect(recordPatches).toEqual([]);
+    await waitFor(() =>
+      expect(patches.some(([u]) => u.includes('/patient-info/me/'))).toBe(true),
+    );
+    // No measurement/observation POST should happen
+    expect(posts).toEqual([]);
   });
 
-  it('never sends a mapped field or an alias when it does PATCH', async () => {
+  it('never sends a mapped field or alias when it does PATCH', async () => {
     await renderAndLoad();
     await editAndSave('howell@example.org', 'a.howell@example.org');
 
@@ -166,9 +165,7 @@ describe('federated PatientInfo save', () => {
       expect(patches.some(([u]) => u.includes('/patient-info/me/'))).toBe(true),
     );
     const [, body] = patches.find(([u]) => u.includes('/patient-info/me/'))!;
-    for (const f of Object.keys(DESCRIPTORS)) {
-      expect(body).not.toHaveProperty(f);
-    }
+    expect(body).not.toHaveProperty('absolute_neutrophile_count');
   });
 
   it('never sends lifecycle columns', async () => {
@@ -193,6 +190,16 @@ describe('federated PatientInfo save', () => {
     );
     const [, body] = patches.find(([u]) => u.includes('/patient-info/me/'))!;
     expect(body).toEqual({ email: 'a.howell@example.org' });
+  });
+
+  it('retains the saved value in the input after the PATCH completes (#1083)', async () => {
+    await renderAndLoad();
+    await editAndSave('howell@example.org', 'a.howell@example.org');
+
+    await waitFor(() =>
+      expect(patches.some(([u]) => u.includes('/patient-info/me/'))).toBe(true),
+    );
+    expect(screen.getByDisplayValue('a.howell@example.org')).toBeInTheDocument();
   });
 
   it('attempts nothing when the descriptor cannot be fetched', async () => {

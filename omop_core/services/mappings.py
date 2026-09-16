@@ -62,7 +62,7 @@ LAB_FIELD_TO_LOINC = {
     'beta2_microglobulin':            ('1952-1',   'mg/L',            'Beta-2-Microglobulin [Mass/volume] in Serum or Plasma'),
     'c_reactive_protein':             ('1988-5',   'mg/L',            'C reactive protein [Mass/volume] in Serum or Plasma'),
     'esr':                            ('30341-2',  'mm/h',            'Erythrocyte sedimentation rate'),
-    'ki67_proliferation_index':       ('85319-2',  '%',               'Ki-67 Ag [Presence] in Tissue by Immune stain'),
+    'ki67_proliferation_index':       ('29593-1',  '%',               'Cells.Ki-67 nuclear Ag/cells in Tissue by Immune stain'),
     # Vital signs
     'weight':                         ('29463-7',  'kg',              'Body weight'),
     'height':                         ('8302-2',   'cm',              'Body height'),
@@ -88,6 +88,18 @@ LAB_FIELD_ALIAS_TO_CANONICAL = {
     'alkaline_phosphatase': 'alkaline_phosphatase_u_l',
     'ldh_level':            'ldh_u_l',
     'ldh':                  'ldh_u_l',
+}
+
+# Additional LOINC tests that are clinically equivalent to a PatientRecord
+# field, but whose primary write-through owner is another legacy field.  These
+# are deliberately separate from LAB_FIELD_ALIAS_TO_CANONICAL: that dictionary
+# routes writes, whereas this one permits a curator to record the equivalent
+# concept on a second read-model field without creating a second write path.
+LAB_FIELD_CONCEPT_ALIASES = {
+    # 1952-1 "Beta-2-Microglobulin [Mass/volume] in Serum or Plasma" is the
+    # broadly used serum assay.  ``beta2_microglobulin`` owns its legacy lab
+    # write-through; this CLL-facing field may also be curated against it.
+    'serum_beta2_microglobulin_level': {'1952-1'},
 }
 
 # Common unit options for fields where multiple units are used in US clinical
@@ -229,6 +241,7 @@ THERAPY_LINE_FIELDS = frozenset(
 # remap_generic_lab_fallback for the repair.
 CONCEPT_GENERIC_LAB       = 0         # No matching concept (OMOP CDM sentinel)
 CONCEPT_LAB_TYPE          = 32856     # Lab (measurement type)
+CONCEPT_PATIENT_REPORTED_TYPE = 32865 # Patient self-report (measurement type)
 CONCEPT_EHR_TYPE          = 32817     # EHR (condition type)
 CONCEPT_TREATMENT_REGIMEN = 32531     # Treatment Regimen (episode concept)
 CONCEPT_DRUG_EXPOSURE_FIELD = 1147094  # drug_exposure_id field concept (EpisodeEvent)
@@ -319,7 +332,7 @@ WEARABLE_ARTIFACT_BOUNDS = {
 # Do not reintroduce a fallback here. The previous code used 32883 ('Survey')
 # and fell back to 32856 ('Lab'), mislabelling every wearable row's provenance
 # (#441).
-WEARABLE_TYPE_CONCEPT_ID = 32865
+WEARABLE_TYPE_CONCEPT_ID = CONCEPT_PATIENT_REPORTED_TYPE
 
 # Minimum valid days required to emit a metric (else field stays None)
 WEARABLE_MIN_VALID_DAYS = 7
@@ -334,15 +347,14 @@ def resolve_wearable_mappings(device_type):
 
     For Garmin uploads, the SCCM source_code IS the metric_key (e.g., 'steps').
 
-    Falls back to the hard-coded WEARABLE_CONCEPT_CODE dict for any metric_key
-    that has no approved SCCM row, so the ingest continues to work during the
-    transition or if the seeder hasn't been run.
+    There is intentionally no code-to-concept fallback. An absent SCCM row is
+    a mapping/configuration gap, not permission for the importer to revive a
+    second, invisible mapping registry in Python.
 
     Returns:
         dict mapping metric_key → Concept (or None if unresolvable)
     """
     from omop_core.models import SourceCodeConceptMapping
-    from omop_core.services.concept_cache import concept_by_vocab as _cc_by_vocab
 
     source_vocab = 'Apple' if device_type == 'apple' else 'Garmin'
 
@@ -369,13 +381,6 @@ def resolve_wearable_mappings(device_type):
         for row in approved:
             if row.target_concept:
                 db_mappings[row.source_code] = row.target_concept
-
-    # Fall back to hard-coded dict for any metric not in the DB.
-    for metric_key, concept_code in WEARABLE_CONCEPT_CODE.items():
-        if metric_key not in db_mappings:
-            concept = _cc_by_vocab(WEARABLE_CONCEPT_VOCAB[metric_key], concept_code)
-            if concept:
-                db_mappings[metric_key] = concept
 
     return db_mappings
 
@@ -406,12 +411,10 @@ def get_gender_concept(gender_str):
 # PatientRecord field → the concept its derivation reads, recovered from the
 # extractors rather than chosen by hand.
 #
-# Provenance. If derivation reads code X into field F, then writing X is correct
-# by construction: a round trip through derivation returns the same value. That
-# makes these mappings auditable — the third element names the extractor the
-# attribution came from, so a reviewer can check the claim at its source instead
-# of re-deriving it. They were found by AST-walking patient_record_service.py for
-# `data['field'] = ...` assignments and the code literal governing them.
+# These entries document runtime attribution, not clinical validation. A
+# successful round trip alone cannot establish that a code asks the right
+# clinical question; vocabulary definitions and event context require review.
+# The third element identifies the extractor for that review.
 #
 # The one rule that governs membership: a code here must be claimed by exactly
 # one field, across this table AND LAB_FIELD_TO_LOINC. Ten further fields were
@@ -424,8 +427,7 @@ def get_gender_concept(gender_str):
 #                      44648-4 with biopsy_grade
 #   two parts of one   pd_l1_assay and pd_l1_tumor_cells are the assay and the
 #   fact               numeric result of ONE 83052-1 measurement, as are
-#                      test_methodology and oncotype_dx_score of one 85337-4
-#                      report, and ecog_assessment_date is the date of the
+#                      ecog_assessment_date is the date of the
 #                      ecog_performance_status observation
 #   resolved (#785)    btk_inhibitor_refractory and bcl2_inhibitor_refractory
 #                      both read SNOMED 182842009, which cannot say which drug
@@ -452,7 +454,7 @@ DERIVED_FIELD_TO_CODE = {
     # Derivation now reads 49457-5 first and 82185-1 second, so the round trip
     # holds and any pre-existing row still projects.
     'androgen_receptor_status':      ('49457-5',   'LOINC',  '_get_genomics_pathology_data'),
-    'lymph_node_status':             ('92837-4',   'LOINC',  '_get_genomics_pathology_data'),
+    'test_methodology':              ('85069-3',   'LOINC',  '_get_genomics_pathology_data'),
     'metastasis_status':             ('21907-1',   'LOINC',  '_get_genomics_pathology_data'),
     'report_interpretation':         ('69548-6',   'LOINC',  '_get_genomics_pathology_data'),
     'test_specimen_type':            ('31208-2',   'LOINC',  '_get_genomics_pathology_data'),
@@ -461,8 +463,9 @@ DERIVED_FIELD_TO_CODE = {
     'nodes_stage':                   ('21906-3',   'LOINC',  '_get_staging_data'),
     'stage':                         ('21908-9',   'LOINC',  '_get_staging_data'),
     'tumor_stage':                   ('21905-5',   'LOINC',  '_get_staging_data'),
-    # CLL — _get_cll_data. 21889-1 is 'Size Tumor'; a lymph-node row carries
-    # qualifier_source_value='lymph-node' to separate it from tumor_size.
+    # CLL — legacy import fallback only. New edits use Cancer Modifier
+    # 36769292 (Dimension of Largest Lymph Node) in write_descriptor.py;
+    # qualified 21889-1 rows remain readable for historical data.
     'largest_lymph_node_size':       ('21889-1',   'LOINC',  '_get_cll_data'),
     # Social — _get_social_data
     # #596 corrected _get_social_data: 408729009 had been writing to
@@ -502,7 +505,7 @@ SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
     # Breast cancer
     'tnbc_status':                   ('706886006', 'SNOMED'),
     'hr_status':                     ('416053008', 'SNOMED'),
-    'oncotype_dx_score':             ('85337-4',   'LOINC'),
+    # Oncotype invasive/DCIS score selection requires reviewed event context (#1227).
     'menopausal_status':             ('276498001', 'SNOMED'),
     # Lymphoma
     'flipi_score':                   ('444723004', 'SNOMED'),
@@ -617,15 +620,18 @@ SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
     'dlbcl_transformation_date':     ('91860004',  'SNOMED'),  # Richter / transformation
     'transformed_to_dlbcl':          ('91860004',  'SNOMED'),  # Richter / transformation
     'plasma_cell_leukemia':          ('47082-2',   'LOINC'),   # Plasma cells in bone marrow
-    'largest_lymph_node_size':       ('21889-1',   'LOINC'),   # Size of primary tumor
     'spleen_size':                   ('16294009',  'SNOMED'),  # Splenomegaly
     'flipi_score_options':           ('444723004', 'SNOMED'),  # FLIPI
 
     # Genomics / molecular
-    'genetic_mutations':             ('55232-3',   'LOINC'),   # Genetic analysis summary panel
+    # Athena 45876022: "Gene mutations tested for".  This is the discrete
+    # result term used for a patient's mutation list; 55232-3 is only a
+    # document-level analysis summary and cannot represent selectable results.
+    'genetic_mutations':             ('36908-2',   'LOINC'),
     'molecular_markers':             ('55232-3',   'LOINC'),   # Genetic analysis summary panel
-    'cytogenic_markers':             ('D002869',   'MeSH'),    # Chromosome Aberrations (#803)
-    'protein_expressions':           ('85337-4',   'LOINC'),   # Gene expression panel
+    # cytogenetic_markers is a local multi-marker summary, not LOINC 69548-6
+    # (genetic variant assessment/status). Its explicit concept-0 recipe is seeded.
+    # Protein-expression panels require a reviewed panel question; 85337-4 is ER.
 
     # Demographics / profile
     'date_of_birth':                 ('21112-8',   'LOINC'),   # Birth date

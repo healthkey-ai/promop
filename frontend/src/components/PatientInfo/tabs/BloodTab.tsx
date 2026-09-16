@@ -69,9 +69,9 @@ export default function BloodTab({ formData, onChange }: Props) {
     <div>
       {!loading && (
         <p className="mb-4 text-xs text-muted-foreground">
-          These values are stored as OMOP measurements. Editing one records a new
-          result dated below and re-derives the record; a field without an editable
-          box explains why underneath it.
+          Edits are saved to the patient record first and, where a mapping exists,
+          projected to a dated OMOP measurement. Computed fields explain why they
+          are read-only.
         </p>
       )}
       {section('Blood Counts', COUNTS)}

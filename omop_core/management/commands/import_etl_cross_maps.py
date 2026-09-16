@@ -18,7 +18,7 @@ import json
 import logging
 from pathlib import Path
 
-from django.core.management.base import BaseCommand
+from omop_core.management.embedding_command import EmbeddingLoadCommand
 
 from omop_core.models import Concept, SourceCodeConceptMapping
 
@@ -28,7 +28,7 @@ DEFAULT_CPT_SNOMED = Path.home() / 'etl/airflow/dags/services/fhir_parsing/codes
 DEFAULT_SNOMED_RXNORM = Path.home() / 'etl/airflow/dags/services/fhir_parsing/codesystems/snomed_to_rxnorm_map.json'
 
 
-class Command(BaseCommand):
+class Command(EmbeddingLoadCommand):
     help = 'Import ETL cross-vocabulary maps (CPT→SNOMED, SNOMED→RxNorm) into SourceCodeConceptMapping.'
 
     def add_arguments(self, parser):

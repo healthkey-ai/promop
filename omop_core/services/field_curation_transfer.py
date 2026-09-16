@@ -8,6 +8,10 @@ that exists *only* because a mapping was approved for it. Moving a subset
 produces a half-configured instance — a custom field whose mapping is missing
 cannot be saved at all — so the default is to move all five.
 
+``SourceCodeConceptMapping`` (the ``/code-mappings`` screen) is carried too, but
+only when asked for: ingest reads it, so copying an approved row changes what a
+later import resolves to, not just what the editor offers.
+
 The transfer is split in two so it is testable without a second database:
 
 * :func:`read_payload` turns one instance's curation tables into plain dicts.
@@ -15,14 +19,16 @@ The transfer is split in two so it is testable without a second database:
 
 Two things deliberately do not survive the trip:
 
-* **Row IDs.** Rows are matched on their natural key (``field_name``, or
-  ``(field_name, display)`` for a choice), never on the source PK, because the
-  two instances assign PKs independently.
+* **Row IDs.** Rows are matched on their natural key (``field_name``,
+  ``(field_name, display)`` for a choice, ``(source_vocabulary_id,
+  source_code)`` for a code mapping), never on the source PK, because the two
+  instances assign PKs independently.
 * **User foreign keys.** ``reviewer`` and ``created_by`` point at ``Identity``
   rows whose IDs mean something different on each instance, so they are cleared
   rather than carried over — a wrong attribution is worse than none.
 
-The concept FK is re-resolved rather than copied. ``concept_id`` is stable
+Concept FKs are re-resolved rather than copied. That is the one on a field
+mapping and all three on a source-code mapping. ``concept_id`` is stable
 across instances for anything loaded from Athena, but locally minted concepts
 (``Concept.source == 'HealthKey'``) are numbered per instance, so the same id
 can name a different concept here. ``(vocabulary_id, concept_code)`` is unique
@@ -31,6 +37,7 @@ never recorded a code.
 """
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field as dataclass_field
 
 from django.db import transaction
@@ -43,24 +50,48 @@ from omop_core.models import (
     FieldConceptMapping,
     FieldFormula,
     FieldSynonym,
+    SourceCodeConceptMapping,
 )
 
 # Table keys, in dependency order: a CustomPatientField requires its mapping, so
 # mappings are written first and pruned last.
-TABLES = ('mappings', 'custom_fields', 'choices', 'formulas', 'synonyms')
+TABLES = ('mappings', 'custom_fields', 'choices', 'formulas', 'synonyms',
+          'code_mappings')
 # The field-mapping page calls these two APIs.  The other curation tables are
 # supported for explicit migrations, but copying them by default would broaden
 # a field-mapping copy into unrelated configuration.
 DEFAULT_TABLES = ('mappings', 'synonyms')
+# code_mappings stays out of the default set: it is a different screen, and
+# copy_curation must not silently start moving it for existing callers.
 
 # Columns copied verbatim for each mapping. Excludes id, concept (re-resolved),
 # reviewer (cleared), and the auto timestamps.
 _MAPPING_FIELDS = (
+    'provenance',
     'vocabulary_id', 'concept_code', 'unit', 'omop_table', 'source_value',
     'value_kind', 'type_concept_id', 'value_vocabulary', 'multiple',
     'status', 'reviewed_at', 'notes',
 )
 _CUSTOM_FIELD_FIELDS = ('display_name', 'tab', 'field_type', 'mode')
+
+# Excludes id, the concept FKs (re-resolved), the user FKs (cleared), the auto
+# timestamps, and the occurrence counters (see _apply_code_mappings).
+_CODE_MAPPING_FIELDS = (
+    'domain_id', 'source_code_description', 'umls_source_name',
+    'suggestion_outcome', 'suggestion_model_version',
+    'destination_vocabulary_id', 'omop_table', 'source', 'status', 'notes',
+    'origin', 'origin_system', 'suggest_strategy', 'umls_cui', 'reviewed_at',
+)
+_CODE_MAPPING_CONCEPT_FKS = (
+    'source_concept', 'target_concept', 'suggested_target_concept',
+)
+
+# A real source table is ~117k rows. Held as one list it does not fit in a
+# 512Mi job, and neither does a dict of every local row to match against.
+CODE_MAPPING_CHUNK: int = 2000
+
+# One unresolvable concept per FK per row would be ~350k strings.
+_WARNING_CAP: int = 100
 
 
 @dataclass
@@ -71,6 +102,16 @@ class TransferStats:
     deleted: dict[str, int] = dataclass_field(default_factory=dict)
     skipped: dict[str, int] = dataclass_field(default_factory=dict)
     warnings: list[str] = dataclass_field(default_factory=list)
+    suppressed_warnings: int = 0
+    # Prune needs the source keys, but streaming does not keep the rows.
+    code_mapping_keys: set[tuple[str, str]] = dataclass_field(default_factory=set)
+
+    def warn(self, message: str) -> None:
+        """Keep the first _WARNING_CAP warnings and count the rest."""
+        if len(self.warnings) < _WARNING_CAP:
+            self.warnings.append(message)
+        else:
+            self.suppressed_warnings += 1
 
     def _bump(self, bucket: dict[str, int], table: str, n: int = 1) -> None:
         bucket[table] = bucket.get(table, 0) + n
@@ -83,10 +124,15 @@ class _Rollback(Exception):
     """Raised to unwind the transaction after a --dry-run."""
 
 
-def read_payload(using: str, tables: tuple[str, ...] = TABLES) -> dict:
+def read_payload(
+    using: str, tables: tuple[str, ...] = TABLES, stream: bool = False,
+) -> dict:
     """Read the curation tables from ``using`` into JSON-safe dicts.
 
     Read-only: nothing is written to the source instance.
+
+    With stream, code_mappings is a generator, so the source connection must
+    stay open until it is consumed.
     """
     payload: dict[str, list[dict]] = {}
 
@@ -162,7 +208,55 @@ def read_payload(using: str, tables: tuple[str, ...] = TABLES) -> dict:
             .order_by('field_name', 'synonym_text')
         ]
 
+    if 'code_mappings' in tables:
+        rows = iter_code_mappings(using)
+        # Only table big enough that materializing it can exhaust the job memory.
+        payload['code_mappings'] = rows if stream else list(rows)
+
     return payload
+
+
+def _code_mapping_row(m: SourceCodeConceptMapping) -> dict[str, object]:
+    """One source-code mapping as a JSON-safe dict."""
+    return {
+        'source_vocabulary_id': m.source_vocabulary_id,
+        'source_code': m.source_code,
+        **{
+            fk: {
+                'vocabulary_id': c.vocabulary_id if c else '',
+                'concept_code': c.concept_code if c else '',
+                'concept_id': getattr(m, f'{fk}_id'),
+            }
+            for fk in _CODE_MAPPING_CONCEPT_FKS
+            for c in (getattr(m, fk),)
+        },
+        **{name: getattr(m, name) for name in _CODE_MAPPING_FIELDS},
+    }
+
+
+def iter_code_mappings(using: str) -> Iterator[dict[str, object]]:
+    """Yield source-code mapping rows without materializing the table."""
+    queryset = (
+        SourceCodeConceptMapping.objects.using(using)
+        .select_related(*_CODE_MAPPING_CONCEPT_FKS)
+        .order_by('source_vocabulary_id', 'source_code')
+    )
+    for m in queryset.iterator(chunk_size=CODE_MAPPING_CHUNK):
+        yield _code_mapping_row(m)
+
+
+def _chunked(
+    rows: Iterable[dict[str, object]], size: int,
+) -> Iterator[list[dict[str, object]]]:
+    """Group rows into lists of at most size, consuming lazily."""
+    chunk: list[dict[str, object]] = []
+    for row in rows:
+        chunk.append(row)
+        if len(chunk) >= size:
+            yield chunk
+            chunk = []
+    if chunk:
+        yield chunk
 
 
 def apply_payload(
@@ -190,6 +284,8 @@ def apply_payload(
                 _apply_formulas(payload.get('formulas', []), stats)
             if 'synonyms' in tables:
                 _apply_synonyms(payload.get('synonyms', []), stats)
+            if 'code_mappings' in tables:
+                _apply_code_mappings(payload.get('code_mappings', []), stats)
             if prune:
                 _prune(payload, tables, stats)
             if dry_run:
@@ -201,39 +297,58 @@ def apply_payload(
 
 # ── Concept resolution ────────────────────────────────────────────────────
 
-def _resolve_concept(row: dict, stats: TransferStats) -> Concept | None:
-    """Find the local Concept a source mapping refers to.
+def _resolve_concept_ref(
+    vocab: str, code: str, concept_id: int | None, label: str,
+    stats: TransferStats,
+    by_code: dict[tuple[str, str], Concept] | None = None,
+    by_id: dict[int, Concept] | None = None,
+    allow_id_fallback: bool = True,
+) -> Concept | None:
+    """Find the local Concept named by (vocab, code), else by concept_id.
 
-    Prefers ``(vocabulary_id, concept_code)`` — unique, and the same pair names
-    the same concept on any instance. Falls back to the raw ``concept_id`` only
-    when the source recorded no code.
+    Returns None instead of the source id because a code mapping's concept FKs
+    are db_constraint=False. A stale id would be accepted and would name a
+    different concept, which ingest then acts on.
     """
-    vocab = row.get('concept_vocabulary_id') or row.get('vocabulary_id') or ''
-    code = row.get('concept_code_resolved') or row.get('concept_code') or ''
     if vocab and code:
-        concept = Concept.objects.filter(
-            vocabulary_id=vocab, concept_code=code
-        ).first()
+        # Without caches this is one query per reference.
+        if by_code is not None:
+            concept = by_code.get((vocab, code))
+        else:
+            concept = Concept.objects.filter(
+                vocabulary_id=vocab, concept_code=code
+            ).first()
         if concept is not None:
             return concept
-    else:
+    elif concept_id is not None and allow_id_fallback:
         # Old rows may predate the denormalized vocabulary/code columns.  An ID
         # is safe only when there is no semantic identifier to resolve: if a
         # supplied code is absent locally, the same numeric ID may name a
         # completely different locally-created concept on this instance.
-        concept_id = row.get('concept_id')
-        if concept_id is not None:
+        if by_id is not None:
+            concept = by_id.get(concept_id)
+        else:
             concept = Concept.objects.filter(concept_id=concept_id).first()
-            if concept is not None:
-                return concept
+        if concept is not None:
+            return concept
 
-    concept_id = row.get('concept_id')
     if concept_id is not None or (vocab and code):
-        stats.warnings.append(
-            f"{row['field_name']}: concept {vocab}:{code or concept_id} is not "
+        stats.warn(
+            f"{label}: concept {vocab}:{code or concept_id} is not "
             f"loaded on this instance — mapping copied with no concept."
         )
     return None
+
+
+def _resolve_concept(row: dict, stats: TransferStats) -> Concept | None:
+    """The concept a field mapping refers to."""
+    return _resolve_concept_ref(
+        row.get('concept_vocabulary_id') or row.get('vocabulary_id') or '',
+        row.get('concept_code_resolved') or row.get('concept_code') or '',
+        row.get('concept_id'),
+        row['field_name'],
+        stats,
+    )
 
 
 # ── Per-table application ─────────────────────────────────────────────────
@@ -241,9 +356,10 @@ def _resolve_concept(row: dict, stats: TransferStats) -> Concept | None:
 def _apply_mappings(rows: list[dict], stats: TransferStats) -> None:
     existing = {m.field_name: m for m in FieldConceptMapping.objects.all()}
     for row in rows:
-        values = {name: row[name] for name in _MAPPING_FIELDS}
+        values = {name: row.get(name, '') if name == 'provenance' else row[name]
+                  for name in _MAPPING_FIELDS}
         values['concept'] = _resolve_concept(row, stats)
-        # Attribution does not cross instances — see module docstring.
+        # Attribution does not cross instances, see module docstring.
         values['reviewer'] = None
 
         mapping = existing.get(row['field_name'])
@@ -265,7 +381,7 @@ def _apply_custom_fields(rows: list[dict], stats: TransferStats) -> None:
         if mapping is None:
             # Only reachable when --tables excluded mappings; a custom field
             # cannot be created without one.
-            stats.warnings.append(
+            stats.warn(
                 f"custom field {row['field_name']}: mapping "
                 f"{row['mapping_field_name']} is not present — skipped."
             )
@@ -353,6 +469,106 @@ def _apply_synonyms(rows: list[dict], stats: TransferStats) -> None:
         stats._bump(stats.updated, 'synonyms')
 
 
+def _apply_code_mappings(
+    rows: Iterable[dict[str, object]], stats: TransferStats,
+) -> None:
+    """Write source-code mappings, keyed on (source_vocabulary_id, source_code).
+
+    Blank vocabulary is a real value, an uncoded lab name, so those rows key
+    correctly instead of colliding.
+
+    occurrence_count, first_seen and last_seen are not copied. They count this
+    instance own ingest traffic, so the source numbers would misattribute it.
+    """
+    for chunk in _chunked(rows, CODE_MAPPING_CHUNK):
+        _apply_code_mapping_chunk(chunk, stats)
+
+
+def _concept_caches(
+    rows: list[dict[str, object]],
+) -> tuple[dict[tuple[str, str], Concept], dict[int, Concept]]:
+    """Resolve every concept a chunk refers to in two queries, not two per row.
+
+    The code lookup is one superset SELECT over the chunk vocabularies and
+    codes. Extra pairs it returns are never read.
+    """
+    pairs: set[tuple[str, str]] = set()
+    ids: set[int] = set()
+    for row in rows:
+        for fk in _CODE_MAPPING_CONCEPT_FKS:
+            ref = row.get(fk) or {}
+            vocab, code = ref.get('vocabulary_id') or '', ref.get('concept_code') or ''
+            if vocab and code:
+                pairs.add((vocab, code))
+            elif ref.get('concept_id') is not None:
+                ids.add(ref['concept_id'])
+
+    by_code: dict[tuple[str, str], Concept] = {}
+    if pairs:
+        by_code = {
+            (c.vocabulary_id, c.concept_code): c
+            for c in Concept.objects.filter(
+                vocabulary_id__in={v for v, _ in pairs},
+                concept_code__in={c for _, c in pairs},
+            )
+        }
+    by_id: dict[int, Concept] = {}
+    if ids:
+        by_id = {c.concept_id: c for c in Concept.objects.filter(concept_id__in=ids)}
+    return by_code, by_id
+
+
+def _apply_code_mapping_chunk(
+    rows: list[dict[str, object]], stats: TransferStats,
+) -> None:
+    """Write one chunk, matching only the local rows it could touch."""
+    keys = [(row['source_vocabulary_id'], row['source_code']) for row in rows]
+    stats.code_mapping_keys.update(keys)
+    existing = {
+        (m.source_vocabulary_id, m.source_code): m
+        for m in SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id__in={v for v, _ in keys},
+            source_code__in={c for _, c in keys},
+        )
+    }
+    by_code, by_id = _concept_caches(rows)
+    for row in rows:
+        key = (row['source_vocabulary_id'], row['source_code'])
+        label = f"{row['source_vocabulary_id'] or '(uncoded)'}:{row['source_code']}"
+        values = {name: row[name] for name in _CODE_MAPPING_FIELDS}
+        for fk in _CODE_MAPPING_CONCEPT_FKS:
+            ref = row.get(fk) or {}
+            values[fk] = _resolve_concept_ref(
+                ref.get('vocabulary_id') or '',
+                ref.get('concept_code') or '',
+                ref.get('concept_id'),
+                f'{label} ({fk})',
+                stats,
+                by_code, by_id,
+                # The source concept is select_related, so a missing one means
+                # the source FK dangles. Its id names nothing we can trust.
+                allow_id_fallback=False,
+            )
+        # Attribution does not cross instances, see module docstring.
+        values['reviewer'] = None
+        values['created_by'] = None
+        values['updated_by'] = None
+
+        mapping = existing.get(key)
+        if mapping is None:
+            SourceCodeConceptMapping.objects.create(
+                source_vocabulary_id=row['source_vocabulary_id'],
+                source_code=row['source_code'],
+                **values,
+            )
+            stats._bump(stats.created, 'code_mappings')
+            continue
+        for name, value in values.items():
+            setattr(mapping, name, value)
+        mapping.save(update_fields=[*values, 'updated_at'])
+        stats._bump(stats.updated, 'code_mappings')
+
+
 def _prune(payload: dict, tables: tuple[str, ...], stats: TransferStats) -> None:
     """Delete local rows the source does not have.
 
@@ -391,3 +607,17 @@ def _prune(payload: dict, tables: tuple[str, ...], stats: TransferStats) -> None
         if stale:
             FieldSynonym.objects.filter(pk__in=stale).delete()
             stats._bump(stats.deleted, 'synonyms', len(stale))
+
+    if 'code_mappings' in tables:
+        # Apply gathers these because the payload rows may be a spent generator.
+        keep = stats.code_mapping_keys
+        stale = [
+            pk for pk, vocab, code in SourceCodeConceptMapping.objects
+            .values_list('pk', 'source_vocabulary_id', 'source_code')
+            .iterator(chunk_size=CODE_MAPPING_CHUNK)
+            if (vocab, code) not in keep
+        ]
+        if stale:
+            # Approved rows steer ingest, so this is a live behaviour change.
+            SourceCodeConceptMapping.objects.filter(pk__in=stale).delete()
+            stats._bump(stats.deleted, 'code_mappings', len(stale))

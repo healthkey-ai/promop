@@ -8,6 +8,9 @@ from django.contrib.contenttypes.models import ContentType
 from django.contrib.postgres.indexes import GinIndex, OpClass
 from django.db.models.functions import Upper
 import re
+import uuid
+
+from pgvector.django import VectorField
 
 from omop_core.services import source_vocabularies
 
@@ -1845,6 +1848,15 @@ class SourceCodeConceptMapping(models.Model):
     )
     source_code = models.CharField(max_length=100, db_index=True)
     source_code_description = models.CharField(max_length=255, blank=True, default='')
+    umls_source_name = models.TextField(
+        blank=True, default='',
+        help_text=(
+            'Canonical UMLS preferred name for this source code, looked up '
+            'from UmlsSourceCode during suggestion or backfill. Read-only '
+            'complement to source_code_description: curators edit the '
+            'description, UMLS name is preserved as-is for reference.'
+        ),
+    )
     source_concept = models.ForeignKey(
         Concept, on_delete=models.DO_NOTHING, null=True, blank=True,
         related_name='source_code_mappings_as_source', db_constraint=False,
@@ -1872,6 +1884,37 @@ class SourceCodeConceptMapping(models.Model):
             'an INNER JOIN).'
         ),
     )
+    # Immutable evidence for suggestion-quality measurement.  target_concept
+    # changes when a curator corrects a proposal; this field preserves what the
+    # model actually suggested so Recall can measure those overrides.
+    suggested_target_concept = models.ForeignKey(
+        Concept, on_delete=models.DO_NOTHING, null=True, blank=True,
+        related_name='source_code_mapping_suggestions', db_constraint=False,
+    )
+    SUGGESTION_OUTCOME_CHOICES = [
+        ('accepted', 'Accepted'),
+        ('overridden', 'Overridden'),
+        ('rejected', 'Rejected'),
+    ]
+    suggestion_outcome = models.CharField(
+        max_length=12, choices=SUGGESTION_OUTCOME_CHOICES, blank=True, default='', db_index=True,
+        help_text='Immutable first curator disposition of a machine suggestion.',
+    )
+    suggestion_model_version = models.CharField(
+        max_length=20, blank=True, default='', db_index=True,
+        help_text='Immutable version of the suggestion model that produced this proposal (for example v0.2).',
+    )
+    # Deliberately separate from suggestion_model_version, which means "this
+    # version proposed the destination on this row" and is what the accuracy
+    # dashboard selects on. A run that finds nothing has still tried, and has to
+    # say so or it re-tries the same codes on every click -- but recording that
+    # as a suggestion would enrol a code the pipeline never proposed anything
+    # for in the model's accuracy figures, as an override, the moment a curator
+    # picks a concept by hand.
+    last_suggest_attempt = models.CharField(
+        max_length=20, blank=True, default='', db_index=True,
+        help_text='Suggestion model version that last examined this code, whether or not it proposed anything.',
+    )
     destination_vocabulary_id = models.CharField(
         max_length=20, blank=True, default='', db_index=True,
         help_text=(
@@ -1898,6 +1941,18 @@ class SourceCodeConceptMapping(models.Model):
     origin_system = models.CharField(
         max_length=50, blank=True, default='',
         help_text="Ingest channel that raised it, e.g. 'fhir-upload', 'hk-labs'.",
+    )
+    suggest_strategy = models.CharField(
+        max_length=10, blank=True, default='',
+        help_text=(
+            'Which retrieval tier proposed this mapping: umls, vectors, or '
+            'lexical. Blank for curator-created rows or rows from before this '
+            'field existed.'
+        ),
+    )
+    umls_cui = models.TextField(
+        blank=True, default='',
+        help_text='Comma-separated UMLS CUIs used to retrieve candidates for this mapping.',
     )
     occurrence_count = models.IntegerField(default=0)
     first_seen = models.DateTimeField(null=True, blank=True)
@@ -1984,6 +2039,30 @@ class SourceCodeConceptMapping(models.Model):
         return f"{source}:{self.source_code} -> {self.target_concept_id}"
 
 
+class MappingDestinationCandidate(models.Model):
+    """An imported alternative; it does not change the chosen clinical mapping."""
+
+    mapping = models.ForeignKey(
+        SourceCodeConceptMapping, on_delete=models.CASCADE,
+        related_name='destination_candidates',
+    )
+    target_vocabulary_id = models.CharField(max_length=50)
+    target_concept_code = models.CharField(max_length=50)
+    target_concept = models.ForeignKey(
+        Concept, null=True, blank=True, on_delete=models.SET_NULL,
+    )
+    origins = models.JSONField(default=list)
+
+    class Meta:
+        db_table = 'mapping_destination_candidate'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['mapping', 'target_vocabulary_id', 'target_concept_code'],
+                name='uq_mapping_destination_candidate',
+            ),
+        ]
+
+
 class RegimenMappingGap(models.Model):
     """Mapping-gap report for regimen/drug names that could not be matched to a
     validated HemOnc (or other licensed-vocabulary) concept at ingest time.
@@ -2059,11 +2138,15 @@ class LoincClass(models.Model):
 
 
 class LoincCodeClass(models.Model):
-    """Maps LOINC codes to their CLASS value (from Loinc.csv)."""
+    """Maps LOINC codes to their CLASS value and example units (from Loinc.csv)."""
     loinc_num = models.CharField(max_length=20, primary_key=True)
     loinc_class = models.ForeignKey(
         LoincClass, on_delete=models.CASCADE,
         db_column='loinc_class_code', to_field='code',
+    )
+    example_units = models.CharField(
+        max_length=128, blank=True, default='',
+        help_text='EXAMPLE_UNITS from Loinc.csv; empty when LOINC defines no unit.',
     )
 
     class Meta:
@@ -2104,6 +2187,14 @@ class PlateletCountUnits(models.TextChoices):
     """Platelet count unit choices"""
     CELLS_UL = 'CELLS/UL', '10^3/μL'
     CELLS_L = 'CELLS/L', '10^9/L'
+
+
+class BloodCountUnits(models.TextChoices):
+    """Explicit scales for ANC and platelet compatibility values."""
+    K_PER_UL = '10*3/uL', '10^3/μL'
+    G_PER_L = '10*9/L', '10^9/L'
+    CELLS_UL = 'CELLS/UL', 'cells/μL'
+    CELLS_L = 'CELLS/L', 'cells/L'
 
 
 class WhiteBloodCellCountUnits(models.TextChoices):
@@ -2510,6 +2601,38 @@ class DiseaseTherapyRegimen(models.Model):
         return f"{self.disease} / {self.round} → {self.regimen}"
 
 
+class TherapyOutcome(models.Model):
+    """A treatment-response option, optionally limited to particular diseases."""
+    code = models.CharField(max_length=20, unique=True)
+    title = models.CharField(max_length=100)
+    value = models.CharField(max_length=60)
+    sort_order = models.PositiveSmallIntegerField(default=0)
+    diseases = models.ManyToManyField(Disease, related_name='therapy_outcomes')
+
+    class Meta:
+        ordering = ['sort_order', 'code']
+
+
+class SupportiveTherapyCourse(models.Model):
+    """An individually editable supportive treatment; never an anticancer line."""
+    person = models.ForeignKey(Person, on_delete=models.CASCADE, related_name='supportive_courses')
+    regimen = models.ForeignKey(TherapyRegimen, on_delete=models.PROTECT)
+    start_date = models.DateField(null=True, blank=True)
+    end_date = models.DateField(null=True, blank=True)
+    intent = models.CharField(max_length=50, blank=True, default='')
+    discontinuation_reason = models.CharField(max_length=60, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['start_date', 'id']
+        constraints = [models.CheckConstraint(
+            condition=models.Q(end_date__isnull=True) | models.Q(start_date__isnull=True)
+                | models.Q(end_date__gte=models.F('start_date')),
+            name='supportive_course_date_order',
+        )]
+
+
 # ---------------------------------------------------------------------------
 # End controlled vocabulary models
 # ---------------------------------------------------------------------------
@@ -2605,7 +2728,7 @@ class PatientRecord(models.Model):
     peripheral_neuropathy_grade = models.IntegerField(blank=True, null=True)
 
     # Cancer-specific fields
-    cytogenic_markers = models.TextField(blank=True, null=True)
+    cytogenetic_markers = models.TextField(blank=True, null=True)
     molecular_markers = models.TextField(blank=True, null=True)
     stem_cell_transplant_history = models.JSONField(blank=True, null=True, default=list)
     sct_date = models.DateField(blank=True, null=True)
@@ -2724,6 +2847,7 @@ class PatientRecord(models.Model):
     supportive_therapy_start_date = models.DateField(blank=True, null=True, help_text="Supportive Therapy Start Date")
     supportive_therapy_end_date = models.DateField(blank=True, null=True, help_text="Supportive Therapy End Date")
     supportive_therapy_intent = models.CharField(max_length=50, blank=True, null=True, help_text="Supportive Therapy Intent")
+    therapy_overrides = models.JSONField(default=dict, blank=True)
     relapse_count = models.IntegerField(blank=True, null=True)
     treatment_refractory_status = models.CharField(max_length=255, blank=True, null=True)
 
@@ -2735,7 +2859,7 @@ class PatientRecord(models.Model):
     absolute_neutrophile_count = models.DecimalField(decimal_places=2, max_digits=10, blank=True, null=True)
     absolute_neutrophile_count_units = models.CharField(
         max_length=10,
-        choices=PlateletCountUnits.choices,
+        choices=BloodCountUnits.choices,
         blank=True,
         null=True,
         default='CELLS/UL'
@@ -2743,7 +2867,7 @@ class PatientRecord(models.Model):
     platelet_count = models.IntegerField(blank=True, null=True)
     platelet_count_units = models.CharField(
         max_length=10,
-        choices=PlateletCountUnits.choices,
+        choices=BloodCountUnits.choices,
         blank=True,
         null=True,
         default='CELLS/UL'
@@ -3048,6 +3172,50 @@ class PatientRecord(models.Model):
 
     # Genetic mutations
     genetic_mutations = models.JSONField(blank=True, null=False, default=list)
+    # Named priority-marker projections. Each holds all matching findings,
+    # including repeated tests; only the genomics writer may author their facts.
+    genomics_brca1 = models.JSONField(blank=True, default=list)
+    genomics_brca2 = models.JSONField(blank=True, default=list)
+    genomics_pik3ca = models.JSONField(blank=True, default=list)
+    genomics_tp53 = models.JSONField(blank=True, default=list)
+    genomics_esr1 = models.JSONField(blank=True, default=list)
+    genomics_palb2 = models.JSONField(blank=True, default=list)
+    genomics_kras = models.JSONField(blank=True, default=list)
+    genomics_nras = models.JSONField(blank=True, default=list)
+    genomics_braf = models.JSONField(blank=True, default=list)
+    genomics_myc = models.JSONField(blank=True, default=list)
+    genomics_fam46c = models.JSONField(blank=True, default=list)
+    genomics_dis3 = models.JSONField(blank=True, default=list)
+    genomics_xbp1 = models.JSONField(blank=True, default=list)
+    genomics_bcl2 = models.JSONField(blank=True, default=list)
+    genomics_ezh2 = models.JSONField(blank=True, default=list)
+    genomics_kmt2d = models.JSONField(blank=True, default=list)
+    genomics_crebbp = models.JSONField(blank=True, default=list)
+    genomics_bcl6 = models.JSONField(blank=True, default=list)
+    genomics_notch1 = models.JSONField(blank=True, default=list)
+    genomics_notch2 = models.JSONField(blank=True, default=list)
+    genomics_sf3b1 = models.JSONField(blank=True, default=list)
+    genomics_atm = models.JSONField(blank=True, default=list)
+    genomics_nsd2 = models.JSONField(blank=True, default=list)
+    genomics_cdkn2a = models.JSONField(blank=True, default=list)
+    genomics_smarca4 = models.JSONField(blank=True, default=list)
+    genomics_ccnd1 = models.JSONField(blank=True, default=list)
+    genomics_del17p = models.JSONField(blank=True, default=list)
+    genomics_t414 = models.JSONField(blank=True, default=list)
+    genomics_t1114 = models.JSONField(blank=True, default=list)
+    genomics_t1416 = models.JSONField(blank=True, default=list)
+    genomics_gain1q = models.JSONField(blank=True, default=list)
+    genomics_hyperdiploidy = models.JSONField(blank=True, default=list)
+    genomics_chromothripsis = models.JSONField(blank=True, default=list)
+    genomics_igh = models.JSONField(blank=True, default=list)
+    genomics_bcl2_amplification = models.JSONField(blank=True, default=list)
+    genomics_complex_karyotype = models.JSONField(blank=True, default=list)
+    genomics_complex_karyotype_excl_t1114 = models.JSONField(blank=True, default=list)
+    genomics_del11q = models.JSONField(blank=True, default=list)
+    genomics_del13q = models.JSONField(blank=True, default=list)
+    genomics_trisomy12 = models.JSONField(blank=True, default=list)
+    genomics_atm_atr = models.JSONField(blank=True, default=list)
+    genomics_notch1_notch2 = models.JSONField(blank=True, default=list)
 
     # PD-L1 and biomarkers
     pd_l1_tumor_cells = models.IntegerField(blank=True, null=True)
@@ -3106,7 +3274,13 @@ class PatientRecord(models.Model):
     gelf_criteria_status = models.TextField(blank=True, null=True)
     flipi_score = models.IntegerField(blank=True, null=True)
     flipi_score_options = models.TextField(blank=True, null=True)
-    tumor_grade = models.IntegerField(blank=True, null=True)
+    tumor_grade = models.CharField(max_length=10, blank=True, null=True)
+    flipi_risk_category = models.CharField(max_length=20, blank=True, null=True)
+    number_of_nodal_sites = models.PositiveSmallIntegerField(blank=True, null=True)
+    bulky_disease = models.BooleanField(blank=True, null=True)
+    b_symptoms = models.BooleanField(blank=True, null=True)
+    gelf_criteria_options = models.TextField(blank=True, null=True)
+    ldh_upper_limit_normal = models.PositiveIntegerField(blank=True, null=True)
     # Histologic transformation of FL to DLBCL — derived from OMOP (DLBCL
     # ConditionOccurrence, or a transformation Observation as fallback).
     transformed_to_dlbcl = models.BooleanField(blank=True, null=True)
@@ -3191,9 +3365,9 @@ class PatientRecord(models.Model):
     user_edited_fields = models.JSONField(
         default=list, blank=True,
         help_text=(
-            "Legacy compatibility metadata from the retired PatientRecord-to-OMOP "
-            "write-through. It is not written or consulted by derivation; mapped "
-            "clinical fields are rebuilt only from OMOP facts."
+            "Fields directly edited by a user that may not yet have OMOP backing. "
+            "Derivation preserves these values when no OMOP fact exists for the "
+            "field, and auto-cleans entries once an OMOP fact is projected."
         ),
     )
     # Values for administrator-defined fields.  Runtime definitions cannot be
@@ -3307,6 +3481,9 @@ class PatientRecord(models.Model):
         
         # Update therapy-related computed fields
         self._update_therapy_computed_fields()
+        for field, value in (self.therapy_overrides or {}).items():
+            if field in {'relapse_count', 'treatment_refractory_status'}:
+                setattr(self, field, value)
         
         super().save(*args, **kwargs)
     
@@ -3434,20 +3611,27 @@ class FieldConceptMapping(models.Model):
     the decision and never acting on it left every curated field exactly as
     unwritable as before.
 
-    "Enough detail" means a concept, an ``omop_table`` naming where the fact
-    lives, and a ``source_value`` to key it by. Without the last one derivation
-    cannot find the row it just wrote, so the mapping stays advisory.
+    "Enough detail" means a concept and an ``omop_table`` naming where the fact
+    lives.  The ``source_value`` key defaults to the concept's own code when left
+    blank — which is the right choice for LOINC and SNOMED mappings.  Set an
+    explicit source_value only when a different key is needed (e.g. a custom FHIR
+    extension URL for SCT fields).
 
     Each PatientRecord field can have at most one mapping. Several fields may
-    intentionally share one OMOP concept, as long as each writable field has its
-    own source_value key; otherwise the editor would supersede one field's fact
-    while saving the other.
+    intentionally share one OMOP concept, as long as each writable field has a
+    distinct source_value key; otherwise the editor would supersede one field's
+    fact while saving the other.
     """
     STATUS_CHOICES = [
         ('proposed', 'Proposed'),
         ('approved', 'Approved'),
         ('rejected', 'Rejected'),
     ]
+    provenance = models.CharField(
+        max_length=20, blank=True, default='', db_default='',
+        choices=[('system_generated', 'System Generated'), ('curator', 'Curator')],
+        help_text='Who supplied the current mapping recipe; blank for unrecorded legacy origins.',
+    )
     field_name = models.CharField(max_length=100, unique=True, db_index=True)
     concept = models.ForeignKey(
         Concept, on_delete=models.PROTECT, null=True, blank=True,
@@ -3464,14 +3648,15 @@ class FieldConceptMapping(models.Model):
     source_value = models.CharField(
         max_length=100, blank=True, default='',
         help_text=(
-            'The *_source_value the fact is keyed by. Derivation matches on this, '
-            'so a mapping without one cannot make its field writable.'
+            'The *_source_value the fact is keyed by. Defaults to the concept '
+            'code when blank, which is correct for standard LOINC/SNOMED mappings. '
+            'Set an explicit value only when a different key is needed.'
         ),
     )
     value_kind = models.CharField(
         max_length=10, blank=True, default='',
         choices=[('number', 'Number'), ('string', 'String'),
-                 ('date', 'Date'), ('boolean', 'Boolean')],
+                 ('date', 'Date'), ('boolean', 'Boolean'), ('json', 'Structured findings')],
         help_text='Which value column the fact is written to.',
     )
     type_concept_id = models.IntegerField(
@@ -3820,6 +4005,16 @@ class PatientTrialEnrollment(models.Model):
         null=True,
         help_text="Free-text notes from coordinating clinician",
     )
+    is_favorite = models.BooleanField(
+        default=False,
+        help_text=(
+            "Patient bookmarked this trial. Deliberately a field and not a "
+            "sixth `status`: the statuses describe participation, and a "
+            "bookmark is orthogonal to it — a patient can save a trial they "
+            "will never register for, and register for one they never saved. "
+            "As a status the two could not be true at once."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -3827,78 +4022,81 @@ class PatientTrialEnrollment(models.Model):
         db_table = 'patient_trial_enrollment'
         unique_together = [('person', 'trial_id')]
         ordering = ['-status_date', '-created_at']
+        indexes = [
+            # The favorites list is read on every trial-search page load to
+            # label the cards and fill the Favorites tab, always for one
+            # person and almost always only the bookmarked rows.
+            models.Index(
+                fields=['person', 'is_favorite'],
+                name='pte_person_favorite_idx',
+            ),
+        ]
 
     def __str__(self):
         return f"Person {self.person_id} — trial {self.trial_id} ({self.status})"
 
 
-class Survey(models.Model):
-    """Survey definition — mirrors the ~/one EpicForm survey structure stored in Firestore."""
-    STATUS_ACTIVE = 'ACTIVE'
-    STATUS_DRAFT = 'DRAFT'
-    STATUS_ARCHIVED = 'ARCHIVED'
-    STATUS_CHOICES = [
-        (STATUS_ACTIVE, 'Active'),
-        (STATUS_DRAFT, 'Draft'),
-        (STATUS_ARCHIVED, 'Archived'),
-    ]
+class TrialSearchPreferences(models.Model):
+    """The filters a patient last used on the trial-search page.
 
-    external_id = models.CharField(
-        max_length=100, unique=True, blank=True, null=True,
-        help_text="Firestore document ID from ~/one (for syncing)",
+    One row per person. The payload is opaque here on purpose: the filter
+    vocabulary belongs to EXACT (`study_preferences_from_query_params`), and
+    mirroring it into columns would mean a migration every time that service
+    gains a filter. PROMOP stores what the UI asked it to store, scoped to
+    the person, and answers how many of those filters are non-default so the
+    UI's "Filters (N)" badge cannot drift from the server's own count.
+    """
+
+    person = models.OneToOneField(
+        Person,
+        on_delete=models.CASCADE,
+        related_name='trial_search_preferences',
+        help_text="The patient whose search these preferences belong to.",
     )
-    name = models.CharField(max_length=200, unique=True)
-    title = models.CharField(max_length=500)
-    description = models.TextField(blank=True, default='')
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
-    disease = models.CharField(max_length=100, blank=True, default='')
-    pages = models.JSONField(
-        default=list,
-        help_text="Array of Form pages; each page has {name, title, inputs[]} matching EpicForm schema",
+    preferences = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            "Opaque filter payload, camelCase as EXACT's query params spell "
+            "it (searchTitle, trialType, phase, …). Not validated against a "
+            "schema here — see the class docstring."
+        ),
     )
-    estimated_minutes = models.IntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        db_table = 'survey'
-        ordering = ['name']
+        db_table = 'trial_search_preferences'
+        verbose_name_plural = 'trial search preferences'
 
     def __str__(self):
-        return self.title
+        return f"Trial search preferences for person {self.person_id}"
 
+    @property
+    def non_default_filter_count(self) -> int:
+        """How many filters the patient actually set.
 
-class PatientSurveyResponse(models.Model):
-    """A patient's responses to one survey, plus completion tracking and consent."""
-    person = models.ForeignKey(
-        Person, on_delete=models.CASCADE, related_name='survey_responses',
-    )
-    survey = models.ForeignKey(
-        Survey, on_delete=models.CASCADE, related_name='responses',
-    )
-    values = models.JSONField(
-        default=dict,
-        help_text="Field-name → answer value map matching the survey's input names",
-    )
-    values_dates = models.JSONField(
-        default=dict,
-        help_text="Field-name → ISO timestamp of last update for each answer",
-    )
-    percent_complete = models.IntegerField(default=0, validators=[MinValueValidator(0), MaxValueValidator(100)])
-    started_at = models.DateTimeField(null=True, blank=True)
-    completed_at = models.DateTimeField(null=True, blank=True)
-    consent_date = models.DateTimeField(null=True, blank=True)
-    consent_signature = models.TextField(blank=True, null=True, default=None)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        db_table = 'patient_survey_response'
-        unique_together = [('person', 'survey')]
-        ordering = ['-updated_at']
-
-    def __str__(self):
-        return f"Person {self.person_id} — {self.survey.name} ({self.percent_complete}%)"
+        Counted here rather than in the UI so every client agrees. Empty
+        string, null and false are "unset" — a cleared text input hands back
+        `""` before anything normalizes it, and an unticked checkbox is
+        `false`. A zero distance counts as unset too: EXACT gates on
+        `if study_info.distance:`, so zero applies no limit at all.
+        """
+        stored = self.preferences
+        if not isinstance(stored, dict):
+            # The serializer rejects a non-object payload, but a row written
+            # before that landed — or from a shell — must not make every
+            # read of it raise.
+            return 0
+        return sum(
+            1
+            for key, value in stored.items()
+            # `sort` and `type` are the sort control and the tab, not
+            # filters; counting them would tick the badge up when the reader
+            # switches tab.
+            if key not in ('sort', 'type')
+            and value not in (None, '', False, 0)
+        )
 
 
 class Institution(models.Model):
@@ -3996,9 +4194,9 @@ class FhirConnection(models.Model):
         help_text="Owning tenant org, derived from the session that initiated the connect.",
     )
 
-    # Tokens — Fernet ciphertext. Plaintext is never persisted.
-    access_token_encrypted = models.TextField()
-    refresh_token_encrypted = models.TextField()
+    # Plain token storage; application-level encryption is not implemented (#60).
+    access_token = models.TextField()
+    refresh_token = models.TextField()
     expires_at = models.DateTimeField(help_text="UTC instant at which access_token expires.")
     scope_granted = models.CharField(max_length=500, blank=True, default="")
 
@@ -4176,6 +4374,114 @@ class UmlsConcept(models.Model):
 
     class Meta:
         db_table = 'umls_concept'
+
+
+class SuggestRun(models.Model):
+    """One Suggest click: what it is working through, and how far it has got.
+
+    Suggest is queued rather than answered inside the request — a code costs
+    ~3.5s and a tab holds dozens, so the synchronous version could not finish
+    inside a gunicorn worker's timeout.  A queued job needs somewhere to report
+    from, and this is it.
+
+    A database row rather than Celery's own task metadata, for three reasons:
+    the progress counts have to survive a worker restart; the poll can land on
+    any gunicorn worker, so nothing process-local will do; and the inline
+    dispatcher a machine with no broker falls back to has no result backend to
+    write metadata into.  One row means one contract for both paths.
+
+    Rows are small and few — one per click — so nothing prunes them; they are
+    also the record of what a given suggestion model version was asked to do.
+    """
+    QUEUED = 'queued'
+    RUNNING = 'running'
+    SUCCESS = 'success'
+    FAILURE = 'failure'
+    STATES = [
+        (QUEUED, 'Queued'),
+        (RUNNING, 'Running'),
+        (SUCCESS, 'Success'),
+        (FAILURE, 'Failure'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    # NULL means every vocabulary; '' is the Uncoded tab, which is a real tab
+    # and the one Suggest actually works on.
+    source_vocabulary_id = models.CharField(max_length=50, null=True, blank=True)
+    state = models.CharField(max_length=10, choices=STATES, default=QUEUED)
+
+    total = models.IntegerField(default=0)
+    # Split because retrieval is 67% of the run and finishes for every code
+    # before the first destination is written. Reporting only `done` would leave
+    # the progress bar at zero for two thirds of the wait.
+    retrieved = models.IntegerField(default=0)
+    done = models.IntegerField(default=0)
+    # What the run actually achieved, and the number the curator is shown: codes
+    # that came out of it with a destination they did not have going in. Not
+    # "rows written" -- a code the ranker declined is written too, so the run
+    # records that it tried, and counting those would claim destinations nobody
+    # proposed.
+    destinations = models.IntegerField(default=0)
+    # Codes a *next* run would newly work on: still eligible, and not already
+    # attempted by this model version. A run is capped well below a tab's
+    # backlog, so without this the curator cannot tell from the page that
+    # another run is warranted. Excluding what this version already tried is
+    # what makes it advice rather than a number: re-running only re-declines
+    # those, so once it reads 0 the next thing to move the queue is a new model
+    # version, not another click.
+    remaining = models.IntegerField(default=0)
+
+    strategy_counts = models.JSONField(default=dict, blank=True)
+    landed_in = models.JSONField(default=dict, blank=True)
+    # Snapshots, not references to mutable mappings: completed runs stay readable
+    # after a curator changes a destination or another run retries the source.
+    # Nullable so older web/worker instances can still insert runs during rollout.
+    selection = models.JSONField(default=dict, blank=True, null=True)
+    activity = models.JSONField(default=list, blank=True, null=True)
+    model_version = models.CharField(max_length=20, blank=True, default='')
+    error = models.TextField(blank=True, default='')
+
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'suggest_run'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return (f'SuggestRun {self.id} ({self.state} {self.done}/{self.total}, '
+                f'{self.destinations} destination(s))')
+
+
+class SuggestEmbeddingSnapshot(models.Model):
+    """Candidate IDs for a precompute configuration and its vocabulary inputs."""
+    key = models.CharField(max_length=64, primary_key=True)
+    fingerprint = models.JSONField(default=list)
+    candidate_ids = models.JSONField(default=list)
+
+    class Meta:
+        db_table = 'suggest_embedding_snapshot'
+
+
+class ConceptEmbedding(models.Model):
+    """Precomputed sentence-transformer embedding for concept name search.
+
+    Populated by ``manage.py build_concept_embeddings`` and queried by the
+    vector-similarity tier of the code-mapping suggest pipeline.  Uses pgvector
+    for cosine-distance indexing.
+    """
+    concept = models.OneToOneField(
+        Concept, primary_key=True, on_delete=models.CASCADE,
+        related_name='embedding',
+    )
+    embedding = VectorField(dimensions=384)
+
+    class Meta:
+        db_table = 'concept_embedding'
 
 
 class UmlsSourceCode(models.Model):

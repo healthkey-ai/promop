@@ -68,6 +68,13 @@ const tableTab = (...keys) => `
 beforeEach(__resetTabFieldState);
 
 describe('no-duplicate-tab-field', () => {
+  it('checks collection editors against other tabs by their owning field', () => {
+    expect(ids([
+      ['GenomicsTab.tsx', 'const Tab = () => <section data-patient-field="genetic_mutations" />'],
+      ['DiseaseTab.tsx', inlineTab('genetic_mutations')],
+    ])).toEqual(['duplicate']);
+  });
+
   it('catches a duplicate declared inline on both tabs', () => {
     expect(ids([
       ['ATab.tsx', inlineTab('psa_ng_ml')],
@@ -200,38 +207,26 @@ describe('no-duplicate-tab-field', () => {
     ])).toEqual(['unreadable']);
   });
 
-  it('exempts the known duplicates it is configured with', () => {
-    // Only 'duplicate' is in question here. This fixture renders none of the
-    // other configured entries, so it also reports those stale — correctly, and
-    // the next test is what covers that.
-    const reports = ids([
-      ['DiseaseTab.tsx', inlineTab('stage')],
-      ['GeneralTab.tsx', inlineTab('stage')],
-    ]);
-    expect(reports.filter((id) => id === 'duplicate')).toEqual([]);
-  });
+  it.each(['disease', 'histologic_type', 'stage'])(
+    'rejects reintroducing the former %s duplicate in either lint order', (field) => {
+      for (const tabs of [
+        ['DiseaseTab.tsx', 'GeneralTab.tsx'],
+        ['GeneralTab.tsx', 'DiseaseTab.tsx'],
+      ]) {
+        __resetTabFieldState();
+        expect(ids(tabs.map((tab) => [tab, inlineTab(field)]))).toEqual(['duplicate']);
+      }
+    },
+  );
 
-  it('flags a known duplicate that no longer renders on both', () => {
-    // A fixed duplicate must not leave a permanent hole behind it — whichever
-    // half drops the field, and whichever order the two are linted in. All
-    // three configured entries pair the same two tabs, so a fixture that
-    // renders none of them makes all three stale, which is the point.
-    const stale = (files) => {
-      __resetTabFieldState();
-      const reports = lint(files);
-      expect(reports.map((r) => r.id)).toEqual(['stale', 'stale', 'stale']);
-      return reports.map((r) => /'([a-z_]+)' is listed/.exec(r.text)[1]).sort();
-    };
-
-    const expected = ['disease', 'histologic_type', 'stage'];
-    expect(stale([
-      ['DiseaseTab.tsx', inlineTab('stage')],
+  it('accepts disease fields owned only by DiseaseTab in either lint order', () => {
+    const files = [
+      ['DiseaseTab.tsx', inlineTab('disease', 'histologic_type', 'stage')],
       ['GeneralTab.tsx', inlineTab('something_else')],
-    ])).toEqual(expected);
-    expect(stale([
-      ['DiseaseTab.tsx', inlineTab('something_else')],
-      ['GeneralTab.tsx', inlineTab('stage')],
-    ])).toEqual(expected);
+    ];
+    expect(ids(files)).toEqual([]);
+    __resetTabFieldState();
+    expect(ids([...files].reverse())).toEqual([]);
   });
 
   it('does not run on files that are not tabs', () => {

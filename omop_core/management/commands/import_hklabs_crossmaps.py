@@ -13,7 +13,8 @@ the target is the LOINC concept looked up in the OMOP concept table.
 import json
 from pathlib import Path
 
-from django.core.management.base import BaseCommand, CommandError
+from django.core.management.base import CommandError
+from omop_core.management.embedding_command import EmbeddingLoadCommand
 
 from omop_core.models import Concept, SourceCodeConceptMapping
 from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE
@@ -24,7 +25,7 @@ LOINC_COMMON = 'backend/apps/labs/data/loinc_common.json'
 MANUAL_ALIASES = 'backend/apps/labs/fixtures/curated_aliases_manual.json'
 
 
-class Command(BaseCommand):
+class Command(EmbeddingLoadCommand):
     help = 'Import curated HK-LABS LOINC mappings into SCCM as approved rows.'
 
     def add_arguments(self, parser):

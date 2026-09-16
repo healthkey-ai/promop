@@ -1,0 +1,71 @@
+# Overlay for the Module Federation *bridge* stack: promop serving its remote
+# and API to HealthTree ONE (SvelteKit), alongside hk-labs.
+#
+#   ONE_FIREBASE_SA_FILE=/path/to/one-staging-sa.json \
+#     docker compose -f docker-compose.yml -f docker-compose.bridge.yml up -d --build
+#
+# Ports are fixed here so the rest of the local stack finds this service where
+# it already expects it: hk-labs syncs to host.docker.internal:9200 and ht-phr
+# defaults VITE_CTOMOP_API_URL to http://localhost:9200/api.
+#
+#   remote : http://localhost:9200/remote/remoteEntry.js
+#            (modules ./PatientInfoBridge, ./LabResultsBridge)
+#   api    : http://localhost:9200/api
+#
+# Identity: ONE's Firebase project is the issuer, because a token is only valid
+# for the project that issued it and ONE's users live there — see
+# ht-phr/docs/mf-bridge-proposal.md §7. The key is mounted read-only and picked
+# up as Application Default Credentials; FIREBASE_CREDENTIALS_JSON is blanked so
+# the Admin SDK takes the ADC path rather than anything left in .env.
+
+services:
+  db:
+    # pgvector, not the base stack's postgres:15: migration 0204 skips creating
+    # `concept_embedding` when the vector extension is unavailable, and a later
+    # migration then fails on the missing table, so `migrate` never completes.
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: promop
+      POSTGRES_PASSWORD: promop_local
+      POSTGRES_DB: promop
+    ports: !override
+      - "${PROMOP_DB_HOST_PORT:-55433}:5432"
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U promop -d promop']
+    # Its own volume: Postgres only creates the role/database on an empty data
+    # directory, so reusing the base stack's volume would keep whatever
+    # credentials it was first initialised with — and wiping that volume would
+    # take a developer's existing local promop database with it.
+    volumes: !override
+      - bridge_pgdata:/var/lib/postgresql/data
+
+  web:
+    environment:
+      DATABASE_URL: postgresql://promop:promop_local@db:5432/promop
+      DEBUG: "True"
+      ENVIRONMENT: local
+      SESSION_COOKIE_SECURE: "false"
+      CSRF_COOKIE_SECURE: "false"
+      SECURE_HSTS_SECONDS: "0"
+      ALLOWED_REDIRECT_URI_SCHEMES: https,http
+      SECRET_KEY: local-bridge-promop
+      ALLOWED_HOSTS: localhost,127.0.0.1,promop_web
+      # The browser calls this API directly from ONE's dev server origin.
+      CORS_ALLOWED_ORIGINS: http://localhost:5173
+      CSRF_TRUSTED_ORIGINS: http://localhost:5173
+      ADMIN_EMAIL: admin@example.com
+      ADMIN_PASSWORD: ${PROMOP_ADMIN_PASSWORD:-changeme-local}
+      FIREBASE_PROJECT_ID: ${ONE_FIREBASE_PROJECT_ID:-healthtree-staging-a7b7a}
+      FIREBASE_CREDENTIALS_JSON: ""
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/one-firebase-sa.json
+      FIREBASE_SKIP_REVOCATION_CHECK: "True"
+      # Shared with hk-labs so its lab-results sync is accepted.
+      SERVICE_AUTH_TOKEN: ${CTOMOP_SERVICE_TOKEN:-local-bridge-service-token}
+      SERVICE_AUTH_SCOPES: "patient/*.read patient/*.write"
+    ports: !override
+      - "${PROMOP_HOST_PORT:-9200}:8000"
+    volumes: !override
+      - ${ONE_FIREBASE_SA_FILE:?path to ONE staging service-account key}:/run/secrets/one-firebase-sa.json:ro
+
+volumes:
+  bridge_pgdata:

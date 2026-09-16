@@ -1,4 +1,5 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
+import { render as baseRender, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import AcceptPatientInvite from './AcceptPatientInvite';
@@ -11,7 +12,8 @@ vi.mock('axios', () => ({
 
 const mockNavigate = vi.fn();
 const mockUseSearchParams = vi.fn();
-vi.mock('react-router-dom', () => ({
+vi.mock('react-router-dom', async importOriginal => ({
+  ...await importOriginal<typeof import("react-router-dom")>(),
   useSearchParams: () => mockUseSearchParams(),
   useNavigate: () => mockNavigate,
 }));
@@ -81,3 +83,7 @@ describe('AcceptPatientInvite', () => {
     expect(screen.getByRole('button', { name: /go to sign in/i })).toBeInTheDocument();
   });
 });
+
+function render(ui: React.ReactElement) {
+  return baseRender(<MemoryRouter>{ui}</MemoryRouter>);
+}

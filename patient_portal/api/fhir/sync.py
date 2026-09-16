@@ -40,13 +40,15 @@ from omop_core.models import (
     Concept, ConditionOccurrence, DrugExposure, Measurement, Observation, Person,
     PatientDocument, ProcedureOccurrence, ProvenanceRecord, SourceCodeConceptMapping,
 )
-from omop_core.services.code_mapping import (
-    SELF_RESOLVING_VOCABULARIES,
+from omop_core.mapping.code_resolution import (
     resolve_source_code,
 )
 from omop_core.services.pk import next_pk_batch
 from omop_core.signals import suppress_patient_record_refresh
-from patient_portal.api.permissions import ScopedTokenPermission, get_request_org, is_service_token
+from patient_portal.api.permissions import (
+    ScopedTokenPermission, get_request_org, is_service_token, is_machine_request,
+    reject_machine_actor_claims,
+)
 # Reuse the proven HK-Labs concept-fallback machinery.
 from patient_portal.api.lab_results.sync import HK_LABS_VOCAB_ID, _ensure_hk_deps
 
@@ -285,12 +287,9 @@ class FhirSyncView(APIView):
             actor_iss = data.get('actor_iss', '')
             actor_sub = data.get('actor_sub', '')
             person_id = data.get('person_id')
-            if not is_service_token(request):
-                if getattr(request.user, 'is_authenticated', False):
-                    actor_iss = getattr(request.user, 'issuer', '') or ''
-                    actor_sub = getattr(request.user, 'sub', '') or ''
-                else:
-                    actor_iss = actor_sub = ''
+            reject_machine_actor_claims(request, actor_iss, actor_sub)
+            actor_iss = getattr(request.user, 'issuer', '') or ''
+            actor_sub = getattr(request.user, 'sub', '') or ''
             source_user_id = f"{actor_iss}|{actor_sub}" if actor_iss and actor_sub else ''
         bundle = data['bundle']
 
@@ -450,10 +449,9 @@ class FhirSyncView(APIView):
         # ratifying its own guess.
         #
         # These overwrite the direct hits above rather than filling gaps behind
-        # them, because overriding a wrong automatic resolution is precisely
-        # what a curator approves a mapping to do. LOINC and SNOMED are exempt:
-        # there the code *is* the concept, so a mapping could only ever drift
-        # from Athena.
+        # them, because SCCM is the governed primary resolver. This includes
+        # LOINC and SNOMED: their direct Athena lookup is a fallback, never a
+        # way to bypass a curator-approved source-code mapping.
         # Matched case-insensitively via UPPER(): an uncoded source is a lab's
         # or a clinician's free text, and 'M-Protein, Serum' and
         # 'M-PROTEIN, SERUM' are one test, not two.
@@ -472,8 +470,6 @@ class FhirSyncView(APIView):
 
             for mapping in approved:
                 vocab = mapping.source_vocabulary_id or '*'
-                if vocab in SELF_RESOLVING_VOCABULARIES:
-                    continue
                 # Keyed by the *inbound* spelling, since that is what _lookup
                 # has in hand, not by however the curator typed it. A mapping
                 # with no source code system is written under every vocabulary
@@ -484,13 +480,6 @@ class FhirSyncView(APIView):
                     cache[(vocab, value)] = mapping.target_concept
                     if vocab == '*':
                         for other in by_vocab:
-                            # Never over a LOINC/SNOMED direct hit. There the
-                            # code *is* the concept, and resolve_source_code
-                            # returns it before consulting any mapping -- so
-                            # overriding here would make the two resolution
-                            # paths disagree about the same input.
-                            if other in SELF_RESOLVING_VOCABULARIES:
-                                continue
                             if value in by_vocab[other]:
                                 cache[(other, value)] = mapping.target_concept
         return cache
@@ -1086,42 +1075,22 @@ class FhirSyncView(APIView):
         return bool(changed)
 
     def _resolve_person(self, request, actor_iss, actor_sub, person_id):
-        is_on_behalf_of = bool(person_id)
-
         if not person_id:
-            if hasattr(request.user, 'issuer') and request.user.issuer != 'urn:service':
-                from patient_portal.services import resolve_or_create_person
-                person_id = resolve_or_create_person(request.user).person_id
-            else:
-                person_id = self._resolve_person_from_identity(actor_iss, actor_sub)
-            if person_id is None:
-                return Response({'detail': 'Cannot resolve person from actor identity.'},
+            if is_machine_request(request):
+                return Response({'detail': 'person_id is required for service imports.'},
                                 status=status.HTTP_400_BAD_REQUEST)
+            from patient_portal.services import resolve_or_create_person
+            person_id = resolve_or_create_person(request.user).person_id
 
         person = Person.objects.filter(person_id=person_id).first()
         if person is None:
             return Response({'detail': 'Person not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        actor_identity = self._resolve_actor_identity(actor_iss, actor_sub, request.user)
-        has_explicit_actor = bool(actor_iss and actor_sub)
         org = get_request_org(request)
-
-        if is_on_behalf_of:
-            if is_service_token(request):
-                if has_explicit_actor and actor_identity is None:
-                    return Response({'detail': 'Actor identity not found.'},
-                                    status=status.HTTP_403_FORBIDDEN)
-                if has_explicit_actor and not can_write_patient(actor_identity, person_id):
-                    return Response({'detail': 'Actor does not have write access to this patient.'},
-                                    status=status.HTTP_403_FORBIDDEN)
-            elif org is None:
-                if not has_explicit_actor:
-                    return Response(
-                        {'detail': 'actor_iss and actor_sub required when writing on behalf of another person.'},
-                        status=status.HTTP_400_BAD_REQUEST)
-                if not can_write_patient(actor_identity, person_id):
-                    return Response({'detail': 'Actor does not have write access to this patient.'},
-                                    status=status.HTTP_403_FORBIDDEN)
+        if not is_service_token(request) and org is None:
+            if not can_write_patient(request.user, person_id):
+                return Response({'detail': 'Actor does not have write access to this patient.'},
+                                status=status.HTTP_403_FORBIDDEN)
 
         if org is not None:
             from omop_core.models import PatientRecord
@@ -1131,24 +1100,6 @@ class FhirSyncView(APIView):
 
         return person, org
 
-    def _resolve_actor_identity(self, actor_iss, actor_sub, request_user):
-        if actor_iss and actor_sub:
-            from patient_portal.models import Identity
-            return Identity.objects.filter(issuer=actor_iss, sub=actor_sub).first()
-        if request_user and request_user.is_authenticated:
-            return request_user
-        return None
-
-    def _resolve_person_from_identity(self, actor_iss, actor_sub):
-        if not actor_iss or not actor_sub:
-            return None
-        from patient_portal.models import Identity
-        from patient_portal.services import resolve_or_create_person
-        identity, created = Identity.objects.get_or_create(issuer=actor_iss, sub=actor_sub)
-        if created:
-            identity.set_unusable_password()
-            identity.save(update_fields=['password'])
-        return resolve_or_create_person(identity).person_id
 
 
 class FhirPatientSyncView(FhirSyncView):

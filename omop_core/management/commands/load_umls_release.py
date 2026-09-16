@@ -3,13 +3,14 @@ import csv
 import zipfile
 from pathlib import Path
 
-from django.core.management.base import BaseCommand, CommandError
+from django.core.management.base import CommandError
+from omop_core.management.embedding_command import EmbeddingLoadCommand
 from omop_core.models import UmlsConcept, UmlsRelease, UmlsSourceCode
 
 BATCH = 10_000
 
 
-class Command(BaseCommand):
+class Command(EmbeddingLoadCommand):
     help = 'Load UMLS CUIs and source-asserted codes from a UMLS Full Release zip.'
 
     def add_arguments(self, parser):

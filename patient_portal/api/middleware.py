@@ -3,13 +3,29 @@ import json
 import logging
 import time
 from email.utils import parsedate_to_datetime
+from typing import Callable
 
-from django.http import JsonResponse
+import sentry_sdk
+from django.http import HttpRequest, HttpResponse, JsonResponse
+
+from promop.sentry import redact_path
 
 logger = logging.getLogger('audit')
 _deprecation_logger = logging.getLogger(__name__)
 
-_SUNSET_DATE = 'Tue, 01 Sep 2026 00:00:00 GMT'
+# Sunset of the legacy, non-versioned /api/ prefix (#271).
+#
+# Moved 2026-09-01 -> 2026-12-01: the original date could not be honoured. Removing
+# the legacy alias (`path('api/', ...)` in promop/urls.py) retires all 14 legacy
+# router registrations at once, and promop's OWN React SPA is still the largest
+# consumer of them - frontend/src/api/axios.ts sets `baseURL: '/api'`, so 78 of its
+# 96 call sites resolve to the legacy prefix, including the module-federation
+# remote (frontend/src/federation/patientInfoApi.ts) that ht-phr renders. Cutting
+# on the old date would have broken promop's own UI and the federated tab with it.
+# Tracked as #666; consumer tickets soc#261 and HealthTree/ht-phr#95.
+#
+# Advertise only a date we intend to honour: consumers read this header.
+_SUNSET_DATE = 'Tue, 01 Dec 2026 00:00:00 GMT'
 _SUNSET_DT = parsedate_to_datetime(_SUNSET_DATE)
 _SUCCESSOR = '</api/v1/>; rel="successor-version"'
 
@@ -30,7 +46,7 @@ class DeprecationWarningMiddleware:
         if datetime.datetime.now(datetime.timezone.utc) > _SUNSET_DT:
             _deprecation_logger.warning(
                 "DeprecationWarningMiddleware: Sunset date %s has passed — "
-                "remove legacy /api/ URL aliases from ctomop/urls.py (the Django project package).",
+                "remove legacy /api/ URL aliases from promop/urls.py (the Django project package).",
                 _SUNSET_DATE,
             )
 
@@ -280,3 +296,25 @@ class ForcePasswordChangeMiddleware:
         if not getattr(user, 'must_change_password', False):
             return False
         return not any(path.endswith(s) for s in _FORCE_CHANGE_EXEMPT_SUFFIXES)
+
+
+class SentryServerErrorMiddleware:
+    """Reports 5xx responses that a view returned instead of raising."""
+
+    def __init__(self, get_response: Callable[[HttpRequest], HttpResponse]) -> None:
+        self.get_response = get_response
+
+    def __call__(self, request: HttpRequest) -> HttpResponse:
+        response = self.get_response(request)
+        if response.status_code >= 500 and not self._already_reported(response):
+            sentry_sdk.capture_message(
+                f'{response.status_code} {request.method} {redact_path(request.path)}',
+                level='error',
+            )
+        return response
+
+    @staticmethod
+    def _already_reported(response: HttpResponse) -> bool:
+        # DRF marks what its exception handler built, and Django marks what it
+        # logged while turning an exception into a response.
+        return getattr(response, 'exception', False) or getattr(response, '_has_been_logged', False)

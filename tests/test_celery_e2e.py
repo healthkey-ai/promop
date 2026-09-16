@@ -7,6 +7,7 @@ cannot run at the same time.
 
 import os
 import subprocess
+import sys
 import time
 
 import pytest
@@ -34,8 +35,8 @@ def _test_database_url() -> str:
     return f"postgresql://{user}{password}@{host}:{port}/{cfg['NAME']}"
 
 
-@pytest.fixture
-def celery_worker_process():
+@pytest.fixture(params=['promop', 'ctomop'])
+def celery_worker_process(request):
     broker = os.environ.get('CELERY_BROKER_URL', '')
     if not broker:
         pytest.skip('CELERY_BROKER_URL is not set')
@@ -44,7 +45,7 @@ def celery_worker_process():
     # solo pool: one process, so a failure surfaces in this worker's own output
     # instead of in a forked child nobody is reading.
     worker = subprocess.Popen(
-        ['celery', '-A', 'ctomop', 'worker', '--loglevel=info', '--pool=solo',
+        [sys.executable, '-m', 'celery', '-A', request.param, 'worker', '--loglevel=info', '--pool=solo',
          '--without-gossip', '--without-mingle', '--without-heartbeat'],
         env=env,
     )
@@ -88,3 +89,44 @@ def test_refresh_is_derived_by_a_real_worker(celery_worker_process):
     assert state['state'] == 'SUCCESS', state
     record.refresh_from_db()
     assert record.derived_at is not None
+
+
+def test_suggest_queues_one_hundred_codes_for_a_real_worker(celery_worker_process):
+    """A broker-backed API run processes all 100 rows instead of the inline 3."""
+    from rest_framework.test import APIClient
+    from omop_core.models import SourceCodeConceptMapping
+
+    staff = Identity.objects.create_user(
+        email='suggest-e2e@example.test', password='pw', is_staff=True)
+    client = APIClient()
+    client.force_authenticate(user=staff)
+    # No UMLS fixtures: each row deterministically finishes without a candidate,
+    # requiring neither an external ranking API nor a downloaded vector model.
+    SourceCodeConceptMapping.objects.bulk_create([
+        SourceCodeConceptMapping(
+            source_vocabulary_id='ICD10CM', source_code=f'E2E.{i:03d}',
+            domain_id='Condition', omop_table='condition', status='proposed',
+            occurrence_count=100-i,
+        ) for i in range(100)
+    ])
+    reference = client.get('/api/v1/code-mappings/reference/')
+    assert reference.status_code == 200
+    assert reference.data['suggest_max_per_run'] == 100
+    response = client.post('/api/v1/code-mappings/suggest/', {
+        'source_vocabulary_id': 'ICD10CM', 'limit': 100, 'strategies': ['umls'],
+    }, format='json')
+    assert response.status_code == 202, response.data
+    assert response.data['total'] == 100
+    deadline = time.monotonic() + _POLL_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        response = client.get(
+            f'/api/v1/code-mappings/suggest-runs/{response.data["run_id"]}/')
+        assert response.status_code == 200, response.data
+        if response.data['state'] in ('success', 'failure'):
+            break
+        time.sleep(0.5)
+    assert response.data['state'] == 'success', response.data
+    assert response.data['done'] == 100
+    assert SourceCodeConceptMapping.objects.filter(
+        source_code__startswith='E2E.', last_suggest_attempt__isnull=False,
+    ).count() == 100

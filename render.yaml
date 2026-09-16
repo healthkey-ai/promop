@@ -9,7 +9,7 @@ services:
     startCommand: "chmod +x start.sh && ./start.sh"
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.0
+        value: 3.12.0
       - key: SECRET_KEY
         generateValue: true
       # Required by patient_portal.E001/E002/E003, which start.sh enforces
@@ -23,7 +23,7 @@ services:
       - key: EXPORT_SIGNING_KEY
         generateValue: true
       - key: DEBUG
-        value: False
+        value: "False"
       - key: DATABASE_URL
         fromDatabase:
           name: promop-db
@@ -41,22 +41,24 @@ services:
       - key: ATHENA_VOCABULARY_GDRIVE_URL
         sync: false
 
-      # Render supplies RENDER_EXTERNAL_HOSTNAME automatically; Django allows
-      # that hostname. Set ALLOWED_HOSTS here for any additional custom domains.
-      # sync: false prompts only on creation. For an existing service, configure
-      # these values in the dashboard; Blueprint updates do not populate them.
+      # Required on deployments, including staging with DEBUG=True.
+      # Render's environment marker enables the settings guard independently
+      # of DEBUG; its supplied hostname can satisfy ALLOWED_HOSTS.
       - key: ALLOWED_HOSTS
         sync: false
       - key: CORS_ALLOWED_ORIGINS
         sync: false
 
-      # Application configuration.
+      # ── Application configuration ────────────────────────────────────────
+      # sync: false means Render prompts for the value rather than storing it
+      # here. Deliberate: this repository is public, and CLAUDE.md forbids
+      # committing hostnames and connection strings.
       - key: APP_BASE_URL
         sync: false
       - key: ADMIN_EMAIL
         sync: false
 
-      # Secrets — never values in a blueprint.
+      # ── Secrets — never values in a blueprint ────────────────────────────
       - key: ADMIN_PASSWORD
         sync: false
       - key: SERVICE_AUTH_TOKEN
@@ -66,11 +68,22 @@ services:
       - key: MAILGUN_SENDER_DOMAIN
         sync: false
 
-      # PHR federation.
+      # ── PHR federation ───────────────────────────────────────────────────
+      # PHR_AUDIENCE is a shared constant, not a secret: phr stamps it as the
+      # token's `aud` and PROMOP requires the match. Both sides must agree, so
+      # it is pinned here rather than left to a dashboard entry. An unset value
+      # fails CLOSED and rejects every PHR token — see healthkey-ai/phr#65,
+      # which must land before this does anything but reject.
       - key: PHR_AUDIENCE
         value: promop-api
       - key: PHR_BASE_URL
         sync: false
+
+      # Unset means Sentry stays off, which is also the rollback.
+      - key: SENTRY_DSN
+        sync: false
+      - key: SENTRY_ENVIRONMENT
+        value: production
 
   - type: worker
     name: promop-worker
@@ -80,10 +93,10 @@ services:
     autoDeploy: true
     # No frontend build: the worker serves nothing.
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "celery -A ctomop worker --loglevel=info"
+    startCommand: "celery -A promop worker --loglevel=info"
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.0
+        value: 3.12.0
       # Taken from the web service rather than generated: two different keys
       # would be two different signing secrets for the same data.
       - key: SECRET_KEY
@@ -92,7 +105,7 @@ services:
           type: web
           envVarKey: SECRET_KEY
       - key: DEBUG
-        value: False
+        value: "False"
       - key: DATABASE_URL
         fromDatabase:
           name: promop-db
@@ -102,12 +115,152 @@ services:
           name: promop-redis
           type: redis
           property: connectionString
+      - key: SENTRY_DSN
+        fromService:
+          name: promop
+          type: web
+          envVarKey: SENTRY_DSN
+      - key: SENTRY_ENVIRONMENT
+        value: production
 
   - type: redis
     name: promop-redis
     plan: starter
     # Reachable from the other services in this blueprint only.
     ipAllowList: []
+
+  # Staging: existing web service; reuse its DATABASE_URL from Render.
+  # Local access uses STAGING_DATABASE_URL in .env. Never commit its value.
+  - type: web
+    name: promop-staging
+    runtime: python
+    repo: https://github.com/healthkey-ai/promop
+    branch: dev
+    autoDeploy: true
+    buildCommand: pip install -r requirements.txt && cd frontend && npm install && npm run build && cd .. && python manage.py
+      collectstatic --noinput
+    startCommand: chmod +x start.sh && ./start.sh
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: SECRET_KEY
+        generateValue: true
+      - key: AUDIT_HMAC_KEY
+        generateValue: true
+      - key: EXPORT_SIGNING_KEY
+        generateValue: true
+      - key: DEBUG
+        value: 'False'
+      - key: DATABASE_URL
+        sync: false
+      - key: CELERY_BROKER_URL
+        fromService:
+          name: promop-staging-redis
+          type: keyvalue
+          property: connectionString
+      - key: ALLOWED_HOSTS
+        value: promop-staging.onrender.com
+      - key: CORS_ALLOWED_ORIGINS
+        value: https://promop-staging.onrender.com
+      - key: APP_BASE_URL
+        value: https://promop-staging.onrender.com
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: SERVICE_AUTH_TOKEN
+        sync: false
+      # The staging ETL capability is accepted only by explicitly approved
+      # non-destructive write endpoints. It does not make the identity staff.
+      - key: SERVICE_AUTH_SCOPES
+        value: "patient/*.read system/etl.write"
+      - key: MAILGUN_API_KEY
+        sync: false
+      - key: MAILGUN_SENDER_DOMAIN
+        sync: false
+      - key: PHR_AUDIENCE
+        value: promop-api
+      - key: PHR_BASE_URL
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          name: promop-staging-redis
+          type: keyvalue
+          property: connectionString
+      - key: SENTRY_DSN
+        sync: false
+      - key: SENTRY_ENVIRONMENT
+        value: staging
+    region: oregon
+  - type: worker
+    name: promop-staging-worker
+    runtime: python
+    repo: https://github.com/healthkey-ai/promop
+    branch: dev
+    region: oregon
+    autoDeploy: true
+    plan: 1c-2g
+    buildCommand: pip install -r requirements.txt
+    startCommand: bash start-worker.sh
+    envVars:
+      - key: SECRET_KEY
+        fromService:
+          name: promop-staging
+          type: web
+          envVarKey: SECRET_KEY
+      - key: DATABASE_URL
+        fromService:
+          name: promop-staging
+          type: web
+          envVarKey: DATABASE_URL
+      - key: AUDIT_HMAC_KEY
+        fromService:
+          name: promop-staging
+          type: web
+          envVarKey: AUDIT_HMAC_KEY
+      - key: EXPORT_SIGNING_KEY
+        fromService:
+          name: promop-staging
+          type: web
+          envVarKey: EXPORT_SIGNING_KEY
+      - key: ANTHROPIC_API_KEY
+        fromService:
+          name: promop-staging
+          type: web
+          envVarKey: ANTHROPIC_API_KEY
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: DEBUG
+        value: 'False'
+      - key: CELERY_BROKER_URL
+        fromService:
+          name: promop-staging-redis
+          type: keyvalue
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          name: promop-staging-redis
+          type: keyvalue
+          property: connectionString
+      - key: CELERY_WORKER_CONCURRENCY
+        value: '1'
+      - key: CELERY_WORKER_PREFETCH_MULTIPLIER
+        value: '1'
+      - key: SENTRY_DSN
+        fromService:
+          name: promop-staging
+          type: web
+          envVarKey: SENTRY_DSN
+      - key: SENTRY_ENVIRONMENT
+        value: staging
+  - type: keyvalue
+    name: promop-staging-redis
+    region: oregon
+    plan: 256mb
+    ipAllowList: []
+    maxmemoryPolicy: noeviction
 
 databases:
   - name: promop-db

@@ -9,6 +9,10 @@ export interface PatientInfoProps {
   className?: string;
   theme?: Partial<LabsThemeTokens>;
   readOnly?: boolean;
+  /** Render the component's own "Health Profile" heading. Hosts that supply a
+   *  page title of their own (see ht-one's clinical routes) pass false, so the
+   *  screen does not show two. */
+  showHeading?: boolean;
   onPatientUpdated?: (data: unknown) => void;
 }
 

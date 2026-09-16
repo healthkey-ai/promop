@@ -80,3 +80,17 @@ def test_upsert_therapy_line_episode_updates_corrected_dates_and_outcome_date():
     assert episode.episode_start_date == date(2024, 2, 1)
     assert episode.episode_end_date == date(2024, 5, 1)
     assert outcome.observation_date == date(2024, 5, 1)
+
+
+def test_episode_end_date_omission_preserves_and_explicit_null_clears():
+    _seed_episode_writer_concepts()
+    person = PersonFactory()
+    upsert_therapy_line_episode(person, line_number=1,
+                               start_date=date(2024, 1, 1), end_date=date(2024, 4, 1))
+    upsert_therapy_line_episode(person, line_number=1)
+    episode = Episode.objects.get(person=person, episode_number=1)
+    assert episode.episode_end_date == date(2024, 4, 1)
+    upsert_therapy_line_episode(person, line_number=1, start_date=None, end_date=None)
+    episode.refresh_from_db()
+    assert episode.episode_end_date is None
+    assert episode.episode_start_date == date(2024, 1, 1)

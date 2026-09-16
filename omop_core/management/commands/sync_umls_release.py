@@ -2,7 +2,8 @@
 import os
 import codecs
 
-from django.core.management.base import BaseCommand, CommandError
+from django.core.management.base import CommandError
+from omop_core.management.embedding_command import EmbeddingLoadCommand
 import requests
 from stream_unzip import stream_unzip
 
@@ -30,7 +31,7 @@ def _find_mrconso(chunks):
     return None
 
 
-class Command(BaseCommand):
+class Command(EmbeddingLoadCommand):
     help = 'Stream/import raw UMLS RRF codes without writing the archive to disk.'
 
     def add_arguments(self, parser):

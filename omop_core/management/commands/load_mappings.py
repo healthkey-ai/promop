@@ -18,7 +18,8 @@ import json
 import logging
 from pathlib import Path
 
-from django.core.management.base import BaseCommand, CommandError
+from django.core.management.base import CommandError
+from omop_core.management.embedding_command import EmbeddingLoadCommand
 
 from omop_core.models import Concept, SourceCodeConceptMapping
 from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE
@@ -31,7 +32,7 @@ DEFAULT_ARTIFACT = Path(__file__).resolve().parents[2] / 'data' / 'code_concept_
 _STALE_ORIGIN_SYSTEMS = ('HK-ETL', 'etl-cross-map')
 
 
-class Command(BaseCommand):
+class Command(EmbeddingLoadCommand):
     help = 'Load approved code-to-concept mappings from the bundled artifact into SCCM.'
 
     def add_arguments(self, parser):

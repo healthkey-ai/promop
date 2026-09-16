@@ -20,6 +20,9 @@ export interface LabsBaseProps {
 }
 
 export interface LabResultsProps extends LabsBaseProps {
+  /** Render the component's own "Lab Results" heading. Hosts that supply a page
+   *  title of their own pass false, so the screen does not show two. */
+  showHeading?: boolean;
   selectedTest?: string;
   onNavigateToDetail?: (conceptCode: string) => void;
   onBack?: () => void;

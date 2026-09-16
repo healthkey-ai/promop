@@ -11,14 +11,16 @@ import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
  * move with vocabulary releases, so a copy in TypeScript would drift silently and
  * start writing facts against stale concepts.
  */
-export type FieldKind = 'editable' | 'selectable' | 'computed' | 'alias' | null;
+export type FieldKind = 'editable' | 'selectable' | 'computed' | 'alias' | 'direct' | null;
 
 export interface FieldDescriptor {
   kind: FieldKind;
   writable: boolean;
   reason?: string;
-  /** editable */
-  target?: 'measurement' | 'observation' | 'condition' | 'drug_exposure' | 'procedure' | 'person';
+  /** Where the write lands. 'patient_record' for clinical fields, 'person'
+   *  for profile fields. Legacy callers may still pass OMOP table names
+   *  (measurement, observation, etc.) to writeClinicalFact directly. */
+  target?: string;
   /** profile: the key the persons endpoint expects, which is not always the
    *  column named by `person_field`. */
   payload_field?: string;
@@ -46,6 +48,17 @@ export interface FieldDescriptor {
   options?: Array<{ value: string; code?: string }>;
   /** Several answers at once, stored comma-joined. */
   multiple?: boolean;
+  /** OMOP projection metadata — present when the field has an approved mapping.
+   *  The backend uses this to project the value into a clinical table after PATCH. */
+  projection?: {
+    omop_table?: string;
+    endpoint?: string;
+    concept_id?: number;
+    type_concept_id?: number;
+    source_value?: string;
+    unit?: string | null;
+    unit_concept_id?: number | null;
+  };
   /** Set when the field is mapped but this caller may not edit this patient —
    *  read-only for who is asking, rather than read-only in principle. */
   read_only_for_caller?: boolean;
@@ -91,6 +104,15 @@ const keyFor = (personId?: number | string) =>
 export function __resetWritableFieldsCache() {
   cached.clear();
   inflight.clear();
+}
+
+/** Invalidate the cached descriptor for one patient so the next render
+ *  re-fetches it. Call after authoring a therapy line or any other action
+ *  that may change field writability within a session. */
+export function invalidateWritableFieldsCache(personId?: number | string) {
+  const key = keyFor(personId);
+  cached.delete(key);
+  inflight.delete(key);
 }
 
 export function fetchWritableFields(

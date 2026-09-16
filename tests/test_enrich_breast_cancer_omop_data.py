@@ -242,7 +242,7 @@ class TestRefreshesPatientRecord:
         record = PatientRecord.objects.get(person=person)
         assert record.no_tobacco_use_status is not None or record.tobacco_use_details is not None
 
-    def test_missing_therapy_backfill_creates_regimen_concept_and_patient_record_id(self):
+    def test_missing_therapy_backfill_creates_regimen_without_inventing_episode(self):
         person = PersonFactory()
         PatientRecordFactory(person=person, stage='IV')
 
@@ -250,9 +250,10 @@ class TestRefreshesPatientRecord:
 
         record = PatientRecord.objects.get(person=person)
         exposure = DrugExposure.objects.get(person=person)
-        assert record.first_line_therapy_id is not None
-        assert exposure.drug_concept_id == record.first_line_therapy_id
-        assert record.first_line_therapy
+        # Enrichment creates a raw exposure, not a persisted treatment episode.
+        assert exposure.drug_concept_id is not None
+        assert record.first_line_therapy_id is None
+        assert record.first_line_therapy is None
 
         # Issue #450: when the genuine HemOnc concept is not loaded, the
         # regimen must be quarantine-minted under HK-Regimen — never under
@@ -385,3 +386,58 @@ class TestRefreshesPatientRecord:
         )
 
         assert refreshed == [breast_person.person_id, other_person.person_id]
+
+
+class TestBreastCancerCohortSelection:
+    def test_default_enrichment_finds_current_synthea_breast_cohort(self):
+        from tests.factories import OrganizationFactory
+        record = PatientRecordFactory(
+            organization=OrganizationFactory(slug='synthea-bc'),
+            disease='Malignant tumor of breast', stage=None,
+        )
+        call_command('enrich_breast_cancer_omop_data', confirm=True)
+        record.refresh_from_db()
+        assert record.stage
+        assert Measurement.objects.filter(person=record.person).exists()
+
+    def test_selection_handles_org_case_alias_and_stale_projection(self, monkeypatch):
+        from tests.factories import OrganizationFactory, ConditionOccurrenceFactory
+        org = OrganizationFactory(slug='SYNTHEA-BC')
+        alias = PatientRecordFactory(organization=org, disease='BC')
+        stale = PatientRecordFactory(organization=org, disease=None)
+        from omop_core.signals import suppress_patient_record_refresh
+        with suppress_patient_record_refresh():
+            ConditionOccurrenceFactory(person=stale.person, condition_concept=ConceptFactory(
+                concept_name='Malignant tumor of breast'))
+        PatientRecordFactory(organization=org, disease='Multiple Myeloma')
+        PatientRecordFactory(disease='Breast Cancer')  # outside selected organization
+        refreshed = []
+        monkeypatch.setattr(
+            'omop_core.management.commands.enrich_breast_cancer_omop_data.refresh_patient_record',
+            lambda person: refreshed.append(person.person_id),
+        )
+        call_command('enrich_breast_cancer_omop_data', org_slugs='synthea-bc', refresh_only=True)
+        assert refreshed == sorted([alias.person_id, stale.person_id])
+
+    @pytest.mark.parametrize('vocabulary,code', [('SNOMED', '254837009'), ('ICD10CM', 'C50.919'), ('ICD10', 'D05.1')])
+    def test_omop_diagnosis_code_selection_excludes_erroneous_rows(self, monkeypatch, vocabulary, code):
+        from tests.factories import OrganizationFactory, ConditionOccurrenceFactory
+        from omop_core.signals import suppress_patient_record_refresh
+        org = OrganizationFactory(slug='synthea-bc')
+        patient = PatientRecordFactory(organization=org, disease=None)
+        excluded = PatientRecordFactory(organization=org, disease=None)
+        concept = ConceptFactory(vocabulary__vocabulary_id=vocabulary, concept_code=code)
+        with suppress_patient_record_refresh():
+            ConditionOccurrenceFactory(person=patient.person, condition_concept=concept)
+            ConditionOccurrenceFactory(person=excluded.person, condition_concept=concept, is_erroneous=True)
+        refreshed = []
+        monkeypatch.setattr(
+            'omop_core.management.commands.enrich_breast_cancer_omop_data.refresh_patient_record',
+            lambda person: refreshed.append(person.person_id),
+        )
+        call_command('enrich_breast_cancer_omop_data', refresh_only=True)
+        assert refreshed == [patient.person_id]
+
+    def test_empty_org_selection_does_not_select_all_patients(self):
+        with pytest.raises(CommandError, match='Select at least one organization'):
+            call_command('enrich_breast_cancer_omop_data', org_slugs=' , ', refresh_only=True)

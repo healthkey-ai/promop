@@ -1,3 +1,4 @@
+import PageTitle from '@/components/Branding/PageTitle';
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, ChevronDown, ChevronRight, Plus, Search, Trash2, X } from 'lucide-react';
@@ -626,7 +627,7 @@ export default function TherapyMappingPage() {
         >
           <ArrowLeft size={20} />
         </button>
-        <h1 className="text-2xl font-bold text-foreground">Therapy Mapping</h1>
+        <PageTitle className="text-2xl font-bold text-foreground">Therapy Mapping</PageTitle>
       </div>
 
       <div className="mb-6 flex gap-1 border-b border-border">

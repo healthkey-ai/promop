@@ -82,7 +82,7 @@ const CLINICAL_TARGETS = {
 
 type ClinicalTarget = keyof typeof CLINICAL_TARGETS;
 
-function clinicalTarget(target: FieldDescriptor['target']): ClinicalTarget | null {
+function clinicalTarget(target: string | undefined): ClinicalTarget | null {
   return target && target in CLINICAL_TARGETS
     ? target as ClinicalTarget
     : null;
@@ -156,6 +156,7 @@ export async function writeClinicalFact(
         String(r.person) === String(personId) &&
         r[cfg.sourceField] === descriptor.source_value &&
         r[cfg.dateField] === date &&
+        (target !== 'measurement' || r[cfg.typeField] === descriptor.type_concept_id) &&
         !r.is_erroneous,
     );
     if (sameDay) {
@@ -194,66 +195,13 @@ export async function writeClinicalFact(
   if (cfg.storesUnit && descriptor.unit) {
     payload.unit_source_value = descriptor.unit;
   }
-
   const created = await clinicalClient().post(clinicalUrl(cfg.base), payload);
   const createdId = (created.data?.[cfg.idField] ?? null) as number | null;
   return { supersededId, createdId };
 }
 
-/**
- * Write a profile field to the Person record.
- *
- * Demographics are stored as a resolved concept plus the raw text, and the
- * endpoint does that resolution — so the payload key is the PatientRecord field
- * name, not either Person column. `payload_field` carries it; `person_field`
- * beside it is prose documenting the columns behind the value ("gender_concept +
- * gender_source_value", "Location.city") and is not a key.
- */
-export async function writeProfileField(
-  personId: number | string,
-  field: string,
-  descriptor: FieldDescriptor,
-  value: unknown,
-): Promise<void> {
-  if (!descriptor?.writable || descriptor.target !== 'person') {
-    throw new Error(`${field} is not a writable profile field`);
-  }
-  await writeProfileFields(personId, [{ field, descriptor, value }]);
-}
-
-export interface ProfileEdit {
-  field: string;
-  descriptor: FieldDescriptor;
-  value: unknown;
-}
-
-/**
- * Write several Person fields in one request.
- *
- * One request rather than one per field, because some of them are only valid
- * together. Latitude and longitude must be both set or both null — the record
- * carries a check constraint saying so — and sending them separately means the
- * first arrives alone and is refused, so a patient with no coordinates could
- * never be given any.
- *
- * Batching is the fix rather than special-casing that pair: the endpoint already
- * accepts every profile field at once, and a form submits what the user changed,
- * not one field at a time.
- */
-export async function writeProfileFields(
-  personId: number | string,
-  edits: ProfileEdit[],
-): Promise<void> {
-  const payload: Record<string, unknown> = {};
-  for (const { field, descriptor, value } of edits) {
-    if (!descriptor?.writable || descriptor.target !== 'person') {
-      throw new Error(`${field} is not a writable profile field`);
-    }
-    payload[descriptor.payload_field ?? field] = value === '' ? null : value;
-  }
-  if (Object.keys(payload).length === 0) return;
-  await clinicalClient().patch(clinicalUrl(`/v1/persons/${personId}/`), payload);
-}
+// Profile fields now write through PatientRecord PATCH (doSave in
+// PatientDetail.tsx), so writeProfileField / writeProfileFields are gone.
 
 /**
  * Write one edited field to wherever the descriptor says it lives.
@@ -272,33 +220,40 @@ export async function writeFieldValue(
   value: unknown,
   date?: string,
 ): Promise<void> {
-  if (descriptor?.target === 'person') {
-    await writeProfileField(personId, field, descriptor, value);
-    return;
+  if (descriptor?.target === 'patient_record') {
+    // Direct writes (clinical and profile) are handled by the PATCH in doSave.
+    throw new Error(
+      `${field} writes directly to PatientRecord via PATCH — use doSave, not writeFieldValue`,
+    );
   }
   await writeClinicalFact(personId, field, descriptor, value, date ?? today());
 }
 
 
+export interface ProfileEdit {
+  field: string;
+  descriptor: FieldDescriptor;
+  value: unknown;
+}
+
 /**
- * Write a set of edits, sending the Person fields together.
+ * Write a set of clinical-fact edits (one write each).
  *
- * The clinical facts stay one write each: each is its own event, dated and
- * superseded on its own terms. The Person fields do not work that way — some are
- * only valid alongside another, so they go in one request.
+ * Profile and direct fields are handled by PatientRecord PATCH in doSave —
+ * this function only processes OMOP-fact targets.
  */
 export async function writeFieldValues(
   personId: number | string,
   edits: ProfileEdit[],
   date?: string,
 ): Promise<void> {
-  const profile = edits.filter((e) => e.descriptor?.target === 'person');
-  const clinical = edits.filter((e) => e.descriptor?.target !== 'person');
+  const clinical = edits.filter(
+    (e) => e.descriptor?.target !== 'patient_record',
+  );
 
   for (const { field, descriptor, value } of clinical) {
     await writeClinicalFact(personId, field, descriptor, value, date ?? today());
   }
-  await writeProfileFields(personId, profile);
 }
 
 /** The capabilities a person can have in a language, server-side vocabulary. */
@@ -313,7 +268,7 @@ export type FlattenedLanguage = typeof FLATTENED_LANGUAGES[number];
  * Replace a person's capabilities in the languages named.
  *
  * Rows, not columns: each capability is its own PersonLanguageSkill row, so
- * this cannot go through `writeProfileFields`. It rides the same persons PATCH
+ * this cannot go through the field PATCH. It rides the PatientRecord PATCH
  * so it inherits one authorization check rather than a second one that could
  * drift from it.
  *
@@ -331,9 +286,21 @@ export async function writeLanguageSkills(
 ): Promise<void> {
   if (Object.keys(skills).length === 0) return;
   await clinicalClient().patch(
-    clinicalUrl(`/v1/persons/${personId}/`),
+    clinicalUrl(`/patient-info/${personId}/`),
     { language_skills: skills },
   );
+}
+
+/** POST /api/patient-info/me/confirm/ — patient attests their record is accurate. */
+export async function confirmRecord(): Promise<{
+  validated: boolean;
+  validated_by: string;
+  validation_date: string;
+}> {
+  const { data } = await clinicalClient().post(
+    clinicalUrl('/patient-info/me/confirm/'),
+  );
+  return data;
 }
 
 /**

@@ -1,9 +1,8 @@
 # Release 1.2: dev-to-main promotion runbook
 
-**Status:** in progress — resume at **Phase 4: release PR and staging
-validation**. Local Phase 2 migration validation and Phase 3 automated gates
-are complete for the candidate recorded below. Do not promote, tag, or deploy
-until every required gate below has passed.
+**Status:** in progress — resume at **Phase 2: local PostgreSQL migration
+validation**.  Do not promote, tag, or deploy until every required gate below
+has passed.
 
 This is the release runbook for promoting the current `dev` integration branch
 to `main`, then creating the annotated tag `v1.2.0` (release name: **Release
@@ -18,11 +17,11 @@ affected by the rebase.
 
 | Item | Value at runbook creation |
 | --- | --- |
-| Candidate branch | `release-candidate/1.2-dev-to-main` |
-| Candidate HEAD | `b0784b3` — deploy gate reapplied to refreshed `dev` |
-| Candidate parent / current dev | `c8c20c0` (PR #979 merged) |
+| Candidate branch | `release-candidate/dev-to-main` |
+| Candidate HEAD | `423423f` — `fix: gate deploy on Athena vocabulary load` |
+| Candidate parent / current dev | `0e2fbd9` |
 | Current main | `ccf3aff` |
-| Promotion size | 496 commits ahead of main |
+| Promotion size | 485 commits ahead of main |
 | Migration endpoint | `omop_core.0201_seed_hklabs_sccm` |
 | Existing release tag convention | annotated-looking version tags: `v1.0.0`, `v1.1.0` |
 
@@ -33,9 +32,9 @@ not a routine fast-forward.
 
 ### Important migration invariant
 
-`0201_seed_hklabs_sccm` creates approved HK-Labs-to-LOINC mappings. Its target
-LOINC concepts must already exist. For production-like validation, the required
-order is:
+`0201_seed_hklabs_sccm` creates approved HK-Labs-to-LOINC mappings.  Its target
+LOINC concepts must already exist.  For production-like validation and the
+production deployment, the required order is:
 
 1. migrate `omop_core` through `0200`;
 2. load a full, in-scope Athena vocabulary bundle (including LOINC); and
@@ -44,46 +43,23 @@ order is:
 Never use `seed_omop_concepts` as a substitute for the full Athena bundle in a
 deployed or release-validation database.
 
-Render web startup cannot perform the full load within its 15-minute port-bind
-deadline. `prepare_production_database` therefore checks the exact LOINC targets
-for 0201, loads only missing targets from the approved Athena archive, verifies
-the complete set, and then migrates. Run the full Athena load separately as
-release maintenance; subsequent web deploys skip the bootstrap once 0201 is
-recorded.
-
 ### Working-tree safety checkpoint
 
-The former uncommitted mapping/vocabulary work was reviewed and merged to
-`dev` in PR #977, with CI-isolation and LFS-checkout corrections merged in PR
-#979. This fresh candidate includes both. The original dirty worktree is being
-preserved separately; do not use it to prepare or tag the release.
+At creation time, this checkout had unrelated/uncommitted vocabulary and
+mapping work in:
 
-Before merging, verify `git status --short` is clean in this release worktree.
-Do not accidentally include any unrelated work in the release commit or tag.
+- modified: `docs/vocabularies.md`,
+  `omop_core/management/commands/load_athena_vocabularies.py`,
+  `patient_portal/tests.py`;
+- untracked: `.gitattributes`, `docs/code-concept-mappings.md`,
+  `omop_core/management/commands/build_crossmap_artifact.py`, and
+  `omop_core/management/commands/load_mappings.py`.
 
-### Validation record — 2026-09-04
-
-On the refreshed Release 1.2 candidate, an isolated local PostgreSQL database
-was migrated through `0200`, loaded from the full local Athena export, then
-migrated through `0203`. A second `migrate --noinput` was a no-op. The completed
-vocabulary load recorded 4,388,766 concepts (287,814 LOINC), 31,939,861 concept
-ancestors, 3,281,969 synonyms, and 2,966,568 drug-strength rows.
-
-The approved `hk-labs-seed` rows validated cleanly: 145 LOINC targets, zero
-null/non-LOINC targets, and zero duplicate source keys. The two intentionally
-unresolved proposed rows are excluded from this deploy-seed check.
-
-Completed local automated gates:
-
-- Django: 1,929 passed, 42 skipped (`omop_core` and `patient_portal`);
-- pytest: 674 passed, 1 skipped, 1 deselected;
-- frontend: ESLint completed with 3 existing warnings, Vitest 447 passed / 4
-  skipped, production build passed;
-- real Celery worker plus temporary Redis: 1 e2e test passed.
-
-`manage.py check --deploy --fail-level ERROR` passed with non-production
-placeholder secrets. It emitted existing OpenAPI/schema and SSL-redirect
-warnings, but no error-level findings.
+Before merging, explicitly choose whether that work belongs in Release 1.2. If
+yes, put it through its own reviewed commit(s), update the candidate from `dev`,
+and rerun every impacted gate. If no, preserve it outside the candidate (for
+example, a separate worktree or a named stash) and use a clean worktree for the
+release. Do not accidentally include it in the release commit or tag.
 
 ## Phase 0 — establish a clean, current candidate
 
@@ -197,24 +173,14 @@ these commands at a shared development, staging, or production database.
 
   ```sql
   SELECT count(*) AS null_targets
-  FROM source_code_concept_mapping
-  WHERE origin_system = 'hk-labs-seed'
-    AND status = 'approved'
-    AND target_concept_id IS NULL;
+  FROM omop_core_sourcecodeconceptmapping
+  WHERE target_concept_id IS NULL;
 
   SELECT count(*) AS missing_or_non_loinc_targets
-  FROM source_code_concept_mapping m
+  FROM omop_core_sourcecodeconceptmapping m
   LEFT JOIN concept c ON c.concept_id = m.target_concept_id
-  WHERE m.origin_system = 'hk-labs-seed'
-    AND m.status = 'approved'
-    AND m.target_concept_id IS NOT NULL
+  WHERE m.target_concept_id IS NOT NULL
     AND (c.concept_id IS NULL OR c.vocabulary_id <> 'LOINC');
-
-  SELECT source_vocabulary_id, source_code, count(*) AS duplicates
-  FROM source_code_concept_mapping
-  WHERE origin_system = 'hk-labs-seed' AND status = 'approved'
-  GROUP BY source_vocabulary_id, source_code
-  HAVING count(*) > 1;
   ```
 
 - [ ] Repeat `migrate --noinput`; it must be a no-op. Run `manage.py check
@@ -261,7 +227,7 @@ has no unexpected null, missing, non-LOINC, or duplicate target rows.
 ## Phase 4 — release PR and staging validation
 
 - [ ] Push the clean candidate and open/update a PR from
-  `release-candidate/1.2-dev-to-main` to `main`. Include the baseline SHAs, the
+  `release-candidate/dev-to-main` to `main`. Include the baseline SHAs, the
   Phase 2 evidence, test results, migration ordering, deployment prerequisites,
   rollback plan, and approvers.
 - [ ] Require all protected CI checks to pass on the exact candidate SHA.

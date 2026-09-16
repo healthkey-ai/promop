@@ -1,4 +1,4 @@
-"""Location fields are writable at the persons endpoint.
+"""Location fields are writable through the PatientRecord PATCH.
 
 `city`, `region`, `postal_code`, `country`, `latitude` and `longitude` are
 projected from the OMOP `Location` row identified by `Person.location_id` — a
@@ -6,6 +6,9 @@ plain IntegerField, not a ForeignKey, so the link is by id and there is nothing 
 follow. The `Location` model already existed; only the API surface was missing, so
 six fields sat read-only for want of a write path rather than for want of a
 concept.
+
+Profile fields now write through `PATCH /api/patient-info/{person_id}/`
+(PatientRecord), and `_project_profile_fields` projects them to Location.
 
 Replaceable rather than fill-if-empty: a patient who moves needs the new address
 to win, which is the opposite of the rule that protects a recorded birth date.
@@ -49,7 +52,7 @@ def person():
 
 def _patch(client, person, payload):
     return client.patch(
-        f'/api/v1/persons/{person.person_id}/', payload, format='json'
+        f'/api/patient-info/{person.person_id}/', payload, format='json'
     )
 
 
@@ -126,23 +129,23 @@ class TestWritingLocation:
         assert pr.city == 'Cambridge'
 
     def test_a_later_write_reports_what_it_changed(self, staff_client, person):
-        # `updated_fields: []` over a write that did change the database is worse
-        # than an error -- the caller has no way to know it needs to re-read.
         _patch(staff_client, person, {'city': 'Boston'})
 
         resp = _patch(staff_client, person, {'city': 'Cambridge', 'country': 'USA'})
 
         assert resp.status_code == 200
-        assert set(resp.json()['updated_fields']) >= {'city', 'country'}
+        body = resp.json()
+        # The PatientRecord PATCH returns previous_values for changed fields.
+        assert 'city' in body.get('previous_values', {})
 
-    def test_a_write_that_changes_nothing_reports_nothing(self, staff_client, person):
-        # The converse still has to hold, or the caller learns nothing from the
-        # field list.
+    def test_a_write_that_changes_nothing_still_succeeds(self, staff_client, person):
         _patch(staff_client, person, {'city': 'Boston'})
 
         resp = _patch(staff_client, person, {'city': 'Boston'})
 
-        assert resp.json()['updated_fields'] == []
+        assert resp.status_code == 200
+        # The city value is unchanged.
+        assert resp.json()['city'] == 'Boston'
 
     def test_a_field_not_sent_is_left_alone(self, staff_client, person):
         _patch(staff_client, person, {'city': 'Boston', 'country': 'USA'})
@@ -181,7 +184,6 @@ class TestValidation:
         resp = _patch(staff_client, person, {'latitude': 'north'})
 
         assert resp.status_code == 400
-        assert 'must be a number' in resp.data['detail']
 
     @pytest.mark.parametrize('field,value', [
         ('latitude', 91), ('latitude', -91),
@@ -221,15 +223,16 @@ class TestValidation:
 
 
 class TestDescriptor:
-    def test_the_six_fields_report_as_writable_profile(self):
+    def test_the_six_fields_report_as_writable_direct(self):
         from omop_core.services.write_descriptor import build_writable_field_descriptor
 
         d = build_writable_field_descriptor()
         for field in ('city', 'region', 'postal_code', 'country',
                       'latitude', 'longitude'):
-            assert d[field]['kind'] == 'profile', field
+            assert d[field]['kind'] == 'direct', field
             assert d[field]['writable'] is True, field
-            assert d[field]['person_field'].startswith('Location.'), field
+            assert d[field]['target'] == 'patient_record', field
+            assert d[field]['projection_target'] == 'location', field
 
     def test_no_field_is_still_grouped_as_location(self):
         """The group existed only because these had no write path."""

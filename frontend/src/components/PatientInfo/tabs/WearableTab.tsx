@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useWritableFields } from '@/hooks/useWritableFields';
 import ClinicalField from '../ClinicalField';
 import Section from '../Section';
-import api from '@/api/axios';
+import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 
 const ACTIVITY_TREND_OPTIONS = ['improving', 'stable', 'declining', 'insufficient_data'];
 
@@ -105,7 +105,7 @@ export default function WearableTab({ formData, onRefresh }: Props) {
 
   const fetchUploads = useCallback(async () => {
     try {
-      const res = await api.get('/v1/patient-records/wearable-uploads/');
+      const res = await clinicalClient().get(clinicalUrl('/v1/patient-records/wearable-uploads/'));
       setUploads(res.data);
     } catch {
       // silently fail — upload history is non-critical
@@ -122,7 +122,7 @@ export default function WearableTab({ formData, onRefresh }: Props) {
     let cancelled = false;
     (async () => {
       try {
-        const res = await api.get('/v1/patient-records/wearable-uploads/');
+        const res = await clinicalClient().get(clinicalUrl('/v1/patient-records/wearable-uploads/'));
         if (!cancelled) setUploads(res.data);
       } catch {
         // silently fail — upload history is non-critical
@@ -139,7 +139,7 @@ export default function WearableTab({ formData, onRefresh }: Props) {
     if (!confirm('Delete this upload and its associated measurements?')) return;
     setDeletingId(uploadId);
     try {
-      await api.delete(`/v1/patient-records/wearable-uploads/${uploadId}/`);
+      await clinicalClient().delete(clinicalUrl(`/v1/patient-records/wearable-uploads/${uploadId}/`));
       setUploads(prev => prev.filter(u => u.id !== uploadId));
       if (expandedUpload === uploadId) setExpandedUpload(null);
       if (onRefresh) onRefresh();
@@ -165,7 +165,7 @@ export default function WearableTab({ formData, onRefresh }: Props) {
         payload.append('file', file);
         payload.append('device_type', deviceType);
 
-        const res = await api.post('/v1/patient-records/upload-wearable/', payload, {
+        const res = await clinicalClient().post(clinicalUrl('/v1/patient-records/upload-wearable/'), payload, {
           headers: { 'Content-Type': 'multipart/form-data' },
         });
 

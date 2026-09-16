@@ -280,6 +280,7 @@ class Command(BaseCommand):
                 'value_kind': choice.get('value_kind', ''),
                 'source_value': '',
                 'status': 'proposed',
+                'provenance': 'system_generated',
                 'notes': note,
             },
         )
@@ -358,6 +359,7 @@ class Command(BaseCommand):
                 # write-into-a-void. The reviewer sets it.
                 'source_value': '',
                 'status': 'proposed',
+                'provenance': 'system_generated',
                 'notes': note,
             },
         )

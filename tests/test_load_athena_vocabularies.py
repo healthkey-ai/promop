@@ -34,6 +34,14 @@ def test_omop_extension_pdl1_measurement_is_in_vocabulary_load_scope():
     )
 
 
+def test_ciel_spleen_size_measurement_is_in_vocabulary_load_scope():
+    """#1000: Athena CIEL 45917997 must be available to field curators."""
+    assert 'CIEL' in VOCAB_SCOPE
+    assert _concept_in_scope(
+        'CIEL', '45917997', 'Measurement', 'Measurement',
+    )
+
+
 def test_umls_options_default_to_automatic_opt_in():
     parser = Command().create_parser('manage.py', 'load_athena_vocabularies')
 

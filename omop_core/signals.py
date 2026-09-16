@@ -22,11 +22,12 @@ import logging
 import threading
 from contextlib import contextmanager
 
+from django.conf import settings
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 
 from .models import (
-    ConditionOccurrence, DrugExposure, Measurement,
+    ConditionOccurrence, DrugExposure, FieldConceptMapping, Measurement,
     Observation, ProcedureOccurrence,
     PersonLanguageSkill,
 )
@@ -164,3 +165,55 @@ def person_language_skill_deleted(sender, instance, **kwargs):
         return
 
     PersonLanguageSkill.objects.filter(pk=survivor.pk).update(is_primary=True)
+
+
+# ---------------------------------------------------------------------------
+# OMOP projection on FieldConceptMapping approval
+# ---------------------------------------------------------------------------
+
+def _project_field_sync(mapping_pk):
+    """Run projection synchronously — shared by the Celery task and inline path."""
+    try:
+        from omop_core.models import FieldConceptMapping as FCM
+        from omop_core.services.omop_projection import project_field_to_omop
+        mapping = FCM.objects.filter(pk=mapping_pk).first()
+        if mapping:
+            project_field_to_omop(mapping)
+    except Exception:
+        logger.warning('OMOP mapping projection failed')
+
+
+@receiver(post_save, sender=FieldConceptMapping)
+def field_concept_mapping_saved(sender, instance, **kwargs):
+    """Project PatientRecord values into OMOP when a mapping is approved.
+
+    This bridges direct user edits (stored on PatientRecord) into the OMOP
+    tables, so derivation picks them up and the field drops out of
+    user_edited_fields.
+
+    When a Celery broker is configured the projection is deferred to a worker,
+    because a commonly populated field (e.g. ``disease``) touches every
+    PatientRecord and would time out the curator's request.
+    """
+    if instance.status != 'approved':
+        return
+    if not instance.concept_id or not instance.omop_table:
+        return
+
+    mapping_pk = instance.pk
+
+    if getattr(settings, 'CELERY_BROKER_URL', ''):
+        from django.db import transaction as txn
+        txn.on_commit(lambda pk=mapping_pk: _dispatch_projection(pk))
+    else:
+        _project_field_sync(mapping_pk)
+
+
+def _dispatch_projection(mapping_pk):
+    """Send projection to Celery worker."""
+    try:
+        from omop_core.tasks import project_field_to_omop_task
+        project_field_to_omop_task.delay(mapping_pk)
+    except Exception:
+        logger.warning('Failed to dispatch OMOP projection task; running inline')
+        _project_field_sync(mapping_pk)

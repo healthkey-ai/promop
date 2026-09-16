@@ -3,7 +3,7 @@ from copy import deepcopy
 from decimal import Decimal
 
 from django.db import connection
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -73,6 +73,7 @@ SAMPLE_BUNDLE = {
 }
 
 
+@override_settings(SERVICE_AUTH_SCOPES='patient/*.write')
 class FhirSyncTests(TestCase):
     def setUp(self):
         _ensure_pk_sequences()
@@ -288,10 +289,10 @@ class FhirSyncTests(TestCase):
         }, format='json')
 
         self.assertEqual(resp.status_code, 403, resp.content)
-        self.assertIn('write access', resp.json()['detail'])
+        self.assertIn('end-user authentication', resp.json()['detail'])
         self.assertEqual(Measurement.objects.filter(person=person).count(), 0)
 
-    def test_userless_oauth_org_token_ignores_body_actor_for_provenance(self):
+    def test_userless_oauth_org_token_rejects_body_actor_for_provenance(self):
         from datetime import timedelta
         from oauth2_provider.models import AccessToken, Application
         from omop_core.models import ApplicationOrganization
@@ -328,17 +329,8 @@ class FhirSyncTests(TestCase):
             'bundle': SAMPLE_BUNDLE,
         }, format='json')
 
-        self.assertEqual(resp.status_code, 201, resp.content)
-        measurement = Measurement.objects.get(person=person)
-        provenance = ProvenanceRecord.objects.get(
-            content_type__model='measurement',
-            object_id=measurement.measurement_id,
-        )
-        self.assertEqual(provenance.source_user_id, '')
-        self.assertNotEqual(
-            provenance.source_user_id,
-            f'{spoofed_actor.issuer}|{spoofed_actor.sub}',
-        )
+        self.assertEqual(resp.status_code, 403, resp.content)
+        self.assertFalse(Measurement.objects.filter(person=person).exists())
 
     # ---- B0 connector: patient self-service ingest ---------------------- #
 
@@ -934,6 +926,23 @@ class CuratedMappingResolutionTest(TestCase):
         )
         resp = self.client.post('/api/fhir/sync/', {
             'bundle': self._bundle('http://hl7.org/fhir/sid/icd-10-cm', 'C90.00'),
+        }, format='json')
+        self.assertEqual(resp.status_code, 201, resp.content)
+        row = Measurement.objects.get(person_id=resp.json()['person_id'])
+        self.assertEqual(row.measurement_concept_id, target.concept_id)
+
+    def test_approved_loinc_mapping_overrides_the_direct_cache_hit(self):
+        """The batched FHIR cache must preserve SCCM-first resolution."""
+        from omop_core.models import SourceCodeConceptMapping
+        direct = self._concept(3046314, '33358-6', 'LOINC', 'Direct LOINC concept')
+        target = self._concept(3046315, '33358-7', 'LOINC', 'Curator-chosen concept')
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='LOINC', source_code=direct.concept_code,
+            target_concept=target, destination_vocabulary_id='LOINC',
+            omop_table='measurement', status='approved',
+        )
+        resp = self.client.post('/api/fhir/sync/', {
+            'bundle': self._bundle('http://loinc.org', direct.concept_code),
         }, format='json')
         self.assertEqual(resp.status_code, 201, resp.content)
         row = Measurement.objects.get(person_id=resp.json()['person_id'])

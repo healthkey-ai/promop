@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import {
   Routes,
   Route,
@@ -7,7 +7,6 @@ import {
   useParams,
 } from "react-router-dom";
 import { Login } from "@/components/Auth/Login";
-import { AuthCallback } from "@/components/Auth/AuthCallback";
 import AcceptInvite from "@/components/Auth/AcceptInvite";
 import AcceptPatientInvite from "@/components/Auth/AcceptPatientInvite";
 import ResetPassword from "@/components/Auth/ResetPassword";
@@ -15,11 +14,15 @@ import ChangePassword from "@/components/Auth/ChangePassword";
 import PatientList from "@/components/Patient/PatientList";
 import PatientDetail from "@/components/Patient/PatientDetail";
 import PatientHome from "@/components/Patient/PatientHome";
+import UploadPage from "@/components/Patient/UploadPage";
 import UploadFHIR from "@/components/Patient/UploadFHIR";
 import UploadCSV from "@/components/Patient/UploadCSV";
 import OrgAdminPage from "@/components/OrgAdmin/OrgAdminPage";
+import ServiceApplicationsPage from "@/components/OrgAdmin/ServiceApplicationsPage";
 import FieldMappingPage from "@/components/FieldMappings/FieldMappingPage";
 import CodeMappingPage from "@/components/CodeMappings/CodeMappingPage";
+import SuggestRunLogPage from "@/components/CodeMappings/SuggestRunLogPage";
+import CodeMappingAccuracyPage from "@/components/CodeMappings/CodeMappingAccuracyPage";
 import MappingHubPage from "@/components/MappingHub/MappingHubPage";
 import TherapyMappingPage from "@/components/TherapyMappings/TherapyMappingPage";
 import OrgLogin from "@/components/Auth/OrgLogin";
@@ -60,14 +63,6 @@ function OrgHome({
 function AppRoutes() {
   const { currentUser, loading: authLoading, refresh, logout } = useAuth();
   const location = useLocation();
-
-  useEffect(() => {
-    if (location.pathname === "/auth/callback") {
-      setTimeout(() => {
-        refresh();
-      }, 500);
-    }
-  }, [location.pathname, refresh]);
 
   const publicPaths = ['/accept-invite', '/accept-patient-invite', '/reset-password', '/forgot-password', '/login', '/auth/callback'];
   const isPublicPath = (path: string) =>
@@ -116,10 +111,16 @@ function AppRoutes() {
     return element;
   };
 
+  const uploadRoute = (element: ReactNode) => {
+    if (!currentUser) return <Navigate to="/login" replace />;
+    if (!(currentUser.is_staff || currentUser.is_org_admin)) return <Navigate to="/" replace />;
+    return element;
+  };
+
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
-      <Route path="/auth/callback" element={<AuthCallback />} />
+      <Route path="/auth/callback" element={<Navigate to="/" replace />} />
       <Route path="/accept-invite" element={<AcceptInvite />} />
       {/* Alias for invitation emails sent before the link was un-nested — the
           token in the query string carries everything; the slug is cosmetic. */}
@@ -148,13 +149,17 @@ function AppRoutes() {
         }
       />
       <Route path="/patient/:personId" element={providerRoute(<PatientDetail user={currentUser} />)} />
-      <Route path="/upload-fhir" element={providerRoute(<UploadFHIR />)} />
-      <Route path="/upload-csv" element={providerRoute(<UploadCSV />)} />
+      <Route path="/upload" element={uploadRoute(<UploadPage />)} />
+      <Route path="/upload-fhir" element={uploadRoute(<UploadFHIR />)} />
+      <Route path="/upload-csv" element={uploadRoute(<UploadCSV />)} />
       <Route path="/stats" element={<Navigate to="/org-admin" replace />} />
+      <Route path="/service-applications" element={currentUser?.is_staff ? <ServiceApplicationsPage /> : <Navigate to={currentUser ? "/" : "/login"} replace />} />
       <Route path="/org-admin" element={providerRoute(<OrgAdminPage />)} />
       <Route path="/mappings" element={mappingAdminRoute(<MappingHubPage />)} />
       <Route path="/field-mappings" element={mappingAdminRoute(<FieldMappingPage />)} />
       <Route path="/code-mappings" element={mappingAdminRoute(<CodeMappingPage />)} />
+      <Route path="/code-mappings/suggest-runs/:runId" element={mappingAdminRoute(<SuggestRunLogPage />)} />
+      <Route path="/code-mappings/accuracy" element={mappingAdminRoute(<CodeMappingAccuracyPage />)} />
       <Route path="/therapy-mappings" element={mappingAdminRoute(<TherapyMappingPage />)} />
       <Route
         path="/profile"
@@ -169,5 +174,11 @@ function AppRoutes() {
 }
 
 export default function App() {
-  return <AppRoutes />;
+  return (
+    <div className="min-h-dvh">
+      <div className="app-page-content">
+        <AppRoutes />
+      </div>
+    </div>
+  );
 }

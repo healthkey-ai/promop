@@ -89,8 +89,8 @@ export default function BehaviorTab({ formData, onChange, onRefresh }: Props) {
     <div>
       {!loading && (
         <p className="mb-4 text-xs text-muted-foreground">
-          These are stored as OMOP facts. A field without an editable box explains
-          why underneath it — most are awaiting a concept assignment.
+          Edits are saved to the patient record first and projected to OMOP when a
+          reviewed mapping exists. Computed fields explain why they are read-only.
         </p>
       )}
       <Section title="Lifestyle Factors">

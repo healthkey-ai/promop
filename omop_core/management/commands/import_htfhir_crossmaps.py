@@ -1,7 +1,8 @@
 """Import the HT-FHIR crossmap artifact into SourceCodeConceptMapping."""
 from pathlib import Path
 
-from django.core.management.base import BaseCommand, CommandError
+from django.core.management.base import CommandError
+from omop_core.management.embedding_command import EmbeddingLoadCommand
 
 from omop_core.models import Concept, SourceCodeConceptMapping
 from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE
@@ -10,7 +11,7 @@ from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE
 DEFAULT_ARTIFACT = Path(__file__).resolve().parents[3] / 'docs' / 'ht-fhir-code-concept-mapping.md'
 
 
-class Command(BaseCommand):
+class Command(EmbeddingLoadCommand):
     help = 'Bulk-import the HT-FHIR crossmap artifact into SCCM.'
 
     def add_arguments(self, parser):

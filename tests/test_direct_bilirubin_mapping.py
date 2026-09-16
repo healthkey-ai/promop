@@ -69,13 +69,13 @@ def test_anc_uses_the_standard_absolute_neutrophil_count_loinc():
     )
 
 
-def test_rederivation_does_not_preserve_legacy_projection_edits():
-    """PatientRecord clinical values have no authority without an OMOP fact."""
+def test_rederivation_preserves_user_edited_fields():
+    """user_edited_fields values survive derivation when no OMOP fact exists."""
     record = PatientRecordFactory(stage='II', user_edited_fields=['stage'])
 
     refreshed = refresh_patient_record(record.person)
 
-    assert refreshed.stage is None
+    assert refreshed.stage == 'II'
 
 
 @pytest.mark.parametrize(

@@ -1,152 +1,151 @@
-/**
- * The Labs tab renders against the server's writable-field descriptor.
- *
- * PatientRecord owns no writable clinical column, so a box is typeable only when
- * the server can name the OMOP fact behind it. Everything else must render
- * read-only *with a reason* — the difference between a UI that looks unfinished
- * and one that explains itself.
- */
-import { render, screen, waitFor } from '@testing-library/react';
-import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { render, screen, fireEvent } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import LabsTab from './LabsTab';
-import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
+import type { LabMeasurementGroup } from '@/hooks/useLabMeasurements';
+import type { LabResultValue } from '@/federation/types';
 
-const mockGet = vi.fn();
-vi.mock('@/api/axios', () => ({
-  default: {
-    get: (...a: unknown[]) => mockGet(...a),
-    post: vi.fn(),
-    patch: vi.fn(),
-  },
+// ── Mocks ────────────────────────────────────────────────────────────────────
+
+vi.mock('@/hooks/useWritableFields', () => ({
+  useWritableFields: vi.fn(() => ({ descriptors: {}, loading: false, error: false })),
 }));
 
-vi.mock('@/hooks/useVocabulary', () => ({
-  useVocabulary: () => ({ options: [], source: null, loading: false }),
+vi.mock('@/hooks/useLabMeasurements', () => ({
+  useLabMeasurements: vi.fn(() => ({ grouped: new Map(), isLoading: false })),
 }));
 
-const DESCRIPTORS = {
-  // The canonical calcium column, declared writable so the alias regression
-  // test below asserts a typeable box rather than a disabled one.
-  serum_calcium_mg_dl: {
-    kind: 'editable', writable: true, target: 'measurement',
-    concept_id: 9, code: '17861-6', value_kind: 'number', unit: 'mg/dL',
-    type_concept_id: 32856, source_value: '17861-6',
-  },
-  hemoglobin_g_dl: {
-    kind: 'editable', writable: true, target: 'measurement',
-    concept_id: 1, code: '718-7', value_kind: 'number', unit: 'g/dL',
-    type_concept_id: 32856, source_value: '718-7',
-  },
-  ast_u_l: {
-    kind: 'editable', writable: true, target: 'measurement',
-    concept_id: 2, code: '1742-6', value_kind: 'number',
-    type_concept_id: 32856, source_value: '1742-6',
-  },
-  egfr_ml_min_173m2: {
-    kind: 'editable', writable: true, target: 'measurement',
-    concept_id: 3, code: '62238-1', value_kind: 'number',
-    type_concept_id: 32856, source_value: '62238-1',
-  },
-  bone_imaging_result: {
-    kind: null, writable: false,
-    reason: 'No reviewed concept set for this field yet — it cannot be written.',
-  },
-};
+vi.mock('@/components/labs/LabTrendChart', () => ({
+  LabTrendChart: ({ values, unit }: { values: LabResultValue[]; unit: string }) => (
+    <div data-testid="lab-trend-chart">{values.length} points, {unit}</div>
+  ),
+}));
 
-beforeEach(() => {
-  vi.clearAllMocks();
-  __resetWritableFieldsCache();
-  mockGet.mockResolvedValue({ data: DESCRIPTORS });
-});
+vi.mock('../ClinicalField', () => ({
+  default: ({ label, name }: { label: string; name: string }) => (
+    <div data-testid={`field-${name}`}>{label}</div>
+  ),
+}));
 
-function renderTab(formData: Record<string, unknown> = {}) {
-  return render(<LabsTab formData={formData} onChange={vi.fn()} />);
+vi.mock('../Section', () => ({
+  default: ({ title, children }: { title: string; children: React.ReactNode }) => (
+    <div data-testid={`section-${title}`}>{children}</div>
+  ),
+}));
+
+import { useWritableFields } from '@/hooks/useWritableFields';
+import { useLabMeasurements } from '@/hooks/useLabMeasurements';
+
+const mockUseWritableFields = vi.mocked(useWritableFields);
+const mockUseLabMeasurements = vi.mocked(useLabMeasurements);
+
+function makeValues(count: number): LabResultValue[] {
+  return Array.from({ length: count }, (_, i) => ({
+    measurement_id: i + 1,
+    value: 10 + i,
+    value_string: null,
+    unit: 'mg/dL',
+    status: 'in_range' as const,
+    measured_at: `2024-0${i + 1}-01`,
+    range_low: 5,
+    range_high: 20,
+    source: '2160-0',
+    lab_name: null,
+    report_filename: null,
+  }));
 }
 
+// ── Tests ────────────────────────────────────────────────────────────────────
+
 describe('LabsTab', () => {
-  it('fetches the descriptor once', async () => {
-    renderTab();
-    await waitFor(() => expect(mockGet).toHaveBeenCalled());
-    expect(mockGet).toHaveBeenCalledWith(
-        '/v1/patient-records/writable-fields/',
-        expect.anything(),
-      );
+  const onChange = vi.fn();
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockUseWritableFields.mockReturnValue({ descriptors: {}, loading: false, error: false });
+    mockUseLabMeasurements.mockReturnValue({ grouped: new Map(), isLoading: false });
   });
 
-  it('shows canonical field names, not the legacy aliases', async () => {
-    renderTab({ egfr_ml_min_173m2: 90 });
-    await waitFor(() => expect(mockGet).toHaveBeenCalled());
-
-    // The canonical column owns the LOINC code; the alias could never be written.
-    expect(screen.getByDisplayValue('90')).toBeInTheDocument();
-    expect(screen.queryByLabelText(/Serum Sodium \(mEq\/L\)/)).not.toBeInTheDocument();
+  it('renders section titles', () => {
+    render(<LabsTab formData={{}} onChange={onChange} />);
+    expect(screen.getByTestId('section-Chemistry Panel')).toBeInTheDocument();
+    expect(screen.getByTestId('section-Liver Function')).toBeInTheDocument();
   });
 
-  it('offers a result date beside an editable value', async () => {
-    renderTab({ ast_u_l: 30 });
-    await waitFor(() => expect(mockGet).toHaveBeenCalled());
-
-    const dates = screen.getAllByLabelText('Result date');
-    expect(dates.length).toBeGreaterThan(0);
-    expect((dates[0] as HTMLInputElement).value).toBe(
-      new Date().toISOString().slice(0, 10),
-    );
+  it('does not show chart icon when field has fewer than 3 data points', () => {
+    const group: LabMeasurementGroup = {
+      sourceValue: '2160-0',
+      unit: 'mg/dL',
+      values: makeValues(2),
+    };
+    mockUseWritableFields.mockReturnValue({
+      descriptors: {
+        serum_creatinine_mg_dl: {
+          kind: 'editable',
+          writable: true,
+          projection: { source_value: '2160-0' },
+        },
+      },
+      loading: false,
+      error: false,
+    });
+    mockUseLabMeasurements.mockReturnValue({
+      grouped: new Map([['2160-0', group]]),
+      isLoading: false,
+    });
+    render(<LabsTab formData={{}} onChange={onChange} />);
+    expect(screen.queryByLabelText(/view trend chart for serum creatinine/i)).not.toBeInTheDocument();
   });
 
-  it('renders a field with no concept set read-only, with the reason', async () => {
-    renderTab();
-    await waitFor(() => expect(mockGet).toHaveBeenCalled());
-
-    const reason = screen.getByTestId('reason-bone_imaging_result');
-    expect(reason).toHaveTextContent('No reviewed concept set');
+  it('shows chart icon when field has 3+ data points', () => {
+    const group: LabMeasurementGroup = {
+      sourceValue: '2160-0',
+      unit: 'mg/dL',
+      values: makeValues(5),
+    };
+    mockUseWritableFields.mockReturnValue({
+      descriptors: {
+        serum_creatinine_mg_dl: {
+          kind: 'editable',
+          writable: true,
+          projection: { source_value: '2160-0' },
+        },
+      },
+      loading: false,
+      error: false,
+    });
+    mockUseLabMeasurements.mockReturnValue({
+      grouped: new Map([['2160-0', group]]),
+      isLoading: false,
+    });
+    render(<LabsTab formData={{}} onChange={onChange} />);
+    expect(screen.getByLabelText(/view trend chart for serum creatinine/i)).toBeInTheDocument();
   });
 
-  it('gives no result-date input to a non-writable field', async () => {
-    renderTab();
-    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+  it('opens chart dialog on icon click', () => {
+    const group: LabMeasurementGroup = {
+      sourceValue: '2160-0',
+      unit: 'mg/dL',
+      values: makeValues(4),
+    };
+    mockUseWritableFields.mockReturnValue({
+      descriptors: {
+        serum_creatinine_mg_dl: {
+          kind: 'editable',
+          writable: true,
+          projection: { source_value: '2160-0' },
+        },
+      },
+      loading: false,
+      error: false,
+    });
+    mockUseLabMeasurements.mockReturnValue({
+      grouped: new Map([['2160-0', group]]),
+      isLoading: false,
+    });
+    render(<LabsTab formData={{}} onChange={onChange} />);
 
-    expect(
-      document.querySelector('#bone_imaging_result-date'),
-    ).not.toBeInTheDocument();
-  });
-
-  it('fails closed when the descriptor cannot be fetched', async () => {
-    mockGet.mockRejectedValue(new Error('offline'));
-    renderTab({ ast_u_l: 30 });
-
-    await waitFor(() => expect(mockGet).toHaveBeenCalled());
-    // No descriptor means nothing is advertised as editable, so no date inputs.
-    await waitFor(() =>
-      expect(screen.queryAllByLabelText('Result date')).toHaveLength(0),
-    );
-  });
-
-  it('explains a field it does not have a descriptor for at all', async () => {
-    mockGet.mockResolvedValue({ data: {} });
-    renderTab();
-    await waitFor(() => expect(mockGet).toHaveBeenCalled());
-
-    expect(screen.getByTestId('reason-ast_u_l')).toHaveTextContent(
-      /not editable here/i,
-    );
-  });
-
-  it('shows the canonical calcium column, not its alias', async () => {
-    // Moved here with the Electrolytes section: the alias regression is
-    // still real, it just lives on the tab that renders calcium now.
-    // calcium_mg_dl is populated during derivation and owns no LOINC code, so it
-    // can never be edited. Showing it rendered a read-only box pointing at a
-    // field the user could not reach.
-    renderTab({ serum_calcium_mg_dl: 9.1 });
-    await waitFor(() => expect(mockGet).toHaveBeenCalled());
-
-    expect(screen.getByDisplayValue('9.1')).toBeInTheDocument();
-    // getByDisplayValue matches a *disabled* input too, so without this the
-    // test passed in exactly the state its comment condemns.
-    expect(screen.queryByTestId('reason-serum_calcium_mg_dl')).toBeNull();
-    // ...and the alias is not rendered at all. Asserting only the line above
-    // let calcium_mg_dl come back as a read-only box, which is the half the
-    // test is named for.
-    expect(screen.queryByLabelText(/^Calcium/)).toBeNull();
+    fireEvent.click(screen.getByLabelText(/view trend chart for serum creatinine/i));
+    expect(screen.getByTestId('lab-trend-chart')).toBeInTheDocument();
+    expect(screen.getByText('4 points, mg/dL')).toBeInTheDocument();
   });
 });

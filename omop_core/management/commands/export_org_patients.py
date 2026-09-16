@@ -34,8 +34,8 @@ Output structure (JSON mode):
                 },
                 "documents": [...],
                 "trial_enrollments": [...],
+                "survey_responses": [{"survey_slug": ..., "answers": [...]}],
                 "language_skills": [...],
-                "survey_responses": [...]
             }
         ]
     }
@@ -66,7 +66,6 @@ from omop_core.models import (
     Organization,
     PatientDocument,
     PatientRecord,
-    PatientSurveyResponse,
     PatientTrialEnrollment,
     Person,
     PersonLanguageSkill,
@@ -96,6 +95,49 @@ def _serialize(instance):
             val = float(val)
         out[field.attname] = val
     return out
+
+
+def _prolog_survey_responses(person_ids):
+    """PROlog survey responses for these people, keyed by person.
+
+    Not built through the generic serializer: a response is a row plus its
+    answers plus the instrument it answered, and it is keyed to the version
+    rather than to a mutable template. The instrument is identified by slug and
+    version so an import can attach to the same one, and skip when the target
+    does not have it.
+    """
+    from prolog_surveys.models import SurveyAnswer, SurveyResponse
+
+    responses = (
+        SurveyResponse.objects.filter(participant_id__in=person_ids)
+        .select_related('survey_version__survey')
+        .order_by('started_at')
+    )
+    answers = defaultdict(list)
+    for answer in SurveyAnswer.objects.filter(response__participant_id__in=person_ids):
+        answers[answer.response_id].append({
+            'question_key': answer.question_key,
+            'value': answer.value,
+            'option_keys': answer.option_keys,
+        })
+
+    groups = defaultdict(list)
+    for response in responses:
+        groups[response.participant_id].append({
+            # The response's own id: stable, non-null, and what an import
+            # dedupes on. `started_at` cannot serve — it is auto_now_add, so a
+            # restore cannot reproduce it through create().
+            'id': str(response.id),
+            'survey_slug': response.survey_version.survey.slug,
+            'survey_version': response.survey_version.version,
+            'language': response.language,
+            'status': response.status,
+            'started_at': response.started_at,
+            'submitted_at': response.submitted_at,
+            'last_question_key': response.last_question_key,
+            'answers': answers.get(response.id, []),
+        })
+    return groups
 
 
 def _group_by_person(qs):
@@ -209,11 +251,13 @@ class Command(BaseCommand):
             ('documents',         PatientDocument,        _group_by_person),
             ('trial_enrollments', PatientTrialEnrollment, _group_by_person),
             ('language_skills',   PersonLanguageSkill,    _group_by_person),
-            ('survey_responses',  PatientSurveyResponse,  _group_by_person),
         ]
 
         fetched_omop = {}
         fetched_related = {}
+        # PROlog's own tables, fetched directly: they are nested rather than
+        # flat, so the generic grouper cannot shape them.
+        survey_responses = _prolog_survey_responses(person_ids)
 
         self.stdout.write('Fetching OMOP tables:')
         total_omop_rows = 0
@@ -290,7 +334,7 @@ class Command(BaseCommand):
                 'documents':         _rows(fetched_related['documents'], pid),
                 'trial_enrollments': _rows(fetched_related['trial_enrollments'], pid),
                 'language_skills':   _rows(fetched_related['language_skills'], pid),
-                'survey_responses':  _rows(fetched_related['survey_responses'], pid),
+                'survey_responses':  survey_responses.get(pid, []),
             }
             patient_docs.append(row)
 

@@ -50,7 +50,7 @@ So:
 
 PROMOP is ahead of the global CancerBot SOC2 snapshot in a few areas:
 
-- `DEBUG` defaults to false in `ctomop/settings.py`.
+- `DEBUG` defaults to false in `promop/settings.py`.
 - Production CORS is restricted by `CORS_ALLOWED_ORIGINS`.
 - Production secure-cookie, HSTS, content-sniffing, frame-deny, and proxy SSL settings exist.
 - DRF throttling is configured for anonymous, user, sync, patient-sync, signup, and OMOP write buckets.
@@ -85,7 +85,7 @@ evidence work rather than code.
 | P1 11 — login response for non-portal accounts | #755 | **Done** |
 | P1 12 — break-glass scope | #755 | **Done** |
 | SOC2 1 — CI security gates | #754 | **Done** — `check --deploy`, `pip-audit`, bandit (baselined), gitleaks |
-| SOC2 2 — change-management evidence | #752 | **Partial** — `CODEOWNERS` added; branch protection requiring code-owner review is a repo setting, not code |
+| SOC2 2 — change-management evidence | #752 | **Partial rollout** — required CI/no direct pushes and native security-file team review verified; any-writer security review and issue-label gate await rollout; ownership, deploy authorization and dated API evidence at [CC8.1 change management](soc2/change-management.md) |
 | SOC2 3 — audit-key evidence | #749 | **Done** in code and procedure; retaining `verify_audit_integrity` output is the recurring operator step |
 | Operator evidence | #753 | **Not started** |
 

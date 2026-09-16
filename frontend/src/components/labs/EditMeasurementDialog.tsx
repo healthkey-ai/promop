@@ -33,7 +33,7 @@ export function EditMeasurementDialog({
 }: EditMeasurementDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-sm">
+      <DialogContent className="max-w-[24rem]">
         <DialogHeader>
           <DialogTitle>Edit measurement</DialogTitle>
         </DialogHeader>

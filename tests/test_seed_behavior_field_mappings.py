@@ -55,19 +55,21 @@ def test_behavior_seed_makes_simple_registered_fields_writable():
     descriptor = build_writable_field_descriptor()
     pack_entry = descriptor['pack_years']
     assert pack_entry['writable'] is True
-    assert pack_entry['target'] == 'measurement'
-    assert pack_entry['concept_id'] == pack_years.concept_id
-    assert pack_entry['source_value'] == '63640-7'
+    assert pack_entry['target'] == 'patient_record'
+    assert pack_entry['projection']['omop_table'] == 'measurement'
+    assert pack_entry['projection']['concept_id'] == pack_years.concept_id
+    assert pack_entry['projection']['source_value'] == '63640-7'
     assert pack_entry['value_kind'] == 'number'
-    assert pack_entry['type_concept_id'] == 32856
+    assert pack_entry['projection']['type_concept_id'] == 32856
 
     contraception_entry = descriptor['contraceptive_use']
     assert contraception_entry['writable'] is True
-    assert contraception_entry['target'] == 'observation'
-    assert contraception_entry['concept_id'] == contraception.concept_id
-    assert contraception_entry['source_value'] == '8659-8'
+    assert contraception_entry['target'] == 'patient_record'
+    assert contraception_entry['projection']['omop_table'] == 'observation'
+    assert contraception_entry['projection']['concept_id'] == contraception.concept_id
+    assert contraception_entry['projection']['source_value'] == '8659-8'
     assert contraception_entry['value_kind'] == 'boolean'
-    assert contraception_entry['type_concept_id'] == 32817
+    assert contraception_entry['projection']['type_concept_id'] == 32817
 
 
 def test_behavior_seeded_numeric_mapping_round_trips():
@@ -79,16 +81,17 @@ def test_behavior_seeded_numeric_mapping_round_trips():
     )
     _run_seed()
     entry = build_writable_field_descriptor()['pack_years']
+    projection = entry['projection']
     person = PersonFactory()
     PatientRecordFactory(person=person)
 
     Measurement.objects.create(
         measurement_id=next_pk(Measurement, 'measurement_id'),
         person=person,
-        measurement_concept_id=entry['concept_id'],
+        measurement_concept_id=projection['concept_id'],
         measurement_date=date(2026, 2, 1),
-        measurement_type_concept_id=entry['type_concept_id'],
-        measurement_source_value=entry['source_value'],
+        measurement_type_concept_id=projection['type_concept_id'],
+        measurement_source_value=projection['source_value'],
         value_as_number=12.5,
     )
 
@@ -106,16 +109,17 @@ def test_behavior_seeded_boolean_mapping_round_trips():
     )
     _run_seed()
     entry = build_writable_field_descriptor()['contraceptive_use']
+    projection = entry['projection']
     person = PersonFactory()
     PatientRecordFactory(person=person)
 
     Observation.objects.create(
         observation_id=next_pk(Observation, 'observation_id'),
         person=person,
-        observation_concept_id=entry['concept_id'],
+        observation_concept_id=projection['concept_id'],
         observation_date=date(2026, 2, 1),
-        observation_type_concept_id=entry['type_concept_id'],
-        observation_source_value=entry['source_value'],
+        observation_type_concept_id=projection['type_concept_id'],
+        observation_source_value=projection['source_value'],
         value_as_string='true',
     )
 

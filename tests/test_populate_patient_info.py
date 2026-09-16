@@ -106,7 +106,7 @@ class TestLaterTherapies:
         data = _cmd().get_treatment_data(person)
         assert 'later_therapies' not in data
 
-    def test_three_or_more_drugs_populate_later_therapies(self):
+    def test_persisted_lines_populate_later_therapies(self):
         person = PersonFactory()
         # Four distinct single agents spaced a quarter apart so LOT inference
         # segments them into four separate lines (gaps exceed the 28-day
@@ -124,9 +124,19 @@ class TestLaterTherapies:
                 drug_exposure_start_date=start,
                 drug_exposure_end_date=end,
             )
+        # Reading must not infer episodes. Persist them explicitly first.
+        assert 'later_therapies' not in _cmd().get_treatment_data(person)
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_core.services.mappings import (
+            CONCEPT_DRUG_EXPOSURE_FIELD, CONCEPT_TREATMENT_REGIMEN,
+        )
+        ConceptFactory(concept_id=CONCEPT_TREATMENT_REGIMEN, concept_name='Treatment Regimen')
+        ConceptFactory(concept_id=CONCEPT_DRUG_EXPOSURE_FIELD, concept_name='drug_exposure_id')
+        infer_lot_for_person(person)
         data = _cmd().get_treatment_data(person)
         assert 'later_therapies' in data
         assert isinstance(data['later_therapies'], list)
+        assert len(data['later_therapies']) == 2
         for entry in data['later_therapies']:
             assert 'therapy' in entry
             assert 'startDate' in entry
@@ -181,6 +191,18 @@ class TestCllMeasurements:
         )
         data = _cmd().get_cll_data(person)
         assert data['largest_lymph_node_size'] == pytest.approx(3.2)
+
+    def test_largest_lymph_node_size_uses_cancer_modifier_concept(self):
+        person = PersonFactory()
+        concept = ConceptFactory(
+            concept_id=36769292,
+            concept_code='largest-lymph-node-dimension',
+            concept_name='Dimension of Largest Lymph Node',
+            vocabulary=VocabularyFactory(vocabulary_id='Cancer Modifier'),
+        )
+        MeasurementFactory(person=person, measurement_concept=concept, value_as_number=2.7)
+
+        assert _cmd().get_cll_data(person)['largest_lymph_node_size'] == pytest.approx(2.7)
 
     def test_code_only_21889_is_not_treated_as_lymph_node(self):
         person = PersonFactory()
@@ -438,7 +460,7 @@ class TestLymphomaData:
         concept = ConceptFactory(concept_name='Lymphoma grade')
         MeasurementFactory(person=person, measurement_concept=concept, value_as_number=2)
         data = _cmd().get_lymphoma_data(person)
-        assert data['tumor_grade'] == 2
+        assert data['tumor_grade'] == '2'
 
     def test_no_lymphoma_data_empty_dict(self):
         person = PersonFactory()
@@ -657,21 +679,59 @@ class TestTp53Disruption:
         _cmd()._compute_derived_fields(pi)
         assert pi.tp53_disruption is True
 
-    def test_tp53_benign_stays_false(self):
+    def test_tp53_benign_is_unknown(self):
         pi = self._pi_with_mutations([
             {'gene': 'tp53', 'interpretation': 'benign'},
         ])
         _cmd()._compute_derived_fields(pi)
-        assert pi.tp53_disruption is False
+        assert pi.tp53_disruption is None
 
-    def test_no_mutations_false(self):
+    def test_no_mutations_is_unknown(self):
         pi = self._pi_with_mutations([])
         _cmd()._compute_derived_fields(pi)
-        assert pi.tp53_disruption is False
+        assert pi.tp53_disruption is None
 
     def test_other_gene_pathogenic_does_not_set_tp53(self):
         pi = self._pi_with_mutations([
             {'gene': 'brca1', 'interpretation': 'pathogenic'},
         ])
         _cmd()._compute_derived_fields(pi)
+        assert pi.tp53_disruption is None
+
+
+    @pytest.mark.parametrize('mutations', [
+        None,
+        [{'gene': 'TP53', 'interpretation': 'Pathogenic', 'assessment': 'absent'}],
+        [{'gene': 'TP53', 'interpretation': 'Pathogenic', 'assessment': 'indeterminate'}],
+        [{'gene': 'TP53', 'interpretation': 'Pathogenic', 'assessment': 'not_tested'}],
+        [{'gene': 'TP53', 'interpretation': 'Pathogenic', 'assessment': 'no_call'}],
+        [{'gene': 'TP53', 'interpretation': 'Pathogenic', 'status': 'indeterminate'}],
+        [{'gene': 'TP53', 'interpretation': 'Likely pathogenic'}],
+        [{'gene': 'TP53', 'interpretation': 'Uncertain significance'}],
+        [{'gene': 'TP53'}],
+        [{'gene': 'del(17p)', 'interpretation': 'Pathogenic'}],
+    ])
+    @pytest.mark.parametrize('previous', [False, True])
+    def test_nonqualifying_evidence_clears_stale_aggregate(self, mutations, previous):
+        pi = self._pi_with_mutations(mutations)
+        pi.tp53_disruption = previous
+        _cmd()._compute_derived_fields(pi)
+        assert pi.tp53_disruption is None
+
+    @pytest.mark.parametrize('previous', [None, True])
+    def test_absent_status_sets_false(self, previous):
+        pi = self._pi_with_mutations([
+            {'gene': 'TP53', 'interpretation': 'Pathogenic', 'status': 'absent'},
+        ])
+        pi.tp53_disruption = previous
+        _cmd()._compute_derived_fields(pi)
         assert pi.tp53_disruption is False
+
+    def test_positive_rule_is_unchanged_with_other_nonqualifying_findings(self):
+        pi = self._pi_with_mutations([
+            {'gene': 'BRCA1', 'interpretation': 'Pathogenic'},
+            {'gene': 'TP53', 'interpretation': 'Benign'},
+            {'gene': 'TP53', 'interpretation': 'Pathogenic', 'assessment': 'present', 'status': 'present'},
+        ])
+        _cmd()._compute_derived_fields(pi)
+        assert pi.tp53_disruption is True

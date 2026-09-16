@@ -55,10 +55,10 @@ to create a vocabulary download. Select these vocabularies:
 
 | Purpose | Select in Athena |
 |---|---|
-| Core clinical terminology and mappings | **SNOMED**, **ICD10CM**, **CPT4**, **LOINC**, **RxNorm**, **RxNorm Extension**, **OMOP Extension**, **UCUM** |
+| Core clinical terminology and mappings | **SNOMED**, **ICD10CM**, **CPT4**, **LOINC**, **CIEL**, **RxNorm**, **RxNorm Extension**, **OMOP Extension**, **UCUM** |
 | Immunizations and visits | **CVX**, **Visit**, **Type Concept** |
 | Drug classification and oncology treatment | **ATC**, **HemOnc** |
-| Genomics and cancer registry data | **OMOP Genomic**, **ICDO3**, **NCIt**, **Cancer Modifier**, **NAACCR** |
+| Genomics, cancer registry, and clinical study data | **OMOP Genomic**, **ICDO3**, **NCIt**, **Cancer Modifier**, **NAACCR**, **CDISC** |
 | OMOP metadata and demographics | **Episode**, **CDM**, **Gender**, **Race**, **Ethnicity** |
 
 Athena may include required dependencies in the download; keep them in the zip.

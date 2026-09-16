@@ -1,0 +1,768 @@
+{
+  "version": 1,
+  "source_commit": "a840f8d9af2c35477e2b6b76f981b29f02c21eec",
+  "sources": [
+    "trials/services/value_options.py:558-571",
+    "trials/services/markers_mapper.py",
+    "trials/services/loaders/load_genetic_mutations.py",
+    "trials/services/mutations_mapper.py",
+    "trials/services/patient_info/patient_info_attributes.py:65-85"
+  ],
+  "markers": [
+    {
+      "key": "brca1",
+      "field_name": "genomics_brca1",
+      "gene": "BRCA1",
+      "label": "BRCA1",
+      "diseases": [
+        "BC"
+      ],
+      "aliases": [],
+      "kind": "gene",
+      "order": 0,
+      "expert_review": ""
+    },
+    {
+      "key": "brca2",
+      "field_name": "genomics_brca2",
+      "gene": "BRCA2",
+      "label": "BRCA2",
+      "diseases": [
+        "BC"
+      ],
+      "aliases": [],
+      "kind": "gene",
+      "order": 1,
+      "expert_review": ""
+    },
+    {
+      "key": "pik3ca",
+      "field_name": "genomics_pik3ca",
+      "gene": "PIK3CA",
+      "label": "PIK3CA",
+      "diseases": [
+        "BC"
+      ],
+      "aliases": [],
+      "kind": "gene",
+      "order": 2,
+      "expert_review": ""
+    },
+    {
+      "key": "tp53",
+      "field_name": "genomics_tp53",
+      "gene": "TP53",
+      "label": "TP53",
+      "diseases": [
+        "BC",
+        "MM",
+        "MCL",
+        "CLL"
+      ],
+      "aliases": [],
+      "kind": "gene",
+      "order": 3,
+      "expert_review": ""
+    },
+    {
+      "key": "esr1",
+      "field_name": "genomics_esr1",
+      "gene": "ESR1",
+      "label": "ESR1",
+      "diseases": [
+        "BC"
+      ],
+      "aliases": [],
+      "kind": "gene",
+      "order": 4,
+      "expert_review": "CancerBot example variants need gene/transcript review; no examples are auto-selected."
+    },
+    {
+      "key": "palb1",
+      "field_name": "genomics_palb1",
+      "gene": "PALB1",
+      "label": "PALB1",
+      "diseases": [
+        "BC"
+      ],
+      "aliases": [],
+      "kind": "gene",
+      "order": 5,
+      "expert_review": "CancerBot legacy spelling; confirm whether PALB2 was intended."
+    },
+    {
+      "key": "kras",
+      "field_name": "genomics_kras",
+      "gene": "KRAS",
+      "label": "KRAS",
+      "diseases": [
+        "MM"
+      ],
+      "aliases": [],
+      "kind": "gene",
+      "order": 6,
+      "expert_review": ""
+    },
+    {
+      "key": "nras",
+      "field_name": "genomics_nras",
+      "gene": "NRAS",
+      "label": "NRAS",
+      "diseases": [
+        "MM"
+      ],
+      "aliases": [],
+      "kind": "gene",
+      "order": 7,
+      "expert_review": ""
+    },
+    {
+      "key": "braf",
+      "field_name": "genomics_braf",
+      "gene": "BRAF",
+      "label": "BRAF",
+      "diseases": [
+        "MM"
+      ],
+      "aliases": [],
+      "kind": "gene",
+      "order": 8,
+      "expert_review": ""
+    },
+    {
+      "key": "myc",
+      "field_name": "genomics_myc",
+      "gene": "MYC",
+      "label": "MYC rearrangement",
+      "diseases": [
+        "MM",
+        "MCL"
+      ],
+      "aliases": [],
+      "kind": "abnormality",
+      "order": 9,
+      "expert_review": ""
+    },
+    {
+      "key": "fam46c",
+      "field_name": "genomics_fam46c",
+      "gene": "FAM46C",
+      "label": "FAM46C",
+      "diseases": [
+        "MM"
+      ],
+      "aliases": [],
+      "kind": "gene",
+      "order": 10,
+      "expert_review": ""
+    },
+    {
+      "key": "dis3",
+      "field_name": "genomics_dis3",
+      "gene": "DIS3",
+      "label": "DIS3",
+      "diseases": [
+        "MM"
+      ],
+      "aliases": [],
+      "kind": "gene",
+      "order": 11,
+      "expert_review": ""
+    },
+    {
+      "key": "xbp1",
+      "field_name": "genomics_xbp1",
+      "gene": "XBP1",
+      "label": "XBP1",
+      "diseases": [
+        "MM"
+      ],
+      "aliases": [],
+      "kind": "gene",
+      "order": 12,
+      "expert_review": ""
+    },
+    {
+      "key": "bcl2",
+      "field_name": "genomics_bcl2",
+      "gene": "BCL2",
+      "label": "BCL2",
+      "diseases": [
+        "FL"
+      ],
+      "aliases": [],
+      "kind": "gene",
+      "order": 13,
+      "expert_review": ""
+    },
+    {
+      "key": "ezh2",
+      "field_name": "genomics_ezh2",
+      "gene": "EZH2",
+      "label": "EZH2",
+      "diseases": [
+        "FL"
+      ],
+      "aliases": [],
+      "kind": "gene",
+      "order": 14,
+      "expert_review": ""
+    },
+    {
+      "key": "kmt2d",
+      "field_name": "genomics_kmt2d",
+      "gene": "KMT2D",
+      "label": "KMT2D",
+      "diseases": [
+        "FL",
+        "MCL"
+      ],
+      "aliases": [],
+      "kind": "gene",
+      "order": 15,
+      "expert_review": ""
+    },
+    {
+      "key": "crebbp",
+      "field_name": "genomics_crebbp",
+      "gene": "CREBBP",
+      "label": "CREBBP",
+      "diseases": [
+        "FL"
+      ],
+      "aliases": [],
+      "kind": "gene",
+      "order": 16,
+      "expert_review": ""
+    },
+    {
+      "key": "bcl6",
+      "field_name": "genomics_bcl6",
+      "gene": "BCL6",
+      "label": "BCL6 rearrangement",
+      "diseases": [
+        "FL"
+      ],
+      "aliases": [],
+      "kind": "abnormality",
+      "order": 17,
+      "expert_review": ""
+    },
+    {
+      "key": "notch1",
+      "field_name": "genomics_notch1",
+      "gene": "NOTCH1",
+      "label": "NOTCH1",
+      "diseases": [
+        "MCL",
+        "CLL"
+      ],
+      "aliases": [],
+      "kind": "gene",
+      "order": 18,
+      "expert_review": ""
+    },
+    {
+      "key": "notch2",
+      "field_name": "genomics_notch2",
+      "gene": "NOTCH2",
+      "label": "NOTCH2",
+      "diseases": [
+        "MCL"
+      ],
+      "aliases": [],
+      "kind": "gene",
+      "order": 19,
+      "expert_review": ""
+    },
+    {
+      "key": "sf3b1",
+      "field_name": "genomics_sf3b1",
+      "gene": "SF3B1",
+      "label": "SF3B1",
+      "diseases": [
+        "CLL"
+      ],
+      "aliases": [],
+      "kind": "gene",
+      "order": 20,
+      "expert_review": ""
+    },
+    {
+      "key": "atm",
+      "field_name": "genomics_atm",
+      "gene": "ATM",
+      "label": "ATM",
+      "diseases": [
+        "CLL"
+      ],
+      "aliases": [],
+      "kind": "gene",
+      "order": 21,
+      "expert_review": ""
+    },
+    {
+      "key": "nsd2",
+      "field_name": "genomics_nsd2",
+      "gene": "NSD2",
+      "label": "NSD2",
+      "diseases": [
+        "MCL"
+      ],
+      "aliases": [],
+      "kind": "gene",
+      "order": 22,
+      "expert_review": ""
+    },
+    {
+      "key": "cdkn2a",
+      "field_name": "genomics_cdkn2a",
+      "gene": "CDKN2A",
+      "label": "CDKN2A",
+      "diseases": [
+        "MCL"
+      ],
+      "aliases": [],
+      "kind": "gene",
+      "order": 23,
+      "expert_review": ""
+    },
+    {
+      "key": "smarca4",
+      "field_name": "genomics_smarca4",
+      "gene": "SMARCA4",
+      "label": "SMARCA4",
+      "diseases": [
+        "MCL"
+      ],
+      "aliases": [],
+      "kind": "gene",
+      "order": 24,
+      "expert_review": ""
+    },
+    {
+      "key": "ccnd1",
+      "field_name": "genomics_ccnd1",
+      "gene": "CCND1",
+      "label": "CCND1",
+      "diseases": [
+        "MCL"
+      ],
+      "aliases": [],
+      "kind": "gene",
+      "order": 25,
+      "expert_review": ""
+    },
+    {
+      "key": "del17p",
+      "field_name": "genomics_del17p",
+      "gene": "TP53",
+      "label": "del(17p)",
+      "diseases": [
+        "MM",
+        "MCL",
+        "CLL"
+      ],
+      "aliases": [
+        "del(17p)",
+        "del(17p13)",
+        "del17p13"
+      ],
+      "kind": "abnormality",
+      "order": 26,
+      "expert_review": ""
+    },
+    {
+      "key": "t414",
+      "field_name": "genomics_t414",
+      "gene": "FGFR3/NSD2/IGH",
+      "label": "t(4;14)",
+      "diseases": [
+        "MM"
+      ],
+      "aliases": [
+        "t(4;14)",
+        "t414"
+      ],
+      "kind": "abnormality",
+      "order": 27,
+      "expert_review": ""
+    },
+    {
+      "key": "t1114",
+      "field_name": "genomics_t1114",
+      "gene": "CCND1/IGH",
+      "label": "t(11;14)",
+      "diseases": [
+        "MM",
+        "MCL"
+      ],
+      "aliases": [
+        "t(11;14)",
+        "t1114"
+      ],
+      "kind": "abnormality",
+      "order": 28,
+      "expert_review": ""
+    },
+    {
+      "key": "t1416",
+      "field_name": "genomics_t1416",
+      "gene": "IGH/MAF",
+      "label": "t(14;16)",
+      "diseases": [
+        "MM"
+      ],
+      "aliases": [
+        "t(14;16)",
+        "t1416"
+      ],
+      "kind": "abnormality",
+      "order": 29,
+      "expert_review": ""
+    },
+    {
+      "key": "gain1q",
+      "field_name": "genomics_gain1q",
+      "gene": "1q21",
+      "label": "1q21 gain / amplification",
+      "diseases": [
+        "MM"
+      ],
+      "aliases": [
+        "1q21",
+        "1q21Amplification",
+        "+1q"
+      ],
+      "kind": "abnormality",
+      "order": 30,
+      "expert_review": ""
+    },
+    {
+      "key": "hyperdiploidy",
+      "field_name": "genomics_hyperdiploidy",
+      "gene": "Chromosomal",
+      "label": "Hyperdiploidy",
+      "diseases": [
+        "MM"
+      ],
+      "aliases": [
+        "hyperdiploidy"
+      ],
+      "kind": "abnormality",
+      "order": 31,
+      "expert_review": ""
+    },
+    {
+      "key": "chromothripsis",
+      "field_name": "genomics_chromothripsis",
+      "gene": "Chromosomal",
+      "label": "Chromothripsis",
+      "diseases": [
+        "MM"
+      ],
+      "aliases": [
+        "chromothripsis"
+      ],
+      "kind": "abnormality",
+      "order": 32,
+      "expert_review": ""
+    },
+    {
+      "key": "igh",
+      "field_name": "genomics_igh",
+      "gene": "IGH",
+      "label": "IGH rearrangement",
+      "diseases": [
+        "MM"
+      ],
+      "aliases": [
+        "ighRearrangements"
+      ],
+      "kind": "abnormality",
+      "order": 33,
+      "expert_review": ""
+    },
+    {
+      "key": "bcl2_amplification",
+      "field_name": "genomics_bcl2_amplification",
+      "gene": "BCL2",
+      "label": "BCL2 amplification",
+      "diseases": [
+        "MCL"
+      ],
+      "aliases": [
+        "bcl2Amplification"
+      ],
+      "kind": "abnormality",
+      "order": 34,
+      "expert_review": ""
+    },
+    {
+      "key": "complex_karyotype",
+      "field_name": "genomics_complex_karyotype",
+      "gene": "Chromosomal",
+      "label": "Complex karyotype",
+      "diseases": [
+        "MCL"
+      ],
+      "aliases": [
+        "complexKaryotype"
+      ],
+      "kind": "abnormality",
+      "order": 35,
+      "expert_review": ""
+    },
+    {
+      "key": "complex_karyotype_excl_t1114",
+      "field_name": "genomics_complex_karyotype_excl_t1114",
+      "gene": "Chromosomal",
+      "label": "Complex karyotype excluding t(11;14)",
+      "diseases": [
+        "MCL"
+      ],
+      "aliases": [
+        "complexKaryotypeExcludingT1114"
+      ],
+      "kind": "abnormality",
+      "order": 36,
+      "expert_review": ""
+    },
+    {
+      "key": "del11q",
+      "field_name": "genomics_del11q",
+      "gene": "11q",
+      "label": "del(11q)",
+      "diseases": [
+        "CLL"
+      ],
+      "aliases": [
+        "del(11q)",
+        "del11q"
+      ],
+      "kind": "abnormality",
+      "order": 37,
+      "expert_review": ""
+    },
+    {
+      "key": "del13q",
+      "field_name": "genomics_del13q",
+      "gene": "13q",
+      "label": "del(13q)",
+      "diseases": [
+        "CLL"
+      ],
+      "aliases": [
+        "del(13q)",
+        "del13q"
+      ],
+      "kind": "abnormality",
+      "order": 38,
+      "expert_review": ""
+    },
+    {
+      "key": "trisomy12",
+      "field_name": "genomics_trisomy12",
+      "gene": "12",
+      "label": "Trisomy 12",
+      "diseases": [
+        "CLL"
+      ],
+      "aliases": [
+        "trisomy 12",
+        "trisomy12"
+      ],
+      "kind": "abnormality",
+      "order": 39,
+      "expert_review": ""
+    },
+    {
+      "key": "atm_atr",
+      "field_name": "genomics_atm_atr",
+      "gene": "ATM/ATR",
+      "label": "ATM or ATR mutation (unspecified)",
+      "diseases": [
+        "MCL"
+      ],
+      "aliases": [
+        "atmOrAtrMutations"
+      ],
+      "kind": "abnormality",
+      "order": 40,
+      "expert_review": ""
+    },
+    {
+      "key": "notch1_notch2",
+      "field_name": "genomics_notch1_notch2",
+      "gene": "NOTCH1/NOTCH2",
+      "label": "NOTCH1 or NOTCH2 mutation (unspecified)",
+      "diseases": [
+        "MCL"
+      ],
+      "aliases": [
+        "notch1or2Mutations"
+      ],
+      "kind": "abnormality",
+      "order": 41,
+      "expert_review": ""
+    }
+  ],
+  "attributes": [
+    {
+      "key": "gene",
+      "code": "48018-6",
+      "table": "measurement",
+      "value_kind": "string"
+    },
+    {
+      "key": "variant_name",
+      "code": "genomics:variant_name",
+      "table": "observation",
+      "value_kind": "string"
+    },
+    {
+      "key": "variant_description",
+      "code": "genomics:variant_description",
+      "table": "observation",
+      "value_kind": "string"
+    },
+    {
+      "key": "origin",
+      "code": "genomics:origin",
+      "table": "observation",
+      "value_kind": "string"
+    },
+    {
+      "key": "interpretation",
+      "code": "53037-8",
+      "table": "measurement",
+      "value_kind": "string"
+    },
+    {
+      "key": "genome_assembly",
+      "code": "62374-4",
+      "table": "measurement",
+      "value_kind": "string"
+    },
+    {
+      "key": "transcript_reference_sequence_id",
+      "code": "51958-7",
+      "table": "measurement",
+      "value_kind": "string"
+    },
+    {
+      "key": "amino_acid_change",
+      "code": "48005-3",
+      "table": "measurement",
+      "value_kind": "string"
+    },
+    {
+      "key": "variant_category",
+      "code": "83005-9",
+      "table": "measurement",
+      "value_kind": "string"
+    },
+    {
+      "key": "variant_analysis_method_type",
+      "code": "81304-8",
+      "table": "measurement",
+      "value_kind": "string"
+    },
+    {
+      "key": "genomic_source_class",
+      "code": "48002-0",
+      "table": "measurement",
+      "value_kind": "string"
+    },
+    {
+      "key": "chromosome",
+      "code": "48000-4",
+      "table": "measurement",
+      "value_kind": "string"
+    },
+    {
+      "key": "cytogenetic_location",
+      "code": "48001-2",
+      "table": "measurement",
+      "value_kind": "string"
+    },
+    {
+      "key": "genomic_dna_change",
+      "code": "81290-9",
+      "table": "measurement",
+      "value_kind": "string"
+    },
+    {
+      "key": "allelic_frequency",
+      "code": "81258-6",
+      "table": "measurement",
+      "value_kind": "number"
+    },
+    {
+      "key": "assessment",
+      "code": "genomics:assessment",
+      "table": "observation",
+      "value_kind": "string"
+    },
+    {
+      "key": "specimen_id",
+      "code": "genomics:specimen_id",
+      "table": "observation",
+      "value_kind": "string"
+    },
+    {
+      "key": "specimen_type",
+      "code": "genomics:specimen_type",
+      "table": "observation",
+      "value_kind": "string"
+    },
+    {
+      "key": "collection_date",
+      "code": "genomics:collection_date",
+      "table": "observation",
+      "value_kind": "string"
+    },
+    {
+      "key": "report_id",
+      "code": "genomics:report_id",
+      "table": "observation",
+      "value_kind": "string"
+    },
+    {
+      "key": "laboratory",
+      "code": "genomics:laboratory",
+      "table": "observation",
+      "value_kind": "string"
+    },
+    {
+      "key": "interpretation_date",
+      "code": "genomics:interpretation_date",
+      "table": "observation",
+      "value_kind": "string"
+    },
+    {
+      "key": "classification_framework",
+      "code": "genomics:classification_framework",
+      "table": "observation",
+      "value_kind": "string"
+    },
+    {
+      "key": "evidence_source",
+      "code": "genomics:evidence_source",
+      "table": "observation",
+      "value_kind": "string"
+    },
+    {
+      "key": "genomic_reference_sequence_id",
+      "code": "genomics:genomic_reference_sequence_id",
+      "table": "observation",
+      "value_kind": "string"
+    },
+    {
+      "key": "zygosity",
+      "code": "genomics:zygosity",
+      "table": "observation",
+      "value_kind": "string"
+    }
+  ]
+}

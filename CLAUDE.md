@@ -6,6 +6,20 @@ This file tells LLMs (Claude, Copilot, etc.) how to work on this codebase consis
 
 ## Project Overview
 
+### Staging deployment
+
+Use Render staging for investigation and verification: service `promop-staging`
+in Oregon at https://promop-staging.onrender.com, deployed from `dev`. Cloud Run
+access is not a genomics delivery gate. Preserve the existing Cloud Run resource
+and integration identifiers in `.github/workflows/deploy-staging.yml` and
+`Dockerfile.gcp`.
+Use `STAGING_DATABASE_URL` from `.env` for Render staging database access; Render
+web and worker processes use `DATABASE_URL` for that same existing database.
+Never put the database connection string or credentials in Git or tool output.
+`render.yaml` declares both production and staging; staging has its own worker
+and broker. A Blueprint sync applies infrastructure settings; a code-only
+redeploy does not. See `docs/render-staging-celery.md`.
+
 **promop** is a Django + React application that:
 - Stores clinical oncology patient data in an OMOP CDM–aligned PostgreSQL schema
 - Exposes a DRF REST API consumed by a React TypeScript frontend
@@ -373,11 +387,11 @@ describe('LabsTab - new_field', () => {
 
 ```bash
 # Backend tests, Django runner — omop_core + patient_portal
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" \
   .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput
 
 # Backend tests, pytest — the tests/ package (18 files, 166 tests)
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" DEBUG=True \
+DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" DEBUG=True \
   .venv/bin/python -m pytest -q
 
 # Frontend tests (install deps first if needed: cd frontend && npm ci)
@@ -405,14 +419,14 @@ without anyone noticing.
 
 ### Rule: Run Tests Before Every Push
 
-**Always run both test suites before pushing to any branch.** Do not push if any test is failing.
+**For changes to code, tests, configuration, dependencies or runtime data, run both test suites before pushing.** Do not push if any test is failing. Documentation-only changes follow the exception in `AGENTS.md`: review content, links and `git diff --check`; application suites are not required.
 
 ### Rule: Run Full Backend Test Suite After Every PR Merge into `dev`
 
-After merging any PR into `dev`, immediately run the full backend test suite against the **local test database** (`promop_test`) to catch any integration regressions:
+After merging a PR that changes code, tests, configuration, dependencies or runtime data into `dev`, immediately run the full backend test suite against the **local test database** (`promop_test`) to catch any integration regressions:
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" \
   .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput
 ```
 
@@ -420,38 +434,72 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
 
 ```bash
 # One-liner to run everything from the repo root:
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" \
   .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput \
   && (cd frontend && npm test -- --run)
 ```
 
-**Local PostgreSQL setup** (one-time, postgresql@14 via Homebrew):
+**Local PostgreSQL setup** (one-time, postgresql@18 via Homebrew, port 5433):
+
+The local server must be **PostgreSQL 18 with pgvector**, not the postgresql@14
+this project used before. Two requirements force it:
+
+* **pgvector.** `omop_core.models.ConceptEmbedding` declares a `vector(384)`
+  column, and the pytest suite runs `--no-migrations` — the test database is
+  built by reflecting model state, so `CREATE TABLE concept_embedding` runs
+  before any fixture and fails with `type "vector" does not exist` on a server
+  without the extension. That is a collection-time error on *every* pytest test,
+  not a few. Homebrew's `pgvector` bottle builds only for postgresql@17 and @18,
+  so @14 cannot have it.
+* **CI parity.** CI's Postgres service is `pgvector/pgvector:pg16`, so pgvector
+  is present there; a local server without it fails tests that CI passes.
+
+Port **5433**, because Postgres.app's PostgreSQL 14 commonly holds 5432 on this
+machine. Nothing needs 5432 — set `DATABASE_URL` to 5433 everywhere locally.
+
 ```bash
-# Start the server
-brew services start postgresql@14
+brew install postgresql@18 pgvector
+echo "port = 5433" >> /opt/homebrew/var/postgresql@18/postgresql.conf
+brew services start postgresql@18
+
+export PATH="/opt/homebrew/opt/postgresql@18/bin:$PATH"
 
 # Create postgres role and databases (run once)
-PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U $(whoami) -d postgres \
+psql -p 5433 -d postgres \
   -c "CREATE ROLE postgres WITH SUPERUSER CREATEDB CREATEROLE LOGIN;"
-PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U postgres -d postgres \
+psql -p 5433 -U postgres -d postgres \
   -c "CREATE DATABASE promop_test OWNER postgres;" \
   -c "CREATE DATABASE promop_dev OWNER postgres;"
 
+# Enable pg_trgm AND vector on template1 — REQUIRED by the pytest suite.
+# pytest runs with --no-migrations, so each test database is cloned from
+# template1 and built by reflecting model state: concept's GIN trigram index and
+# concept_embedding's vector(384) column are both created during CREATE TABLE,
+# before any fixture could enable an extension. On template1 every clone already
+# has them. Without pg_trgm: `operator class "gin_trgm_ops" does not exist`.
+# Without vector: `type "vector" does not exist`.
+psql -p 5433 -U postgres -d template1 \
+  -c "CREATE EXTENSION IF NOT EXISTS pg_trgm" \
+  -c "CREATE EXTENSION IF NOT EXISTS vector"
+
 # Apply migrations
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" \
   .venv/bin/python manage.py migrate --noinput
 
-# Enable pg_trgm on template1 — REQUIRED by the pytest suite.
-# pytest runs with --no-migrations, so the test DB is built by reflecting model
-# state, which recreates concept's GIN trigram index during CREATE TABLE before
-# any fixture can enable the extension. Putting it on template1 means every
-# database cloned from it already has pg_trgm. Without this, all 166 pytest
-# tests error with: operator class "gin_trgm_ops" does not exist
-PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U postgres -d template1 \
-  -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
+# Connect (use @18 bin directly — the system psql binary has an OpenSSL crash
+# on this machine)
+psql -p 5433 -U postgres -d promop_test
+```
 
-# Connect (use @14 bin directly — system psql binary has OpenSSL crash on this machine)
-PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -d promop_test
+**Python 3.12 is also required.** `prolog` (the `prolog_surveys` app) declares
+`requires-python >=3.12`, as do the pinned numpy/scipy builds, so a 3.11 venv
+silently installs neither and Django fails at startup with
+`ModuleNotFoundError: No module named 'prolog_surveys'`. CI uses 3.12.
+
+```bash
+brew install python@3.12
+/opt/homebrew/opt/python@3.12/bin/python3.12 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 ```
 
 ---
@@ -692,17 +740,21 @@ If `remoteEntry.js` returns 500 on staging, check that `WHITENOISE_ROOT` points 
 
 ---
 
-## Copying Field Mappings Between Instances
+## Copying Curation Between Instances
 
-`copy_field_mappings` moves the field-mapping curation from another PRomop
-instance into this one. The curation is manual reviewer work, so it is copied
+`copy_curation` moves hand-curated mapping data from another PRomop instance
+into this one — both the `/field-mappings` tables and, opt-in, the
+`/code-mappings` table. The curation is manual reviewer work, so it is copied
 rather than redone.
+
+It was named `copy_field_mappings` until it grew the second screen; the old
+name is gone, not aliased.
 
 ```bash
 SOURCE_DATABASE_URL="postgresql://..." \
-  .venv/bin/python manage.py copy_field_mappings --dry-run
+  .venv/bin/python manage.py copy_curation --dry-run
 SOURCE_DATABASE_URL="postgresql://..." \
-  .venv/bin/python manage.py copy_field_mappings
+  .venv/bin/python manage.py copy_curation
 ```
 
 Destination is `DATABASE_URL`. The source is opened as a second connection
@@ -722,21 +774,43 @@ included explicitly with `--tables`:
 | `FieldChoice` + `FieldChoiceCode` | `(field_name, display)`; codes are replaced wholesale |
 | `FieldFormula` | `field_name` |
 | `FieldSynonym` | `(field_name, synonym_text)` |
+| `SourceCodeConceptMapping` | `(source_vocabulary_id, source_code)` — see below |
 
 `--dry-run` rolls back, and `--prune` also deletes local rows the source lacks
 (off by default, so a copy is additive). Everything runs in one transaction
 against the local database. To migrate the entire related curation set, pass
 `--tables mappings custom_fields choices formulas synonyms`.
 
+### Code mappings are opt-in
+
+`--tables code_mappings` copies `SourceCodeConceptMapping` — the
+**`/code-mappings`** screen, not `/field-mappings`. Never in the default set:
+ingest reads that table (`services/code_mapping.resolve_source_code`), so an
+approved row decides what a later import resolves to. Copying one changes ingest
+behaviour; `--prune` deletes live resolution rules.
+
+There are also seven file-based loaders for this table (`load_mappings`,
+`import_*_crossmaps`, `sync_athena_mappings`). Prefer those where one fits — an
+artifact diffs in git.
+
+Two rules apply to this table only:
+
+- **All three concept FKs are re-resolved** (`source_concept`, `target_concept`,
+  `suggested_target_concept`). They are `db_constraint=False`, so a stale source
+  id would be *accepted* and silently name a different concept. Unresolvable
+  references are nulled and warned about.
+- **`occurrence_count` / `first_seen` / `last_seen` are not copied** — they count
+  this deployment's own ingest traffic.
+
 Two things deliberately do not survive the trip:
 
 - **Row IDs.** Matching is on the natural key — the two instances number rows
   independently.
-- **`reviewer` / `created_by`.** These point at `Identity` rows whose IDs mean a
-  different person on each instance, so they are cleared. A wrong attribution is
-  worse than none.
+- **`reviewer` / `created_by` / `updated_by`.** These point at `Identity` rows
+  whose IDs mean a different person on each instance, so they are cleared. A
+  wrong attribution is worse than none.
 
-The concept FK is **re-resolved by `(vocabulary_id, concept_code)`**, not copied
+Concept FKs are **re-resolved by `(vocabulary_id, concept_code)`**, not copied
 as an id. Athena concept ids are stable across instances, but locally minted
 concepts (`Concept.source == 'HealthKey'`) are numbered per instance, so the
 same id can name a different concept on the target. A concept the target has
@@ -745,7 +819,213 @@ mapping still lands.
 
 Logic lives in `omop_core/services/field_curation_transfer.py`, split into
 `read_payload(using)` and `apply_payload(payload)` so the round trip is testable
-without a second test database (`tests/test_copy_field_mappings.py`).
+without a second test database (`tests/test_copy_curation.py`).
+
+---
+
+## Code Mapping Suggest
+
+Suggest proposes a destination concept for queue rows that have none. Two rules
+decide what it touches and how long it takes.
+
+### It reads the tab, not the clinical tables
+
+The candidate set is `suggestable_mappings()`: every `proposed` row on the tab
+with **no destination yet**, whatever its provenance. A row with nothing in the
+destination column has nothing that could be overwritten — an
+`open-wearables-seed` or `hk-labs` row waiting for a concept is exactly what
+Suggest is for, and staging has 69 of them (67 + 2).
+
+Provenance decides only what **Replace** may re-answer. A row that already has a
+destination is revisited only with `resuggest`, and then only if its
+`origin_system` is empty or begins with `suggest` — meaning nothing but a
+previous Suggest run ever set it. An `HT-One`, `HT-FHIR` or `athena` destination
+was asserted by an importer that knew more than the source text does (75,257 of
+staging's 85,318 rows), so re-deriving it would spend a model call to make the
+answer worse. In practice the ICD-10 and RxNorm tabs return nothing, because
+every row on them already has an importer's destination.
+
+Rows are ordered **untried, then gaps before replacements, then by
+occurrence**:
+
+1. **Untried before tried**, by the current `suggestion_model_version`. This is
+   the primary key *always*, because anything above it starves the queue. A
+   declined code keeps no destination, so it stays eligible and, being
+   high-occurrence, retakes the front of the very next run — on the staging
+   sample *every* code in the top slots was declined, so they would never free
+   up. Putting "no destination" above it has the same failure in the replacing
+   case: a run would spend its whole budget re-trying declined gaps and never
+   reach a replacement. Untried-first means every run advances; declined codes
+   come round again once the tab is drained.
+2. **No destination before has one**, within untried and within tried alike. An
+   empty destination is a gap, a replaceable one is an improvement, and the gap
+   is worth the model call first. Without Replace nothing has a destination, so
+   this key is constant.
+3. **Occurrence**, because that is the order a curator should meet codes in.
+
+### The limit counts codes, not codes per table
+
+A tab maps to one or more clinical tables — the Uncoded tab maps to all five —
+but that is only where the rows live. Each queue row carries its own
+`omop_table`, so rows are selected, ordered and limited **once, together**.
+
+Selecting per table applied the limit to each, so the Uncoded tab could evaluate
+5× the ceiling it was given, and the ordering above would only hold within a
+table rather than across the run.
+
+It used to derive the queue instead, by grouping a whole clinical table on
+`concept_id = 0` and subtracting every existing mapping. That cost 4-7s per
+table per request and, once ingest began queueing every code it met, returned
+**zero** rows on both tabs with a real backlog. `manage.py
+enqueue_unmapped_source_codes` still does that scan, as the batch job it is: it
+creates empty queue rows with blank provenance, which is exactly the state
+Suggest looks for. So the split is **enqueue, then suggest**.
+
+### One retrieval and one ranking, not a waterfall of three
+
+```
+UMLS CUI bridge ──► exactly one standard concept? ──► done, no model call
+       │ no
+       ▼
+Lexical trigram ──► best N survivors (N from the UI, default 10)
+       │
+       ▼
+Vector rerank ────► reorder those N by embedding cosine
+       │
+       ▼
+One ranking call ─► the model picks one, or declines
+```
+
+The old shape gave each tier its own ranker call and took the first that
+answered, so a code that fell through UMLS and vectors paid for three calls at
+4-6s each and usually got the lexical answer anyway. Vectors were also a
+*retrieval* tier, cosine-scanning 1.5M stored vectors per code (2.6-2.9s). They
+are a good ordering and a bad filter, so they now rerank the shortlist instead:
+one query embedding (~25ms) plus a primary-key lookup of at most N stored
+vectors.
+
+Measured on staging, per code: **17.8s → 3.5s**.
+
+Where the remaining time goes, per code:
+
+| Stage | Cost |
+|---|---|
+| lexical trigram retrieval | ~2.5s (**67%**, and serial) |
+| ranking model call | 3.5s each, but concurrent (`RANK_CONCURRENCY`) and only for codes UMLS did not settle |
+| vector rerank | ~0.3s stored-vector lookup + ~0.025s query embedding |
+| embedding model load | ~5s, **once per gunicorn worker**, on its first Suggest |
+
+### The run is queued, and how big it may be depends on that
+
+At ~3.5s per code a tab's backlog does not fit in a request, so `POST
+/v1/code-mappings/suggest/` returns **202** with a run id and the page polls
+`GET /v1/code-mappings/suggest-runs/<id>/`. Progress lives on a `SuggestRun`
+row rather than in Celery's task metadata: the counts must survive a worker
+restart, the poll can land on any gunicorn worker, and the inline dispatcher has
+no result backend to write into.
+
+`omop_core/services/suggest_jobs.py` picks how it runs, on the same rule as
+`derivation_jobs.py` — Celery when `CELERY_BROKER_URL` is set, inline otherwise
+— and **the ceiling depends on which**:
+
+| Dispatcher | Ceiling | Bounded by |
+|---|---|---|
+| `CeleryDispatcher` | `QUEUED_MAX_CODES = 50` | `CELERY_TASK_TIME_LIMIT` (900s) |
+| `InlineDispatcher` | `INLINE_MAX_CODES = 5` | the request, under `start.sh`'s bare gunicorn (30s default) |
+
+That split is not a nicety. `render.yaml` leaves `CELERY_BROKER_URL`
+dashboard-managed on the web service (`sync: false`), so a deployment that has
+not pasted the Redis URL in yet **falls back to inline** — and 50 codes inline is
+~125s of serial retrieval and a 502, the exact failure this design removes.
+Batches measured at 3/9.5s, 5/24.1s, 8/28.7s, 10/38.3s.
+
+The ceiling is a budget for the whole run, not per clinical table: a source
+vocabulary can map to five tables, and a per-table limit would let one run
+attempt five times its own ceiling.
+
+Raising it needs retrieval to get cheaper, not the timeout to get longer — each
+extra code adds another trigram query, while ranking adds ~3.5s to a run of any
+size.
+
+### What the curator is shown
+
+The headline number is **new destinations written** (`SuggestRun.destinations`)
+— what the run achieved. Not "rows written": a code the ranker declined is
+written too, so the run records that it tried, and counting those would claim
+destinations nobody proposed. `done`/`total` is the separate "how far through"
+number.
+
+### Replace re-answers rows, it does not delete them
+
+It used to delete: while the candidate set came from a clinical scan, a deleted
+row would be found again and recreated. Now that Suggest reads the tab, a
+deleted row is a code that has left the queue for good, taking its
+`occurrence_count` and `first_seen` with it.
+
+### Vectors cannot run alone
+
+It reranks what retrieval found and retrieves nothing itself, so a run with
+neither UMLS nor Lexical would report "no candidate concept" for every code. The
+API rejects that combination and the checkbox disables itself.
+
+### The embeddings the reranker reads
+
+`vector_rerank` **never embeds a candidate on the fly**. It reads
+`concept_embedding` by primary key and demotes any candidate that has no stored
+vector below the ones it could score. So an unpopulated table does not make
+Suggest slower — it makes it stop reranking, silently.
+
+`manage.py build_concept_embeddings` embeds every standard concept (1,523,060
+rows, ~2.8 hours). `manage.py precompute_suggest_embeddings` embeds only the
+concepts the queue can actually retrieve — it walks the eligible rows, takes
+each one's top-N lexical candidates plus UMLS candidates, and embeds the union.
+The original lexical-only staging sample retrieved **287 concepts** rather than
+1.5M. `--measure` reports the cost and writes nothing:
+
+```bash
+manage.py precompute_suggest_embeddings --measure
+manage.py precompute_suggest_embeddings --measure --source-vocabulary ICD10
+```
+
+Retrieval is the expensive half of that command too (one trigram query per queue
+row), which is why it is a command and not part of a click.
+
+After a successful `load_athena_vocabularies` (including `--concepts-only`),
+`load_mappings`, `sync_athena_mappings`, `load_umls_release`, `sync_umls_release`,
+or any `import_*crossmap*` command,
+candidate precomputation runs automatically (#1092). With `CELERY_BROKER_URL`
+configured, `omop_core.precompute_suggest_embeddings` runs on a Celery worker;
+without it, the command runs inline. Dispatch is deferred until commit and
+nested mapping loads dispatch only once, after the outer load succeeds.
+Dry runs and failed loads do not dispatch. Workers need sentence-transformers
+and access to `BAAI/bge-small-en-v1.5`; failures propagate rather than recording
+successful maintenance. A configured broker failure is not silently run inline.
+
+The automatic run uses `--min-occurrences 1 --lexical-limit 100` to cover all
+eligible queue rows and the largest shortlist the UI allows. It inserts only
+missing vectors. `--skip-suggest-embeddings` on a loader suppresses maintenance
+for that load and its nested loaders, useful when doing an initial bulk import
+followed by `build_concept_embeddings`.
+
+`SuggestEmbeddingSnapshot` persists the candidate union by precompute options
+and model/retrieval version. One SQL query compares order-independent content
+checksums of concepts, synonyms, eligible queue rows, and relevant UMLS source
+terms and CUI siblings, and checks that every
+cached candidate still has a vector. Unchanged inputs and complete vectors
+return without lexical retrieval, model loading, or writes. This query scans
+the input tables; "one query" does not mean constant-time work. Changed input
+content (including same-count replacements and bulk SQL writes) invalidates the
+snapshot. A deleted vector is rebuilt from the saved candidate IDs. Changed
+shortlist/minimum-count options have separate snapshots. Increment
+`retrieval_version` in the command when candidate selection changes.
+
+`--measure` never writes snapshots or vectors. `--force` re-embeds candidates;
+use it after changing the embedding model, since the existing vector table does
+not record model versions. Existing vectors are otherwise retained, including
+when a vocabulary load changes a concept's name. Maintenance is asynchronous
+when queued: candidates become available after the worker completes, not before
+the loader returns. A changed queue or vocabulary requires retrieval again and
+can take minutes on a large queue; the command is not universally seconds-long.
 
 ---
 
@@ -762,8 +1042,8 @@ without a second test database (`tests/test_copy_field_mappings.py`).
 
 | Purpose | DATABASE_URL |
 |---|---|
-| Running tests | `postgresql://postgres@localhost:5432/promop_test` |
-| Local development (manual testing, sync uploads, shell exploration) | `postgresql://postgres@localhost:5432/promop_dev` |
+| Running tests | `postgresql://postgres@localhost:5433/promop_test` |
+| Local development (manual testing, sync uploads, shell exploration) | `postgresql://postgres@localhost:5433/promop_dev` |
 | Staging migrations and sync checks | `${STAGING_DATABASE_URL:-$DATABASE_URL}` |
 
 **Both `.env` database URLs point at staging.** `STAGING_DATABASE_URL` is the explicit name;
@@ -857,7 +1137,7 @@ patch Celery or run it eager.
 Run a worker with:
 
 ```bash
-celery -A ctomop worker --loglevel=info
+celery -A promop worker --loglevel=info
 ```
 
 The task is idempotent — derivation clears and rebuilds every field — so a
@@ -938,6 +1218,125 @@ Three things to know before touching this code:
 - **The collapse path deletes rows, and `post_delete` receivers are live.** The
   whole write block runs inside `suppress_patient_record_refresh()`; without it a
   batch that collapses duplicates fires one refresh per deleted row.
+
+---
+
+## Bulk OMOP Row Deletes
+
+The five clinical endpoints delete in batches, on `/api/v1/` only:
+
+```
+POST /api/v1/measurements/bulk_delete/     {"ids": [10605646, 10605649, ...]}
+  200 {"deleted": 2, "missing": []}
+```
+
+Ids come from a prior read, so there is no matching logic server-side. One
+transaction, all-or-nothing. One batch is one person (mixed-person → 400).
+Max 5,000 ids (`OMOP_BULK_DELETE_MAX_IDS`) → 413. `?skip_refresh=true` defers
+the derivation, admin-gated as on the row level `DELETE`.
+
+**Ids that name no row come back in `missing` rather than failing the batch.**
+A retry after a read timeout, or a re-run of an applied batch, has to converge.
+Rows the caller cannot reach are reported the same way, so the endpoint cannot
+be used to tell an absent id from somebody else's.
+
+`POST`, not `DELETE`, because a `DELETE` with a body gets stripped by
+intermediaries. That makes the permission class matter: the viewsets use
+`PatientCrudPermission`, which grants a session patient `POST` but denies them
+`DELETE`, so the action overrides it with the base `ScopedTokenPermission`.
+Evaluated on a `POST` that class reproduces the `DELETE` rule. Per-person write
+access is `_authorize_person_write`, shared with the bulk create path.
+
+Three things that are easy to get wrong:
+
+- **Scoping is `_visible_clinical_rows`, not `get_queryset()`.** That queryset
+  carries the tenancy filter *and* hides `is_erroneous` rows. Only the first
+  half is wanted here, since a row flagged in error is one a reconciliation
+  most wants to drop.
+- **The lookup is locked inside the transaction.** Without `select_for_update`
+  a concurrent row level `PATCH` could move a row to another person between the
+  authorization and the delete.
+- **`queryset.delete()` fires `post_delete`**, unlike `bulk_create`. The delete
+  runs inside `suppress_patient_record_refresh()` with one explicit
+  `refresh_patient_record` after it. Without the suppression a 40-row batch
+  costs 40 derivations.
+
+`ProvenanceRecord` and `MeasurementOwnership` rows for the deleted ids go too.
+Neither has a database cascade: provenance points through a `GenericForeignKey`,
+and ownership holds a bare `measurement_id`. Ids are never reused
+(`next_pk` only advances its sequence), so the risk is orphan rows rather than
+mis-attribution. `EpisodeEvent` is deliberately left alone: its `event_id` is
+ambiguous without the field concept, and deleting by id alone would take out
+links belonging to another domain.
+
+---
+
+## Bulk OMOP Row Updates
+
+Updates are ~3% of the migration's volume, so this is the smallest of the three
+batch entrances. A correction pass still paid one request per row:
+
+```
+PATCH /api/v1/measurements/bulk_update/   [{"measurement_id": 106, "value_as_number": 7.5}, ...]
+  200 {"updated": 1, "missing": []}
+```
+
+Partial per row, through the same serializer and the same `partial=True` as the
+row level `PATCH`. One transaction, one person, one refresh, ids reported in
+`missing`, `409` on a constraint, per-index validation errors. Max 1,000 rows
+(`OMOP_BULK_MAX_ROWS`) → 413. Same locking and same scoping as the delete path.
+
+Rules specific to updates:
+
+- **`person` is rejected in the payload.** Moving a row to another person breaks
+  both the batch's single authorization and its single refresh. Use the row
+  level `PATCH` for that.
+- **Duplicate ids are rejected, not last-wins.** Two partial patches of one row
+  in one batch have no defined order.
+- **Rows carrying only an id are not counted and get no provenance.** They wrote
+  nothing.
+- **Errors are re-indexed onto the request rows.** Validation runs over matched
+  rows only, so an id that matched nothing would otherwise shift every error
+  after it onto the wrong row.
+
+Permissions are the viewset's own, because `PATCH` is open to session patients
+at the row level. `_authorize_person_write` on the batch's person is the guard,
+and `_visible_clinical_rows` builds the reachable set from the same access
+grants the row level path honours: self, verified representative, professional
+through `GroupAccess`.
+
+Writes are grouped by patched column set, one `bulk_update` per distinct shape.
+A single call takes one column list for every instance, so an ungrouped batch
+would write a column back onto rows whose payload never carried it, clobbering
+a concurrent change.
+
+**Each row is validated by its own serializer, bound to its instance.** That is
+what keeps the batch honest about partial writes: a serializer with no instance
+cannot tell a column the caller omitted from one it set to null. The FK caches
+are resolved once for the batch (`_bulk_fk_caches`) and shared across the row
+serializers, so the query count stays flat in batch size.
+
+### The partial-write trap behind it
+
+`MeasurementSerializer.validate` and `ObservationSerializer.validate` assigned
+`value_as_number` and `value_as_string` unconditionally, reading them out of
+`attrs` where a partial update had never put them. So a `PATCH` of an unrelated
+field wrote `None` over the row value. That was live on the row level `PATCH`,
+and `bulk_update` would have amplified it to a thousand rows a request.
+
+Both serializers now decide by what the write carries:
+
+| The write carries | Value columns |
+|---|---|
+| nothing, source is not an assertion code | untouched |
+| nothing, source becomes an assertion code | stored values coerced, both written |
+| one value column, source is not an assertion code | only that column written |
+| either value column, source is an assertion code | both written, coerced |
+
+An explicitly supplied value is never mixed with the stored sibling.
+`coerce_assertion_value` gives `value_as_string` precedence, so feeding the
+stored string back in would let it beat a patch that sets the number, and
+setting an assertion from 1 to 0 would silently stay true.
 
 ---
 

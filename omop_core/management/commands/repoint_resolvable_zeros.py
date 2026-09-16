@@ -13,7 +13,7 @@ from django.db import connection, transaction
 from django.db.models import Count
 
 from omop_core.models import Concept, PatientRecord, SourceCodeConceptMapping, resolve_concept_replacement
-from omop_core.services.code_mapping import CLINICAL_TABLES, _QUARANTINE_TARGETS
+from omop_core.mapping.code_resolution import CLINICAL_TABLES, _QUARANTINE_TARGETS
 
 
 NO_MATCHING_CONCEPT_ID = 0

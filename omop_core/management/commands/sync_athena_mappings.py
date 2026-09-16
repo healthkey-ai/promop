@@ -27,7 +27,7 @@ WARNING so curators can review them.
 import logging
 from collections import defaultdict
 
-from django.core.management.base import BaseCommand
+from omop_core.management.embedding_command import EmbeddingLoadCommand
 
 from omop_core.models import ConceptRelationship, SourceCodeConceptMapping
 from omop_core.services.source_vocabularies import (
@@ -53,7 +53,7 @@ SOURCE_VOCABULARIES = {
 }
 
 
-class Command(BaseCommand):
+class Command(EmbeddingLoadCommand):
     help = 'Sync Athena Maps-to relationships into SourceCodeConceptMapping.'
 
     def add_arguments(self, parser):

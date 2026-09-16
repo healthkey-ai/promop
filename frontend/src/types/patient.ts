@@ -59,7 +59,7 @@ export interface PatientInfo {
   post_transformation_outcome?: string;
   
   // Multiple Myeloma specific
-  cytogenic_markers?: string;
+  cytogenetic_markers?: string;
   molecular_markers?: string;
   plasma_cell_leukemia?: boolean;
   progression?: string;

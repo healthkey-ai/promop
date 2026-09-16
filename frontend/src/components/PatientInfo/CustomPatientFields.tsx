@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Plus, Search, X } from "lucide-react";
-import api from "@/api/axios";
+import { clinicalClient, clinicalUrl } from "@/api/clinicalTransport";
 
 type Mode = "editable" | "computed";
 
@@ -71,7 +71,7 @@ export function AddCustomFieldDialog({ tab, onClose, onCreated }: {
     const timer = setTimeout(async () => {
       if (query.trim().length < 3) { setResults([]); return; }
       try {
-        const response = await api.get("/v1/concepts/search/", { params: { q: query, limit: "20" } });
+        const response = await clinicalClient().get(clinicalUrl("/v1/concepts/search/"), { params: { q: query, limit: "20" } });
         setResults(response.data.results || response.data || []);
       } catch { setResults([]); }
     }, 300);
@@ -86,7 +86,7 @@ export function AddCustomFieldDialog({ tab, onClose, onCreated }: {
     if (!selected || !confirmed) return;
     setSaving(true); setError("");
     try {
-      await api.post("/v1/custom-patient-fields/", {
+      await clinicalClient().post(clinicalUrl("/v1/custom-patient-fields/"), {
         confirm_patient_record: true,
         display_name: displayName.trim(),
         field_name: fieldName.trim(),
@@ -108,7 +108,7 @@ export function AddCustomFieldDialog({ tab, onClose, onCreated }: {
   };
 
   return <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-    <div className="relative max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-lg border bg-white p-6 shadow-xl">
+    <div className="relative max-h-[90vh] w-full max-w-[42rem] overflow-y-auto rounded-lg border bg-white p-6 shadow-xl">
       <button onClick={onClose} className="absolute right-3 top-3 rounded p-1 text-gray-400 hover:text-gray-700" aria-label="Close"><X size={16} /></button>
       <h2 className="text-lg font-semibold">Add field to PatientRecord</h2>
       <p className="mb-4 text-sm text-gray-500">This field will appear at the bottom of the {tab} tab after its approved mapping is saved.</p>
@@ -134,7 +134,15 @@ export function CustomPatientFields({ tab, formData, canManage, onEditableValueC
   const [fields, setFields] = useState<CustomField[]>([]);
   const [showDialog, setShowDialog] = useState(false);
   const load = useCallback(async () => {
-    try { const response = await api.get("/v1/custom-patient-fields/"); setFields(response.data); } catch { setFields([]); }
+    try {
+      const response = await clinicalClient().get(clinicalUrl("/v1/custom-patient-fields/"));
+      // Only an array is usable here; a paginated envelope or anything else
+      // (an HTML shell from a mis-targeted request) must not reach setFields.
+      const body = response.data;
+      setFields(Array.isArray(body) ? body : Array.isArray(body?.results) ? body.results : []);
+    } catch {
+      setFields([]);
+    }
   }, []);
   useEffect(() => {
     const timer = setTimeout(() => { void load(); }, 0);

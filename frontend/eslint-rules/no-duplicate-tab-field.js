@@ -42,14 +42,10 @@ const fieldsByFile = new Map();
  * exemption cannot widen. Exempting the whole tab *pair* would permanently
  * excuse the two largest tabs, and a new duplicate between them would pass.
  *
- * These three are #960. Once that lands the rule reports them as stale, so a
- * fixed duplicate cannot leave a dead exemption behind it.
+ * No exemptions remain after #960 moved disease fields to DiseaseTab.
+ * Keep the stale-exemption guard for any future temporary exceptions.
  */
-const KNOWN_DUPLICATES = new Map([
-  ['disease', ['DiseaseTab.tsx', 'GeneralTab.tsx']],
-  ['histologic_type', ['DiseaseTab.tsx', 'GeneralTab.tsx']],
-  ['stage', ['DiseaseTab.tsx', 'GeneralTab.tsx']],
-]);
+const KNOWN_DUPLICATES = new Map();
 
 /**
  * Drop what previous files contributed. Only the rule's own tests need this:
@@ -152,6 +148,17 @@ export default {
     return {
       // <ClinicalField name="field_key" …>
       JSXOpeningElement(node) {
+        // Collection editors declare their owning PatientRecord field on the
+        // container. Their nested fields (e.g. variant.test_date) are not
+        // separate PatientRecord columns and must not collide with those.
+        const collection = node.attributes.find(
+          (a) => a.type === 'JSXAttribute' && a.name.name === 'data-patient-field',
+        );
+        if (collection?.value?.type === 'Literal' && typeof collection.value.value === 'string') {
+          addKey(collection.value.value, collection);
+        } else if (collection?.value?.type === 'JSXExpressionContainer') {
+          reportBlind(collection, 'unreadable', collection.value.expression);
+        }
         if (node.name.type !== 'JSXIdentifier' || node.name.name !== 'ClinicalField') return;
         const attr = node.attributes.find(
           (a) => a.type === 'JSXAttribute' && a.name.name === 'name',

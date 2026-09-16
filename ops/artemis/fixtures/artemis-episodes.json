@@ -1,0 +1,12 @@
+{
+  "schema_version": "1",
+  "episodes": [
+    {
+      "person_id": 101,
+      "line_number": 1,
+      "start_date": "2024-01-01",
+      "end_date": "2024-01-29",
+      "drug_exposure_ids": [10001, 10002]
+    }
+  ]
+}

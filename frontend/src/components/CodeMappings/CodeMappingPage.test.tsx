@@ -2,6 +2,7 @@ import { render, screen, fireEvent, waitFor, within } from "@testing-library/rea
 import { MemoryRouter } from "react-router-dom";
 import { vi, describe, it, expect, beforeEach } from "vitest";
 import CodeMappingPage from "./CodeMappingPage";
+import CodeMappingAccuracyPage from "./CodeMappingAccuracyPage";
 
 const mockGet = vi.fn();
 const mockPost = vi.fn();
@@ -119,12 +120,11 @@ const reference = {
     Procedure: "procedure",
   },
   // The API supplies the full tab catalog, including source vocabularies whose
-  // current queue contains only approved mappings. Without it, ICD10CM is
-  // intentionally hidden as a data-only tab and these fixtures cannot open
-  // their approved rows.
+  // current queue contains only approved mappings. ICD10CM rows are merged
+  // into the ICD-10 tab (#1028) via VOCABULARY_ALIASES.
   source_vocabulary_tabs: [
     { vocabulary_id: "", label: "Uncoded", is_standard: false },
-    { vocabulary_id: "ICD10CM", label: "ICD10CM", is_standard: true },
+    { vocabulary_id: "ICD10", label: "ICD-10", is_standard: false },
   ],
 };
 
@@ -140,9 +140,36 @@ const loincHit = {
   suggested_unit: "mg/dL",
 };
 
-function renderPage(rows = [proposedRow, approvedRow]) {
+type TestMappingRow = Omit<typeof proposedRow, "status"> & {
+  status: "proposed" | "approved" | "rejected" | "unmapped";
+  mapping_origin?: "athena" | "healthkey";
+  destination_count?: number;
+  source_retired?: boolean | null;
+  source_retirement_evidence?: string[];
+};
+
+/** A /suggest-runs/<id>/ payload, defaulted to a finished run. */
+function suggestRun(overrides: Record<string, unknown> = {}) {
+  return {
+    run_id: "11111111-1111-1111-1111-111111111111",
+    state: "success",
+    source_vocabulary_id: "",
+    total: 0,
+    retrieved: 0,
+    done: 0,
+    destinations: 0,
+    remaining: 0,
+    strategy_counts: {},
+    landed_in: {},
+    model_version: "v0.2",
+    error: "",
+    ...overrides,
+  };
+}
+
+function renderPage(rows: TestMappingRow[] = [proposedRow, approvedRow]) {
   mockGet.mockImplementation((url: string) => {
-    if (url === "/v1/code-mappings/") return Promise.resolve({ data: rows });
+    if (url === "/v1/code-mappings/") return Promise.resolve({ data: [...rows] });
     if (url === "/v1/code-mappings/reference/") return Promise.resolve({ data: reference });
     if (url === "/v1/concepts/search/") {
       return Promise.resolve({ data: { results: [loincHit] } });
@@ -185,6 +212,187 @@ describe("CodeMappingPage", () => {
     mockDelete.mockResolvedValue({ data: {} });
   });
 
+  describe("duplicate source-code errors", () => {
+    const proposed = { ...proposedRow, mapping_id: 101, source_vocabulary_id: "ICD10", source_code: "A02.0" };
+    const mapped = { ...approvedRow, mapping_id: 102, source_code: "A02.0" };
+    const athena = { ...mapped, mapping_id: 103, mapping_origin: "athena" as const };
+
+    it("flags all three sections and reveals exact rows despite search and collapsed sections", async () => {
+      const scroll = vi.spyOn(Element.prototype, "scrollIntoView");
+      renderPage([proposed, mapped, athena]);
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveClass("text-red-800", "bg-red-50");
+      expect(alert).toHaveTextContent("1 duplicate source code on this tab");
+      expect(within(alert).getAllByRole("link")).toHaveLength(3);
+
+      fireEvent.change(screen.getByRole("textbox", { name: "Search mappings" }), { target: { value: "no-match" } });
+      expect(screen.getByRole("alert")).toBeInTheDocument();
+      fireEvent.click(within(alert).getByRole("link", { name: /Athena Mapped.*#103/ }));
+      expect(screen.getByRole("textbox", { name: "Search mappings" })).toHaveValue("");
+      await waitFor(() => expect(document.getElementById("code-mapping-103")).toHaveFocus());
+      expect(scroll).toHaveBeenCalledWith({ behavior: "smooth", block: "center" });
+
+      fireEvent.click(within(alert).getByRole("link", { name: /— Mapped.*#102/ }));
+      await waitFor(() => expect(document.getElementById("code-mapping-102")).toHaveFocus());
+      fireEvent.click(within(alert).getByRole("link", { name: /Unmapped.*#101/ }));
+      await waitFor(() => expect(document.getElementById("code-mapping-101")).toHaveFocus());
+
+      fireEvent.click(screen.getByRole("button", { name: /Athena Mapped \(1\)/ }));
+      fireEvent.click(within(alert).getByRole("link", { name: /Athena Mapped.*#103/ }));
+      await waitFor(() => expect(document.getElementById("code-mapping-103")).toHaveFocus());
+      scroll.mockRestore();
+    });
+
+    it("includes hidden rejected duplicates and reveals them on navigation", async () => {
+      renderPage([proposed, { ...mapped, status: "rejected" }]);
+      const alert = await screen.findByRole("alert");
+      expect(document.getElementById("code-mapping-102")).not.toBeInTheDocument();
+      fireEvent.click(within(alert).getByRole("link", { name: /rejected.*#102/ }));
+      await waitFor(() => expect(document.getElementById("code-mapping-102")).toHaveFocus());
+    });
+
+    it("normalizes case and whitespace without conflating meaningful punctuation", async () => {
+      renderPage([proposed, { ...mapped, source_code: " a02.0 " }, { ...athena, source_code: "A020" }]);
+      const alert = await screen.findByRole("alert");
+      expect(within(alert).getAllByRole("link")).toHaveLength(2);
+    });
+
+    it("does not flag distinct codes, blanks, or the same code in unrelated vocabularies on Overall", async () => {
+      renderPage([proposed, { ...mapped, source_vocabulary_id: "LOINC" },
+        { ...proposed, mapping_id: 104, source_code: "" }, { ...mapped, mapping_id: 105, source_code: " " }]);
+      await screen.findByRole("tab", { name: /Overall/ });
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("tab", { name: /Overall/ }));
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+
+    it("keeps real duplicate groups separate on Overall and scopes other tabs", async () => {
+      renderPage([proposed, mapped, { ...proposed, mapping_id: 104, source_vocabulary_id: "LOINC" }]);
+      await screen.findByRole("alert");
+      fireEvent.click(screen.getByRole("tab", { name: /LOINC/ }));
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("tab", { name: /Overall/ }));
+      const alert = screen.getByRole("alert");
+      expect(within(alert).getAllByRole("link")).toHaveLength(2);
+      fireEvent.click(within(alert).getByRole("link", { name: /Unmapped.*#101/ }));
+      await waitFor(() => expect(document.getElementById("code-mapping-101")).toHaveFocus());
+    });
+
+    it("detects duplicates within a section and clears the error after curator deletion", async () => {
+      const rows: TestMappingRow[] = [proposed, { ...mapped, status: "proposed" }];
+      renderPage(rows);
+      const alert = await screen.findByRole("alert");
+      fireEvent.click(within(alert).getByRole("link", { name: /#102/ }));
+      const row = document.getElementById("code-mapping-102")!;
+      fireEvent.click(within(row).getByRole("button", { name: "Edit A02.0" }));
+      mockDelete.mockImplementationOnce(() => {
+        rows.splice(1, 1);
+        return Promise.resolve({ data: {} });
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+      await waitFor(() => expect(mockDelete).toHaveBeenCalledWith("/v1/code-mappings/102/"));
+      await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+      expect(await screen.findByRole("button", { name: "Edit A02.0" })).toBeInTheDocument();
+    });
+  });
+
+  it("shows the exact Athena duplicate error when table approval is blocked", async () => {
+    const message = "This source and destination map is already supplied by Athena";
+    mockPatch.mockRejectedValueOnce({ response: { data: { detail: message } } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Approve M-PROTEIN, SERUM" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("shows the exact Athena duplicate error inside the edit dialog", async () => {
+    const message = "This source and destination map is already supplied by Athena";
+    mockPatch.mockRejectedValueOnce({ response: { data: { detail: message } } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Edit M-PROTEIN, SERUM" }));
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Update Mapping" }));
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert.textContent).toBe(message);
+    expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/", expect.any(Object));
+  });
+
+  describe("source retirement and section sorting", () => {
+    const high: TestMappingRow = { ...proposedRow, mapping_id: 31, source_vocabulary_id: "ICD10", source_code: "Z10",
+      origin_system: "Zulu", source_code_description: "Zebra", destination_concept_name: "Zinc", destination_concept_id: 20,
+      source_retired: true, source_retirement_evidence: ["Athena ICD10CM concept 45582496: invalid reason D; validity ended 2022-09-30"],
+      occurrence_count: 20, destination_count: 20, status: "unmapped" };
+    const low: TestMappingRow = { ...high, mapping_id: 32, source_code: "A2", origin_system: "Alpha",
+      source_code_description: "Apple", destination_concept_name: "Apple", destination_concept_id: 3, source_retired: false,
+      source_retirement_evidence: [], occurrence_count: 3, destination_count: 3, status: "proposed" };
+    const ids = (table: HTMLElement) => Array.from(table.querySelectorAll("tbody tr[id]")).map((row) => row.id);
+
+    it("shows retirement in the dialog, where #1080 left it after taking its column", async () => {
+      // #1080 replaced the Retired column with Seen and added Dest count. The
+      // retirement metadata is still served and still shown, but only once a
+      // curator opens the row -- so this is the only place it can be asserted.
+      renderPage([high, low]);
+      const table = await screen.findByRole("table", { name: "Unmapped mappings" });
+      const headers = within(table).getAllByRole("columnheader");
+      expect(headers[1]).toHaveTextContent("Source code");
+      expect(headers[2]).toHaveTextContent("Seen");
+      expect(within(table).queryByRole("columnheader", { name: "Retired" })).not.toBeInTheDocument();
+      const row = document.getElementById("code-mapping-31")!;
+      fireEvent.click(within(row).getByRole("button", { name: "Edit Z10" }));
+      await waitFor(() => expect(screen.queryByText("Loading source destinations…")).not.toBeInTheDocument());
+      expect(screen.getByTestId("source-retirement")).toHaveValue("Retired");
+      expect(within(screen.getByRole("dialog")).getByRole("status")).toHaveTextContent("invalid reason D");
+      fireEvent.change(screen.getByLabelText("Source Code Value"), { target: { value: "A3" } });
+      expect(screen.getByTestId("source-retirement")).toHaveValue("Unknown");
+      expect(within(screen.getByRole("dialog")).queryByRole("status")).not.toBeInTheDocument();
+    });
+
+    it.each(["Provenance", "Source code", "Seen", "Source description", "Destination concept", "Concept ID", "Dest count", "Status"])(
+      "sorts %s ascending and descending", async (column) => {
+        renderPage([high, low]);
+        const table = await screen.findByRole("table", { name: "Unmapped mappings" });
+        const button = within(table).getByRole("button", { name: column });
+        fireEvent.click(button);
+        expect(ids(table)).toEqual(["code-mapping-32", "code-mapping-31"]);
+        expect(button.closest("th")).toHaveAttribute("aria-sort", "ascending");
+        fireEvent.click(button);
+        expect(ids(table)).toEqual(["code-mapping-31", "code-mapping-32"]);
+        expect(button.closest("th")).toHaveAttribute("aria-sort", "descending");
+      },
+    );
+
+    it("keeps each section's sort independent without moving mappings between sections", async () => {
+      renderPage([high, low,
+        { ...high, mapping_id: 41, status: "approved" }, { ...low, mapping_id: 42, status: "approved" },
+        { ...high, mapping_id: 51, status: "approved", mapping_origin: "athena" },
+        { ...low, mapping_id: 52, status: "approved", mapping_origin: "athena" }]);
+      const unmapped = await screen.findByRole("table", { name: "Unmapped mappings" });
+      fireEvent.click(screen.getByRole("button", { name: /^Mapped \(/ }));
+      fireEvent.click(screen.getByRole("button", { name: /^Athena Mapped \(/ }));
+      const mapped = screen.getByRole("table", { name: "Mapped mappings" });
+      const athena = screen.getByRole("table", { name: "Athena Mapped mappings" });
+      for (const table of [unmapped, mapped, athena]) {
+        fireEvent.click(within(table).getByRole("button", { name: "Concept ID" }));
+      }
+      fireEvent.click(within(mapped).getByRole("button", { name: "Concept ID" }));
+      expect(ids(unmapped)).toEqual(["code-mapping-32", "code-mapping-31"]);
+      expect(ids(mapped)).toEqual(["code-mapping-41", "code-mapping-42"]);
+      expect(ids(athena)).toEqual(["code-mapping-52", "code-mapping-51"]);
+      expect(within(athena).queryByRole("columnheader", { name: "Status" })).not.toBeInTheDocument();
+    });
+
+    it("still labels missing retirement metadata as Unknown in the dialog", async () => {
+      // The Retired column and its sort went with #1080, so "sorts Unknown
+      // last" has no subject any more. What survives is the distinction the
+      // label exists for: absent metadata is not evidence of retirement.
+      renderPage([{ ...low, mapping_id: 33, source_code: "A3", source_retired: null }]);
+      const cell = await screen.findByText("A3", { selector: "td" });
+      fireEvent.click(cell.closest("tr")!);
+      await screen.findByText("Edit Mapping");
+      expect(screen.getByTestId("source-retirement")).toHaveValue("Unknown");
+    });
+  });
+
   it("puts the source code first without repeating the selected source-system tab", async () => {
     renderPage();
     const row = (await screen.findByText("M-PROTEIN, SERUM", { selector: "td" })).closest("tr")!;
@@ -193,14 +401,15 @@ describe("CodeMappingPage", () => {
     expect(screen.queryByRole("columnheader", { name: "Source code system" })).not.toBeInTheDocument();
   });
 
-  it("shows source descriptions beside source codes and removes OMOP table and Seen", async () => {
+  it("shows source descriptions beside source codes, and no OMOP table column", async () => {
+    // Seen came back as its own column in #1080, so only OMOP table is gone.
     renderPage();
     const row = (await screen.findByText("M-PROTEIN, SERUM", { selector: "td" })).closest("tr")!;
     const cells = within(row).getAllByRole("cell");
-    expect(cells[2]).toHaveTextContent("M-protein, serum");
+    expect(cells[3]).toHaveTextContent("M-protein, serum");
     expect(screen.getByRole("columnheader", { name: "Source description" })).toBeInTheDocument();
     expect(screen.queryByRole("columnheader", { name: "OMOP table" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("columnheader", { name: "Seen" })).not.toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Seen" })).toBeInTheDocument();
   });
 
   it("searches mappings across source-vocabulary tabs", async () => {
@@ -224,7 +433,7 @@ describe("CodeMappingPage", () => {
     expect(screen.queryByText("C90.00")).not.toBeInTheDocument();
 
     fireEvent.click(within(screen.getByRole("tablist", { name: "Source vocabularies" }))
-      .getByRole("tab", { name: /ICD10CM/ }));
+      .getByRole("tab", { name: /ICD-10/ }));
     fireEvent.click(screen.getByText(/^Mapped/));
     expect(await screen.findByText("C90.00")).toBeInTheDocument();
   });
@@ -246,7 +455,7 @@ describe("CodeMappingPage", () => {
     await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
     const tabs = within(screen.getByRole("tablist", { name: "Source vocabularies" }));
     expect(tabs.getByRole("tab", { name: /Uncoded/ })).toBeInTheDocument();
-    expect(tabs.getByRole("tab", { name: /ICD10CM/ })).toBeInTheDocument();
+    expect(tabs.getByRole("tab", { name: /ICD-10/ })).toBeInTheDocument();
   });
 
   it("selects Uncoded instead of falling back to the default vocabulary", async () => {
@@ -254,15 +463,15 @@ describe("CodeMappingPage", () => {
     renderPage([proposedRow, proposedIcd10Row]);
     const tabs = within(await screen.findByRole("tablist", { name: "Source vocabularies" }));
     const uncoded = tabs.getByRole("tab", { name: /Uncoded/ });
-    const icd10cm = tabs.getByRole("tab", { name: /ICD10CM/ });
+    const icd10 = tabs.getByRole("tab", { name: /ICD-10/ });
 
-    fireEvent.click(icd10cm);
-    expect(icd10cm).toHaveAttribute("aria-selected", "true");
+    fireEvent.click(icd10);
+    expect(icd10).toHaveAttribute("aria-selected", "true");
     expect(await screen.findByText("C90.00", { selector: "td" })).toBeInTheDocument();
 
     fireEvent.click(uncoded);
     expect(uncoded).toHaveAttribute("aria-selected", "true");
-    expect(icd10cm).toHaveAttribute("aria-selected", "false");
+    expect(icd10).toHaveAttribute("aria-selected", "false");
     expect(await screen.findByText("M-PROTEIN, SERUM", { selector: "td" })).toBeInTheDocument();
     expect(screen.queryByText("C90.00", { selector: "td" })).not.toBeInTheDocument();
   });
@@ -296,6 +505,92 @@ describe("CodeMappingPage", () => {
       fireEvent.click(cell.closest("tr")!);
       return await screen.findByText("Edit Mapping");
     };
+
+    it("shows individual candidates above search and preserves an early choice when the winner arrives", async () => {
+      await openDialog();
+      const alternative = { ...loincHit, concept_id: 555, concept_name: "Early lexical candidate", concept_code: "555" };
+      const semantic = { ...loincHit, concept_id: 556, concept_name: "Later semantic candidate", concept_code: "556", vector_distance: 0.125 };
+      const activity = [
+        { stage: "candidates", strategy: "umls", candidates: [loincHit] },
+        { stage: "candidates", strategy: "lexical", candidates: [alternative] },
+      ];
+      mockPost.mockResolvedValue({ data: suggestRun({ state: "running", activity }) });
+      const originalGet = mockGet.getMockImplementation()!;
+      mockGet.mockImplementation((url: string) => url.includes("/suggest-runs/")
+        ? Promise.resolve({ data: suggestRun({ activity: [...activity,
+          { stage: "candidates", strategy: "semantic", candidates: [semantic] },
+          { stage: "result", suggested: loincHit, candidates: [loincHit, alternative, semantic] },
+        ] }) }) : originalGet(url));
+      const dialog = within(screen.getByRole("dialog"));
+      const suggest = dialog.getByRole("button", { name: "Suggest", exact: true });
+      fireEvent.click(suggest);
+      const section = await dialog.findByRole("region", { name: "Individual suggestion candidates" });
+      expect(suggest.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(section.compareDocumentPosition(dialog.getByLabelText("Search destination concepts")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(within(section).getByRole("status")).toHaveTextContent("Searching");
+      fireEvent.click(within(section).getByRole("button", { name: /Early lexical candidate/ }));
+      expect(dialog.getByLabelText("Destination Concept ID")).toHaveValue(555);
+      expect(mockPatch).not.toHaveBeenCalled();
+      expect(await within(section).findByText("Distance 0.1250", {}, { timeout: 3000 })).toBeInTheDocument();
+      expect(within(section).getByText(`Winner: ${loincHit.concept_name}`)).toBeInTheDocument();
+      expect(dialog.getByLabelText("Destination Concept ID")).toHaveValue(555);
+      expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/suggest-one/", expect.objectContaining({ async: true }));
+      fireEvent.click(within(section).getByRole("button", { name: /Later semantic candidate/ }));
+      expect(dialog.getByLabelText("Destination Concept ID")).toHaveValue(556);
+      fireEvent.click(dialog.getByRole("button", { name: "Update Mapping" }));
+      await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/", expect.objectContaining({ destination_concept_id: 556 })));
+    });
+
+    it("displays inline individual results and fills the winner when nothing was selected", async () => {
+      await openDialog();
+      mockPost.mockResolvedValue({ data: suggestRun({ activity: [
+        { stage: "candidates", strategy: "umls", candidates: [loincHit] },
+        { stage: "result", suggested: loincHit, candidates: [loincHit] },
+      ] }) });
+      fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Suggest", exact: true }));
+      await waitFor(() => expect(screen.getByLabelText("Destination Concept ID")).toHaveValue(loincHit.concept_id));
+      const section = screen.getByRole("region", { name: "Individual suggestion candidates" });
+      expect(within(section).getByText("Winner")).toBeInTheDocument();
+      expect(mockPatch).not.toHaveBeenCalled();
+    });
+
+    it("hides old individual candidates and ignores the winner after the source changes", async () => {
+      await openDialog();
+      mockPost.mockResolvedValue({ data: suggestRun({ state: "running", activity: [
+        { stage: "candidates", strategy: "umls", candidates: [loincHit] },
+      ] }) });
+      fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Suggest", exact: true }));
+      await screen.findByRole("region", { name: "Individual suggestion candidates" });
+      fireEvent.change(screen.getByLabelText("Source Code Value"), { target: { value: "CHANGED" } });
+      expect(screen.queryByRole("region", { name: "Individual suggestion candidates" })).not.toBeInTheDocument();
+      expect(screen.getByLabelText("Destination Concept ID")).toHaveValue(proposedRow.destination_concept_id);
+    });
+
+    it("highlights imported alternatives and saves the curator's selected destination", async () => {
+      renderPage([{ ...proposedRow, destination_count: 3 }]);
+      const originalGet = mockGet.getMockImplementation()!;
+      mockGet.mockImplementation((url: string) => url === "/v1/code-mappings/7/"
+        ? Promise.resolve({ data: { destination_options: [
+          { ...loincHit, selectable: true, selected: false, origins: ["HT-One"] },
+          { ...loincHit, concept_id: 555, concept_code: "555", concept_name: "Other source destination", selectable: true, selected: false, origins: ["HT-One"] },
+          { ...loincHit, concept_id: null, concept_code: "999", concept_name: "Concept not loaded", selectable: false, selected: false, origins: ["HT-One"] },
+        ] } }) : originalGet(url));
+      fireEvent.click((await screen.findByText("M-PROTEIN, SERUM", { selector: "td" })).closest("tr")!);
+      const choices = await screen.findByLabelText("Source data destinations (3)");
+      expect(screen.getByText(/Multiple destinations are available/)).toBeInTheDocument();
+      expect(screen.getByRole("option", { name: /Concept not loaded/ })).toBeDisabled();
+      fireEvent.change(choices, { target: { value: String(loincHit.concept_id) } });
+      expect(screen.getByLabelText("Destination Concept ID")).toHaveValue(loincHit.concept_id);
+      expect(screen.getByTestId("destination-concept-code")).toHaveValue(loincHit.concept_code);
+      expect(screen.getByTestId("destination-concept-class")).toHaveValue(loincHit.concept_class_id);
+      fireEvent.click(screen.getByRole("button", { name: "Update Mapping" }));
+      await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/", expect.objectContaining({
+        destination_concept_id: loincHit.concept_id,
+        destination_vocabulary_id: "LOINC",
+        domain_id: "Measurement",
+        omop_table: "measurement",
+      })));
+    });
 
     it("opens from a click anywhere on the row", async () => {
       await openDialog();
@@ -368,6 +663,7 @@ describe("CodeMappingPage", () => {
         "Source Code Value",
         "Source Description",
         "Source Concept ID",
+        "Source code retirement",
       ]);
       expect((screen.getByLabelText("Domain") as HTMLSelectElement).value).toBe("Measurement");
     });
@@ -417,6 +713,7 @@ describe("CodeMappingPage", () => {
         "Destination Vocabulary ID",
         "Destination Concept Class",
         "Standard Concept",
+        "Destination Status",
         "Destination Table",
       ]);
     });
@@ -484,6 +781,21 @@ describe("CodeMappingPage", () => {
       });
     });
 
+    it("identifies a retired non-standard destination without rewriting its class", async () => {
+      renderPage([{
+        ...proposedRow,
+        destination_concept_class_id: "Undefined",
+        destination_invalid_reason: "U",
+      }]);
+      await openDialog();
+
+      expect(screen.getByTestId("destination-concept-class")).toHaveValue("Undefined");
+      expect(screen.getByTestId("standard-concept")).toHaveValue("");
+      expect(screen.getByTestId("destination-status"))
+        .toHaveValue("Retired / invalid (reason U)");
+      expect(screen.getByRole("button", { name: "Find replacement" })).toBeInTheDocument();
+    });
+
     it("fills the destination from a concept search result", async () => {
       await openDialog();
       fireEvent.change(screen.getByLabelText("Search destination concepts"), {
@@ -506,6 +818,20 @@ describe("CodeMappingPage", () => {
         target: { value: "monoclonal" },
       });
       expect(await screen.findByText("Quantitative · Unit: mg/dL")).toBeInTheDocument();
+    });
+
+    it("selects a reviewed mint candidate as the mapping destination", async () => {
+      await openDialog();
+      mockPost.mockResolvedValue({ data: { candidates: [loincHit], review_token: "checked" } });
+      fireEvent.click(screen.getByRole("button", { name: "Mint new concept" }));
+      const mint = within(screen.getByRole("dialog", { name: "Mint new concept" }));
+      fireEvent.change(mint.getByLabelText("Custom vocabulary group"), { target: { value: "HK-Labs" } });
+      fireEvent.change(mint.getByLabelText("Concept code"), { target: { value: "custom-protein" } });
+      fireEvent.click(mint.getByText("Check existing destinations"));
+      fireEvent.click(await mint.findByRole("button", { name: /Protein.monoclonal/ }));
+      expect(screen.queryByRole("dialog", { name: "Mint new concept" })).not.toBeInTheDocument();
+      expect(screen.getByLabelText("Destination Concept ID")).toHaveValue(3046299);
+      expect(mockPost).toHaveBeenCalledTimes(1);
     });
 
     it("scopes the concept search to the destination vocabulary", async () => {
@@ -534,7 +860,12 @@ describe("CodeMappingPage", () => {
     it("shows import provenance so an SME knows what they are reviewing", async () => {
       await openDialog();
       expect(screen.getByText(/Proposed by import/)).toHaveTextContent("hk-labs");
-      expect(screen.getByText(/Proposed by import/)).toHaveTextContent("14");
+      // The occurrence count moved out of the provenance line and onto its own
+      // badge in #1080, alongside the new Seen column. The text is split across
+      // elements, so match the badge that contains it.
+      expect(
+        screen.getByText((_content, el) => el?.textContent === "Seen 14 times"),
+      ).toBeInTheDocument();
     });
 
     it("offers Update & Approve once the destination has moved", async () => {
@@ -639,10 +970,10 @@ describe("CodeMappingPage", () => {
   describe("Unmapped queue ordering", () => {
     const row = (over: Partial<typeof proposedRow>) => ({ ...proposedRow, ...over });
 
-    it("puts import proposals above hand-written ones, then sorts humans by name", async () => {
-      // An import's proposal is nobody's decision yet — it is the work the
-      // queue exists for. Human drafts then group by author so one curator's
-      // in-progress work stays together.
+    it("puts the busiest code first, whoever raised it", async () => {
+      // #1080 replaced the provenance-then-author grouping with occurrence
+      // order across every section: the code seen 900 times is worth more of a
+      // curator's time than one seen once, whoever proposed it.
       renderPage([
         row({ mapping_id: 1, source_code: "HUMAN-ZOE", origin: "curator", created_by: "zoe@example.com", occurrence_count: 900 }),
         row({ mapping_id: 2, source_code: "HUMAN-ADA", origin: "curator", created_by: "ada@example.com", occurrence_count: 1 }),
@@ -656,9 +987,9 @@ describe("CodeMappingPage", () => {
       const codes = screen
         .getAllByText(/^(MACHINE|HUMAN-ADA|HUMAN-ZOE)$/, { selector: "td" })
         .map((cell) => cell.textContent);
-      // Machine first despite the lowest count; then Ada before Zoe despite
-      // Zoe's row being seen 900 times.
-      expect(codes).toEqual(["MACHINE", "HUMAN-ADA", "HUMAN-ZOE"]);
+      // Zoe's 900 first, then the import's 5, then Ada's 1 -- who raised it no
+      // longer changes the order.
+      expect(codes).toEqual(["HUMAN-ZOE", "MACHINE", "HUMAN-ADA"]);
     });
 
     it("names the creating curator instead of an import system", async () => {
@@ -689,7 +1020,7 @@ describe("CodeMappingPage", () => {
     /** Open the dialog for a row that lives under the collapsed Mapped section. */
     const openApproved = async (code: string) => {
       const tabs = within(await screen.findByRole("tablist", { name: "Source vocabularies" }));
-      fireEvent.click(tabs.getByRole("tab", { name: /ICD10CM/ }));
+      fireEvent.click(tabs.getByRole("tab", { name: /ICD-10/ }));
       fireEvent.click(await screen.findByText(/^Mapped/));
       const cell = await screen.findByText(code, { selector: "td" });
       fireEvent.click(cell.closest("tr")!);
@@ -708,7 +1039,7 @@ describe("CodeMappingPage", () => {
       const when = new Date("2026-08-31T09:14:00Z").toLocaleDateString();
       expect(
         screen.getByText(
-          `Created by zoe@example.com · approved by ada@example.com on ${when} · seen 3 time(s)`,
+          `Created by zoe@example.com · approved by ada@example.com on ${when}`,
         ),
       ).toBeInTheDocument();
     });
@@ -725,7 +1056,7 @@ describe("CodeMappingPage", () => {
       const when = new Date("2026-08-31T09:14:00Z").toLocaleDateString();
       expect(
         screen.getByText(
-          `Proposed by import (fhir-sync) · approved by ada@example.com on ${when} · seen 3 time(s)`,
+          `Proposed by import (fhir-sync) · approved by ada@example.com on ${when}`,
         ),
       ).toBeInTheDocument();
     });
@@ -771,7 +1102,7 @@ describe("CodeMappingPage", () => {
       expect(screen.getByRole("button", { name: /Suggest/ })).toBeEnabled();
 
       const tabs = within(screen.getByRole("tablist", { name: "Source vocabularies" }));
-      fireEvent.click(tabs.getByRole("tab", { name: /ICD10CM/ }));
+      fireEvent.click(tabs.getByRole("tab", { name: /ICD-10/ }));
       const button = screen.getByRole("button", { name: /Suggest/ });
       expect(button).toBeEnabled();
       expect(button).toHaveAttribute("title", expect.stringContaining("source codes"));
@@ -783,42 +1114,207 @@ describe("CodeMappingPage", () => {
         expect(screen.getByRole("button", { name: /Suggest/ })).toBeEnabled());
     });
 
-    it("defaults the threshold to 10 and sends it", async () => {
-      // 43% of staging's unmapped codes appear exactly once; proposing for them
-      // buries the 512 that carry the traffic.
-      mockPost.mockResolvedValue({ data: { created: 3, considered: 5, ranked: 2 } });
+    it("includes all Seen counts without a threshold control", async () => {
+      mockPost.mockResolvedValue({ data: suggestRun({ updated: 3, total: 5, ranked: 2 }) });
       renderPage();
       await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
-      expect(screen.getByLabelText(/seen at least/i)).toHaveValue(10);
+      expect(screen.queryByLabelText(/seen at least/i)).not.toBeInTheDocument();
 
       fireEvent.click(screen.getByRole("button", { name: /Suggest/ }));
       await waitFor(() => expect(mockPost).toHaveBeenCalled());
       expect(mockPost.mock.calls[0][0]).toBe("/v1/code-mappings/suggest/");
       expect(mockPost.mock.calls[0][1]).toMatchObject({
         source_vocabulary_id: "",
-        min_occurrences: 10,
       });
+      expect(mockPost.mock.calls[0][1]).not.toHaveProperty("min_occurrences");
     });
 
     it("reports what it proposed", async () => {
       mockPost.mockResolvedValue({
-        data: { created: 3, considered: 5, ranked: 2, truncated: true },
+        data: suggestRun({ total: 5, done: 5, destinations: 3, landed_in: { LOINC: 3 } }),
       });
       renderPage();
       await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
       fireEvent.click(screen.getByRole("button", { name: /Suggest/ }));
 
-      const status = await screen.findByRole("status");
-      expect(status).toHaveTextContent("Proposed 3 mapping(s) from 5 unmapped code(s)");
-      expect(status).toHaveTextContent("More remain");
+      await waitFor(() =>
+        expect(screen.getByTestId("suggest-progress")).toHaveTextContent(
+          "Done — wrote 3 new destination(s) across 5 code(s).",
+        ));
+      expect(screen.getByTestId("suggest-progress")).toHaveTextContent("5/5");
+      const logLink = within(screen.getByTestId("suggest-progress")).getByRole("link", { name: "View run log" });
+      expect(logLink).toHaveAttribute("href", expect.stringContaining("/code-mappings/suggest-runs/"));
+      expect(logLink).toHaveAttribute("target", "_blank");
     });
 
-    it("says so when nothing meets the threshold", async () => {
-      mockPost.mockResolvedValue({ data: { created: 0, considered: 0, ranked: 0 } });
+    it("says so when nothing on the tab is awaiting a suggestion", async () => {
+      // Importer rows are deliberately left alone, so an empty result is a
+      // normal state and not a failure.
+      mockPost.mockResolvedValue({ data: suggestRun({ updated: 0, total: 0, ranked: 0 }) });
       renderPage();
       await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
       fireEvent.click(screen.getByRole("button", { name: /Suggest/ }));
-      expect(await screen.findByRole("status")).toHaveTextContent("No unmapped codes seen 10+ times");
+      await waitFor(() =>
+        expect(screen.getByTestId("suggest-progress"))
+          .toHaveTextContent("nothing on this tab was awaiting a suggestion"));
+    });
+
+    it("puts Suggest first directly below the tabs, followed by the enabled strategies", async () => {
+      mockPost.mockResolvedValue({ data: suggestRun() });
+      renderPage();
+      await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      const toolbar = screen.getByRole("group", { name: "Suggest controls" });
+      expect(screen.getByRole("tablist").nextElementSibling).toBe(toolbar);
+      const controls = toolbar.querySelectorAll("button, input");
+      expect(controls[0]).toHaveTextContent("Suggest");
+      for (const [index, name] of ["UMLS", "Lexical", "Semantic retrieval"].entries()) {
+        const checkbox = within(toolbar).getByRole("checkbox", { name });
+        expect(controls[index + 2]).toBe(checkbox);
+        expect(checkbox).toBeChecked();
+      }
+      const batchSize = within(toolbar).getByRole("spinbutton", { name: "Number of suggestions" });
+      expect(controls[1]).toBe(batchSize);
+      expect(batchSize).toHaveValue(100);
+      expect(batchSize.nextElementSibling).toHaveTextContent("Using");
+      fireEvent.change(batchSize, { target: { value: "25" } });
+      fireEvent.click(within(toolbar).getByRole("button", { name: "Suggest" }));
+      await waitFor(() => expect(mockPost).toHaveBeenCalled());
+      expect(mockPost.mock.calls[0][1]).toMatchObject({
+        limit: 25, strategies: ["umls", "lexical", "semantic"],
+      });
+      expect(mockPost.mock.calls[0][1]).not.toHaveProperty("lexical_limit");
+      expect(mockPost.mock.calls[0][1]).not.toHaveProperty("min_occurrences");
+    });
+
+    it("can suggest with semantic retrieval alone and requires at least one retriever", async () => {
+      mockPost.mockResolvedValue({ data: suggestRun() });
+      renderPage();
+      await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      const toolbar = screen.getByRole("group", { name: "Suggest controls" });
+      for (const name of ["UMLS", "Lexical"]) {
+        fireEvent.click(within(toolbar).getByRole("checkbox", { name }));
+      }
+      const button = within(toolbar).getByRole("button", { name: "Suggest" });
+      const semantic = within(toolbar).getByRole("checkbox", { name: "Semantic retrieval" });
+      expect(within(toolbar).queryByRole("checkbox", { name: /Vector/ })).not.toBeInTheDocument();
+      expect(button).toBeEnabled();
+      fireEvent.click(semantic);
+      expect(button).toBeDisabled();
+      fireEvent.click(semantic);
+      fireEvent.click(button);
+      await waitFor(() => expect(mockPost).toHaveBeenCalled());
+      expect(mockPost.mock.calls[0][1]).toMatchObject({ strategies: ["semantic"] });
+    });
+
+    it("uses the active server batch cap as the default", async () => {
+      const page = renderPage();
+      const originalGet = mockGet.getMockImplementation()!;
+      mockGet.mockImplementation((url: string) => url === "/v1/code-mappings/reference/"
+        ? Promise.resolve({ data: { ...reference, suggest_max_per_run: 3 } }) : originalGet(url));
+      // Refresh the reference by switching away and remounting with the capped response.
+      page.unmount();
+      render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+      await waitFor(() => expect(screen.getByLabelText("Number of suggestions")).toHaveValue(3));
+      fireEvent.change(screen.getByLabelText("Number of suggestions"), { target: { value: "4" } });
+      expect(screen.getByRole("button", { name: "Suggest" })).toBeDisabled();
+    });
+
+    it("shows incremental progress while the run is still working", async () => {
+      // The run is queued and a code costs seconds, so a curator has to be able
+      // to tell a working run from a stuck one.
+      mockPost.mockResolvedValue({
+        data: { ...suggestRun({ state: "running", total: 4, retrieved: 1, done: 0 }), activity: [{ stage: "candidates", mapping_id: 7, source_code: "LIVE", strategy: "umls", candidates: [{ concept_id: 1, concept_name: "UMLS candidate", concept_code: "A", vocabulary_id: "SNOMED" }] }] },
+      });
+      mockGet.mockImplementation((url: string) => {
+        if (url.startsWith("/v1/code-mappings/suggest-runs/")) {
+          return Promise.resolve({
+            data: { ...suggestRun({ state: "success", total: 4, done: 4, destinations: 4 }), activity: [{ stage: "candidates", mapping_id: 7, source_code: "LIVE", strategy: "semantic", candidates: [{ concept_id: 2, concept_name: "Semantic candidate", concept_code: "B", vocabulary_id: "SNOMED", vector_distance: 0.25 }] }] },
+          });
+        }
+        if (url === "/v1/code-mappings/") return Promise.resolve({ data: [proposedRow] });
+        if (url === "/v1/code-mappings/reference/") return Promise.resolve({ data: reference });
+        return Promise.resolve({ data: {} });
+      });
+      render(
+        <MemoryRouter>
+          <CodeMappingPage />
+        </MemoryRouter>,
+      );
+      await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      fireEvent.click(screen.getByRole("button", { name: /Suggest/ }));
+
+      // The in-flight phase names what it is doing, against a known denominator.
+      await waitFor(() =>
+        expect(screen.getByTestId("suggest-progress"))
+          .toHaveTextContent("Searching for candidates… 1 of 4"));
+      expect(screen.getByText(/UMLS candidate/)).toBeInTheDocument();
+      // Then it polls to completion.
+      await waitFor(() =>
+        expect(screen.getByTestId("suggest-progress"))
+          .toHaveTextContent("Done — wrote 4 new destination(s) across 4 code(s)."),
+        { timeout: 4000 });
+      expect(screen.getByText(/Semantic candidate/)).toBeInTheDocument();
+      expect(screen.getByText("Distance 0.2500")).toBeInTheDocument();
+      expect(mockGet).toHaveBeenCalledWith(expect.stringContaining("/suggest-runs/"), { params: { include_activity: "1" } });
+      expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/suggest/", expect.objectContaining({ include_activity: true }));
+    });
+
+    it("says how many remain so the curator knows to run it again", async () => {
+      // A run is capped well below a tab's backlog, so finishing is not the
+      // same as being done.
+      mockPost.mockResolvedValue({
+        data: suggestRun({ total: 5, done: 5, destinations: 3, remaining: 28 }),
+      });
+      renderPage();
+      await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      fireEvent.click(screen.getByRole("button", { name: /Suggest/ }));
+      await waitFor(() =>
+        expect(screen.getByTestId("suggest-progress"))
+          .toHaveTextContent("28 still awaiting a suggestion — run Suggest again."));
+    });
+
+    it("keeps polling through a transient failure", async () => {
+      // The work is on a worker and carries on; treating a dropped GET as a
+      // failed run would show an error over a run that succeeded.
+      mockPost.mockResolvedValue({
+        data: suggestRun({ state: "running", total: 2, retrieved: 1 }),
+      });
+      let polls = 0;
+      mockGet.mockImplementation((url: string) => {
+        if (url.startsWith("/v1/code-mappings/suggest-runs/")) {
+          polls += 1;
+          if (polls === 1) return Promise.reject(new Error("network blip"));
+          return Promise.resolve({
+            data: suggestRun({ state: "success", total: 2, done: 2, destinations: 2 }),
+          });
+        }
+        if (url === "/v1/code-mappings/") return Promise.resolve({ data: [proposedRow] });
+        if (url === "/v1/code-mappings/reference/") return Promise.resolve({ data: reference });
+        return Promise.resolve({ data: {} });
+      });
+      render(
+        <MemoryRouter>
+          <CodeMappingPage />
+        </MemoryRouter>,
+      );
+      await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      fireEvent.click(screen.getByRole("button", { name: /Suggest/ }));
+      await waitFor(() =>
+        expect(screen.getByTestId("suggest-progress"))
+          .toHaveTextContent("wrote 2 new destination(s)"),
+        { timeout: 6000 });
+      expect(screen.queryByText("Failed to suggest mappings.")).not.toBeInTheDocument();
+    });
+
+    it("surfaces a failed run rather than leaving the bar stuck", async () => {
+      mockPost.mockResolvedValue({
+        data: suggestRun({ state: "failure", error: "retrieval exploded" }),
+      });
+      renderPage();
+      await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      fireEvent.click(screen.getByRole("button", { name: /Suggest/ }));
+      await waitFor(() =>
+        expect(screen.getByTestId("suggest-progress")).toHaveTextContent("retrieval exploded"));
     });
 
     it("shows a proposal with no destination yet in its domain's tab", async () => {
@@ -834,5 +1330,221 @@ describe("CodeMappingPage", () => {
       }]);
       expect(await screen.findByText("99999-9", { selector: "td" })).toBeInTheDocument();
     });
+  });
+});
+
+describe("mapping dialog request isolation", () => {
+  const first = { ...proposedRow, source_code: "Z94.81", source_code_description: "Bone marrow transplant status" };
+  const second = { ...proposedRow, mapping_id: 99, source_code: "Z12.11", source_code_description: "Screening encounter" };
+
+  it("clears a previous code's no-match message when opening another code", async () => {
+    renderPage([first, second]);
+    fireEvent.click(await screen.findByText("Z94.81"));
+    mockPost.mockResolvedValueOnce({ data: suggestRun({ activity: [{ stage: "result", suggested: null, note: "No suitable concept: Z94.81" }] }) });
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Suggest" }));
+    expect(await screen.findByText("No suitable concept: Z94.81")).toBeInTheDocument();
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByText("Z12.11"));
+    expect(within(screen.getByRole("dialog")).queryByText("No suitable concept: Z94.81")).not.toBeInTheDocument();
+  });
+
+  it("shows the suggestion method only in the dialog and clears it for another code", async () => {
+    renderPage([first, second]);
+    fireEvent.click(await screen.findByText("Z94.81"));
+    mockPost.mockResolvedValueOnce({ data: suggestRun({ activity: [{ stage: "result", suggested: loincHit, strategy_used: "lexical" }] }) });
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Suggest" }));
+    const message = await screen.findByText("Winner filled in. You can choose another candidate before saving.");
+    expect(screen.getByRole("dialog")).toContainElement(message);
+    expect(screen.getAllByText("Winner filled in. You can choose another candidate before saving.")).toHaveLength(1);
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByText("Winner filled in. You can choose another candidate before saving.")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("Z12.11"));
+    expect(screen.queryByText("Winner filled in. You can choose another candidate before saving.")).not.toBeInTheDocument();
+  });
+
+  it.each([false, true])("ignores a late suggestion for a closed dialog (destination=%s)", async (found) => {
+    renderPage([first, second]);
+    fireEvent.click(await screen.findByText("Z94.81"));
+    let resolve!: (value: unknown) => void;
+    mockPost.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Suggest" }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByText("Z12.11"));
+    resolve({ data: { suggested: found ? loincHit : null, note: "No suitable concept: Z94.81" } });
+    await waitFor(() => expect(within(screen.getByRole("dialog")).getByRole("button", { name: "Suggest" })).toBeEnabled());
+    expect(screen.queryByText("No suitable concept: Z94.81")).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue("Z12.11")).toBeInTheDocument();
+    expect(screen.getByLabelText("Destination Concept ID")).toHaveValue(second.destination_concept_id);
+  });
+});
+
+describe("server mapping pages", () => {
+  it("requests the next page and sorts the full section on the server", async () => {
+    mockGet.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
+      if (url === "/v1/code-mappings/") {
+        const page = Number(config?.params?.page_0 || 1);
+        return Promise.resolve({ data: {
+          results: [{ ...proposedRow, source_code: page === 1 ? "FIRST PAGE" : "SECOND PAGE" }],
+          duplicates: [], selected_source: "",
+          tabs: [{ vocabulary_id: "", label: "Uncoded", is_standard: false, proposed: 101, approved: 0, athena: 0 }],
+          pages: { Unmapped: { page, page_size: 100, total: 101 }, Mapped: { page: 1, page_size: 100, total: 0 }, "Athena Mapped": { page: 1, page_size: 100, total: 0 } },
+          rejected_count: 0,
+        } });
+      }
+      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+    });
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    expect(await screen.findByText("FIRST PAGE")).toBeInTheDocument();
+    expect(screen.getByText("Page 1 of 2 · 101 mappings")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(await screen.findByText("SECOND PAGE")).toBeInTheDocument();
+    fireEvent.click(screen.getByTitle("Sort Unmapped by Seen"));
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ page_0: 1, order_0: "occurrence_count" }) }));
+  });
+});
+
+describe("Overall review counters and refresh", () => {
+  const metrics = { approved: 0, accepted: 0, rejected: 0, overridden: 0, reviewed: 0, precision: null, recall: null, f1: null, model_version: "v0.2" };
+  beforeEach(() => { mockGet.mockReset(); mockPatch.mockReset(); });
+
+  it("shows overall reviews across models regardless of the selected vocabulary", async () => {
+    mockGet.mockImplementation((url: string) => Promise.resolve({ data: url.includes("accuracy") ? {
+      overall: { ...metrics, review_totals: { approved: 6, rejected: 2, overridden: 3 } },
+      by_source_vocabulary: { "": { ...metrics, review_totals: { approved: 99, rejected: 99, overridden: 99 } } },
+    } : url.includes("reference") ? reference : [proposedRow] }));
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    const section = await screen.findByRole("region", { name: "Suggestion accuracy" });
+    expect(within(section).getByText("Approved").parentElement).toHaveTextContent("6");
+    expect(within(section).getByText("Rejected").parentElement).toHaveTextContent("2");
+    expect(within(section).getByText("Other destination").parentElement).toHaveTextContent("3");
+    expect(within(section).queryByText(/^Metrics:/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Review counts: all models")).not.toBeInTheDocument();
+    const controls = screen.getByRole("group", { name: "Suggest controls" });
+    const semantic = within(controls).getByRole("checkbox", { name: "Semantic retrieval" });
+    const replace = within(controls).getByRole("checkbox", { name: "Replace Current Suggestions" });
+    expect(semantic.closest("span")?.nextElementSibling).toBe(replace.closest("label"));
+    // Approved leads the strip now that no box names a model version.
+    expect(section.firstElementChild).toHaveTextContent("Approved");
+  });
+
+  it("scores precision, recall and F1 over every model rather than the newest reviewed one", async () => {
+    // v0.3 alone would read 100%; all models together are 2 of 4 accepted.
+    const latestReviewed = { ...metrics, model_version: "v0.3", reviewed: 1, approved: 1, precision: 1, recall: 1, f1: 1 };
+    const allModels = { ...metrics, model_versions: 2, suggestions: 4, reviewed: 4, approved: 2, rejected: 1, overridden: 1, precision: 0.5, recall: 2 / 3, f1: 4 / 7 };
+    mockGet.mockImplementation((url: string) => Promise.resolve({ data: url.includes("accuracy") ? {
+      overall: url.includes("dashboard") ? allModels : { ...metrics, all_models: allModels },
+      models: [latestReviewed, { ...metrics, model_version: "v0.2" }],
+      by_source_vocabulary: { "": { ...latestReviewed, all_models: { ...latestReviewed, model_versions: 1 } } },
+    } : url.includes("reference") ? reference : [proposedRow] }));
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    const section = await screen.findByRole("region", { name: "Suggestion accuracy" });
+    expect(await within(section).findByText("Precision")).toBeInTheDocument();
+    expect(within(section).getByText("Precision").parentElement).toHaveTextContent("50.0%");
+    expect(within(section).getByText("Recall").parentElement).toHaveTextContent("66.7%");
+    expect(within(section).getByText("F1").parentElement).toHaveTextContent("57.1%");
+    expect(within(section).getByText("Approved").parentElement).toHaveTextContent("2");
+    expect(within(section).getByText("Rejected").parentElement).toHaveTextContent("1");
+    expect(within(section).getByText("Other destination").parentElement).toHaveTextContent("1");
+    expect(within(section).queryByText(/model reviews/)).not.toBeInTheDocument();
+    const labels = ["Approved", "Rejected", "Other destination", "Precision", "Recall", "F1"];
+    const displayed = labels.map(label => within(section).getByText(label).parentElement?.lastElementChild?.textContent);
+    fireEvent.click(screen.getByRole("tab", { name: /Overall/ }));
+    expect(labels.map(label => within(section).getByText(label).parentElement?.lastElementChild?.textContent)).toEqual(displayed);
+    render(<MemoryRouter><CodeMappingAccuracyPage /></MemoryRouter>);
+    const historyRow = (await screen.findByText("All models (2)")).closest("tr")!;
+    expect(within(historyRow).getAllByRole("cell").slice(2).map(cell => cell.textContent)).toEqual(displayed);
+  });
+
+  it("shows dashes rather than one model's score when the API predates all_models", async () => {
+    // A web instance mid-roll answers without the key. Counts still span
+    // versions, so a single version's score beside them would be #1154 again
+    // with nothing left on the strip to explain it.
+    const latestReviewed = { ...metrics, model_version: "v0.2", reviewed: 2, approved: 2, precision: 1, recall: 1, f1: 1 };
+    mockGet.mockImplementation((url: string) => Promise.resolve({ data: url.includes("accuracy") ? {
+      overall: { ...metrics, latest_reviewed: latestReviewed, review_totals: { approved: 5, rejected: 1, overridden: 0 } },
+      by_source_vocabulary: {},
+    } : url.includes("reference") ? reference : [proposedRow] }));
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    const section = await screen.findByRole("region", { name: "Suggestion accuracy" });
+    expect(await within(section).findByText("Precision")).toBeInTheDocument();
+    expect(within(section).queryByText("100.0%")).not.toBeInTheDocument();
+    expect(within(section).getAllByText("—")).toHaveLength(3);
+    expect(within(section).getByText("Approved").parentElement).toHaveTextContent("5");
+  });
+
+  it("updates confirmed reviews and counters without waiting for the table reload", async () => {
+    let loads = 0;
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/v1/code-mappings/") {
+        loads += 1;
+        return loads === 1 ? Promise.resolve({ data: [proposedRow] }) : new Promise(() => {});
+      }
+      if (url.includes("reference")) return Promise.resolve({ data: reference });
+      return Promise.resolve({ data: { overall: { ...metrics, review_totals: { approved: loads > 1 ? 1 : 0, rejected: 0, overridden: 0 } }, by_source_vocabulary: {} } });
+    });
+    mockPatch.mockResolvedValue({ data: { ...proposedRow, status: "approved" } });
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: "Approve M-PROTEIN, SERUM" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Approve M-PROTEIN, SERUM" })).not.toBeInTheDocument());
+    const section = screen.getByRole("region", { name: "Suggestion accuracy" });
+    await waitFor(() => expect(within(section).getByText("Approved").parentElement).toHaveTextContent("1"));
+    expect(mockGet.mock.calls.filter(([url]) => url === "/v1/code-mappings/reference/")).toHaveLength(1);
+  });
+
+  it("shows overall reviews even when the selected vocabulary has no suggestions", async () => {
+    mockGet.mockImplementation((url: string) => Promise.resolve({ data: url.includes("accuracy") ? {
+      overall: { ...metrics, approved: 99, review_totals: { approved: 99, rejected: 0, overridden: 0 } },
+      by_source_vocabulary: {},
+    } : url.includes("reference") ? reference : [proposedRow] }));
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    const section = await screen.findByRole("region", { name: "Suggestion accuracy" });
+    expect(within(section).getByText("Approved").parentElement).toHaveTextContent("99");
+    // Older API responses still cannot supply cross-version scores.
+    expect(within(section).getAllByText("—")).toHaveLength(3);
+  });
+});
+
+
+describe("saved batch log discovery", () => {
+  it("recovers the completed run link after leaving and reopening the mapping page", async () => {
+    mockGet.mockImplementation((url: string) => Promise.resolve({ data:
+      url.endsWith("suggest-runs/latest/") ? { run_id: "saved-run" }
+        : url.includes("reference") ? reference : url.includes("accuracy") ? {} : [proposedRow],
+    }));
+    const page = render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    expect(await screen.findByRole("link", { name: "View latest batch run log" }))
+      .toHaveAttribute("href", "/code-mappings/suggest-runs/saved-run");
+    page.unmount();
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    expect(await screen.findByRole("link", { name: "View latest batch run log" }))
+      .toHaveAttribute("href", "/code-mappings/suggest-runs/saved-run");
+  });
+});
+
+
+describe("expanded ICD10 review feedback", () => {
+  it.each(["approved", "rejected"])("updates the expanded queue and counts immediately after a confirmed %s response", async (status) => {
+    const mapping = { ...proposedRow, source_vocabulary_id: "ICD10", source_code: "Z12.11", mapping_origin: "healthkey" };
+    let loads = 0;
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/v1/code-mappings/") {
+        if (++loads > 1) return new Promise(() => {});
+        return Promise.resolve({ data: {
+          results: [mapping], duplicates: [], selected_source: "ICD10", rejected_count: 0,
+          tabs: [{ vocabulary_id: "ICD10", label: "ICD10", is_standard: true, proposed: 1, approved: 0, athena: 0 }],
+          pages: { Unmapped: { page: 1, page_size: 100, total: 1 }, Mapped: { page: 1, page_size: 100, total: 0 }, "Athena Mapped": { page: 1, page_size: 100, total: 0 } },
+        } });
+      }
+      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+    });
+    mockPatch.mockResolvedValue({ data: { ...mapping, status } });
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText("Z12.11", { selector: "td" }));
+    fireEvent.change(screen.getByLabelText("Status"), { target: { value: status } });
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Update Mapping" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Unmapped (0)" })).toBeInTheDocument();
+    expect(within(screen.getByRole("table", { name: "Unmapped mappings" })).queryByText("Z12.11")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: `Mapped (${status === "approved" ? 1 : 0})` })).toBeInTheDocument();
   });
 });

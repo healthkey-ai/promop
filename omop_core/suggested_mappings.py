@@ -49,14 +49,6 @@ REVIEWED_SUGGESTIONS = {
         'omop_table': 'observation', 'value_kind': 'date',
         'rationale': '"Date of diagnosis" — the same fact, phrased the other way round.',
     },
-    'death_date': {
-        'vocabulary_id': 'LOINC', 'concept_code': '81954-0',
-        'omop_table': 'observation', 'value_kind': 'date',
-        'rationale': (
-            '"Date of death [Date]" rather than the plain "Date of death", '
-            'because this field carries a date and that variant says so.'
-        ),
-    },
     'condition_clinical_status': {
         'vocabulary_id': 'LOINC', 'concept_code': '99493-9',
         'omop_table': 'observation', 'value_kind': 'string',

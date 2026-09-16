@@ -56,6 +56,7 @@ _PK_SEQUENCES = [
     ('procedure_occurrence', 'procedure_occurrence_id'),
     ('person', 'person_id'),
     ('episode', 'episode_id'),
+    ('note', 'note_id'),
 ]
 
 

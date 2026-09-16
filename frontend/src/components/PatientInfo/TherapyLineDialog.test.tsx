@@ -11,11 +11,12 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import TherapyLineDialog from './TherapyLineDialog';
 
 const mockGet = vi.fn();
+const mockOutcomes = vi.fn();
 const mockPost = vi.fn();
 const mockPatch = vi.fn();
 vi.mock('@/api/axios', () => ({
   default: {
-    get: (...a: unknown[]) => mockGet(...a),
+    get: (...a: unknown[]) => a[0] === '/v1/therapy-outcomes/' ? mockOutcomes(...a) : mockGet(...a),
     post: (...a: unknown[]) => mockPost(...a),
     patch: (...a: unknown[]) => mockPatch(...a),
   },
@@ -35,6 +36,7 @@ let onAuthored: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockOutcomes.mockResolvedValue({ data: [{ code: 'PR', value: 'Partial Response', label: 'Partial Response (PR)' }] });
   onClose = vi.fn();
   onAuthored = vi.fn();
   mockGet.mockResolvedValue({ data: { results: [LENALIDOMIDE, DEXAMETHASONE] } });
@@ -120,6 +122,8 @@ describe('TherapyLineDialog', () => {
       start_date: '2025-03-01',
       end_date: null,
       outcome: null,
+      intent: null,
+      discontinuation_reason: null,
       regimen_concept_id: null,
       drugs: [{ concept_id: 19026972, source_value: 'lenalidomide' }],
     });
@@ -388,6 +392,8 @@ describe('TherapyLineDialog', () => {
       start_date: '2025-01-15',
       end_date: '2025-06-15',
       outcome: 'Partial Response',
+      intent: null,
+      discontinuation_reason: null,
       regimen_concept_id: null,
       drugs: [{ concept_id: 1518254, source_value: 'dexamethasone' }],
     });
@@ -396,4 +402,17 @@ describe('TherapyLineDialog', () => {
       therapy_lines_count: 1, first_line_therapy: 'Dex',
     });
   });
+});
+
+
+it('loads disease-specific outcomes and submits the selected response', async () => {
+  mockOutcomes.mockResolvedValue({ data: [{ code: 'VGPR', value: 'Very Good Partial Response', label: 'Very Good Partial Response (VGPR)' }] });
+  render(<TherapyLineDialog personId={262} defaultLineNumber={1} diseaseCode="C3242" onClose={onClose} onAuthored={onAuthored} />);
+  await screen.findByRole('option', { name: 'Very Good Partial Response (VGPR)' });
+  expect(mockOutcomes).toHaveBeenCalledWith('/v1/therapy-outcomes/', { params: { disease: 'C3242' } });
+  expect(screen.queryByRole('option', { name: 'Partial Response (PR)' })).not.toBeInTheDocument();
+  await addDrug('lenalidomide');
+  fireEvent.change(screen.getByLabelText(/outcome/i), { target: { value: 'Very Good Partial Response' } });
+  fireEvent.click(screen.getByRole('button', { name: /record line/i }));
+  await waitFor(() => expect(mockPost).toHaveBeenCalledWith('/v1/therapy-lines/', expect.objectContaining({ outcome: 'Very Good Partial Response' })));
 });

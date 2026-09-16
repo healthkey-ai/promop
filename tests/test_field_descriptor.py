@@ -131,7 +131,7 @@ def test_tabs_are_valid():
     """All tab values are from the known set."""
     valid_tabs = {
         'general', 'disease', 'treatment', 'blood', 'labs',
-        'behavior', 'other',
+        'behavior', 'genomics', 'other',
     }
     descriptors = get_all_field_descriptors()
     found_tabs = {d['tab'] for d in descriptors}

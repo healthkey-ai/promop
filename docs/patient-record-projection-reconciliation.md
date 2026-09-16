@@ -1,8 +1,9 @@
 # Reconciling legacy PatientRecord values
 
-`PatientRecord` is a derived clinical read model.  It is not an alternate
-clinical source of truth.  Some pre-#484 deployments may nevertheless contain
-values entered directly into that projection.
+This runbook repairs legacy numeric lab/vital values from pre-#484 deployments.
+For current interactive edits and automatic mapping-approval backfill, use
+[PatientRecord-first writes](patient-record-first-writes.md). The legacy repair
+command requires an independently verified clinical event date.
 
 Run `reconcile_patient_record_projection` first with no write options.  It
 reports only mapped numeric lab/vital tuples:
@@ -13,8 +14,8 @@ reports only mapped numeric lab/vital tuples:
 
 Unmapped legacy `PatientRecord` fields are deliberately excluded from this
 clinical repair inventory. Profile/admin values displayed on PatientRecord are
-owned by HealthKey extension columns on `Person`; direct PatientRecord writes
-are not a source-of-truth path.
+projected onward to Person/Location by the current PatientRecord PATCH path;
+this command does not repair them.
 
 An operator who has recovered and verified the actual clinical event date may
 create only the `RECONCILABLE` facts:

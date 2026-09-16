@@ -98,6 +98,7 @@ _DRUG_SYSTEMS = (
 _MEASUREMENT_SYSTEMS = (
     ('LOINC', 'LOINC — OMOP standard for labs and measurements'),
     ('SNOMED', 'SNOMED CT — findings and qualitative results'),
+    ('CIEL', 'CIEL — interface terminology'),
     ('OpenWearables', 'OpenWearables — unified wearable device metrics'),
     ('Apple', 'Apple — Apple HealthKit wearable metrics'),
     ('Garmin', 'Garmin — Garmin FIT wearable metrics'),
@@ -113,6 +114,7 @@ _OBSERVATION_SYSTEMS = (
     ('Apple', 'Apple — Apple HealthKit wearable metrics'),
     ('Garmin', 'Garmin — Garmin FIT wearable metrics'),
     ('ICD10CM', 'ICD-10-CM — Z-codes and social history'),
+    ('ICD10', 'ICD-10 — Z-code equivalents (merged with ICD-10-CM)'),
     ('HCPCS', 'HCPCS — assessments and screenings'),
     ('NCIt', 'NCIt — NCI thesaurus'),
     ('PPI', 'PPI — participant-provided information (surveys)'),
@@ -158,7 +160,7 @@ def domain_for_table(omop_table):
 # Non-standard vocabularies (the ones curators actually need to map) come first,
 # then uncoded, then standard vocabularies last (they self-resolve).
 SOURCE_TAB_ORDER = [
-    'ICD10CM', 'ICD10', 'ICD9CM', 'CPT4', 'HCPCS',
+    'ICD10', 'ICD9CM', 'CPT4', 'HCPCS',
     'RxNorm', 'NDC',
     'Read', 'MeSH', 'OPCS4', 'Nebraska Lexicon',
     'MedDRA', 'ICDO3', 'dm+d',
@@ -168,7 +170,6 @@ SOURCE_TAB_ORDER = [
 ]
 
 SOURCE_TAB_LABELS = {
-    'ICD10CM': 'ICD-10-CM',
     'ICD10': 'ICD-10',
     'ICD9CM': 'ICD-9-CM',
     'ICD10PCS': 'ICD-10-PCS',
@@ -181,6 +182,10 @@ SOURCE_TAB_LABELS = {
 # Wearable device vocabularies that are consolidated under the single
 # "Wearables" tab (OpenWearables) on the Code Mapping page.
 WEARABLE_SOURCE_VOCABULARIES = {'OpenWearables', 'Apple', 'Garmin'}
+
+# ICD-10-CM codes are merged into the ICD-10 tab — curators think of them as
+# one vocabulary.  Same pattern as wearable consolidation above.
+ICD10CM_MERGE = {'ICD10CM': 'ICD10'}
 
 # FHIR OID URIs that are aliases for OMOP vocabulary_ids.  Rows arriving
 # via crossmap imports sometimes carry the OID instead of the OMOP spelling.

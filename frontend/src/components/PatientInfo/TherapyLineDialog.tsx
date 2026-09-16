@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Search, X, Plus, Trash2 } from 'lucide-react';
 import {
-  searchDrugConcepts, authorTherapyLine, updateTherapyLine, THERAPY_OUTCOME_CHOICES,
+  searchDrugConcepts, authorTherapyLine, updateTherapyLine,
+  listTherapyOutcomes, type TherapyOutcomeChoice, THERAPY_INTENT_CHOICES, DISCONTINUATION_REASON_CHOICES,
   searchTherapyRegimens, listTherapyRegimens, getTherapyRegimenDetail,
   type DrugConcept, type EditableTherapyLine,
 } from '@/api/therapyLines';
@@ -56,6 +57,11 @@ export default function TherapyLineDialog({
   const [startDate, setStartDate] = useState(line?.start_date ?? '');
   const [endDate, setEndDate] = useState(line?.end_date ?? '');
   const [outcome, setOutcome] = useState(line?.outcome ?? '');
+  const [outcomes, setOutcomes] = useState<TherapyOutcomeChoice[]>([]);
+  const [loadingOutcomes, setLoadingOutcomes] = useState(true);
+  const [outcomeError, setOutcomeError] = useState('');
+  const [intent, setIntent] = useState(line?.intent ?? '');
+  const [discReason, setDiscReason] = useState(line?.discontinuation_reason ?? '');
   const [drugs, setDrugs] = useState<SelectedDrug[]>(line?.drugs ?? []);
 
   const [query, setQuery] = useState('');
@@ -64,6 +70,16 @@ export default function TherapyLineDialog({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    listTherapyOutcomes(diseaseCode).then((items) => {
+      if (active) setOutcomes(items);
+    }).catch(() => {
+      if (active) setOutcomeError('Could not load outcomes. Close and reopen to retry.');
+    }).finally(() => { if (active) setLoadingOutcomes(false); });
+    return () => { active = false; };
+  }, [diseaseCode]);
 
   // Regimen picker state
   const [selectedRegimen, setSelectedRegimen] = useState<TherapyRegimen | null>(null);
@@ -184,6 +200,9 @@ export default function TherapyLineDialog({
     }
   }, []);
 
+  // Clearing the regimen dissociates the label but keeps any drugs the user
+  // may have added or modified — a clinician selecting a regimen to pre-fill
+  // the drug list and then clearing the regimen still wants those drugs.
   const clearRegimen = useCallback(() => {
     setSelectedRegimen(null);
     setSearchMode(false);
@@ -249,6 +268,8 @@ export default function TherapyLineDialog({
         start_date: startDate || null,
         end_date: endDate || null,
         outcome: outcome || null,
+        intent: intent || null,
+        discontinuation_reason: discReason || null,
         // Preserve the original concept_id when the clinician hasn't changed the
         // regimen — a no-op save must not silently erase a stored concept.
         regimen_concept_id: selectedRegimen?.concept_id ?? line?.regimen_concept_id ?? null,
@@ -293,7 +314,7 @@ export default function TherapyLineDialog({
       aria-modal="true"
       aria-label={editing ? 'Edit a line of therapy' : 'Record a line of therapy'}
     >
-      <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-lg border border-border bg-background p-5 shadow-xl">
+      <div className="max-h-[90vh] w-full max-w-[32rem] overflow-y-auto rounded-lg border border-border bg-background p-5 shadow-xl">
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-base font-semibold">
             {editing ? 'Edit line of therapy' : 'Record a line of therapy'}
@@ -304,7 +325,7 @@ export default function TherapyLineDialog({
         </div>
 
         <p className="mb-4 text-xs text-muted-foreground">
-          The therapy fields on this tab are derived from the lines on record.
+          The therapy fields on this tab are derived from the lines on record.{' '}
           {editing
             ? 'Changing one here updates the drug exposures and episode grouping, then re-derives the record.'
             : 'Adding one here writes the drug exposures and the episode that groups them, then re-derives the record.'}
@@ -323,11 +344,13 @@ export default function TherapyLineDialog({
           <label className="text-sm">
             <span className="mb-1 block font-medium">Outcome</span>
             <select
+              disabled={loadingOutcomes || !!outcomeError}
               value={outcome} onChange={(e) => setOutcome(e.target.value)}
               className="w-full rounded-md border border-input px-2 py-1.5 text-sm"
             >
               <option value="">—</option>
-              {THERAPY_OUTCOME_CHOICES.map((o) => (
+              {outcome && !outcomes.some((o) => o.value === outcome) && <option value={outcome}>{outcome}</option>}
+              {outcomes.map((o) => (
                 <option key={o.value} value={o.value}>{o.label}</option>
               ))}
             </select>
@@ -347,6 +370,30 @@ export default function TherapyLineDialog({
               onChange={(e) => setEndDate(e.target.value)}
               className="w-full rounded-md border border-input px-2 py-1.5 text-sm"
             />
+          </label>
+          <label className="text-sm">
+            <span className="mb-1 block font-medium">Intent</span>
+            <select
+              value={intent} onChange={(e) => setIntent(e.target.value)}
+              className="w-full rounded-md border border-input px-2 py-1.5 text-sm"
+            >
+              <option value="">—</option>
+              {THERAPY_INTENT_CHOICES.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+          </label>
+          <label className="text-sm">
+            <span className="mb-1 block font-medium">Reason for discontinuation</span>
+            <select
+              value={discReason} onChange={(e) => setDiscReason(e.target.value)}
+              className="w-full rounded-md border border-input px-2 py-1.5 text-sm"
+            >
+              <option value="">—</option>
+              {DISCONTINUATION_REASON_CHOICES.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
           </label>
         </div>
 
@@ -527,6 +574,7 @@ export default function TherapyLineDialog({
           )}
         </div>
 
+        {outcomeError && <p role="alert" className="mt-4 text-sm text-red-700">{outcomeError}</p>}
         {error && (
           <p className="mt-4 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700" role="alert">
             {error}

@@ -80,6 +80,7 @@ class TestTheSuggestionsAreWellFormed:
         """Suggesting where a mapping already exists would invite overwriting one."""
         descriptor = build_writable_field_descriptor()
         for field in REVIEWED_SUGGESTIONS:
-            assert descriptor[field]['kind'] == 'unmapped', (
-                f'{field} is {descriptor[field]["kind"]}, not awaiting a concept'
+            entry = descriptor[field]
+            assert 'projection' not in entry, (
+                f'{field} already has projection metadata — suggesting would overwrite'
             )

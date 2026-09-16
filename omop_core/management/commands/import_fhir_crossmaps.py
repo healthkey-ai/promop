@@ -23,7 +23,8 @@ Non-standard targets are skipped with a count reported at the end.
 import json
 import logging
 
-from django.core.management.base import BaseCommand, CommandError
+from django.core.management.base import CommandError
+from omop_core.management.embedding_command import EmbeddingLoadCommand
 
 from omop_core.models import Concept, SourceCodeConceptMapping
 from omop_core.services.source_vocabularies import (
@@ -36,7 +37,7 @@ logger = logging.getLogger(__name__)
 VALID_TYPES = ('cpt-to-snomed', 'snomed-to-rxnorm')
 
 
-class Command(BaseCommand):
+class Command(EmbeddingLoadCommand):
     help = 'Import ETL FHIR cross-map JSON files into SourceCodeConceptMapping.'
 
     def add_arguments(self, parser):

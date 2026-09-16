@@ -7,6 +7,7 @@ data/
 !/omop_core/data/
 /omop_core/data/*
 !/omop_core/data/code_concept_mappings.json
+!/omop_core/data/icd10_snomed_mappings.json
 # Therapy reference CSVs are force-added (git add -f) despite this rule
 
 # Node modules and frontend build
@@ -110,3 +111,4 @@ synthea-with-dependencies.jar
 # Local agent/tool state
 .claude/
 .worktrees/
+.review/

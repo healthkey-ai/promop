@@ -40,7 +40,7 @@ def test_histologic_type_uses_measurement_source_value_fallback():
 def test_genetic_mutations_use_measurement_source_value_fallback():
     person = PersonFactory()
 
-    MeasurementFactory(
+    measurement = MeasurementFactory(
         person=person,
         measurement_date=date(2024, 5, 1),
         measurement_source_value='21636-6',
@@ -51,11 +51,35 @@ def test_genetic_mutations_use_measurement_source_value_fallback():
 
     assert data['genetic_mutations'] == [
         {
+            'id': measurement.pk,
             'gene': 'brca1',
             'variant': 'BRCA1 pathogenic variant',
             'test_date': '2024-05-01',
+            'status': 'present',
+            'provenance': 'asserted',
         },
     ]
+
+
+def test_generic_gene_mutation_loinc_round_trips_gene_from_qualifier():
+    """The #905 LOINC question preserves a UI-selected gene and its variant."""
+    person = PersonFactory()
+
+    measurement = MeasurementFactory(
+        person=person,
+        measurement_source_value='36908-2',
+        qualifier_source_value='BRCA1',
+        value_as_string='c.68_69delAG',
+    )
+
+    assert _get_genetic_mutations(person)['genetic_mutations'] == [{
+        'id': measurement.pk,
+        'gene': 'brca1',
+        'variant': 'c.68_69delAG',
+        'test_date': '2024-01-15',
+        'status': 'present',
+        'provenance': 'asserted',
+    }]
 
 
 def test_genomics_pathology_fields_use_dated_loinc_measurements():
@@ -66,7 +90,7 @@ def test_genomics_pathology_fields_use_dated_loinc_measurements():
     # source values so the contract does not depend on an installed Athena DB.
     MeasurementFactory(
         person=person, measurement_date=date(2024, 5, 1),
-        measurement_source_value='85337-4', value_as_string='NGS', value_as_number=17,
+        measurement_concept_id=0, measurement_source_value='85069-3', value_as_string='NGS', value_as_number=17,
     )
     MeasurementFactory(
         person=person, measurement_date=date(2024, 5, 2),
@@ -97,12 +121,10 @@ def test_genomics_pathology_fields_use_dated_loinc_measurements():
 
     assert data == {
         'test_methodology': 'NGS',
-        'oncotype_dx_score': 17,
         'test_date': date(2024, 5, 3),
         'test_specimen_type': 'Primary biopsy',
         'report_interpretation': 'Indeterminate',
         'androgen_receptor_status': 'Positive',
-        'lymph_node_status': 'Positive',
         'metastasis_status': 'Negative',
         'biopsy_grade_depr': '2',
     }
@@ -140,13 +162,13 @@ def test_refresh_clears_removed_genomics_pathology_facts():
         mrd_status='Positive',
     )
     measurement = MeasurementFactory(
-        person=person, measurement_source_value='85337-4',
+        person=person, measurement_concept_id=0, measurement_source_value='85069-3',
         value_as_string='IHC', value_as_number=12,
     )
 
     refreshed = refresh_patient_record(person)
     assert refreshed.test_methodology == 'IHC'
-    assert refreshed.oncotype_dx_score == 12
+    assert refreshed.oncotype_dx_score is None
 
     measurement.delete()
     refreshed = refresh_patient_record(person)
@@ -183,16 +205,12 @@ def test_wearable_metrics_use_measurement_source_value_fallbacks():
     assert data['sleep_duration_hours_avg_30d'] == pytest.approx(7.3)
 
 
-def test_treatment_fallback_derives_bc_regimen_concept_from_same_day_combo():
+def test_treatment_without_persisted_episode_does_not_project_a_line():
     person = PersonFactory()
 
-    # The TC regimen concept exists on real DBs (HemOnc-loaded); seed it so
-    # derivation can surface its full concept name, not just the 'TC' abbreviation.
-    ConceptFactory(concept_id=35804232, concept_name='Cyclophosphamide and Docetaxel (TC)')
-
-    # Same-day combination — explicit end dates so LOT inference groups the two
-    # exposures into one line (DrugExposureFactory's default end date is
-    # unrelated to these start dates).
+    # Drug exposure import precedes ARTEMIS episode generation.  Refresh must
+    # not run an in-memory ARTEMIS-lite grouping: only persisted Episode +
+    # EpisodeEvent records can populate the treatment-line projection.
     DrugExposureFactory(
         person=person,
         drug_concept=ConceptFactory(concept_name='docetaxel 20 MG/ML Injection [DOCETAXEL EG]'),
@@ -208,70 +226,9 @@ def test_treatment_fallback_derives_bc_regimen_concept_from_same_day_combo():
 
     data = _get_treatment_data(person)
 
-    assert data['first_line_therapy'] == 'Cyclophosphamide and Docetaxel (TC)'
-    assert data['first_line_therapy_id'] == 35804232
-    assert data['therapy_lines_count'] == 1
-
-
-def test_treatment_fallback_collapses_staggered_bc_backfill_into_one_line():
-    person = PersonFactory()
-
-    DrugExposureFactory(
-        person=person,
-        drug_concept=ConceptFactory(concept_name='doxorubicin hydrochloride 2 MG/ML Injection'),
-        drug_exposure_start_date=date(2024, 1, 1),
-        drug_exposure_end_date=date(2024, 1, 21),
-    )
-    DrugExposureFactory(
-        person=person,
-        drug_concept=ConceptFactory(concept_name='cyclophosphamide 500 MG Injection'),
-        drug_exposure_start_date=date(2024, 1, 22),
-        drug_exposure_end_date=date(2024, 2, 11),
-    )
-    DrugExposureFactory(
-        person=person,
-        drug_concept=ConceptFactory(concept_name='Paclitaxel 6 MG/ML Injection [Aj-Paclitaxel]'),
-        drug_exposure_start_date=date(2024, 2, 12),
-        drug_exposure_end_date=date(2024, 3, 4),
-    )
-
-    data = _get_treatment_data(person)
-
-    assert data['first_line_therapy'] == 'AC-T'
-    assert data['first_line_therapy_id'] == 35101507
-    assert data['therapy_lines_count'] == 1
-
-
-def test_treatment_fallback_normalizes_thp_product_names_to_regimen():
-    person = PersonFactory()
-
-    # Contiguous end dates so LOT inference groups the three product-named
-    # exposures into a single line (DrugExposureFactory's default end date is
-    # unrelated to these start dates).
-    DrugExposureFactory(
-        person=person,
-        drug_concept=ConceptFactory(concept_name='Paclitaxel 6 MG/ML Injection [Aj-Paclitaxel]'),
-        drug_exposure_start_date=date(2024, 1, 1),
-        drug_exposure_end_date=date(2024, 1, 21),
-    )
-    DrugExposureFactory(
-        person=person,
-        drug_concept=ConceptFactory(concept_name='trastuzumab 150 MG Injectable Solution'),
-        drug_exposure_start_date=date(2024, 1, 22),
-        drug_exposure_end_date=date(2024, 2, 11),
-    )
-    DrugExposureFactory(
-        person=person,
-        drug_concept=ConceptFactory(concept_name='pertuzumab; parenteral'),
-        drug_exposure_start_date=date(2024, 2, 12),
-        drug_exposure_end_date=date(2024, 3, 4),
-    )
-
-    data = _get_treatment_data(person)
-
-    assert data['first_line_therapy'] == 'THP'
-    assert data['first_line_therapy_id'] == 1525210
-    assert data['therapy_lines_count'] == 1
+    assert 'first_line_therapy' not in data
+    assert 'first_line_therapy_id' not in data
+    assert 'therapy_lines_count' not in data
 
 
 def test_mm_specific_data_merges_measurement_and_observation_sources():

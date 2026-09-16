@@ -35,8 +35,7 @@ describe('step 5 fields round trip (live server)', () => {
     const after = await record();
     expect(Number(after.pd_l1_combined_positive_score)).toBe(next);
 
-    render(<DiseaseTab formData={after} onChange={vi.fn()} onMutationAdd={vi.fn()}
-      onMutationRemove={vi.fn()} onMutationChange={vi.fn()} diseaseType="breast" />);
+    render(<DiseaseTab formData={after} onChange={vi.fn()} diseaseType="breast" />);
     await waitFor(() =>
       expect(screen.getByDisplayValue(String(next))).toBeInTheDocument(),
     );
@@ -53,7 +52,7 @@ describe('step 5 fields round trip (live server)', () => {
     expect(after.facility_name).toBe(next);
 
     render(<GeneralTab formData={after} onChange={vi.fn()} editedName="T"
-      onNameChange={vi.fn()} onZipcodeChange={vi.fn()} diseaseType="breast" />);
+      onNameChange={vi.fn()} onZipcodeChange={vi.fn()} />);
     await waitFor(() =>
       expect(screen.getByDisplayValue(next)).toBeInTheDocument(),
     );
