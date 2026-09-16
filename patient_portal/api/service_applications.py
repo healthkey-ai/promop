@@ -1,4 +1,6 @@
 """Staff application/token administration, with one-time secret disclosure."""
+from datetime import timedelta
+
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers, status, viewsets
@@ -42,13 +44,25 @@ class ServiceApplicationSerializer(serializers.ModelSerializer):
         return ' '.join(sorted(scopes))
 
 
+# A service credential is a static bearer secret with no refresh step, so its
+# lifetime is the whole of its exposure. An expiry the operator chooses is
+# accepted; a year-2999 expiry is not a choice, it is the absence of one.
+MAX_TOKEN_LIFETIME = timedelta(days=365)
+
+
 class TokenIssueSerializer(serializers.Serializer):
     label = serializers.CharField(max_length=160)
     expires_at = serializers.DateTimeField(required=False, allow_null=True)
 
     def validate_expires_at(self, value):
-        if value is not None and value <= timezone.now():
+        if value is None:
+            return value
+        now = timezone.now()
+        if value <= now:
             raise serializers.ValidationError('Expiration must be in the future.')
+        if value > now + MAX_TOKEN_LIFETIME:
+            raise serializers.ValidationError(
+                f'Expiration cannot be more than {MAX_TOKEN_LIFETIME.days} days away.')
         return value
 
 

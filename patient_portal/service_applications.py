@@ -8,12 +8,13 @@ from django.utils import timezone
 from rest_framework.exceptions import AuthenticationFailed
 
 from patient_portal.models import ServiceAccessToken, ServiceApplication
-from patient_portal.service_tokens import ServiceCredential
-
-ALLOWED_SCOPES = frozenset({
-    'patient/*.read', 'patient/*.write', 'user/*.read', 'user/*.write',
-    'system/*.read', 'system/etl.write',
-})
+# ALLOWED_SCOPES lives in service_tokens so patient_portal.models can enforce it
+# as a field validator without importing this module (which imports the models).
+# Re-exported here for the callers that already import it from this module.
+from patient_portal.service_tokens import (  # noqa: F401
+    ALLOWED_SCOPES as ALLOWED_SCOPES,
+    ServiceCredential,
+)
 
 
 def token_digest(secret):

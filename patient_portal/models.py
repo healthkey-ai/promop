@@ -6,6 +6,8 @@ from django.db import models
 from django.db.models import Q
 from django.utils import timezone
 
+from patient_portal.service_tokens import validate_service_scopes
+
 
 class IdentityManager(BaseUserManager):
     use_in_migrations = True
@@ -426,7 +428,8 @@ class ServiceApplication(models.Model):
     ])
     description = models.TextField(blank=True)
     owner_contact = models.CharField(max_length=255, blank=True)
-    scopes = models.CharField(max_length=512, default='patient/*.read', blank=True)
+    scopes = models.CharField(max_length=512, default='patient/*.read', blank=True,
+                              validators=[validate_service_scopes])
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

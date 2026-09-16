@@ -26813,3 +26813,170 @@ class CreateSmartAppRedirectSchemeTest(TestCase):
                 )
         self.assertEqual(
             self._application().redirect_uris, 'https://client.example.invalid/callback')
+
+
+from patient_portal.models import ServiceAccessToken, ServiceApplication  # noqa: E402
+
+
+class ServiceScopeCapTest(TestCase):
+    """ALLOWED_SCOPES was stated in one place and enforced in another (#1218 review)."""
+
+    def test_the_model_rejects_a_scope_outside_the_cap(self):
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
+        application = ServiceApplication(
+            name='Rogue', service_id='rogue-service', scopes='patient/*.read patient/*.delete')
+        with self.assertRaises(DjangoValidationError) as ctx:
+            application.full_clean()
+        self.assertIn('scopes', ctx.exception.message_dict)
+        self.assertIn('patient/*.delete', str(ctx.exception))
+
+    def test_the_model_accepts_every_supported_scope(self):
+        from patient_portal.service_tokens import ALLOWED_SCOPES
+
+        application = ServiceApplication(
+            name='ETL', service_id='etl-full', scopes=' '.join(sorted(ALLOWED_SCOPES)))
+        application.full_clean()
+
+    def test_the_django_admin_form_enforces_the_same_cap(self):
+        """Admin is a model form, so it must inherit the field validator."""
+        from django.contrib import admin as django_admin
+
+        model_admin = django_admin.site._registry[ServiceApplication]
+        form_class = model_admin.get_form(None)
+        form = form_class(data={
+            'name': 'Rogue', 'service_id': 'rogue-admin', 'description': '',
+            'owner_contact': '', 'scopes': 'system/*.delete', 'is_active': True,
+        })
+        self.assertFalse(form.is_valid())
+        self.assertIn('scopes', form.errors)
+
+    def test_an_environment_grant_with_an_unsupported_scope_is_reported(self):
+        from patient_portal.checks import service_token_scope_check
+
+        with override_settings(
+            SERVICE_AUTH_TOKENS={'etl': {'token': 'x' * 40, 'scopes': 'patient/*.read bogus/scope'}},
+            SERVICE_AUTH_TOKEN='', SERVICE_AUTH_SCOPES='patient/*.read',
+        ):
+            issues = service_token_scope_check(None)
+        self.assertEqual([issue.id for issue in issues], ['patient_portal.W007'])
+        self.assertIn('bogus/scope', issues[0].msg)
+        self.assertNotIn('x' * 40, issues[0].msg)
+
+    def test_the_legacy_grant_is_only_checked_when_it_is_configured(self):
+        from patient_portal.checks import service_token_scope_check
+
+        with override_settings(SERVICE_AUTH_TOKENS={}, SERVICE_AUTH_TOKEN='',
+                               SERVICE_AUTH_SCOPES='patient/*.reed'):
+            self.assertEqual(service_token_scope_check(None), [])
+        with override_settings(SERVICE_AUTH_TOKENS={}, SERVICE_AUTH_TOKEN='legacy-secret',
+                               SERVICE_AUTH_SCOPES='patient/*.reed'):
+            issues = service_token_scope_check(None)
+        self.assertEqual([issue.id for issue in issues], ['patient_portal.W007'])
+        self.assertNotIn('legacy-secret', issues[0].msg)
+
+    def test_a_malformed_service_token_setting_does_not_crash_the_deploy_check(self):
+        from patient_portal.checks import service_token_scope_check
+
+        with override_settings(SERVICE_AUTH_TOKENS='not-a-mapping', SERVICE_AUTH_TOKEN=''):
+            self.assertEqual(service_token_scope_check(None), [])
+
+    def test_a_conforming_environment_grant_is_silent(self):
+        from patient_portal.checks import service_token_scope_check
+
+        with override_settings(
+            SERVICE_AUTH_TOKENS={'etl': {'token': 'x' * 40, 'scopes': 'system/etl.write'}},
+            SERVICE_AUTH_TOKEN='', SERVICE_AUTH_SCOPES='patient/*.read',
+        ):
+            self.assertEqual(service_token_scope_check(None), [])
+
+
+class ServiceTokenLifetimeTest(TestCase):
+    """A static bearer secret with no refresh step needs a bounded lifetime."""
+
+    def test_an_expiry_beyond_the_cap_is_rejected(self):
+        from patient_portal.api.service_applications import (
+            MAX_TOKEN_LIFETIME, TokenIssueSerializer,
+        )
+
+        serializer = TokenIssueSerializer(data={
+            'label': 'forever', 'expires_at': '2999-01-01T00:00:00Z'})
+        self.assertFalse(serializer.is_valid())
+        self.assertIn(str(MAX_TOKEN_LIFETIME.days), str(serializer.errors['expires_at']))
+
+    def test_an_expiry_inside_the_cap_is_accepted(self):
+        from patient_portal.api.service_applications import (
+            MAX_TOKEN_LIFETIME, TokenIssueSerializer,
+        )
+
+        expires = timezone.now() + MAX_TOKEN_LIFETIME - timedelta(days=1)
+        serializer = TokenIssueSerializer(data={
+            'label': 'annual', 'expires_at': expires.isoformat()})
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+    def test_no_expiry_is_still_allowed(self):
+        from patient_portal.api.service_applications import TokenIssueSerializer
+
+        serializer = TokenIssueSerializer(data={'label': 'unbounded', 'expires_at': None})
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+
+class LegacyServiceGrantKillSwitchTest(TestCase):
+    """Disabling the application must stop the environment credential (#1218 review)."""
+
+    LEGACY_TOKEN = 'legacy-env-secret-token-value-0001'
+
+    def _authenticate(self):
+        from patient_portal.api.authentication import ServiceTokenAuthentication
+        from rest_framework.test import APIRequestFactory
+
+        request = APIRequestFactory().get('/api/v1/patient-records/')
+        request.META['HTTP_AUTHORIZATION'] = f'Bearer {self.LEGACY_TOKEN}'
+        return ServiceTokenAuthentication().authenticate(request)
+
+    def test_the_seeded_application_matches_the_legacy_credentials_service_id(self):
+        application = ServiceApplication.objects.get(service_id='hk-labs-sync')
+        self.assertTrue(application.is_active)
+        self.assertFalse(application.tokens.exists())
+        # No scopes: while the environment credential is live, its scopes come
+        # from SERVICE_AUTH_SCOPES, and a guess here would narrow them at cutover.
+        self.assertEqual(application.scopes, '')
+
+    def test_a_rollback_keeps_an_operators_disabled_kill_switch(self):
+        """Deleting a disabled row on rollback would re-arm the credential."""
+        from importlib import import_module
+
+        from django.apps import apps as global_apps
+        from django.db import connection
+
+        migration = import_module(
+            'patient_portal.migrations.0019_seed_legacy_service_application')
+        ServiceApplication.objects.filter(service_id='hk-labs-sync').update(is_active=False)
+        migration.drop_legacy_application(global_apps, connection.schema_editor())
+        self.assertTrue(ServiceApplication.objects.filter(service_id='hk-labs-sync').exists())
+
+    def test_a_rollback_removes_the_untouched_seeded_row(self):
+        from importlib import import_module
+
+        from django.apps import apps as global_apps
+        from django.db import connection
+
+        migration = import_module(
+            'patient_portal.migrations.0019_seed_legacy_service_application')
+        migration.drop_legacy_application(global_apps, connection.schema_editor())
+        self.assertFalse(ServiceApplication.objects.filter(service_id='hk-labs-sync').exists())
+
+    @override_settings(SERVICE_AUTH_TOKEN=LEGACY_TOKEN, SERVICE_AUTH_TOKENS={},
+                       SERVICE_AUTH_SCOPES='patient/*.read')
+    def test_the_legacy_credential_works_while_the_application_is_enabled(self):
+        identity, credential = self._authenticate()
+        self.assertEqual(credential.service_id, 'hk-labs-sync')
+
+    @override_settings(SERVICE_AUTH_TOKEN=LEGACY_TOKEN, SERVICE_AUTH_TOKENS={},
+                       SERVICE_AUTH_SCOPES='patient/*.read')
+    def test_disabling_the_application_stops_the_legacy_credential(self):
+        from rest_framework.exceptions import AuthenticationFailed
+
+        ServiceApplication.objects.filter(service_id='hk-labs-sync').update(is_active=False)
+        with self.assertRaises(AuthenticationFailed):
+            self._authenticate()

@@ -20,6 +20,14 @@ const scopeOptions = [
   ['user/*.read', 'Read user data'], ['user/*.write', 'Write user data'],
 ];
 const endpoint = '/v1/service-applications/';
+// Mirrors MAX_TOKEN_LIFETIME in patient_portal/api/service_applications.py; the
+// server is the authority and reports the exact bound it refused.
+const MAX_TOKEN_DAYS = 365;
+
+function maxExpiry() {
+  const limit = new Date(Date.now() + MAX_TOKEN_DAYS * 24 * 60 * 60 * 1000);
+  return limit.toISOString().slice(0, 16);
+}
 const inputClass = 'w-full rounded border border-gray-300 p-2 text-sm';
 const buttonClass = 'rounded border border-gray-300 px-3 py-2 text-sm disabled:opacity-50';
 const formatDate = (value: string | null) => value ? new Date(value).toLocaleString() : 'Never';
@@ -79,7 +87,14 @@ export default function ServiceApplicationsPage() {
       // Kept only in component memory; never local/session storage or logs.
       setIssued({ token: response.data.token, appName: selected.name }); setTokenLabel('');
       await load();
-    } catch { setError('Could not create the token. Check the label, expiry, and application status.'); }
+    } catch (err) {
+      // The server states the exact bound it refused (e.g. the maximum
+      // lifetime); a generic message would leave the operator guessing.
+      const detail = (err as { response?: { data?: Record<string, string[] | string> } })
+        .response?.data?.expires_at;
+      setError(Array.isArray(detail) ? detail[0] : detail
+        || 'Could not create the token. Check the label, expiry, and application status.');
+    }
     finally { setBusy(false); }
   }
   async function revoke() {
@@ -124,7 +139,7 @@ export default function ServiceApplicationsPage() {
           <label className="block text-sm">Description<textarea className={inputClass} value={draft.description}
             onChange={e => setDraft({ ...draft, description: e.target.value })} /></label>
           <fieldset><legend className="text-sm font-medium">Access for all tokens in this application</legend>
-            <p className="mb-2 text-xs text-gray-600">Service grants apply across patients. Changes affect existing tokens immediately.</p>
+            <p className="mb-2 text-xs text-gray-600">Service grants apply across patients. Changes affect tokens issued here immediately. A credential still configured through the environment keeps its configured scopes until it is replaced by a token issued here; disabling the application stops it.</p>
             {scopeOptions.map(([scope, label]) => <label key={scope} className="block text-sm">
               <input type="checkbox" checked={draft.scopes.split(' ').includes(scope)} onChange={e => {
                 const values = new Set(draft.scopes.split(' ').filter(Boolean));
@@ -143,7 +158,8 @@ export default function ServiceApplicationsPage() {
           <p className="text-sm text-gray-600">To rotate, create and distribute a replacement, then revoke the old token.</p>
           <label className="block text-sm">Token label<input className={inputClass} value={tokenLabel}
             onChange={e => setTokenLabel(e.target.value)} placeholder="e.g. Production integration" /></label>
-          <label className="block text-sm">Expires at (optional)<input type="datetime-local" className={inputClass}
+          <label className="block text-sm">Expires at (optional, at most {MAX_TOKEN_DAYS} days out)<input
+            type="datetime-local" className={inputClass} max={maxExpiry()}
             value={expiresAt} onChange={e => setExpiresAt(e.target.value)} /></label>
           <button className={buttonClass} disabled={busy || !selected.is_active || !tokenLabel.trim()} onClick={createToken}>Create token</button>
           {issued && <div role="status" className="space-y-2 rounded border border-amber-300 bg-amber-50 p-3">
