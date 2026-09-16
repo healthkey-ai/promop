@@ -164,6 +164,8 @@ interface MappingForm {
   standard_concept: string;
   destination_invalid_reason: string;
   omop_table: string;
+  measurement_type: string;
+  suggested_unit: string;
   status: "proposed" | "approved" | "rejected";
   notes: string;
 }
@@ -182,6 +184,8 @@ const emptyForm: MappingForm = {
   standard_concept: "",
   destination_invalid_reason: "",
   omop_table: "",
+  measurement_type: "",
+  suggested_unit: "",
   status: "proposed",
   notes: "",
 };
@@ -435,6 +439,8 @@ function buildEditForm(row: CodeMappingRow, reference: Reference): MappingForm {
     standard_concept: row.standard_concept || "",
     destination_invalid_reason: row.destination_invalid_reason || "",
     omop_table: row.destination_omop_table || omopTableFor(reference, domainId),
+    measurement_type: row.measurement_type || "",
+    suggested_unit: row.suggested_unit || "",
     status: row.status === "unmapped" ? "proposed" : row.status,
     notes: row.notes || "",
   };
@@ -867,6 +873,8 @@ export default function CodeMappingPage() {
         standard_concept: concept.standard_concept || "",
         destination_invalid_reason: concept.invalid_reason || "",
         omop_table: (adoptDomain ? "" : prev.omop_table) || omopTableFor(reference, domainId),
+        measurement_type: concept.measurement_type || "",
+        suggested_unit: concept.suggested_unit || "",
       };
     });
   };
@@ -2159,6 +2167,15 @@ export default function CodeMappingPage() {
                     value={form.omop_table}
                     testId="destination-table"
                   />
+                  {form.suggested_unit && (
+                    <ReadOnlyField
+                      id="suggested_unit"
+                      label="Unit"
+                      tip="Standard unit for this measurement concept, from LOINC."
+                      value={form.suggested_unit}
+                      testId="suggested-unit"
+                    />
+                  )}
                 </div>
                 <div className="mt-3 flex justify-end">
                   <button type="button" onClick={() => setMintOpen(true)} className="rounded border border-sky-300 px-3 py-2 text-sm text-sky-700">Mint new concept</button>

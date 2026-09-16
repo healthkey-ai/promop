@@ -7915,7 +7915,8 @@ def _concept_name_search_filter(query):
 
 
 def _serialize_concept(concept, versions=None):
-    return {
+    from omop_core.services.concept_unit_info import concept_unit_fields
+    payload = {
         'concept_id': concept.concept_id,
         'concept_name': concept.concept_name,
         'vocabulary_id': concept.vocabulary_id,
@@ -7926,6 +7927,8 @@ def _serialize_concept(concept, versions=None):
         'standard_concept': concept.standard_concept,
         'invalid_reason': concept.invalid_reason,
     }
+    payload.update(concept_unit_fields(concept))
+    return payload
 
 
 def _paginated_concept_response(queryset, request):
