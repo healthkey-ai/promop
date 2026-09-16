@@ -53,8 +53,8 @@ and treatment-guideline checking then all read the same pre-computed answers ins
 maintaining its own version of the truth.
 
 PRomop is deployed in production across the HealthTree Foundation (14,000 blood-cancer patients)
-and CancerBot (3,500 patients), supporting trial matching against 6,000 actively recruiting
-trials across five cancer types. Checking whether a patient meets a trial's eligibility criteria
+and CancerBot (3,500 patients), supporting trial matching against 18,000+ trials with structured eligibility criteria
+across five cancer types. Checking whether a patient meets a trial's eligibility criteria
 runs about 37 times faster against `PatientRecord` than against the raw OMOP tables
 [@Blum2026].
 
@@ -164,7 +164,7 @@ Key implementation components include:
 PRomop is deployed in production across two independent organizations — the HealthTree Foundation
 (approximately 14,000 blood-cancer patients) and CancerBot (approximately 3,500 patients) —
 totaling roughly 17,500 patient records. These deployments support clinical trial matching against
-6,000 actively recruiting trials across five cancer types (multiple myeloma, follicular lymphoma,
+18,000+ trials with structured eligibility criteria across five cancer types (multiple myeloma, follicular lymphoma,
 chronic lymphocytic leukemia, breast cancer, and diffuse large B-cell lymphoma).
 
 The `PatientRecord` projection has enabled integration with two downstream systems: PRism, a
