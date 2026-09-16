@@ -65,6 +65,8 @@ interface CodeMappingRow {
   destination_count: number;
   has_mapping: boolean;
   mapping_origin?: "athena" | "healthkey";
+  measurement_type?: "qualitative" | "quantitative";
+  suggested_unit?: string;
 }
 
 interface ConceptResult {
@@ -1362,6 +1364,9 @@ export default function CodeMappingPage() {
                 <div className="font-mono text-xs text-slate-500">
                   {row.destination_vocabulary_id}:{row.destination_concept_code}
                 </div>
+                {(row.measurement_type || row.suggested_unit) && (
+                  <ConceptInputDetails domain_id={row.destination_domain_id || ""} measurement_type={row.measurement_type} suggested_unit={row.suggested_unit} />
+                )}
               </td>
               <td className="px-4 py-3 font-mono text-xs text-slate-900">{row.destination_concept_id}</td>
               <td className={`px-4 py-3 text-center font-mono text-xs font-medium ${row.destination_count !== 1 ? "text-red-600" : "text-slate-700"}`}>{row.destination_count ?? 0}</td>
@@ -1959,6 +1964,8 @@ export default function CodeMappingPage() {
                               value={option.concept_id === null ? `unavailable:${option.vocabulary_id}:${option.concept_code}` : String(option.concept_id)}
                               disabled={!option.selectable}>
                               {option.concept_name} — {option.vocabulary_id}:{option.concept_code} — OMOP {option.concept_id ?? "not loaded"}
+                              {option.measurement_type ? ` · ${option.measurement_type === "quantitative" ? "Quantitative" : "Qualitative"}` : ""}
+                              {option.suggested_unit ? ` · ${option.suggested_unit}` : ""}
                               {option.origins.length ? ` (${option.origins.join(", ")})` : ""}
                               {!option.selectable ? " — unavailable" : ""}
                             </option>
