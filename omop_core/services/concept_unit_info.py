@@ -4,8 +4,10 @@ Pure functions, no view or request dependency. Used by the concept search view
 and by code-mapping serialisation to show curators the expected unit for a
 LOINC Measurement concept.
 """
+from functools import lru_cache
 
 
+@lru_cache(maxsize=1)
 def get_loinc_to_unit() -> dict[str, str]:
     """Lazily build LOINC-code -> unit mapping from LAB_FIELD_TO_LOINC."""
     from omop_core.services.mappings import LAB_FIELD_TO_LOINC
