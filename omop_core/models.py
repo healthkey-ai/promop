@@ -2138,11 +2138,15 @@ class LoincClass(models.Model):
 
 
 class LoincCodeClass(models.Model):
-    """Maps LOINC codes to their CLASS value (from Loinc.csv)."""
+    """Maps LOINC codes to their CLASS value and example units (from Loinc.csv)."""
     loinc_num = models.CharField(max_length=20, primary_key=True)
     loinc_class = models.ForeignKey(
         LoincClass, on_delete=models.CASCADE,
         db_column='loinc_class_code', to_field='code',
+    )
+    example_units = models.CharField(
+        max_length=128, blank=True, default='',
+        help_text='EXAMPLE_UNITS from Loinc.csv; empty when LOINC defines no unit.',
     )
 
     class Meta:

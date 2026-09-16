@@ -1,8 +1,10 @@
 """Tests for omop_core.services.concept_unit_info."""
+import pytest
 from types import SimpleNamespace
 
 from omop_core.services.concept_unit_info import (
     concept_unit_fields,
+    get_loinc_to_unit,
     measurement_input_type,
 )
 
@@ -68,3 +70,59 @@ class TestConceptUnitFields:
         result = concept_unit_fields(c)
         # No unit, no recognizable name marker → empty dict.
         assert result == {}
+
+
+@pytest.mark.django_db
+class TestGetLoincToUnitDBFallback:
+    """Verify that get_loinc_to_unit() picks up LoincCodeClass.example_units."""
+
+    def setup_method(self):
+        # Clear the lru_cache so each test gets a fresh lookup.
+        get_loinc_to_unit.cache_clear()
+
+    def teardown_method(self):
+        get_loinc_to_unit.cache_clear()
+
+    def test_db_units_included(self):
+        from omop_core.models import LoincClass, LoincCodeClass
+        LoincClass.objects.get_or_create(code='CHEM', defaults={'display_name': 'Chemistry'})
+        LoincCodeClass.objects.update_or_create(
+            loinc_num='99990-0',
+            defaults={'loinc_class_id': 'CHEM', 'example_units': 'mmol/L'},
+        )
+        units = get_loinc_to_unit()
+        assert units.get('99990-0') == 'mmol/L'
+
+    def test_curated_overrides_db(self):
+        """LAB_FIELD_TO_LOINC entry wins over a DB row with the same code."""
+        from omop_core.models import LoincClass, LoincCodeClass
+        LoincClass.objects.get_or_create(code='CHEM', defaults={'display_name': 'Chemistry'})
+        # Glucose (2345-7) is in LAB_FIELD_TO_LOINC with unit 'mg/dL'.
+        LoincCodeClass.objects.update_or_create(
+            loinc_num='2345-7',
+            defaults={'loinc_class_id': 'CHEM', 'example_units': 'wrong_unit'},
+        )
+        units = get_loinc_to_unit()
+        assert units['2345-7'] == 'mg/dL'
+
+    def test_empty_example_units_excluded(self):
+        from omop_core.models import LoincClass, LoincCodeClass
+        LoincClass.objects.get_or_create(code='CHEM', defaults={'display_name': 'Chemistry'})
+        LoincCodeClass.objects.update_or_create(
+            loinc_num='99991-0',
+            defaults={'loinc_class_id': 'CHEM', 'example_units': ''},
+        )
+        units = get_loinc_to_unit()
+        assert '99991-0' not in units
+
+    def test_concept_unit_fields_uses_db_unit(self):
+        """concept_unit_fields returns DB-sourced unit for a LOINC Measurement."""
+        from omop_core.models import LoincClass, LoincCodeClass
+        LoincClass.objects.get_or_create(code='CHEM', defaults={'display_name': 'Chemistry'})
+        LoincCodeClass.objects.update_or_create(
+            loinc_num='99992-0',
+            defaults={'loinc_class_id': 'CHEM', 'example_units': 'ng/mL'},
+        )
+        c = _make_concept(concept_code='99992-0', concept_name='Some analyte')
+        result = concept_unit_fields(c)
+        assert result == {'measurement_type': 'quantitative', 'suggested_unit': 'ng/mL'}

@@ -4,16 +4,45 @@ Pure functions, no view or request dependency. Used by the concept search view
 and by code-mapping serialisation to show curators the expected unit for a
 LOINC Measurement concept.
 """
+import logging
 from functools import lru_cache
+
+logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=1)
 def get_loinc_to_unit() -> dict[str, str]:
-    """Lazily build LOINC-code -> unit mapping from LAB_FIELD_TO_LOINC."""
+    """Build LOINC-code -> unit mapping, DB-backed with curated overrides.
+
+    Base layer: LoincCodeClass.example_units from Loinc.csv (~100k codes).
+    Override layer: LAB_FIELD_TO_LOINC (~50 hand-curated codes), always wins.
+    Returns an empty dict (no error) when the loinc_code_class table has not
+    been populated yet.
+    """
     from omop_core.services.mappings import LAB_FIELD_TO_LOINC
-    return {
-        code: unit for code, unit, _display in LAB_FIELD_TO_LOINC.values() if unit
-    }
+
+    # Base: DB-sourced LOINC example units (broad coverage).
+    result = _db_loinc_units()
+
+    # Override: curated units always win.
+    result.update(
+        {code: unit for code, unit, _display in LAB_FIELD_TO_LOINC.values() if unit}
+    )
+    return result
+
+
+def _db_loinc_units() -> dict[str, str]:
+    """Read example_units from LoincCodeClass. Tolerates missing table."""
+    try:
+        from omop_core.models import LoincCodeClass
+        return dict(
+            LoincCodeClass.objects
+            .exclude(example_units='')
+            .values_list('loinc_num', 'example_units')
+        )
+    except Exception:
+        logger.debug('loinc_code_class not available; falling back to curated units only')
+        return {}
 
 
 _QUANTITATIVE_LOINC_NAME_MARKERS = (
