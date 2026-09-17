@@ -1286,12 +1286,13 @@ def _prepare(*, source_code, source_vocabulary_id, source_text, domain_id,
             description=source_text, source_concept=None, umls_name='',
             domain_id=domain_id, omop_table='',
         )
-    if not definitive:
-        loaded_source = source_context.get('loaded_source_concept') or {}
-        candidates = enrich_candidates(
-            candidates, source_text or source_code, loaded_source.get('concept_id'),
-            min_similarity=MIN_TRIGRAM_SCORE,
-        )
+    # Always enrich — even UMLS-only candidates benefit from synonym/
+    # relationship data that helps the ranker make an informed choice.
+    loaded_source = source_context.get('loaded_source_concept') or {}
+    candidates = enrich_candidates(
+        candidates, source_text or source_code, loaded_source.get('concept_id'),
+        min_similarity=MIN_TRIGRAM_SCORE,
+    )
     job = {
         'candidates': candidates,
         'umls_cui': umls_cui,
@@ -1307,10 +1308,9 @@ def _prepare(*, source_code, source_vocabulary_id, source_text, domain_id,
         'strategy_used': None,
         'vector_reranked': any('vector_score' in c for c in candidates),
     }
-    if definitive:
-        job['chosen'] = candidates[0]
-        job['strategy_used'] = STRATEGY_UMLS
-        job['note'] = f'UMLS CUI bridge ({umls_cui}): exact cross-vocabulary equivalency.'
+    # UMLS candidates carry umls_score=1.0 so the ranker sees the signal,
+    # but we no longer short-circuit — let the ranking model weigh all
+    # evidence (UMLS, lexical, vector) and pick the winner.
     return job
 
 

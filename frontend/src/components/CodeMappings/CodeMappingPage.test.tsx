@@ -528,14 +528,14 @@ describe("CodeMappingPage", () => {
       expect(suggest.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
       expect(section.compareDocumentPosition(dialog.getByLabelText("Search destination concepts")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
       expect(within(section).getByRole("status")).toHaveTextContent("Searching");
-      fireEvent.click(within(section).getByRole("button", { name: /Early lexical candidate/ }));
+      fireEvent.click(within(section).getByText(/Early lexical candidate/).closest("tr")!);
       expect(dialog.getByLabelText("Destination Concept ID")).toHaveValue(555);
       expect(mockPatch).not.toHaveBeenCalled();
-      expect(await within(section).findByText("Distance 0.1250", {}, { timeout: 3000 })).toBeInTheDocument();
+      expect(await within(section).findByText("0.125", {}, { timeout: 3000 })).toBeInTheDocument();
       expect(within(section).getByText(`Winner: ${loincHit.concept_name}`)).toBeInTheDocument();
       expect(dialog.getByLabelText("Destination Concept ID")).toHaveValue(555);
       expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/suggest-one/", expect.objectContaining({ async: true }));
-      fireEvent.click(within(section).getByRole("button", { name: /Later semantic candidate/ }));
+      fireEvent.click(within(section).getByText(/Later semantic candidate/).closest("tr")!);
       expect(dialog.getByLabelText("Destination Concept ID")).toHaveValue(556);
       fireEvent.click(dialog.getByRole("button", { name: "Update Mapping" }));
       await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/", expect.objectContaining({ destination_concept_id: 556 })));
@@ -1250,7 +1250,7 @@ describe("CodeMappingPage", () => {
           .toHaveTextContent("Done — wrote 4 new destination(s) across 4 code(s)."),
         { timeout: 4000 });
       expect(screen.getByText(/Semantic candidate/)).toBeInTheDocument();
-      expect(screen.getByText("Distance 0.2500")).toBeInTheDocument();
+      expect(screen.getByText("0.250")).toBeInTheDocument();
       expect(mockGet).toHaveBeenCalledWith(expect.stringContaining("/suggest-runs/"), { params: { include_activity: "1" } });
       expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/suggest/", expect.objectContaining({ include_activity: true }));
     });
