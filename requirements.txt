@@ -45,6 +45,7 @@ sentence-transformers>=3.0.0
 # Testing
 pytest==9.0.3
 pytest-django==4.11.1
+pytest-xdist==3.5.0
 factory-boy==3.3.3
 
 # PROlog survey runner, installed as a Django app (prolog_surveys). Public repo,
