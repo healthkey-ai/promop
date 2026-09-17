@@ -663,6 +663,15 @@ operations = [
 - **Apply to staging DB before pushing**: run `migrate` against `promop_dev` to verify before committing.
 - **Never apply schema changes manually** to the DB — always go through migrations so Django's state stays in sync.
 - **Production migrations run automatically** — `start.sh` calls `migrate` on every Render deploy.
+- **Rebase on `dev` before creating any migration.** Two feature branches that both
+  create a migration off the same base will produce conflicting sequence numbers when
+  both merge. Before running `makemigrations`, always:
+  ```bash
+  git fetch origin dev && git rebase origin/dev
+  ```
+  This ensures the new migration gets the next available sequence number. CI runs a
+  conflict check on every push to `dev`, so a missed conflict is caught immediately
+  after merge, but prevention is better than cleanup.
 
 ---
 
