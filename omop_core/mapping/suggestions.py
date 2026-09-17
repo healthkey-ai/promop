@@ -1140,13 +1140,13 @@ def _rank_both(source_value, candidates, source_description, **kwargs):
 
     def run_anthropic():
         t0 = _time.monotonic()
-        result = rank_candidates(source_value, candidates, source_description, **kwargs)
-        return (*result, round((_time.monotonic() - t0) * 1000))
+        chosen, note, alts = rank_candidates(source_value, candidates, source_description, **kwargs)
+        return chosen, note, alts, round((_time.monotonic() - t0) * 1000)
 
     def run_jev():
         t0 = _time.monotonic()
-        result = rank_candidates_jev(source_value, candidates, source_description, **kwargs)
-        return (*result, round((_time.monotonic() - t0) * 1000))
+        chosen, note, alts = rank_candidates_jev(source_value, candidates, source_description, **kwargs)
+        return chosen, note, alts, round((_time.monotonic() - t0) * 1000)
 
     results = {}
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -1803,11 +1803,6 @@ def suggest_one_mapping(source_code, source_vocabulary_id, omop_table, *,
     emit("ranking")
     rank_and_expand_jobs([job], ranking_model=ranking_model)
 
-    emit("ranked", source_code=source_code, source_vocabulary_id=source_vocabulary_id,
-         suggested=job['chosen'], note=job['note'], strategy_used=job['strategy_used'],
-         candidates=job['candidates'], alternatives=job.get('alternatives'),
-         ranking_timings=job.get('ranking_timings'))
-
     from omop_core.services.athena_mapping_guard import (
         ATHENA_DUPLICATE_MESSAGE, athena_supplies_mapping,
     )
@@ -1815,6 +1810,12 @@ def suggest_one_mapping(source_code, source_vocabulary_id, omop_table, *,
     if chosen and athena_supplies_mapping(source_vocabulary_id, source_code,
                                           chosen['concept_id']):
         chosen, note = None, ATHENA_DUPLICATE_MESSAGE
+
+    emit("ranked", source_code=source_code, source_vocabulary_id=source_vocabulary_id,
+         suggested=chosen, note=note, strategy_used=job['strategy_used'],
+         candidates=job['candidates'], alternatives=job.get('alternatives'),
+         ranking_timings=job.get('ranking_timings'))
+
     return {
         'suggested': chosen,
         'note': note or 'No candidate concept found by any enabled strategy.',

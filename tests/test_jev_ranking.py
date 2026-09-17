@@ -159,10 +159,7 @@ class TestRankCandidatesJev:
         assert alts[0]['concept_id'] == 100
         mock_post.assert_called_once()
         # Verify the payload uses the correct API format.
-        call_kwargs = mock_post.call_args
-        payload = call_kwargs[1]['json'] if 'json' in call_kwargs[1] else call_kwargs[0][1] if len(call_kwargs[0]) > 1 else None
-        if payload is None:
-            payload = call_kwargs.kwargs.get('json')
+        payload = mock_post.call_args.kwargs['json']
         assert 'model' in payload
         assert 'questions' in payload
         assert 'best_match' in payload['questions']
