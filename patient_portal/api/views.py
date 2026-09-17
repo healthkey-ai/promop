@@ -834,17 +834,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             # Org-admin access includes trust-derived admin orgs.
             admin_org_ids = list(get_admin_orgs(self.request.user).values_list('id', flat=True))
 
-            # Analyst org grants give read-only org-level visibility
-            # without admin or write powers.
-            analyst_org_ids = list(
+            # Public demo orgs: patients can browse all org patients.
+            # Only direct org grants are checked — no trust expansion,
+            # no admin powers, no mapping curation access.
+            demo_org_ids = list(
                 active_grants.filter(
                     org__isnull=False,
-                    role='analyst',
+                    org__allows_patient_signup=True,
                 ).values_list('org_id', flat=True)
             )
-            # Merge into admin_org_ids for the visibility filter — both
-            # grant org-level read access to PatientRecord.
-            all_visible_org_ids = list(set(admin_org_ids) | set(analyst_org_ids))
+            all_visible_org_ids = list(set(admin_org_ids) | set(demo_org_ids))
 
             # Group grants: see patients in those groups
             actor_group_ids = list(

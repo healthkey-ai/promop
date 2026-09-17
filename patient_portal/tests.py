@@ -15085,9 +15085,8 @@ class OrgPatientSignupTest(TestCase):
         self.assertFalse(identity.is_superuser)
         self.assertEqual(client.session['_auth_user_id'], str(identity.pk))
         self.assertTrue(PatientUser.objects.filter(identity=identity).exists())
-        # Public demo org (allows_patient_signup=True) → analyst role (read-only)
         self.assertTrue(
-            GroupAccess.objects.filter(identity=identity, org=self.org, role='analyst').exists()
+            GroupAccess.objects.filter(identity=identity, org=self.org, role='patient').exists()
         )
 
     def test_signup_private_org_gets_patient_role(self):
