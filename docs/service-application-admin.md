@@ -17,8 +17,9 @@ sense that you need not pick one: leaving it blank issues a token expiring in 36
 days, the maximum, because a service credential is a static bearer secret with no
 refresh step and its lifetime is the whole of its exposure. An explicit expiry
 beyond that maximum is refused. Credentials imported with `import_service_tokens`
-keep whatever expiry they already had, including none — see the follow-up issue
-linked from the import section. Copy the secret
+keep whatever expiry they already had, including none; bounding those needs a
+rotation plan and is tracked in
+[#1423](https://github.com/healthkey-ai/promop/issues/1423). Copy the secret
 immediately: it is shown only in the creation response and is never retrievable
 later. The database stores a SHA-256 digest of the randomly generated 384-bit
 secret and its last four characters. List/detail/admin pages never expose the

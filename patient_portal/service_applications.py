@@ -35,6 +35,11 @@ def issue_token(application, label, *, actor=None, expires_at=None):
     # out-of-bounds value rather than silently clamping it, because a person who
     # typed a date deserves to be told it was refused.
     ceiling = timezone.now() + MAX_TOKEN_LIFETIME
+    if expires_at is not None and timezone.is_naive(expires_at):
+        # DRF hands over an aware datetime; a shell or management-command caller
+        # may not, and comparing the two raises TypeError. Interpret it in the
+        # configured timezone rather than failing on the clamp.
+        expires_at = timezone.make_aware(expires_at)
     expires_at = ceiling if expires_at is None else min(expires_at, ceiling)
     secret = secrets.token_urlsafe(48)
     record = ServiceAccessToken.objects.create(

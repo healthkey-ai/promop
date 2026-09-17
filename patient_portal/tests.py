@@ -27347,12 +27347,56 @@ class LegacyGrantMigrationGuardsTest(TestCase):
 
         self.assertEqual(ServiceApplication.objects.get(service_id='hk-labs').description, appended)
 
+    def test_a_rollback_keeps_an_hk_labs_sync_row_somebody_created_by_hand(self):
+        """Active and tokenless is not the same as "what this migration wrote"."""
+        migration = self._migration()
+        ServiceApplication.objects.filter(service_id='hk-labs-sync').delete()
+        ServiceApplication.objects.create(
+            service_id='hk-labs-sync', name='Labs sync (ours)',
+            description='Created by ops before the migration', scopes='patient/*.write')
+
+        self._run(migration.drop_legacy_application)
+
+        kept = ServiceApplication.objects.get(service_id='hk-labs-sync')
+        self.assertEqual(kept.description, 'Created by ops before the migration')
+
     def test_the_forward_is_idempotent_on_a_row_it_already_labelled(self):
         migration = self._migration()
         self._run(migration.seed_legacy_application)
         self._run(migration.seed_legacy_application)
         self.assertEqual(
             ServiceApplication.objects.filter(service_id='hk-labs-sync').count(), 1)
+
+
+class ScopelessTokenIssueTest(TestCase):
+    """Issuing on hk-labs-sync is a cutover, and a scopeless token is not one."""
+
+    URL = '/api/v1/service-applications/'
+
+    def setUp(self):
+        self.staff = Identity.objects.create_user(email='cutover@test.com', password='ops-pass')
+        self.staff.is_staff = True
+        self.staff.save(update_fields=['is_staff'])
+        self.client = APIClient()
+        self.assertTrue(self.client.login(username='cutover@test.com', password='ops-pass'))
+
+    def test_a_token_cannot_be_issued_while_the_application_has_no_scopes(self):
+        application = ServiceApplication.objects.get(service_id='hk-labs-sync')
+        self.assertEqual(application.scopes, '')
+        response = self.client.post(
+            f'{self.URL}{application.pk}/tokens/', {'label': 'cutover'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('scopes', str(response.data).lower())
+        # The environment credential must still work: issuing is what stops it.
+        self.assertFalse(application.tokens.exists())
+
+    def test_setting_scopes_first_lets_the_cutover_proceed(self):
+        application = ServiceApplication.objects.get(service_id='hk-labs-sync')
+        self.client.patch(f'{self.URL}{application.pk}/',
+                          {'scopes': 'patient/*.read'}, format='json')
+        response = self.client.post(
+            f'{self.URL}{application.pk}/tokens/', {'label': 'cutover'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
 
 
 class LegacyServiceGrantKillSwitchTest(TestCase):

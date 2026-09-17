@@ -63,6 +63,29 @@ describe('Service applications', () => {
     renderPage(); await selectApp();
     expect(await screen.findByText(/expires in 9 days — rotate it/)).toBeInTheDocument();
   });
+  it('never offers an expiry the server would refuse', async () => {
+    renderPage(); await selectApp();
+    const input = screen.getByLabelText(/Expires at/) as HTMLInputElement;
+    // The picker reads `max` as local wall-clock; parsed back it must land inside
+    // the server's 365-day bound, in this timezone and across a DST transition.
+    expect(new Date(input.max).getTime()).toBeLessThanOrEqual(Date.now() + 365 * 24 * 60 * 60 * 1000);
+    expect(new Date(input.max).getTime()).toBeGreaterThan(Date.now() + 362 * 24 * 60 * 60 * 1000);
+  });
+  it('does not tell anyone to rotate a token they already revoked', async () => {
+    const soon = new Date(Date.now() + 9 * 24 * 60 * 60 * 1000).toISOString();
+    mocks.get.mockResolvedValue({ data: [{ ...app, tokens: [
+      { ...app.tokens[0], expires_at: soon, revoked_at: '2026-09-15T10:00:00Z' }] }] });
+    renderPage(); await selectApp();
+    expect(await screen.findByText(/Revoked/)).toBeInTheDocument();
+    expect(screen.queryByText(/rotate it/)).not.toBeInTheDocument();
+  });
+  it('does not warn about tokens of a disabled application', async () => {
+    const soon = new Date(Date.now() + 9 * 24 * 60 * 60 * 1000).toISOString();
+    mocks.get.mockResolvedValue({ data: [{ ...app, is_active: false, tokens: [
+      { ...app.tokens[0], expires_at: soon }] }] });
+    renderPage(); await selectApp();
+    expect(screen.queryByText(/rotate it/)).not.toBeInTheDocument();
+  });
   it('requires explicit confirmation to revoke a specific token', async () => {
     renderPage(); await selectApp(); fireEvent.click(screen.getByRole('button', { name: 'Revoke Initial token' }));
     expect(screen.getByRole('alertdialog')).toBeInTheDocument(); expect(mocks.post).not.toHaveBeenCalled();

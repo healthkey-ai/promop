@@ -22,8 +22,9 @@ const scopeOptions = [
 const endpoint = '/v1/service-applications/';
 // Mirrors MAX_TOKEN_LIFETIME in patient_portal/service_applications.py. The
 // server is the authority: it reports the exact bound it refused, and it
-// substitutes this maximum when the field is left blank, so there is no way to
-// mint a token that never expires.
+// substitutes this maximum when the field is left blank, so no token issued
+// here is permanent. Credentials registered by import_service_tokens keep
+// whatever expiry they came with, including none (#1423).
 const MAX_TOKEN_DAYS = 365;
 
 // Every managed token now has an expiry, so an integration dies on a date
@@ -36,19 +37,31 @@ function daysUntil(when?: string | null) {
   return Math.ceil((new Date(when).getTime() - Date.now()) / (24 * 60 * 60 * 1000));
 }
 
-function expiringSoon(when?: string | null) {
-  const days = daysUntil(when);
+function expiringSoon(token: Token, applicationActive: boolean) {
+  // A revoked token needs no rotation, and a disabled application's tokens are
+  // already refused — telling someone to rotate either is noise where the point
+  // is that the badge means act now.
+  if (token.revoked_at || !applicationActive) return false;
+  const days = daysUntil(token.expires_at);
   return days !== null && days > 0 && days <= EXPIRY_WARNING_DAYS;
+}
+
+function localInput(when: Date) {
+  const shifted = new Date(when.getTime() - when.getTimezoneOffset() * 60 * 1000);
+  return shifted.toISOString().slice(0, 16);
 }
 
 function maxExpiry() {
   // datetime-local reads `max` as local wall-clock, and createToken parses the
-  // chosen value the same way. An ISO (UTC) string here would offer a maximum
-  // that is up to a day past the server's bound west of UTC, so selecting the
-  // offered maximum would be refused.
-  const limit = new Date(Date.now() + MAX_TOKEN_DAYS * 24 * 60 * 60 * 1000);
-  limit.setMinutes(limit.getMinutes() - limit.getTimezoneOffset());
-  return limit.toISOString().slice(0, 16);
+  // chosen value the same way. An ISO (UTC) string here would offer a maximum up
+  // to a day past the server's bound west of UTC, so selecting the offered
+  // maximum would be refused. Shifting by the offset fixes that, except across a
+  // DST transition, where the wall clock we print maps back to a different
+  // instant — so re-parse once and take off whatever drift is left.
+  const ceiling = Date.now() + MAX_TOKEN_DAYS * 24 * 60 * 60 * 1000;
+  const candidate = new Date(ceiling);
+  const drift = new Date(localInput(candidate)).getTime() - ceiling;
+  return localInput(drift > 0 ? new Date(candidate.getTime() - drift) : candidate);
 }
 const inputClass = 'w-full rounded border border-gray-300 p-2 text-sm';
 const buttonClass = 'rounded border border-gray-300 px-3 py-2 text-sm disabled:opacity-50';
@@ -198,7 +211,7 @@ export default function ServiceApplicationsPage() {
             {selected.tokens.map(token => <li key={token.id} className="flex items-start justify-between gap-3 py-3">
               <div><p className="font-medium">{token.label} <span className="font-mono text-sm">…{token.suffix}</span></p>
                 <p className="text-xs text-gray-600">Created {formatDate(token.created_at)} · Last used {formatDate(token.last_used_at)}</p>
-                <p className="text-xs text-gray-600">Expires: {token.expires_at ? formatDate(token.expires_at) : 'No expiry'}{expiringSoon(token.expires_at) && <span className="font-medium text-amber-800"> · expires in {daysUntil(token.expires_at)} day{daysUntil(token.expires_at) === 1 ? '' : 's'} — rotate it</span>} · {token.revoked_at ? 'Revoked' : token.expires_at && new Date(token.expires_at) <= new Date() ? 'Expired' : selected.is_active ? 'Active' : 'Disabled'}</p>
+                <p className="text-xs text-gray-600">Expires: {token.expires_at ? formatDate(token.expires_at) : 'No expiry'}{expiringSoon(token, selected.is_active) && <span className="font-medium text-amber-800"> · expires in {daysUntil(token.expires_at)} day{daysUntil(token.expires_at) === 1 ? '' : 's'} — rotate it</span>} · {token.revoked_at ? 'Revoked' : token.expires_at && new Date(token.expires_at) <= new Date() ? 'Expired' : selected.is_active ? 'Active' : 'Disabled'}</p>
               </div>
               {!token.revoked_at && <button className={buttonClass} disabled={busy} onClick={() => setRevokeId(token.id)}>Revoke {token.label}</button>}
             </li>)}

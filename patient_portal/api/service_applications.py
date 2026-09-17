@@ -82,7 +82,7 @@ class ServiceApplicationViewSet(viewsets.ModelViewSet):
             raise PermissionDenied('An authenticated staff user is required.')
         # IsStaffPermission only proves the *user* is staff. A third-party SMART
         # application holding that user's delegated `patient/*.write` grant would
-        # otherwise convert it into a self-issued, cross-patient service token outliving that grant that
+        # otherwise convert it into a self-issued, cross-patient service token that
         # outlives the grant — the escalation this viewset exists to prevent.
         if not is_interactive_session(request):
             raise PermissionDenied(
@@ -100,6 +100,16 @@ class ServiceApplicationViewSet(viewsets.ModelViewSet):
         application = self.get_object()
         if not application.is_active:
             raise ValidationError('Enable the application before creating a token.')
+        if not application.scopes.strip():
+            # Issuing here is a cutover: check_environment_fallback refuses the
+            # environment grant as soon as this application has any token, and a
+            # token carrying no scopes grants nothing — so the integration would
+            # go down and its replacement would not work. hk-labs-sync is seeded
+            # scopeless on purpose (migration 0019), which makes this reachable.
+            raise ValidationError(
+                'Set the application scopes before issuing a token: a token with no '
+                'scopes grants nothing, and issuing one stops any environment '
+                'credential for this service.')
         serializer = TokenIssueSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         record, secret = issue_token(application, actor=request.user, **serializer.validated_data)
