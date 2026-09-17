@@ -19,17 +19,28 @@ def validate_webhook_subscription_url(value):
     Referenced by name in the webhook schema migration, so renaming or moving
     this function breaks a replay from zero. Leave a stub if it ever moves.
 
-    The delivery task re-validates and re-resolves, so a bad row fails closed at
-    send rather than causing an SSRF. Without this, though, a shell or a data
-    migration can write ``http://10.0.0.1/`` and the row looks valid until the
-    first delivery attempt.
+    What this does and does not reach: like any Django validator it runs on
+    ``full_clean()``, so it covers model forms (Django admin) and DRF, which
+    copies model-field validators onto the serializer field. A direct
+    ``objects.create()`` or ``.save()`` still writes whatever it is given —
+    Django does not call ``full_clean()`` on save, and forcing it here would
+    change the semantics of every write path for one field. The delivery task
+    re-validates and re-resolves before sending, so such a row fails closed at
+    send rather than causing an SSRF; what this adds is that the rule is stated
+    on the field, and that the paths a person actually uses refuse it up front.
     """
     from patient_portal.webhooks import validate_webhook_url
 
     try:
         validate_webhook_url(value)
-    except ValueError as error:
-        raise ValidationError(str(error)) from None
+    except ValueError:
+        # A fixed message, never the exception text. DRF runs model-field
+        # validators before the serializer's own method, so this is the path
+        # that produces the API's URL error — forwarding str(error) here would
+        # quietly undo the no-details control the serializer was written for.
+        raise ValidationError(
+            'Webhook URL must resolve only to public HTTPS addresses on port 443.'
+        ) from None
 
 
 class WebhookSubscription(models.Model):

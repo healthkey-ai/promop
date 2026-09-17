@@ -6,8 +6,11 @@ document contents, or patient demographics. Inbound events notify subscribers;
 they do not import or modify clinical data. Use the existing lab sync, document,
 or FHIR APIs for authenticated clinical writes.
 
-Set `WEBHOOKS_ENABLED=true` on web and workers to enable publishing, inbound
-processing, and delivery. It defaults to false: clinical signal/bulk hooks return
+`WEBHOOKS_ENABLED=true` enables publishing, inbound processing, and delivery. It
+has to be true on the web service **and** its worker; on Render, set it on the
+web service only — `render.yaml` declares it there and each worker pulls that
+exact value, so there is one place to flip and no way for the two to disagree.
+Setting it on a worker directly fights that reference. It defaults to false: clinical signal/bulk hooks return
 before any webhook database queries, inbound returns 503, and delivery tasks pause
 without changing queued rows. Subscription management stays available for setup.
 Restart web and workers after changing this flag.
@@ -97,8 +100,8 @@ direct `org_admin` grants only. A trust is granted for data access, and naming
 where an organization's events are sent is data-egress configuration, so a trust
 does not carry it ([decision](soc2/webhook-egress-authority.md)). OAuth and service tokens must
 additionally hold the relevant read/write scope. Partner tokens (Firebase,
-SAML) carry no scopes at all, so for them that administrative set is the whole
-gate; session callers are covered by CSRF enforcement on the endpoint. The 201 response includes
+SAML) carry no scopes at all, so for them the two sets above — wide for reads,
+direct grants only for writes — are the whole gate; session callers are covered by CSRF enforcement on the endpoint. The 201 response includes
 the generated `secret` once: store it at the subscriber. List, detail, update,
 and delivery-log responses never expose the secret. Subscriptions cannot be
 transferred between organizations. `PATCH /api/v1/webhooks/subscriptions/{id}/`
@@ -182,9 +185,21 @@ Celery messages from sending concurrently. HTTP sends have 5-second connect and
 Both beat tasks return immediately unless `WEBHOOKS_ENABLED` is true, so the
 scheduler is only as useful as that flag: a web service publishing events while
 its worker has the flag off leaves every delivery `pending` with no error
-anywhere. `render.yaml` therefore declares it on the web service and pulls the
-worker's value `fromService`, the same treatment `SECRET_KEY` and the broker URL
-get, and `test_render_staging_blueprint.py` asserts the pair.
+anywhere. `render.yaml` therefore declares it on the web service and pulls the worker's
+value `fromService`, the mechanism `SENTRY_DSN` already uses between these two
+services, and `test_render_staging_blueprint.py` asserts the pair. (Not the
+broker URL's mechanism: each service points independently at the Redis resource.
+`SECRET_KEY` and the broker URL are set-once values that converge by
+construction; this flag is the first `fromService` reference whose purpose is to
+be toggled later, so it converges only once the worker redeploys — which is what
+"restart web and workers after changing this flag" above means in practice.)
+
+**Applying this to an existing Render deployment:** a newly added `sync: false`
+entry is ignored on a Blueprint update of a service that already exists (see
+[Render configuration](render-staging-celery.md)), so add `WEBHOOKS_ENABLED` to
+the web service in the Render dashboard first, then sync the blueprint — the
+worker's reference is applied normally and would otherwise point at a variable
+that does not exist yet.
 
 `start-worker.sh` starts embedded Celery beat when `CELERY_EMBEDDED_BEAT=true`,
 with its schedule in `/tmp/promop-celerybeat-schedule`. It is off unless asked

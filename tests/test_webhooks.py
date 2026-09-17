@@ -157,7 +157,10 @@ def test_patient_and_expired_admin_cannot_manage_subscriptions(setup):
 def test_subscription_url_errors_never_expose_exception_details(setup):
     client = APIClient()
     client.force_authenticate(setup[3])
-    with patch('patient_portal.api.webhook_views.validate_webhook_url', side_effect=ValueError('private resolver details')):
+    # Patch the shared implementation, not the view-local alias: DRF copies the
+    # model-field validator onto the serializer field, so the model path is the
+    # one that produces this error and the alias is never reached on a failure.
+    with patch('patient_portal.webhooks.validate_webhook_url', side_effect=ValueError('private resolver details')):
         response = client.post('/api/v1/webhooks/subscriptions/', {
             'organization': setup[0].pk,
             'url': 'https://subscriber.example/events',

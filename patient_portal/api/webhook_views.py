@@ -45,14 +45,15 @@ class WebhookSubscriptionSerializer(serializers.ModelSerializer):
         )
 
     def validate_url(self, value):
-        """Kept although the model validator now runs first.
+        """Kept although the model validator now runs first, and decides.
 
         DRF copies model-field validators onto the serializer field, so a bad
-        URL is already refused before this method — it is reached only on the
-        happy path, where it repeats a cheap parse. It stays because it is the
-        method the API's error contract is pinned to, and because a serializer
-        used without the model (a plain Serializer, a future non-model path)
-        would otherwise validate nothing.
+        URL is refused before this method: on a failure this is dead, and on
+        the happy path it repeats a cheap parse. It stays because a serializer
+        used without the model field behind it would otherwise validate
+        nothing. The no-details guarantee lives in both places now — see
+        patient_portal.models.validate_webhook_subscription_url, which is the
+        one the API actually exercises.
         """
         try:
             validate_webhook_url(value)
