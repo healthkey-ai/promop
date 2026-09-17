@@ -700,7 +700,8 @@ import a bundle you already have, for instance:
 
 ```bash
 # Generate only
-python manage.py generate_synthea_bc --count 100 --output /tmp/synthea_bc_100.json
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" SECRET_KEY=dev-only-secret \
+  python manage.py generate_synthea_bc --count 100 --output /tmp/synthea_bc_100.json
 
 # Import an existing FHIR Bundle into OMOP under an org (creates the org if needed)
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" SECRET_KEY=dev-only-secret \
@@ -719,7 +720,8 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" SECRET_KEY=dev-on
 
 **`No matching patients found` from a benchmark command** — verify the import:
 ```bash
-DATABASE_URL="..." python manage.py shell -c "
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" SECRET_KEY=dev-only-secret \
+  python manage.py shell -c "
 from omop_core.models import PatientRecord
 print(PatientRecord.objects.filter(organization__slug='synthea-bc').count())
 "

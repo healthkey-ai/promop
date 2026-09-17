@@ -11,6 +11,9 @@ Usage::
     SOURCE_DATABASE_URL="postgresql://..." \\
       .venv/bin/python manage.py copy_curation
 
+Settings also need ``SECRET_KEY``, from ``.env`` or exported — the key belonging
+to the destination if that is a shared database.
+
 The destination is whatever ``DATABASE_URL`` points at, i.e. the instance you
 would otherwise be running ``manage.py`` against. The source is opened as a
 second connection and, on PostgreSQL, in a read-only session — this command
