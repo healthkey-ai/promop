@@ -15056,6 +15056,9 @@ class OrgPatientSignupTest(TestCase):
     """Test the public patient self-signup endpoint."""
 
     def setUp(self):
+        from django.core.cache import cache
+        # DRF throttle state lives in the cache and leaks between tests.
+        cache.clear()
         self.org = Organization.objects.create(
             name='Signup Org', slug='signup-org', allows_patient_signup=True,
         )
@@ -21711,6 +21714,182 @@ class CodeMappingResolutionTest(TestCase):
         self.assertEqual(
             SourceCodeConceptMapping.objects.get(source_code='MPS').status, 'approved',
         )
+
+
+class CodeMappingLoadedSinceProposalTest(TestCase):
+    """A queue row written because a vocabulary was missing yields once it loads."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.drug_domain, _ = Domain.objects.get_or_create(
+            domain_id='Drug', defaults={'domain_name': 'Drug', 'domain_concept_id': 13},
+        )
+        cls.measurement_domain, _ = Domain.objects.get_or_create(
+            domain_id='Measurement',
+            defaults={'domain_name': 'Measurement', 'domain_concept_id': 21},
+        )
+        cls.rxnorm, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='RxNorm',
+            defaults={'vocabulary_name': 'RxNorm', 'vocabulary_reference': 'x',
+                      'vocabulary_version': '2026', 'vocabulary_concept_id': 0},
+        )
+        cls.loinc, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='LOINC',
+            defaults={'vocabulary_name': 'LOINC', 'vocabulary_reference': 'x',
+                      'vocabulary_version': '2.80', 'vocabulary_concept_id': 0},
+        )
+        for class_id in ('Quant Clinical Drug', 'Brand Name', 'Lab Test'):
+            ConceptClass.objects.get_or_create(
+                concept_class_id=class_id,
+                defaults={'concept_class_name': class_id, 'concept_class_concept_id': 0},
+            )
+
+    def setUp(self):
+        SourceCodeConceptMapping.objects.filter(origin_system='hk-labs-seed').delete()
+
+    def _concept(self, concept_id, code, vocabulary, domain, class_id, standard):
+        return Concept.objects.create(
+            concept_id=concept_id, concept_name=f'concept {code}', concept_code=code,
+            vocabulary=vocabulary, domain=domain, concept_class_id=class_id,
+            standard_concept=standard,
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+
+    def _resolve_before_load(self, code, vocabulary_id, table):
+        from unittest.mock import patch
+
+        with patch(
+            'omop_core.mapping.suggestions.suggest_source_code',
+            return_value=(None, 'No suitable candidate.'),
+        ):
+            return resolve_source_code(
+                source_code=code, source_vocabulary_id=vocabulary_id,
+                omop_table=table, source_system='etl',
+            )
+
+    def test_minted_placeholder_yields_to_a_standard_concept_loaded_later(self):
+        concept, queued = self._resolve_before_load('1807630', 'RxNorm', 'drug_exposure')
+        self.assertIsNone(concept)
+        self.assertEqual(queued.target_concept.vocabulary_id, 'HK-Drug')
+        loaded = self._concept(
+            40_000_101, '1807630', self.rxnorm, self.drug_domain, 'Quant Clinical Drug', 'S',
+        )
+
+        concept, mapping = resolve_source_code(
+            source_code='1807630', source_vocabulary_id='RxNorm', omop_table='drug_exposure',
+        )
+
+        self.assertEqual(concept.concept_id, loaded.concept_id)
+        self.assertEqual(mapping.pk, queued.pk)
+        self.assertEqual(mapping.status, 'approved')
+        self.assertEqual(mapping.origin_system, 'athena-direct')
+        self.assertEqual(mapping.target_concept_id, loaded.concept_id)
+        self.assertEqual(mapping.occurrence_count, 1)
+
+    def test_non_standard_concept_does_not_replace_the_placeholder(self):
+        _, queued = self._resolve_before_load('337535', 'RxNorm', 'drug_exposure')
+        self._concept(19_025_425, '337535', self.rxnorm, self.drug_domain, 'Brand Name', None)
+
+        concept, mapping = resolve_source_code(
+            source_code='337535', source_vocabulary_id='RxNorm', omop_table='drug_exposure',
+        )
+
+        self.assertIsNone(concept)
+        self.assertEqual(mapping.pk, queued.pk)
+        self.assertEqual(mapping.status, 'proposed')
+        self.assertEqual(mapping.target_concept.vocabulary_id, 'HK-Drug')
+
+    def test_loinc_gap_yields_once_loinc_is_loaded(self):
+        _, gap = self._resolve_before_load('2160-0', 'LOINC', 'measurement')
+        self.assertIsNone(gap.target_concept_id)
+        loaded = self._concept(
+            3_016_723, '2160-0', self.loinc, self.measurement_domain, 'Lab Test', 'S',
+        )
+
+        concept, mapping = resolve_source_code(
+            source_code='2160-0', source_vocabulary_id='LOINC', omop_table='measurement',
+        )
+
+        self.assertEqual(concept.concept_id, loaded.concept_id)
+        self.assertEqual(mapping.pk, gap.pk)
+        self.assertEqual(mapping.status, 'approved')
+
+    def test_proposal_with_curator_evidence_is_left_for_review(self):
+        _, queued = self._resolve_before_load('203148', 'RxNorm', 'drug_exposure')
+        suggested = self._concept(
+            40_000_102, 'other', self.rxnorm, self.drug_domain, 'Quant Clinical Drug', 'S',
+        )
+        SourceCodeConceptMapping.objects.filter(pk=queued.pk).update(
+            suggested_target_concept=suggested,
+        )
+        self._concept(40_000_103, '203148', self.rxnorm, self.drug_domain, 'Quant Clinical Drug', 'S')
+
+        concept, mapping = resolve_source_code(
+            source_code='203148', source_vocabulary_id='RxNorm', omop_table='drug_exposure',
+        )
+
+        self.assertIsNone(concept)
+        self.assertEqual(mapping.status, 'proposed')
+
+
+    def test_concept_from_another_domain_does_not_replace_the_placeholder(self):
+        _, queued = self._resolve_before_load('1807634', 'RxNorm', 'drug_exposure')
+        self._concept(
+            40_000_104, '1807634', self.rxnorm, self.measurement_domain, 'Quant Clinical Drug', 'S',
+        )
+
+        concept, mapping = resolve_source_code(
+            source_code='1807634', source_vocabulary_id='RxNorm', omop_table='drug_exposure',
+        )
+
+        self.assertIsNone(concept)
+        self.assertEqual(mapping.pk, queued.pk)
+        self.assertEqual(mapping.status, 'proposed')
+
+    def test_rejection_during_promotion_is_not_reported_as_resolved(self):
+        from unittest.mock import patch
+
+        _, queued = self._resolve_before_load('82063', 'RxNorm', 'drug_exposure')
+        loaded = self._concept(
+            40_000_105, '82063', self.rxnorm, self.drug_domain, 'Quant Clinical Drug', 'S',
+        )
+
+        def reject_then_find(*args, **kwargs):
+            SourceCodeConceptMapping.objects.filter(pk=queued.pk).update(status='rejected')
+            return loaded
+
+        with patch('omop_core.mapping.code_resolution._direct_concept', side_effect=reject_then_find):
+            concept, mapping = resolve_source_code(
+                source_code='82063', source_vocabulary_id='RxNorm', omop_table='drug_exposure',
+            )
+
+        self.assertIsNone(concept)
+        self.assertEqual(mapping.status, 'rejected')
+        self.assertEqual(mapping.target_concept.vocabulary_id, 'HK-Drug')
+
+    def test_curator_edit_during_promotion_is_kept(self):
+        from unittest.mock import patch
+
+        _, queued = self._resolve_before_load('48933', 'RxNorm', 'drug_exposure')
+        loaded = self._concept(
+            40_000_106, '48933', self.rxnorm, self.drug_domain, 'Quant Clinical Drug', 'S',
+        )
+        chosen = self._concept(
+            40_000_107, 'chosen', self.rxnorm, self.drug_domain, 'Quant Clinical Drug', 'S',
+        )
+
+        def edit_then_find(*args, **kwargs):
+            SourceCodeConceptMapping.objects.filter(pk=queued.pk).update(target_concept=chosen)
+            return loaded
+
+        with patch('omop_core.mapping.code_resolution._direct_concept', side_effect=edit_then_find):
+            concept, mapping = resolve_source_code(
+                source_code='48933', source_vocabulary_id='RxNorm', omop_table='drug_exposure',
+            )
+
+        self.assertIsNone(concept)
+        self.assertEqual(mapping.status, 'proposed')
+        self.assertEqual(mapping.target_concept_id, chosen.concept_id)
 
 
 class FieldConceptMappingTest(TestCase):

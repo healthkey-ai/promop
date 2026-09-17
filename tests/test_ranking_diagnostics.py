@@ -20,7 +20,7 @@ def client(monkeypatch, settings):
 
 def test_missing_key_is_visible_in_note_and_log(settings, caplog):
     settings.ANTHROPIC_API_KEY = ''
-    chosen, note = rank_candidates('sensitive-source', [CANDIDATE])
+    chosen, note, _alts = rank_candidates('sensitive-source', [CANDIDATE])
     assert chosen == CANDIDATE
     assert 'ANTHROPIC_API_KEY is not configured in the process' in note
     assert 'reason=missing_api_key' in caplog.text
@@ -38,7 +38,7 @@ def test_provider_error_is_classified_without_raw_exception(client, caplog, stat
     error.status_code = status
     error.request_id = 'req_diagnostic_123'
     client.messages.create.side_effect = error
-    chosen, note = rank_candidates('sensitive-source', [CANDIDATE])
+    chosen, note, _alts = rank_candidates('sensitive-source', [CANDIDATE])
     assert chosen == CANDIDATE
     assert 'Ranking model unavailable' in note
     assert f'reason={reason}' in caplog.text
@@ -64,7 +64,7 @@ def test_response_failures_include_stop_reason_and_request_id(client, caplog, te
     client.messages.create.return_value = SimpleNamespace(
         content=[SimpleNamespace(type='text', text=text)], stop_reason=stop, _request_id='req_output',
     )
-    chosen, note = rank_candidates('private source', [CANDIDATE])
+    chosen, note, _alts = rank_candidates('private source', [CANDIDATE])
     assert chosen == CANDIDATE
     assert 'Details:' in note
     assert f'reason={reason}' in caplog.text
@@ -83,7 +83,7 @@ def test_insufficient_credits_explains_billing_without_exposing_body(client, cap
         body = {'error': body}
     response = httpx.Response(400, request=httpx.Request('POST', 'https://api.anthropic.com/v1/messages'))
     client.messages.create.side_effect = anthropic.BadRequestError('private-exception', response=response, body=body)
-    chosen, note = rank_candidates('private-source', [CANDIDATE])
+    chosen, note, _alts = rank_candidates('private-source', [CANDIDATE])
     assert chosen == CANDIDATE
     assert 'insufficient credits' in note
     assert 'Plans & Billing' in note
@@ -94,7 +94,7 @@ def test_insufficient_credits_explains_billing_without_exposing_body(client, cap
 
 def test_expanded_search_stays_unresolved_when_key_is_missing(settings):
     settings.ANTHROPIC_API_KEY = ''
-    chosen, note = rank_candidates('source', [CANDIDATE], require_model_selection=True)
+    chosen, note, _alts = rank_candidates('source', [CANDIDATE], require_model_selection=True)
     assert chosen is None
     assert 'expanded search remains unresolved' in note
     assert 'not configured' in note
@@ -104,7 +104,7 @@ def test_success_keeps_the_model_verdict(client, caplog):
     client.messages.create.return_value = SimpleNamespace(content=[SimpleNamespace(
         type='text', text='{"concept_id": 1, "confidence": "high", "reason": "Matching concept."}',
     )])
-    chosen, note = rank_candidates('source', [CANDIDATE])
+    chosen, note, _alts = rank_candidates('source', [CANDIDATE])
     assert chosen == CANDIDATE
     assert note == 'high confidence: Matching concept.'
     assert 'unavailable' not in caplog.text
