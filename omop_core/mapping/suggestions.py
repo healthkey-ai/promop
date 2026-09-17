@@ -70,6 +70,7 @@ down is worse than one that returns a decent guess a curator can correct.
 """
 import json
 import logging
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
@@ -980,6 +981,12 @@ def rank_candidates_jev(source_value, candidates, source_description='', *, sour
         return fallback, f'{fallback_note} Details: {detail}', None
 
     jev_key = getattr(settings, 'JEV_API_KEY', '')
+    logger.info(
+        'Jev ranking: JEV_API_KEY from settings=%r, from env=%r, bool=%s',
+        jev_key[:8] + '...' if jev_key else '',
+        (os.environ.get('JEV_API_KEY', '') or '')[:8] + '...' if os.environ.get('JEV_API_KEY') else '',
+        bool(jev_key),
+    )
     if not jev_key:
         return unavailable('missing_api_key', 'JEV_API_KEY is not configured.')
 
