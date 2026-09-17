@@ -12,7 +12,7 @@ credential that is none of those things. Org administrators and patients cannot
 administer tokens either. Session-authenticated mutations enforce CSRF even when
 other API routes retain legacy session behavior.
 
-Select an app to create a labeled token with an optional expiry. Copy the secret
+Select an app to create a labeled token. The expiry is optional only in the sense that you need not pick one: leaving it blank issues a token expiring in 365 days, the maximum, because a service credential is a static bearer secret with no refresh step and its lifetime is the whole of its exposure. An explicit expiry beyond that maximum is refused. Credentials imported with `import_service_tokens` keep whatever expiry they already had, including none. Copy the secret
 immediately: it is shown only in the creation response and is never retrievable
 later. The database stores a SHA-256 digest of the randomly generated 384-bit
 secret and its last four characters. List/detail/admin pages never expose the

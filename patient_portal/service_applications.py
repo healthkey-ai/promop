@@ -21,7 +21,17 @@ def token_digest(secret):
     return hashlib.sha256(secret.encode()).hexdigest()
 
 
+# A service credential is a static bearer secret with no refresh step, so its
+# lifetime is the whole of its exposure. Bounding only an explicitly supplied
+# expiry would refuse a 366-day token while handing out a permanent one, which
+# is what omitting the field used to do — and omitting it is the default path
+# through the Org Admin form.
+MAX_TOKEN_LIFETIME = timedelta(days=365)
+
+
 def issue_token(application, label, *, actor=None, expires_at=None):
+    if expires_at is None:
+        expires_at = timezone.now() + MAX_TOKEN_LIFETIME
     secret = secrets.token_urlsafe(48)
     record = ServiceAccessToken.objects.create(
         application=application, label=label, digest=token_digest(secret),

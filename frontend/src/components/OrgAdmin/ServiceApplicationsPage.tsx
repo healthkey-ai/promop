@@ -20,8 +20,10 @@ const scopeOptions = [
   ['user/*.read', 'Read user data'], ['user/*.write', 'Write user data'],
 ];
 const endpoint = '/v1/service-applications/';
-// Mirrors MAX_TOKEN_LIFETIME in patient_portal/api/service_applications.py; the
-// server is the authority and reports the exact bound it refused.
+// Mirrors MAX_TOKEN_LIFETIME in patient_portal/service_applications.py. The
+// server is the authority: it reports the exact bound it refused, and it
+// substitutes this maximum when the field is left blank, so there is no way to
+// mint a token that never expires.
 const MAX_TOKEN_DAYS = 365;
 
 function maxExpiry() {
@@ -158,7 +160,7 @@ export default function ServiceApplicationsPage() {
           <p className="text-sm text-gray-600">To rotate, create and distribute a replacement, then revoke the old token.</p>
           <label className="block text-sm">Token label<input className={inputClass} value={tokenLabel}
             onChange={e => setTokenLabel(e.target.value)} placeholder="e.g. Production integration" /></label>
-          <label className="block text-sm">Expires at (optional, at most {MAX_TOKEN_DAYS} days out)<input
+          <label className="block text-sm">Expires at (leave blank for the {MAX_TOKEN_DAYS}-day maximum)<input
             type="datetime-local" className={inputClass} max={maxExpiry()}
             value={expiresAt} onChange={e => setExpiresAt(e.target.value)} /></label>
           <button className={buttonClass} disabled={busy || !selected.is_active || !tokenLabel.trim()} onClick={createToken}>Create token</button>

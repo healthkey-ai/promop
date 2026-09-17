@@ -27212,11 +27212,65 @@ class ServiceTokenLifetimeTest(TestCase):
             'label': 'annual', 'expires_at': expires.isoformat()})
         self.assertTrue(serializer.is_valid(), serializer.errors)
 
-    def test_no_expiry_is_still_allowed(self):
+    def test_an_omitted_expiry_is_accepted_and_then_bounded_at_issue(self):
+        """The form's blank field must not be the way to mint a permanent token."""
         from patient_portal.api.service_applications import TokenIssueSerializer
+        from patient_portal.service_applications import MAX_TOKEN_LIFETIME, issue_token
 
         serializer = TokenIssueSerializer(data={'label': 'unbounded', 'expires_at': None})
         self.assertTrue(serializer.is_valid(), serializer.errors)
+
+        application = ServiceApplication.objects.create(name='ETL', service_id='etl-default-expiry')
+        record, _ = issue_token(application, 'no expiry given')
+        self.assertIsNotNone(record.expires_at)
+        expected = timezone.now() + MAX_TOKEN_LIFETIME
+        self.assertLess(abs((record.expires_at - expected).total_seconds()), 60)
+
+    def test_an_explicit_expiry_is_kept_as_given(self):
+        from patient_portal.service_applications import issue_token
+
+        application = ServiceApplication.objects.create(name='ETL', service_id='etl-explicit-expiry')
+        chosen = timezone.now() + timedelta(days=30)
+        record, _ = issue_token(application, 'thirty days', expires_at=chosen)
+        self.assertEqual(record.expires_at, chosen)
+
+    def test_the_api_mints_a_bounded_token_when_the_field_is_left_blank(self):
+        from patient_portal.service_applications import MAX_TOKEN_LIFETIME
+
+        staff = Identity.objects.create_user(email='lifetime-admin@test.com', password='ops-pass')
+        staff.is_staff = True
+        staff.save(update_fields=['is_staff'])
+        client = APIClient()
+        self.assertTrue(client.login(username='lifetime-admin@test.com', password='ops-pass'))
+        created = client.post('/api/v1/service-applications/', {
+            'name': 'Blank expiry', 'service_id': 'blank-expiry', 'scopes': 'patient/*.read',
+        }, format='json')
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED, created.data)
+        minted = client.post(f'/api/v1/service-applications/{created.data["id"]}/tokens/',
+                             {'label': 'blank'}, format='json')
+        self.assertEqual(minted.status_code, status.HTTP_201_CREATED, minted.data)
+        self.assertIsNotNone(minted.data['expires_at'])
+        record = ServiceAccessToken.objects.get(pk=minted.data['id'])
+        expected = timezone.now() + MAX_TOKEN_LIFETIME
+        self.assertLess(abs((record.expires_at - expected).total_seconds()), 60)
+
+    def test_importing_existing_credentials_is_left_unbounded_for_now(self):
+        """Imported tokens are already distributed; expiring them needs a
+
+        rotation plan, so #1375's follow-up owns that rather than this change.
+        """
+        import json
+        import tempfile
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        application = ServiceApplication.objects.create(name='ETL', service_id='etl-import')
+        with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as handle:
+            json.dump({'etl-import': {'token': 'x' * 48, 'scopes': 'patient/*.read'}}, handle)
+            path = handle.name
+        call_command('import_service_tokens', '--file', path, stdout=StringIO())
+        self.assertIsNone(application.tokens.get().expires_at)
 
 
 class LegacyServiceGrantKillSwitchTest(TestCase):

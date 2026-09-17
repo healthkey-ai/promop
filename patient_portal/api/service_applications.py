@@ -1,6 +1,4 @@
 """Staff application/token administration, with one-time secret disclosure."""
-from datetime import timedelta
-
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers, status, viewsets
@@ -11,7 +9,7 @@ from rest_framework.response import Response
 from rest_framework.settings import api_settings
 
 from patient_portal.models import ServiceAccessToken, ServiceApplication
-from patient_portal.service_applications import ALLOWED_SCOPES, issue_token
+from patient_portal.service_applications import ALLOWED_SCOPES, MAX_TOKEN_LIFETIME, issue_token
 from .permissions import (
     IsStaffPermission, ScopedTokenPermission, is_interactive_session, is_machine_request,
 )
@@ -46,17 +44,14 @@ class ServiceApplicationSerializer(serializers.ModelSerializer):
         return ' '.join(sorted(scopes))
 
 
-# A service credential is a static bearer secret with no refresh step, so its
-# lifetime is the whole of its exposure. An expiry the operator chooses is
-# accepted; a year-2999 expiry is not a choice, it is the absence of one.
-MAX_TOKEN_LIFETIME = timedelta(days=365)
-
-
 class TokenIssueSerializer(serializers.Serializer):
     label = serializers.CharField(max_length=160)
     expires_at = serializers.DateTimeField(required=False, allow_null=True)
 
     def validate_expires_at(self, value):
+        # None is not "no expiry" any more: issue_token substitutes the maximum,
+        # so the form's blank field yields a bounded token rather than a
+        # permanent one. This only rejects an explicit value outside the bound.
         if value is None:
             return value
         now = timezone.now()

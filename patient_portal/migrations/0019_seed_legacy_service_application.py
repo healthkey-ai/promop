@@ -10,7 +10,18 @@ LEGACY_SERVICE_ID = 'hk-labs-sync'
 
 def seed_legacy_application(apps, schema_editor):
     Application = apps.get_model('patient_portal', 'ServiceApplication')
-    Application.objects.using(schema_editor.connection.alias).get_or_create(
+    rows = Application.objects.using(schema_editor.connection.alias)
+    # 0017 seeded 'hk-labs' on the assumption that it was the legacy credential's
+    # principal. It is not, and leaving both rows unexplained puts two plausible
+    # HK-Labs entries in Org Admin, one of which silently does nothing. Say so on
+    # the row itself — but only while nobody has edited or used it.
+    rows.filter(service_id='hk-labs', description='', tokens__isnull=True).update(
+        description=(
+            'Managed tokens for HK-Labs. The legacy SERVICE_AUTH_TOKEN credential '
+            'is NOT governed by this record — disable "hk-labs-sync" to stop it.'
+        ),
+    )
+    rows.get_or_create(
         service_id=LEGACY_SERVICE_ID,
         defaults={
             'name': 'HK-Labs (legacy environment grant)',
@@ -37,9 +48,11 @@ def drop_legacy_application(apps, schema_editor):
     re-arm the legacy credential with nothing in the UI or the logs to say so.
     """
     Application = apps.get_model('patient_portal', 'ServiceApplication')
-    Application.objects.using(schema_editor.connection.alias).filter(
-        service_id=LEGACY_SERVICE_ID, is_active=True, tokens__isnull=True,
-    ).delete()
+    rows = Application.objects.using(schema_editor.connection.alias)
+    rows.filter(service_id=LEGACY_SERVICE_ID, is_active=True, tokens__isnull=True).delete()
+    rows.filter(service_id='hk-labs', description__startswith='Managed tokens for HK-Labs.').update(
+        description='',
+    )
 
 
 class Migration(migrations.Migration):

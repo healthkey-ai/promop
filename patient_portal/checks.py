@@ -225,7 +225,7 @@ def service_token_scope_check(app_configs, **kwargs):
         if isinstance(grant, dict)
     ]
     if (getattr(settings, 'SERVICE_AUTH_TOKEN', '') or '').strip():
-        configured.append(('the SERVICE_AUTH_TOKEN grant', getattr(settings, 'SERVICE_AUTH_SCOPES', '')))
+        configured.append(('SERVICE_AUTH_TOKEN', getattr(settings, 'SERVICE_AUTH_SCOPES', '')))
     for service_id, scopes in configured:
         unsupported = set((scopes or '').split()) - ALLOWED_SCOPES
         if unsupported:

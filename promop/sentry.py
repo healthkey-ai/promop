@@ -23,6 +23,10 @@ _EXTRA_SECRET_KEYS: tuple[str, ...] = (
     'AUDIT_HMAC_KEY',
     'EXPORT_SIGNING_KEY',
     'SERVICE_AUTH_TOKEN',
+    # Defence in depth for key-named context data. The control that keeps
+    # service secrets out of events is `include_local_variables: False` below:
+    # the plaintext pairs live in a local named `credentials`, which no key
+    # denylist would match. Cite that one as evidence, not this line.
     'SERVICE_AUTH_TOKENS',
     'ANTHROPIC_API_KEY',
     'MAILGUN_API_KEY',
