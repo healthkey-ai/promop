@@ -15056,6 +15056,9 @@ class OrgPatientSignupTest(TestCase):
     """Test the public patient self-signup endpoint."""
 
     def setUp(self):
+        from django.core.cache import cache
+        # DRF throttle state lives in the cache and leaks between tests.
+        cache.clear()
         self.org = Organization.objects.create(
             name='Signup Org', slug='signup-org', allows_patient_signup=True,
         )
