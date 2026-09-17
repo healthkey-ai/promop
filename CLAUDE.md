@@ -731,86 +731,73 @@ If `remoteEntry.js` returns 500 on staging, check that `WHITENOISE_ROOT` points 
 
 ---
 
-## Copying Curation Between Instances
+## Copying Data Between Instances
 
-`copy_curation` moves hand-curated mapping data from another PRomop instance
-into this one — both the `/field-mappings` tables and, opt-in, the
-`/code-mappings` table. The curation is manual reviewer work, so it is copied
-rather than redone.
+Every model is one of three kinds, listed in `omop_core/services/instance_data.py`.
+`tests/test_instance_data.py` fails when a new model has no kind.
 
-It was named `copy_field_mappings` until it grew the second screen; the old
-name is gone, not aliased.
+| Kind | What | Moved by |
+|---|---|---|
+| system | accounts, tokens, sessions, tenancy, audit, caches | never copied |
+| reference | what is needed to import patients: mappings, lookups, therapy reference, HealthKey concepts | `copy_reference_data` |
+| patient | what is known about one person | `copy_patient` |
 
 ```bash
-SOURCE_DATABASE_URL="postgresql://..." \
-  .venv/bin/python manage.py copy_curation --dry-run
-SOURCE_DATABASE_URL="postgresql://..." \
-  .venv/bin/python manage.py copy_curation
+SOURCE_DATABASE_URL="postgresql://..." .venv/bin/python manage.py copy_reference_data --dry-run
+SOURCE_DATABASE_URL="postgresql://..." .venv/bin/python manage.py copy_patient 12345 --org healthtree --dry-run
+SOURCE_DATABASE_URL="postgresql://..." .venv/bin/python manage.py copy_patient --filter-org-id 26 --org healthtree
 ```
 
-Destination is `DATABASE_URL`. The source is opened as a second connection
-registered at runtime (not in `settings.DATABASES`, so the test runner does not
-try to build a test database for it) and, on PostgreSQL, in a
-`default_transaction_read_only` session — the command never writes to the source.
+Both write to `DATABASE_URL` and open the source read-only. `copy_reference_data`
+runs in one transaction; `copy_patient` uses one transaction per patient.
+Copy reference data before patients: concepts and therapy regimens resolve by code.
 
-By default the command copies the two datasets loaded by the field-mapping
-screen: `FieldConceptMapping` and `FieldSynonym`. Existing rows with the same
-natural key are always overwritten. Related field-curation tables can be
-included explicitly with `--tables`:
+### copy_reference_data
 
-| Table | Natural key |
-|---|---|
-| `FieldConceptMapping` | `field_name` |
-| `CustomPatientField` | `field_name` (its mapping is `PROTECT`, so mappings are written first) |
-| `FieldChoice` + `FieldChoiceCode` | `(field_name, display)`; codes are replaced wholesale |
-| `FieldFormula` | `field_name` |
-| `FieldSynonym` | `(field_name, synonym_text)` |
-| `SourceCodeConceptMapping` | `(source_vocabulary_id, source_code)` — see below |
+Rows match on a natural key (`code`, `slug`, `(source_vocabulary_id, source_code)`),
+never on the source pk, and are overwritten from the source. Links travel as
+the related row's natural key. Concepts travel as `(vocabulary_id, concept_code)`:
+Athena ids agree across instances, HealthKey-minted ids do not. A concept not
+loaded here is cleared and reported.
 
-`--dry-run` rolls back, and `--prune` also deletes local rows the source lacks
-(off by default, so a copy is additive). Everything runs in one transaction
-against the local database. To migrate the entire related curation set, pass
-`--tables mappings custom_fields choices formulas synonyms`.
+Reference data with a release loader is not copied: Athena vocabularies
+(`load_athena_vocabularies`), UMLS, LOINC classes and survey definitions. Only
+HealthKey-minted concepts are copied, under this instance's own ids.
 
-### Code mappings are opt-in
+`--prune` deletes field and code mappings the source lacks. It never deletes
+lookups or therapy reference rows, because patient data can point at them.
 
-`--tables code_mappings` copies `SourceCodeConceptMapping` — the
-**`/code-mappings`** screen, not `/field-mappings`. Never in the default set:
-ingest reads that table (`services/code_mapping.resolve_source_code`), so an
-approved row decides what a later import resolves to. Copying one changes ingest
-behaviour; `--prune` deletes live resolution rules.
+Code mappings steer ingest (`resolve_source_code`), so copying an approved row
+changes what a later import resolves to. `occurrence_count`, `first_seen` and
+`last_seen` stay local. `reviewer` / `created_by` / `updated_by` are cleared:
+the same Identity id is a different person on another instance.
 
-There are also seven file-based loaders for this table (`load_mappings`,
-`import_*_crossmaps`, `sync_athena_mappings`). Prefer those where one fits — an
-artifact diffs in git.
+The field-mapping tables go through `field_curation_transfer`, whose payload is
+also the `dump_field_curation` fixture format. Keep that payload stable.
 
-Two rules apply to this table only:
+### copy_patient
 
-- **All three concept FKs are re-resolved** (`source_concept`, `target_concept`,
-  `suggested_target_concept`). They are `db_constraint=False`, so a stale source
-  id would be *accepted* and silently name a different concept. Unresolvable
-  references are nulled and warned about.
-- **`occurrence_count` / `first_seen` / `last_seen` are not copied** — they count
-  this deployment's own ingest traffic.
+Patients are selected on the source by ids, `--filter-*` flags, or both, which
+narrows the ids. Filters combine with AND. A run needs at least one id or filter,
+so it cannot copy every patient by accident. `--filter-org-id` is the org id on
+the source. A failed patient is reported, the rest continue, and the command
+exits non-zero.
 
-Two things deliberately do not survive the trip:
+Every row gets a new id. Foreign keys, plain integer references
+(`visit_detail_id`, `episode_id`) and polymorphic ones (`EpisodeEvent.event_id`,
+`measurement_event_id`, resolved through the field concept named `table.column`)
+follow the copied rows. A missing concept becomes 0 where required, else null.
 
-- **Row IDs.** Matching is on the natural key — the two instances number rows
-  independently.
-- **`reviewer` / `created_by` / `updated_by`.** These point at `Identity` rows
-  whose IDs mean a different person on each instance, so they are cleared. A
-  wrong attribution is worse than none.
-
-Concept FKs are **re-resolved by `(vocabulary_id, concept_code)`**, not copied
-as an id. Athena concept ids are stable across instances, but locally minted
-concepts (`Concept.source == 'HealthKey'`) are numbered per instance, so the
-same id can name a different concept on the target. A concept the target has
-not loaded leaves the mapping's concept null and logs a warning; the rest of the
-mapping still lands.
-
-Logic lives in `omop_core/services/field_curation_transfer.py`, split into
-`read_payload(using)` and `apply_payload(payload)` so the round trip is testable
-without a second test database (`tests/test_copy_curation.py`).
+- The patient keeps their `person_id` if it is free. Otherwise pass
+  `--target-person-id`, or `--replace`, which refuses when system data (a login,
+  a FHIR connection, an invitation) points at the person here.
+- `PatientRecord` is copied and re-derived, so user edits survive and derived
+  therapy ids follow this instance's reference data. It joins `--org`.
+- Stored document files are not copied; those rows are skipped and reported.
+- Source timestamps are kept, including `auto_now` ones. Revision authors are
+  source Identity ids, so they are cleared, except `system`.
+- Only some OMOP tables have a pk sequence. Tables without one allocate above
+  `MAX(pk)` under a table lock.
 
 ---
 

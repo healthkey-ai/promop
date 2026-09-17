@@ -1,7 +1,7 @@
 """Load a field-curation fixture exported by ``dump_field_curation``.
 
 Seeds or updates the field-curation tables from a JSON file, using the same
-``apply_payload`` logic that ``copy_curation`` uses for a live database
+``apply_payload`` logic that ``copy_reference_data`` uses for a live database
 transfer. Idempotent: rows are matched on natural keys, so re-running updates
 rather than duplicates.
 

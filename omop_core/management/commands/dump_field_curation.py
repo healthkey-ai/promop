@@ -1,6 +1,6 @@
 """Export the field-curation tables to a JSON fixture.
 
-Writes the same payload that ``copy_curation`` transfers live between databases,
+Writes the same payload that ``copy_reference_data`` transfers live between databases,
 but to a file instead — useful for checking into version control so a fresh
 instance can ``load_field_curation`` without a running source database.
 
