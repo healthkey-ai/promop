@@ -36,19 +36,19 @@ class TestRankingModelConstants:
         assert DEFAULT_RANKING_MODEL == 'anthropic'
 
     def test_both_models_in_set(self):
-        assert RANKING_MODELS == {'anthropic', 'jev'}
+        assert RANKING_MODELS == {'anthropic', 'jev', 'both'}
 
 
 class TestRankCandidatesDispatch:
     def test_routes_to_anthropic_by_default(self):
         with patch('omop_core.mapping.suggestions.rank_candidates') as mock_rank:
-            mock_rank.return_value = (_candidates()[0], 'high confidence: test')
+            mock_rank.return_value = (_candidates()[0], 'high confidence: test', [{'concept_id': 100, 'concept_name': 'HbA1c', 'confidence': 0.85, 'ranker': 'anthropic'}])
             chosen, note, alts = rank_candidates_dispatch(
                 'HbA1c', _candidates(), 'Hemoglobin A1c',
             )
             mock_rank.assert_called_once()
             assert chosen['concept_id'] == 100
-            assert alts is None
+            assert alts is not None
 
     def test_routes_to_jev_when_requested(self):
         with patch('omop_core.mapping.suggestions.rank_candidates_jev') as mock_jev:
@@ -62,11 +62,30 @@ class TestRankCandidatesDispatch:
 
     def test_explicit_anthropic_routes_correctly(self):
         with patch('omop_core.mapping.suggestions.rank_candidates') as mock_rank:
-            mock_rank.return_value = (_candidates()[0], 'test note')
+            mock_rank.return_value = (_candidates()[0], 'test note', None)
             rank_candidates_dispatch(
                 'HbA1c', _candidates(), ranking_model='anthropic',
             )
             mock_rank.assert_called_once()
+
+    def test_both_runs_both_rankers_concurrently(self):
+        a_alts = [{'concept_id': 100, 'concept_name': 'HbA1c', 'confidence': 0.55, 'ranker': 'anthropic'}]
+        j_alts = [{'concept_id': 200, 'concept_name': 'Glycated', 'confidence': 0.90, 'ranker': 'jev'}]
+        with patch('omop_core.mapping.suggestions.rank_candidates') as mock_a, \
+             patch('omop_core.mapping.suggestions.rank_candidates_jev') as mock_j:
+            mock_a.return_value = (_candidates()[0], 'medium confidence: ok', a_alts)
+            mock_j.return_value = (_candidates()[1], 'high confidence (Jev 90%)', j_alts)
+            chosen, note, alts = rank_candidates_dispatch(
+                'HbA1c', _candidates(), 'Hemoglobin A1c',
+                ranking_model='both',
+            )
+            mock_a.assert_called_once()
+            mock_j.assert_called_once()
+            # Jev wins because 0.90 > 0.55
+            assert chosen['concept_id'] == 200
+            assert 'Jev wins' in note
+            # Both rankers' alternatives are merged
+            assert len(alts) == 2
 
 
 def _mock_requests_post(json_response, *, raise_exc=None):

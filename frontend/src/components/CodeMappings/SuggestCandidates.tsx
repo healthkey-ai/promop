@@ -15,6 +15,7 @@ type Alternative = {
   concept_id: number;
   concept_name?: string;
   confidence: number;
+  ranker?: string;
 };
 export type CandidateActivity = {
   stage: string;
@@ -65,12 +66,20 @@ export default function SuggestCandidates({ activity, finished, onSaved }: Props
     }
   };
 
-  // Build a confidence lookup from the ranked event's alternatives (Jev ranker).
-  const confidenceLookup = (events: CandidateActivity[]): Map<number, number> => {
+  // Build a confidence lookup from the ranked event's alternatives.
+  // When both rankers ran, keep the highest confidence per concept.
+  const confidenceLookup = (events: CandidateActivity[]): Map<number, { confidence: number; ranker?: string }> => {
     const ranked = events.filter(e => e.stage === "ranked").at(-1);
     const alts = ranked?.alternatives;
     if (!alts) return new Map();
-    return new Map(alts.map(a => [a.concept_id, a.confidence]));
+    const m = new Map<number, { confidence: number; ranker?: string }>();
+    for (const a of alts) {
+      const existing = m.get(a.concept_id);
+      if (!existing || a.confidence > existing.confidence) {
+        m.set(a.concept_id, { confidence: a.confidence, ranker: a.ranker });
+      }
+    }
+    return m;
   };
 
   return <section aria-label="Suggestion candidates" className="mb-4 space-y-3 rounded-md border border-slate-200 bg-white p-4">
@@ -102,7 +111,8 @@ export default function SuggestCandidates({ activity, finished, onSaved }: Props
                 <span>{candidate.vocabulary_id}:{candidate.concept_code} — {candidate.concept_name} (OMOP {candidate.concept_id})</span>
                 {(candidate.vector_distance != null || candidate.semantic_score != null) &&
                   <span className="text-slate-600">Distance {(candidate.vector_distance ?? (1 - candidate.semantic_score!)).toFixed(4)}</span>}
-                {conf != null && <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-xs font-medium text-indigo-700">{Math.round(conf * 100)}%</span>}
+                {conf != null && <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${conf.ranker === "jev" ? "bg-indigo-100 text-indigo-700" : conf.ranker === "anthropic" ? "bg-sky-100 text-sky-700" : "bg-slate-100 text-slate-700"}`}
+                  title={conf.ranker ? `${conf.ranker} confidence` : "confidence"}>{Math.round(conf.confidence * 100)}%{conf.ranker ? ` ${conf.ranker[0].toUpperCase()}` : ""}</span>}
                 {candidate.concept_id === winner?.concept_id && <span className="font-semibold">Winner</span>}
                 {selected[mappingId] === candidate.concept_id && <span role="status">Selected alternative · awaiting review</span>}
                 {finished && result?.updated && !result.dry_run && candidate.concept_id !== activeId && <button
