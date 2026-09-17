@@ -11,6 +11,11 @@ export type SuggestCandidate = {
   semantic_score?: number;
   vector_distance?: number;
 };
+type Alternative = {
+  concept_id: number;
+  concept_name?: string;
+  confidence: number;
+};
 export type CandidateActivity = {
   stage: string;
   mapping_id?: number;
@@ -22,6 +27,7 @@ export type CandidateActivity = {
   note?: string;
   updated?: boolean;
   dry_run?: boolean;
+  alternatives?: Alternative[];
 };
 
 type Props = {
@@ -29,7 +35,7 @@ type Props = {
   finished: boolean;
   onSaved?: () => void;
 };
-const stages = { umls: "UMLS", lexical: "Lexical", semantic: "Semantic (vector distance)" };
+const stages: Record<string, string> = { umls: "UMLS", lexical: "Lexical", vectors: "Vectors", semantic: "Vectors" };
 
 export default function SuggestCandidates({ activity, finished, onSaved }: Props) {
   const [saving, setSaving] = useState<number | null>(null);
@@ -58,6 +64,15 @@ export default function SuggestCandidates({ activity, finished, onSaved }: Props
       setSaving(null);
     }
   };
+
+  // Build a confidence lookup from the ranked event's alternatives (Jev ranker).
+  const confidenceLookup = (events: CandidateActivity[]): Map<number, number> => {
+    const ranked = events.filter(e => e.stage === "ranked").at(-1);
+    const alts = ranked?.alternatives;
+    if (!alts) return new Map();
+    return new Map(alts.map(a => [a.concept_id, a.confidence]));
+  };
+
   return <section aria-label="Suggestion candidates" className="mb-4 space-y-3 rounded-md border border-slate-200 bg-white p-4">
     <h2 className="font-semibold">Suggestion candidates</h2>
     <p className="text-sm text-slate-600">Candidates appear as each search finishes. After the run finishes, you can choose an alternative and review it in the mapping table.</p>
@@ -74,23 +89,28 @@ export default function SuggestCandidates({ activity, finished, onSaved }: Props
       const seen = new Set(searches.flatMap(event => (event.candidates ?? []).map(candidate => candidate.concept_id)));
       const additional = (ranked?.candidates ?? []).filter(candidate => !seen.has(candidate.concept_id));
       const lists = [...searches, ...(additional.length ? [{ stage: "candidates", strategy: "additional", candidates: additional }] : [])];
+      const confidences = confidenceLookup(events);
       return <article key={mappingId} className="rounded border border-slate-200 p-3">
         <h3 className="font-medium">{source.source_vocabulary_id || "Uncoded"}:{source.source_code}</h3>
         {lists.map((event, index) => <div key={index} className="mt-2">
           <h4 className="text-sm font-medium">{stages[event.strategy as keyof typeof stages] ?? "Additional ranking candidates"}</h4>
           {!event.candidates?.length && <p className="text-sm text-slate-500">No matches</p>}
           <ul className="space-y-1 text-sm">
-            {event.candidates?.map(candidate => <li key={candidate.concept_id} className="flex flex-wrap items-center gap-2">
-              <span>{candidate.vocabulary_id}:{candidate.concept_code} — {candidate.concept_name} (OMOP {candidate.concept_id})</span>
-              {(candidate.vector_distance != null || candidate.semantic_score != null) &&
-                <span className="text-slate-600">Distance {(candidate.vector_distance ?? (1 - candidate.semantic_score!)).toFixed(4)}</span>}
-              {candidate.concept_id === winner?.concept_id && <span className="font-semibold">Winner</span>}
-              {selected[mappingId] === candidate.concept_id && <span role="status">Selected alternative · awaiting review</span>}
-              {finished && result?.updated && !result.dry_run && candidate.concept_id !== activeId && <button
-                type="button" disabled={saving !== null} className="rounded border px-2 py-1 disabled:opacity-50"
-                aria-label={`Use ${candidate.concept_name} for ${source.source_code}`}
-                onClick={() => void choose(mappingId, candidate)}>{saving === mappingId ? "Saving…" : "Use candidate"}</button>}
-            </li>)}
+            {event.candidates?.map(candidate => {
+              const conf = confidences.get(candidate.concept_id);
+              return <li key={candidate.concept_id} className="flex flex-wrap items-center gap-2">
+                <span>{candidate.vocabulary_id}:{candidate.concept_code} — {candidate.concept_name} (OMOP {candidate.concept_id})</span>
+                {(candidate.vector_distance != null || candidate.semantic_score != null) &&
+                  <span className="text-slate-600">Distance {(candidate.vector_distance ?? (1 - candidate.semantic_score!)).toFixed(4)}</span>}
+                {conf != null && <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-xs font-medium text-indigo-700">{Math.round(conf * 100)}%</span>}
+                {candidate.concept_id === winner?.concept_id && <span className="font-semibold">Winner</span>}
+                {selected[mappingId] === candidate.concept_id && <span role="status">Selected alternative · awaiting review</span>}
+                {finished && result?.updated && !result.dry_run && candidate.concept_id !== activeId && <button
+                  type="button" disabled={saving !== null} className="rounded border px-2 py-1 disabled:opacity-50"
+                  aria-label={`Use ${candidate.concept_name} for ${source.source_code}`}
+                  onClick={() => void choose(mappingId, candidate)}>{saving === mappingId ? "Saving…" : "Use candidate"}</button>}
+              </li>;
+            })}
           </ul>
         </div>)}
         {ranked && <p className="mt-2 text-sm font-medium">{winner ? `Winner: ${winner.concept_name}` : "No destination proposed"}</p>}

@@ -181,14 +181,18 @@ assert _UMLS_ROOT_TO_VOCAB.get('ICD10CM') == 'ICD10CM', (
 # Strategy labels
 # ---------------------------------------------------------------------------
 STRATEGY_UMLS = 'umls'
-STRATEGY_VECTORS = 'vectors'
 STRATEGY_LEXICAL = 'lexical'
+STRATEGY_VECTORS = 'vectors'
+# Legacy alias so old client payloads carrying 'semantic' are still accepted.
 STRATEGY_SEMANTIC = 'semantic'
-DEFAULT_STRATEGIES = [STRATEGY_UMLS, STRATEGY_LEXICAL, STRATEGY_SEMANTIC]
-# Keep explicit requests from older clients compatible; default runs pass the
-# complete retrieval pool straight to the LLM, without redundant reordering.
-ALL_STRATEGIES = [*DEFAULT_STRATEGIES, STRATEGY_VECTORS]
-RANKING_MODEL = 'claude-opus-5'
+DEFAULT_STRATEGIES = [STRATEGY_UMLS, STRATEGY_LEXICAL, STRATEGY_VECTORS]
+ALL_STRATEGIES = [*DEFAULT_STRATEGIES, STRATEGY_SEMANTIC]
+RANKING_MODEL_ANTHROPIC = 'claude-opus-5'
+RANKING_MODEL_JEV = 'jev'
+RANKING_MODELS = {'anthropic', 'jev'}
+DEFAULT_RANKING_MODEL = 'anthropic'
+# Backwards compat: old code that reads RANKING_MODEL gets the Anthropic model.
+RANKING_MODEL = RANKING_MODEL_ANTHROPIC
 
 
 def _find_source_concept(source_vocabulary_id, source_code):
@@ -362,7 +366,7 @@ def semantic_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
         # Separate from vector_score: retrieving neighbours is not reranking.
         'semantic_score': round(1 - row['distance'], 4),
         'vector_distance': round(row['distance'], 6),
-        'retrieval': STRATEGY_SEMANTIC,
+        'retrieval': STRATEGY_VECTORS,
     } for row in sorted(rows, key=lambda r: (r['distance'], r['concept_id']))]
 
 
@@ -475,18 +479,21 @@ def vocabulary_aliases(source_vocabulary_id):
 
 def suggestable_mappings(omop_table=None, *, source_vocabulary_id=None,
                          min_occurrences=DEFAULT_MIN_OCCURRENCES,
-                         limit=None, resuggest=False):
+                         limit=None, resuggest=False,
+                         ranking_model=DEFAULT_RANKING_MODEL):
     """The rows a run will work through, at most *limit* of them."""
     rows = suggestable_queryset(
         omop_table, source_vocabulary_id=source_vocabulary_id,
         min_occurrences=min_occurrences, resuggest=resuggest,
+        ranking_model=ranking_model,
     )
     return list(rows[:limit] if limit else rows)
 
 
 def suggestable_queryset(omop_table=None, *, source_vocabulary_id=None,
                          min_occurrences=DEFAULT_MIN_OCCURRENCES,
-                         resuggest=False):
+                         resuggest=False,
+                         ranking_model=DEFAULT_RANKING_MODEL):
     """The queue rows on one tab that a Suggest run is allowed to write to.
 
     **Every row on the tab with no destination yet.**  That is the whole default
@@ -543,11 +550,12 @@ def suggestable_queryset(omop_table=None, *, source_vocabulary_id=None,
         rows = rows.filter(target_concept__isnull=True)
     if min_occurrences > 1:
         rows = rows.filter(occurrence_count__gte=min_occurrences)
-    return _suggestable_queryset_ordered(rows)
+    return _suggestable_queryset_ordered(rows, ranking_model=ranking_model)
 
 
-def _suggestable_queryset_ordered(rows):
+def _suggestable_queryset_ordered(rows, *, ranking_model=DEFAULT_RANKING_MODEL):
     """Apply the run order. Split out so a caller can count without fetching."""
+    version_stamp = f'{SUGGESTION_MODEL_VERSION}-{ranking_model}'
     return rows.annotate(
         has_destination=Case(
             When(target_concept__isnull=True, then=Value(0)),
@@ -560,7 +568,7 @@ def _suggestable_queryset_ordered(rows):
             output_field=IntegerField(),
         ),
         already_tried=Case(
-            When(last_suggest_attempt=SUGGESTION_MODEL_VERSION, then=Value(1)),
+            When(last_suggest_attempt=version_stamp, then=Value(1)),
             default=Value(0),
             output_field=IntegerField(),
         ),
@@ -921,6 +929,172 @@ def rank_candidates(source_value, candidates, source_description='', *, source_c
     )
 
 
+def rank_candidates_jev(source_value, candidates, source_description='', *, source_context=None,
+                        require_model_selection=False):
+    """Select from the candidate pool using the Jev (Typesafe) ranking API.
+
+    Returns ``(chosen, note, alternatives)`` — same contract as
+    :func:`rank_candidates` plus a list of ``{concept_id, confidence}`` dicts
+    for every alternative the Jev model scored.
+    """
+    if not candidates:
+        return None, 'No candidate concept scored above the similarity threshold.', None
+
+    top = candidates[0]
+    fallback = None if require_model_selection else top
+    top_score = (
+        top.get('lexical_score')
+        or top.get('vector_score')
+        or top.get('semantic_score')
+        or top.get('umls_score')
+        or '?'
+    )
+    fallback_note = (
+        f'Best-match fallback (score {top_score}). '
+        f'Ranking model unavailable, so this is the first candidate in retrieval fallback order. '
+        f'Retrieval scores do not establish clinical compatibility — review carefully.'
+    )
+    if require_model_selection:
+        fallback_note = 'Ranking model unavailable; expanded search remains unresolved.'
+
+    def unavailable(reason, detail):
+        logger.warning(
+            'Jev ranking unavailable reason=%s key_configured=%s candidate_count=%s',
+            reason, bool(getattr(settings, 'JEV_API_KEY', '')), len(candidates),
+        )
+        return fallback, f'{fallback_note} Details: {detail}', None
+
+    jev_key = getattr(settings, 'JEV_API_KEY', '')
+    if not jev_key:
+        return unavailable('missing_api_key', 'JEV_API_KEY is not configured.')
+
+    source_info = source_context or {
+        'code': source_value, 'original_description': source_description,
+    }
+    choices = []
+    for c in candidates:
+        label = f"{c.get('vocabulary_id', '')}:{c.get('concept_code', '')} — {c.get('concept_name', '')} (OMOP {c['concept_id']})"
+        choices.append({'id': str(c['concept_id']), 'label': label})
+
+    payload = {
+        'primitive': 'Choice',
+        'context': (
+            f"Select the best clinically compatible OMOP destination concept for this source code. "
+            f"Source: {source_info.get('code', source_value)} — "
+            f"{source_info.get('original_description', source_description)}. "
+            f"If no candidate is clinically compatible, choose 'none'."
+        ),
+        'choices': [*choices, {'id': 'none', 'label': 'None of the candidates are clinically compatible'}],
+    }
+
+    try:
+        import requests
+    except ImportError:
+        return unavailable('http_unavailable', 'requests is not installed.')
+
+    jev_url = getattr(settings, 'JEV_API_URL', 'https://api.typesafe.ai/v1/systemone')
+    try:
+        resp = requests.post(
+            jev_url,
+            json=payload,
+            headers={'Authorization': f'Bearer {jev_key}', 'Content-Type': 'application/json'},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:  # noqa: BLE001 - degrade, never fail
+        logger.warning('Jev ranking request failed: %s', type(exc).__name__)
+        return unavailable('request_failed', 'The Jev ranking request failed.')
+
+    # Parse the Jev response — extract the chosen id and alternatives with confidence.
+    chosen_id_str = data.get('choice')
+    if chosen_id_str is None:
+        chosen_id_str = data.get('selected')
+    if chosen_id_str is None:
+        chosen_id_str = data.get('id')
+    probabilities = data.get('probabilities') or data.get('scores') or {}
+
+    alternatives = []
+    for c in candidates:
+        cid = str(c['concept_id'])
+        raw_prob = probabilities.get(cid)
+        if raw_prob is not None:
+            try:
+                prob = float(raw_prob)
+            except (TypeError, ValueError):
+                continue
+            alternatives.append({
+                'concept_id': c['concept_id'],
+                'concept_name': c.get('concept_name', ''),
+                'confidence': prob,
+            })
+    # Sort alternatives by confidence descending.
+    alternatives.sort(key=lambda a: a['confidence'], reverse=True)
+
+    if chosen_id_str == 'none' or chosen_id_str is None:
+        note = 'No suitable concept (Jev ranking).'
+        if alternatives:
+            scores_text = '; '.join(
+                f"{a['concept_name']} ({a['confidence']:.0%})" for a in alternatives[:5]
+            )
+            note += f' Alternatives considered: {scores_text}'
+        return None, note, alternatives
+
+    try:
+        chosen_id = int(chosen_id_str)
+    except (TypeError, ValueError):
+        return unavailable('invalid_output', f'Jev returned non-integer choice: {chosen_id_str!r}')
+
+    chosen = next((c for c in candidates if c['concept_id'] == chosen_id), None)
+    if chosen is None:
+        return unavailable('candidate_outside_pool', 'Jev selected a concept outside the candidate list.')
+
+    chosen_confidence = probabilities.get(str(chosen_id))
+    confidence_label = 'unknown'
+    if chosen_confidence is not None:
+        if chosen_confidence >= 0.7:
+            confidence_label = 'high'
+        elif chosen_confidence >= 0.4:
+            confidence_label = 'medium'
+        else:
+            confidence_label = 'low'
+
+    scores_text = '; '.join(
+        f"{a['concept_name']} ({a['confidence']:.0%})" for a in alternatives[:5]
+    )
+    confidence_display = f'{chosen_confidence:.0%}' if chosen_confidence is not None else 'unknown'
+    note = f'{confidence_label} confidence (Jev {confidence_display})'
+    if scores_text:
+        note += f': {scores_text}'
+
+    return chosen, note, alternatives
+
+
+def rank_candidates_dispatch(source_value, candidates, source_description='', *,
+                             source_context=None, require_model_selection=False,
+                             ranking_model=DEFAULT_RANKING_MODEL):
+    """Route to the appropriate ranker based on *ranking_model*.
+
+    Returns ``(chosen, note, alternatives)`` where *alternatives* is a list of
+    ``{concept_id, confidence}`` dicts when the Jev ranker is used, or None for
+    Anthropic.
+    """
+    if ranking_model == 'jev':
+        return rank_candidates_jev(
+            source_value, candidates, source_description,
+            source_context=source_context,
+            require_model_selection=require_model_selection,
+        )
+    # Default: Anthropic.  rank_candidates returns (chosen, note); wrap to
+    # three-tuple for uniform contract.
+    chosen, note = rank_candidates(
+        source_value, candidates, source_description,
+        source_context=source_context,
+        require_model_selection=require_model_selection,
+    )
+    return chosen, note, None
+
+
 def retrieval_pool(*, source_code, source_vocabulary_id, source_text, domain_id,
                    strategies, lexical_limit=CANDIDATE_LIMIT, on_candidates=None):  # noqa: C901
     """Candidates for one source code, in the order the ranker should see them.
@@ -967,12 +1141,13 @@ def retrieval_pool(*, source_code, source_vocabulary_id, source_text, domain_id,
         report(STRATEGY_LEXICAL, lexical_hits)
         candidates += [hit for hit in lexical_hits if hit['concept_id'] not in seen]
 
-    if STRATEGY_SEMANTIC in strategies:
+    # Accept both 'vectors' (new) and 'semantic' (legacy) for vector retrieval.
+    if STRATEGY_VECTORS in strategies or STRATEGY_SEMANTIC in strategies:
         # Always search when enabled, even if lexical returned plausible hits:
         # the correct concept can still be absent from that shortlist.
         by_id = {c['concept_id']: c for c in candidates}
         semantic_hits = semantic_candidates(source_text or source_code, domain_id)
-        report(STRATEGY_SEMANTIC, semantic_hits)
+        report(STRATEGY_VECTORS, semantic_hits)
         for hit in semantic_hits:
             existing = by_id.get(hit['concept_id'])
             if existing is not None:
@@ -982,23 +1157,6 @@ def retrieval_pool(*, source_code, source_vocabulary_id, source_text, domain_id,
             else:
                 candidates.append(hit)
                 by_id[hit['concept_id']] = hit
-
-    if STRATEGY_VECTORS in strategies:
-        # Reranked within each tier, not across them. Sorting the merged list on
-        # cosine alone would let a trigram hit overtake an NLM-curated UMLS
-        # equivalency -- and `rank_candidates` returns `candidates[0]` whenever
-        # it degrades (no API key, no network, unparseable reply), so on the
-        # documented degrade path the worse candidate would become the written
-        # destination.
-        umls_tier = [c for c in candidates if c.get('retrieval') == STRATEGY_UMLS]
-        lexical_tier = [c for c in candidates if c.get('retrieval') == STRATEGY_LEXICAL]
-        semantic_tier = [c for c in candidates if c.get('retrieval') == STRATEGY_SEMANTIC]
-        query = source_text or source_code
-        umls_tier, _ = vector_rerank(query, umls_tier)
-        lexical_tier, _ = vector_rerank(query, lexical_tier)
-        # Semantic-only candidates already have cosine order. Preserve curated
-        # and lexical fallback precedence instead of comparing unlike scores.
-        candidates = umls_tier + lexical_tier + semantic_tier
 
     return candidates, umls_cui, definitive
 
@@ -1049,7 +1207,7 @@ def _prepare(*, source_code, source_vocabulary_id, source_text, domain_id,
     return job
 
 
-def rank_jobs(jobs, on_ranked=None):
+def rank_jobs(jobs, on_ranked=None, ranking_model=DEFAULT_RANKING_MODEL):
     """Fill in ``chosen``/``note`` for every job still needing the ranker.
 
     Concurrent because each call is 4-6s of waiting on a third party and there
@@ -1066,15 +1224,18 @@ def rank_jobs(jobs, on_ranked=None):
             on_ranked(job)
 
     def rank(job):
-        return rank_candidates(
+        return rank_candidates_dispatch(
             job['source_code'], job['candidates'],
             source_description=job['source_text'],
             source_context=job.get('source_context'),
             require_model_selection=bool(job.get('query_expansion')),
+            ranking_model=ranking_model,
         )
 
-    def record(job, chosen, note):
+    def record(job, chosen, note, alternatives=None):
         job['chosen'], job['note'] = chosen, note
+        if alternatives is not None:
+            job['alternatives'] = alternatives
         if chosen is not None:
             job['strategy_used'] = chosen.get('retrieval') or STRATEGY_LEXICAL
         if on_ranked is not None:
@@ -1091,24 +1252,24 @@ def rank_jobs(jobs, on_ranked=None):
         for future in as_completed(futures):
             job = futures[future]
             try:
-                chosen, note = future.result()
+                chosen, note, alternatives = future.result()
             except Exception as exc:              # noqa: BLE001 - degrade, never fail
                 # rank_candidates already swallows its own failures; this is the
                 # backstop for anything that escapes it, so one bad code cannot
                 # take down a whole Suggest run.
                 logger.warning('Ranking raised for %r: %s', job['source_code'], exc)
                 job['ranking_failed'] = True
-                chosen, note = None, 'Ranking failed; no destination proposed.'
-            record(job, chosen, note)
+                chosen, note, alternatives = None, 'Ranking failed; no destination proposed.', None
+            record(job, chosen, note, alternatives)
     return jobs
 
 
-def rank_and_expand_jobs(jobs, on_ranked=None):
+def rank_and_expand_jobs(jobs, on_ranked=None, ranking_model=DEFAULT_RANKING_MODEL):
     """One initial selection and at most one query-expansion/selection retry."""
-    rank_jobs(jobs, on_ranked=on_ranked)
+    rank_jobs(jobs, on_ranked=on_ranked, ranking_model=ranking_model)
     pending = [job for job in jobs if job['chosen'] is None
                and not job.get('ranking_failed')
-               and {STRATEGY_LEXICAL, STRATEGY_SEMANTIC}.intersection(job['strategies'])
+               and {STRATEGY_LEXICAL, STRATEGY_VECTORS, STRATEGY_SEMANTIC}.intersection(job['strategies'])
                and getattr(settings, 'ANTHROPIC_API_KEY', '')]
     if not pending:
         return jobs
@@ -1141,7 +1302,7 @@ def rank_and_expand_jobs(jobs, on_ranked=None):
                 hits, _, _ = retrieval_pool(
                     source_code=job['source_code'], source_vocabulary_id=job['source_vocabulary_id'],
                     source_text=query, domain_id=job['domain_id'],
-                    strategies=[s for s in job['strategies'] if s in (STRATEGY_LEXICAL, STRATEGY_SEMANTIC)],
+                    strategies=[s for s in job['strategies'] if s in (STRATEGY_LEXICAL, STRATEGY_VECTORS, STRATEGY_SEMANTIC)],
                     lexical_limit=min(job['lexical_limit'], CANDIDATE_LIMIT),
                 )
         except Exception:  # noqa: BLE001 - a retry must preserve the initial result
@@ -1163,7 +1324,7 @@ def rank_and_expand_jobs(jobs, on_ranked=None):
 
     # No recursive call: another abstention ends the attempt. Every candidate,
     # including the first pool, is compared with the unchanged source context.
-    rank_jobs(retry_jobs)
+    rank_jobs(retry_jobs, ranking_model=ranking_model)
     for job in retry_jobs:
         job['note'] = f"Search expanded with {job['query_expansion']!r}. {job['note']}"
         if on_ranked is not None:
@@ -1246,7 +1407,8 @@ def _source_description(mapping, source_concept):
 def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
                      limit=None, dry_run=False, source_vocabulary_id=None,
                      strategies=None, lexical_limit=CANDIDATE_LIMIT,
-                     resuggest=False, progress=None, activity=None):
+                     resuggest=False, progress=None, activity=None,
+                     ranking_model=DEFAULT_RANKING_MODEL):
     """Propose destinations for the unanswered queue rows on one tab.
 
     The candidate set is :func:`suggestable_mappings` -- rows already on the
@@ -1270,8 +1432,7 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
 
     - ``umls`` — CUI bridge. A unique match wins after other searches finish.
     - ``lexical`` — GIN trigram, the best *lexical_limit* survivors.
-    - ``semantic`` — up to ten cosine neighbours, even when lexical has hits.
-    - ``vectors`` — reorders those survivors by embedding similarity.
+    - ``vectors`` — up to ten cosine neighbours, even when lexical has hits.
 
     *progress*, when given, is called as ``progress(stage, done, total)`` with
     *stage* ``'retrieving'`` then ``'writing'``.  Retrieval is two thirds of the
@@ -1294,6 +1455,7 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
     mappings = suggestable_mappings(
         omop_table, source_vocabulary_id=source_vocabulary_id,
         min_occurrences=min_occurrences, limit=limit, resuggest=resuggest,
+        ranking_model=ranking_model,
     )
 
     def report(stage, done):
@@ -1361,9 +1523,10 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
 
     def ranked(job):
         emit('ranked', **source(job['mapping']), suggested=job['chosen'],
-             note=job['note'], strategy_used=job['strategy_used'], candidates=job['candidates'])
+             note=job['note'], strategy_used=job['strategy_used'], candidates=job['candidates'],
+             alternatives=job.get('alternatives'))
 
-    rank_and_expand_jobs(jobs, on_ranked=ranked)
+    rank_and_expand_jobs(jobs, on_ranked=ranked, ranking_model=ranking_model)
     report('writing', 0)
 
     # Phase 3 -- the writes, serially.
@@ -1429,7 +1592,8 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
         # Recorded on every row the run examined, so the next run does not
         # re-retrieve and re-rank the same codes. Says nothing about whether a
         # suggestion was made -- see the field's own note on the model.
-        mapping.last_suggest_attempt = SUGGESTION_MODEL_VERSION
+        # Include the ranking model so switching rankers gives a fresh queue.
+        mapping.last_suggest_attempt = f'{SUGGESTION_MODEL_VERSION}-{ranking_model}'
         mapping.suggest_strategy = job['strategy_used'] or ''
         mapping.umls_cui = job['umls_cui'] or ''
         fields = ['last_suggest_attempt', 'suggest_strategy', 'umls_cui', 'updated_at']
@@ -1497,7 +1661,8 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
 
 def suggest_one_mapping(source_code, source_vocabulary_id, omop_table, *,
                         source_description='', strategies=None,
-                        lexical_limit=CANDIDATE_LIMIT, activity=None):
+                        lexical_limit=CANDIDATE_LIMIT, activity=None,
+                        ranking_model=DEFAULT_RANKING_MODEL):
     """Run the shared retrieval and ranking pipeline for one dialog row."""
     if strategies is None:
         strategies = list(DEFAULT_STRATEGIES)
@@ -1533,7 +1698,7 @@ def suggest_one_mapping(source_code, source_vocabulary_id, omop_table, *,
         ),
     )
     emit("ranking")
-    rank_and_expand_jobs([job])
+    rank_and_expand_jobs([job], ranking_model=ranking_model)
 
     from omop_core.services.athena_mapping_guard import (
         ATHENA_DUPLICATE_MESSAGE, athena_supplies_mapping,
@@ -1551,4 +1716,5 @@ def suggest_one_mapping(source_code, source_vocabulary_id, omop_table, *,
         'candidates': job['candidates'],
         'vector_reranked': job['vector_reranked'],
         'query_expansion': job.get('query_expansion'),
+        'alternatives': job.get('alternatives'),
     }
