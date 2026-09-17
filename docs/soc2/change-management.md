@@ -70,11 +70,20 @@ enforces this after bootstrap.
    acceptance of Lars’s current approval.
 
 The status writer executes only trusted default-branch code with metadata read and
-status-write permissions. It never checks out PR code. A separate unprivileged
+status-write permissions. It never checks out PR code, and it checks out only the policy
+module itself: the policy's tests run in a separate job that holds no write permissions,
+so no test file executes in the job that publishes the verdict. Files under `.github/`,
+CODEOWNERS, `docs/soc2/`, and the scanner configurations are classified as
+security-sensitive even when named like tests, because a test file in the control plane
+still runs with the control plane's privileges. A separate unprivileged
 review-event workflow signals trusted reevaluation. PR/issue events and a five-minute
 scheduled reconciliation refresh results; scheduled runs can be delayed. API errors fail
-closed. PRs sharing a head are evaluated together so an ordinary PR cannot overwrite a
-security PR's failed status. Label/review changes can take until the next successful run
+closed: a commit that cannot be evaluated is marked `failure`, and if even that
+status cannot be written the workflow run itself fails so the stale verdict is
+visible. PRs sharing a head are evaluated together so an ordinary PR cannot overwrite a
+security PR's failed status. A commit's status is written only when the verdict changes,
+which keeps the five-minute reconciliation from exhausting GitHub's per-commit status
+limit. Label/review changes can take until the next successful run
 to update a previously published status.
 
 The ruleset change must preserve unrelated rules. Capture the complete existing ruleset
