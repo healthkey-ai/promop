@@ -914,11 +914,14 @@ class OrgPatientSignupView(APIView):
                 from omop_core.services.patient_record_service import refresh_patient_record
                 refresh_patient_record(person)
 
-                # Grant patient access to this org
+                # Grant access to this org.  Public demo orgs get 'org_admin'
+                # so the user can browse all sample patients; private orgs get
+                # 'patient' (self-access only).
+                signup_role = 'org_admin' if org.allows_patient_signup else 'patient'
                 GroupAccess.objects.get_or_create(
                     identity=identity,
                     org=org,
-                    defaults={'role': 'patient'},
+                    defaults={'role': signup_role},
                 )
         except Exception:
             logger.exception('Unexpected error during patient signup for %s', email)
