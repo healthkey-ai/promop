@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useInfiniteQuery } from "@tanstack/react-query";
-import api from "@/api/axios";
+import { clinicalClient, clinicalUrl } from "@/api/clinicalTransport";
 import type { PaginatedResponse } from "@/federation/types";
 
 const DEFAULT_PAGE_SIZE = 100;
@@ -17,8 +17,13 @@ export function useInfiniteOmopQuery<T>(
   const query = useInfiniteQuery<PaginatedResponse<T>>({
     queryKey: ["clinical-summary", endpoint, personId, pageSize],
     queryFn: async ({ pageParam }) => {
-      const resp = await api.get<PaginatedResponse<T>>(
-        `/v1/${endpoint}/`,
+      // The clinical transport, not `@/api/axios`: that singleton resolves
+      // relative URLs against whatever origin serves the bundle, which under a
+      // federation host is the HOST. `/v1/measurements/` then returns the
+      // host's HTML shell with a 200, `results` is undefined, and the Labs and
+      // History tabs crash on the first row that is not there.
+      const resp = await clinicalClient().get<PaginatedResponse<T>>(
+        clinicalUrl(`/v1/${endpoint}/`),
         { params: { person_id: personId, page: pageParam, page_size: pageSize } },
       );
       return resp.data;
@@ -30,8 +35,11 @@ export function useInfiniteOmopQuery<T>(
     staleTime: 30_000,
   });
 
+  // `?? []` per page: a response that is not the paginated shape we asked for
+  // otherwise flattens to `[undefined]`, and every consumer reads fields off
+  // the rows without checking.
   const allResults = useMemo(
-    () => query.data?.pages.flatMap((p) => p.results) ?? [],
+    () => query.data?.pages.flatMap((p) => p.results ?? []) ?? [],
     [query.data?.pages],
   );
   const totalCount = query.data?.pages[0]?.count ?? 0;

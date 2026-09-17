@@ -616,7 +616,7 @@ export default function PatientDetail({
   };
 
   const getDiseaseTabLabel = () =>
-    ({ breast: "Breast Cancer", lymphoma: "Follicular Lymphoma", myeloma: "Multiple Myeloma", cll: "CLL", mcl: "Mantle Cell Lymphoma", other: "Disease Specific" })[getDiseaseType()];
+    ({ breast: "Breast Cancer", lymphoma: "Follicular Lymphoma", myeloma: "Multiple Myeloma", cll: "CLL", mcl: "Mantle Cell Lymphoma" } as Record<string, string>)[getDiseaseType()];
 
   if (loading) return <PatientDetailSkeleton />;
 
@@ -642,15 +642,23 @@ export default function PatientDetail({
 
   // Build tab list dynamically — patient mode adds Allergies (after Labs) and Surveys (last).
   // Immunizations are shown inside the Treatment tab, not as a separate tab.
+  // The disease-specific tab only appears when a recognised disease is selected.
   const canViewOmop = !patientMode && !!(user?.is_staff || user?.is_org_admin);
-  const coreTabs = ["General", getDiseaseTabLabel(), "Treatment", "Blood", "Labs", "Genomics"];
+  const diseaseType = getDiseaseType();
+  const showDiseaseTab = diseaseType !== "other";
+  const coreTabs = ["General", ...(showDiseaseTab ? [getDiseaseTabLabel()] : []), "Treatment", "Blood", "Labs", "Genomics"];
   const afterLabsTabs = patientMode ? ["Allergies"] : [];
   const trailingTabs = ["Behavior", "Wearables", "History"];
   const surveyTabs = patientMode ? ["Surveys"] : [];
   const adminTabs = canViewOmop ? ["OMOP"] : [];
   const tabLabels = [...coreTabs, ...afterLabsTabs, ...trailingTabs, ...surveyTabs, ...adminTabs];
 
-  // Compute dynamic indices
+  // Compute dynamic indices — disease tab shifts everything when absent.
+  const diseaseIdx = showDiseaseTab ? 1 : -1;
+  const treatmentIdx = showDiseaseTab ? 2 : 1;
+  const bloodIdx = treatmentIdx + 1;
+  const labsIdx = bloodIdx + 1;
+  const genomicsIdx = labsIdx + 1;
   const allergiesIdx = patientMode ? coreTabs.length : -1;
   const behaviorIdx = coreTabs.length + afterLabsTabs.length;
   const wearablesIdx = behaviorIdx + 1;
@@ -660,11 +668,11 @@ export default function PatientDetail({
 
   const tabDescriptions: Record<number, string> = {
     0: "Keep patient details up to date for accurate personalisation.",
-    1: "Disease selection, staging, and disease-specific clinical information.",
-    2: "Therapy history, treatment lines, and planned therapies.",
-    3: "Blood counts and differential.",
-    4: "Chemistry, liver function, coagulation, cardiac and tumour markers.",
-    5: "Genes, variants, origins, interpretations, and test details.",
+    ...(diseaseIdx >= 0 ? { [diseaseIdx]: "Staging and disease-specific clinical information." } : {}),
+    [treatmentIdx]: "Therapy history, treatment lines, and planned therapies.",
+    [bloodIdx]: "Blood counts and differential.",
+    [labsIdx]: "Chemistry, liver function, coagulation, cardiac and tumour markers.",
+    [genomicsIdx]: "Genes, variants, origins, interpretations, and test details.",
     ...(allergiesIdx >= 0 ? { [allergiesIdx]: "Known allergies and intolerances from your health records." } : {}),
     [behaviorIdx]: "Lifestyle, socioeconomic, and behavioural health factors.",
     [wearablesIdx]: "30 day summaries derived from synced OMOP data.",
@@ -835,19 +843,19 @@ export default function PatientDetail({
                     />
                   </>
                 )}
-                {activeTab === 1 && (
+                {diseaseIdx >= 0 && activeTab === diseaseIdx && (
                   <DiseaseTab
                     formData={editedInfo}
                     onChange={handleFieldChange}
-                    diseaseType={getDiseaseType()}
+                    diseaseType={diseaseType}
                   />
                 )}
-                {activeTab === 2 && (
+                {activeTab === treatmentIdx && (
                   <>
                     <TreatmentTab
                       formData={editedInfo}
                       onChange={handleFieldChange}
-                      diseaseType={getDiseaseType()}
+                      diseaseType={diseaseType}
                       onRecordRefreshed={(info) => {
                         // The server already re-derived and returned the record.
                         // Advancing the baseline too stops the next autosave
@@ -865,13 +873,13 @@ export default function PatientDetail({
                     )}
                   </>
                 )}
-                {activeTab === 3 && <BloodTab formData={editedInfo} onChange={handleFieldChange} />}
-                {activeTab === 4 && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
-                {activeTab === 5 && <GenomicsTab formData={editedInfo} />}
+                {activeTab === bloodIdx && <BloodTab formData={editedInfo} onChange={handleFieldChange} />}
+                {activeTab === labsIdx && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
+                {activeTab === genomicsIdx && <GenomicsTab formData={editedInfo} />}
                 {allergiesIdx >= 0 && activeTab === allergiesIdx && <AllergyList user={user ?? null} />}
                 {activeTab === behaviorIdx && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} />}
                 {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} />}
-                {activeTab === summaryIdx && <ClinicalSummaryTab formData={editedInfo} onNavigateToLabs={() => setActiveTab(4)} />}
+                {activeTab === summaryIdx && <ClinicalSummaryTab formData={editedInfo} onNavigateToLabs={() => setActiveTab(labsIdx)} />}
                 {surveysIdx >= 0 && activeTab === surveysIdx && <PatientSurveys user={user ?? null} />}
                 {omopIdx >= 0 && activeTab === omopIdx && personId && <PatientOmopTab personId={personId} />}
               </div>

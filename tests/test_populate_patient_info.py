@@ -705,7 +705,6 @@ class TestTp53Disruption:
         [{'gene': 'TP53', 'interpretation': 'Pathogenic', 'assessment': 'indeterminate'}],
         [{'gene': 'TP53', 'interpretation': 'Pathogenic', 'assessment': 'not_tested'}],
         [{'gene': 'TP53', 'interpretation': 'Pathogenic', 'assessment': 'no_call'}],
-        [{'gene': 'TP53', 'interpretation': 'Pathogenic', 'status': 'absent'}],
         [{'gene': 'TP53', 'interpretation': 'Pathogenic', 'status': 'indeterminate'}],
         [{'gene': 'TP53', 'interpretation': 'Likely pathogenic'}],
         [{'gene': 'TP53', 'interpretation': 'Uncertain significance'}],
@@ -718,6 +717,15 @@ class TestTp53Disruption:
         pi.tp53_disruption = previous
         _cmd()._compute_derived_fields(pi)
         assert pi.tp53_disruption is None
+
+    @pytest.mark.parametrize('previous', [None, True])
+    def test_absent_status_sets_false(self, previous):
+        pi = self._pi_with_mutations([
+            {'gene': 'TP53', 'interpretation': 'Pathogenic', 'status': 'absent'},
+        ])
+        pi.tp53_disruption = previous
+        _cmd()._compute_derived_fields(pi)
+        assert pi.tp53_disruption is False
 
     def test_positive_rule_is_unchanged_with_other_nonqualifying_findings(self):
         pi = self._pi_with_mutations([

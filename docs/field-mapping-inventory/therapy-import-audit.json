@@ -1,0 +1,996 @@
+{
+  "source_workbook": "Therapy_Component_Category_Mapping with Concept IDs (1).xlsm",
+  "source_sha256": "2a024ae4e15a1767849480b7b690e8e14ade7dea25af82f0e955af7c3e45f144",
+  "normalization": {
+    "disease": {
+      "mantle cell lymphoma": "MCL",
+      "chronic lymphocytic leukemia": "C2987",
+      "multiple myeloma": "C3242",
+      "follicular lymphoma": "C3209",
+      "breast cancer": "C9335"
+    },
+    "round": {
+      "First Line Therapy": "first_line_therapy",
+      "Second Line Therapy": "second_line_therapy",
+      "SecondLine Therapy": "second_line_therapy",
+      "Second Round Therapy": "second_round_therapy",
+      "Later Therapy": "later_line_therapy",
+      "Supportive Therapy": "supportive_therapy"
+    }
+  },
+  "source_conflicts": [
+    {
+      "kind": "regimens",
+      "code": "orelabrutinib",
+      "first": {
+        "code": "orelabrutinib",
+        "title": "Orelabrutinib Monotherapy",
+        "concept": "Newly added to DB, not yet mapped",
+        "source_sheet": "Therapy  Component Mapping",
+        "source_row": 2
+      },
+      "other": {
+        "code": "orelabrutinib",
+        "title": "Orelabrutinib Monotherapy",
+        "concept": "Newly added to DB , not yet mapped",
+        "source_sheet": "TherapyDiseaseRound",
+        "source_row": 2
+      }
+    },
+    {
+      "kind": "regimens",
+      "code": "orelabrutinib",
+      "first": {
+        "code": "orelabrutinib",
+        "title": "Orelabrutinib Monotherapy",
+        "concept": "Newly added to DB, not yet mapped",
+        "source_sheet": "Therapy  Component Mapping",
+        "source_row": 2
+      },
+      "other": {
+        "code": "orelabrutinib",
+        "title": "Orelabrutinib Monotherapy",
+        "concept": "Newly added to DB , not yet mapped",
+        "source_sheet": "TherapyDiseaseRound",
+        "source_row": 3
+      }
+    },
+    {
+      "kind": "regimens",
+      "code": "orelabrutinib",
+      "first": {
+        "code": "orelabrutinib",
+        "title": "Orelabrutinib Monotherapy",
+        "concept": "Newly added to DB, not yet mapped",
+        "source_sheet": "Therapy  Component Mapping",
+        "source_row": 2
+      },
+      "other": {
+        "code": "orelabrutinib",
+        "title": "Orelabrutinib Monotherapy",
+        "concept": "Newly added to DB , not yet mapped",
+        "source_sheet": "TherapyDiseaseRound",
+        "source_row": 4
+      }
+    },
+    {
+      "kind": "regimens",
+      "code": "orelabrutinib",
+      "first": {
+        "code": "orelabrutinib",
+        "title": "Orelabrutinib Monotherapy",
+        "concept": "Newly added to DB, not yet mapped",
+        "source_sheet": "Therapy  Component Mapping",
+        "source_row": 2
+      },
+      "other": {
+        "code": "orelabrutinib",
+        "title": "Orelabrutinib Monotherapy",
+        "concept": "Newly added to DB , not yet mapped",
+        "source_sheet": "TherapyDiseaseRound",
+        "source_row": 5
+      }
+    },
+    {
+      "kind": "regimens",
+      "code": "brexu_cel",
+      "first": {
+        "code": "brexu_cel",
+        "title": "Brexu-cel (Tecartus) Monotherapy",
+        "concept": "Newly added to DB, not yet mapped",
+        "source_sheet": "Therapy  Component Mapping",
+        "source_row": 3
+      },
+      "other": {
+        "code": "brexu_cel",
+        "title": "Brexu-cel (Tecartus) Monotherapy",
+        "concept": "Newly added to DB , not yet mapped",
+        "source_sheet": "TherapyDiseaseRound",
+        "source_row": 6
+      }
+    },
+    {
+      "kind": "regimens",
+      "code": "brexu_cel",
+      "first": {
+        "code": "brexu_cel",
+        "title": "Brexu-cel (Tecartus) Monotherapy",
+        "concept": "Newly added to DB, not yet mapped",
+        "source_sheet": "Therapy  Component Mapping",
+        "source_row": 3
+      },
+      "other": {
+        "code": "brexu_cel",
+        "title": "Brexu-cel (Tecartus) Monotherapy",
+        "concept": "Newly added to DB , not yet mapped",
+        "source_sheet": "TherapyDiseaseRound",
+        "source_row": 7
+      }
+    },
+    {
+      "kind": "regimens",
+      "code": "other_lbr",
+      "first": {
+        "code": "other_lbr",
+        "title": "Other Lenalidomide-Based Regimens",
+        "concept": "no_omop",
+        "source_sheet": "Therapy  Component Mapping",
+        "source_row": 354
+      },
+      "other": {
+        "code": "other_lbr",
+        "title": "Other Lenalidomide-Based Regimens",
+        "concept": null,
+        "source_sheet": "TherapyDiseaseRound",
+        "source_row": 565
+      }
+    },
+    {
+      "kind": "regimens",
+      "code": "other_lbr",
+      "first": {
+        "code": "other_lbr",
+        "title": "Other Lenalidomide-Based Regimens",
+        "concept": "no_omop",
+        "source_sheet": "Therapy  Component Mapping",
+        "source_row": 354
+      },
+      "other": {
+        "code": "other_lbr",
+        "title": "Other Lenalidomide-Based Regimens",
+        "concept": null,
+        "source_sheet": "TherapyDiseaseRound",
+        "source_row": 566
+      }
+    },
+    {
+      "kind": "regimens",
+      "code": "other_lbr",
+      "first": {
+        "code": "other_lbr",
+        "title": "Other Lenalidomide-Based Regimens",
+        "concept": "no_omop",
+        "source_sheet": "Therapy  Component Mapping",
+        "source_row": 354
+      },
+      "other": {
+        "code": "other_lbr",
+        "title": "Other Lenalidomide-Based Regimens",
+        "concept": null,
+        "source_sheet": "TherapyDiseaseRound",
+        "source_row": 567
+      }
+    },
+    {
+      "kind": "regimens",
+      "code": "other_lbr",
+      "first": {
+        "code": "other_lbr",
+        "title": "Other Lenalidomide-Based Regimens",
+        "concept": "no_omop",
+        "source_sheet": "Therapy  Component Mapping",
+        "source_row": 354
+      },
+      "other": {
+        "code": "other_lbr",
+        "title": "Other Lenalidomide-Based Regimens",
+        "concept": null,
+        "source_sheet": "TherapyDiseaseRound",
+        "source_row": 568
+      }
+    },
+    {
+      "kind": "regimens",
+      "code": "other_lbr",
+      "first": {
+        "code": "other_lbr",
+        "title": "Other Lenalidomide-Based Regimens",
+        "concept": "no_omop",
+        "source_sheet": "Therapy  Component Mapping",
+        "source_row": 354
+      },
+      "other": {
+        "code": "other_lbr",
+        "title": "Other Lenalidomide-Based Regimens",
+        "concept": null,
+        "source_sheet": "TherapyDiseaseRound",
+        "source_row": 569
+      }
+    },
+    {
+      "kind": "regimens",
+      "code": "cy_bor_d",
+      "first": {
+        "code": "cy_bor_d",
+        "title": "CyBorD/VCd",
+        "concept": 35806061,
+        "source_sheet": "Therapy  Component Mapping",
+        "source_row": 372
+      },
+      "other": {
+        "code": "cy_bor_d",
+        "title": "CyBorD/VCD",
+        "concept": 35806061,
+        "source_sheet": "TherapyDiseaseRound",
+        "source_row": 597
+      }
+    }
+  ],
+  "entities": {
+    "regimens": {
+      "workbook_count": 239,
+      "promop_count": 244,
+      "missing": [],
+      "extra": [
+        "bortezomib_maintenance",
+        "her2_targeted_therapies",
+        "hormonal_therapy",
+        "immunoglobulin_replacement_therapy",
+        "radiotherapy"
+      ],
+      "differences": [
+        {
+          "code": "entecavir",
+          "difference": "concept_id",
+          "workbook": 40058763,
+          "promop": null
+        },
+        {
+          "code": "cataflam",
+          "difference": "concept_id",
+          "workbook": 19058062,
+          "promop": null
+        },
+        {
+          "code": "voltaren",
+          "difference": "concept_id",
+          "workbook": 19044580,
+          "promop": null
+        },
+        {
+          "code": "aleve",
+          "difference": "concept_id",
+          "workbook": 19053148,
+          "promop": null
+        },
+        {
+          "code": "advil_motrin_ib_ibuprofen",
+          "difference": "concept_id",
+          "workbook": 19023250,
+          "promop": null
+        },
+        {
+          "code": "adjuvant_chemotherapy",
+          "difference": "concept_id",
+          "workbook": 37363921,
+          "promop": null
+        },
+        {
+          "code": "contraceptives",
+          "difference": "concept_id",
+          "workbook": 21602472,
+          "promop": null
+        },
+        {
+          "code": "hrt",
+          "difference": "concept_id",
+          "workbook": 3170208,
+          "promop": null
+        },
+        {
+          "code": "esa",
+          "difference": "concept_id",
+          "workbook": 4333784,
+          "promop": null
+        },
+        {
+          "code": "st_john_s_wort",
+          "difference": "concept_id",
+          "workbook": 43636734,
+          "promop": null
+        },
+        {
+          "code": "carbamazepine",
+          "difference": "concept_id",
+          "workbook": 387222003,
+          "promop": null
+        },
+        {
+          "code": "hiv_antiretroviral_therapy",
+          "difference": "concept_id",
+          "workbook": 416234007,
+          "promop": null
+        },
+        {
+          "code": "topical_corticosteroids",
+          "difference": "concept_id",
+          "workbook": 21602098,
+          "promop": null
+        },
+        {
+          "code": "mineralocorticoids",
+          "difference": "concept_id",
+          "workbook": 2160272,
+          "promop": null
+        },
+        {
+          "code": "liposomal_doxorubicin",
+          "difference": "concept_id",
+          "workbook": 43253424,
+          "promop": null
+        }
+      ]
+    },
+    "components": {
+      "workbook_count": 187,
+      "promop_count": 187,
+      "missing": [],
+      "extra": [],
+      "differences": [
+        {
+          "code": "diclofenac_potassium",
+          "difference": "concept_id",
+          "workbook": 19132917,
+          "promop": null
+        },
+        {
+          "code": "diclofenac_sodium",
+          "difference": "concept_id",
+          "workbook": 19026850,
+          "promop": null
+        },
+        {
+          "code": "analgesic_opioid_agent",
+          "difference": "concept_id",
+          "workbook": 21604200,
+          "promop": null
+        },
+        {
+          "code": "topical_corticosteroid",
+          "difference": "concept_id",
+          "workbook": 723738,
+          "promop": null
+        },
+        {
+          "code": "systemic_corticosteroid",
+          "difference": "concept_id",
+          "workbook": 723814,
+          "promop": null
+        },
+        {
+          "code": "megestrol_acetate",
+          "difference": "concept_id",
+          "workbook": 19072024,
+          "promop": null
+        }
+      ]
+    },
+    "classes": {
+      "workbook_count": 91,
+      "promop_count": 91,
+      "missing": [],
+      "extra": [],
+      "differences": [
+        {
+          "code": "surgery",
+          "difference": "concept_id",
+          "workbook": 45888085,
+          "promop": null
+        },
+        {
+          "code": "cyp2c8_inhibitors",
+          "difference": "concept_id",
+          "workbook": 19403357,
+          "promop": null
+        },
+        {
+          "code": "cyp2c9_inhibitors",
+          "difference": "concept_id",
+          "workbook": 19403358,
+          "promop": null
+        },
+        {
+          "code": "opioid_therapies",
+          "difference": "concept_id",
+          "workbook": 21604200,
+          "promop": null
+        },
+        {
+          "code": "cyp3a4_inhibitors",
+          "difference": "concept_id",
+          "workbook": 19403362,
+          "promop": null
+        },
+        {
+          "code": "cyp3a4_inducers",
+          "difference": "concept_id",
+          "workbook": 19403370,
+          "promop": null
+        },
+        {
+          "code": "anti_seizure_meds",
+          "difference": "concept_id",
+          "workbook": 37362234,
+          "promop": null
+        },
+        {
+          "code": "antidepressants",
+          "difference": "concept_id",
+          "workbook": 21604686,
+          "promop": null
+        },
+        {
+          "code": "bone_modifying_agents",
+          "difference": "concept_id",
+          "workbook": 21604147,
+          "promop": null
+        }
+      ]
+    }
+  },
+  "relationships": {
+    "regimen_components": {
+      "workbook_count": 391,
+      "promop_count": 391,
+      "missing": [],
+      "extra": []
+    },
+    "component_classes": {
+      "workbook_count": 490,
+      "promop_count": 490,
+      "missing": [],
+      "extra": []
+    },
+    "disease_rounds": {
+      "workbook_count": 600,
+      "promop_count": 681,
+      "missing": [],
+      "extra": [
+        [
+          "antiviral",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "aspirin_gt_81mg_daily",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "aspirin_lt_81mg_daily",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "bortezomib_maintenance",
+          "C3242",
+          "supportive_therapy"
+        ],
+        [
+          "bupropion",
+          "C2987",
+          "supportive_therapy"
+        ],
+        [
+          "bupropion",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "carbamazepine",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "chronic_opioid_therapy",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "ciprofloxacin",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "clarithromycin",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "denosumab",
+          "C2987",
+          "supportive_therapy"
+        ],
+        [
+          "denosumab",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "denosumab",
+          "MCL",
+          "supportive_therapy"
+        ],
+        [
+          "erythromycin",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "esa",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "fluconazole",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "fluoxetine",
+          "C2987",
+          "supportive_therapy"
+        ],
+        [
+          "fluoxetine",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "fluvoxamine",
+          "C2987",
+          "supportive_therapy"
+        ],
+        [
+          "fluvoxamine",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "g_csf",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "gm_csf",
+          "C2987",
+          "supportive_therapy"
+        ],
+        [
+          "gm_csf",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "grapefruit_juice",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "heparin_anticoagulant",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "her2_targeted_therapies",
+          "C9335",
+          "supportive_therapy"
+        ],
+        [
+          "herbal_supplements",
+          "C2987",
+          "supportive_therapy"
+        ],
+        [
+          "herbal_supplements",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "hiv_antiretroviral_therapy",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "hormonal_therapy",
+          "C2987",
+          "supportive_therapy"
+        ],
+        [
+          "hormonal_therapy",
+          "C3209",
+          "supportive_therapy"
+        ],
+        [
+          "hormonal_therapy",
+          "C3242",
+          "supportive_therapy"
+        ],
+        [
+          "hormonal_therapy",
+          "C9335",
+          "supportive_therapy"
+        ],
+        [
+          "hormonal_therapy",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "hormonal_therapy",
+          "MCL",
+          "supportive_therapy"
+        ],
+        [
+          "immunoglobulin_replacement_therapy",
+          "C2987",
+          "supportive_therapy"
+        ],
+        [
+          "immunoglobulin_replacement_therapy",
+          "C3209",
+          "supportive_therapy"
+        ],
+        [
+          "immunoglobulin_replacement_therapy",
+          "C3242",
+          "supportive_therapy"
+        ],
+        [
+          "immunoglobulin_replacement_therapy",
+          "C9335",
+          "supportive_therapy"
+        ],
+        [
+          "immunoglobulin_replacement_therapy",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "immunoglobulin_replacement_therapy",
+          "MCL",
+          "supportive_therapy"
+        ],
+        [
+          "immunosuppressant",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "inhaled_corticosteroids",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "intranasal_corticosteroids",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "itraconazole",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "ketoconazole",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "local_palliative_radiotherapy",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "mineralocorticoids",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "mineralocorticoids",
+          "MCL",
+          "supportive_therapy"
+        ],
+        [
+          "pamidronate",
+          "C2987",
+          "supportive_therapy"
+        ],
+        [
+          "pamidronate",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "pamidronate",
+          "MCL",
+          "supportive_therapy"
+        ],
+        [
+          "paroxetine",
+          "C2987",
+          "supportive_therapy"
+        ],
+        [
+          "paroxetine",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "phenobarbital",
+          "C2987",
+          "supportive_therapy"
+        ],
+        [
+          "phenobarbital",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "phenytoin",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "posaconazole",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "radiotherapy",
+          "C2987",
+          "supportive_therapy"
+        ],
+        [
+          "radiotherapy",
+          "C3209",
+          "supportive_therapy"
+        ],
+        [
+          "radiotherapy",
+          "C3242",
+          "supportive_therapy"
+        ],
+        [
+          "radiotherapy",
+          "C9335",
+          "supportive_therapy"
+        ],
+        [
+          "radiotherapy",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "radiotherapy",
+          "MCL",
+          "supportive_therapy"
+        ],
+        [
+          "rifabutin",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "rifampin",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "sertraline",
+          "C2987",
+          "supportive_therapy"
+        ],
+        [
+          "sertraline",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "st_john_s_wort",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "systemic_corticosteroids_gt_10_mg_day",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "systemic_corticosteroids_gt_20_mg_day",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "systemic_corticosteroids_gt_5_mg_day",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "systemic_corticosteroids_lt_5_mg_day",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "topical_corticosteroids",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "topiramate",
+          "C2987",
+          "supportive_therapy"
+        ],
+        [
+          "topiramate",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "voriconazole",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "warfarin_anticoagulant",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "zoledronic_acid",
+          "C2987",
+          "supportive_therapy"
+        ],
+        [
+          "zoledronic_acid",
+          "DLBCL",
+          "supportive_therapy"
+        ],
+        [
+          "zoledronic_acid",
+          "MCL",
+          "supportive_therapy"
+        ]
+      ]
+    }
+  },
+  "csv_relationships": {
+    "regimen_components": {
+      "csv_count": 391,
+      "missing_from_csv": [],
+      "extra_in_csv": []
+    },
+    "component_classes": {
+      "csv_count": 490,
+      "missing_from_csv": [],
+      "extra_in_csv": []
+    },
+    "disease_rounds": {
+      "csv_count": 600,
+      "missing_from_csv": [],
+      "extra_in_csv": []
+    }
+  },
+  "cancerbot_vs_promop": {
+    "regimens": {
+      "cancerbot_count": 239,
+      "promop_count": 244,
+      "only_cancerbot": [],
+      "only_promop": [
+        "bortezomib_maintenance",
+        "her2_targeted_therapies",
+        "hormonal_therapy",
+        "immunoglobulin_replacement_therapy",
+        "radiotherapy"
+      ],
+      "title_differences": [
+        {
+          "code": "alpelisib_monotherapy",
+          "cancerbot": "Alpelisib (Piqray)  Monotherapy",
+          "promop": "Alpelisib (Piqray) Monotherapy"
+        }
+      ]
+    },
+    "components": {
+      "cancerbot_count": 186,
+      "promop_count": 187,
+      "only_cancerbot": [],
+      "only_promop": [
+        ""
+      ],
+      "title_differences": []
+    },
+    "classes": {
+      "cancerbot_count": 91,
+      "promop_count": 91,
+      "only_cancerbot": [
+        "growth_factors"
+      ],
+      "only_promop": [
+        ""
+      ],
+      "title_differences": []
+    },
+    "regimen_components": {
+      "cancerbot_count": 394,
+      "promop_count": 391,
+      "only_cancerbot": [
+        [
+          "chop",
+          "[NULL FK]"
+        ],
+        [
+          "ixazomib",
+          "ixazomib"
+        ],
+        [
+          "local_palliative_radiotherapy",
+          "[NULL FK]"
+        ],
+        [
+          "other_lbr",
+          "[NULL FK]"
+        ]
+      ],
+      "only_promop": [
+        [
+          "ixazomib",
+          ""
+        ]
+      ]
+    },
+    "component_classes": {
+      "cancerbot_count": 493,
+      "promop_count": 490,
+      "only_cancerbot": [
+        [
+          "daratumumab",
+          "[NULL FK]"
+        ],
+        [
+          "ibritumomab_tiuxetan",
+          "[NULL FK]"
+        ],
+        [
+          "rituximab",
+          "[NULL FK]"
+        ],
+        [
+          "ublituximab",
+          "[NULL FK]"
+        ]
+      ],
+      "only_promop": [
+        [
+          "investigational_agent",
+          ""
+        ]
+      ]
+    }
+  },
+  "snapshot_context": {
+    "cancerbot": "production reference tables, read-only",
+    "promop": "Render staging reference tables, read-only",
+    "date": "2026-09-14"
+  }
+}

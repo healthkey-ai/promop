@@ -1,36 +1,93 @@
 # Field and value reference inventory
 
-Snapshot: 2026-09-14T05:30:47.610466+00:00. Schema: 1.
+Snapshot: 2026-09-14T15:07:52.840817+00:00. Schema: 1.
 
 **Inventory remains incomplete. No candidates are clinically approved by this export.**
 
-2801 source rows; 1615 await destination reconciliation; 1200 have no attached candidate.
+7767 source rows; 5906 have no direct scalar-field destination (see source/catalog routing below); 5042 have no attached candidate.
 
 | Source | Rows |
 |---|---:|
+| cancerbot_history | 394 |
+| cancerbot_live | 4105 |
 | cancerbot_source | 175 |
-| frontend_constant | 463 |
-| frontend_control | 336 |
+| cancerbot_static | 82 |
+| descriptor_option | 211 |
+| frontend_constant | 505 |
+| frontend_control | 413 |
+| frontend_provider | 41 |
 | genomics_catalog | 42 |
 | promop_catalog | 977 |
 | promop_choice | 262 |
-| promop_field | 414 |
-| promop_model_choice | 132 |
+| promop_field | 420 |
+| promop_model_choice | 140 |
 
 | Disposition | Rows |
 |---|---:|
-| needs_review | 2373 |
-| not_applicable | 151 |
-| requires_structured_representation | 277 |
+| ambiguous | 80 |
+| needs_review | 4097 |
+| not_applicable | 404 |
+| requires_structured_representation | 3186 |
 
 ## Coverage gaps
 
-- CancerBot: 93 public lists need further source/provider reconciliation; database-driven lists need live reference coverage. Therapy catalogs/disease links use authoritative staging exports; literal lists and planned picker context are tracked separately.
-- CancerBot seed/migration retirement history and source-to-destination crosswalk still require reconciliation.
-- Dynamic frontend expressions and dependent genetics lists require explicit provider reconciliation; see source_coverage.
+- CancerBot: 0 public lists lack reference coverage; 0 planned lists lack source eligibility coverage. Reference membership is distinct from destination and clinical mapping approval.
+- CancerBot source routes are recorded separately from immutable source context; missing destinations and clinical equivalence remain review items. Seed/migration retirement history still requires reconciliation.
+- Frontend: 0 controls and 0 constants lack provider accounting. Descriptor source: base_descriptors_captured. Source routing does not certify destination semantics.
 - Reference catalogs preserve codes, links and destination candidates; unresolved destination/context is never inferred from labels.
 - Exact labels and synonyms are lexical evidence only; case-sensitive search is not exhaustive and no-equivalent requires separate review.
 - Existing approved statuses are preserved; candidate semantic meaning, destination domains and vocabulary lineage still require review.
+
+## CancerBot public-list reconciliation
+
+| Coverage | Lists |
+|---|---:|
+| covered_by_live_export | 118 |
+| covered_by_static_source | 51 |
+| excluded_trial_search | 3 |
+
+Static results describe the checked-in source definitions, including empty and blank-only lists. They do not certify a deployed CancerBot version. Trial-search exclusions retain their source evidence. Unresolved providers below require reference data; model names come from source imports, not label matching.
+
+| Unresolved list | Source models |
+|---|---|
+
+## Implementation destination accounting
+
+Source/consumer routing assigns implementation work. It does not approve concepts, merge aliases, infer retirement or certify runtime field availability.
+
+| Destination evidence | Source rows |
+|---|---:|
+| existing_reference_catalog | 977 |
+| field_destination_recorded | 1542 |
+| frontend_consumers_recorded | 290 |
+| historical_source_evidence | 394 |
+| retained_source_evidence | 202 |
+| source_consumers_recorded | 4360 |
+| trial_search_metadata | 2 |
+
+Rows awaiting a source/consumer routing disposition: 0. Missing runtime fields and ambiguous clinical contexts remain explicit even when source routing is known.
+
+## CancerBot destination routing
+
+Source review status: `source_routes_recorded`.
+
+Routes retain source disease, line, nested keys and representation warnings separately from immutable source identity. A recorded route is not clinical equivalence or an approved answer mapping.
+
+| Route status | Bindings |
+|---|---:|
+| destination_missing | 8 |
+| source_route_recorded | 164 |
+
+| Source list | Missing PRomop destination |
+|---|---|
+| diseaseBehaviorsMcl | disease_behavior |
+| diseaseSubtypesMcl | disease_subtype |
+| morphologicVariants | morphologic_variant |
+| bulkyDiseaseCriteria | bulky_disease_criteria |
+| highRiskMclCriteria | high_risk_mcl_criteria |
+| extranodalSites | extranodal_sites |
+| mipiRisks | mipi_risk |
+| mipiCRisks | mipi_c_risk |
 
 ## CancerBot-derived staging therapy catalogs
 
@@ -80,12 +137,53 @@ Staging is the authoritative source for these catalogs, as confirmed by the user
 | supportiveTherapiesCll | 59 | C2987 | supportive_therapy |
 | supportiveTherapiesMcl | 69 | MCL | supportive_therapy |
 
-Planned-therapy catalogs are available; planned picker eligibility/status remains a context reconciliation task. Existing disease/round links do not encode administration status. Unknown/Other sentinels are recorded separately from catalog counts.
+Staging membership above is preserved as independent evidence. Where live CancerBot rows are supplied, the public binding references those rows instead. PlannedTherapy is a separate CancerBot source catalog; its disease/round eligibility never proves administration or a mapping to a PRomop regimen. Planned lists still awaiting source eligibility: 0. Unknown/Other sentinels are recorded separately from catalog counts.
 
+
+## CancerBot source history
+
+Definitions only; no migration, patient or trial table is read or executed. Recorded scopes distinguish clinical source repairs from trial/platform metadata. Definition coverage never certifies execution, clinical aliases or current membership. Absence never establishes retirement.
+
+Migration definition accounting complete: True.
+
+| History evidence | Count |
+|---|---:|
+| schema_events | 91 |
+| catalog_events | 10 |
+| historical_seed_options | 309 |
+| source_scope_recorded | 51 |
+| literal_seed_definitions_recorded | 20 |
+| source_noop | 21 |
+| reviewed_catalog_rule | 6 |
+
+| Catalog scope | Old code | Replacement | Rule |
+|---|---|---|---|
+| PatientInfo | `40` | `(none)` | Clear the obsolete numeric grade-4 value to null; this is not selection of Unknown or a valid breast biopsy grade. |
+| Disease | `mm` | `MM` | Repoint disease relationships and deduplicate, or rename when uppercase counterpart is absent. Do not normalize unrelated codes. |
+| Disease | `fl` | `FL` | Repoint disease relationships and deduplicate, or rename when uppercase counterpart is absent. Do not normalize unrelated codes. |
+| Disease | `bc` | `BC` | Repoint disease relationships and deduplicate, or rename when uppercase counterpart is absent. Do not normalize unrelated codes. |
+| TrialType | `targeted_therapy_all` | `(none)` | Trial-type search category removed; this is not a Therapy, component or class catalog retirement. |
+| Therapy, TherapyComponent, TherapyComponentCategory | `i` | `ixazomib` | Replacement must exist in the same catalog level; unresolved references abort removal. |
+| Therapy, TherapyComponent, TherapyComponentCategory | `s` | `selinexor` | Replacement must exist in the same catalog level; unresolved references abort removal. |
+| Therapy, TherapyComponent, TherapyComponentCategory | `t` | `tazemetostat` | Replacement must exist in the same catalog level; unresolved references abort removal. |
+| TherapyComponent | `st._john_s_wort` | `st._john's_wort` | Repoint duplicate to canonical component, or rename if canonical absent; no global punctuation normalization. |
+| Therapy | `nsaids` | `(none)` | Misclassified regimen removed; concomitant medication remains a separate source identity. |
+
+## Priority gene and marker field mappings (#1311)
+
+42 distinct fields across 51 disease memberships. Source-only parents remain supported by the Genomics Measurement/event contract. An Observation-domain concept cannot certify a standard Measurement parent. Field question coverage does not approve gene/variant answer concepts.
+
+| Disease | Fields | Storage incomplete | Source-only parent | Standard parent candidate requiring review |
+|---|---:|---:|---:|---:|
+| BC | 6 | 0 | 6 | 0 |
+| CLL | 8 | 0 | 8 | 0 |
+| FL | 5 | 0 | 5 | 0 |
+| MCL | 16 | 0 | 16 | 0 |
+| MM | 16 | 0 | 16 | 0 |
 
 ## Reconciliation
 
-Duplicate source identities: 0. Shared destination/value/context groups: 69. These groups are evidence for review, not automatic aliases.
+Duplicate source identities: 0. Shared destination/value/context groups: 258. These groups are evidence for review, not automatic aliases.
 
 | Validation flag | Source rows |
 |---|---:|
@@ -97,6 +195,7 @@ Duplicate source identities: 0. Shared destination/value/context groups: 69. The
 
 | Table | Rows |
 |---|---:|
+| custom_patient_field | 0 |
 | disease_therapy_regimen | 681 |
 | field_choice | 262 |
 | field_choice_code | 66 |
@@ -167,8 +266,9 @@ Both release mechanisms and vocabulary history are recorded separately in the ma
 
 | Scope | Required representation | Owner |
 |---|---|---|
+| Ethnicity / race | Keep CancerBot ancestry/race categories distinct from the PRomop Hispanic/Latino ethnicity picker; reconcile the legacy Ethnicity lookup without merging Person race and ethnicity. | #1228 |
 | bone_lesions | Keep count and >2 comparator separate from presence; do not equate source counts with Yes/No. | #1228 |
-| GELF / FLIPI | Retain seven GELF criteria and aggregate separately; retain five FLIPI inputs, numeric score and risk separately. | #1228 |
+| GELF / FLIPI | Retain CancerBot seven and PRomop eight GELF criteria with threshold conflicts explicit; aggregate is separate. Retain five FLIPI inputs, numeric score and risk separately. | #1228 |
 | TNM and staging basis | Retain tumor, system, edition and c/p/yp basis. Imaging modality is a separate event. | #1227 |
 | ISS / R-ISS / legacy stage; Rai / Binet | Keep disease and staging system in identity; legacy I–IV has unresolved system, never infer R-ISS. | #1228 |
 | Markers and genetics | Use frozen Genomics findings/components; retain gene, variant, origin, interpretation, polarity and independent results. | #1229 |

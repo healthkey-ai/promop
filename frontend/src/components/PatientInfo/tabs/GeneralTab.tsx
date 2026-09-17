@@ -9,6 +9,7 @@ import { today } from '@/api/clinicalFacts';
 import {
   COUNTRY_OPTIONS, US_STATES,
   ECOG_OPTIONS, KARNOFSKY_OPTIONS,
+  DISEASE_OPTIONS,
 } from '../patientConstants';
 
 interface Props {
@@ -51,6 +52,7 @@ export default function GeneralTab({
   const { source: ecogSource }        = useVocabulary('ecog-status', 'code');
   const { source: karnofskySource }   = useVocabulary('karnofsky-score', 'code');
   const { source: ethnicitySource }   = useVocabulary('ethnicity', 'title');
+  const { source: diseaseSource }     = useVocabulary('disease', 'title');
 
   const age = formData?.date_of_birth
     ? calculateAge(formData.date_of_birth as string)
@@ -116,6 +118,10 @@ export default function GeneralTab({
 
           {field('Email', 'email', 'email')}
           {field('Phone Number', 'phone_number', 'text')}
+
+          <div className="sm:col-span-2">
+            {field('Disease', 'disease', 'select', { options: DISEASE_OPTIONS, vocabSource: diseaseSource })}
+          </div>
 
           <div className="sm:col-span-2">
             <TreatingInstitutionField key={personId} value={String(formData?.facility_name || '')}

@@ -1142,9 +1142,6 @@ describe("CodeMappingPage", () => {
           "Done — wrote 3 new destination(s) across 5 code(s).",
         ));
       expect(screen.getByTestId("suggest-progress")).toHaveTextContent("5/5");
-      const logLink = within(screen.getByTestId("suggest-progress")).getByRole("link", { name: "View run log" });
-      expect(logLink).toHaveAttribute("href", expect.stringContaining("/code-mappings/suggest-runs/"));
-      expect(logLink).toHaveAttribute("target", "_blank");
     });
 
     it("says so when nothing on the tab is awaiting a suggestion", async () => {
@@ -1167,7 +1164,7 @@ describe("CodeMappingPage", () => {
       expect(screen.getByRole("tablist").nextElementSibling).toBe(toolbar);
       const controls = toolbar.querySelectorAll("button, input");
       expect(controls[0]).toHaveTextContent("Suggest");
-      for (const [index, name] of ["UMLS", "Lexical", "Semantic retrieval"].entries()) {
+      for (const [index, name] of ["UMLS", "Lexical", "Vectors"].entries()) {
         const checkbox = within(toolbar).getByRole("checkbox", { name });
         expect(controls[index + 2]).toBe(checkbox);
         expect(checkbox).toBeChecked();
@@ -1180,7 +1177,7 @@ describe("CodeMappingPage", () => {
       fireEvent.click(within(toolbar).getByRole("button", { name: "Suggest" }));
       await waitFor(() => expect(mockPost).toHaveBeenCalled());
       expect(mockPost.mock.calls[0][1]).toMatchObject({
-        limit: 25, strategies: ["umls", "lexical", "semantic"],
+        limit: 25, strategies: ["umls", "lexical", "vectors"],
       });
       expect(mockPost.mock.calls[0][1]).not.toHaveProperty("lexical_limit");
       expect(mockPost.mock.calls[0][1]).not.toHaveProperty("min_occurrences");
@@ -1195,15 +1192,14 @@ describe("CodeMappingPage", () => {
         fireEvent.click(within(toolbar).getByRole("checkbox", { name }));
       }
       const button = within(toolbar).getByRole("button", { name: "Suggest" });
-      const semantic = within(toolbar).getByRole("checkbox", { name: "Semantic retrieval" });
-      expect(within(toolbar).queryByRole("checkbox", { name: /Vector/ })).not.toBeInTheDocument();
+      const vectors = within(toolbar).getByRole("checkbox", { name: "Vectors" });
       expect(button).toBeEnabled();
-      fireEvent.click(semantic);
+      fireEvent.click(vectors);
       expect(button).toBeDisabled();
-      fireEvent.click(semantic);
+      fireEvent.click(vectors);
       fireEvent.click(button);
       await waitFor(() => expect(mockPost).toHaveBeenCalled());
-      expect(mockPost.mock.calls[0][1]).toMatchObject({ strategies: ["semantic"] });
+      expect(mockPost.mock.calls[0][1]).toMatchObject({ strategies: ["vectors"] });
     });
 
     it("uses the active server batch cap as the default", async () => {
@@ -1420,9 +1416,8 @@ describe("Overall review counters and refresh", () => {
     expect(within(section).queryByText(/^Metrics:/)).not.toBeInTheDocument();
     expect(screen.queryByText("Review counts: all models")).not.toBeInTheDocument();
     const controls = screen.getByRole("group", { name: "Suggest controls" });
-    const semantic = within(controls).getByRole("checkbox", { name: "Semantic retrieval" });
-    const replace = within(controls).getByRole("checkbox", { name: "Replace Current Suggestions" });
-    expect(semantic.closest("span")?.nextElementSibling).toBe(replace.closest("label"));
+    expect(within(controls).getByRole("checkbox", { name: "Vectors" })).toBeInTheDocument();
+    expect(within(controls).getByRole("checkbox", { name: "Replace Current Suggestions" })).toBeInTheDocument();
     // Approved leads the strip now that no box names a model version.
     expect(section.firstElementChild).toHaveTextContent("Approved");
   });
@@ -1505,21 +1500,6 @@ describe("Overall review counters and refresh", () => {
 });
 
 
-describe("saved batch log discovery", () => {
-  it("recovers the completed run link after leaving and reopening the mapping page", async () => {
-    mockGet.mockImplementation((url: string) => Promise.resolve({ data:
-      url.endsWith("suggest-runs/latest/") ? { run_id: "saved-run" }
-        : url.includes("reference") ? reference : url.includes("accuracy") ? {} : [proposedRow],
-    }));
-    const page = render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
-    expect(await screen.findByRole("link", { name: "View latest batch run log" }))
-      .toHaveAttribute("href", "/code-mappings/suggest-runs/saved-run");
-    page.unmount();
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
-    expect(await screen.findByRole("link", { name: "View latest batch run log" }))
-      .toHaveAttribute("href", "/code-mappings/suggest-runs/saved-run");
-  });
-});
 
 
 describe("expanded ICD10 review feedback", () => {

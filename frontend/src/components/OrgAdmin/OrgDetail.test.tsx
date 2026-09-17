@@ -120,7 +120,7 @@ describe("OrgDetail — Settings", () => {
     await waitFor(() => {
       expect(screen.getByText("Acme Clinic")).toBeInTheDocument();
     });
-    const toggle = screen.getByLabelText("Allow direct patient signup");
+    const toggle = screen.getByLabelText("Allow public demo access");
     expect(toggle).toBeInTheDocument();
     expect(toggle).toBeChecked();
   });
@@ -131,7 +131,7 @@ describe("OrgDetail — Settings", () => {
     await waitFor(() => {
       expect(screen.getByText("Acme Clinic")).toBeInTheDocument();
     });
-    const toggle = screen.getByLabelText("Allow direct patient signup");
+    const toggle = screen.getByLabelText("Allow public demo access");
     expect(toggle).not.toBeChecked();
   });
 
@@ -141,7 +141,7 @@ describe("OrgDetail — Settings", () => {
     await waitFor(() => {
       expect(screen.getByText("Acme Clinic")).toBeInTheDocument();
     });
-    fireEvent.click(screen.getByLabelText("Allow direct patient signup"));
+    fireEvent.click(screen.getByLabelText("Allow public demo access"));
     await waitFor(() => {
       expect(mockPatch).toHaveBeenCalledWith("/orgs/acme/", { allows_patient_signup: true });
     });

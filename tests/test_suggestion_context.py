@@ -168,7 +168,7 @@ def test_ranker_has_no_database_reads_and_keeps_explanation(llm, django_assert_n
                                    source_concept=None, umls_name='', domain_id='Measurement',
                                    omop_table='measurement')
     with django_assert_num_queries(0):
-        chosen, note = suggest.rank_candidates('LOCAL', [candidate(concept)], source_context=context)
+        chosen, note, _alts = suggest.rank_candidates('LOCAL', [candidate(concept)], source_context=context)
     assert chosen is None
     assert 'Conflicting source labels' in note
     assert payload(llm)['source']['vocabulary_id'] is None

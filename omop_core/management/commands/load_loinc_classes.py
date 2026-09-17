@@ -156,16 +156,28 @@ class Command(BaseCommand):
                 if loinc_class not in valid_classes:
                     skipped += 1
                     continue
+                example_units = row.get('EXAMPLE_UNITS', '').strip()
                 batch.append(LoincCodeClass(
                     loinc_num=loinc_num,
                     loinc_class_id=loinc_class,
+                    example_units=example_units,
                 ))
                 count += 1
                 if len(batch) >= BATCH:
-                    LoincCodeClass.objects.bulk_create(batch, ignore_conflicts=True)
+                    LoincCodeClass.objects.bulk_create(
+                        batch, ignore_conflicts=False,
+                        update_conflicts=True,
+                        unique_fields=['loinc_num'],
+                        update_fields=['loinc_class_id', 'example_units'],
+                    )
                     batch = []
         if batch:
-            LoincCodeClass.objects.bulk_create(batch, ignore_conflicts=True)
+            LoincCodeClass.objects.bulk_create(
+                batch, ignore_conflicts=False,
+                update_conflicts=True,
+                unique_fields=['loinc_num'],
+                update_fields=['loinc_class_id', 'example_units'],
+            )
         self.stdout.write(
             f'Loaded {count} LOINC code → class mappings '
             f'(skipped {skipped} with unknown class).'

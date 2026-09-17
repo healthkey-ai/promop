@@ -14,6 +14,7 @@ export interface ConditionRow {
   condition_source_value: string | null;
   condition_source_concept: number | null;
   condition_status_source_value: string | null;
+  concept_name?: string | null;
   is_erroneous: boolean;
   erroneous_reason: string | null;
 }
@@ -36,6 +37,7 @@ export interface DrugExposureRow {
   drug_source_concept: number | null;
   route_source_value: string | null;
   dose_unit_source_value: string | null;
+  concept_name?: string | null;
   is_erroneous: boolean;
   erroneous_reason: string | null;
 }
@@ -58,6 +60,7 @@ export interface MeasurementRow {
   measurement_source_concept: number | null;
   unit_source_value: string | null;
   value_source_value: string | null;
+  concept_name?: string | null;
   is_erroneous: boolean;
   erroneous_reason: string | null;
 }
@@ -79,6 +82,7 @@ export interface ObservationRow {
   unit_source_value: string | null;
   qualifier_source_value: string | null;
   value_source_value: string | null;
+  concept_name?: string | null;
   is_erroneous: boolean;
   erroneous_reason: string | null;
 }
@@ -97,6 +101,7 @@ export interface ProcedureRow {
   procedure_source_value: string | null;
   procedure_source_concept: number | null;
   modifier_source_value: string | null;
+  concept_name?: string | null;
   is_erroneous: boolean;
   erroneous_reason: string | null;
 }

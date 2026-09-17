@@ -136,6 +136,14 @@ def cancerbot_source(path):
     for binding in bindings:
         if binding['coverage'] == 'covered_by_static_source':
             binding['source_row_ids'] = [r['id'] for r in rows if r['option_list'] == f"{binding['source_method']}:literal:0"]
+    from omop_core.services.cancerbot_static_options import reconcile_static_bindings
+    rows += reconcile_static_bindings(Path(path).read_text(), bindings, inventory_row)
+    excluded_methods = {'register': 'registers', 'trialPurpose': 'trial_purposes', 'trialType': 'trial_types'}
+    excluded = {excluded_methods[b['option_list']] for b in bindings if b['coverage'] == 'excluded_trial_search'}
+    for row in rows:
+        if row['option_list'].split(':')[0] in excluded:
+            row.update(disposition='not_applicable',
+                       reason='Trial search metadata; outside patient clinical field/value mapping scope.')
     return {'bindings': bindings, 'rows': rows, 'literal_methods': sorted(set(fragments))}
 
 
@@ -181,7 +189,8 @@ def apply_live_coverage(bindings, payload, rows):
     for binding in bindings:
         name = binding['option_list']
         if name in payload['options']:
-            binding['coverage_before_live_export'] = binding['coverage']
+            if binding['coverage'] != 'covered_by_live_export':
+                binding['coverage_before_live_export'] = binding['coverage']
             binding['coverage'] = 'covered_by_live_export'
             binding['live_source_row_ids'] = sorted(by_list[name])
             binding['live_source_revision'] = payload['source_revision']
@@ -240,6 +249,20 @@ def validate_manifest(manifest):
     rows, totals = manifest['rows'], manifest['totals']
     if totals != coverage(rows, totals['source_coverage']):
         raise ValueError('Manifest totals do not reconcile with source rows.')
+    if totals['duplicate_source_ids']:
+        raise ValueError('Manifest contains duplicate source identities.')
+    if 'cancerbot_bindings' in manifest:
+        bindings = manifest['cancerbot_bindings']
+        ids = {r['id'] for r in rows}
+        for binding in bindings:
+            if any(pk not in ids for key in ('source_row_ids', 'live_source_row_ids') for pk in binding.get(key, [])):
+                raise ValueError('CancerBot binding references a missing source row.')
+        providers = totals['source_coverage']['cancerbot_public_lists']
+        if providers['by_provider'] != dict(Counter(b['coverage'] for b in bindings)):
+            raise ValueError('CancerBot provider totals do not reconcile with bindings.')
+        missing = sorted(b['option_list'] for b in bindings if b['coverage'] == 'requires_live_export')
+        if sorted(providers['missing_live_lists']) != missing:
+            raise ValueError('CancerBot outstanding lists do not reconcile with bindings.')
     for row in rows:
         if any(str(key) not in manifest['candidates'] for key in row['candidate_ids']):
             raise ValueError('Candidate reference missing from manifest.')
@@ -317,15 +340,58 @@ def render_report(manifest):
     lines = ['# Field and value reference inventory', '',
              f"Snapshot: {manifest['generated_at']}. Schema: {manifest['schema_version']}.", '',
              '**Inventory remains incomplete. No candidates are clinically approved by this export.**', '',
-             f"{totals['total_rows']} source rows; {totals['without_destination']} await destination reconciliation; "
+             f"{totals['total_rows']} source rows; {totals['without_destination']} have no direct scalar-field destination "
+             '(see source/catalog routing below); '
              f"{totals['without_candidate']} have no attached candidate.", '',
              '| Source | Rows |', '|---|---:|']
     lines += [f'| {key} | {value} |' for key, value in totals['by_source'].items()]
     lines += ['', '| Disposition | Rows |', '|---|---:|']
     lines += [f'| {key} | {value} |' for key, value in totals['by_disposition'].items()]
+    acceptance = manifest.get('inventory_acceptance')
+    if acceptance:
+        lines += ['', '## Inventory acceptance evidence', '', acceptance['limitation'], '',
+                  f"Accounting checks pass: {acceptance['accounting_checks_pass']}. Review status: `{acceptance['review_status']}`.", '',
+                  '| #21 field | Representation | Disposition | Validation flags |', '|---|---|---|---|']
+        lines += [f"| `{r['field']}` | {r['representation']} | {r['disposition']} | {', '.join(r['validation_flags']) or 'None recorded'} |"
+                  for r in acceptance['issue_21']]
+        lines += ['', '| #26 scope | Source bindings | Source occurrences | Missing runtime fields | Owner |', '|---|---:|---:|---|---|']
+        lines += [f"| {r['scope']} | {len(r['source_bindings'])} | {len(r['source_row_ids'])} | {', '.join(r['missing_runtime_destinations']) or 'None recorded'} | {r['owner']} |"
+                  for r in acceptance['issue_26']]
+        if acceptance['problems']:
+            lines += ['', 'Accounting gaps:', '', *['- ' + problem for problem in acceptance['problems']]]
     lines += ['', '## Coverage gaps', '']
     lines += [f'- {gap}' for gap in manifest['limitations']]
+    lines += ['', '## CancerBot public-list reconciliation', '',
+              '| Coverage | Lists |', '|---|---:|']
+    providers = totals['source_coverage'].get('cancerbot_public_lists', {}).get('by_provider', {})
+    lines += [f'| {key} | {count} |' for key, count in sorted(providers.items())]
+    lines += ['', 'Static results describe the checked-in source definitions, including empty and blank-only lists. '
+              'They do not certify a deployed CancerBot version. Trial-search exclusions retain their source evidence. '
+              'Unresolved providers below require reference data; model names come from source imports, not label matching.', '',
+              '| Unresolved list | Source models |', '|---|---|']
+    for binding in manifest.get('cancerbot_bindings', []):
+        if binding['coverage'] == 'requires_live_export':
+            providers = binding.get('static_resolution', {}).get('provider_models', [])
+            lines.append(f"| {binding['option_list']} | {', '.join(providers) or 'unresolved source expression'} |")
     therapy = manifest.get('therapy_source_coverage')
+    crosswalk = manifest.get('destination_crosswalk')
+    contracts = manifest.get('implementation_contracts')
+    if contracts:
+        lines += ['', '## Implementation destination accounting', '', contracts['limitation'], '',
+                  '| Destination evidence | Source rows |', '|---|---:|']
+        lines += [f'| {key} | {count} |' for key, count in contracts['counts'].items()]
+        lines += ['', f"Rows awaiting a source/consumer routing disposition: {len(contracts['unresolved_row_ids'])}. "
+                  'Missing runtime fields and ambiguous clinical contexts remain explicit even when source routing is known.']
+    if crosswalk:
+        lines += ['', '## CancerBot destination routing', '',
+                  f"Source review status: `{crosswalk.get('status', 'unrecorded')}`.", '',
+                  'Routes retain source disease, line, nested keys and representation warnings separately from immutable source identity. '
+                  'A recorded route is not clinical equivalence or an approved answer mapping.', '',
+                  '| Route status | Bindings |', '|---|---:|']
+        lines += [f'| {key} | {count} |' for key, count in crosswalk.get('counts', {}).items()]
+        lines += ['', '| Source list | Missing PRomop destination |', '|---|---|']
+        lines += [f"| {r['option_list']} | {', '.join(r['missing_destinations'])} |"
+                  for r in crosswalk.get('bindings', []) if r['status'] == 'destination_missing']
     if therapy:
         lines += ['', '## CancerBot-derived staging therapy catalogs', '',
                   'Staging is the authoritative source for these catalogs, as confirmed by the user. '
@@ -335,9 +401,31 @@ def render_report(manifest):
         lines += ['', '| Public list | Catalog options | Disease code | Round |', '|---|---:|---|---|']
         lines += [f"| {r['option_list']} | {r['catalog_options']} | {r['disease_code'] or 'all'} | {r['round_code'] or 'all'} |"
                   for r in therapy['memberships']]
-        lines += ['', 'Planned-therapy catalogs are available; planned picker eligibility/status remains a '
-                  'context reconciliation task. Existing disease/round links do not encode administration status. '
+        lines += ['', 'Staging membership above is preserved as independent evidence. Where live CancerBot rows are supplied, '
+                  'the public binding references those rows instead. PlannedTherapy is a separate CancerBot source catalog; '
+                  'its disease/round eligibility never proves administration or a mapping to a PRomop regimen. '
+                  f"Planned lists still awaiting source eligibility: {len(therapy['context_pending_lists'])}. "
                   'Unknown/Other sentinels are recorded separately from catalog counts.', '']
+    source_history = manifest.get('source_history')
+    if source_history:
+        lines += ['', '## CancerBot source history', '', source_history.get('limitation', 'Source history unavailable.'), '',
+                  f"Migration definition accounting complete: {source_history.get('definition_coverage_complete', False)}.", '',
+                  '| History evidence | Count |', '|---|---:|']
+        lines += [f'| {key} | {count} |' for key, count in source_history.get('counts', {}).items()]
+        lines += ['', '| Catalog scope | Old code | Replacement | Rule |', '|---|---|---|---|']
+        lines += [f"| {', '.join(r['models'])} | `{r['old_code']}` | `{r['replacement_code'] or '(none)'}` | {r['condition']} |"
+                  for r in source_history.get('catalog_events', [])]
+    priority = manifest.get('priority_field_coverage')
+    if priority:
+        lines += ['', '## Priority gene and marker field mappings (#1311)', '',
+                  f"{priority['total_fields']} distinct fields across {priority['disease_memberships']} disease memberships. "
+                  + priority['limitation'], '',
+                  '| Disease | Fields | Storage incomplete | Source-only parent | Standard parent candidate requiring review |',
+                  '|---|---:|---:|---:|---:|']
+        for disease, data in priority['by_disease'].items():
+            counts = data['counts']
+            lines.append(f"| {disease} | {len(data['field_names'])} | {counts.get('storage_recipe_incomplete', 0)} | "
+                         f"{counts.get('source_only_parent', 0)} | {counts.get('standard_parent_candidate_requires_review', 0)} |")
     lines += ['', '## Reconciliation', '',
               f"Duplicate source identities: {len(totals['duplicate_source_ids'])}. "
               f"Shared destination/value/context groups: {len(totals['shared_destination_identities'])}. "

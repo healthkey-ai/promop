@@ -39,6 +39,26 @@ def is_machine_request(request):
     )
 
 
+def is_interactive_session(request) -> bool:
+    """True only for session or partner (Firebase/PHR) authentication.
+
+    Everything else — an OAuth2 access token a user delegated to an
+    application, a service credential, an HTTP Basic password — is a credential
+    that can be presented without the person. Administration of long-lived
+    credentials must require the person, not something they handed out: an
+    OAuth2 grant is scoped, expiring and revocable, while a service token it
+    could mint is none of those things.
+
+    The authenticator is identified positively rather than by `auth is None`:
+    BasicAuthentication also reports no token, and ENABLE_BASIC_AUTH is a
+    supported deployment setting.
+    """
+    from rest_framework.authentication import SessionAuthentication
+    if isinstance(getattr(request, "successful_authenticator", None), SessionAuthentication):
+        return True
+    return isinstance(getattr(request, "auth", None), TokenClaims)
+
+
 def reject_machine_actor_claims(request, actor_iss, actor_sub):
     """A service credential proves the service, never a user named in JSON."""
     if is_machine_request(request) and (actor_iss or actor_sub):
