@@ -208,6 +208,7 @@ const strategyLabel: Record<string, string> = {
   umls: "UMLS",
   vectors: "Vectors",
   lexical: "Lexical",
+  semantic: "Vectors",  // legacy alias
 };
 
 /** How far along a run is, counting the phase it is actually in.
@@ -264,6 +265,7 @@ type SuggestRunProgress = {
   strategy_counts: Record<string, number>;
   landed_in: Record<string, number>;
   error: string;
+  ranking_model?: string;
 };
 
 /** Pipeline order, which is also the order the checkboxes read in. */

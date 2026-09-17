@@ -984,50 +984,45 @@ def rank_candidates_jev(source_value, candidates, source_description='', *, sour
     }
 
     try:
-        import httpx
+        import requests
     except ImportError:
-        try:
-            import requests as httpx
-        except ImportError:
-            return unavailable('http_unavailable', 'Neither httpx nor requests is installed.')
+        return unavailable('http_unavailable', 'requests is not installed.')
 
+    jev_url = getattr(settings, 'JEV_API_URL', 'https://api.typesafe.ai/v1/systemone')
     try:
-        if hasattr(httpx, 'Client'):
-            # httpx
-            with httpx.Client(timeout=30) as client:
-                resp = client.post(
-                    'https://api.typesafe.ai/v1/systemone',
-                    json=payload,
-                    headers={'Authorization': f'Bearer {jev_key}', 'Content-Type': 'application/json'},
-                )
-                resp.raise_for_status()
-                data = resp.json()
-        else:
-            # requests fallback
-            resp = httpx.post(
-                'https://api.typesafe.ai/v1/systemone',
-                json=payload,
-                headers={'Authorization': f'Bearer {jev_key}', 'Content-Type': 'application/json'},
-                timeout=30,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        resp = requests.post(
+            jev_url,
+            json=payload,
+            headers={'Authorization': f'Bearer {jev_key}', 'Content-Type': 'application/json'},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
     except Exception as exc:  # noqa: BLE001 - degrade, never fail
         logger.warning('Jev ranking request failed: %s', type(exc).__name__)
         return unavailable('request_failed', 'The Jev ranking request failed.')
 
     # Parse the Jev response — extract the chosen id and alternatives with confidence.
-    chosen_id_str = data.get('choice') or data.get('selected') or data.get('id')
+    chosen_id_str = data.get('choice')
+    if chosen_id_str is None:
+        chosen_id_str = data.get('selected')
+    if chosen_id_str is None:
+        chosen_id_str = data.get('id')
     probabilities = data.get('probabilities') or data.get('scores') or {}
 
     alternatives = []
     for c in candidates:
         cid = str(c['concept_id'])
-        if cid in probabilities:
+        raw_prob = probabilities.get(cid)
+        if raw_prob is not None:
+            try:
+                prob = float(raw_prob)
+            except (TypeError, ValueError):
+                continue
             alternatives.append({
                 'concept_id': c['concept_id'],
                 'concept_name': c.get('concept_name', ''),
-                'confidence': probabilities[cid],
+                'confidence': prob,
             })
     # Sort alternatives by confidence descending.
     alternatives.sort(key=lambda a: a['confidence'], reverse=True)
@@ -1063,7 +1058,10 @@ def rank_candidates_jev(source_value, candidates, source_description='', *, sour
     scores_text = '; '.join(
         f"{a['concept_name']} ({a['confidence']:.0%})" for a in alternatives[:5]
     )
-    note = f'{confidence_label} confidence (Jev {chosen_confidence:.0%}): {scores_text}'
+    confidence_display = f'{chosen_confidence:.0%}' if chosen_confidence is not None else 'unknown'
+    note = f'{confidence_label} confidence (Jev {confidence_display})'
+    if scores_text:
+        note += f': {scores_text}'
 
     return chosen, note, alternatives
 

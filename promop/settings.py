@@ -437,6 +437,7 @@ service_credentials(SERVICE_AUTH_TOKENS, SERVICE_AUTH_TOKEN, SERVICE_AUTH_SCOPES
 # worse than one that returns a guess a curator can correct.
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 JEV_API_KEY = os.environ.get("JEV_API_KEY", "")
+JEV_API_URL = os.environ.get("JEV_API_URL", "https://api.typesafe.ai/v1/systemone")
 
 _auth_classes = [
     'patient_portal.api.authentication.ServiceTokenAuthentication',

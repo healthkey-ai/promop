@@ -35,7 +35,7 @@ type Props = {
   finished: boolean;
   onSaved?: () => void;
 };
-const stages = { umls: "UMLS", lexical: "Lexical", vectors: "Vectors" };
+const stages: Record<string, string> = { umls: "UMLS", lexical: "Lexical", vectors: "Vectors", semantic: "Vectors" };
 
 export default function SuggestCandidates({ activity, finished, onSaved }: Props) {
   const [saving, setSaving] = useState<number | null>(null);
