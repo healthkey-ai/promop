@@ -2,7 +2,7 @@
 
 These exercise the CLI layer — argument parsing, schema version validation,
 stdout/file output, --dry-run, and idempotency. The underlying read_payload /
-apply_payload logic is covered in test_copy_curation.py.
+apply_payload logic is covered in test_field_curation_transfer.py.
 """
 import json
 import os

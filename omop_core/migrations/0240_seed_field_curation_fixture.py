@@ -12,7 +12,7 @@ not yet loaded Athena vocabularies (``load_athena_vocabularies``), concept
 resolution will fail and the seeded mappings will have ``concept=None``.  They
 are still usable — the vocabulary_id/concept_code columns carry the intent —
 and will resolve correctly once Athena is loaded and the mapping is re-saved or
-``copy_curation`` is run.
+``copy_reference_data`` is run.
 """
 import json
 import os
