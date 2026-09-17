@@ -84,6 +84,12 @@ services:
         sync: false
       - key: SENTRY_ENVIRONMENT
         value: production
+      # The flag that decides whether webhooks do anything. Operator-controlled
+      # (sync: false) so it is flipped in one place; the worker pulls this exact
+      # value, because a web service publishing events while its worker has the
+      # flag off leaves every delivery pending with no error anywhere.
+      - key: WEBHOOKS_ENABLED
+        sync: false
 
   - type: worker
     name: promop-worker
@@ -97,6 +103,9 @@ services:
     # and signing key that match the web service, and it is the only path that
     # can start embedded beat.
     startCommand: "bash start-worker.sh"
+    # Beat is a singleton. Stated as configuration rather than as a comment, so
+    # scaling this service cannot quietly give the deployment N schedulers.
+    numInstances: 1
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.0
@@ -112,6 +121,11 @@ services:
       # it unset here would quietly cut production concurrency from 4 to 1.
       - key: CELERY_WORKER_CONCURRENCY
         value: "4"
+      - key: WEBHOOKS_ENABLED
+        fromService:
+          name: promop
+          type: web
+          envVarKey: WEBHOOKS_ENABLED
       # Taken from the web service rather than generated: two different keys
       # would be two different signing secrets for the same data.
       - key: SECRET_KEY
@@ -208,6 +222,9 @@ services:
         sync: false
       - key: SENTRY_ENVIRONMENT
         value: staging
+      # One switch per deployment; the worker pulls this exact value.
+      - key: WEBHOOKS_ENABLED
+        sync: false
     region: oregon
   - type: worker
     name: promop-staging-worker
@@ -219,12 +236,17 @@ services:
     plan: 1c-2g
     buildCommand: pip install -r requirements.txt
     startCommand: bash start-worker.sh
+    # Exactly one scheduler per deployment, as configuration rather than as a
+    # comment: scaling this up means moving beat to its own service.
+    numInstances: 1
     envVars:
-      # Exactly one scheduler per deployment. Safe here because this service
-      # runs a single replica; scaling it up means moving beat to its own
-      # service rather than raising the replica count.
       - key: CELERY_EMBEDDED_BEAT
         value: "true"
+      - key: WEBHOOKS_ENABLED
+        fromService:
+          name: promop-staging
+          type: web
+          envVarKey: WEBHOOKS_ENABLED
       - key: SECRET_KEY
         fromService:
           name: promop-staging

@@ -16,6 +16,9 @@ def webhook_secret():
 def validate_webhook_subscription_url(value):
     """Same rule as the API: public HTTPS on 443, no credentials, no fragment.
 
+    Referenced by name in the webhook schema migration, so renaming or moving
+    this function breaks a replay from zero. Leave a stub if it ever moves.
+
     The delivery task re-validates and re-resolves, so a bad row fails closed at
     send rather than causing an SSRF. Without this, though, a shell or a data
     migration can write ``http://10.0.0.1/`` and the row looks valid until the

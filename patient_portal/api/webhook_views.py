@@ -45,6 +45,15 @@ class WebhookSubscriptionSerializer(serializers.ModelSerializer):
         )
 
     def validate_url(self, value):
+        """Kept although the model validator now runs first.
+
+        DRF copies model-field validators onto the serializer field, so a bad
+        URL is already refused before this method — it is reached only on the
+        happy path, where it repeats a cheap parse. It stays because it is the
+        method the API's error contract is pinned to, and because a serializer
+        used without the model (a plain Serializer, a future non-model path)
+        would otherwise validate nothing.
+        """
         try:
             validate_webhook_url(value)
         except ValueError:
