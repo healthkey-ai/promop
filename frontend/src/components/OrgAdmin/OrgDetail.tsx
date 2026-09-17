@@ -478,7 +478,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
               onChange={(e) => handlePatientSignupToggle(e.target.checked)}
               className="h-4 w-4 rounded border-gray-300 text-blue-600"
             />
-            <span className="text-sm text-gray-700">Allow direct patient signup</span>
+            <span className="text-sm text-gray-700">Allow public demo access</span>
           </label>
           <button
             onClick={handleSaveSettings}
