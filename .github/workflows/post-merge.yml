@@ -28,6 +28,7 @@ jobs:
           DATABASE_URL: sqlite:///unused
           SECRET_KEY: ci-migration-check
           DEBUG: 'True'
+          DJANGO_SETTINGS_MODULE: promop.settings
         run: |
           python - <<'PYCHECK'
           import django, sys; django.setup()
