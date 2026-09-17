@@ -15065,7 +15065,11 @@ class OrgPatientSignupTest(TestCase):
 
     def test_signup_creates_account(self):
         from patient_portal.models import PatientUser
-        resp = APIClient().post('/api/v1/orgs/signup-org/patient-signup/', {
+        client = APIClient()
+        directory = client.get('/api/v1/orgs/signup-directory/', {'email': 'self-signup@test.com'})
+        self.assertEqual(directory.status_code, 200)
+        self.assertIn({'name': self.org.name, 'slug': self.org.slug}, directory.data)
+        resp = client.post('/api/v1/orgs/signup-org/patient-signup/', {
             'email': 'self-signup@test.com',
             'password': 'Str0ng!Pass99',
             'given_name': 'Test',
@@ -15077,6 +15081,9 @@ class OrgPatientSignupTest(TestCase):
 
         identity = Identity.objects.get(email='self-signup@test.com')
         self.assertTrue(identity.has_usable_password())
+        self.assertFalse(identity.is_staff)
+        self.assertFalse(identity.is_superuser)
+        self.assertEqual(client.session['_auth_user_id'], str(identity.pk))
         self.assertTrue(PatientUser.objects.filter(identity=identity).exists())
         self.assertTrue(
             GroupAccess.objects.filter(identity=identity, org=self.org, role='patient').exists()
@@ -15336,9 +15343,9 @@ class OrgSignupDirectoryTest(TestCase):
         resp = APIClient().get(self.URL)
         self.assertEqual(set(resp.data[0].keys()), {'name', 'slug'})
 
-    def test_email_filters_to_pending_invitations_and_trusted_domains(self):
+    def test_email_includes_public_orgs_pending_invitations_and_trusted_domains(self):
         invited = Organization.objects.get(slug='closed-clinic')
-        trusted = Organization.objects.get(slug='zeta-clinic')
+        trusted = Organization.objects.create(name='Trusted Clinic', slug='trusted-clinic')
         OrgInvitation.objects.create(
             org=invited, email='member@trusted.example', role='patient',
             token='b' * 64, expires_at=timezone.now() + timedelta(days=7),
@@ -15348,13 +15355,54 @@ class OrgSignupDirectoryTest(TestCase):
         resp = APIClient().get(f'{self.URL}?email=member@trusted.example')
 
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual([org['slug'] for org in resp.data], ['closed-clinic', 'zeta-clinic'])
+        self.assertEqual([org['slug'] for org in resp.data], [
+            'alpha-clinic', 'closed-clinic', 'trusted-clinic', 'zeta-clinic',
+        ])
+
+    def test_unrelated_email_still_lists_public_demo_orgs(self):
+        resp = APIClient().get(self.URL, {'email': 'visitor@unrelated.example'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(list(resp.data), [
+            {'name': 'Alpha Clinic', 'slug': 'alpha-clinic'},
+            {'name': 'Zeta Clinic', 'slug': 'zeta-clinic'},
+        ])
+
+    def test_email_does_not_expose_inactive_or_ineligible_private_orgs(self):
+        email = 'visitor@unrelated.example'
+        for slug, state in [('closed-clinic', 'expired'), ('retired-clinic', 'active')]:
+            OrgInvitation.objects.create(
+                org=Organization.objects.get(slug=slug), email=email, role='patient',
+                token=slug.ljust(64, 'x'),
+                expires_at=timezone.now() + timedelta(days=-1 if state == 'expired' else 1),
+            )
+        OrgTrust.objects.create(
+            granting_org=Organization.objects.get(slug='retired-clinic'),
+            trusted_domain='unrelated.example',
+        )
+        resp = APIClient().get(self.URL, {'email': email})
+        self.assertEqual([org['slug'] for org in resp.data], ['alpha-clinic', 'zeta-clinic'])
+
+    def test_public_org_matching_multiple_access_paths_is_listed_once(self):
+        org = Organization.objects.get(slug='alpha-clinic')
+        OrgTrust.objects.create(granting_org=org, trusted_domain='trusted.example')
+        for number in range(2):
+            OrgInvitation.objects.create(
+                org=org, email=f'member{number}@trusted.example', role='patient',
+                token=str(number) * 64, expires_at=timezone.now() + timedelta(days=1),
+            )
+        resp = APIClient().get(self.URL, {'email': ' MEMBER0@TRUSTED.EXAMPLE '})
+        self.assertEqual([org['slug'] for org in resp.data], ['alpha-clinic', 'zeta-clinic'])
 
     def test_empty_when_no_org_allows_signup(self):
         Organization.objects.all().update(allows_patient_signup=False)
         resp = APIClient().get(self.URL)
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(list(resp.data), [])
+
+    def test_disabling_public_demo_access_removes_org_for_unrelated_email(self):
+        Organization.objects.filter(slug='alpha-clinic').update(allows_patient_signup=False)
+        resp = APIClient().get(self.URL, {'email': 'visitor@unrelated.example'})
+        self.assertEqual([org['slug'] for org in resp.data], ['zeta-clinic'])
 
     def test_does_not_shadow_org_detail_route(self):
         """A real org slugged 'signup-directory' must not break the directory URL."""

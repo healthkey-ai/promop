@@ -748,10 +748,9 @@ class OrgVocabularyUsageView(APIView):
 def org_signup_directory(request):
     """List organizations eligible for a logged-out visitor's sign-up.
 
-    With no email, return the public self-signup directory so the homepage can
-    decide whether to offer Sign Up.  With an email, return only active orgs
-    that have invited that email or trust its domain; the email field therefore
-    determines the Organization choices shown directly beneath it.
+    With no email, return the public demo directory so the homepage can decide
+    whether to offer Sign Up. With an email, include those public organizations
+    plus active orgs that have invited that email or trust its domain.
     """
     email = (request.query_params.get('email') or '').strip().lower()
     if '@' not in email:
@@ -762,7 +761,8 @@ def org_signup_directory(request):
         orgs = Organization.objects.filter(
             is_active=True,
         ).filter(
-            Q(trusts_granted__trusted_domain__iexact=domain)
+            Q(allows_patient_signup=True)
+            | Q(trusts_granted__trusted_domain__iexact=domain)
             | Q(
                 invitations__email__iexact=email,
                 invitations__confirmed_at__isnull=True,
