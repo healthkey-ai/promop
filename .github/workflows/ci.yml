@@ -94,6 +94,7 @@ jobs:
           psql -h localhost -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS vector"
 
       - name: Run migrations
+        if: matrix.suite == 'django'
         run: python manage.py migrate --noinput
 
       - name: Run production deploy checks
@@ -114,7 +115,7 @@ jobs:
       # own PostgreSQL/test database while retaining migrations and deploy checks.
       - name: Run tests (pytest)
         if: matrix.suite == 'pytest'
-        run: pytest -q --durations=20
+        run: pytest -n auto --dist loadfile -q --durations=20
 
 
   backend:
