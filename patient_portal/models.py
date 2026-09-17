@@ -2,6 +2,7 @@ import uuid
 import secrets
 
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
+from django.core.exceptions import ValidationError
 from django.core.validators import RegexValidator
 from django.db import models
 from django.db.models import Q
@@ -12,9 +13,39 @@ def webhook_secret():
     return secrets.token_urlsafe(32)
 
 
+def validate_webhook_subscription_url(value):
+    """Same rule as the API: public HTTPS on 443, no credentials, no fragment.
+
+    Referenced by name in the webhook schema migration, so renaming or moving
+    this function breaks a replay from zero. Leave a stub if it ever moves.
+
+    What this does and does not reach: like any Django validator it runs on
+    ``full_clean()``, so it covers model forms (Django admin) and DRF, which
+    copies model-field validators onto the serializer field. A direct
+    ``objects.create()`` or ``.save()`` still writes whatever it is given —
+    Django does not call ``full_clean()`` on save, and forcing it here would
+    change the semantics of every write path for one field. The delivery task
+    re-validates and re-resolves before sending, so such a row fails closed at
+    send rather than causing an SSRF; what this adds is that the rule is stated
+    on the field, and that the paths a person actually uses refuse it up front.
+    """
+    from patient_portal.webhooks import validate_webhook_url
+
+    try:
+        validate_webhook_url(value)
+    except ValueError:
+        # A fixed message, never the exception text. DRF runs model-field
+        # validators before the serializer's own method, so this is the path
+        # that produces the API's URL error — forwarding str(error) here would
+        # quietly undo the no-details control the serializer was written for.
+        raise ValidationError(
+            'Webhook URL must resolve only to public HTTPS addresses on port 443.'
+        ) from None
+
+
 class WebhookSubscription(models.Model):
     organization = models.ForeignKey('omop_core.Organization', on_delete=models.CASCADE)
-    url = models.URLField(max_length=2048)
+    url = models.URLField(max_length=2048, validators=[validate_webhook_subscription_url])
     event_types = models.JSONField()
     secret = models.CharField(max_length=128, default=webhook_secret, editable=False)
     active = models.BooleanField(default=True)

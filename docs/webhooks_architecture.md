@@ -6,8 +6,11 @@ document contents, or patient demographics. Inbound events notify subscribers;
 they do not import or modify clinical data. Use the existing lab sync, document,
 or FHIR APIs for authenticated clinical writes.
 
-Set `WEBHOOKS_ENABLED=true` on web and workers to enable publishing, inbound
-processing, and delivery. It defaults to false: clinical signal/bulk hooks return
+`WEBHOOKS_ENABLED=true` enables publishing, inbound processing, and delivery. It
+has to be true on the web service **and** its worker; on Render, set it on the
+web service only — `render.yaml` declares it there and each worker pulls that
+exact value, so there is one place to flip and no way for the two to disagree.
+Setting it on a worker directly fights that reference. It defaults to false: clinical signal/bulk hooks return
 before any webhook database queries, inbound returns 503, and delivery tasks pause
 without changing queued rows. Subscription management stays available for setup.
 Restart web and workers after changing this flag.
@@ -46,6 +49,14 @@ transaction. `data.person_id` must belong to the configured organization;
 forwarded. Bodies are limited to 64 KiB. Invalid signatures return 401, invalid
 JSON/schema or a patient outside the source organization returns 400.
 
+A relayed event carries `origin`: `{"source": ..., "event_id": ...}`, naming the
+inbound source and its event id. Events this service originates have no such key.
+Each hop mints a fresh event id, so `(source, event_id)` deduplication cannot see
+a cycle: an organization subscribed to the partner that feeds it gets its own
+event back. The marker lets that partner recognise its own traffic and stop —
+subscribers should drop an event whose `origin.source` names them. It does not
+constrain a partner that ignores it, so the inbound quota remains the hard bound.
+
 The signed `id` is the idempotency key, unique per source (maximum 128 characters).
 An optional `Idempotency-Key` header must equal it. First processing returns 202;
 a retry within the retention period returns 200 with `duplicate: true`. Reusing an ID with different
@@ -78,16 +89,19 @@ Content-Type: application/json
 {"organization":42,"url":"https://subscriber.example/events","event_types":["patient.changed","lab.updated"],"active":true}
 ```
 
-Organization access is whatever `get_admin_orgs` returns, and that is wider
-than a direct grant: platform staff administer every organization, a live
-`org_admin` grant covers its own organization, and a non-patient professional
-role reaches further organizations through organization and domain trusts.
-The same set bounds which subscriptions a caller can see, so the read and
-write authorities do not diverge — but it does mean a trust relationship is
-an egress authority here, not only a read one. OAuth and service tokens must
+Read and write authorities differ here, on purpose. Reading subscriptions and
+their delivery history follows `get_admin_orgs`, which is wider than a direct
+grant: platform staff see every organization, a live `org_admin` grant sees its
+own, and a non-patient professional role reaches further organizations through
+organization and domain trusts — the same reach that decides whose patients they
+work with, so the list matches the data they already see. Creating, editing or
+deleting a subscription follows `get_direct_admin_orgs`: platform staff and
+direct `org_admin` grants only. A trust is granted for data access, and naming
+where an organization's events are sent is data-egress configuration, so a trust
+does not carry it ([decision](soc2/webhook-egress-authority.md)). OAuth and service tokens must
 additionally hold the relevant read/write scope. Partner tokens (Firebase,
-SAML) carry no scopes at all, so for them that administrative set is the whole
-gate; session callers are covered by CSRF enforcement on the endpoint. The 201 response includes
+SAML) carry no scopes at all, so for them the two sets above — wide for reads,
+direct grants only for writes — are the whole gate; session callers are covered by CSRF enforcement on the endpoint. The 201 response includes
 the generated `secret` once: store it at the subscriber. List, detail, update,
 and delivery-log responses never expose the secret. Subscriptions cannot be
 transferred between organizations. `PATCH /api/v1/webhooks/subscriptions/{id}/`
@@ -120,7 +134,11 @@ visible failure for silent, permanent notification loss, which is the worse
 side for an audit-relevant egress path.
 
 Delivery bodies contain `id`, `type`, `occurred_at`, and `data` with identifiers
-and operation metadata. Outbound `X-HealthKey-Signature` uses the subscription
+and operation metadata, plus `origin` on a relayed event (see Inbound above) —
+so a subscriber validating against a strict schema should allow it rather than
+reject the delivery. `origin.source` is the inbound source id the feeding
+partner sends in `X-HealthKey-Source`, visible to every subscriber of that
+organization; both sides are configured by the same org admin. Outbound `X-HealthKey-Signature` uses the subscription
 secret over `<X-HealthKey-Timestamp>.<raw body>`, the same construction the
 inbound endpoint verifies, so a subscriber can and should reject deliveries
 whose timestamp is outside its own tolerance — five minutes is what this
@@ -164,11 +182,33 @@ Celery messages from sending concurrently. HTTP sends have 5-second connect and
 10-second read timeouts; this task alone has 45/60-second soft/hard limits and a
 120-second recovery lease. Lost worker attempts count toward the same limit.
 
+Both beat tasks return immediately unless `WEBHOOKS_ENABLED` is true, so the
+scheduler is only as useful as that flag: a web service publishing events while
+its worker has the flag off leaves every delivery `pending` with no error
+anywhere. `render.yaml` therefore declares it on the web service and pulls the worker's
+value `fromService`, the mechanism `SENTRY_DSN` already uses between these two
+services, and `test_render_staging_blueprint.py` asserts the pair. (Not the
+broker URL's mechanism: each service points independently at the Redis resource.
+`SECRET_KEY` and the broker URL are set-once values that converge by
+construction; this flag is the first `fromService` reference whose purpose is to
+be toggled later, so it converges only once the worker redeploys — which is what
+"restart web and workers after changing this flag" above means in practice.)
+
+**Applying this to an existing Render deployment:** a newly added `sync: false`
+entry is ignored on a Blueprint update of a service that already exists (see
+[Render configuration](render-staging-celery.md)), so add `WEBHOOKS_ENABLED` to
+the web service in the Render dashboard first, then sync the blueprint — the
+worker's reference is applied normally and would otherwise point at a variable
+that does not exist yet.
+
 `start-worker.sh` starts embedded Celery beat when `CELERY_EMBEDDED_BEAT=true`,
 with its schedule in `/tmp/promop-celerybeat-schedule`. It is off unless asked
 for, because beat is a singleton and the default must stay safe when a worker
-service is scaled to more than one replica; `render.yaml` sets it on the
-single-replica staging worker. Every minute it queues up to 1,000 due outbox
+service is scaled to more than one replica; `render.yaml` sets it on both
+single-replica workers — staging and production. Production previously started
+Celery directly rather than through `start-worker.sh`, so the flag was
+unreachable there and neither the recovery sweep nor retention ran; the
+blueprint test asserts the entrypoint now. Every minute it queues up to 1,000 due outbox
 rows, recovering broker outages, lost tasks, and expired leases. The existing
 Render `promop-staging-worker` is a single worker service; staging is
 https://promop-staging.onrender.com (see [Render configuration](render-staging-celery.md)).
@@ -197,8 +237,16 @@ data when configuring database access, backups, and retention.
 
 ## Retention
 
-Schedule `python manage.py prune_webhooks` daily on a process with the same
-configured database. Default retention is 30 days (`WEBHOOK_RETENTION_DAYS`);
+`CELERY_BEAT_SCHEDULE` runs `patient_portal.tasks.prune_webhook_history` daily at
+03:30 UTC (`CELERY_TIMEZONE` is unset, so celery's UTC default applies whatever
+Django's `TIME_ZONE` says), which calls the command below; the deployment that runs beat therefore
+runs retention too, and there is no second thing to keep configured. A fixed hour rather than an
+interval, because a redeploy resets beat's schedule file in `/tmp`: with
+redeploys more frequent than the interval, an interval-scheduled pass would
+never fire at all. The trade is that a redeploy spanning 03:30 skips that day
+rather than running late, which retention can afford. Run it by hand the same way on a
+deployment without beat: `python manage.py prune_webhooks` on a process with the
+same configured database. Default retention is 30 days (`WEBHOOK_RETENTION_DAYS`);
 `--days N`, `--batch-size N` (default 1000), and `--dry-run` are supported.
 Retention must be at least one day, beyond the five-minute signature window.
 The command removes old terminal delivery history (`delivered`, `dead_letter`,
