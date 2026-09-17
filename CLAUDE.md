@@ -421,24 +421,6 @@ without anyone noticing.
 
 **For changes to code, tests, configuration, dependencies or runtime data, run both test suites before pushing.** Do not push if any test is failing. Documentation-only changes follow the exception in `AGENTS.md`: review content, links and `git diff --check`; application suites are not required.
 
-### Rule: Run Full Backend Test Suite After Every PR Merge into `dev`
-
-After merging a PR that changes code, tests, configuration, dependencies or runtime data into `dev`, immediately run the full backend test suite against the **local test database** (`promop_test`) to catch any integration regressions:
-
-```bash
-DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" \
-  .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput
-```
-
-**Do not run the test suite against the staging DB.** That was tried and abandoned: over the network the suite takes 10+ minutes (vs ~1 minute locally), and an interrupted run leaves an orphaned `test_*` database on the staging server that blocks every future run until manually dropped (and the leftover DB may have live connections that refuse `DROP DATABASE`). Local PostgreSQL matches CI, so it is the right place for post-merge checks too.
-
-```bash
-# One-liner to run everything from the repo root:
-DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" \
-  .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput \
-  && (cd frontend && npm test -- --run)
-```
-
 **Local PostgreSQL setup** (one-time, postgresql@18 via Homebrew, port 5433):
 
 The local server must be **PostgreSQL 18 with pgvector**, not the postgresql@14
@@ -663,6 +645,15 @@ operations = [
 - **Apply to staging DB before pushing**: run `migrate` against `promop_dev` to verify before committing.
 - **Never apply schema changes manually** to the DB — always go through migrations so Django's state stays in sync.
 - **Production migrations run automatically** — `start.sh` calls `migrate` on every Render deploy.
+- **Rebase on `dev` before creating any migration.** Two feature branches that both
+  create a migration off the same base will produce conflicting sequence numbers when
+  both merge. Before running `makemigrations`, always:
+  ```bash
+  git fetch origin dev && git rebase origin/dev
+  ```
+  This ensures the new migration gets the next available sequence number. CI runs a
+  conflict check on every push to `dev`, so a missed conflict is caught immediately
+  after merge, but prevention is better than cleanup.
 
 ---
 

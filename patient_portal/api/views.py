@@ -84,12 +84,15 @@ from omop_core.mapping.code_resolution import (
 )
 from omop_core.mapping.suggestions import (
     ALL_STRATEGIES,
+    DEFAULT_RANKING_MODEL,
     DEFAULT_STRATEGIES,
     CANDIDATE_LIMIT,
     LEXICAL_LIMIT_MAX,
+    RANKING_MODELS,
     STRATEGY_LEXICAL,
     STRATEGY_SEMANTIC,
     STRATEGY_UMLS,
+    STRATEGY_VECTORS,
     SUGGESTION_MODEL_VERSION,
     VOCAB_TO_UMLS_ROOT,
     suggest_one_mapping,
@@ -834,6 +837,17 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             # Org-admin access includes trust-derived admin orgs.
             admin_org_ids = list(get_admin_orgs(self.request.user).values_list('id', flat=True))
 
+            # Public demo orgs: patients can browse all org patients.
+            # Only direct org grants are checked — no trust expansion,
+            # no admin powers, no mapping curation access.
+            demo_org_ids = list(
+                active_grants.filter(
+                    org__isnull=False,
+                    org__allows_patient_signup=True,
+                ).values_list('org_id', flat=True)
+            )
+            all_visible_org_ids = list(set(admin_org_ids) | set(demo_org_ids))
+
             # Group grants: see patients in those groups
             actor_group_ids = list(
                 active_grants.filter(group__isnull=False).values_list('group_id', flat=True)
@@ -844,15 +858,15 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 ).values_list('person_id', flat=True)
                 accessible_pids.update(group_pids)
 
-            if not accessible_pids and not admin_org_ids:
+            if not accessible_pids and not all_visible_org_ids:
                 return qs.none()
 
-            if admin_org_ids and accessible_pids:
+            if all_visible_org_ids and accessible_pids:
                 qs = qs.filter(
-                    Q(organization_id__in=admin_org_ids) | Q(person_id__in=accessible_pids)
+                    Q(organization_id__in=all_visible_org_ids) | Q(person_id__in=accessible_pids)
                 )
-            elif admin_org_ids:
-                qs = qs.filter(organization_id__in=admin_org_ids)
+            elif all_visible_org_ids:
+                qs = qs.filter(organization_id__in=all_visible_org_ids)
             else:
                 qs = qs.filter(person_id__in=accessible_pids)
         return qs
@@ -7915,7 +7929,8 @@ def _concept_name_search_filter(query):
 
 
 def _serialize_concept(concept, versions=None):
-    return {
+    from omop_core.services.concept_unit_info import concept_unit_fields
+    payload = {
         'concept_id': concept.concept_id,
         'concept_name': concept.concept_name,
         'vocabulary_id': concept.vocabulary_id,
@@ -7926,6 +7941,8 @@ def _serialize_concept(concept, versions=None):
         'standard_concept': concept.standard_concept,
         'invalid_reason': concept.invalid_reason,
     }
+    payload.update(concept_unit_fields(concept))
+    return payload
 
 
 def _paginated_concept_response(queryset, request):
@@ -7941,39 +7958,14 @@ def _paginated_concept_response(queryset, request):
 
 @functools.lru_cache(maxsize=1)
 def _get_loinc_to_unit() -> dict[str, str]:
-    """Lazily build LOINC-code → unit mapping from LAB_FIELD_TO_LOINC."""
-    from omop_core.services.mappings import LAB_FIELD_TO_LOINC
-    return {
-        code: unit for code, unit, _display in LAB_FIELD_TO_LOINC.values() if unit
-    }
-
-
-_QUANTITATIVE_LOINC_NAME_MARKERS = (
-    'mass/', 'moles/', '#/', 'units/', 'volume fraction', 'catalytic activity',
-    'ratio', 'fraction', 'clearance', ' rate', ' score', ' time',
-)
-_QUALITATIVE_LOINC_NAME_MARKERS = (
-    '[presence]', '[ordinal]', '[narrative]', '[interpretation]', '[type]',
-    '[finding]', 'susceptibility',
-)
+    """Lazily build LOINC-code -> unit mapping from LAB_FIELD_TO_LOINC."""
+    from omop_core.services.concept_unit_info import get_loinc_to_unit
+    return get_loinc_to_unit()
 
 
 def _measurement_input_type(concept_name, suggested_unit):
-    """Return the safe qualitative/quantitative cue available in OMOP data.
-
-    OMOP's Concept table does not retain LOINC's Scale Type. A curated unit is
-    conclusive, and common LOINC display-name markers cover unitless numeric
-    measurements (for example, renal clearance) and qualitative Presence
-    results without pretending an unknown result has a known scale.
-    """
-    if suggested_unit:
-        return 'quantitative'
-    name = (concept_name or '').casefold()
-    if any(marker in name for marker in _QUANTITATIVE_LOINC_NAME_MARKERS):
-        return 'quantitative'
-    if any(marker in name for marker in _QUALITATIVE_LOINC_NAME_MARKERS):
-        return 'qualitative'
-    return ''
+    from omop_core.services.concept_unit_info import measurement_input_type
+    return measurement_input_type(concept_name, suggested_unit)
 
 
 @api_view(['GET'])
@@ -8497,9 +8489,9 @@ def mapping_stats(request):
 
     GET /api/v1/mapping-stats/
     Returns counts for field mappings, code mappings, and therapy reference data.
-    Restricted to staff or org_admin users.
+    Any professional role (staff, org_admin, doctor, analyst) can view.
     """
-    if not has_org_admin_access(request.user):
+    if not has_professional_access(request.user):
         return Response({'detail': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldConceptMapping
@@ -10193,6 +10185,11 @@ def _user_display(user):
     )
 
 
+def _concept_unit_fields(concept):
+    from omop_core.services.concept_unit_info import concept_unit_fields
+    return concept_unit_fields(concept)
+
+
 def _serialize_code_mapping_row(concept, mapping=None, source_metadata=None, destination_count=None):
     """One row of the Code Mapping list: a source code and where it lands.
 
@@ -10318,6 +10315,9 @@ def _serialize_code_mapping_row(concept, mapping=None, source_metadata=None, des
         'concept_code': concept.concept_code,
         'concept_vocabulary_id': concept.vocabulary_id,
         'concept_class_id': concept.concept_class_id,
+        # Unit info for LOINC Measurement concepts — helps curators assess
+        # mapping quality without opening a concept search.
+        **_concept_unit_fields(concept),
     }
 
 
@@ -10926,20 +10926,27 @@ def code_mapping_suggest(request):
                 {'strategies': 'At least one strategy must be selected.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        # Vectors reorders what retrieval found; it finds nothing itself. On its
-        # own it would run to completion and report "no candidate concept" for
-        # every code, which reads as a broken tab rather than a bad selection.
-        if not {STRATEGY_UMLS, STRATEGY_LEXICAL, STRATEGY_SEMANTIC} & set(raw_strategies):
+        # At least one retrieval strategy is needed. Vectors is now a retrieval
+        # strategy (pgvector cosine search). UMLS and Lexical are the other two.
+        if not {STRATEGY_UMLS, STRATEGY_LEXICAL, STRATEGY_VECTORS, STRATEGY_SEMANTIC} & set(raw_strategies):
             return Response(
                 {'strategies': (
-                    'Vectors reranks the candidates retrieval found, so it '
-                    'cannot run alone. Select UMLS, Lexical or Semantic retrieval as well.'
+                    'At least one retrieval strategy (UMLS, Lexical, or Vectors) '
+                    'must be selected.'
                 )},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         strategies = raw_strategies
     else:
         strategies = list(DEFAULT_STRATEGIES)
+
+    # Ranking model selection.
+    ranking_model = str(request.data.get('ranking_model') or DEFAULT_RANKING_MODEL).strip()
+    if ranking_model not in RANKING_MODELS:
+        return Response(
+            {'ranking_model': f'Must be one of {sorted(RANKING_MODELS)}.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     # Replace mode re-answers rows a previous run already answered, rather than
     # deleting them. Deleting was right while the candidate set came from a scan
@@ -10969,11 +10976,13 @@ def code_mapping_suggest(request):
         'strategies': strategies,
         'lexical_limit': lexical_limit,
         'resuggest': replace,
+        'ranking_model': ranking_model,
     }
     run = SuggestRun.objects.create(
         source_vocabulary_id=source_vocab,
         total=expected,
         model_version=SUGGESTION_MODEL_VERSION,
+        ranking_model=ranking_model,
         selection=selection_summary(params),
         created_by=request.user if request.user.is_authenticated else None,
     )
@@ -10999,6 +11008,7 @@ def _serialize_suggest_run(run, *, include_activity=False):
         'strategy_counts': run.strategy_counts or {},
         'landed_in': run.landed_in or {},
         'model_version': run.model_version,
+        'ranking_model': run.ranking_model or 'anthropic',
         'error': run.error,
         'created_at': run.created_at,
         'finished_at': run.finished_at,
@@ -11041,13 +11051,11 @@ def code_mapping_suggest_one(request):
     strategies = request.data.get('strategies') or list(DEFAULT_STRATEGIES)
     if not source_code or not omop_table or not isinstance(strategies, list) or any(s not in ALL_STRATEGIES for s in strategies):
         return Response({'detail': 'source_code, omop_table, and valid strategies are required.'}, status=status.HTTP_400_BAD_REQUEST)
-    # Same rule as the batch endpoint: vectors reranks what retrieval found and
-    # retrieves nothing itself, so on its own it answers "no candidate concept"
-    # every time, which reads as a broken dialog rather than a bad selection.
-    if not {STRATEGY_UMLS, STRATEGY_LEXICAL, STRATEGY_SEMANTIC} & set(strategies):
+    # At least one retrieval strategy is needed.
+    if not {STRATEGY_UMLS, STRATEGY_LEXICAL, STRATEGY_VECTORS, STRATEGY_SEMANTIC} & set(strategies):
         return Response({'strategies': (
-            'Vectors reranks the candidates retrieval found, so it cannot run '
-            'alone. Select UMLS, Lexical or Semantic retrieval as well.'
+            'At least one retrieval strategy (UMLS, Lexical, or Vectors) '
+            'must be selected.'
         )}, status=status.HTTP_400_BAD_REQUEST)
     try:
         lexical_limit = int(request.data.get('lexical_limit') or CANDIDATE_LIMIT)
@@ -11056,6 +11064,12 @@ def code_mapping_suggest_one(request):
     if not 1 <= lexical_limit <= LEXICAL_LIMIT_MAX:
         return Response({'lexical_limit': f'Must be between 1 and {LEXICAL_LIMIT_MAX}.'},
                         status=status.HTTP_400_BAD_REQUEST)
+    ranking_model = str(request.data.get('ranking_model') or DEFAULT_RANKING_MODEL).strip()
+    if ranking_model not in RANKING_MODELS:
+        return Response(
+            {'ranking_model': f'Must be one of {sorted(RANKING_MODELS)}.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
     params = {
         'source_code': source_code,
         'source_vocabulary_id': str(request.data.get('source_vocabulary_id') or ''),
@@ -11063,19 +11077,21 @@ def code_mapping_suggest_one(request):
         'source_description': str(request.data.get('source_code_description') or ''),
         'strategies': strategies,
         'lexical_limit': lexical_limit,
+        'ranking_model': ranking_model,
     }
     if request.data.get('async') is True:
         from omop_core.services.suggest_jobs import get_dispatcher
         run = SuggestRun.objects.create(
             source_vocabulary_id=params['source_vocabulary_id'], total=1,
-            model_version=SUGGESTION_MODEL_VERSION, created_by=request.user,
+            model_version=SUGGESTION_MODEL_VERSION, ranking_model=ranking_model,
+            created_by=request.user,
             selection={
                 'mode': 'individual', 'dry_run': True, 'limit': 1,
                 'order': 'The source code currently open in the mapping dialog.',
                 'strategies': strategies, 'source_vocabulary_id': params['source_vocabulary_id'],
             },
         )
-        get_dispatcher().dispatch(run, {'preview': params})
+        get_dispatcher().dispatch(run, {'preview': params, 'ranking_model': ranking_model})
         run.refresh_from_db()
         return Response(_serialize_suggest_run(run, include_activity=True), status=status.HTTP_202_ACCEPTED)
     return Response(suggest_one_mapping(**params))

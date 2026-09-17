@@ -15056,6 +15056,9 @@ class OrgPatientSignupTest(TestCase):
     """Test the public patient self-signup endpoint."""
 
     def setUp(self):
+        from django.core.cache import cache
+        # DRF throttle state lives in the cache and leaks between tests.
+        cache.clear()
         self.org = Organization.objects.create(
             name='Signup Org', slug='signup-org', allows_patient_signup=True,
         )
@@ -15065,7 +15068,11 @@ class OrgPatientSignupTest(TestCase):
 
     def test_signup_creates_account(self):
         from patient_portal.models import PatientUser
-        resp = APIClient().post('/api/v1/orgs/signup-org/patient-signup/', {
+        client = APIClient()
+        directory = client.get('/api/v1/orgs/signup-directory/', {'email': 'self-signup@test.com'})
+        self.assertEqual(directory.status_code, 200)
+        self.assertIn({'name': self.org.name, 'slug': self.org.slug}, directory.data)
+        resp = client.post('/api/v1/orgs/signup-org/patient-signup/', {
             'email': 'self-signup@test.com',
             'password': 'Str0ng!Pass99',
             'given_name': 'Test',
@@ -15077,10 +15084,72 @@ class OrgPatientSignupTest(TestCase):
 
         identity = Identity.objects.get(email='self-signup@test.com')
         self.assertTrue(identity.has_usable_password())
+        self.assertFalse(identity.is_staff)
+        self.assertFalse(identity.is_superuser)
+        self.assertEqual(client.session['_auth_user_id'], str(identity.pk))
         self.assertTrue(PatientUser.objects.filter(identity=identity).exists())
         self.assertTrue(
-            GroupAccess.objects.filter(identity=identity, org=self.org, role='patient').exists()
+            GroupAccess.objects.filter(identity=identity, org=self.org, role='analyst').exists()
         )
+
+    def test_signup_private_org_gets_patient_role(self):
+        """Private org signup (via domain trust) assigns patient role."""
+        from omop_core.models import OrgTrust
+        private_org = Organization.objects.create(
+            name='Private Clinic', slug='private-clinic',
+            allows_patient_signup=False,
+        )
+        # Grant domain trust so the endpoint allows signup without
+        # allows_patient_signup=True.
+        OrgTrust.objects.create(
+            granting_org=private_org,
+            trusted_domain='private-clinic.com',
+        )
+        client = APIClient()
+        resp = client.post('/api/v1/orgs/private-clinic/patient-signup/', {
+            'email': 'user@private-clinic.com',
+            'password': 'Str0ng!Pass99',
+            'given_name': 'Private',
+            'family_name': 'User',
+        })
+        self.assertEqual(resp.status_code, 201)
+        identity = Identity.objects.get(email='user@private-clinic.com')
+        self.assertTrue(
+            GroupAccess.objects.filter(
+                identity=identity, org=private_org, role='patient',
+            ).exists()
+        )
+
+    def test_demo_signup_user_sees_all_org_patients(self):
+        """User who signs up to a public demo org can see all org patients."""
+        # Create an existing patient in the demo org
+        person_existing = Person.objects.create(person_id=77701)
+        existing_record = PatientRecord.objects.create(
+            person=person_existing, organization=self.org,
+        )
+
+        # Sign up a new user
+        client = APIClient()
+        resp = client.post('/api/v1/orgs/signup-org/patient-signup/', {
+            'email': 'demo-viewer@test.com',
+            'password': 'Str0ng!Pass99',
+            'given_name': 'Demo',
+            'family_name': 'Viewer',
+        })
+        self.assertEqual(resp.status_code, 201)
+
+        # The signed-up user should see both their own record and existing ones
+        identity = Identity.objects.get(email='demo-viewer@test.com')
+        client.force_authenticate(user=identity)
+        list_resp = client.get('/api/patient-info/')
+        self.assertEqual(list_resp.status_code, 200)
+        results = (
+            list_resp.data.get('results', list_resp.data)
+            if isinstance(list_resp.data, dict) else list_resp.data
+        )
+        visible_ids = {r['id'] for r in results}
+        self.assertIn(existing_record.id, visible_ids)
+        self.assertGreaterEqual(len(visible_ids), 2)
 
     def test_signup_disabled_returns_403(self):
         resp = APIClient().post('/api/v1/orgs/no-signup-org/patient-signup/', {
@@ -15336,9 +15405,9 @@ class OrgSignupDirectoryTest(TestCase):
         resp = APIClient().get(self.URL)
         self.assertEqual(set(resp.data[0].keys()), {'name', 'slug'})
 
-    def test_email_filters_to_pending_invitations_and_trusted_domains(self):
+    def test_email_includes_public_orgs_pending_invitations_and_trusted_domains(self):
         invited = Organization.objects.get(slug='closed-clinic')
-        trusted = Organization.objects.get(slug='zeta-clinic')
+        trusted = Organization.objects.create(name='Trusted Clinic', slug='trusted-clinic')
         OrgInvitation.objects.create(
             org=invited, email='member@trusted.example', role='patient',
             token='b' * 64, expires_at=timezone.now() + timedelta(days=7),
@@ -15348,13 +15417,54 @@ class OrgSignupDirectoryTest(TestCase):
         resp = APIClient().get(f'{self.URL}?email=member@trusted.example')
 
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual([org['slug'] for org in resp.data], ['closed-clinic', 'zeta-clinic'])
+        self.assertEqual([org['slug'] for org in resp.data], [
+            'alpha-clinic', 'closed-clinic', 'trusted-clinic', 'zeta-clinic',
+        ])
+
+    def test_unrelated_email_still_lists_public_demo_orgs(self):
+        resp = APIClient().get(self.URL, {'email': 'visitor@unrelated.example'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(list(resp.data), [
+            {'name': 'Alpha Clinic', 'slug': 'alpha-clinic'},
+            {'name': 'Zeta Clinic', 'slug': 'zeta-clinic'},
+        ])
+
+    def test_email_does_not_expose_inactive_or_ineligible_private_orgs(self):
+        email = 'visitor@unrelated.example'
+        for slug, state in [('closed-clinic', 'expired'), ('retired-clinic', 'active')]:
+            OrgInvitation.objects.create(
+                org=Organization.objects.get(slug=slug), email=email, role='patient',
+                token=slug.ljust(64, 'x'),
+                expires_at=timezone.now() + timedelta(days=-1 if state == 'expired' else 1),
+            )
+        OrgTrust.objects.create(
+            granting_org=Organization.objects.get(slug='retired-clinic'),
+            trusted_domain='unrelated.example',
+        )
+        resp = APIClient().get(self.URL, {'email': email})
+        self.assertEqual([org['slug'] for org in resp.data], ['alpha-clinic', 'zeta-clinic'])
+
+    def test_public_org_matching_multiple_access_paths_is_listed_once(self):
+        org = Organization.objects.get(slug='alpha-clinic')
+        OrgTrust.objects.create(granting_org=org, trusted_domain='trusted.example')
+        for number in range(2):
+            OrgInvitation.objects.create(
+                org=org, email=f'member{number}@trusted.example', role='patient',
+                token=str(number) * 64, expires_at=timezone.now() + timedelta(days=1),
+            )
+        resp = APIClient().get(self.URL, {'email': ' MEMBER0@TRUSTED.EXAMPLE '})
+        self.assertEqual([org['slug'] for org in resp.data], ['alpha-clinic', 'zeta-clinic'])
 
     def test_empty_when_no_org_allows_signup(self):
         Organization.objects.all().update(allows_patient_signup=False)
         resp = APIClient().get(self.URL)
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(list(resp.data), [])
+
+    def test_disabling_public_demo_access_removes_org_for_unrelated_email(self):
+        Organization.objects.filter(slug='alpha-clinic').update(allows_patient_signup=False)
+        resp = APIClient().get(self.URL, {'email': 'visitor@unrelated.example'})
+        self.assertEqual([org['slug'] for org in resp.data], ['zeta-clinic'])
 
     def test_does_not_shadow_org_detail_route(self):
         """A real org slugged 'signup-directory' must not break the directory URL."""
@@ -21606,6 +21716,182 @@ class CodeMappingResolutionTest(TestCase):
         )
 
 
+class CodeMappingLoadedSinceProposalTest(TestCase):
+    """A queue row written because a vocabulary was missing yields once it loads."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.drug_domain, _ = Domain.objects.get_or_create(
+            domain_id='Drug', defaults={'domain_name': 'Drug', 'domain_concept_id': 13},
+        )
+        cls.measurement_domain, _ = Domain.objects.get_or_create(
+            domain_id='Measurement',
+            defaults={'domain_name': 'Measurement', 'domain_concept_id': 21},
+        )
+        cls.rxnorm, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='RxNorm',
+            defaults={'vocabulary_name': 'RxNorm', 'vocabulary_reference': 'x',
+                      'vocabulary_version': '2026', 'vocabulary_concept_id': 0},
+        )
+        cls.loinc, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='LOINC',
+            defaults={'vocabulary_name': 'LOINC', 'vocabulary_reference': 'x',
+                      'vocabulary_version': '2.80', 'vocabulary_concept_id': 0},
+        )
+        for class_id in ('Quant Clinical Drug', 'Brand Name', 'Lab Test'):
+            ConceptClass.objects.get_or_create(
+                concept_class_id=class_id,
+                defaults={'concept_class_name': class_id, 'concept_class_concept_id': 0},
+            )
+
+    def setUp(self):
+        SourceCodeConceptMapping.objects.filter(origin_system='hk-labs-seed').delete()
+
+    def _concept(self, concept_id, code, vocabulary, domain, class_id, standard):
+        return Concept.objects.create(
+            concept_id=concept_id, concept_name=f'concept {code}', concept_code=code,
+            vocabulary=vocabulary, domain=domain, concept_class_id=class_id,
+            standard_concept=standard,
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+
+    def _resolve_before_load(self, code, vocabulary_id, table):
+        from unittest.mock import patch
+
+        with patch(
+            'omop_core.mapping.suggestions.suggest_source_code',
+            return_value=(None, 'No suitable candidate.'),
+        ):
+            return resolve_source_code(
+                source_code=code, source_vocabulary_id=vocabulary_id,
+                omop_table=table, source_system='etl',
+            )
+
+    def test_minted_placeholder_yields_to_a_standard_concept_loaded_later(self):
+        concept, queued = self._resolve_before_load('1807630', 'RxNorm', 'drug_exposure')
+        self.assertIsNone(concept)
+        self.assertEqual(queued.target_concept.vocabulary_id, 'HK-Drug')
+        loaded = self._concept(
+            40_000_101, '1807630', self.rxnorm, self.drug_domain, 'Quant Clinical Drug', 'S',
+        )
+
+        concept, mapping = resolve_source_code(
+            source_code='1807630', source_vocabulary_id='RxNorm', omop_table='drug_exposure',
+        )
+
+        self.assertEqual(concept.concept_id, loaded.concept_id)
+        self.assertEqual(mapping.pk, queued.pk)
+        self.assertEqual(mapping.status, 'approved')
+        self.assertEqual(mapping.origin_system, 'athena-direct')
+        self.assertEqual(mapping.target_concept_id, loaded.concept_id)
+        self.assertEqual(mapping.occurrence_count, 1)
+
+    def test_non_standard_concept_does_not_replace_the_placeholder(self):
+        _, queued = self._resolve_before_load('337535', 'RxNorm', 'drug_exposure')
+        self._concept(19_025_425, '337535', self.rxnorm, self.drug_domain, 'Brand Name', None)
+
+        concept, mapping = resolve_source_code(
+            source_code='337535', source_vocabulary_id='RxNorm', omop_table='drug_exposure',
+        )
+
+        self.assertIsNone(concept)
+        self.assertEqual(mapping.pk, queued.pk)
+        self.assertEqual(mapping.status, 'proposed')
+        self.assertEqual(mapping.target_concept.vocabulary_id, 'HK-Drug')
+
+    def test_loinc_gap_yields_once_loinc_is_loaded(self):
+        _, gap = self._resolve_before_load('2160-0', 'LOINC', 'measurement')
+        self.assertIsNone(gap.target_concept_id)
+        loaded = self._concept(
+            3_016_723, '2160-0', self.loinc, self.measurement_domain, 'Lab Test', 'S',
+        )
+
+        concept, mapping = resolve_source_code(
+            source_code='2160-0', source_vocabulary_id='LOINC', omop_table='measurement',
+        )
+
+        self.assertEqual(concept.concept_id, loaded.concept_id)
+        self.assertEqual(mapping.pk, gap.pk)
+        self.assertEqual(mapping.status, 'approved')
+
+    def test_proposal_with_curator_evidence_is_left_for_review(self):
+        _, queued = self._resolve_before_load('203148', 'RxNorm', 'drug_exposure')
+        suggested = self._concept(
+            40_000_102, 'other', self.rxnorm, self.drug_domain, 'Quant Clinical Drug', 'S',
+        )
+        SourceCodeConceptMapping.objects.filter(pk=queued.pk).update(
+            suggested_target_concept=suggested,
+        )
+        self._concept(40_000_103, '203148', self.rxnorm, self.drug_domain, 'Quant Clinical Drug', 'S')
+
+        concept, mapping = resolve_source_code(
+            source_code='203148', source_vocabulary_id='RxNorm', omop_table='drug_exposure',
+        )
+
+        self.assertIsNone(concept)
+        self.assertEqual(mapping.status, 'proposed')
+
+
+    def test_concept_from_another_domain_does_not_replace_the_placeholder(self):
+        _, queued = self._resolve_before_load('1807634', 'RxNorm', 'drug_exposure')
+        self._concept(
+            40_000_104, '1807634', self.rxnorm, self.measurement_domain, 'Quant Clinical Drug', 'S',
+        )
+
+        concept, mapping = resolve_source_code(
+            source_code='1807634', source_vocabulary_id='RxNorm', omop_table='drug_exposure',
+        )
+
+        self.assertIsNone(concept)
+        self.assertEqual(mapping.pk, queued.pk)
+        self.assertEqual(mapping.status, 'proposed')
+
+    def test_rejection_during_promotion_is_not_reported_as_resolved(self):
+        from unittest.mock import patch
+
+        _, queued = self._resolve_before_load('82063', 'RxNorm', 'drug_exposure')
+        loaded = self._concept(
+            40_000_105, '82063', self.rxnorm, self.drug_domain, 'Quant Clinical Drug', 'S',
+        )
+
+        def reject_then_find(*args, **kwargs):
+            SourceCodeConceptMapping.objects.filter(pk=queued.pk).update(status='rejected')
+            return loaded
+
+        with patch('omop_core.mapping.code_resolution._direct_concept', side_effect=reject_then_find):
+            concept, mapping = resolve_source_code(
+                source_code='82063', source_vocabulary_id='RxNorm', omop_table='drug_exposure',
+            )
+
+        self.assertIsNone(concept)
+        self.assertEqual(mapping.status, 'rejected')
+        self.assertEqual(mapping.target_concept.vocabulary_id, 'HK-Drug')
+
+    def test_curator_edit_during_promotion_is_kept(self):
+        from unittest.mock import patch
+
+        _, queued = self._resolve_before_load('48933', 'RxNorm', 'drug_exposure')
+        loaded = self._concept(
+            40_000_106, '48933', self.rxnorm, self.drug_domain, 'Quant Clinical Drug', 'S',
+        )
+        chosen = self._concept(
+            40_000_107, 'chosen', self.rxnorm, self.drug_domain, 'Quant Clinical Drug', 'S',
+        )
+
+        def edit_then_find(*args, **kwargs):
+            SourceCodeConceptMapping.objects.filter(pk=queued.pk).update(target_concept=chosen)
+            return loaded
+
+        with patch('omop_core.mapping.code_resolution._direct_concept', side_effect=edit_then_find):
+            concept, mapping = resolve_source_code(
+                source_code='48933', source_vocabulary_id='RxNorm', omop_table='drug_exposure',
+            )
+
+        self.assertIsNone(concept)
+        self.assertEqual(mapping.status, 'proposed')
+        self.assertEqual(mapping.target_concept_id, chosen.concept_id)
+
+
 class FieldConceptMappingTest(TestCase):
     """Tests for the /api/v1/field-mappings/ endpoints."""
 
@@ -23904,6 +24190,17 @@ class MappingStatsTest(MappingHubTestBase):
 
         resp = self.client.get('/api/v1/mapping-stats/')
 
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_analyst_can_see_stats(self):
+        analyst = Identity.objects.create_user(
+            email='analyst-mapping@test.com', password='testpass',
+        )
+        GroupAccess.objects.create(
+            identity=analyst, org=self.admin_org, role='analyst',
+        )
+        self.client.force_authenticate(user=analyst)
+        resp = self.client.get('/api/v1/mapping-stats/')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
     def test_regular_user_forbidden(self):
@@ -26816,6 +27113,7 @@ class CreateSmartAppRedirectSchemeTest(TestCase):
 
 
 from patient_portal.models import ServiceAccessToken, ServiceApplication  # noqa: E402
+from patient_portal.api.providers.base import TokenClaims  # noqa: E402
 
 
 class ServiceScopeCapTest(TestCase):
@@ -26980,3 +27278,99 @@ class LegacyServiceGrantKillSwitchTest(TestCase):
         ServiceApplication.objects.filter(service_id='hk-labs-sync').update(is_active=False)
         with self.assertRaises(AuthenticationFailed):
             self._authenticate()
+
+class ServiceTokenAdministrationBoundaryTest(TestCase):
+    """Who may mint a service credential — #1218 review, finding 3.
+
+    A service credential never expires, is not bound to any patient, and
+    survives revocation of whatever grant was used to create it. Minting one
+    must therefore require an interactive staff session, not a token a staff
+    user delegated to somebody else's application.
+    """
+
+    URL = '/api/v1/service-applications/'
+
+    @classmethod
+    def setUpTestData(cls):
+        from oauth2_provider.models import AccessToken, Application
+        import datetime
+
+        cls.staff = Identity.objects.create_user(email='ops@test.com', password='ops-pass')
+        cls.staff.is_staff = True
+        cls.staff.save(update_fields=['is_staff'])
+
+        # A third-party SMART app holding a delegated, expiring, revocable grant
+        # on the staff user's behalf — exactly what create_smart_app produces.
+        cls.smart_app = Application.objects.create(
+            name='Third-party SMART app',
+            client_id='smart-partner-client',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_AUTHORIZATION_CODE,
+            user=cls.staff,
+        )
+        cls.delegated_token = AccessToken.objects.create(
+            user=cls.staff,
+            application=cls.smart_app,
+            token='smart-delegated-token-444',
+            expires=timezone.now() + datetime.timedelta(hours=1),
+            scope='patient/*.read patient/*.write openid launch/patient',
+        )
+
+    def _bearer(self):
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.delegated_token.token}')
+        return client
+
+    def test_a_delegated_smart_token_cannot_create_a_service_application(self):
+        response = self._bearer().post(
+            self.URL,
+            {'name': 'Backdoor', 'service_id': 'backdoor', 'scopes': 'patient/*.write'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(ServiceApplication.objects.filter(service_id='backdoor').exists())
+
+    def test_a_delegated_smart_token_cannot_mint_a_token_for_an_existing_application(self):
+        application = ServiceApplication.objects.create(
+            name='HK Labs', service_id='hk-labs-admin-test', scopes='patient/*.read')
+        response = self._bearer().post(
+            f'{self.URL}{application.pk}/tokens/', {'label': 'minted'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(application.tokens.exists())
+
+    def test_a_delegated_smart_token_cannot_read_the_application_list(self):
+        self.assertEqual(self._bearer().get(self.URL).status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_a_staff_session_still_administers_applications(self):
+        client = APIClient()
+        # A real session login, not force_authenticate: the boundary is defined
+        # by which authenticator succeeded, and forcing bypasses all of them.
+        self.assertTrue(client.login(username='ops@test.com', password='ops-pass'))
+        response = client.post(
+            self.URL,
+            {'name': 'ETL', 'service_id': 'etl-service', 'scopes': 'patient/*.read'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        created = ServiceApplication.objects.get(service_id='etl-service')
+        minted = client.post(f'{self.URL}{created.pk}/tokens/', {'label': 'first'}, format='json')
+        self.assertEqual(minted.status_code, status.HTTP_201_CREATED)
+        self.assertIn('token', minted.data)
+
+    def test_http_basic_is_not_an_interactive_session(self):
+        """ENABLE_BASIC_AUTH is supported, and Basic also reports no token."""
+        from rest_framework.authentication import BasicAuthentication, SessionAuthentication
+        from patient_portal.api.permissions import is_interactive_session
+
+        class _Request:
+            def __init__(self, authenticator, auth=None):
+                self.successful_authenticator = authenticator
+                self.auth = auth
+
+        self.assertFalse(is_interactive_session(_Request(BasicAuthentication())))
+        self.assertTrue(is_interactive_session(_Request(SessionAuthentication())))
+        self.assertTrue(is_interactive_session(_Request(
+            BasicAuthentication(), auth=TokenClaims(
+                issuer='https://securetoken.google.com/proj', sub='uid-1', email='p@test.com',
+                name='', raw={},
+            ))))

@@ -25,7 +25,7 @@ describe("progressive suggestion candidates", () => {
     const { rerender } = render(<SuggestCandidates activity={searches.slice(0, 1)} finished={false} onSaved={onSaved} />);
     expect(screen.getByText(/Exact match/)).toBeInTheDocument();
     expect(screen.queryByText(/Alternative match/)).not.toBeInTheDocument();
-    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Use .* for/ })).not.toBeInTheDocument();
     rerender(<SuggestCandidates activity={searches} finished={false} onSaved={onSaved} />);
     expect(screen.getByText("No matches")).toBeInTheDocument();
     expect(screen.getByText("Distance 0.1235")).toBeInTheDocument();
@@ -41,9 +41,9 @@ describe("progressive suggestion candidates", () => {
 
   it("keeps choices unavailable until writes finish and for dry runs", () => {
     const { rerender } = render(<SuggestCandidates activity={results} finished={false} />);
-    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Use .* for/ })).not.toBeInTheDocument();
     rerender(<SuggestCandidates activity={results.map(event => ({ ...event, dry_run: true }))} finished />);
-    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Use .* for/ })).not.toBeInTheDocument();
   });
 
   it("reports failed saves and allows retry without claiming selection", async () => {

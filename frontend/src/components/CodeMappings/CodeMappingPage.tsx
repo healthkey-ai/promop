@@ -2,7 +2,7 @@ import PageTitle from '@/components/Branding/PageTitle';
 import IndividualSuggestCandidates from "./IndividualSuggestCandidates";
 import SuggestCandidates, { type CandidateActivity } from "./SuggestCandidates";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, ChevronDown, ChevronRight, Pencil, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
 import api from "@/api/axios";
 import MintConceptDialog from "./MintConceptDialog";
@@ -65,6 +65,8 @@ interface CodeMappingRow {
   destination_count: number;
   has_mapping: boolean;
   mapping_origin?: "athena" | "healthkey";
+  measurement_type?: "qualitative" | "quantitative";
+  suggested_unit?: string;
 }
 
 interface ConceptResult {
@@ -162,6 +164,8 @@ interface MappingForm {
   standard_concept: string;
   destination_invalid_reason: string;
   omop_table: string;
+  measurement_type: string;
+  suggested_unit: string;
   status: "proposed" | "approved" | "rejected";
   notes: string;
 }
@@ -180,6 +184,8 @@ const emptyForm: MappingForm = {
   standard_concept: "",
   destination_invalid_reason: "",
   omop_table: "",
+  measurement_type: "",
+  suggested_unit: "",
   status: "proposed",
   notes: "",
 };
@@ -200,9 +206,9 @@ const statusClass: Record<string, string> = {
 
 const strategyLabel: Record<string, string> = {
   umls: "UMLS",
-  vectors: "Vector",
+  vectors: "Vectors",
   lexical: "Lexical",
-  semantic: "Semantic retrieval",
+  semantic: "Vectors",  // legacy alias
 };
 
 /** How far along a run is, counting the phase it is actually in.
@@ -259,13 +265,14 @@ type SuggestRunProgress = {
   strategy_counts: Record<string, number>;
   landed_in: Record<string, number>;
   error: string;
+  ranking_model?: string;
 };
 
 /** Pipeline order, which is also the order the checkboxes read in. */
 const STRATEGY_LABELS = {
   umls: "UMLS",
   lexical: "Lexical",
-  semantic: "Semantic retrieval",
+  vectors: "Vectors",
 } as const;
 
 /**
@@ -375,6 +382,7 @@ const TIP = {
   status_new:
     "A new mapping always starts as Proposed. Only org admins and staff can approve it once reviewed — approval is what rewrites the clinical rows already stored.",
   notes: "Why this decision was made, for the next curator who opens the row.",
+  ranker: "Which AI model ranks the candidates. Anthropic uses Claude, Jev uses the Typesafe SystemOne API. Both runs both concurrently and picks the higher-confidence winner.",
 } as const;
 
 function omopTableFor(reference: Reference, domainId: string): string {
@@ -433,6 +441,8 @@ function buildEditForm(row: CodeMappingRow, reference: Reference): MappingForm {
     standard_concept: row.standard_concept || "",
     destination_invalid_reason: row.destination_invalid_reason || "",
     omop_table: row.destination_omop_table || omopTableFor(reference, domainId),
+    measurement_type: row.measurement_type || "",
+    suggested_unit: row.suggested_unit || "",
     status: row.status === "unmapped" ? "proposed" : row.status,
     notes: row.notes || "",
   };
@@ -484,8 +494,9 @@ export default function CodeMappingPage() {
   const validSuggestionLimit = suggestionLimit !== "" && Number.isInteger(suggestionLimit)
     && suggestionLimit >= 1 && suggestionLimit <= maxSuggestions;
   const [strategies, setStrategies] = useState({
-    umls: true, lexical: true, semantic: true,
+    umls: true, lexical: true, vectors: true,
   });
+  const [rankingModel, setRankingModel] = useState<"anthropic" | "jev" | "both">("anthropic");
   const [dialogMode, setDialogMode] = useState<"new" | "edit" | null>(null);
   const [selectedRow, setSelectedRow] = useState<CodeMappingRow | null>(null);
   const [form, setForm] = useState<MappingForm>(emptyForm);
@@ -521,15 +532,6 @@ export default function CodeMappingPage() {
   // is in flight; `flash` marks the moment it finished so the strip can announce
   // itself before settling into the banner.
   const [suggestRun, setSuggestRun] = useState<SuggestRunProgress | null>(null);
-  const [latestRunId, setLatestRunId] = useState<string | null>(null);
-  useEffect(() => {
-    let active = true;
-    api.get<{ run_id: string | null }>("/v1/code-mappings/suggest-runs/latest/")
-      .then(({ data }) => { if (active) setLatestRunId(data.run_id || null); })
-      .catch(() => { /* Older deployments may not yet expose saved-run discovery. */ });
-    return () => { active = false; };
-  }, []);
-
   const [suggestFlash, setSuggestFlash] = useState(false);
   // Which run the page is still interested in. A poll compares against this so
   // a superseded run — or an unmounted page — stops rather than setting state
@@ -865,6 +867,8 @@ export default function CodeMappingPage() {
         standard_concept: concept.standard_concept || "",
         destination_invalid_reason: concept.invalid_reason || "",
         omop_table: (adoptDomain ? "" : prev.omop_table) || omopTableFor(reference, domainId),
+        measurement_type: concept.measurement_type || "",
+        suggested_unit: concept.suggested_unit || "",
       };
     });
   };
@@ -949,7 +953,7 @@ export default function CodeMappingPage() {
       const { data: started } = await api.post<SuggestRunProgress>("/v1/code-mappings/suggest-one/", {
         source_code: form.source_code, source_vocabulary_id: form.source_vocabulary_id,
         source_code_description: form.source_code_description, omop_table: form.omop_table,
-        strategies: enabled, async: true,
+        strategies: enabled, ranking_model: rankingModel, async: true,
       });
       let current = started;
       const deadline = Date.now() + SUGGEST_POLL_TIMEOUT_MS;
@@ -1117,7 +1121,7 @@ export default function CodeMappingPage() {
    * somewhere a curator re-points *into* — enumerating SNOMED's 1.09M concepts
    * would not be a queue.
    */
-  const hasRetrieval = strategies.umls || strategies.lexical || strategies.semantic;
+  const hasRetrieval = strategies.umls || strategies.lexical || strategies.vectors;
 
   const runSuggest = async () => {
     if (!validSuggestionLimit) {
@@ -1152,13 +1156,13 @@ export default function CodeMappingPage() {
           source_vocabulary_id: selectedVocabulary,
           limit: suggestionLimit,
           strategies: activeStrategies,
+          ranking_model: rankingModel,
           replace: effectiveReplace,
           include_activity: true,
         },
       );
       suggestRunRef.current = started.run_id;
       setSuggestRun(started);
-      setLatestRunId(started.run_id);
       const finished = await pollSuggestRun(started);
       if (suggestRunRef.current !== started.run_id) return;
       setSuggestRun(finished);
@@ -1362,6 +1366,9 @@ export default function CodeMappingPage() {
                 <div className="font-mono text-xs text-slate-500">
                   {row.destination_vocabulary_id}:{row.destination_concept_code}
                 </div>
+                {(row.measurement_type || row.suggested_unit) && (
+                  <ConceptInputDetails domain_id={row.destination_domain_id || ""} measurement_type={row.measurement_type} suggested_unit={row.suggested_unit} />
+                )}
               </td>
               <td className="px-4 py-3 font-mono text-xs text-slate-900">{row.destination_concept_id}</td>
               <td className={`px-4 py-3 text-center font-mono text-xs font-medium ${row.destination_count !== 1 ? "text-red-600" : "text-slate-700"}`}>{row.destination_count ?? 0}</td>
@@ -1538,8 +1545,8 @@ export default function CodeMappingPage() {
           <button
             type="button"
             onClick={() => void runSuggest()}
-            disabled={suggesting || !hasRetrieval || !validSuggestionLimit}
-            title="Propose destinations for queued source codes on this tab."
+            disabled={suggesting || !hasRetrieval || !validSuggestionLimit || overallTab}
+            title={overallTab ? "Select a specific vocabulary tab to run suggestions." : "Propose destinations for queued source codes on this tab."}
             className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Sparkles size={13} />
@@ -1556,7 +1563,7 @@ export default function CodeMappingPage() {
             className="h-8 w-16 rounded-md border border-slate-300 px-2 text-xs"
           />
           <span className="text-xs text-slate-600">Using</span>
-          {(["umls", "lexical", "semantic"] as const).map((key) => (
+          {(["umls", "lexical", "vectors"] as const).map((key) => (
             <span key={key} className="inline-flex items-center gap-1">
               <label className="inline-flex items-center gap-1 text-xs text-slate-600">
                 <input
@@ -1581,6 +1588,18 @@ export default function CodeMappingPage() {
               className="h-3.5 w-3.5 rounded border-slate-300"
             />
             Replace Current Suggestions
+          </label>
+          <label className="inline-flex items-center gap-1 text-xs text-slate-600">
+            Ranker
+            <select
+              value={rankingModel}
+              onChange={(e) => setRankingModel(e.target.value as "anthropic" | "jev" | "both")}
+              className="h-7 rounded-md border border-slate-300 px-1.5 text-xs"
+            >
+              <option value="anthropic">Anthropic</option>
+              <option value="jev">Jev</option>
+              <option value="both">Both</option>
+            </select>
           </label>
           <section
             aria-label="Suggestion accuracy"
@@ -1614,12 +1633,6 @@ export default function CodeMappingPage() {
           finished={suggestRun.state === "success" || suggestRun.state === "failure"}
           onSaved={() => { void refreshCurrent.current(); }} />}
 
-        {!suggestRun && latestRunId && (
-          <div className="mb-4 text-sm">
-            <Link to={`/code-mappings/suggest-runs/${latestRunId}`} target="_blank" rel="noopener noreferrer"
-              className="font-medium text-sky-700 underline hover:text-sky-900">View latest batch run log</Link>
-          </div>
-        )}
 
         {/* Directly under the Suggest button, because that is where the eye
             already is when the wait starts. The run is queued and a code costs
@@ -1641,12 +1654,6 @@ export default function CodeMappingPage() {
           >
             <div className="flex items-center justify-between gap-3">
               <span>{describeSuggestRun(suggestRun)}</span>
-              <Link
-                to={`/code-mappings/suggest-runs/${suggestRun.run_id}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="shrink-0 font-medium text-sky-700 underline hover:text-sky-900"
-              >View run log</Link>
               <span className="font-medium tabular-nums">
                 {suggestProgressCount(suggestRun)}/{suggestRun.total}
               </span>
@@ -1959,6 +1966,8 @@ export default function CodeMappingPage() {
                               value={option.concept_id === null ? `unavailable:${option.vocabulary_id}:${option.concept_code}` : String(option.concept_id)}
                               disabled={!option.selectable}>
                               {option.concept_name} — {option.vocabulary_id}:{option.concept_code} — OMOP {option.concept_id ?? "not loaded"}
+                              {option.measurement_type ? ` · ${option.measurement_type === "quantitative" ? "Quantitative" : "Qualitative"}` : ""}
+                              {option.suggested_unit ? ` · ${option.suggested_unit}` : ""}
                               {option.origins.length ? ` (${option.origins.join(", ")})` : ""}
                               {!option.selectable ? " — unavailable" : ""}
                             </option>
@@ -1987,14 +1996,8 @@ export default function CodeMappingPage() {
                       </label>
                       <HelpTip tip={TIP.search} />
                     </div>
-                    <div className="flex items-center gap-3">
-                      <div className="flex items-center gap-1">
-                        <label className="text-sm font-medium text-slate-700" htmlFor="code-mapping-search-vocabulary">
-                          Search vocabulary
-                        </label>
-                        <HelpTip tip={TIP.search_vocabulary} />
-                      </div>
-                      {(["umls", "lexical", "semantic"] as const).map((key) => (
+                    <div className="flex flex-wrap items-center gap-3">
+                      {(["umls", "lexical", "vectors"] as const).map((key) => (
                         <div key={key} className="inline-flex items-center gap-1 text-xs text-slate-600">
                           <label className="inline-flex items-center gap-1">
                             <input type="checkbox" checked={strategies[key]} onChange={(e) => setStrategies((prev) => ({ ...prev, [key]: e.target.checked }))} />
@@ -2003,6 +2006,21 @@ export default function CodeMappingPage() {
                           <HelpTip tip={key === "umls" ? "Bridge the code to an equivalent concept through UMLS. A unique match wins after the other enabled searches finish." : key === "lexical" ? "Retrieve candidate destinations by matching names and synonyms." : "Find candidate destinations by meaning, including concepts whose names and synonyms do not match the source wording."} />
                         </div>
                       ))}
+                      <div className="inline-flex items-center gap-1 text-xs text-slate-600">
+                        <label className="inline-flex items-center gap-1">
+                          Ranker
+                          <select
+                            value={rankingModel}
+                            onChange={(e) => setRankingModel(e.target.value as "anthropic" | "jev" | "both")}
+                            className="h-7 rounded-md border border-slate-300 px-1.5 text-xs"
+                          >
+                            <option value="anthropic">Anthropic</option>
+                            <option value="jev">Jev</option>
+                            <option value="both">Both</option>
+                          </select>
+                        </label>
+                        <HelpTip tip={TIP.ranker} />
+                      </div>
                       <button
                         type="button"
                         onClick={() => void suggestCurrentCode()}
@@ -2042,21 +2060,25 @@ export default function CodeMappingPage() {
                         a scope a curator can widen, or re-pointing a minted
                         HK-* mapping at a standard concept would be impossible,
                         which is the whole point of the queue. */}
-                    <select
-                      id="code-mapping-search-vocabulary"
-                      title={TIP.search_vocabulary}
-                      value={searchVocabulary}
-                      onChange={(e) => {
-                        setSearchVocabulary(e.target.value);
-                        void searchConcepts(conceptSearchQuery, e.target.value);
-                      }}
-                      className="h-10 w-40 shrink-0 rounded-md border border-slate-300 px-2 text-sm text-slate-950"
-                    >
-                      <option value="">All vocabularies</option>
-                      {reference.destination_vocabularies.map((v) => (
-                        <option key={v.vocabulary_id} value={v.vocabulary_id}>{v.vocabulary_id}</option>
-                      ))}
-                    </select>
+                    <div className="flex items-center gap-1">
+                      <select
+                        id="code-mapping-search-vocabulary"
+                        aria-label="Search vocabulary"
+                        title={TIP.search_vocabulary}
+                        value={searchVocabulary}
+                        onChange={(e) => {
+                          setSearchVocabulary(e.target.value);
+                          void searchConcepts(conceptSearchQuery, e.target.value);
+                        }}
+                        className="h-10 w-40 shrink-0 rounded-md border border-slate-300 px-2 text-sm text-slate-950"
+                      >
+                        <option value="">All vocabularies</option>
+                        {reference.destination_vocabularies.map((v) => (
+                          <option key={v.vocabulary_id} value={v.vocabulary_id}>{v.vocabulary_id}</option>
+                        ))}
+                      </select>
+                      <HelpTip tip={TIP.search_vocabulary} />
+                    </div>
                   </div>
                   <div className="mt-2 max-h-40 overflow-y-auto rounded-md border border-slate-200">
                     {searchingConcepts && <div className="px-3 py-2 text-sm text-slate-500">Searching...</div>}
@@ -2152,6 +2174,15 @@ export default function CodeMappingPage() {
                     value={form.omop_table}
                     testId="destination-table"
                   />
+                  {form.suggested_unit && (
+                    <ReadOnlyField
+                      id="suggested_unit"
+                      label="Unit"
+                      tip="Standard unit for this measurement concept, from LOINC."
+                      value={form.suggested_unit}
+                      testId="suggested-unit"
+                    />
+                  )}
                 </div>
                 <div className="mt-3 flex justify-end">
                   <button type="button" onClick={() => setMintOpen(true)} className="rounded border border-sky-300 px-3 py-2 text-sm text-sky-700">Mint new concept</button>

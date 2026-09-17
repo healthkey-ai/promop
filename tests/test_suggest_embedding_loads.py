@@ -100,7 +100,7 @@ def test_deleted_embedding_is_rebuilt_without_retrieval(queue, encoder):
 
 
 def test_limited_snapshot_tracks_attempt_order(queue, encoder):
-    from omop_core.mapping.suggestions import SUGGESTION_MODEL_VERSION
+    from omop_core.mapping.suggestions import DEFAULT_RANKING_MODEL, SUGGESTION_MODEL_VERSION
 
     first, mapping = queue
     second = ConceptFactory(concept_name='Unrelated candidate')
@@ -112,7 +112,8 @@ def test_limited_snapshot_tracks_attempt_order(queue, encoder):
     precompute(limit=1)
     assert ConceptEmbedding.objects.filter(concept=first).exists()
     assert not ConceptEmbedding.objects.filter(concept=second).exists()
-    mapping.last_suggest_attempt = SUGGESTION_MODEL_VERSION
+    # The version stamp now includes the ranking model suffix.
+    mapping.last_suggest_attempt = f'{SUGGESTION_MODEL_VERSION}-{DEFAULT_RANKING_MODEL}'
     mapping.save(update_fields=['last_suggest_attempt'])
     precompute(limit=1)
     assert ConceptEmbedding.objects.filter(concept=second).exists()

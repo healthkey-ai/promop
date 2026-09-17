@@ -12,7 +12,9 @@ from rest_framework.settings import api_settings
 
 from patient_portal.models import ServiceAccessToken, ServiceApplication
 from patient_portal.service_applications import ALLOWED_SCOPES, issue_token
-from .permissions import IsStaffPermission, ScopedTokenPermission, is_machine_request
+from .permissions import (
+    IsStaffPermission, ScopedTokenPermission, is_interactive_session, is_machine_request,
+)
 
 
 class ServiceAccessTokenSerializer(serializers.ModelSerializer):
@@ -83,6 +85,13 @@ class ServiceApplicationViewSet(viewsets.ModelViewSet):
         super().check_permissions(request)
         if is_machine_request(request):
             raise PermissionDenied('An authenticated staff user is required.')
+        # IsStaffPermission only proves the *user* is staff. A third-party SMART
+        # application holding that user's delegated `patient/*.write` grant would
+        # otherwise convert it into a self-issued, non-expiring service token that
+        # outlives the grant — the escalation this viewset exists to prevent.
+        if not is_interactive_session(request):
+            raise PermissionDenied(
+                'Service credential administration requires an interactive staff session.')
 
     def finalize_response(self, request, response, *args, **kwargs):
         response = super().finalize_response(request, response, *args, **kwargs)

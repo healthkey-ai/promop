@@ -124,7 +124,8 @@ def test_batch_suggest_skips_athena_supplied_candidate(athena, monkeypatch, dry_
     # queue for ever.
     assert result[0]['updated'] is (not dry_run)
     assert queued.last_suggest_attempt == (
-        '' if dry_run else suggestions.SUGGESTION_MODEL_VERSION
+        '' if dry_run
+        else f'{suggestions.SUGGESTION_MODEL_VERSION}-{suggestions.DEFAULT_RANKING_MODEL}'
     )
     # Never suggestion_model_version: nothing was proposed, so the accuracy
     # figures must not count this code as a suggestion the curator overrode.

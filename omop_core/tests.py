@@ -6282,7 +6282,7 @@ class MappingSuggestionsTest(_OmopBase):
              'lexical_score': 0.6},
         ]
         with override_settings(ANTHROPIC_API_KEY=''):
-            chosen, note = rank_candidates('anything', candidates)
+            chosen, note, _alts = rank_candidates('anything', candidates)
         self.assertEqual(chosen['concept_id'], 1)
         self.assertIn('Ranking model unavailable', note)
 
@@ -6306,7 +6306,7 @@ class MappingSuggestionsTest(_OmopBase):
         client.messages.create.return_value = MagicMock(content=[block])
         with override_settings(ANTHROPIC_API_KEY='test-key'), \
                 patch('anthropic.Anthropic', return_value=client):
-            chosen, note = rank_candidates('SERUM FREE LIGHT CHAIN KAPPA', candidates)
+            chosen, note, _alts = rank_candidates('SERUM FREE LIGHT CHAIN KAPPA', candidates)
         self.assertEqual(chosen['concept_id'], 3034860, 'the ratio was not demoted')
         self.assertIn('A ratio is not the analyte', note)
         self.assertEqual(client.messages.create.call_args.kwargs['model'], 'claude-opus-5')
@@ -6325,7 +6325,7 @@ class MappingSuggestionsTest(_OmopBase):
         client.messages.create.return_value = MagicMock(content=[block])
         with override_settings(ANTHROPIC_API_KEY='k'), \
                 patch('anthropic.Anthropic', return_value=client):
-            chosen, note = rank_candidates('x', candidates)
+            chosen, note, _alts = rank_candidates('x', candidates)
         self.assertEqual(chosen['concept_id'], 1)
         self.assertIn('Ranking model unavailable', note)
 
@@ -6337,7 +6337,7 @@ class MappingSuggestionsTest(_OmopBase):
                        'lexical_score': 0.7}]
         with override_settings(ANTHROPIC_API_KEY='k'), \
                 patch('anthropic.Anthropic', side_effect=RuntimeError('network down')):
-            chosen, note = rank_candidates('x', candidates)
+            chosen, note, _alts = rank_candidates('x', candidates)
         self.assertEqual(chosen['concept_id'], 1)
         self.assertIn('Ranking model unavailable', note)
 
@@ -6353,7 +6353,7 @@ class MappingSuggestionsTest(_OmopBase):
         client.messages.create.return_value = MagicMock(content=[block])
         with override_settings(ANTHROPIC_API_KEY='k'), \
                 patch('anthropic.Anthropic', return_value=client):
-            chosen, note = rank_candidates('x', candidates)
+            chosen, note, _alts = rank_candidates('x', candidates)
         self.assertIsNone(chosen, 'a wrong mapping is written into patient records')
         self.assertIn('none match', note)
 
@@ -6475,7 +6475,7 @@ class MappingSuggestionsTest(_OmopBase):
             client.messages.create.return_value = MagicMock(content=[block])
             with override_settings(ANTHROPIC_API_KEY='k'), \
                     patch('anthropic.Anthropic', return_value=client):
-                chosen, note = rank_candidates('x', candidates)
+                chosen, note, _alts = rank_candidates('x', candidates)
             self.assertEqual(chosen['concept_id'], 1, f'{payload!r} was not handled')
             self.assertIn('Ranking model unavailable', note)
 
