@@ -3,9 +3,14 @@
 Staff users (`is_staff=True`) can open **Org Admin → Service applications**.
 Each app has an editable name, owner/contact, description, enabled flag, and
 scope grant. Its service ID stays fixed to preserve historical audit identity.
-Org administrators, patients, and machine credentials cannot administer tokens.
-Session-authenticated mutations enforce CSRF even when other API routes retain
-legacy session behavior.
+Administration requires an interactive staff session: the browser session or a
+partner (Firebase) login. Every bearer credential acting on a user's behalf is
+refused — a service token, an OAuth2 client-credentials token, and equally an
+OAuth2 token a staff user delegated to a third-party SMART application. A
+scoped, expiring, revocable grant must not be convertible into a service
+credential that is none of those things. Org administrators and patients cannot
+administer tokens either. Session-authenticated mutations enforce CSRF even when
+other API routes retain legacy session behavior.
 
 Select an app to create a labeled token with an optional expiry. Copy the secret
 immediately: it is shown only in the creation response and is never retrievable

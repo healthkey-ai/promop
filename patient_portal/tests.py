@@ -26813,3 +26813,104 @@ class CreateSmartAppRedirectSchemeTest(TestCase):
                 )
         self.assertEqual(
             self._application().redirect_uris, 'https://client.example.invalid/callback')
+
+
+from patient_portal.models import ServiceApplication  # noqa: E402
+from patient_portal.api.providers.base import TokenClaims  # noqa: E402
+
+
+class ServiceTokenAdministrationBoundaryTest(TestCase):
+    """Who may mint a service credential — #1218 review, finding 3.
+
+    A service credential never expires, is not bound to any patient, and
+    survives revocation of whatever grant was used to create it. Minting one
+    must therefore require an interactive staff session, not a token a staff
+    user delegated to somebody else's application.
+    """
+
+    URL = '/api/v1/service-applications/'
+
+    @classmethod
+    def setUpTestData(cls):
+        from oauth2_provider.models import AccessToken, Application
+        import datetime
+
+        cls.staff = Identity.objects.create_user(email='ops@test.com', password='ops-pass')
+        cls.staff.is_staff = True
+        cls.staff.save(update_fields=['is_staff'])
+
+        # A third-party SMART app holding a delegated, expiring, revocable grant
+        # on the staff user's behalf — exactly what create_smart_app produces.
+        cls.smart_app = Application.objects.create(
+            name='Third-party SMART app',
+            client_id='smart-partner-client',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_AUTHORIZATION_CODE,
+            user=cls.staff,
+        )
+        cls.delegated_token = AccessToken.objects.create(
+            user=cls.staff,
+            application=cls.smart_app,
+            token='smart-delegated-token-444',
+            expires=timezone.now() + datetime.timedelta(hours=1),
+            scope='patient/*.read patient/*.write openid launch/patient',
+        )
+
+    def _bearer(self):
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.delegated_token.token}')
+        return client
+
+    def test_a_delegated_smart_token_cannot_create_a_service_application(self):
+        response = self._bearer().post(
+            self.URL,
+            {'name': 'Backdoor', 'service_id': 'backdoor', 'scopes': 'patient/*.write'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(ServiceApplication.objects.filter(service_id='backdoor').exists())
+
+    def test_a_delegated_smart_token_cannot_mint_a_token_for_an_existing_application(self):
+        application = ServiceApplication.objects.create(
+            name='HK Labs', service_id='hk-labs-admin-test', scopes='patient/*.read')
+        response = self._bearer().post(
+            f'{self.URL}{application.pk}/tokens/', {'label': 'minted'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(application.tokens.exists())
+
+    def test_a_delegated_smart_token_cannot_read_the_application_list(self):
+        self.assertEqual(self._bearer().get(self.URL).status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_a_staff_session_still_administers_applications(self):
+        client = APIClient()
+        # A real session login, not force_authenticate: the boundary is defined
+        # by which authenticator succeeded, and forcing bypasses all of them.
+        self.assertTrue(client.login(username='ops@test.com', password='ops-pass'))
+        response = client.post(
+            self.URL,
+            {'name': 'ETL', 'service_id': 'etl-service', 'scopes': 'patient/*.read'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        created = ServiceApplication.objects.get(service_id='etl-service')
+        minted = client.post(f'{self.URL}{created.pk}/tokens/', {'label': 'first'}, format='json')
+        self.assertEqual(minted.status_code, status.HTTP_201_CREATED)
+        self.assertIn('token', minted.data)
+
+    def test_http_basic_is_not_an_interactive_session(self):
+        """ENABLE_BASIC_AUTH is supported, and Basic also reports no token."""
+        from rest_framework.authentication import BasicAuthentication, SessionAuthentication
+        from patient_portal.api.permissions import is_interactive_session
+
+        class _Request:
+            def __init__(self, authenticator, auth=None):
+                self.successful_authenticator = authenticator
+                self.auth = auth
+
+        self.assertFalse(is_interactive_session(_Request(BasicAuthentication())))
+        self.assertTrue(is_interactive_session(_Request(SessionAuthentication())))
+        self.assertTrue(is_interactive_session(_Request(
+            BasicAuthentication(), auth=TokenClaims(
+                issuer='https://securetoken.google.com/proj', sub='uid-1', email='p@test.com',
+                name='', raw={},
+            ))))
