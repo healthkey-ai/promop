@@ -24192,6 +24192,17 @@ class MappingStatsTest(MappingHubTestBase):
 
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
+    def test_analyst_can_see_stats(self):
+        analyst = Identity.objects.create_user(
+            email='analyst-mapping@test.com', password='testpass',
+        )
+        GroupAccess.objects.create(
+            identity=analyst, org=self.admin_org, role='analyst',
+        )
+        self.client.force_authenticate(user=analyst)
+        resp = self.client.get('/api/v1/mapping-stats/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
     def test_regular_user_forbidden(self):
         self.client.force_authenticate(user=self.regular)
         resp = self.client.get('/api/v1/mapping-stats/')
