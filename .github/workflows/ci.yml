@@ -3,6 +3,8 @@ name: CI
 on:
   pull_request:
     branches: [dev, main]
+  push:
+    branches: [dev]
   workflow_call:
 
 permissions:
@@ -95,6 +97,21 @@ jobs:
 
       - name: Run migrations
         run: python manage.py migrate --noinput
+
+      - name: Check for migration conflicts
+        run: |
+          python - <<'PYCHECK'
+          import django, sys; django.setup()
+          from django.db.migrations.loader import MigrationLoader
+          loader = MigrationLoader(None, ignore_no_migrations=True)
+          conflicts = loader.detect_conflicts()
+          if conflicts:
+              for app, names in conflicts.items():
+                  print(f"CONFLICT in {app}: {', '.join(names)}")
+              print("Fix with: python manage.py makemigrations --merge")
+              sys.exit(1)
+          print("No migration conflicts detected.")
+          PYCHECK
 
       - name: Run production deploy checks
         env:
