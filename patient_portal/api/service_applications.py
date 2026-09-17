@@ -82,7 +82,7 @@ class ServiceApplicationViewSet(viewsets.ModelViewSet):
             raise PermissionDenied('An authenticated staff user is required.')
         # IsStaffPermission only proves the *user* is staff. A third-party SMART
         # application holding that user's delegated `patient/*.write` grant would
-        # otherwise convert it into a self-issued, non-expiring service token that
+        # otherwise convert it into a self-issued, cross-patient service token outliving that grant that
         # outlives the grant — the escalation this viewset exists to prevent.
         if not is_interactive_session(request):
             raise PermissionDenied(

@@ -30,8 +30,12 @@ MAX_TOKEN_LIFETIME = timedelta(days=365)
 
 
 def issue_token(application, label, *, actor=None, expires_at=None):
-    if expires_at is None:
-        expires_at = timezone.now() + MAX_TOKEN_LIFETIME
+    # Both halves of the bound live here, so the ceiling holds for a caller that
+    # does not go through the serializer. The serializer still rejects an
+    # out-of-bounds value rather than silently clamping it, because a person who
+    # typed a date deserves to be told it was refused.
+    ceiling = timezone.now() + MAX_TOKEN_LIFETIME
+    expires_at = ceiling if expires_at is None else min(expires_at, ceiling)
     secret = secrets.token_urlsafe(48)
     record = ServiceAccessToken.objects.create(
         application=application, label=label, digest=token_digest(secret),

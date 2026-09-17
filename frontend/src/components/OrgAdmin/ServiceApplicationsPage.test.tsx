@@ -42,6 +42,27 @@ describe('Service applications', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss token' }));
     expect(screen.queryByDisplayValue('newly-generated-test-secret')).not.toBeInTheDocument(); storage.mockRestore();
   });
+  it('shows the bound the server refused rather than a generic failure', async () => {
+    mocks.post.mockRejectedValueOnce({ response: { data: {
+      expires_at: ['Expiration cannot be more than 365 days away.'] } } });
+    renderPage(); await selectApp();
+    fireEvent.change(screen.getByLabelText(/Token label/), { target: { value: 'Too long' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create token' }));
+    expect(await screen.findByText('Expiration cannot be more than 365 days away.')).toBeInTheDocument();
+  });
+  it('falls back to a readable message when the server says nothing specific', async () => {
+    mocks.post.mockRejectedValueOnce(new Error('network'));
+    renderPage(); await selectApp();
+    fireEvent.change(screen.getByLabelText(/Token label/), { target: { value: 'Whatever' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create token' }));
+    expect(await screen.findByText(/Could not create the token/)).toBeInTheDocument();
+  });
+  it('warns about a token approaching its expiry, where the operator already looks', async () => {
+    const soon = new Date(Date.now() + 9 * 24 * 60 * 60 * 1000).toISOString();
+    mocks.get.mockResolvedValue({ data: [{ ...app, tokens: [{ ...app.tokens[0], expires_at: soon }] }] });
+    renderPage(); await selectApp();
+    expect(await screen.findByText(/expires in 9 days — rotate it/)).toBeInTheDocument();
+  });
   it('requires explicit confirmation to revoke a specific token', async () => {
     renderPage(); await selectApp(); fireEvent.click(screen.getByRole('button', { name: 'Revoke Initial token' }));
     expect(screen.getByRole('alertdialog')).toBeInTheDocument(); expect(mocks.post).not.toHaveBeenCalled();

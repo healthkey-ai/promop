@@ -27255,22 +27255,104 @@ class ServiceTokenLifetimeTest(TestCase):
         self.assertLess(abs((record.expires_at - expected).total_seconds()), 60)
 
     def test_importing_existing_credentials_is_left_unbounded_for_now(self):
-        """Imported tokens are already distributed; expiring them needs a
+        """Imported tokens are already distributed, so expiring them is a
 
-        rotation plan, so #1375's follow-up owns that rather than this change.
+        scheduled outage rather than a control. Tracked in #1423, which outlives
+        #1375; this test keeps the exception visible instead of assumed.
         """
         import json
+        import os
         import tempfile
         from io import StringIO
 
         from django.core.management import call_command
 
         application = ServiceApplication.objects.create(name='ETL', service_id='etl-import')
-        with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as handle:
-            json.dump({'etl-import': {'token': 'x' * 48, 'scopes': 'patient/*.read'}}, handle)
-            path = handle.name
-        call_command('import_service_tokens', '--file', path, stdout=StringIO())
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, 'tokens.json')
+            with open(path, 'w') as handle:
+                json.dump({'etl-import': {'token': 'x' * 48, 'scopes': 'patient/*.read'}}, handle)
+            call_command('import_service_tokens', '--file', path, stdout=StringIO())
         self.assertIsNone(application.tokens.get().expires_at)
+
+    def test_an_expiry_beyond_the_ceiling_is_clamped_rather_than_stored(self):
+        """The serializer refuses one; a caller that skips it must not slip past."""
+        from patient_portal.service_applications import MAX_TOKEN_LIFETIME, issue_token
+
+        application = ServiceApplication.objects.create(name='ETL', service_id='etl-clamped')
+        record, _ = issue_token(
+            application, 'forever', expires_at=timezone.now() + timedelta(days=4000))
+        expected = timezone.now() + MAX_TOKEN_LIFETIME
+        self.assertLess(abs((record.expires_at - expected).total_seconds()), 60)
+
+
+class LegacyGrantMigrationGuardsTest(TestCase):
+    """0019 rewrites a row 0017 seeded, so its guards decide what it may touch."""
+
+    @staticmethod
+    def _migration():
+        from importlib import import_module
+
+        return import_module('patient_portal.migrations.0019_seed_legacy_service_application')
+
+    def _run(self, func):
+        from django.apps import apps as global_apps
+        from django.db import connection
+
+        func(global_apps, connection.schema_editor())
+
+    def test_the_managed_row_is_labelled_even_when_it_already_has_a_token(self):
+        """The documented setup imports a token onto hk-labs, and that is exactly
+
+        the deployment that needs to be told which row is the kill switch.
+        """
+        migration = self._migration()
+        managed = ServiceApplication.objects.get(service_id='hk-labs')
+        ServiceApplication.objects.filter(pk=managed.pk).update(description='')
+        ServiceAccessToken.objects.create(
+            application=managed, label='imported', digest='a' * 64, suffix='abcd')
+
+        self._run(migration.seed_legacy_application)
+
+        managed.refresh_from_db()
+        self.assertEqual(managed.description, migration.MANAGED_NOTE)
+
+    def test_an_operators_own_description_is_never_overwritten(self):
+        migration = self._migration()
+        ServiceApplication.objects.filter(service_id='hk-labs').update(
+            description='OPS-4412: owned by the labs integration squad')
+
+        self._run(migration.seed_legacy_application)
+
+        self.assertEqual(
+            ServiceApplication.objects.get(service_id='hk-labs').description,
+            'OPS-4412: owned by the labs integration squad')
+
+    def test_a_rollback_clears_only_the_note_this_migration_wrote(self):
+        migration = self._migration()
+        ServiceApplication.objects.filter(service_id='hk-labs').update(
+            description=migration.MANAGED_NOTE)
+
+        self._run(migration.drop_legacy_application)
+
+        self.assertEqual(ServiceApplication.objects.get(service_id='hk-labs').description, '')
+
+    def test_a_rollback_keeps_a_note_an_operator_appended_to(self):
+        """Prefix-matching here would eat the operator's half of the sentence."""
+        migration = self._migration()
+        appended = migration.MANAGED_NOTE + ' Owned by OPS-4412.'
+        ServiceApplication.objects.filter(service_id='hk-labs').update(description=appended)
+
+        self._run(migration.drop_legacy_application)
+
+        self.assertEqual(ServiceApplication.objects.get(service_id='hk-labs').description, appended)
+
+    def test_the_forward_is_idempotent_on_a_row_it_already_labelled(self):
+        migration = self._migration()
+        self._run(migration.seed_legacy_application)
+        self._run(migration.seed_legacy_application)
+        self.assertEqual(
+            ServiceApplication.objects.filter(service_id='hk-labs-sync').count(), 1)
 
 
 class LegacyServiceGrantKillSwitchTest(TestCase):
@@ -27333,11 +27415,12 @@ class LegacyServiceGrantKillSwitchTest(TestCase):
         with self.assertRaises(AuthenticationFailed):
             self._authenticate()
 
+
 class ServiceTokenAdministrationBoundaryTest(TestCase):
     """Who may mint a service credential — #1218 review, finding 3.
 
-    A service credential never expires, is not bound to any patient, and
-    survives revocation of whatever grant was used to create it. Minting one
+    A service credential is not bound to any patient, outlives the grant used to
+    create it, and — before #1380 bounded it — never expired. Minting one
     must therefore require an interactive staff session, not a token a staff
     user delegated to somebody else's application.
     """

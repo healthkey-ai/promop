@@ -26,8 +26,28 @@ const endpoint = '/v1/service-applications/';
 // mint a token that never expires.
 const MAX_TOKEN_DAYS = 365;
 
+// Every managed token now has an expiry, so an integration dies on a date
+// somebody has to act before. Say so where the operator already looks, rather
+// than leaving it to be discovered as an outage.
+const EXPIRY_WARNING_DAYS = 30;
+
+function daysUntil(when?: string | null) {
+  if (!when) return null;
+  return Math.ceil((new Date(when).getTime() - Date.now()) / (24 * 60 * 60 * 1000));
+}
+
+function expiringSoon(when?: string | null) {
+  const days = daysUntil(when);
+  return days !== null && days > 0 && days <= EXPIRY_WARNING_DAYS;
+}
+
 function maxExpiry() {
+  // datetime-local reads `max` as local wall-clock, and createToken parses the
+  // chosen value the same way. An ISO (UTC) string here would offer a maximum
+  // that is up to a day past the server's bound west of UTC, so selecting the
+  // offered maximum would be refused.
   const limit = new Date(Date.now() + MAX_TOKEN_DAYS * 24 * 60 * 60 * 1000);
+  limit.setMinutes(limit.getMinutes() - limit.getTimezoneOffset());
   return limit.toISOString().slice(0, 16);
 }
 const inputClass = 'w-full rounded border border-gray-300 p-2 text-sm';
@@ -178,7 +198,7 @@ export default function ServiceApplicationsPage() {
             {selected.tokens.map(token => <li key={token.id} className="flex items-start justify-between gap-3 py-3">
               <div><p className="font-medium">{token.label} <span className="font-mono text-sm">…{token.suffix}</span></p>
                 <p className="text-xs text-gray-600">Created {formatDate(token.created_at)} · Last used {formatDate(token.last_used_at)}</p>
-                <p className="text-xs text-gray-600">Expires: {token.expires_at ? formatDate(token.expires_at) : 'No expiry'} · {token.revoked_at ? 'Revoked' : token.expires_at && new Date(token.expires_at) <= new Date() ? 'Expired' : selected.is_active ? 'Active' : 'Disabled'}</p>
+                <p className="text-xs text-gray-600">Expires: {token.expires_at ? formatDate(token.expires_at) : 'No expiry'}{expiringSoon(token.expires_at) && <span className="font-medium text-amber-800"> · expires in {daysUntil(token.expires_at)} day{daysUntil(token.expires_at) === 1 ? '' : 's'} — rotate it</span>} · {token.revoked_at ? 'Revoked' : token.expires_at && new Date(token.expires_at) <= new Date() ? 'Expired' : selected.is_active ? 'Active' : 'Disabled'}</p>
               </div>
               {!token.revoked_at && <button className={buttonClass} disabled={busy} onClick={() => setRevokeId(token.id)}>Revoke {token.label}</button>}
             </li>)}

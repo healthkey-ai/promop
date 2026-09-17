@@ -6,6 +6,13 @@ from django.db import migrations
 # PHI-writing token working: check_environment_fallback() looks the application
 # up by the credential's own service_id and found nothing.
 LEGACY_SERVICE_ID = 'hk-labs-sync'
+MANAGED_SERVICE_ID = 'hk-labs'
+# One literal, referenced by the forward and the reverse: two copies would drift
+# and the reverse would stop recognising what the forward wrote.
+MANAGED_NOTE = (
+    'Managed tokens for HK-Labs. The legacy SERVICE_AUTH_TOKEN credential '
+    'is NOT governed by this record — disable "hk-labs-sync" to stop it.'
+)
 
 
 def seed_legacy_application(apps, schema_editor):
@@ -14,13 +21,14 @@ def seed_legacy_application(apps, schema_editor):
     # 0017 seeded 'hk-labs' on the assumption that it was the legacy credential's
     # principal. It is not, and leaving both rows unexplained puts two plausible
     # HK-Labs entries in Org Admin, one of which silently does nothing. Say so on
-    # the row itself — but only while nobody has edited or used it.
-    rows.filter(service_id='hk-labs', description='', tokens__isnull=True).update(
-        description=(
-            'Managed tokens for HK-Labs. The legacy SERVICE_AUTH_TOKEN credential '
-            'is NOT governed by this record — disable "hk-labs-sync" to stop it.'
-        ),
-    )
+    # the row itself.
+    #
+    # Guarded on the description alone, not on tokens: the documented setup runs
+    # import_service_tokens, whose distributed file includes 'hk-labs', so any
+    # deployment that followed the runbook has a token on this row — and that is
+    # exactly the deployment that needs the label. An operator's own description
+    # is still never overwritten.
+    rows.filter(service_id=MANAGED_SERVICE_ID, description='').update(description=MANAGED_NOTE)
     rows.get_or_create(
         service_id=LEGACY_SERVICE_ID,
         defaults={
@@ -50,9 +58,10 @@ def drop_legacy_application(apps, schema_editor):
     Application = apps.get_model('patient_portal', 'ServiceApplication')
     rows = Application.objects.using(schema_editor.connection.alias)
     rows.filter(service_id=LEGACY_SERVICE_ID, is_active=True, tokens__isnull=True).delete()
-    rows.filter(service_id='hk-labs', description__startswith='Managed tokens for HK-Labs.').update(
-        description='',
-    )
+    # Exact match, not a prefix: an operator who kept the note and appended their
+    # own text has written something this migration did not, and a rollback must
+    # not eat it.
+    rows.filter(service_id=MANAGED_SERVICE_ID, description=MANAGED_NOTE).update(description='')
 
 
 class Migration(migrations.Migration):
