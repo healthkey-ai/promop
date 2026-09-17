@@ -1142,9 +1142,6 @@ describe("CodeMappingPage", () => {
           "Done — wrote 3 new destination(s) across 5 code(s).",
         ));
       expect(screen.getByTestId("suggest-progress")).toHaveTextContent("5/5");
-      const logLink = within(screen.getByTestId("suggest-progress")).getByRole("link", { name: "View run log" });
-      expect(logLink).toHaveAttribute("href", expect.stringContaining("/code-mappings/suggest-runs/"));
-      expect(logLink).toHaveAttribute("target", "_blank");
     });
 
     it("says so when nothing on the tab is awaiting a suggestion", async () => {
@@ -1503,21 +1500,6 @@ describe("Overall review counters and refresh", () => {
 });
 
 
-describe("saved batch log discovery", () => {
-  it("recovers the completed run link after leaving and reopening the mapping page", async () => {
-    mockGet.mockImplementation((url: string) => Promise.resolve({ data:
-      url.endsWith("suggest-runs/latest/") ? { run_id: "saved-run" }
-        : url.includes("reference") ? reference : url.includes("accuracy") ? {} : [proposedRow],
-    }));
-    const page = render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
-    expect(await screen.findByRole("link", { name: "View latest batch run log" }))
-      .toHaveAttribute("href", "/code-mappings/suggest-runs/saved-run");
-    page.unmount();
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
-    expect(await screen.findByRole("link", { name: "View latest batch run log" }))
-      .toHaveAttribute("href", "/code-mappings/suggest-runs/saved-run");
-  });
-});
 
 
 describe("expanded ICD10 review feedback", () => {

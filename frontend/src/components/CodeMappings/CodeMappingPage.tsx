@@ -2,7 +2,7 @@ import PageTitle from '@/components/Branding/PageTitle';
 import IndividualSuggestCandidates from "./IndividualSuggestCandidates";
 import SuggestCandidates, { type CandidateActivity } from "./SuggestCandidates";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, ChevronDown, ChevronRight, Pencil, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
 import api from "@/api/axios";
 import MintConceptDialog from "./MintConceptDialog";
@@ -532,15 +532,6 @@ export default function CodeMappingPage() {
   // is in flight; `flash` marks the moment it finished so the strip can announce
   // itself before settling into the banner.
   const [suggestRun, setSuggestRun] = useState<SuggestRunProgress | null>(null);
-  const [latestRunId, setLatestRunId] = useState<string | null>(null);
-  useEffect(() => {
-    let active = true;
-    api.get<{ run_id: string | null }>("/v1/code-mappings/suggest-runs/latest/")
-      .then(({ data }) => { if (active) setLatestRunId(data.run_id || null); })
-      .catch(() => { /* Older deployments may not yet expose saved-run discovery. */ });
-    return () => { active = false; };
-  }, []);
-
   const [suggestFlash, setSuggestFlash] = useState(false);
   // Which run the page is still interested in. A poll compares against this so
   // a superseded run — or an unmounted page — stops rather than setting state
@@ -1172,7 +1163,6 @@ export default function CodeMappingPage() {
       );
       suggestRunRef.current = started.run_id;
       setSuggestRun(started);
-      setLatestRunId(started.run_id);
       const finished = await pollSuggestRun(started);
       if (suggestRunRef.current !== started.run_id) return;
       setSuggestRun(finished);
@@ -1643,12 +1633,6 @@ export default function CodeMappingPage() {
           finished={suggestRun.state === "success" || suggestRun.state === "failure"}
           onSaved={() => { void refreshCurrent.current(); }} />}
 
-        {!suggestRun && latestRunId && (
-          <div className="mb-4 text-sm">
-            <Link to={`/code-mappings/suggest-runs/${latestRunId}`} target="_blank" rel="noopener noreferrer"
-              className="font-medium text-sky-700 underline hover:text-sky-900">View latest batch run log</Link>
-          </div>
-        )}
 
         {/* Directly under the Suggest button, because that is where the eye
             already is when the wait starts. The run is queued and a code costs
@@ -1670,12 +1654,6 @@ export default function CodeMappingPage() {
           >
             <div className="flex items-center justify-between gap-3">
               <span>{describeSuggestRun(suggestRun)}</span>
-              <Link
-                to={`/code-mappings/suggest-runs/${suggestRun.run_id}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="shrink-0 font-medium text-sky-700 underline hover:text-sky-900"
-              >View run log</Link>
               <span className="font-medium tabular-nums">
                 {suggestProgressCount(suggestRun)}/{suggestRun.total}
               </span>

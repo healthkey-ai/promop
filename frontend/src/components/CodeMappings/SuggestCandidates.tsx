@@ -22,6 +22,8 @@ export type CandidateActivity = {
   mapping_id?: number;
   source_code?: string;
   source_vocabulary_id?: string;
+  source_description?: string;
+  source_code_description?: string;
   strategy?: string;
   candidates?: SuggestCandidate[];
   suggested?: SuggestCandidate | null;
@@ -38,10 +40,16 @@ type Props = {
 };
 const stages: Record<string, string> = { umls: "UMLS", lexical: "Lexical", vectors: "Vectors", semantic: "Vectors" };
 
+const RANKER_STYLE: Record<string, string> = {
+  jev: "bg-indigo-100 text-indigo-700",
+  anthropic: "bg-sky-100 text-sky-700",
+};
+
 export default function SuggestCandidates({ activity, finished, onSaved }: Props) {
   const [saving, setSaving] = useState<number | null>(null);
   const [selected, setSelected] = useState<Record<number, number>>({});
   const [error, setError] = useState("");
+  const [collapsed, setCollapsed] = useState(false);
   const groups = new Map<number, CandidateActivity[]>();
   for (const event of activity) {
     if (event.mapping_id == null) continue;
@@ -67,65 +75,82 @@ export default function SuggestCandidates({ activity, finished, onSaved }: Props
   };
 
   // Build a confidence lookup from the ranked event's alternatives.
-  // When both rankers ran, keep the highest confidence per concept.
-  const confidenceLookup = (events: CandidateActivity[]): Map<number, { confidence: number; ranker?: string }> => {
+  // When both rankers ran, collect ALL scores per concept so both badges show.
+  const confidenceLookup = (events: CandidateActivity[]): Map<number, Alternative[]> => {
     const ranked = events.filter(e => e.stage === "ranked").at(-1);
     const alts = ranked?.alternatives;
     if (!alts) return new Map();
-    const m = new Map<number, { confidence: number; ranker?: string }>();
+    const m = new Map<number, Alternative[]>();
     for (const a of alts) {
-      const existing = m.get(a.concept_id);
-      if (!existing || a.confidence > existing.confidence) {
-        m.set(a.concept_id, { confidence: a.confidence, ranker: a.ranker });
-      }
+      const existing = m.get(a.concept_id) ?? [];
+      existing.push(a);
+      m.set(a.concept_id, existing);
     }
     return m;
   };
 
+  const sourceDescription = (events: CandidateActivity[]): string | undefined => {
+    for (const e of events) {
+      const desc = e.source_description || e.source_code_description;
+      if (desc) return desc;
+    }
+    return undefined;
+  };
+
   return <section aria-label="Suggestion candidates" className="mb-4 space-y-3 rounded-md border border-slate-200 bg-white p-4">
-    <h2 className="font-semibold">Suggestion candidates</h2>
-    <p className="text-sm text-slate-600">Candidates appear as each search finishes. After the run finishes, you can choose an alternative and review it in the mapping table.</p>
-    {error && <p role="alert" className="text-sm text-rose-700">{error}</p>}
-    {!groups.size && <p role="status" className="text-sm">{finished ? "No candidates recorded for this run." : "Waiting for candidates…"}</p>}
-    {[...groups].map(([mappingId, events]) => {
-      const source = events[0];
-      const result = events.filter(event => event.stage === "result").at(-1);
-      const ranked = events.filter(event => event.stage === "ranked").at(-1);
-      const winner = (result ?? ranked)?.suggested;
-      const activeId = selected[mappingId] ?? winner?.concept_id;
-      const searches = events.filter(event => event.stage === "candidates");
-      // Ranking may add candidates through query expansion or enrichment.
-      const seen = new Set(searches.flatMap(event => (event.candidates ?? []).map(candidate => candidate.concept_id)));
-      const additional = (ranked?.candidates ?? []).filter(candidate => !seen.has(candidate.concept_id));
-      const lists = [...searches, ...(additional.length ? [{ stage: "candidates", strategy: "additional", candidates: additional }] : [])];
-      const confidences = confidenceLookup(events);
-      return <article key={mappingId} className="rounded border border-slate-200 p-3">
-        <h3 className="font-medium">{source.source_vocabulary_id || "Uncoded"}:{source.source_code}</h3>
-        {lists.map((event, index) => <div key={index} className="mt-2">
-          <h4 className="text-sm font-medium">{stages[event.strategy as keyof typeof stages] ?? "Additional ranking candidates"}</h4>
-          {!event.candidates?.length && <p className="text-sm text-slate-500">No matches</p>}
-          <ul className="space-y-1 text-sm">
-            {event.candidates?.map(candidate => {
-              const conf = confidences.get(candidate.concept_id);
-              return <li key={candidate.concept_id} className="flex flex-wrap items-center gap-2">
-                <span>{candidate.vocabulary_id}:{candidate.concept_code} — {candidate.concept_name} (OMOP {candidate.concept_id})</span>
-                {(candidate.vector_distance != null || candidate.semantic_score != null) &&
-                  <span className="text-slate-600">Distance {(candidate.vector_distance ?? (1 - candidate.semantic_score!)).toFixed(4)}</span>}
-                {conf != null && <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${conf.ranker === "jev" ? "bg-indigo-100 text-indigo-700" : conf.ranker === "anthropic" ? "bg-sky-100 text-sky-700" : "bg-slate-100 text-slate-700"}`}
-                  title={conf.ranker ? `${conf.ranker} confidence` : "confidence"}>{Math.round(conf.confidence * 100)}%{conf.ranker ? ` ${conf.ranker[0].toUpperCase()}` : ""}</span>}
-                {candidate.concept_id === winner?.concept_id && <span className="font-semibold">Winner</span>}
-                {selected[mappingId] === candidate.concept_id && <span role="status">Selected alternative · awaiting review</span>}
-                {finished && result?.updated && !result.dry_run && candidate.concept_id !== activeId && <button
-                  type="button" disabled={saving !== null} className="rounded border px-2 py-1 disabled:opacity-50"
-                  aria-label={`Use ${candidate.concept_name} for ${source.source_code}`}
-                  onClick={() => void choose(mappingId, candidate)}>{saving === mappingId ? "Saving…" : "Use candidate"}</button>}
-              </li>;
-            })}
-          </ul>
-        </div>)}
-        {ranked && <p className="mt-2 text-sm font-medium">{winner ? `Winner: ${winner.concept_name}` : "No destination proposed"}</p>}
-        {(result ?? ranked)?.note && <p className="mt-1 text-sm text-slate-600">{(result ?? ranked)?.note}</p>}
-      </article>;
-    })}
+    <button type="button" className="flex w-full items-center justify-between text-left"
+      onClick={() => setCollapsed(c => !c)} aria-expanded={!collapsed}>
+      <h2 className="font-semibold">Suggestion candidates</h2>
+      <span className="text-slate-400">{collapsed ? "+" : "\u2212"}</span>
+    </button>
+    {!collapsed && <>
+      <p className="text-sm text-slate-600">Candidates appear as each search finishes. After the run finishes, you can choose an alternative and review it in the mapping table.</p>
+      {error && <p role="alert" className="text-sm text-rose-700">{error}</p>}
+      {!groups.size && <p role="status" className="text-sm">{finished ? "No candidates recorded for this run." : "Waiting for candidates\u2026"}</p>}
+      {[...groups].map(([mappingId, events]) => {
+        const source = events[0];
+        const description = sourceDescription(events);
+        const result = events.filter(event => event.stage === "result").at(-1);
+        const ranked = events.filter(event => event.stage === "ranked").at(-1);
+        const winner = (result ?? ranked)?.suggested;
+        const activeId = selected[mappingId] ?? winner?.concept_id;
+        const searches = events.filter(event => event.stage === "candidates");
+        // Ranking may add candidates through query expansion or enrichment.
+        const seen = new Set(searches.flatMap(event => (event.candidates ?? []).map(candidate => candidate.concept_id)));
+        const additional = (ranked?.candidates ?? []).filter(candidate => !seen.has(candidate.concept_id));
+        const lists = [...searches, ...(additional.length ? [{ stage: "candidates", strategy: "additional", candidates: additional }] : [])];
+        const confidences = confidenceLookup(events);
+        return <article key={mappingId} className="rounded border border-slate-200 p-3">
+          <h3 className="font-medium">
+            {source.source_vocabulary_id || "Uncoded"}:{source.source_code}
+            {description && <span className="ml-2 font-normal text-slate-600">{description}</span>}
+          </h3>
+          {lists.map((event, index) => <div key={index} className="mt-2">
+            <h4 className="text-sm font-medium">{stages[event.strategy as keyof typeof stages] ?? "Additional ranking candidates"}</h4>
+            {!event.candidates?.length && <p className="text-sm text-slate-500">No matches</p>}
+            <ul className="space-y-1 text-sm">
+              {event.candidates?.map(candidate => {
+                const confs = confidences.get(candidate.concept_id) ?? [];
+                return <li key={candidate.concept_id} className="flex flex-wrap items-center gap-2">
+                  <span>{candidate.vocabulary_id}:{candidate.concept_code} — {candidate.concept_name} (OMOP {candidate.concept_id})</span>
+                  {(candidate.vector_distance != null || candidate.semantic_score != null) &&
+                    <span className="text-slate-600">Distance {(candidate.vector_distance ?? (1 - candidate.semantic_score!)).toFixed(4)}</span>}
+                  {confs.map((conf, ci) => <span key={ci} className={`rounded px-1.5 py-0.5 text-xs font-medium ${RANKER_STYLE[conf.ranker ?? ""] ?? "bg-slate-100 text-slate-700"}`}
+                    title={conf.ranker ? `${conf.ranker} confidence` : "confidence"}>{Math.round(conf.confidence * 100)}%{conf.ranker ? ` ${conf.ranker[0].toUpperCase()}` : ""}</span>)}
+                  {candidate.concept_id === winner?.concept_id && <span className="font-semibold">Winner</span>}
+                  {selected[mappingId] === candidate.concept_id && <span role="status">Selected alternative · awaiting review</span>}
+                  {finished && result?.updated && !result.dry_run && candidate.concept_id !== activeId && <button
+                    type="button" disabled={saving !== null} className="rounded border px-2 py-1 disabled:opacity-50"
+                    aria-label={`Use ${candidate.concept_name} for ${source.source_code}`}
+                    onClick={() => void choose(mappingId, candidate)}>{saving === mappingId ? "Saving\u2026" : "Use candidate"}</button>}
+                </li>;
+              })}
+            </ul>
+          </div>)}
+          {ranked && <p className="mt-2 text-sm font-medium">{winner ? `Winner: ${winner.concept_name}` : "No destination proposed"}</p>}
+          {(result ?? ranked)?.note && <p className="mt-1 text-sm text-slate-600">{(result ?? ranked)?.note}</p>}
+        </article>;
+      })}
+    </>}
   </section>;
 }
