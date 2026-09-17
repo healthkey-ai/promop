@@ -55,5 +55,10 @@ export default function IndividualSuggestCandidates({ activity, running, selecte
     </div>
     {effectiveResult && <p className="mt-2 text-sm font-medium">{effectiveResult.suggested ? `Winner: ${effectiveResult.suggested.concept_name}` : "No winner selected"}</p>}
     {effectiveResult?.note && <p className="mt-1 text-xs text-slate-600">{effectiveResult.note}</p>}
+    {(ranked ?? result)?.ranking_timings && <p className="mt-1 text-xs text-slate-500">
+      Ranking: {Object.entries((ranked ?? result)!.ranking_timings!).map(([k, v]) =>
+        `${k.replace(/_ms$/, "")} ${(v / 1000).toFixed(1)}s`
+      ).join(" · ")}
+    </p>}
   </section>;
 }

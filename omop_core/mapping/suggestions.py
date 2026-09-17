@@ -986,20 +986,33 @@ def rank_candidates_jev(source_value, candidates, source_description='', *, sour
     source_info = source_context or {
         'code': source_value, 'original_description': source_description,
     }
-    choices = []
+    criteria = {}
     for c in candidates:
-        label = f"{c.get('vocabulary_id', '')}:{c.get('concept_code', '')} — {c.get('concept_name', '')} (OMOP {c['concept_id']})"
-        choices.append({'id': str(c['concept_id']), 'label': label})
+        cid = str(c['concept_id'])
+        criteria[cid] = (
+            f"{c.get('vocabulary_id', '')}:{c.get('concept_code', '')} — "
+            f"{c.get('concept_name', '')} (OMOP {c['concept_id']})"
+        )
+    criteria['none'] = 'None of the candidates are clinically compatible'
 
     payload = {
-        'primitive': 'Choice',
-        'context': (
-            f"Select the best clinically compatible OMOP destination concept for this source code. "
-            f"Source: {source_info.get('code', source_value)} — "
+        'state': (
+            f"Source code: {source_info.get('code', source_value)} — "
             f"{source_info.get('original_description', source_description)}. "
-            f"If no candidate is clinically compatible, choose 'none'."
+            f"Map this to the best OMOP CDM standard vocabulary concept."
         ),
-        'choices': [*choices, {'id': 'none', 'label': 'None of the candidates are clinically compatible'}],
+        'model': 'jev-latest',
+        'questions': {
+            'best_match': {
+                'type': 'choice',
+                'instructions': (
+                    'Which OMOP destination concept is the best clinical match '
+                    'for this source code? Select the most specific and '
+                    'clinically equivalent concept.'
+                ),
+                'criteria': criteria,
+            },
+        },
     }
 
     try:
@@ -1022,12 +1035,9 @@ def rank_candidates_jev(source_value, candidates, source_description='', *, sour
         return unavailable('request_failed', 'The Jev ranking request failed.')
 
     # Parse the Jev response — extract the chosen id and alternatives with confidence.
-    chosen_id_str = data.get('choice')
-    if chosen_id_str is None:
-        chosen_id_str = data.get('selected')
-    if chosen_id_str is None:
-        chosen_id_str = data.get('id')
-    probabilities = data.get('probabilities') or data.get('scores') or {}
+    answer = (data.get('answers') or {}).get('best_match') or {}
+    chosen_id_str = answer.get('choice')
+    probabilities = answer.get('probabilities') or {}
 
     alternatives = []
     for c in candidates:
@@ -1091,37 +1101,52 @@ def rank_candidates_dispatch(source_value, candidates, source_description='', *,
                              ranking_model=DEFAULT_RANKING_MODEL):
     """Route to the appropriate ranker based on *ranking_model*.
 
-    Returns ``(chosen, note, alternatives)`` where *alternatives* is a list of
-    ``{concept_id, concept_name, confidence, ranker}`` dicts.
+    Returns ``(chosen, note, alternatives, ranking_timings)`` where
+    *alternatives* is a list of ``{concept_id, concept_name, confidence,
+    ranker}`` dicts and *ranking_timings* is a dict of per-ranker elapsed
+    milliseconds (e.g. ``{'anthropic_ms': 3200}`` or ``{'jev_ms': 450}``).
 
     When *ranking_model* is ``'both'``, runs Anthropic and Jev concurrently and
     picks the winner with the higher confidence score.
     """
+    import time as _time
+
     kwargs = dict(
         source_context=source_context,
         require_model_selection=require_model_selection,
     )
-    if ranking_model == 'jev':
-        return rank_candidates_jev(
-            source_value, candidates, source_description, **kwargs,
-        )
     if ranking_model == 'both':
         return _rank_both(source_value, candidates, source_description, **kwargs)
+
+    t0 = _time.monotonic()
+    if ranking_model == 'jev':
+        result = rank_candidates_jev(
+            source_value, candidates, source_description, **kwargs,
+        )
+        ms = round((_time.monotonic() - t0) * 1000)
+        return (*result, {'jev_ms': ms})
     # Default: Anthropic.
-    return rank_candidates(
+    result = rank_candidates(
         source_value, candidates, source_description, **kwargs,
     )
+    ms = round((_time.monotonic() - t0) * 1000)
+    return (*result, {'anthropic_ms': ms})
 
 
 def _rank_both(source_value, candidates, source_description, **kwargs):
     """Run Anthropic and Jev concurrently, pick the higher-confidence winner."""
+    import time as _time
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     def run_anthropic():
-        return rank_candidates(source_value, candidates, source_description, **kwargs)
+        t0 = _time.monotonic()
+        chosen, note, alts = rank_candidates(source_value, candidates, source_description, **kwargs)
+        return chosen, note, alts, round((_time.monotonic() - t0) * 1000)
 
     def run_jev():
-        return rank_candidates_jev(source_value, candidates, source_description, **kwargs)
+        t0 = _time.monotonic()
+        chosen, note, alts = rank_candidates_jev(source_value, candidates, source_description, **kwargs)
+        return chosen, note, alts, round((_time.monotonic() - t0) * 1000)
 
     results = {}
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -1135,10 +1160,10 @@ def _rank_both(source_value, candidates, source_description, **kwargs):
                 results[ranker] = future.result()
             except Exception:  # noqa: BLE001 - degrade, never fail
                 logger.warning('Dual-ranker %s failed.', ranker, exc_info=True)
-                results[ranker] = (None, f'{ranker} ranking failed.', None)
+                results[ranker] = (None, f'{ranker} ranking failed.', None, 0)
 
-    a_chosen, a_note, a_alts = results.get('anthropic', (None, '', None))
-    j_chosen, j_note, j_alts = results.get('jev', (None, '', None))
+    a_chosen, a_note, a_alts, a_ms = results.get('anthropic', (None, '', None, 0))
+    j_chosen, j_note, j_alts, j_ms = results.get('jev', (None, '', None, 0))
 
     # Merge alternatives from both rankers.
     combined_alts = list(a_alts or []) + list(j_alts or [])
@@ -1166,7 +1191,8 @@ def _rank_both(source_value, candidates, source_description, **kwargs):
     else:
         winner, note = None, f'Both rankers declined. Anthropic: {a_note} | Jev: {j_note}'
 
-    return winner, note, combined_alts
+    ranking_timings = {'anthropic_ms': a_ms, 'jev_ms': j_ms}
+    return winner, note, combined_alts, ranking_timings
 
 
 def retrieval_pool(*, source_code, source_vocabulary_id, source_text, domain_id,
@@ -1306,10 +1332,12 @@ def rank_jobs(jobs, on_ranked=None, ranking_model=DEFAULT_RANKING_MODEL):
             ranking_model=ranking_model,
         )
 
-    def record(job, chosen, note, alternatives=None):
+    def record(job, chosen, note, alternatives=None, ranking_timings=None):
         job['chosen'], job['note'] = chosen, note
         if alternatives is not None:
             job['alternatives'] = alternatives
+        if ranking_timings is not None:
+            job['ranking_timings'] = ranking_timings
         if chosen is not None:
             job['strategy_used'] = chosen.get('retrieval') or STRATEGY_LEXICAL
         if on_ranked is not None:
@@ -1326,15 +1354,15 @@ def rank_jobs(jobs, on_ranked=None, ranking_model=DEFAULT_RANKING_MODEL):
         for future in as_completed(futures):
             job = futures[future]
             try:
-                chosen, note, alternatives = future.result()
+                chosen, note, alternatives, ranking_timings = future.result()
             except Exception as exc:              # noqa: BLE001 - degrade, never fail
                 # rank_candidates already swallows its own failures; this is the
                 # backstop for anything that escapes it, so one bad code cannot
                 # take down a whole Suggest run.
                 logger.warning('Ranking raised for %r: %s', job['source_code'], exc)
                 job['ranking_failed'] = True
-                chosen, note, alternatives = None, 'Ranking failed; no destination proposed.', None
-            record(job, chosen, note, alternatives)
+                chosen, note, alternatives, ranking_timings = None, 'Ranking failed; no destination proposed.', None, None
+            record(job, chosen, note, alternatives, ranking_timings)
     return jobs
 
 
@@ -1598,7 +1626,8 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
     def ranked(job):
         emit('ranked', **source(job['mapping']), suggested=job['chosen'],
              note=job['note'], strategy_used=job['strategy_used'], candidates=job['candidates'],
-             alternatives=job.get('alternatives'))
+             alternatives=job.get('alternatives'),
+             ranking_timings=job.get('ranking_timings'))
 
     rank_and_expand_jobs(jobs, on_ranked=ranked, ranking_model=ranking_model)
     report('writing', 0)
@@ -1781,6 +1810,12 @@ def suggest_one_mapping(source_code, source_vocabulary_id, omop_table, *,
     if chosen and athena_supplies_mapping(source_vocabulary_id, source_code,
                                           chosen['concept_id']):
         chosen, note = None, ATHENA_DUPLICATE_MESSAGE
+
+    emit("ranked", source_code=source_code, source_vocabulary_id=source_vocabulary_id,
+         suggested=chosen, note=note, strategy_used=job['strategy_used'],
+         candidates=job['candidates'], alternatives=job.get('alternatives'),
+         ranking_timings=job.get('ranking_timings'))
+
     return {
         'suggested': chosen,
         'note': note or 'No candidate concept found by any enabled strategy.',
@@ -1791,4 +1826,5 @@ def suggest_one_mapping(source_code, source_vocabulary_id, omop_table, *,
         'vector_reranked': job['vector_reranked'],
         'query_expansion': job.get('query_expansion'),
         'alternatives': job.get('alternatives'),
+        'ranking_timings': job.get('ranking_timings'),
     }
