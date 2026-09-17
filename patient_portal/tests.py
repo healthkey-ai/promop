@@ -15089,6 +15089,65 @@ class OrgPatientSignupTest(TestCase):
             GroupAccess.objects.filter(identity=identity, org=self.org, role='patient').exists()
         )
 
+    def test_signup_private_org_gets_patient_role(self):
+        """Private org signup (via domain trust) assigns patient role."""
+        from omop_core.models import OrgTrust
+        private_org = Organization.objects.create(
+            name='Private Clinic', slug='private-clinic',
+            allows_patient_signup=False,
+        )
+        # Grant domain trust so the endpoint allows signup without
+        # allows_patient_signup=True.
+        OrgTrust.objects.create(
+            granting_org=private_org,
+            trusted_domain='private-clinic.com',
+        )
+        client = APIClient()
+        resp = client.post('/api/v1/orgs/private-clinic/patient-signup/', {
+            'email': 'user@private-clinic.com',
+            'password': 'Str0ng!Pass99',
+            'given_name': 'Private',
+            'family_name': 'User',
+        })
+        self.assertEqual(resp.status_code, 201)
+        identity = Identity.objects.get(email='user@private-clinic.com')
+        self.assertTrue(
+            GroupAccess.objects.filter(
+                identity=identity, org=private_org, role='patient',
+            ).exists()
+        )
+
+    def test_demo_signup_user_sees_all_org_patients(self):
+        """User who signs up to a public demo org can see all org patients."""
+        # Create an existing patient in the demo org
+        person_existing = Person.objects.create(person_id=77701)
+        existing_record = PatientRecord.objects.create(
+            person=person_existing, organization=self.org,
+        )
+
+        # Sign up a new user
+        client = APIClient()
+        resp = client.post('/api/v1/orgs/signup-org/patient-signup/', {
+            'email': 'demo-viewer@test.com',
+            'password': 'Str0ng!Pass99',
+            'given_name': 'Demo',
+            'family_name': 'Viewer',
+        })
+        self.assertEqual(resp.status_code, 201)
+
+        # The signed-up user should see both their own record and existing ones
+        identity = Identity.objects.get(email='demo-viewer@test.com')
+        client.force_authenticate(user=identity)
+        list_resp = client.get('/api/patient-info/')
+        self.assertEqual(list_resp.status_code, 200)
+        results = (
+            list_resp.data.get('results', list_resp.data)
+            if isinstance(list_resp.data, dict) else list_resp.data
+        )
+        visible_ids = {r['id'] for r in results}
+        self.assertIn(existing_record.id, visible_ids)
+        self.assertGreaterEqual(len(visible_ids), 2)
+
     def test_signup_disabled_returns_403(self):
         resp = APIClient().post('/api/v1/orgs/no-signup-org/patient-signup/', {
             'email': 'blocked@test.com',

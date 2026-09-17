@@ -837,6 +837,17 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             # Org-admin access includes trust-derived admin orgs.
             admin_org_ids = list(get_admin_orgs(self.request.user).values_list('id', flat=True))
 
+            # Public demo orgs: patients can browse all org patients.
+            # Only direct org grants are checked — no trust expansion,
+            # no admin powers, no mapping curation access.
+            demo_org_ids = list(
+                active_grants.filter(
+                    org__isnull=False,
+                    org__allows_patient_signup=True,
+                ).values_list('org_id', flat=True)
+            )
+            all_visible_org_ids = list(set(admin_org_ids) | set(demo_org_ids))
+
             # Group grants: see patients in those groups
             actor_group_ids = list(
                 active_grants.filter(group__isnull=False).values_list('group_id', flat=True)
@@ -847,15 +858,15 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 ).values_list('person_id', flat=True)
                 accessible_pids.update(group_pids)
 
-            if not accessible_pids and not admin_org_ids:
+            if not accessible_pids and not all_visible_org_ids:
                 return qs.none()
 
-            if admin_org_ids and accessible_pids:
+            if all_visible_org_ids and accessible_pids:
                 qs = qs.filter(
-                    Q(organization_id__in=admin_org_ids) | Q(person_id__in=accessible_pids)
+                    Q(organization_id__in=all_visible_org_ids) | Q(person_id__in=accessible_pids)
                 )
-            elif admin_org_ids:
-                qs = qs.filter(organization_id__in=admin_org_ids)
+            elif all_visible_org_ids:
+                qs = qs.filter(organization_id__in=all_visible_org_ids)
             else:
                 qs = qs.filter(person_id__in=accessible_pids)
         return qs
