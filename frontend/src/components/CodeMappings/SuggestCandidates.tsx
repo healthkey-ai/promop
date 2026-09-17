@@ -31,6 +31,7 @@ export type CandidateActivity = {
   updated?: boolean;
   dry_run?: boolean;
   alternatives?: Alternative[];
+  ranking_timings?: Record<string, number>;
 };
 
 type Props = {
@@ -149,6 +150,11 @@ export default function SuggestCandidates({ activity, finished, onSaved }: Props
           </div>)}
           {ranked && <p className="mt-2 text-sm font-medium">{winner ? `Winner: ${winner.concept_name}` : "No destination proposed"}</p>}
           {(result ?? ranked)?.note && <p className="mt-1 text-sm text-slate-600">{(result ?? ranked)?.note}</p>}
+          {ranked?.ranking_timings && <p className="mt-1 text-xs text-slate-500">
+            Ranking: {Object.entries(ranked.ranking_timings).map(([k, v]) =>
+              `${k.replace(/_ms$/, "")} ${(v / 1000).toFixed(1)}s`
+            ).join(" · ")}
+          </p>}
         </article>;
       })}
     </>}

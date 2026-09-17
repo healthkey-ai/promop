@@ -43,30 +43,33 @@ class TestRankCandidatesDispatch:
     def test_routes_to_anthropic_by_default(self):
         with patch('omop_core.mapping.suggestions.rank_candidates') as mock_rank:
             mock_rank.return_value = (_candidates()[0], 'high confidence: test', [{'concept_id': 100, 'concept_name': 'HbA1c', 'confidence': 0.85, 'ranker': 'anthropic'}])
-            chosen, note, alts = rank_candidates_dispatch(
+            chosen, note, alts, timings = rank_candidates_dispatch(
                 'HbA1c', _candidates(), 'Hemoglobin A1c',
             )
             mock_rank.assert_called_once()
             assert chosen['concept_id'] == 100
             assert alts is not None
+            assert 'anthropic_ms' in timings
 
     def test_routes_to_jev_when_requested(self):
         with patch('omop_core.mapping.suggestions.rank_candidates_jev') as mock_jev:
             mock_jev.return_value = (_candidates()[0], 'high confidence (Jev 85%)', [])
-            chosen, note, alts = rank_candidates_dispatch(
+            chosen, note, alts, timings = rank_candidates_dispatch(
                 'HbA1c', _candidates(), 'Hemoglobin A1c',
                 ranking_model='jev',
             )
             mock_jev.assert_called_once()
             assert chosen['concept_id'] == 100
+            assert 'jev_ms' in timings
 
     def test_explicit_anthropic_routes_correctly(self):
         with patch('omop_core.mapping.suggestions.rank_candidates') as mock_rank:
             mock_rank.return_value = (_candidates()[0], 'test note', None)
-            rank_candidates_dispatch(
+            chosen, note, alts, timings = rank_candidates_dispatch(
                 'HbA1c', _candidates(), ranking_model='anthropic',
             )
             mock_rank.assert_called_once()
+            assert 'anthropic_ms' in timings
 
     def test_both_runs_both_rankers_concurrently(self):
         a_alts = [{'concept_id': 100, 'concept_name': 'HbA1c', 'confidence': 0.55, 'ranker': 'anthropic'}]
@@ -75,7 +78,7 @@ class TestRankCandidatesDispatch:
              patch('omop_core.mapping.suggestions.rank_candidates_jev') as mock_j:
             mock_a.return_value = (_candidates()[0], 'medium confidence: ok', a_alts)
             mock_j.return_value = (_candidates()[1], 'high confidence (Jev 90%)', j_alts)
-            chosen, note, alts = rank_candidates_dispatch(
+            chosen, note, alts, timings = rank_candidates_dispatch(
                 'HbA1c', _candidates(), 'Hemoglobin A1c',
                 ranking_model='both',
             )
@@ -86,10 +89,25 @@ class TestRankCandidatesDispatch:
             assert 'Jev wins' in note
             # Both rankers' alternatives are merged
             assert len(alts) == 2
+            # Timing for both rankers
+            assert 'anthropic_ms' in timings
+            assert 'jev_ms' in timings
 
 
-def _mock_requests_post(json_response, *, raise_exc=None):
-    """Return a patcher for requests.post that returns the given JSON."""
+def _mock_jev_response(choice, probabilities, *, raise_exc=None):
+    """Return a patcher for requests.post that returns a Jev API response."""
+    json_response = {
+        'model': 'jev-1.13.0',
+        'answers': {
+            'best_match': {
+                'type': 'choice',
+                'choice': choice,
+                'confidence': max(probabilities.values()) if probabilities else 0,
+                'probabilities': probabilities,
+            },
+        },
+        'usage': {'input_tokens': 100, 'output_tokens': 20},
+    }
     mock_resp = MagicMock()
     mock_resp.json.return_value = json_response
     mock_resp.raise_for_status = MagicMock()
@@ -128,10 +146,7 @@ class TestRankCandidatesJev:
 
     def test_successful_jev_response(self, settings):
         settings.JEV_API_KEY = 'test-key'
-        patcher, mock_post = _mock_requests_post({
-            'choice': '100',
-            'probabilities': {'100': 0.85, '200': 0.15},
-        })
+        patcher, mock_post = _mock_jev_response('100', {'100': 0.85, '200': 0.15})
         with patcher:
             chosen, note, alts = rank_candidates_jev(
                 'HbA1c', _candidates(), 'Hemoglobin A1c',
@@ -143,13 +158,19 @@ class TestRankCandidatesJev:
         assert alts[0]['confidence'] == 0.85
         assert alts[0]['concept_id'] == 100
         mock_post.assert_called_once()
+        # Verify the payload uses the correct API format.
+        call_kwargs = mock_post.call_args
+        payload = call_kwargs[1]['json'] if 'json' in call_kwargs[1] else call_kwargs[0][1] if len(call_kwargs[0]) > 1 else None
+        if payload is None:
+            payload = call_kwargs.kwargs.get('json')
+        assert 'model' in payload
+        assert 'questions' in payload
+        assert 'best_match' in payload['questions']
+        assert 'criteria' in payload['questions']['best_match']
 
     def test_jev_declines_all_candidates(self, settings):
         settings.JEV_API_KEY = 'test-key'
-        patcher, _ = _mock_requests_post({
-            'choice': 'none',
-            'probabilities': {'100': 0.3, '200': 0.2},
-        })
+        patcher, _ = _mock_jev_response('none', {'100': 0.3, '200': 0.2})
         with patcher:
             chosen, note, alts = rank_candidates_jev(
                 'HbA1c', _candidates(), 'Hemoglobin A1c',
@@ -161,10 +182,7 @@ class TestRankCandidatesJev:
 
     def test_alternatives_sorted_by_confidence(self, settings):
         settings.JEV_API_KEY = 'test-key'
-        patcher, _ = _mock_requests_post({
-            'choice': '200',
-            'probabilities': {'100': 0.3, '200': 0.7},
-        })
+        patcher, _ = _mock_jev_response('200', {'100': 0.3, '200': 0.7})
         with patcher:
             chosen, note, alts = rank_candidates_jev(
                 'HbA1c', _candidates(), 'Hemoglobin A1c',
@@ -175,7 +193,7 @@ class TestRankCandidatesJev:
 
     def test_api_failure_degrades(self, settings):
         settings.JEV_API_KEY = 'test-key'
-        patcher, _ = _mock_requests_post({}, raise_exc=Exception('Connection refused'))
+        patcher, _ = _mock_jev_response('100', {}, raise_exc=Exception('Connection refused'))
         with patcher:
             chosen, note, alts = rank_candidates_jev(
                 'HbA1c', _candidates(), 'Hemoglobin A1c',
