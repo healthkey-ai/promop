@@ -20,15 +20,15 @@ const results: CandidateActivity[] = [
 beforeEach(() => { patch.mockReset(); });
 
 describe("progressive suggestion candidates", () => {
-  it("shows stages as they arrive, then the winner and selectable alternatives", async () => {
+  it("shows candidates as they arrive, then the winner and selectable alternatives", async () => {
     const onSaved = vi.fn();
     const { rerender } = render(<SuggestCandidates activity={searches.slice(0, 1)} finished={false} onSaved={onSaved} />);
     expect(screen.getByText(/Exact match/)).toBeInTheDocument();
     expect(screen.queryByText(/Alternative match/)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Use .* for/ })).not.toBeInTheDocument();
     rerender(<SuggestCandidates activity={searches} finished={false} onSaved={onSaved} />);
-    expect(screen.getByText("No matches")).toBeInTheDocument();
-    expect(screen.getByText("Distance 0.1235")).toBeInTheDocument();
+    // Deduplicated table shows distance as 3-decimal
+    expect(screen.getByText("0.123")).toBeInTheDocument();
     expect(screen.queryByText("Winner")).not.toBeInTheDocument();
     rerender(<SuggestCandidates activity={results} finished onSaved={onSaved} />);
     expect(screen.getByText("Winner: Exact match")).toBeInTheDocument();
@@ -36,7 +36,7 @@ describe("progressive suggestion candidates", () => {
     fireEvent.click(screen.getByRole("button", { name: "Use Alternative match for LOCAL" }));
     await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
     expect(patch).toHaveBeenCalledWith("/v1/code-mappings/7/", { destination_concept_id: 2, status: "proposed" });
-    expect(screen.getByText("Selected alternative · awaiting review")).toBeInTheDocument();
+    expect(screen.getByText("Selected")).toBeInTheDocument();
   });
 
   it("keeps choices unavailable until writes finish and for dry runs", () => {
@@ -51,7 +51,24 @@ describe("progressive suggestion candidates", () => {
     render(<SuggestCandidates activity={results} finished />);
     fireEvent.click(screen.getByRole("button", { name: "Use Alternative match for LOCAL" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Could not save");
-    expect(screen.queryByText("Selected alternative · awaiting review")).not.toBeInTheDocument();
+    expect(screen.queryByText("Selected")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Use Alternative match for LOCAL" })).toBeEnabled();
+  });
+
+  it("deduplicates candidates found by multiple strategies", () => {
+    const shared = { concept_id: 1, concept_name: "Shared", concept_code: "A", vocabulary_id: "SNOMED" };
+    const activity: CandidateActivity[] = [
+      { ...source, stage: "candidates", strategy: "umls", candidates: [shared] },
+      { ...source, stage: "candidates", strategy: "lexical", candidates: [{ ...shared, lexical_score: 0.9 }] },
+      { ...source, stage: "ranked", suggested: shared, candidates: [shared] },
+      { ...source, stage: "result", suggested: shared, updated: true },
+    ];
+    render(<SuggestCandidates activity={activity} finished />);
+    // Should appear once, not twice
+    const rows = screen.getAllByText(/Shared/);
+    // "Shared" appears in the table row and in "Winner: Shared"
+    expect(rows.length).toBe(2);
+    // Strategy badge shows both UMLS and Lexical
+    expect(screen.getByText("UL")).toBeInTheDocument();
   });
 });
