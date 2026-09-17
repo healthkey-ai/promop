@@ -1356,6 +1356,9 @@ def rank_jobs(jobs, on_ranked=None, ranking_model=DEFAULT_RANKING_MODEL):
             record(job, *rank(job))
         return jobs
 
+    # Rank concurrently but emit `on_ranked` in original job order so the
+    # activity log preserves the occurrence-count ordering the curator expects.
+    results: dict[int, tuple] = {}
     with ThreadPoolExecutor(max_workers=min(RANK_CONCURRENCY, len(pending))) as pool:
         futures = {pool.submit(rank, job): job for job in pending}
         for future in as_completed(futures):
@@ -1363,13 +1366,12 @@ def rank_jobs(jobs, on_ranked=None, ranking_model=DEFAULT_RANKING_MODEL):
             try:
                 chosen, note, alternatives, ranking_timings = future.result()
             except Exception as exc:              # noqa: BLE001 - degrade, never fail
-                # rank_candidates already swallows its own failures; this is the
-                # backstop for anything that escapes it, so one bad code cannot
-                # take down a whole Suggest run.
                 logger.warning('Ranking raised for %r: %s', job['source_code'], exc)
                 job['ranking_failed'] = True
                 chosen, note, alternatives, ranking_timings = None, 'Ranking failed; no destination proposed.', None, None
-            record(job, chosen, note, alternatives, ranking_timings)
+            results[id(job)] = (chosen, note, alternatives, ranking_timings)
+    for job in pending:
+        record(job, *results[id(job)])
     return jobs
 
 
