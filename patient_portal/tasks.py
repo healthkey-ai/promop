@@ -75,6 +75,18 @@ def deliver_webhook(delivery_id):
 
 
 @shared_task
+def prune_webhook_history():
+    """Daily retention pass, so the scheduler runs what the docs ask for.
+
+    The management command stays the single implementation; this only gives it
+    a place to run on a deployment that has beat.
+    """
+    from django.core.management import call_command
+
+    call_command('prune_webhooks')
+
+
+@shared_task
 def dispatch_pending_webhooks():
     if not settings.WEBHOOKS_ENABLED:
         return

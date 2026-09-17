@@ -2,6 +2,7 @@ import uuid
 import secrets
 
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
+from django.core.exceptions import ValidationError
 from django.core.validators import RegexValidator
 from django.db import models
 from django.db.models import Q
@@ -12,9 +13,25 @@ def webhook_secret():
     return secrets.token_urlsafe(32)
 
 
+def validate_webhook_subscription_url(value):
+    """Same rule as the API: public HTTPS on 443, no credentials, no fragment.
+
+    The delivery task re-validates and re-resolves, so a bad row fails closed at
+    send rather than causing an SSRF. Without this, though, a shell or a data
+    migration can write ``http://10.0.0.1/`` and the row looks valid until the
+    first delivery attempt.
+    """
+    from patient_portal.webhooks import validate_webhook_url
+
+    try:
+        validate_webhook_url(value)
+    except ValueError as error:
+        raise ValidationError(str(error)) from None
+
+
 class WebhookSubscription(models.Model):
     organization = models.ForeignKey('omop_core.Organization', on_delete=models.CASCADE)
-    url = models.URLField(max_length=2048)
+    url = models.URLField(max_length=2048, validators=[validate_webhook_subscription_url])
     event_types = models.JSONField()
     secret = models.CharField(max_length=128, default=webhook_secret, editable=False)
     active = models.BooleanField(default=True)

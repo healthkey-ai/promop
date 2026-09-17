@@ -134,7 +134,16 @@ def enqueue_delivery(delivery_id, countdown=0):
         logger.warning('Webhook queue unavailable; delivery retained in outbox')
 
 
-def publish_event(organization_id, event_type, data):
+def publish_event(organization_id, event_type, data, origin=None):
+    """Fan an event out to the organization's subscribers.
+
+    ``origin`` marks an event we are relaying rather than originating. Each hop
+    mints a fresh event id, so the ``(source, event_id)`` dedup cannot see a
+    cycle: an organization subscribed to the partner that feeds it would send
+    the partner its own event back. The marker lets that partner recognise its
+    own traffic and stop; it does not stop a partner that ignores it, which is
+    why the inbound quota remains the hard bound.
+    """
     if not settings.WEBHOOKS_ENABLED:
         return
     if event_type not in EVENT_TYPES:
@@ -143,6 +152,8 @@ def publish_event(organization_id, event_type, data):
         'id': str(uuid.uuid4()), 'type': event_type,
         'occurred_at': timezone.now().isoformat(), 'data': data,
     }
+    if origin is not None:
+        event['origin'] = origin
     for subscription in WebhookSubscription.objects.filter(
         organization_id=organization_id, organization__is_active=True,
         active=True, event_types__contains=[event_type],
@@ -151,16 +162,22 @@ def publish_event(organization_id, event_type, data):
         transaction.on_commit(lambda pk=delivery.pk: enqueue_delivery(pk))
 
 
+def _relay(event, event_type, data):
+    publish_event(event.organization_id, event_type, data, origin={
+        'source': event.source, 'event_id': event.event_id,
+    })
+
+
 def handle_lab_update(event, data):
-    publish_event(event.organization_id, 'lab.updated', data)
+    _relay(event, 'lab.updated', data)
 
 
 def handle_document_received(event, data):
-    publish_event(event.organization_id, 'document.received', data)
+    _relay(event, 'document.received', data)
 
 
 def handle_foundation_sync(event, data):
-    publish_event(event.organization_id, 'foundation.synced', data)
+    _relay(event, 'foundation.synced', data)
 
 
 INBOUND_HANDLERS = {

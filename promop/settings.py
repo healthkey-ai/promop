@@ -14,6 +14,7 @@ import os
 import json
 from pathlib import Path
 import dj_database_url
+from celery.schedules import crontab
 from dotenv import load_dotenv
 from corsheaders.defaults import default_headers
 
@@ -697,6 +698,14 @@ CELERY_BEAT_SCHEDULE = {
     'recover-webhook-deliveries': {
         'task': 'patient_portal.tasks.dispatch_pending_webhooks',
         'schedule': 60.0,
+    },
+    # Retention has to run somewhere, and the scheduler this deployment already
+    # runs is that somewhere — a separate cron service would be a second thing
+    # to keep configured. A fixed hour rather than an interval, so a redeploy
+    # (which resets beat's schedule file) cannot push it a day out.
+    'prune-webhook-history': {
+        'task': 'patient_portal.tasks.prune_webhook_history',
+        'schedule': crontab(hour=3, minute=30),
     },
 }
 CELERY_BROKER_CONNECTION_TIMEOUT = 2

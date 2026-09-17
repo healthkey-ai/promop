@@ -46,6 +46,14 @@ transaction. `data.person_id` must belong to the configured organization;
 forwarded. Bodies are limited to 64 KiB. Invalid signatures return 401, invalid
 JSON/schema or a patient outside the source organization returns 400.
 
+A relayed event carries `origin`: `{"source": ..., "event_id": ...}`, naming the
+inbound source and its event id. Events this service originates have no such key.
+Each hop mints a fresh event id, so `(source, event_id)` deduplication cannot see
+a cycle: an organization subscribed to the partner that feeds it gets its own
+event back. The marker lets that partner recognise its own traffic and stop —
+subscribers should drop an event whose `origin.source` names them. It does not
+constrain a partner that ignores it, so the inbound quota remains the hard bound.
+
 The signed `id` is the idempotency key, unique per source (maximum 128 characters).
 An optional `Idempotency-Key` header must equal it. First processing returns 202;
 a retry within the retention period returns 200 with `duplicate: true`. Reusing an ID with different
@@ -167,8 +175,11 @@ Celery messages from sending concurrently. HTTP sends have 5-second connect and
 `start-worker.sh` starts embedded Celery beat when `CELERY_EMBEDDED_BEAT=true`,
 with its schedule in `/tmp/promop-celerybeat-schedule`. It is off unless asked
 for, because beat is a singleton and the default must stay safe when a worker
-service is scaled to more than one replica; `render.yaml` sets it on the
-single-replica staging worker. Every minute it queues up to 1,000 due outbox
+service is scaled to more than one replica; `render.yaml` sets it on both
+single-replica workers — staging and production. Production previously started
+Celery directly rather than through `start-worker.sh`, so the flag was
+unreachable there and neither the recovery sweep nor retention ran; the
+blueprint test asserts the entrypoint now. Every minute it queues up to 1,000 due outbox
 rows, recovering broker outages, lost tasks, and expired leases. The existing
 Render `promop-staging-worker` is a single worker service; staging is
 https://promop-staging.onrender.com (see [Render configuration](render-staging-celery.md)).
@@ -197,8 +208,13 @@ data when configuring database access, backups, and retention.
 
 ## Retention
 
-Schedule `python manage.py prune_webhooks` daily on a process with the same
-configured database. Default retention is 30 days (`WEBHOOK_RETENTION_DAYS`);
+`CELERY_BEAT_SCHEDULE` runs `patient_portal.tasks.prune_webhook_history` daily at
+03:30, which calls the command below; the deployment that runs beat therefore
+runs retention too, and there is no second thing to keep configured. A fixed
+hour rather than an interval, so a redeploy — which resets beat's schedule file
+in `/tmp` — cannot push the pass a day out. Run it by hand the same way on a
+deployment without beat: `python manage.py prune_webhooks` on a process with the
+same configured database. Default retention is 30 days (`WEBHOOK_RETENTION_DAYS`);
 `--days N`, `--batch-size N` (default 1000), and `--dry-run` are supported.
 Retention must be at least one day, beyond the five-minute signature window.
 The command removes old terminal delivery history (`delivered`, `dead_letter`,

@@ -73,3 +73,31 @@ def test_worker_start_defaults_to_one_child(tmp_path, embedded_beat):
     if embedded_beat == 'true':
         expected += ' --beat --schedule=/tmp/promop-celerybeat-schedule'
     assert result.stdout == expected
+
+
+def test_production_worker_runs_the_entrypoint_that_can_schedule_recovery():
+    """Without beat the recovery sweep and retention never run in production."""
+    config = yaml.safe_load((ROOT / 'render.yaml').read_text())
+    worker = next(s for s in config['services']
+                  if s['type'] == 'worker' and s['name'] == 'promop-worker')
+    assert worker['branch'] == 'main'
+    assert worker['startCommand'] == 'bash start-worker.sh'
+    env = {e['key']: e.get('value') for e in worker['envVars']}
+    assert env['CELERY_EMBEDDED_BEAT'] == 'true'
+    # Pinned so moving to start-worker.sh does not cut concurrency to its default.
+    assert env['CELERY_WORKER_CONCURRENCY'] == '4'
+
+
+def test_exactly_one_scheduler_across_the_blueprint():
+    config = yaml.safe_load((ROOT / 'render.yaml').read_text())
+    with_beat = [
+        s['name'] for s in config['services'] if s['type'] == 'worker'
+        and any(e['key'] == 'CELERY_EMBEDDED_BEAT' and e.get('value') == 'true'
+                for e in s['envVars'])
+    ]
+    # One per deployment, not one per blueprint: production and staging are
+    # separate brokers and databases.
+    assert sorted(with_beat) == ['promop-staging-worker', 'promop-worker']
+    for name in with_beat:
+        service = next(s for s in config['services'] if s['name'] == name)
+        assert service['startCommand'] == 'bash start-worker.sh'

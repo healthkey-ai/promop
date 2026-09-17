@@ -27,7 +27,7 @@ class Migration(migrations.Migration):
                         verbose_name="ID",
                     ),
                 ),
-                ("url", models.URLField(max_length=2048)),
+                ("url", models.URLField(max_length=2048, validators=[patient_portal.models.validate_webhook_subscription_url])),
                 ("event_types", models.JSONField()),
                 (
                     "secret",

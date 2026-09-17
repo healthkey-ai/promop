@@ -1,8 +1,10 @@
 """Bound webhook history without deleting active work or recent replay keys."""
+import uuid
 from datetime import timedelta
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
+from django.db import models
 from django.utils import timezone
 
 from patient_portal.models import InboundWebhookEvent, WebhookDelivery
@@ -40,7 +42,13 @@ class Command(BaseCommand):
             # index in 0019 excludes — it covers active deliveries — so an
             # unbounded re-scan per batch is quadratic at the size retention
             # exists to handle.
-            after = 0
+            #
+            # The sentinel is typed to the model's own key. WebhookDelivery is
+            # keyed by UUID and InboundWebhookEvent by an integer; Django would
+            # coerce a literal 0 to the nil UUID for the first, which works but
+            # reads as an integer key and invites a wrong fix later.
+            after = (uuid.UUID(int=0) if isinstance(query.model._meta.pk, models.UUIDField)
+                     else 0)
             while True:
                 ids = list(
                     query.filter(pk__gt=after).order_by('pk')
