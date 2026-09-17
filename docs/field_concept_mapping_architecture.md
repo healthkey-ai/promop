@@ -1,6 +1,6 @@
 # Field concept mapping architecture
 
-Implemented behavior reviewed against `dev` at `4302c97` on 2026-09-14.
+Implemented behavior reviewed against `dev` at `10c5644` on 2026-09-17.
 This document explains how UI fields, PatientRecord and OMOP mappings interact.
 Future schema, mapping review, repairs and delivery gates belong to the
 [field concept mapping plan](field_concept_mapping_plan.md).
@@ -14,7 +14,8 @@ Future schema, mapping review, repairs and delivery gates belong to the
 | [Generated field/value inventory](field-mapping-inventory/README.md) | Reproducible source rows, mappings, candidates, context and coverage evidence |
 | [Mapping plan](field_concept_mapping_plan.md) | Unresolved meanings, proposed capabilities, dependencies and acceptance |
 
-The generated inventory is the field-by-field evidence source. Its
+The generated inventory is the field-by-field evidence source
+([PR #1284](https://github.com/healthkey-ai/promop/pull/1284), merged). Its
 [manifest](field-mapping-inventory/manifest.json) includes source revisions,
 field and option identities, existing recipes, candidate evidence and validation
 flags; its [coverage report](field-mapping-inventory/coverage.md) states the
@@ -39,9 +40,11 @@ schema does not provide stable scoped answer identity or a reviewed
 
 `FieldConceptMapping.provenance` distinguishes System Generated and Curator
 recipes. Approval state is separate from origin: approving a recipe does not
-change who supplied it. Older unrecorded origin is not inferred. The mapping API
-and curation transfer preserve this distinction. A recipe's OMOP `type_concept_id`
-is fact provenance, not this curation-origin label.
+change who supplied it. Migration 0239 backfilled `provenance = 'system_generated'`
+on all 314 legacy rows that had blank provenance (created by seed migrations
+0156–0227, before the provenance field existed). No blank-provenance rows remain
+on staging. The mapping API and curation transfer preserve this distinction. A
+recipe's OMOP `type_concept_id` is fact provenance, not this curation-origin label.
 
 ## Runtime field ownership
 
@@ -126,6 +129,38 @@ reviewed mapping revision and source catalog/recipe version. Curation uses the
 installed concept/domain and preserves portable vocabulary/code plus source
 identity. A proposed or even previously approved row in an inventory export is
 not a fresh clinical validation of its meaning.
+
+## Curation transfer and fixture seeding
+
+Curation data (mappings, choices, formulas, synonyms, custom fields) can reach a
+new instance through three paths:
+
+1. **`copy_curation`** — live database-to-database transfer from a running source
+   instance. See [CLAUDE.md](../CLAUDE.md) for usage. Requires `SOURCE_DATABASE_URL`.
+
+2. **`dump_field_curation` / `load_field_curation`** — file-based export and import.
+   `dump_field_curation` serialises the curation tables to JSON with a metadata
+   envelope (`schema_version`, `exported_at`, `source`). `load_field_curation`
+   reads the JSON and applies it via `apply_payload`. Both reuse the proven
+   `read_payload`/`apply_payload` from
+   [`field_curation_transfer.py`](../omop_core/services/field_curation_transfer.py).
+   Supports `--dry-run`, `--prune` and `--tables` (same interface as `copy_curation`).
+   Default tables: mappings, custom_fields, choices, formulas, synonyms (no
+   code_mappings).
+
+3. **Checked-in fixture** — [`omop_core/data/field_curation_v1.json`](../omop_core/data/field_curation_v1.json)
+   contains 314 mappings, 262 choices, 12 formulas and 1 synonym exported from
+   staging after the provenance backfill. Migration 0240 loads this fixture
+   automatically on `migrate`, so a fresh deployment gets the full curated
+   inventory without manual steps. The migration is additive: it filters out rows
+   that already exist by natural key, so curator-approved mappings are never
+   overwritten. It requires Athena vocabularies to be loaded first for concept
+   re-resolution; on a database without vocabularies, mappings land with
+   `concept = None` and a warning.
+
+All three paths use natural-key matching, re-resolve concept FKs by
+`(vocabulary_id, concept_code)`, and clear user FKs (reviewer, created_by) since
+user IDs are instance-specific. Row IDs are never copied.
 
 ## Verification and historical evidence
 
