@@ -84,12 +84,15 @@ from omop_core.mapping.code_resolution import (
 )
 from omop_core.mapping.suggestions import (
     ALL_STRATEGIES,
+    DEFAULT_RANKING_MODEL,
     DEFAULT_STRATEGIES,
     CANDIDATE_LIMIT,
     LEXICAL_LIMIT_MAX,
+    RANKING_MODELS,
     STRATEGY_LEXICAL,
     STRATEGY_SEMANTIC,
     STRATEGY_UMLS,
+    STRATEGY_VECTORS,
     SUGGESTION_MODEL_VERSION,
     VOCAB_TO_UMLS_ROOT,
     suggest_one_mapping,
@@ -10912,20 +10915,27 @@ def code_mapping_suggest(request):
                 {'strategies': 'At least one strategy must be selected.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        # Vectors reorders what retrieval found; it finds nothing itself. On its
-        # own it would run to completion and report "no candidate concept" for
-        # every code, which reads as a broken tab rather than a bad selection.
-        if not {STRATEGY_UMLS, STRATEGY_LEXICAL, STRATEGY_SEMANTIC} & set(raw_strategies):
+        # At least one retrieval strategy is needed. Vectors is now a retrieval
+        # strategy (pgvector cosine search). UMLS and Lexical are the other two.
+        if not {STRATEGY_UMLS, STRATEGY_LEXICAL, STRATEGY_VECTORS, STRATEGY_SEMANTIC} & set(raw_strategies):
             return Response(
                 {'strategies': (
-                    'Vectors reranks the candidates retrieval found, so it '
-                    'cannot run alone. Select UMLS, Lexical or Semantic retrieval as well.'
+                    'At least one retrieval strategy (UMLS, Lexical, or Vectors) '
+                    'must be selected.'
                 )},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         strategies = raw_strategies
     else:
         strategies = list(DEFAULT_STRATEGIES)
+
+    # Ranking model selection.
+    ranking_model = str(request.data.get('ranking_model') or DEFAULT_RANKING_MODEL).strip()
+    if ranking_model not in RANKING_MODELS:
+        return Response(
+            {'ranking_model': f'Must be one of {sorted(RANKING_MODELS)}.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     # Replace mode re-answers rows a previous run already answered, rather than
     # deleting them. Deleting was right while the candidate set came from a scan
@@ -10955,11 +10965,13 @@ def code_mapping_suggest(request):
         'strategies': strategies,
         'lexical_limit': lexical_limit,
         'resuggest': replace,
+        'ranking_model': ranking_model,
     }
     run = SuggestRun.objects.create(
         source_vocabulary_id=source_vocab,
         total=expected,
         model_version=SUGGESTION_MODEL_VERSION,
+        ranking_model=ranking_model,
         selection=selection_summary(params),
         created_by=request.user if request.user.is_authenticated else None,
     )
@@ -10985,6 +10997,7 @@ def _serialize_suggest_run(run, *, include_activity=False):
         'strategy_counts': run.strategy_counts or {},
         'landed_in': run.landed_in or {},
         'model_version': run.model_version,
+        'ranking_model': run.ranking_model or 'anthropic',
         'error': run.error,
         'created_at': run.created_at,
         'finished_at': run.finished_at,
@@ -11027,13 +11040,11 @@ def code_mapping_suggest_one(request):
     strategies = request.data.get('strategies') or list(DEFAULT_STRATEGIES)
     if not source_code or not omop_table or not isinstance(strategies, list) or any(s not in ALL_STRATEGIES for s in strategies):
         return Response({'detail': 'source_code, omop_table, and valid strategies are required.'}, status=status.HTTP_400_BAD_REQUEST)
-    # Same rule as the batch endpoint: vectors reranks what retrieval found and
-    # retrieves nothing itself, so on its own it answers "no candidate concept"
-    # every time, which reads as a broken dialog rather than a bad selection.
-    if not {STRATEGY_UMLS, STRATEGY_LEXICAL, STRATEGY_SEMANTIC} & set(strategies):
+    # At least one retrieval strategy is needed.
+    if not {STRATEGY_UMLS, STRATEGY_LEXICAL, STRATEGY_VECTORS, STRATEGY_SEMANTIC} & set(strategies):
         return Response({'strategies': (
-            'Vectors reranks the candidates retrieval found, so it cannot run '
-            'alone. Select UMLS, Lexical or Semantic retrieval as well.'
+            'At least one retrieval strategy (UMLS, Lexical, or Vectors) '
+            'must be selected.'
         )}, status=status.HTTP_400_BAD_REQUEST)
     try:
         lexical_limit = int(request.data.get('lexical_limit') or CANDIDATE_LIMIT)
@@ -11042,6 +11053,12 @@ def code_mapping_suggest_one(request):
     if not 1 <= lexical_limit <= LEXICAL_LIMIT_MAX:
         return Response({'lexical_limit': f'Must be between 1 and {LEXICAL_LIMIT_MAX}.'},
                         status=status.HTTP_400_BAD_REQUEST)
+    ranking_model = str(request.data.get('ranking_model') or DEFAULT_RANKING_MODEL).strip()
+    if ranking_model not in RANKING_MODELS:
+        return Response(
+            {'ranking_model': f'Must be one of {sorted(RANKING_MODELS)}.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
     params = {
         'source_code': source_code,
         'source_vocabulary_id': str(request.data.get('source_vocabulary_id') or ''),
@@ -11049,19 +11066,21 @@ def code_mapping_suggest_one(request):
         'source_description': str(request.data.get('source_code_description') or ''),
         'strategies': strategies,
         'lexical_limit': lexical_limit,
+        'ranking_model': ranking_model,
     }
     if request.data.get('async') is True:
         from omop_core.services.suggest_jobs import get_dispatcher
         run = SuggestRun.objects.create(
             source_vocabulary_id=params['source_vocabulary_id'], total=1,
-            model_version=SUGGESTION_MODEL_VERSION, created_by=request.user,
+            model_version=SUGGESTION_MODEL_VERSION, ranking_model=ranking_model,
+            created_by=request.user,
             selection={
                 'mode': 'individual', 'dry_run': True, 'limit': 1,
                 'order': 'The source code currently open in the mapping dialog.',
                 'strategies': strategies, 'source_vocabulary_id': params['source_vocabulary_id'],
             },
         )
-        get_dispatcher().dispatch(run, {'preview': params})
+        get_dispatcher().dispatch(run, {'preview': params, 'ranking_model': ranking_model})
         run.refresh_from_db()
         return Response(_serialize_suggest_run(run, include_activity=True), status=status.HTTP_202_ACCEPTED)
     return Response(suggest_one_mapping(**params))

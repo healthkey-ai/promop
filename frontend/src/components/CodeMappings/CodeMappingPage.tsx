@@ -206,9 +206,8 @@ const statusClass: Record<string, string> = {
 
 const strategyLabel: Record<string, string> = {
   umls: "UMLS",
-  vectors: "Vector",
+  vectors: "Vectors",
   lexical: "Lexical",
-  semantic: "Semantic retrieval",
 };
 
 /** How far along a run is, counting the phase it is actually in.
@@ -271,7 +270,7 @@ type SuggestRunProgress = {
 const STRATEGY_LABELS = {
   umls: "UMLS",
   lexical: "Lexical",
-  semantic: "Semantic retrieval",
+  vectors: "Vectors",
 } as const;
 
 /**
@@ -492,8 +491,9 @@ export default function CodeMappingPage() {
   const validSuggestionLimit = suggestionLimit !== "" && Number.isInteger(suggestionLimit)
     && suggestionLimit >= 1 && suggestionLimit <= maxSuggestions;
   const [strategies, setStrategies] = useState({
-    umls: true, lexical: true, semantic: true,
+    umls: true, lexical: true, vectors: true,
   });
+  const [rankingModel, setRankingModel] = useState<"anthropic" | "jev">("anthropic");
   const [dialogMode, setDialogMode] = useState<"new" | "edit" | null>(null);
   const [selectedRow, setSelectedRow] = useState<CodeMappingRow | null>(null);
   const [form, setForm] = useState<MappingForm>(emptyForm);
@@ -959,7 +959,7 @@ export default function CodeMappingPage() {
       const { data: started } = await api.post<SuggestRunProgress>("/v1/code-mappings/suggest-one/", {
         source_code: form.source_code, source_vocabulary_id: form.source_vocabulary_id,
         source_code_description: form.source_code_description, omop_table: form.omop_table,
-        strategies: enabled, async: true,
+        strategies: enabled, ranking_model: rankingModel, async: true,
       });
       let current = started;
       const deadline = Date.now() + SUGGEST_POLL_TIMEOUT_MS;
@@ -1127,7 +1127,7 @@ export default function CodeMappingPage() {
    * somewhere a curator re-points *into* — enumerating SNOMED's 1.09M concepts
    * would not be a queue.
    */
-  const hasRetrieval = strategies.umls || strategies.lexical || strategies.semantic;
+  const hasRetrieval = strategies.umls || strategies.lexical || strategies.vectors;
 
   const runSuggest = async () => {
     if (!validSuggestionLimit) {
@@ -1162,6 +1162,7 @@ export default function CodeMappingPage() {
           source_vocabulary_id: selectedVocabulary,
           limit: suggestionLimit,
           strategies: activeStrategies,
+          ranking_model: rankingModel,
           replace: effectiveReplace,
           include_activity: true,
         },
@@ -1569,7 +1570,7 @@ export default function CodeMappingPage() {
             className="h-8 w-16 rounded-md border border-slate-300 px-2 text-xs"
           />
           <span className="text-xs text-slate-600">Using</span>
-          {(["umls", "lexical", "semantic"] as const).map((key) => (
+          {(["umls", "lexical", "vectors"] as const).map((key) => (
             <span key={key} className="inline-flex items-center gap-1">
               <label className="inline-flex items-center gap-1 text-xs text-slate-600">
                 <input
@@ -1594,6 +1595,17 @@ export default function CodeMappingPage() {
               className="h-3.5 w-3.5 rounded border-slate-300"
             />
             Replace Current Suggestions
+          </label>
+          <label className="inline-flex items-center gap-1 text-xs text-slate-600">
+            Ranker
+            <select
+              value={rankingModel}
+              onChange={(e) => setRankingModel(e.target.value as "anthropic" | "jev")}
+              className="h-7 rounded-md border border-slate-300 px-1.5 text-xs"
+            >
+              <option value="anthropic">Anthropic</option>
+              <option value="jev">Jev</option>
+            </select>
           </label>
           <section
             aria-label="Suggestion accuracy"
@@ -2009,7 +2021,7 @@ export default function CodeMappingPage() {
                         </label>
                         <HelpTip tip={TIP.search_vocabulary} />
                       </div>
-                      {(["umls", "lexical", "semantic"] as const).map((key) => (
+                      {(["umls", "lexical", "vectors"] as const).map((key) => (
                         <div key={key} className="inline-flex items-center gap-1 text-xs text-slate-600">
                           <label className="inline-flex items-center gap-1">
                             <input type="checkbox" checked={strategies[key]} onChange={(e) => setStrategies((prev) => ({ ...prev, [key]: e.target.checked }))} />

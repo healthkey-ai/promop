@@ -4439,6 +4439,7 @@ class SuggestRun(models.Model):
     selection = models.JSONField(default=dict, blank=True, null=True)
     activity = models.JSONField(default=list, blank=True, null=True)
     model_version = models.CharField(max_length=20, blank=True, default='')
+    ranking_model = models.CharField(max_length=20, blank=True, default='anthropic')
     error = models.TextField(blank=True, default='')
 
     created_by = models.ForeignKey(

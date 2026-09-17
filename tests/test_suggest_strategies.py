@@ -595,35 +595,34 @@ class TestSuggestAPIStrategies:
             self._post(min_occurrences=99999)
         assert fake.calls[0][1]['lexical_limit'] == CANDIDATE_LIMIT
 
-    def test_vectors_alone_is_rejected(self):
-        """It reranks what retrieval found and retrieves nothing itself, so on
-        its own it reports "no candidate concept" for every code -- which reads
-        as a broken tab rather than a bad selection."""
-        resp = self._post(strategies=['vectors'])
-        assert resp.status_code == 400
-        assert 'cannot run alone' in str(resp.data)
+    def test_vectors_alone_is_accepted(self):
+        """Vectors is now a retrieval strategy (cosine search), so it can run
+        independently."""
+        with use_suggest_dispatcher(FakeSuggestDispatcher()) as fake:
+            resp = self._post(strategies=['vectors'], min_occurrences=99999)
+        assert resp.status_code == 202
+        assert fake.calls[0][1]['strategies'] == ['vectors']
 
-    def test_vectors_alone_is_rejected_by_suggest_one_too(self):
-        resp = self.client.post(
-            '/api/v1/code-mappings/suggest-one/',
-            data={'source_code': 'X', 'omop_table': 'measurement',
-                  'strategies': ['vectors']},
-            format='json',
-        )
-        assert resp.status_code == 400
-        assert 'cannot run alone' in str(resp.data)
+    def test_vectors_alone_is_accepted_by_suggest_one_too(self):
+        with use_suggest_dispatcher(FakeSuggestDispatcher()):
+            resp = self.client.post(
+                '/api/v1/code-mappings/suggest-one/',
+                data={'source_code': 'X', 'omop_table': 'measurement',
+                      'strategies': ['vectors'], 'async': True},
+                format='json',
+            )
+        assert resp.status_code == 202
 
-    def test_vectors_with_a_retriever_is_accepted(self):
+    def test_vectors_with_lexical_is_accepted(self):
         assert self._post(
             strategies=['lexical', 'vectors'], min_occurrences=99999,
         ).status_code == 202
 
-    @pytest.mark.parametrize('strategies', [['semantic'], ['semantic', 'vectors']])
-    def test_semantic_is_an_independent_retriever(self, strategies):
+    def test_semantic_is_an_independent_retriever(self):
         with use_suggest_dispatcher(FakeSuggestDispatcher()) as fake:
-            response = self._post(strategies=strategies, min_occurrences=99999)
+            response = self._post(strategies=['vectors'], min_occurrences=99999)
         assert response.status_code == 202
-        assert fake.calls[0][1]['strategies'] == strategies
+        assert fake.calls[0][1]['strategies'] == ['vectors']
 
     def test_individual_preview_queues_and_never_changes_the_mapping(self, monkeypatch, measurement_concept):
         from omop_core.models import SuggestRun
@@ -654,7 +653,7 @@ class TestSuggestAPIStrategies:
         execute_run(*dispatcher.calls[0])
         run = SuggestRun.objects.get(pk=response.data['run_id'])
         assert run.state == 'success'
-        assert [event['strategy'] for event in run.activity if event['stage'] == 'candidates'] == ['umls', 'lexical', 'semantic']
+        assert [event['strategy'] for event in run.activity if event['stage'] == 'candidates'] == ['umls', 'lexical', 'vectors']
         assert run.activity[-1]['suggested']['concept_id'] == measurement_concept.pk
         assert run.activity[-1]['dry_run'] is True
         assert run.destinations == 0
@@ -681,14 +680,30 @@ class TestSuggestAPIStrategies:
         response = self.client.post(
             '/api/v1/code-mappings/suggest-one/',
             data={'source_code': 'LOCAL-123', 'omop_table': 'measurement',
-                  'strategies': ['semantic']}, format='json',
+                  'strategies': ['vectors']}, format='json',
         )
         assert response.status_code == 200
 
     def test_default_strategies_include_semantic(self):
         with use_suggest_dispatcher(FakeSuggestDispatcher()) as fake:
             self._post(min_occurrences=99999)
-        assert fake.calls[0][1]['strategies'] == ['umls', 'lexical', 'semantic']
+        assert fake.calls[0][1]['strategies'] == ['umls', 'lexical', 'vectors']
+
+    def test_ranking_model_defaults_to_anthropic(self):
+        with use_suggest_dispatcher(FakeSuggestDispatcher()) as fake:
+            self._post(min_occurrences=99999)
+        assert fake.calls[0][1]['ranking_model'] == 'anthropic'
+
+    def test_ranking_model_jev_is_accepted(self):
+        with use_suggest_dispatcher(FakeSuggestDispatcher()) as fake:
+            resp = self._post(min_occurrences=99999, ranking_model='jev')
+        assert resp.status_code == 202
+        assert fake.calls[0][1]['ranking_model'] == 'jev'
+
+    def test_invalid_ranking_model_is_rejected(self):
+        resp = self._post(min_occurrences=99999, ranking_model='invalid')
+        assert resp.status_code == 400
+        assert 'ranking_model' in resp.data
 
     def test_replace_requires_a_vocabulary(self):
         resp = self.client.post(
@@ -797,15 +812,15 @@ class TestSuggestRunLifecycle:
         def semantic(*args, **kwargs):
             events = SuggestRun.objects.latest('created_at').activity
             assert [event['strategy'] for event in events if event['stage'] == 'candidates'] == ['umls', 'lexical']
-            return [{**hit, 'retrieval': 'semantic', 'semantic_score': 0.9, 'vector_distance': 0.1}]
+            return [{**hit, 'retrieval': 'vectors', 'semantic_score': 0.9, 'vector_distance': 0.1}]
 
         monkeypatch.setattr('omop_core.mapping.suggestions.lexical_candidates', lexical)
         monkeypatch.setattr('omop_core.mapping.suggestions.semantic_candidates', semantic)
         with use_suggest_dispatcher(InlineSuggestDispatcher()):
-            response = self._post(strategies=['umls', 'lexical', 'semantic'], include_activity=True)
+            response = self._post(strategies=['umls', 'lexical', 'vectors'], include_activity=True)
         assert response.data['state'] == 'success'
         events = response.data['activity']
-        assert [event['strategy'] for event in events if event['stage'] == 'candidates'] == ['umls', 'lexical', 'semantic']
+        assert [event['strategy'] for event in events if event['stage'] == 'candidates'] == ['umls', 'lexical', 'vectors']
         ranked = next(event for event in events if event['stage'] == 'ranked')
         assert ranked['suggested']['concept_id'] == measurement_concept.pk
         assert ranked['candidates'][0]['vector_distance'] == 0.1
