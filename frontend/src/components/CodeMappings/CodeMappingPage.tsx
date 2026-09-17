@@ -382,6 +382,7 @@ const TIP = {
   status_new:
     "A new mapping always starts as Proposed. Only org admins and staff can approve it once reviewed — approval is what rewrites the clinical rows already stored.",
   notes: "Why this decision was made, for the next curator who opens the row.",
+  ranker: "Which AI model ranks the candidates. Anthropic uses Claude, Jev uses the Typesafe SystemOne API. Both runs both concurrently and picks the higher-confidence winner.",
 } as const;
 
 function omopTableFor(reference: Reference, domainId: string): string {
@@ -495,7 +496,7 @@ export default function CodeMappingPage() {
   const [strategies, setStrategies] = useState({
     umls: true, lexical: true, vectors: true,
   });
-  const [rankingModel, setRankingModel] = useState<"anthropic" | "jev">("anthropic");
+  const [rankingModel, setRankingModel] = useState<"anthropic" | "jev" | "both">("anthropic");
   const [dialogMode, setDialogMode] = useState<"new" | "edit" | null>(null);
   const [selectedRow, setSelectedRow] = useState<CodeMappingRow | null>(null);
   const [form, setForm] = useState<MappingForm>(emptyForm);
@@ -1554,8 +1555,8 @@ export default function CodeMappingPage() {
           <button
             type="button"
             onClick={() => void runSuggest()}
-            disabled={suggesting || !hasRetrieval || !validSuggestionLimit}
-            title="Propose destinations for queued source codes on this tab."
+            disabled={suggesting || !hasRetrieval || !validSuggestionLimit || overallTab}
+            title={overallTab ? "Select a specific vocabulary tab to run suggestions." : "Propose destinations for queued source codes on this tab."}
             className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Sparkles size={13} />
@@ -1602,11 +1603,12 @@ export default function CodeMappingPage() {
             Ranker
             <select
               value={rankingModel}
-              onChange={(e) => setRankingModel(e.target.value as "anthropic" | "jev")}
+              onChange={(e) => setRankingModel(e.target.value as "anthropic" | "jev" | "both")}
               className="h-7 rounded-md border border-slate-300 px-1.5 text-xs"
             >
               <option value="anthropic">Anthropic</option>
               <option value="jev">Jev</option>
+              <option value="both">Both</option>
             </select>
           </label>
           <section
@@ -2016,13 +2018,7 @@ export default function CodeMappingPage() {
                       </label>
                       <HelpTip tip={TIP.search} />
                     </div>
-                    <div className="flex items-center gap-3">
-                      <div className="flex items-center gap-1">
-                        <label className="text-sm font-medium text-slate-700" htmlFor="code-mapping-search-vocabulary">
-                          Search vocabulary
-                        </label>
-                        <HelpTip tip={TIP.search_vocabulary} />
-                      </div>
+                    <div className="flex flex-wrap items-center gap-3">
                       {(["umls", "lexical", "vectors"] as const).map((key) => (
                         <div key={key} className="inline-flex items-center gap-1 text-xs text-slate-600">
                           <label className="inline-flex items-center gap-1">
@@ -2032,6 +2028,21 @@ export default function CodeMappingPage() {
                           <HelpTip tip={key === "umls" ? "Bridge the code to an equivalent concept through UMLS. A unique match wins after the other enabled searches finish." : key === "lexical" ? "Retrieve candidate destinations by matching names and synonyms." : "Find candidate destinations by meaning, including concepts whose names and synonyms do not match the source wording."} />
                         </div>
                       ))}
+                      <div className="inline-flex items-center gap-1 text-xs text-slate-600">
+                        <label className="inline-flex items-center gap-1">
+                          Ranker
+                          <select
+                            value={rankingModel}
+                            onChange={(e) => setRankingModel(e.target.value as "anthropic" | "jev" | "both")}
+                            className="h-7 rounded-md border border-slate-300 px-1.5 text-xs"
+                          >
+                            <option value="anthropic">Anthropic</option>
+                            <option value="jev">Jev</option>
+                            <option value="both">Both</option>
+                          </select>
+                        </label>
+                        <HelpTip tip={TIP.ranker} />
+                      </div>
                       <button
                         type="button"
                         onClick={() => void suggestCurrentCode()}
@@ -2071,21 +2082,25 @@ export default function CodeMappingPage() {
                         a scope a curator can widen, or re-pointing a minted
                         HK-* mapping at a standard concept would be impossible,
                         which is the whole point of the queue. */}
-                    <select
-                      id="code-mapping-search-vocabulary"
-                      title={TIP.search_vocabulary}
-                      value={searchVocabulary}
-                      onChange={(e) => {
-                        setSearchVocabulary(e.target.value);
-                        void searchConcepts(conceptSearchQuery, e.target.value);
-                      }}
-                      className="h-10 w-40 shrink-0 rounded-md border border-slate-300 px-2 text-sm text-slate-950"
-                    >
-                      <option value="">All vocabularies</option>
-                      {reference.destination_vocabularies.map((v) => (
-                        <option key={v.vocabulary_id} value={v.vocabulary_id}>{v.vocabulary_id}</option>
-                      ))}
-                    </select>
+                    <div className="flex items-center gap-1">
+                      <select
+                        id="code-mapping-search-vocabulary"
+                        aria-label="Search vocabulary"
+                        title={TIP.search_vocabulary}
+                        value={searchVocabulary}
+                        onChange={(e) => {
+                          setSearchVocabulary(e.target.value);
+                          void searchConcepts(conceptSearchQuery, e.target.value);
+                        }}
+                        className="h-10 w-40 shrink-0 rounded-md border border-slate-300 px-2 text-sm text-slate-950"
+                      >
+                        <option value="">All vocabularies</option>
+                        {reference.destination_vocabularies.map((v) => (
+                          <option key={v.vocabulary_id} value={v.vocabulary_id}>{v.vocabulary_id}</option>
+                        ))}
+                      </select>
+                      <HelpTip tip={TIP.search_vocabulary} />
+                    </div>
                   </div>
                   <div className="mt-2 max-h-40 overflow-y-auto rounded-md border border-slate-200">
                     {searchingConcepts && <div className="px-3 py-2 text-sm text-slate-500">Searching...</div>}

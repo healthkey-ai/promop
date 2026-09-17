@@ -189,7 +189,11 @@ DEFAULT_STRATEGIES = [STRATEGY_UMLS, STRATEGY_LEXICAL, STRATEGY_VECTORS]
 ALL_STRATEGIES = [*DEFAULT_STRATEGIES, STRATEGY_SEMANTIC]
 RANKING_MODEL_ANTHROPIC = 'claude-opus-5'
 RANKING_MODEL_JEV = 'jev'
-RANKING_MODELS = {'anthropic', 'jev'}
+RANKING_MODELS = {'anthropic', 'jev', 'both'}
+
+# Map Anthropic's qualitative confidence labels to numeric values for comparison
+# with Jev's probabilistic scores.
+ANTHROPIC_CONFIDENCE_MAP = {'high': 0.85, 'medium': 0.55, 'low': 0.25}
 DEFAULT_RANKING_MODEL = 'anthropic'
 # Backwards compat: old code that reads RANKING_MODEL gets the Anthropic model.
 RANKING_MODEL = RANKING_MODEL_ANTHROPIC
@@ -795,12 +799,12 @@ def rank_candidates(source_value, candidates, source_description='', *, source_c
                     require_model_selection=False):
     """Select from the full candidate pool and vocabulary evidence, without DB reads.
 
-    ``chosen`` is a candidate dict or None; ``note`` explains the choice for the
-    curator, including when the model was unavailable and the lexical order
-    stands.
+    Returns ``(chosen, note, alternatives)`` where *alternatives* is a list of
+    ``{concept_id, concept_name, confidence, ranker}`` dicts with numeric
+    confidence derived from the model's qualitative label.
     """
     if not candidates:
-        return None, 'No candidate concept scored above the similarity threshold.'
+        return None, 'No candidate concept scored above the similarity threshold.', None
 
     top = candidates[0]
     # Query expansion can introduce unsupported meaning. Those candidates need
@@ -834,7 +838,7 @@ def rank_candidates(source_value, candidates, source_description='', *, source_c
             len(candidates), type(error).__name__ if error else None,
             status_code, request_id, getattr(response, 'stop_reason', None),
         )
-        return fallback, f'{fallback_note} Details: {detail}'
+        return fallback, f'{fallback_note} Details: {detail}', None
 
     if not getattr(settings, 'ANTHROPIC_API_KEY', ''):
         return unavailable('missing_api_key', 'ANTHROPIC_API_KEY is not configured in the process performing ranking.')
@@ -915,7 +919,7 @@ def rank_candidates(source_value, candidates, source_description='', *, source_c
 
     chosen_id = verdict.get('concept_id')
     if chosen_id is None:
-        return None, f'No suitable concept: {verdict.get("reason", "")}'.strip()
+        return None, f'No suitable concept: {verdict.get("reason", "")}'.strip(), None
 
     chosen = next((c for c in candidates if c['concept_id'] == chosen_id), None)
     if chosen is None:
@@ -923,10 +927,21 @@ def rank_candidates(source_value, candidates, source_description='', *, source_c
         # the candidates were domain-scoped and validated, an arbitrary id is not.
         return unavailable('candidate_outside_pool', 'Anthropic selected a concept outside the candidate list.', response=response)
 
-    return chosen, (
-        f'{verdict.get("confidence", "unknown")} confidence: '
-        f'{verdict.get("reason", "")}'.strip()
-    )
+    confidence_label = verdict.get('confidence', 'unknown')
+    confidence_numeric = ANTHROPIC_CONFIDENCE_MAP.get(confidence_label)
+    note = f'{confidence_label} confidence: {verdict.get("reason", "")}'.strip()
+
+    # Build alternatives with numeric confidence so dual-ranker mode can compare.
+    alternatives = []
+    if confidence_numeric is not None:
+        alternatives.append({
+            'concept_id': chosen['concept_id'],
+            'concept_name': chosen.get('concept_name', ''),
+            'confidence': confidence_numeric,
+            'ranker': 'anthropic',
+        })
+
+    return chosen, note, alternatives
 
 
 def rank_candidates_jev(source_value, candidates, source_description='', *, source_context=None,
@@ -1027,6 +1042,7 @@ def rank_candidates_jev(source_value, candidates, source_description='', *, sour
                 'concept_id': c['concept_id'],
                 'concept_name': c.get('concept_name', ''),
                 'confidence': prob,
+                'ranker': 'jev',
             })
     # Sort alternatives by confidence descending.
     alternatives.sort(key=lambda a: a['confidence'], reverse=True)
@@ -1076,23 +1092,81 @@ def rank_candidates_dispatch(source_value, candidates, source_description='', *,
     """Route to the appropriate ranker based on *ranking_model*.
 
     Returns ``(chosen, note, alternatives)`` where *alternatives* is a list of
-    ``{concept_id, confidence}`` dicts when the Jev ranker is used, or None for
-    Anthropic.
+    ``{concept_id, concept_name, confidence, ranker}`` dicts.
+
+    When *ranking_model* is ``'both'``, runs Anthropic and Jev concurrently and
+    picks the winner with the higher confidence score.
     """
-    if ranking_model == 'jev':
-        return rank_candidates_jev(
-            source_value, candidates, source_description,
-            source_context=source_context,
-            require_model_selection=require_model_selection,
-        )
-    # Default: Anthropic.  rank_candidates returns (chosen, note); wrap to
-    # three-tuple for uniform contract.
-    chosen, note = rank_candidates(
-        source_value, candidates, source_description,
+    kwargs = dict(
         source_context=source_context,
         require_model_selection=require_model_selection,
     )
-    return chosen, note, None
+    if ranking_model == 'jev':
+        return rank_candidates_jev(
+            source_value, candidates, source_description, **kwargs,
+        )
+    if ranking_model == 'both':
+        return _rank_both(source_value, candidates, source_description, **kwargs)
+    # Default: Anthropic.
+    return rank_candidates(
+        source_value, candidates, source_description, **kwargs,
+    )
+
+
+def _rank_both(source_value, candidates, source_description, **kwargs):
+    """Run Anthropic and Jev concurrently, pick the higher-confidence winner."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def run_anthropic():
+        return rank_candidates(source_value, candidates, source_description, **kwargs)
+
+    def run_jev():
+        return rank_candidates_jev(source_value, candidates, source_description, **kwargs)
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = {
+            pool.submit(run_anthropic): 'anthropic',
+            pool.submit(run_jev): 'jev',
+        }
+        for future in as_completed(futures):
+            ranker = futures[future]
+            try:
+                results[ranker] = future.result()
+            except Exception:  # noqa: BLE001 - degrade, never fail
+                logger.warning('Dual-ranker %s failed.', ranker, exc_info=True)
+                results[ranker] = (None, f'{ranker} ranking failed.', None)
+
+    a_chosen, a_note, a_alts = results.get('anthropic', (None, '', None))
+    j_chosen, j_note, j_alts = results.get('jev', (None, '', None))
+
+    # Merge alternatives from both rankers.
+    combined_alts = list(a_alts or []) + list(j_alts or [])
+
+    def _best_confidence(chosen, alternatives):
+        """Return the numeric confidence for the chosen concept, or 0."""
+        if chosen is None or not alternatives:
+            return 0.0
+        cid = chosen['concept_id']
+        for a in alternatives:
+            if a['concept_id'] == cid:
+                return a.get('confidence', 0.0)
+        return 0.0
+
+    a_conf = _best_confidence(a_chosen, a_alts)
+    j_conf = _best_confidence(j_chosen, j_alts)
+
+    if j_chosen is not None and j_conf > a_conf:
+        winner, note = j_chosen, f'Jev wins ({j_conf:.0%} vs Anthropic {a_conf:.0%}). {j_note}'
+    elif a_chosen is not None:
+        note_suffix = f' (Anthropic {a_conf:.0%} vs Jev {j_conf:.0%})' if j_chosen else ''
+        winner, note = a_chosen, f'{a_note}{note_suffix}'
+    elif j_chosen is not None:
+        winner, note = j_chosen, j_note
+    else:
+        winner, note = None, f'Both rankers declined. Anthropic: {a_note} | Jev: {j_note}'
+
+    return winner, note, combined_alts
 
 
 def retrieval_pool(*, source_code, source_vocabulary_id, source_text, domain_id,
@@ -1354,7 +1428,7 @@ def suggest_source_code(*, source_vocabulary_id, source_code, source_text, omop_
         description or source_code, source_concept.pk if source_concept else None,
         min_similarity=MIN_TRIGRAM_SCORE,
     )
-    chosen, note = rank_candidates(
+    chosen, note, _alternatives = rank_candidates(
         source_code, candidates, source_description=description,
         source_context=build_source_context(
             source_code=source_code, vocabulary_id=source_vocabulary_id,
