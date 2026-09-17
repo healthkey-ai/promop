@@ -1117,3 +1117,78 @@ def test_the_batch_sentinel_is_typed_to_each_models_key(setup):
     # The nil UUID sorts below every generated one, so the first batch sees the
     # whole table rather than skipping rows.
     assert uuid_module.UUID(int=0) < uuid_module.uuid4()
+
+
+@pytest.fixture
+def trusted_professional(setup):
+    """A doctor at org A holding an organization trust into org B.
+
+    This is the shape that made a trust an egress authority: the trust is
+    granted so the professional can work with B's patients, and it also reached
+    subscription creation, which names where B's patient events are sent.
+    """
+    from omop_core.models import OrgTrust
+
+    org, other, person, user, subscription = setup
+    professional = Identity.objects.create_user(email='doctor@trusted.example')
+    GroupAccess.objects.create(identity=professional, org=other, role='doctor')
+    OrgTrust.objects.create(granting_org=org, trusted_org=other)
+    client = APIClient()
+    client.force_authenticate(user=professional)
+    return client, org, other, professional
+
+
+def test_a_trust_no_longer_reaches_subscription_creation(trusted_professional):
+    client, org, other, professional = trusted_professional
+    from omop_core.services.access import get_admin_orgs, get_direct_admin_orgs
+
+    # The trust still grants data access; it no longer grants egress config.
+    assert org in get_admin_orgs(professional)
+    assert org not in get_direct_admin_orgs(professional)
+    response = client.post('/api/v1/webhooks/subscriptions/', {
+        'organization': org.pk, 'url': 'https://attacker.example/collect',
+        'event_types': ['patient.changed'],
+    }, format='json')
+    assert response.status_code in (400, 403), response.data
+    assert not WebhookSubscription.objects.filter(url='https://attacker.example/collect').exists()
+
+
+def test_a_trust_cannot_redirect_or_delete_an_existing_subscription(trusted_professional):
+    client, org, other, professional = trusted_professional
+    subscription = WebhookSubscription.objects.get(organization=org)
+
+    # 403 when the caller administers nothing directly, 404 once the narrowed
+    # queryset is the only thing hiding the row — both are refusals, and which
+    # one fires is not a property worth pinning.
+    patched = client.patch(f'/api/v1/webhooks/subscriptions/{subscription.pk}/',
+                           {'url': 'https://attacker.example/collect'}, format='json')
+    assert patched.status_code in (403, 404), patched.data
+    assert client.delete(
+        f'/api/v1/webhooks/subscriptions/{subscription.pk}/').status_code in (403, 404)
+    subscription.refresh_from_db()
+    assert subscription.url == 'https://subscriber.example/events'
+    assert WebhookSubscription.objects.filter(pk=subscription.pk).exists()
+
+
+def test_a_trust_still_reads_the_subscriptions_it_could_always_see(trusted_professional):
+    client, org, other, professional = trusted_professional
+    listing = client.get('/api/v1/webhooks/subscriptions/')
+    assert listing.status_code == 200
+    rows = listing.data['results'] if isinstance(listing.data, dict) else listing.data
+    urls = [row['url'] for row in rows]
+    assert 'https://subscriber.example/events' in urls
+
+
+def test_a_direct_org_admin_still_administers_its_own_subscriptions(setup):
+    org, other, person, user, subscription = setup
+    client = APIClient()
+    client.force_authenticate(user=user)  # live org_admin grant on org
+    response = client.post('/api/v1/webhooks/subscriptions/', {
+        'organization': org.pk, 'url': 'https://partner.example/events',
+        'event_types': ['patient.changed'],
+    }, format='json')
+    assert response.status_code == 201, response.data
+    assert response.data['secret']
+    created = WebhookSubscription.objects.get(url='https://partner.example/events')
+    assert client.patch(f'/api/v1/webhooks/subscriptions/{created.pk}/',
+                        {'active': False}, format='json').status_code == 200

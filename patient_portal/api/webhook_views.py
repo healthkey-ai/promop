@@ -9,7 +9,7 @@ from django.utils import timezone
 from rest_framework import serializers, status, viewsets
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import action
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import SAFE_METHODS, AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.settings import api_settings
@@ -17,7 +17,7 @@ from rest_framework.throttling import SimpleRateThrottle
 from drf_spectacular.utils import extend_schema
 
 from omop_core.models import Organization, PatientRecord
-from omop_core.services.access import get_admin_orgs
+from omop_core.services.access import get_admin_orgs, get_direct_admin_orgs
 from patient_portal.models import InboundWebhookEvent, WebhookDelivery, WebhookSubscription
 from patient_portal.webhooks import (
     EVENT_TYPES, INBOUND_HANDLERS, compute_hmac_signature, validate_webhook_url,
@@ -38,8 +38,10 @@ class WebhookSubscriptionSerializer(serializers.ModelSerializer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         request = self.context.get('request')
+        # Writes only: a trust lets a professional work with another
+        # organization's patients, not point its event stream somewhere.
         self.fields['organization'].queryset = (
-            get_admin_orgs(request.user) if request else Organization.objects.none()
+            get_direct_admin_orgs(request.user) if request else Organization.objects.none()
         )
 
     def validate_url(self, value):
@@ -67,15 +69,22 @@ class WebhookManagementPermission(ScopedTokenPermission):
     entire point of the endpoint. Scopes cannot substitute: TokenClaims
     (Firebase/SAML) has no scope field at all, and a session has no token.
 
-    So the gate is get_admin_orgs, checked first and applying to every caller
+    So the gate is an admin-org set, checked first and applying to every caller
     including OAuth and service tokens; those two additionally go through the
-    scope model below. Note what that set actually contains: platform staff get
-    every organization, a live org_admin grant gets its own, and a non-patient
-    professional role reaches further organizations through organization and
-    domain trusts. It is the same authority that decides which subscriptions
-    the caller can see, so read and write do not diverge — but a trust is an
-    egress authority here, which is worth knowing when granting one. CSRF
-    enforcement on the viewset covers the session case, which is the one an
+    scope model below. Read and write use different sets, on purpose:
+
+      read  — get_admin_orgs: platform staff see every organization, a live
+              org_admin grant sees its own, and a non-patient professional role
+              reaches further organizations through organization and domain
+              trusts. Same authority that decides which patients they can work
+              with, so the subscription list matches the data they already see.
+      write — get_direct_admin_orgs: staff and direct org_admin grants only.
+              A trust is granted for data access; creating a subscription is
+              data-egress configuration, and create() returns the signing
+              secret. Extending a trust to that was not the intent of granting
+              one (docs/soc2/webhook-egress-authority.md).
+
+    CSRF enforcement on the viewset covers the session case, which is the one an
     attacker can drive from a page the admin visits.
     """
 
@@ -83,6 +92,8 @@ class WebhookManagementPermission(ScopedTokenPermission):
         if not request.user or not request.user.is_authenticated:
             return False
         if not get_admin_orgs(request.user).exists():
+            return False
+        if request.method not in SAFE_METHODS and not get_direct_admin_orgs(request.user).exists():
             return False
         if request.auth is None:
             return True
@@ -125,8 +136,13 @@ class WebhookSubscriptionViewSet(viewsets.ModelViewSet):
         return response
 
     def get_queryset(self):
+        # Reads follow the caller's full admin reach, so the list matches the
+        # data they already work with. Writes follow only the organizations they
+        # administer directly, so a trust cannot edit away or redirect another
+        # organization's egress configuration either — not just not create one.
+        resolve = get_admin_orgs if self.request.method in SAFE_METHODS else get_direct_admin_orgs
         return WebhookSubscription.objects.filter(
-            organization__in=get_admin_orgs(self.request.user),
+            organization__in=resolve(self.request.user),
         ).order_by('pk')
 
     def create(self, request, *args, **kwargs):

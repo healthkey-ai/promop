@@ -190,6 +190,24 @@ def get_admin_orgs(user) -> QuerySet:
     )
 
 
+def get_direct_admin_orgs(user) -> QuerySet:
+    """Organizations a user administers in their own right, trusts excluded.
+
+    ``get_admin_orgs`` answers "whose data may this user reach", and organization
+    and domain trusts widen it deliberately. Configuring data egress is a
+    different question: a trust is granted so a professional can work with
+    another organization's patients, not so they can point that organization's
+    event stream at a URL of their choosing. Callers that create or change an
+    egress configuration use this; callers that read use ``get_admin_orgs``.
+    """
+    if getattr(user, 'is_staff', False):
+        return Organization.objects.all()
+    return Organization.objects.filter(id__in={
+        path['org'].pk for path in get_admin_access_paths(user)
+        if path['source'] == 'org_grant'
+    })
+
+
 def has_org_admin_access(user, slug: str | None = None) -> bool:
     """Return True when the user may administer any org or a specific org slug."""
     admin_orgs = get_admin_orgs(user)
