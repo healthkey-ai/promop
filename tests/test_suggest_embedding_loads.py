@@ -112,6 +112,7 @@ def test_limited_snapshot_tracks_attempt_order(queue, encoder):
     precompute(limit=1)
     assert ConceptEmbedding.objects.filter(concept=first).exists()
     assert not ConceptEmbedding.objects.filter(concept=second).exists()
+    # The version stamp now includes the ranking model suffix.
     mapping.last_suggest_attempt = f'{SUGGESTION_MODEL_VERSION}-{DEFAULT_RANKING_MODEL}'
     mapping.save(update_fields=['last_suggest_attempt'])
     precompute(limit=1)
