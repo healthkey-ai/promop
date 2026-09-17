@@ -15085,36 +15085,37 @@ class OrgPatientSignupTest(TestCase):
         self.assertFalse(identity.is_superuser)
         self.assertEqual(client.session['_auth_user_id'], str(identity.pk))
         self.assertTrue(PatientUser.objects.filter(identity=identity).exists())
-        # Public demo org (allows_patient_signup=True) → org_admin role
+        # Public demo org (allows_patient_signup=True) → analyst role (read-only)
         self.assertTrue(
-            GroupAccess.objects.filter(identity=identity, org=self.org, role='org_admin').exists()
+            GroupAccess.objects.filter(identity=identity, org=self.org, role='analyst').exists()
         )
 
     def test_signup_private_org_gets_patient_role(self):
-        """Private org signup (via invitation/domain trust) assigns patient role."""
-        # Make a private org that allows signup only via invitation
+        """Private org signup (via domain trust) assigns patient role."""
+        from omop_core.models import OrgTrust
         private_org = Organization.objects.create(
-            name='Private Clinic', slug='private-clinic', allows_patient_signup=False,
+            name='Private Clinic', slug='private-clinic',
+            allows_patient_signup=False,
         )
-        # Simulate invitation-based access by directly setting allows_patient_signup
-        # for the signup flow.  The actual signup view checks invitation access
-        # separately, so we test the role assignment by temporarily enabling signup.
-        private_org.allows_patient_signup = True
-        private_org.save()
-        # This org is now public, so it should get analyst — reverse to test private
-        private_org.allows_patient_signup = False
-        private_org.save()
-
-        # We cannot call the endpoint for a private org without an invitation,
-        # so test the role logic directly via the GroupAccess creation pattern.
-        identity = Identity.objects.create_user(
-            email='private-test@test.com', password='Str0ng!Pass99',
+        # Grant domain trust so the endpoint allows signup without
+        # allows_patient_signup=True.
+        OrgTrust.objects.create(
+            granting_org=private_org,
+            trusted_domain='private-clinic.com',
         )
-        # Simulate what the view does for a private org
-        signup_role = 'org_admin' if private_org.allows_patient_signup else 'patient'
-        GroupAccess.objects.create(identity=identity, org=private_org, role=signup_role)
+        client = APIClient()
+        resp = client.post('/api/v1/orgs/private-clinic/patient-signup/', {
+            'email': 'user@private-clinic.com',
+            'password': 'Str0ng!Pass99',
+            'given_name': 'Private',
+            'family_name': 'User',
+        })
+        self.assertEqual(resp.status_code, 201)
+        identity = Identity.objects.get(email='user@private-clinic.com')
         self.assertTrue(
-            GroupAccess.objects.filter(identity=identity, org=private_org, role='patient').exists()
+            GroupAccess.objects.filter(
+                identity=identity, org=private_org, role='patient',
+            ).exists()
         )
 
     def test_demo_signup_user_sees_all_org_patients(self):

@@ -834,6 +834,18 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             # Org-admin access includes trust-derived admin orgs.
             admin_org_ids = list(get_admin_orgs(self.request.user).values_list('id', flat=True))
 
+            # Analyst org grants give read-only org-level visibility
+            # without admin or write powers.
+            analyst_org_ids = list(
+                active_grants.filter(
+                    org__isnull=False,
+                    role='analyst',
+                ).values_list('org_id', flat=True)
+            )
+            # Merge into admin_org_ids for the visibility filter — both
+            # grant org-level read access to PatientRecord.
+            all_visible_org_ids = list(set(admin_org_ids) | set(analyst_org_ids))
+
             # Group grants: see patients in those groups
             actor_group_ids = list(
                 active_grants.filter(group__isnull=False).values_list('group_id', flat=True)
@@ -844,15 +856,15 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 ).values_list('person_id', flat=True)
                 accessible_pids.update(group_pids)
 
-            if not accessible_pids and not admin_org_ids:
+            if not accessible_pids and not all_visible_org_ids:
                 return qs.none()
 
-            if admin_org_ids and accessible_pids:
+            if all_visible_org_ids and accessible_pids:
                 qs = qs.filter(
-                    Q(organization_id__in=admin_org_ids) | Q(person_id__in=accessible_pids)
+                    Q(organization_id__in=all_visible_org_ids) | Q(person_id__in=accessible_pids)
                 )
-            elif admin_org_ids:
-                qs = qs.filter(organization_id__in=admin_org_ids)
+            elif all_visible_org_ids:
+                qs = qs.filter(organization_id__in=all_visible_org_ids)
             else:
                 qs = qs.filter(person_id__in=accessible_pids)
         return qs
