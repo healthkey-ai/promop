@@ -21,6 +21,7 @@ from omop_core.models import (
 from omop_core.services.mapping_suggestions import (
     ALL_STRATEGIES,
     CANDIDATE_LIMIT,
+    DEFAULT_RANKING_MODEL,
     SUGGESTION_MODEL_VERSION,
     SUGGESTION_PROVENANCE,
     STRATEGY_LEXICAL,
@@ -32,6 +33,9 @@ from omop_core.services.mapping_suggestions import (
     umls_candidates,
     vector_rerank,
 )
+# The version stamp now includes the ranking model, so tests that set
+# last_suggest_attempt must use this compound value.
+_ATTEMPT_STAMP = f'{SUGGESTION_MODEL_VERSION}-{DEFAULT_RANKING_MODEL}'
 from omop_core.services.mapping_suggestions import suggest_mappings
 from omop_core.services.suggest_jobs import (
     FakeDispatcher as FakeSuggestDispatcher,
@@ -428,13 +432,13 @@ class TestSuggestableMappings:
     def test_a_declined_code_stays_eligible(self):
         """It has no destination, so it is still work to do."""
         queue_row('DECLINED', origin_system=SUGGESTION_PROVENANCE,
-                  last_suggest_attempt=SUGGESTION_MODEL_VERSION)
+                  last_suggest_attempt=_ATTEMPT_STAMP)
         assert len(suggestable_mappings('measurement')) == 1
 
     def test_gaps_follow_seen_even_when_this_model_already_tried_them(self):
         queue_row('DECLINED BUT BUSY', occurrence_count=900,
                   origin_system=SUGGESTION_PROVENANCE,
-                  last_suggest_attempt=SUGGESTION_MODEL_VERSION)
+                  last_suggest_attempt=_ATTEMPT_STAMP)
         queue_row('NEVER TRIED', occurrence_count=12)
         codes = [m.source_code for m in suggestable_mappings('measurement')]
         assert codes == ['DECLINED BUT BUSY', 'NEVER TRIED']
@@ -442,7 +446,7 @@ class TestSuggestableMappings:
     def test_a_declined_code_comes_round_again_once_the_tab_is_drained(self):
         queue_row('DECLINED', occurrence_count=900,
                   origin_system=SUGGESTION_PROVENANCE,
-                  last_suggest_attempt=SUGGESTION_MODEL_VERSION)
+                  last_suggest_attempt=_ATTEMPT_STAMP)
         assert [m.source_code for m in suggestable_mappings('measurement')] == ['DECLINED']
 
     def test_seen_outranks_model_version_for_gaps(self):
@@ -450,7 +454,7 @@ class TestSuggestableMappings:
                   last_suggest_attempt='v0.1')
         queue_row('THIS VERSION', occurrence_count=900,
                   origin_system=SUGGESTION_PROVENANCE,
-                  last_suggest_attempt=SUGGESTION_MODEL_VERSION)
+                  last_suggest_attempt=_ATTEMPT_STAMP)
         codes = [m.source_code for m in suggestable_mappings('measurement')]
         assert codes == ['THIS VERSION', 'OLD GUESS']
 
@@ -499,12 +503,12 @@ class TestSuggestableMappings:
     def test_gaps_by_seen_then_untried_replacements(self, measurement_concept):
         queue_row('GAP TRIED', occurrence_count=900,
                   origin_system=SUGGESTION_PROVENANCE,
-                  last_suggest_attempt=SUGGESTION_MODEL_VERSION)
+                  last_suggest_attempt=_ATTEMPT_STAMP)
         queue_row('GAP UNTRIED', occurrence_count=10)
         queue_row('ANSWERED TRIED', occurrence_count=900,
                   origin_system=SUGGESTION_PROVENANCE,
                   target_concept=measurement_concept,
-                  last_suggest_attempt=SUGGESTION_MODEL_VERSION)
+                  last_suggest_attempt=_ATTEMPT_STAMP)
         queue_row('ANSWERED UNTRIED', occurrence_count=10,
                   origin_system=SUGGESTION_PROVENANCE,
                   target_concept=measurement_concept)
@@ -753,7 +757,7 @@ class TestSuggestRunLifecycle:
     def test_log_snapshots_order_live_source_and_chosen_destination(self, monkeypatch, measurement_concept):
         from omop_core.models import SuggestRun
         busy = queue_row('BUSY', occurrence_count=900, origin_system='HT-One',
-                         last_suggest_attempt=SUGGESTION_MODEL_VERSION)
+                         last_suggest_attempt=_ATTEMPT_STAMP)
         queue_row('QUIET', occurrence_count=1)
         chosen = {
             'concept_id': measurement_concept.pk,
@@ -1182,7 +1186,7 @@ class TestPipelineIntegration:
         assert row.target_concept_id is None
         assert row.origin_system == 'hk-labs'
         assert row.suggestion_model_version == ''
-        assert row.last_suggest_attempt == SUGGESTION_MODEL_VERSION, (
+        assert row.last_suggest_attempt == _ATTEMPT_STAMP, (
             'but it must still record that it tried, or it retries for ever'
         )
 
@@ -1288,7 +1292,7 @@ class TestSourceEnrichment:
 
         mapping = SourceCodeConceptMapping.objects.get(source_code='2345-7')
         assert mapping.notes == 'waiting on lab confirmation'
-        assert mapping.last_suggest_attempt == SUGGESTION_MODEL_VERSION, (
+        assert mapping.last_suggest_attempt == _ATTEMPT_STAMP, (
             'the run still records that it tried'
         )
 

@@ -479,18 +479,21 @@ def vocabulary_aliases(source_vocabulary_id):
 
 def suggestable_mappings(omop_table=None, *, source_vocabulary_id=None,
                          min_occurrences=DEFAULT_MIN_OCCURRENCES,
-                         limit=None, resuggest=False):
+                         limit=None, resuggest=False,
+                         ranking_model=DEFAULT_RANKING_MODEL):
     """The rows a run will work through, at most *limit* of them."""
     rows = suggestable_queryset(
         omop_table, source_vocabulary_id=source_vocabulary_id,
         min_occurrences=min_occurrences, resuggest=resuggest,
+        ranking_model=ranking_model,
     )
     return list(rows[:limit] if limit else rows)
 
 
 def suggestable_queryset(omop_table=None, *, source_vocabulary_id=None,
                          min_occurrences=DEFAULT_MIN_OCCURRENCES,
-                         resuggest=False):
+                         resuggest=False,
+                         ranking_model=DEFAULT_RANKING_MODEL):
     """The queue rows on one tab that a Suggest run is allowed to write to.
 
     **Every row on the tab with no destination yet.**  That is the whole default
@@ -547,11 +550,12 @@ def suggestable_queryset(omop_table=None, *, source_vocabulary_id=None,
         rows = rows.filter(target_concept__isnull=True)
     if min_occurrences > 1:
         rows = rows.filter(occurrence_count__gte=min_occurrences)
-    return _suggestable_queryset_ordered(rows)
+    return _suggestable_queryset_ordered(rows, ranking_model=ranking_model)
 
 
-def _suggestable_queryset_ordered(rows):
+def _suggestable_queryset_ordered(rows, *, ranking_model=DEFAULT_RANKING_MODEL):
     """Apply the run order. Split out so a caller can count without fetching."""
+    version_stamp = f'{SUGGESTION_MODEL_VERSION}-{ranking_model}'
     return rows.annotate(
         has_destination=Case(
             When(target_concept__isnull=True, then=Value(0)),
@@ -564,7 +568,7 @@ def _suggestable_queryset_ordered(rows):
             output_field=IntegerField(),
         ),
         already_tried=Case(
-            When(last_suggest_attempt=SUGGESTION_MODEL_VERSION, then=Value(1)),
+            When(last_suggest_attempt=version_stamp, then=Value(1)),
             default=Value(0),
             output_field=IntegerField(),
         ),
@@ -1451,6 +1455,7 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
     mappings = suggestable_mappings(
         omop_table, source_vocabulary_id=source_vocabulary_id,
         min_occurrences=min_occurrences, limit=limit, resuggest=resuggest,
+        ranking_model=ranking_model,
     )
 
     def report(stage, done):
@@ -1587,7 +1592,8 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
         # Recorded on every row the run examined, so the next run does not
         # re-retrieve and re-rank the same codes. Says nothing about whether a
         # suggestion was made -- see the field's own note on the model.
-        mapping.last_suggest_attempt = SUGGESTION_MODEL_VERSION
+        # Include the ranking model so switching rankers gives a fresh queue.
+        mapping.last_suggest_attempt = f'{SUGGESTION_MODEL_VERSION}-{ranking_model}'
         mapping.suggest_strategy = job['strategy_used'] or ''
         mapping.umls_cui = job['umls_cui'] or ''
         fields = ['last_suggest_attempt', 'suggest_strategy', 'umls_cui', 'updated_at']
