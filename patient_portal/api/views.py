@@ -8489,9 +8489,9 @@ def mapping_stats(request):
 
     GET /api/v1/mapping-stats/
     Returns counts for field mappings, code mappings, and therapy reference data.
-    Restricted to staff or org_admin users.
+    Any professional role (staff, org_admin, doctor, analyst) can view.
     """
-    if not has_org_admin_access(request.user):
+    if not has_professional_access(request.user):
         return Response({'detail': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldConceptMapping
