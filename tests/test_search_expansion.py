@@ -60,10 +60,10 @@ def test_rewrite_recovers_missing_candidate_and_keeps_original_source(initial_hi
 
 
 def test_no_shortcut_for_close_cosine_score(monkeypatch, llm):
-    target = candidate(ConceptFactory()) | {'retrieval': 'semantic', 'semantic_score': 0.9999}
+    target = candidate(ConceptFactory()) | {'retrieval': 'vectors', 'semantic_score': 0.9999}
     monkeypatch.setattr(suggest, 'semantic_candidates', Mock(return_value=[target]))
     llm.messages.create.return_value = select(target['concept_id'])
-    result = suggest.suggest_one_mapping('LOCAL', '', 'measurement', strategies=['semantic'])
+    result = suggest.suggest_one_mapping('LOCAL', '', 'measurement', strategies=['vectors'])
     assert result['suggested']['concept_id'] == target['concept_id']
     assert result['query_expansion'] is None
     assert llm.messages.create.call_count == 1

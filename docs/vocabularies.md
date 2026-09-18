@@ -36,7 +36,7 @@ loads the vocabulary tables, and publishes a `vocabulary_release` manifest.
 [Open the supplied vocabulary folder](https://drive.google.com/drive/u/0/folders/1HoRWGepqcH3pMKK03KNb1oWpaVs0Avl7).
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py load_athena_vocabularies --gdrive
 ```
 
@@ -44,7 +44,7 @@ To load a specific Google Drive file instead of the first zip in the folder,
 pass its Drive URL:
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py load_athena_vocabularies --gdrive "https://drive.google.com/file/d/<file-id>/view"
 ```
 
@@ -70,7 +70,7 @@ Extension drug classes, and LOINC concepts in the `Measurement`, `Observation`,
 Load the downloaded zip directly:
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py load_athena_vocabularies \
     --archive ~/Downloads/vocabulary_download_v5.zip
 ```
@@ -78,7 +78,7 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
 If you have already extracted the zip, load the extracted directory instead:
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py load_athena_vocabularies \
     --path ~/Downloads/vocabulary_download_v5
 ```

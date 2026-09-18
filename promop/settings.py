@@ -275,6 +275,9 @@ AUTH_USER_MODEL = "patient_portal.Identity"
 # if it times out. Model loading/encoding is outside this database timeout.
 SUGGEST_SEMANTIC_TIMEOUT_MS = max(1, int(os.environ.get('SUGGEST_SEMANTIC_TIMEOUT_MS', '3000')))
 
+# How long a curator's edit lock on a code mapping stays active (minutes).
+MAPPING_LOCK_TIMEOUT_MINUTES = max(1, int(os.environ.get('MAPPING_LOCK_TIMEOUT_MINUTES', '15')))
+
 AUTHENTICATION_BACKENDS = [
     "patient_portal.backends.EmailBackend",
 ]
@@ -438,6 +441,8 @@ service_credentials(SERVICE_AUTH_TOKENS, SERVICE_AUTH_TOKEN, SERVICE_AUTH_SCOPES
 # because a Suggest button that returns nothing when a third party is down is
 # worse than one that returns a guess a curator can correct.
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+JEV_API_KEY = os.environ.get("JEV_API_KEY", "")
+JEV_API_URL = os.environ.get("JEV_API_URL", "https://api.typesafe.ai/v1/systemone")
 
 _auth_classes = [
     'patient_portal.api.authentication.ServiceTokenAuthentication',

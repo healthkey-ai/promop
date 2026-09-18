@@ -11,15 +11,35 @@ against PRomop `a5e42c5`, the local CancerBot option definitions, and read-only
 queries of staging reference/vocabulary tables. This document specifies the
 implementation work; it does not approve mappings or change staging data.
 
-## Current delivery status — 2026-09-14, after PR #1321
+## Current delivery status — 2026-09-17
 
-The active inventory work is [draft PR #1284](https://github.com/healthkey-ai/promop/pull/1284),
-on `feat/1223-next`, at checkpoint `0572098`. The status and inventory evidence
-below describe that draft branch. This documentation update does not merge its
-implementation or generated inventory into `dev`. The portable implementation
-checkpoint integrates dev through `0c655fa`, including
-FLIPI/GELF assessments, the PALB2 naming correction and the deployment migration
-repairs. Earlier schema/runtime work remains preserved separately on
+### Recently completed
+
+- **PR #1284** (inventory reconciliation) is **merged** into `dev`. The
+  generated inventory and CancerBot reference evidence are on `dev`.
+- **Provenance backfill** (migration 0239, [PR #1384](https://github.com/healthkey-ai/promop/pull/1384)):
+  all 314 blank-provenance `FieldConceptMapping` rows set to `system_generated`.
+  Applied to staging; zero blank-provenance rows remain.
+- **Curation fixture export/import** (PR #1384): `dump_field_curation` and
+  `load_field_curation` management commands, checked-in
+  `omop_core/data/field_curation_v1.json` (314 mappings, 262 choices, 12
+  formulas, 1 synonym), and migration 0240 that auto-seeds the fixture on
+  `migrate`. Migration 0240 is additive: it filters out existing rows by
+  natural key so curator decisions are never overwritten. Applied to staging
+  (no-op since all rows existed).
+- **Merge migration 0241** ([PR #1401](https://github.com/healthkey-ai/promop/pull/1401)):
+  resolved conflict between the concurrent `0239_add_ranking_model_to_suggest_run`
+  and `0239_backfill_field_mapping_provenance`.
+- **#1227** (repair BC staging/pathology/test mappings) is **closed**.
+
+### Previous milestones
+
+[PR #1321](https://github.com/healthkey-ai/promop/pull/1321),
+merged as `d1035ab`: the release preflight, scoped TP53 cache reconciliation,
+authenticated smoke runner and updated RC scope are implemented. Its canonical
+Genomics plan is now [genomics_plan.md](genomics_plan.md).
+
+Earlier schema/runtime work remains preserved separately on
 `feat/field-value-concept-mappings`; do not replace upstream ownership contracts
 with that older implementation without review.
 
@@ -82,12 +102,10 @@ the traced historical metadata helper; coordinate #461/#623 before bulk approval
 
 ### Work in progress and next steps
 
-Continue in the existing isolated `feat/1223-next` worktree and update PR #1284.
-Preserve the earlier implementation on `feat/field-value-concept-mappings` and
-unrelated local changes. The [architecture](field_concept_mapping_architecture.md),
-[inventory instructions](https://github.com/healthkey-ai/promop/blob/0572098af4debbab93569842b10d8dd1d08a1ad0/docs/field-mapping-inventory/README.md), coverage and manifest
-are the current references. CancerBot reference replay is portable and no longer
-depends on obtaining another export or transferring a chat.
+PR #1284 is merged. The [architecture](field_concept_mapping_architecture.md),
+[inventory instructions](field-mapping-inventory/README.md), coverage and manifest
+are the current references on `dev`. CancerBot reference replay is portable and
+no longer depends on obtaining another export or transferring a chat.
 
 1. Finish the **field and enumerated-value inventory (#1223)**. Source collection
    and source routing are accounted for. Complete the semantic acceptance
@@ -203,37 +221,19 @@ AGENTS.md rule and require no application tests. Keep unfinished issues open.
 
 ### Continue implementation on another machine
 
-Use the latest `dev` copy of this plan and the pushed **`0572098`** checkpoint on
-`origin/feat/1223-next` in [draft PR #1284](https://github.com/healthkey-ai/promop/pull/1284).
-All generated inventory and CancerBot reference evidence described above is
-pushed and linked at that immutable revision. The older
-`feat/field-value-concept-mappings` branch is preserved for later review;
-informational PR #1235 remains closed and unmerged.
+PR #1284 is merged into `dev`. All generated inventory and CancerBot reference
+evidence is on `dev`. The older `feat/field-value-concept-mappings` branch is
+preserved for later review; informational PR #1235 remains closed and unmerged.
 
-On a fresh machine where the local feature branch does not yet exist:
-
-```sh
-git fetch origin
-git worktree add --track -b feat/1223-next ../promop-fcm-next origin/feat/1223-next
-cd ../promop-fcm-next
-git merge origin/dev
-```
-
-If the branch already exists, use its existing worktree and preserve local
-changes. Resolve the plan overlap by keeping current dev's RC scope, current
-status and standing docs-only rules. Review #1321's changes to
-`patient_record_service.py`, the TP53 commands and renamed Genomics plan before
-reusing older runtime work. Update the existing draft PR #1284; do not merge its
-unfinished implementation merely to transfer context.
-
-Read `AGENTS.md`, `CLAUDE.md`, this plan, the field mapping architecture, the
-pinned inventory README/coverage/manifest and `docs/genomics_plan.md` first.
-CancerBot source is available at `~/cancerbot` on the prior machine; its pinned
-revision and hashes are in the manifest. The checked-in reference snapshot is
-replayable without a fresh database capture. A full candidate refresh needs the
-privately configured reference/vocabulary connection. Credentials and `.env`
-are not committed; request missing credentials if a needed environment is not
-available. Tests must use local PostgreSQL, never CancerBot or staging.
+New implementation work should branch from current `dev`. Read `AGENTS.md`,
+`CLAUDE.md`, this plan, the field mapping architecture, the inventory
+README/coverage/manifest and `docs/genomics_plan.md` first. CancerBot source
+is available at `~/cancerbot` on the prior machine; its pinned revision and
+hashes are in the manifest. The checked-in reference snapshot is replayable
+without a fresh database capture. A full candidate refresh needs the privately
+configured reference/vocabulary connection. Credentials and `.env` are not
+committed; request missing credentials if a needed environment is not available.
+Tests must use local PostgreSQL, never CancerBot or staging.
 
 **Immediate next FCM task: finish the #1223 acceptance evidence.** The pushed
 snapshot accounts for sources and routing, but the following review additions
@@ -873,7 +873,7 @@ coordinate includes #1076 (disease mapping contracts), #1069 (aliases), #1071
 | [#1224](https://github.com/healthkey-ai/promop/issues/1224) | Field mapper: add stable scoped choices and reviewed value-to-concept mappings | #1223 |
 | [#1225](https://github.com/healthkey-ai/promop/issues/1225) | Field mapper: curate answer concepts in the existing choice editor and APIs | #1224 |
 | [#1226](https://github.com/healthkey-ai/promop/issues/1226) | Project and read back approved field-value concepts through the existing backend save flow | #1224 |
-| [#1227](https://github.com/healthkey-ai/promop/issues/1227) | Repair breast cancer staging, pathology and test metadata mappings and extraction (#21) | #1223, #1226 |
+| [#1227](https://github.com/healthkey-ai/promop/issues/1227) | ~~Repair breast cancer staging, pathology and test metadata mappings and extraction (#21)~~ | **Closed** |
 | [#1228](https://github.com/healthkey-ai/promop/issues/1228) | Seed missing MM, FL, CLL and shared field questions and all enumerated answer mappings | #1223, #1224, #1226 |
 | [#1229](https://github.com/healthkey-ai/promop/issues/1229) | Map genetic catalog values to Athena concepts with gene and variant context | #1223, #1224, #1226 |
 | [#1230](https://github.com/healthkey-ai/promop/issues/1230) | Expose therapy catalog mapping coverage and resolve gaps using existing regimen/component/class tables | #1223, #1224 |

@@ -81,6 +81,9 @@ _QUARANTINE_TARGETS = {
     'drug_exposure': ('HK-Drug', 'Drug', 'Drug', 'hkd'),
     'procedure': ('HK-Procedure', 'Procedure', 'Procedure', 'hkp'),
 }
+_QUARANTINE_VOCABULARIES: frozenset[str] = frozenset(
+    vocabulary_id for vocabulary_id, *_ in _QUARANTINE_TARGETS.values()
+)
 
 
 # What makes two rows the same event, per table. Mirrors the bulk write path's
@@ -263,6 +266,69 @@ def _effective_direct_mapping(*, source_vocabulary_id, source_code, concept, omo
         ).select_related('target_concept').get()
 
 
+def _promote_if_loaded(
+    pending: SourceCodeConceptMapping, source_vocabulary_id: str, source_code: str,
+) -> SourceCodeConceptMapping | None:
+    """Promote a proposal that was queued only because its vocabulary was missing.
+
+    Import writes a placeholder or an empty gap when the vocabulary is not
+    loaded. Without this the queue row blocks the direct lookup forever, so a
+    later vocabulary load never reaches the code. Returns the promoted mapping,
+    or None when the row must stay in the queue.
+    """
+    if not source_vocabulary_id or not _waiting_for_vocabulary(pending):
+        return None
+    concept = _direct_concept(source_vocabulary_id, source_code)
+    if not _usable_destination(concept, pending.omop_table):
+        return None
+    with transaction.atomic():
+        mapping = (
+            SourceCodeConceptMapping.objects.select_for_update(of=('self',))
+            .select_related('target_concept').filter(pk=pending.pk).first()
+        )
+        # A curator may have rejected or edited the row since it was read.
+        if mapping is None or not _waiting_for_vocabulary(mapping):
+            return None
+        mapping.source_concept = concept
+        mapping.target_concept = concept
+        mapping.destination_vocabulary_id = concept.vocabulary_id or ''
+        mapping.domain_id = concept.domain_id
+        mapping.source = 'Athena'
+        mapping.status = 'approved'
+        mapping.origin_system = 'athena-direct'
+        mapping.save(update_fields=[
+            'source_concept', 'target_concept', 'destination_vocabulary_id',
+            'domain_id', 'source', 'status', 'origin_system', 'updated_at',
+        ])
+    return mapping
+
+
+def _waiting_for_vocabulary(mapping: SourceCodeConceptMapping) -> bool:
+    """True for an untouched import proposal holding only a placeholder or a gap."""
+    if mapping.status != 'proposed' or mapping.origin != 'import':
+        return False
+    if mapping.reviewer_id is not None or mapping.suggested_target_concept_id is not None:
+        return False
+    target = mapping.target_concept
+    return target is None or (
+        target.source == SOURCE_HEALTHKEY and target.vocabulary_id in _QUARANTINE_VOCABULARIES
+    )
+
+
+def _usable_destination(concept: Concept | None, omop_table: str) -> bool:
+    """A standard valid concept in the domain of the table the rows are written to.
+
+    Non-standard hits like an RxNorm Brand Name and cross-domain hits like a
+    LOINC Observation code for a measurement stay with a curator.
+    """
+    return (
+        concept is not None
+        and concept.standard_concept == 'S'
+        and not concept.invalid_reason
+        and concept.domain_id == _DOMAIN_FOR_TABLE.get(normalize_omop_table(omop_table))
+    )
+
+
 def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
                         source_text='', source_system='fhir-upload'):
     """Resolve an inbound source code to a destination concept.
@@ -289,8 +355,11 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
     pending = SourceCodeConceptMapping.objects.filter(
         source_vocabulary_id=source_vocabulary_id or '',
         source_code__iexact=source_code[:SOURCE_CODE_MAX], status='proposed',
-    ).first()
+    ).select_related('target_concept').first()
     if pending is not None:
+        promoted = _promote_if_loaded(pending, source_vocabulary_id, source_code)
+        if promoted is not None:
+            return promoted.target_concept, promoted
         return None, _record_proposal(
             source_vocabulary_id=source_vocabulary_id,
             source_code=source_code,

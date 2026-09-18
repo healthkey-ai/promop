@@ -15056,6 +15056,9 @@ class OrgPatientSignupTest(TestCase):
     """Test the public patient self-signup endpoint."""
 
     def setUp(self):
+        from django.core.cache import cache
+        # DRF throttle state lives in the cache and leaks between tests.
+        cache.clear()
         self.org = Organization.objects.create(
             name='Signup Org', slug='signup-org', allows_patient_signup=True,
         )
@@ -15065,7 +15068,11 @@ class OrgPatientSignupTest(TestCase):
 
     def test_signup_creates_account(self):
         from patient_portal.models import PatientUser
-        resp = APIClient().post('/api/v1/orgs/signup-org/patient-signup/', {
+        client = APIClient()
+        directory = client.get('/api/v1/orgs/signup-directory/', {'email': 'self-signup@test.com'})
+        self.assertEqual(directory.status_code, 200)
+        self.assertIn({'name': self.org.name, 'slug': self.org.slug}, directory.data)
+        resp = client.post('/api/v1/orgs/signup-org/patient-signup/', {
             'email': 'self-signup@test.com',
             'password': 'Str0ng!Pass99',
             'given_name': 'Test',
@@ -15077,10 +15084,72 @@ class OrgPatientSignupTest(TestCase):
 
         identity = Identity.objects.get(email='self-signup@test.com')
         self.assertTrue(identity.has_usable_password())
+        self.assertFalse(identity.is_staff)
+        self.assertFalse(identity.is_superuser)
+        self.assertEqual(client.session['_auth_user_id'], str(identity.pk))
         self.assertTrue(PatientUser.objects.filter(identity=identity).exists())
         self.assertTrue(
-            GroupAccess.objects.filter(identity=identity, org=self.org, role='patient').exists()
+            GroupAccess.objects.filter(identity=identity, org=self.org, role='analyst').exists()
         )
+
+    def test_signup_private_org_gets_patient_role(self):
+        """Private org signup (via domain trust) assigns patient role."""
+        from omop_core.models import OrgTrust
+        private_org = Organization.objects.create(
+            name='Private Clinic', slug='private-clinic',
+            allows_patient_signup=False,
+        )
+        # Grant domain trust so the endpoint allows signup without
+        # allows_patient_signup=True.
+        OrgTrust.objects.create(
+            granting_org=private_org,
+            trusted_domain='private-clinic.com',
+        )
+        client = APIClient()
+        resp = client.post('/api/v1/orgs/private-clinic/patient-signup/', {
+            'email': 'user@private-clinic.com',
+            'password': 'Str0ng!Pass99',
+            'given_name': 'Private',
+            'family_name': 'User',
+        })
+        self.assertEqual(resp.status_code, 201)
+        identity = Identity.objects.get(email='user@private-clinic.com')
+        self.assertTrue(
+            GroupAccess.objects.filter(
+                identity=identity, org=private_org, role='patient',
+            ).exists()
+        )
+
+    def test_demo_signup_user_sees_all_org_patients(self):
+        """User who signs up to a public demo org can see all org patients."""
+        # Create an existing patient in the demo org
+        person_existing = Person.objects.create(person_id=77701)
+        existing_record = PatientRecord.objects.create(
+            person=person_existing, organization=self.org,
+        )
+
+        # Sign up a new user
+        client = APIClient()
+        resp = client.post('/api/v1/orgs/signup-org/patient-signup/', {
+            'email': 'demo-viewer@test.com',
+            'password': 'Str0ng!Pass99',
+            'given_name': 'Demo',
+            'family_name': 'Viewer',
+        })
+        self.assertEqual(resp.status_code, 201)
+
+        # The signed-up user should see both their own record and existing ones
+        identity = Identity.objects.get(email='demo-viewer@test.com')
+        client.force_authenticate(user=identity)
+        list_resp = client.get('/api/patient-info/')
+        self.assertEqual(list_resp.status_code, 200)
+        results = (
+            list_resp.data.get('results', list_resp.data)
+            if isinstance(list_resp.data, dict) else list_resp.data
+        )
+        visible_ids = {r['id'] for r in results}
+        self.assertIn(existing_record.id, visible_ids)
+        self.assertGreaterEqual(len(visible_ids), 2)
 
     def test_signup_disabled_returns_403(self):
         resp = APIClient().post('/api/v1/orgs/no-signup-org/patient-signup/', {
@@ -15336,9 +15405,9 @@ class OrgSignupDirectoryTest(TestCase):
         resp = APIClient().get(self.URL)
         self.assertEqual(set(resp.data[0].keys()), {'name', 'slug'})
 
-    def test_email_filters_to_pending_invitations_and_trusted_domains(self):
+    def test_email_includes_public_orgs_pending_invitations_and_trusted_domains(self):
         invited = Organization.objects.get(slug='closed-clinic')
-        trusted = Organization.objects.get(slug='zeta-clinic')
+        trusted = Organization.objects.create(name='Trusted Clinic', slug='trusted-clinic')
         OrgInvitation.objects.create(
             org=invited, email='member@trusted.example', role='patient',
             token='b' * 64, expires_at=timezone.now() + timedelta(days=7),
@@ -15348,13 +15417,54 @@ class OrgSignupDirectoryTest(TestCase):
         resp = APIClient().get(f'{self.URL}?email=member@trusted.example')
 
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual([org['slug'] for org in resp.data], ['closed-clinic', 'zeta-clinic'])
+        self.assertEqual([org['slug'] for org in resp.data], [
+            'alpha-clinic', 'closed-clinic', 'trusted-clinic', 'zeta-clinic',
+        ])
+
+    def test_unrelated_email_still_lists_public_demo_orgs(self):
+        resp = APIClient().get(self.URL, {'email': 'visitor@unrelated.example'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(list(resp.data), [
+            {'name': 'Alpha Clinic', 'slug': 'alpha-clinic'},
+            {'name': 'Zeta Clinic', 'slug': 'zeta-clinic'},
+        ])
+
+    def test_email_does_not_expose_inactive_or_ineligible_private_orgs(self):
+        email = 'visitor@unrelated.example'
+        for slug, state in [('closed-clinic', 'expired'), ('retired-clinic', 'active')]:
+            OrgInvitation.objects.create(
+                org=Organization.objects.get(slug=slug), email=email, role='patient',
+                token=slug.ljust(64, 'x'),
+                expires_at=timezone.now() + timedelta(days=-1 if state == 'expired' else 1),
+            )
+        OrgTrust.objects.create(
+            granting_org=Organization.objects.get(slug='retired-clinic'),
+            trusted_domain='unrelated.example',
+        )
+        resp = APIClient().get(self.URL, {'email': email})
+        self.assertEqual([org['slug'] for org in resp.data], ['alpha-clinic', 'zeta-clinic'])
+
+    def test_public_org_matching_multiple_access_paths_is_listed_once(self):
+        org = Organization.objects.get(slug='alpha-clinic')
+        OrgTrust.objects.create(granting_org=org, trusted_domain='trusted.example')
+        for number in range(2):
+            OrgInvitation.objects.create(
+                org=org, email=f'member{number}@trusted.example', role='patient',
+                token=str(number) * 64, expires_at=timezone.now() + timedelta(days=1),
+            )
+        resp = APIClient().get(self.URL, {'email': ' MEMBER0@TRUSTED.EXAMPLE '})
+        self.assertEqual([org['slug'] for org in resp.data], ['alpha-clinic', 'zeta-clinic'])
 
     def test_empty_when_no_org_allows_signup(self):
         Organization.objects.all().update(allows_patient_signup=False)
         resp = APIClient().get(self.URL)
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(list(resp.data), [])
+
+    def test_disabling_public_demo_access_removes_org_for_unrelated_email(self):
+        Organization.objects.filter(slug='alpha-clinic').update(allows_patient_signup=False)
+        resp = APIClient().get(self.URL, {'email': 'visitor@unrelated.example'})
+        self.assertEqual([org['slug'] for org in resp.data], ['zeta-clinic'])
 
     def test_does_not_shadow_org_detail_route(self):
         """A real org slugged 'signup-directory' must not break the directory URL."""
@@ -20942,7 +21052,25 @@ class CodeMappingApiTest(TestCase):
             {'reviewed C90.00', 'reviewed MULTIPLE MYELOMA'},
         )
 
-    def test_delete_removes_one_mapping_and_leaves_the_sibling(self):
+    def test_delete_without_a_destination_removes_one_row_and_leaves_the_sibling(self):
+        """A queue entry with nothing to clear is still deleted outright.
+
+        #1441 made DELETE clear a destination rather than remove the row, but
+        only when there is a destination to clear.
+        """
+        self.client.force_authenticate(user=self.staff)
+        sibling = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='ICD10CM',
+            source_code='C90.00',
+            omop_table='measurement',
+        )
+        resp = self.client.delete(f'/api/v1/code-mappings/{sibling.id}/')
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(SourceCodeConceptMapping.objects.filter(id=sibling.id).exists())
+        self.assertTrue(SourceCodeConceptMapping.objects.filter(id=self.mapping.id).exists())
+
+    def test_delete_with_a_destination_clears_it_and_leaves_the_sibling(self):
+        """The row stays in the queue so it can receive new proposals."""
         self.client.force_authenticate(user=self.staff)
         sibling = SourceCodeConceptMapping.objects.create(
             source_vocabulary_id='ICD10CM',
@@ -20950,10 +21078,14 @@ class CodeMappingApiTest(TestCase):
             target_concept=self.standard,
             destination_vocabulary_id='LOINC',
             omop_table='measurement',
+            status='approved',
         )
         resp = self.client.delete(f'/api/v1/code-mappings/{sibling.id}/')
-        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
-        self.assertFalse(SourceCodeConceptMapping.objects.filter(id=sibling.id).exists())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        sibling.refresh_from_db()
+        self.assertIsNone(sibling.target_concept_id)
+        self.assertEqual(sibling.destination_vocabulary_id, '')
+        self.assertEqual(sibling.status, 'proposed')
         self.assertTrue(SourceCodeConceptMapping.objects.filter(id=self.mapping.id).exists())
 
     def test_blank_source_systems_stay_distinct(self):
@@ -21604,6 +21736,182 @@ class CodeMappingResolutionTest(TestCase):
         self.assertEqual(
             SourceCodeConceptMapping.objects.get(source_code='MPS').status, 'approved',
         )
+
+
+class CodeMappingLoadedSinceProposalTest(TestCase):
+    """A queue row written because a vocabulary was missing yields once it loads."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.drug_domain, _ = Domain.objects.get_or_create(
+            domain_id='Drug', defaults={'domain_name': 'Drug', 'domain_concept_id': 13},
+        )
+        cls.measurement_domain, _ = Domain.objects.get_or_create(
+            domain_id='Measurement',
+            defaults={'domain_name': 'Measurement', 'domain_concept_id': 21},
+        )
+        cls.rxnorm, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='RxNorm',
+            defaults={'vocabulary_name': 'RxNorm', 'vocabulary_reference': 'x',
+                      'vocabulary_version': '2026', 'vocabulary_concept_id': 0},
+        )
+        cls.loinc, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='LOINC',
+            defaults={'vocabulary_name': 'LOINC', 'vocabulary_reference': 'x',
+                      'vocabulary_version': '2.80', 'vocabulary_concept_id': 0},
+        )
+        for class_id in ('Quant Clinical Drug', 'Brand Name', 'Lab Test'):
+            ConceptClass.objects.get_or_create(
+                concept_class_id=class_id,
+                defaults={'concept_class_name': class_id, 'concept_class_concept_id': 0},
+            )
+
+    def setUp(self):
+        SourceCodeConceptMapping.objects.filter(origin_system='hk-labs-seed').delete()
+
+    def _concept(self, concept_id, code, vocabulary, domain, class_id, standard):
+        return Concept.objects.create(
+            concept_id=concept_id, concept_name=f'concept {code}', concept_code=code,
+            vocabulary=vocabulary, domain=domain, concept_class_id=class_id,
+            standard_concept=standard,
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+
+    def _resolve_before_load(self, code, vocabulary_id, table):
+        from unittest.mock import patch
+
+        with patch(
+            'omop_core.mapping.suggestions.suggest_source_code',
+            return_value=(None, 'No suitable candidate.'),
+        ):
+            return resolve_source_code(
+                source_code=code, source_vocabulary_id=vocabulary_id,
+                omop_table=table, source_system='etl',
+            )
+
+    def test_minted_placeholder_yields_to_a_standard_concept_loaded_later(self):
+        concept, queued = self._resolve_before_load('1807630', 'RxNorm', 'drug_exposure')
+        self.assertIsNone(concept)
+        self.assertEqual(queued.target_concept.vocabulary_id, 'HK-Drug')
+        loaded = self._concept(
+            40_000_101, '1807630', self.rxnorm, self.drug_domain, 'Quant Clinical Drug', 'S',
+        )
+
+        concept, mapping = resolve_source_code(
+            source_code='1807630', source_vocabulary_id='RxNorm', omop_table='drug_exposure',
+        )
+
+        self.assertEqual(concept.concept_id, loaded.concept_id)
+        self.assertEqual(mapping.pk, queued.pk)
+        self.assertEqual(mapping.status, 'approved')
+        self.assertEqual(mapping.origin_system, 'athena-direct')
+        self.assertEqual(mapping.target_concept_id, loaded.concept_id)
+        self.assertEqual(mapping.occurrence_count, 1)
+
+    def test_non_standard_concept_does_not_replace_the_placeholder(self):
+        _, queued = self._resolve_before_load('337535', 'RxNorm', 'drug_exposure')
+        self._concept(19_025_425, '337535', self.rxnorm, self.drug_domain, 'Brand Name', None)
+
+        concept, mapping = resolve_source_code(
+            source_code='337535', source_vocabulary_id='RxNorm', omop_table='drug_exposure',
+        )
+
+        self.assertIsNone(concept)
+        self.assertEqual(mapping.pk, queued.pk)
+        self.assertEqual(mapping.status, 'proposed')
+        self.assertEqual(mapping.target_concept.vocabulary_id, 'HK-Drug')
+
+    def test_loinc_gap_yields_once_loinc_is_loaded(self):
+        _, gap = self._resolve_before_load('2160-0', 'LOINC', 'measurement')
+        self.assertIsNone(gap.target_concept_id)
+        loaded = self._concept(
+            3_016_723, '2160-0', self.loinc, self.measurement_domain, 'Lab Test', 'S',
+        )
+
+        concept, mapping = resolve_source_code(
+            source_code='2160-0', source_vocabulary_id='LOINC', omop_table='measurement',
+        )
+
+        self.assertEqual(concept.concept_id, loaded.concept_id)
+        self.assertEqual(mapping.pk, gap.pk)
+        self.assertEqual(mapping.status, 'approved')
+
+    def test_proposal_with_curator_evidence_is_left_for_review(self):
+        _, queued = self._resolve_before_load('203148', 'RxNorm', 'drug_exposure')
+        suggested = self._concept(
+            40_000_102, 'other', self.rxnorm, self.drug_domain, 'Quant Clinical Drug', 'S',
+        )
+        SourceCodeConceptMapping.objects.filter(pk=queued.pk).update(
+            suggested_target_concept=suggested,
+        )
+        self._concept(40_000_103, '203148', self.rxnorm, self.drug_domain, 'Quant Clinical Drug', 'S')
+
+        concept, mapping = resolve_source_code(
+            source_code='203148', source_vocabulary_id='RxNorm', omop_table='drug_exposure',
+        )
+
+        self.assertIsNone(concept)
+        self.assertEqual(mapping.status, 'proposed')
+
+
+    def test_concept_from_another_domain_does_not_replace_the_placeholder(self):
+        _, queued = self._resolve_before_load('1807634', 'RxNorm', 'drug_exposure')
+        self._concept(
+            40_000_104, '1807634', self.rxnorm, self.measurement_domain, 'Quant Clinical Drug', 'S',
+        )
+
+        concept, mapping = resolve_source_code(
+            source_code='1807634', source_vocabulary_id='RxNorm', omop_table='drug_exposure',
+        )
+
+        self.assertIsNone(concept)
+        self.assertEqual(mapping.pk, queued.pk)
+        self.assertEqual(mapping.status, 'proposed')
+
+    def test_rejection_during_promotion_is_not_reported_as_resolved(self):
+        from unittest.mock import patch
+
+        _, queued = self._resolve_before_load('82063', 'RxNorm', 'drug_exposure')
+        loaded = self._concept(
+            40_000_105, '82063', self.rxnorm, self.drug_domain, 'Quant Clinical Drug', 'S',
+        )
+
+        def reject_then_find(*args, **kwargs):
+            SourceCodeConceptMapping.objects.filter(pk=queued.pk).update(status='rejected')
+            return loaded
+
+        with patch('omop_core.mapping.code_resolution._direct_concept', side_effect=reject_then_find):
+            concept, mapping = resolve_source_code(
+                source_code='82063', source_vocabulary_id='RxNorm', omop_table='drug_exposure',
+            )
+
+        self.assertIsNone(concept)
+        self.assertEqual(mapping.status, 'rejected')
+        self.assertEqual(mapping.target_concept.vocabulary_id, 'HK-Drug')
+
+    def test_curator_edit_during_promotion_is_kept(self):
+        from unittest.mock import patch
+
+        _, queued = self._resolve_before_load('48933', 'RxNorm', 'drug_exposure')
+        loaded = self._concept(
+            40_000_106, '48933', self.rxnorm, self.drug_domain, 'Quant Clinical Drug', 'S',
+        )
+        chosen = self._concept(
+            40_000_107, 'chosen', self.rxnorm, self.drug_domain, 'Quant Clinical Drug', 'S',
+        )
+
+        def edit_then_find(*args, **kwargs):
+            SourceCodeConceptMapping.objects.filter(pk=queued.pk).update(target_concept=chosen)
+            return loaded
+
+        with patch('omop_core.mapping.code_resolution._direct_concept', side_effect=edit_then_find):
+            concept, mapping = resolve_source_code(
+                source_code='48933', source_vocabulary_id='RxNorm', omop_table='drug_exposure',
+            )
+
+        self.assertIsNone(concept)
+        self.assertEqual(mapping.status, 'proposed')
+        self.assertEqual(mapping.target_concept_id, chosen.concept_id)
 
 
 class FieldConceptMappingTest(TestCase):
@@ -23906,6 +24214,17 @@ class MappingStatsTest(MappingHubTestBase):
 
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
+    def test_analyst_can_see_stats(self):
+        analyst = Identity.objects.create_user(
+            email='analyst-mapping@test.com', password='testpass',
+        )
+        GroupAccess.objects.create(
+            identity=analyst, org=self.admin_org, role='analyst',
+        )
+        self.client.force_authenticate(user=analyst)
+        resp = self.client.get('/api/v1/mapping-stats/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
     def test_regular_user_forbidden(self):
         self.client.force_authenticate(user=self.regular)
         resp = self.client.get('/api/v1/mapping-stats/')
@@ -25410,6 +25729,15 @@ class PrologSurveyDeletionTest(TestCase):
             response=response, consent_version='1.0', text_hash='x' * 8,
             language='en', agreed_at=timezone.now(),
         )
+        # PROlog 0.4.5: an address kept beside the response, and a consent
+        # given with it — both hang off the response and must go with it.
+        from prolog_surveys.models import SurveyCaptureConsent, SurveyLinkedContact
+        SurveyLinkedContact.objects.create(
+            response=response, email='deletion@example.org', language='en', consent_text='n',
+        )
+        SurveyCaptureConsent.objects.create(
+            response=response, key='contact', text='c', text_hash='y' * 8, language='en',
+        )
         SurveyInvitation.objects.create(
             survey=version.survey, participant_id=person.person_id
         )
@@ -26813,3 +27141,724 @@ class CreateSmartAppRedirectSchemeTest(TestCase):
                 )
         self.assertEqual(
             self._application().redirect_uris, 'https://client.example.invalid/callback')
+
+
+from patient_portal.models import ServiceAccessToken, ServiceApplication  # noqa: E402
+from patient_portal.api.providers.base import TokenClaims  # noqa: E402
+
+
+class ServiceScopeCapTest(TestCase):
+    """ALLOWED_SCOPES was stated in one place and enforced in another (#1218 review)."""
+
+    def test_the_model_rejects_a_scope_outside_the_cap(self):
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
+        application = ServiceApplication(
+            name='Rogue', service_id='rogue-service', scopes='patient/*.read patient/*.delete')
+        with self.assertRaises(DjangoValidationError) as ctx:
+            application.full_clean()
+        self.assertIn('scopes', ctx.exception.message_dict)
+        self.assertIn('patient/*.delete', str(ctx.exception))
+
+    def test_the_model_accepts_every_supported_scope(self):
+        from patient_portal.service_tokens import ALLOWED_SCOPES
+
+        application = ServiceApplication(
+            name='ETL', service_id='etl-full', scopes=' '.join(sorted(ALLOWED_SCOPES)))
+        application.full_clean()
+
+    def test_the_django_admin_form_enforces_the_same_cap(self):
+        """Admin is a model form, so it must inherit the field validator."""
+        from django.contrib import admin as django_admin
+
+        model_admin = django_admin.site._registry[ServiceApplication]
+        form_class = model_admin.get_form(None)
+        form = form_class(data={
+            'name': 'Rogue', 'service_id': 'rogue-admin', 'description': '',
+            'owner_contact': '', 'scopes': 'system/*.delete', 'is_active': True,
+        })
+        self.assertFalse(form.is_valid())
+        self.assertIn('scopes', form.errors)
+
+    def test_an_environment_grant_with_an_unsupported_scope_is_reported(self):
+        from patient_portal.checks import service_token_scope_check
+
+        with override_settings(
+            SERVICE_AUTH_TOKENS={'etl': {'token': 'x' * 40, 'scopes': 'patient/*.read bogus/scope'}},
+            SERVICE_AUTH_TOKEN='', SERVICE_AUTH_SCOPES='patient/*.read',
+        ):
+            issues = service_token_scope_check(None)
+        self.assertEqual([issue.id for issue in issues], ['patient_portal.W007'])
+        self.assertIn('bogus/scope', issues[0].msg)
+        self.assertNotIn('x' * 40, issues[0].msg)
+
+    def test_the_legacy_grant_is_only_checked_when_it_is_configured(self):
+        from patient_portal.checks import service_token_scope_check
+
+        with override_settings(SERVICE_AUTH_TOKENS={}, SERVICE_AUTH_TOKEN='',
+                               SERVICE_AUTH_SCOPES='patient/*.reed'):
+            self.assertEqual(service_token_scope_check(None), [])
+        with override_settings(SERVICE_AUTH_TOKENS={}, SERVICE_AUTH_TOKEN='legacy-secret',
+                               SERVICE_AUTH_SCOPES='patient/*.reed'):
+            issues = service_token_scope_check(None)
+        self.assertEqual([issue.id for issue in issues], ['patient_portal.W007'])
+        self.assertNotIn('legacy-secret', issues[0].msg)
+
+    def test_a_malformed_service_token_setting_does_not_crash_the_deploy_check(self):
+        from patient_portal.checks import service_token_scope_check
+
+        with override_settings(SERVICE_AUTH_TOKENS='not-a-mapping', SERVICE_AUTH_TOKEN=''):
+            self.assertEqual(service_token_scope_check(None), [])
+
+    def test_a_conforming_environment_grant_is_silent(self):
+        from patient_portal.checks import service_token_scope_check
+
+        with override_settings(
+            SERVICE_AUTH_TOKENS={'etl': {'token': 'x' * 40, 'scopes': 'system/etl.write'}},
+            SERVICE_AUTH_TOKEN='', SERVICE_AUTH_SCOPES='patient/*.read',
+        ):
+            self.assertEqual(service_token_scope_check(None), [])
+
+
+class ServiceTokenLifetimeTest(TestCase):
+    """A static bearer secret with no refresh step needs a bounded lifetime."""
+
+    def test_an_expiry_beyond_the_cap_is_rejected(self):
+        from patient_portal.api.service_applications import (
+            MAX_TOKEN_LIFETIME, TokenIssueSerializer,
+        )
+
+        serializer = TokenIssueSerializer(data={
+            'label': 'forever', 'expires_at': '2999-01-01T00:00:00Z'})
+        self.assertFalse(serializer.is_valid())
+        self.assertIn(str(MAX_TOKEN_LIFETIME.days), str(serializer.errors['expires_at']))
+
+    def test_an_expiry_inside_the_cap_is_accepted(self):
+        from patient_portal.api.service_applications import (
+            MAX_TOKEN_LIFETIME, TokenIssueSerializer,
+        )
+
+        expires = timezone.now() + MAX_TOKEN_LIFETIME - timedelta(days=1)
+        serializer = TokenIssueSerializer(data={
+            'label': 'annual', 'expires_at': expires.isoformat()})
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+    def test_an_omitted_expiry_is_accepted_and_then_bounded_at_issue(self):
+        """The form's blank field must not be the way to mint a permanent token."""
+        from patient_portal.api.service_applications import TokenIssueSerializer
+        from patient_portal.service_applications import MAX_TOKEN_LIFETIME, issue_token
+
+        serializer = TokenIssueSerializer(data={'label': 'unbounded', 'expires_at': None})
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+        application = ServiceApplication.objects.create(name='ETL', service_id='etl-default-expiry')
+        record, _ = issue_token(application, 'no expiry given')
+        self.assertIsNotNone(record.expires_at)
+        expected = timezone.now() + MAX_TOKEN_LIFETIME
+        self.assertLess(abs((record.expires_at - expected).total_seconds()), 60)
+
+    def test_an_explicit_expiry_is_kept_as_given(self):
+        from patient_portal.service_applications import issue_token
+
+        application = ServiceApplication.objects.create(name='ETL', service_id='etl-explicit-expiry')
+        chosen = timezone.now() + timedelta(days=30)
+        record, _ = issue_token(application, 'thirty days', expires_at=chosen)
+        self.assertEqual(record.expires_at, chosen)
+
+    def test_the_api_mints_a_bounded_token_when_the_field_is_left_blank(self):
+        from patient_portal.service_applications import MAX_TOKEN_LIFETIME
+
+        staff = Identity.objects.create_user(email='lifetime-admin@test.com', password='ops-pass')
+        staff.is_staff = True
+        staff.save(update_fields=['is_staff'])
+        client = APIClient()
+        self.assertTrue(client.login(username='lifetime-admin@test.com', password='ops-pass'))
+        created = client.post('/api/v1/service-applications/', {
+            'name': 'Blank expiry', 'service_id': 'blank-expiry', 'scopes': 'patient/*.read',
+        }, format='json')
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED, created.data)
+        minted = client.post(f'/api/v1/service-applications/{created.data["id"]}/tokens/',
+                             {'label': 'blank'}, format='json')
+        self.assertEqual(minted.status_code, status.HTTP_201_CREATED, minted.data)
+        self.assertIsNotNone(minted.data['expires_at'])
+        record = ServiceAccessToken.objects.get(pk=minted.data['id'])
+        expected = timezone.now() + MAX_TOKEN_LIFETIME
+        self.assertLess(abs((record.expires_at - expected).total_seconds()), 60)
+
+    def test_importing_existing_credentials_is_left_unbounded_for_now(self):
+        """Imported tokens are already distributed, so expiring them is a
+
+        scheduled outage rather than a control. Tracked in #1423, which outlives
+        #1375; this test keeps the exception visible instead of assumed.
+        """
+        import json
+        import os
+        import tempfile
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        application = ServiceApplication.objects.create(name='ETL', service_id='etl-import')
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, 'tokens.json')
+            with open(path, 'w') as handle:
+                json.dump({'etl-import': {'token': 'x' * 48, 'scopes': 'patient/*.read'}}, handle)
+            call_command('import_service_tokens', '--file', path, stdout=StringIO())
+        self.assertIsNone(application.tokens.get().expires_at)
+
+    def test_an_expiry_beyond_the_ceiling_is_clamped_rather_than_stored(self):
+        """The serializer refuses one; a caller that skips it must not slip past."""
+        from patient_portal.service_applications import MAX_TOKEN_LIFETIME, issue_token
+
+        application = ServiceApplication.objects.create(name='ETL', service_id='etl-clamped')
+        record, _ = issue_token(
+            application, 'forever', expires_at=timezone.now() + timedelta(days=4000))
+        expected = timezone.now() + MAX_TOKEN_LIFETIME
+        self.assertLess(abs((record.expires_at - expected).total_seconds()), 60)
+
+
+class LegacyGrantMigrationGuardsTest(TestCase):
+    """0019 rewrites a row 0017 seeded, so its guards decide what it may touch."""
+
+    @staticmethod
+    def _migration():
+        from importlib import import_module
+
+        return import_module('patient_portal.migrations.0019_seed_legacy_service_application')
+
+    def _run(self, func):
+        from django.apps import apps as global_apps
+        from django.db import connection
+
+        func(global_apps, connection.schema_editor())
+
+    def test_the_managed_row_is_labelled_even_when_it_already_has_a_token(self):
+        """The documented setup imports a token onto hk-labs, and that is exactly
+
+        the deployment that needs to be told which row is the kill switch.
+        """
+        migration = self._migration()
+        managed = ServiceApplication.objects.get(service_id='hk-labs')
+        ServiceApplication.objects.filter(pk=managed.pk).update(description='')
+        ServiceAccessToken.objects.create(
+            application=managed, label='imported', digest='a' * 64, suffix='abcd')
+
+        self._run(migration.seed_legacy_application)
+
+        managed.refresh_from_db()
+        self.assertEqual(managed.description, migration.MANAGED_NOTE)
+
+    def test_an_operators_own_description_is_never_overwritten(self):
+        migration = self._migration()
+        ServiceApplication.objects.filter(service_id='hk-labs').update(
+            description='OPS-4412: owned by the labs integration squad')
+
+        self._run(migration.seed_legacy_application)
+
+        self.assertEqual(
+            ServiceApplication.objects.get(service_id='hk-labs').description,
+            'OPS-4412: owned by the labs integration squad')
+
+    def test_a_rollback_clears_only_the_note_this_migration_wrote(self):
+        migration = self._migration()
+        ServiceApplication.objects.filter(service_id='hk-labs').update(
+            description=migration.MANAGED_NOTE)
+
+        self._run(migration.drop_legacy_application)
+
+        self.assertEqual(ServiceApplication.objects.get(service_id='hk-labs').description, '')
+
+    def test_a_rollback_keeps_a_note_an_operator_appended_to(self):
+        """Prefix-matching here would eat the operator's half of the sentence."""
+        migration = self._migration()
+        appended = migration.MANAGED_NOTE + ' Owned by OPS-4412.'
+        ServiceApplication.objects.filter(service_id='hk-labs').update(description=appended)
+
+        self._run(migration.drop_legacy_application)
+
+        self.assertEqual(ServiceApplication.objects.get(service_id='hk-labs').description, appended)
+
+    def test_a_rollback_keeps_an_hk_labs_sync_row_somebody_created_by_hand(self):
+        """Active and tokenless is not the same as "what this migration wrote"."""
+        migration = self._migration()
+        ServiceApplication.objects.filter(service_id='hk-labs-sync').delete()
+        ServiceApplication.objects.create(
+            service_id='hk-labs-sync', name='Labs sync (ours)',
+            description='Created by ops before the migration', scopes='patient/*.write')
+
+        self._run(migration.drop_legacy_application)
+
+        kept = ServiceApplication.objects.get(service_id='hk-labs-sync')
+        self.assertEqual(kept.description, 'Created by ops before the migration')
+
+    def test_the_forward_is_idempotent_on_a_row_it_already_labelled(self):
+        migration = self._migration()
+        self._run(migration.seed_legacy_application)
+        self._run(migration.seed_legacy_application)
+        self.assertEqual(
+            ServiceApplication.objects.filter(service_id='hk-labs-sync').count(), 1)
+
+
+class ScopelessTokenIssueTest(TestCase):
+    """Issuing on hk-labs-sync is a cutover, and a scopeless token is not one."""
+
+    URL = '/api/v1/service-applications/'
+
+    def setUp(self):
+        self.staff = Identity.objects.create_user(email='cutover@test.com', password='ops-pass')
+        self.staff.is_staff = True
+        self.staff.save(update_fields=['is_staff'])
+        self.client = APIClient()
+        self.assertTrue(self.client.login(username='cutover@test.com', password='ops-pass'))
+
+    def test_a_token_cannot_be_issued_while_the_application_has_no_scopes(self):
+        application = ServiceApplication.objects.get(service_id='hk-labs-sync')
+        self.assertEqual(application.scopes, '')
+        response = self.client.post(
+            f'{self.URL}{application.pk}/tokens/', {'label': 'cutover'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('scopes', str(response.data).lower())
+        # The environment credential must still work: issuing is what stops it.
+        self.assertFalse(application.tokens.exists())
+
+    def test_the_refusal_is_keyed_to_the_field_so_a_client_can_show_it(self):
+        """A bare string serialises to a list, which the Org Admin page drops on
+
+        the floor in favour of a generic message naming label and expiry — the
+        two things that are fine.
+        """
+        application = ServiceApplication.objects.get(service_id='hk-labs-sync')
+        response = self.client.post(
+            f'{self.URL}{application.pk}/tokens/', {'label': 'cutover'}, format='json')
+        self.assertIsInstance(response.data, dict)
+        self.assertIn('scopes', response.data)
+
+    def test_scopes_cannot_be_cleared_once_a_token_exists(self):
+        """Otherwise the same dead end is reachable from the other direction."""
+        from patient_portal.service_applications import issue_token
+
+        application = ServiceApplication.objects.create(
+            name='ETL', service_id='etl-clearable', scopes='patient/*.read')
+        issue_token(application, 'live')
+        response = self.client.patch(
+            f'{self.URL}{application.pk}/', {'scopes': ''}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('scopes', response.data)
+        application.refresh_from_db()
+        self.assertEqual(application.scopes, 'patient/*.read')
+
+    def test_django_admin_cannot_clear_scopes_a_live_token_depends_on(self):
+        """The serializer's rule does not reach admin; the model's clean() does."""
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
+        from patient_portal.service_applications import issue_token
+
+        application = ServiceApplication.objects.create(
+            name='ETL', service_id='etl-admin-clear', scopes='patient/*.read')
+        issue_token(application, 'live')
+        application.scopes = ''
+        with self.assertRaises(DjangoValidationError) as ctx:
+            application.full_clean()
+        self.assertIn('scopes', ctx.exception.message_dict)
+
+    def test_an_expired_token_does_not_block_clearing_scopes(self):
+        """stored_credential already refuses it, so requiring a revocation would
+
+        make the operator retire a credential that is dead anyway.
+        """
+        from patient_portal.service_applications import issue_token
+
+        application = ServiceApplication.objects.create(
+            name='ETL', service_id='etl-expired', scopes='patient/*.read')
+        record, _ = issue_token(application, 'stale')
+        ServiceAccessToken.objects.filter(pk=record.pk).update(
+            expires_at=timezone.now() - timedelta(days=1))
+        response = self.client.patch(
+            f'{self.URL}{application.pk}/', {'scopes': ''}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+
+    def test_scopes_can_be_cleared_once_every_token_is_revoked(self):
+        """The refusal says to revoke first, and tokens have no delete route, so
+
+        counting revoked ones would make the instruction impossible to follow.
+        """
+        from patient_portal.service_applications import issue_token
+
+        application = ServiceApplication.objects.create(
+            name='ETL', service_id='etl-revoked', scopes='patient/*.read')
+        record, _ = issue_token(application, 'retired')
+        self.client.post(f'{self.URL}{application.pk}/tokens/{record.pk}/revoke/')
+        response = self.client.patch(
+            f'{self.URL}{application.pk}/', {'scopes': ''}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+
+    def test_scopes_can_still_be_cleared_before_any_token_is_issued(self):
+        application = ServiceApplication.objects.create(
+            name='ETL', service_id='etl-blankable', scopes='patient/*.read')
+        response = self.client.patch(
+            f'{self.URL}{application.pk}/', {'scopes': ''}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+
+    def test_importing_a_scopeless_entry_is_refused(self):
+        import json
+        import os
+        import tempfile
+        from io import StringIO
+
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, 'tokens.json')
+            with open(path, 'w') as handle:
+                json.dump({'hk-labs-sync': {'token': 'y' * 48, 'scopes': ''}}, handle)
+            with self.assertRaises(CommandError) as ctx:
+                call_command('import_service_tokens', '--file', path, stdout=StringIO())
+        self.assertIn('no scopes', str(ctx.exception))
+
+    def test_setting_scopes_first_lets_the_cutover_proceed(self):
+        application = ServiceApplication.objects.get(service_id='hk-labs-sync')
+        self.client.patch(f'{self.URL}{application.pk}/',
+                          {'scopes': 'patient/*.read'}, format='json')
+        response = self.client.post(
+            f'{self.URL}{application.pk}/tokens/', {'label': 'cutover'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+
+
+class LegacyServiceGrantKillSwitchTest(TestCase):
+    """Disabling the application must stop the environment credential (#1218 review)."""
+
+    LEGACY_TOKEN = 'legacy-env-secret-token-value-0001'
+
+    def _authenticate(self):
+        from patient_portal.api.authentication import ServiceTokenAuthentication
+        from rest_framework.test import APIRequestFactory
+
+        request = APIRequestFactory().get('/api/v1/patient-records/')
+        request.META['HTTP_AUTHORIZATION'] = f'Bearer {self.LEGACY_TOKEN}'
+        return ServiceTokenAuthentication().authenticate(request)
+
+    def test_the_seeded_application_matches_the_legacy_credentials_service_id(self):
+        application = ServiceApplication.objects.get(service_id='hk-labs-sync')
+        self.assertTrue(application.is_active)
+        self.assertFalse(application.tokens.exists())
+        # No scopes: while the environment credential is live, its scopes come
+        # from SERVICE_AUTH_SCOPES, and a guess here would narrow them at cutover.
+        self.assertEqual(application.scopes, '')
+
+    def test_a_rollback_keeps_an_operators_disabled_kill_switch(self):
+        """Deleting a disabled row on rollback would re-arm the credential."""
+        from importlib import import_module
+
+        from django.apps import apps as global_apps
+        from django.db import connection
+
+        migration = import_module(
+            'patient_portal.migrations.0019_seed_legacy_service_application')
+        ServiceApplication.objects.filter(service_id='hk-labs-sync').update(is_active=False)
+        migration.drop_legacy_application(global_apps, connection.schema_editor())
+        self.assertTrue(ServiceApplication.objects.filter(service_id='hk-labs-sync').exists())
+
+    def test_a_rollback_removes_the_untouched_seeded_row(self):
+        from importlib import import_module
+
+        from django.apps import apps as global_apps
+        from django.db import connection
+
+        migration = import_module(
+            'patient_portal.migrations.0019_seed_legacy_service_application')
+        migration.drop_legacy_application(global_apps, connection.schema_editor())
+        self.assertFalse(ServiceApplication.objects.filter(service_id='hk-labs-sync').exists())
+
+    @override_settings(SERVICE_AUTH_TOKEN=LEGACY_TOKEN, SERVICE_AUTH_TOKENS={},
+                       SERVICE_AUTH_SCOPES='patient/*.read')
+    def test_the_legacy_credential_works_while_the_application_is_enabled(self):
+        identity, credential = self._authenticate()
+        self.assertEqual(credential.service_id, 'hk-labs-sync')
+
+    @override_settings(SERVICE_AUTH_TOKEN=LEGACY_TOKEN, SERVICE_AUTH_TOKENS={},
+                       SERVICE_AUTH_SCOPES='patient/*.read')
+    def test_disabling_the_application_stops_the_legacy_credential(self):
+        from rest_framework.exceptions import AuthenticationFailed
+
+        ServiceApplication.objects.filter(service_id='hk-labs-sync').update(is_active=False)
+        with self.assertRaises(AuthenticationFailed):
+            self._authenticate()
+
+
+class ServiceTokenAdministrationBoundaryTest(TestCase):
+    """Who may mint a service credential — #1218 review, finding 3.
+
+    A service credential is not bound to any patient, outlives the grant used to
+    create it, and — before #1380 bounded it — never expired. Minting one
+    must therefore require an interactive staff session, not a token a staff
+    user delegated to somebody else's application.
+    """
+
+    URL = '/api/v1/service-applications/'
+
+    @classmethod
+    def setUpTestData(cls):
+        from oauth2_provider.models import AccessToken, Application
+        import datetime
+
+        cls.staff = Identity.objects.create_user(email='ops@test.com', password='ops-pass')
+        cls.staff.is_staff = True
+        cls.staff.save(update_fields=['is_staff'])
+
+        # A third-party SMART app holding a delegated, expiring, revocable grant
+        # on the staff user's behalf — exactly what create_smart_app produces.
+        cls.smart_app = Application.objects.create(
+            name='Third-party SMART app',
+            client_id='smart-partner-client',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_AUTHORIZATION_CODE,
+            user=cls.staff,
+        )
+        cls.delegated_token = AccessToken.objects.create(
+            user=cls.staff,
+            application=cls.smart_app,
+            token='smart-delegated-token-444',
+            expires=timezone.now() + datetime.timedelta(hours=1),
+            scope='patient/*.read patient/*.write openid launch/patient',
+        )
+
+    def _bearer(self):
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.delegated_token.token}')
+        return client
+
+    def test_a_delegated_smart_token_cannot_create_a_service_application(self):
+        response = self._bearer().post(
+            self.URL,
+            {'name': 'Backdoor', 'service_id': 'backdoor', 'scopes': 'patient/*.write'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(ServiceApplication.objects.filter(service_id='backdoor').exists())
+
+    def test_a_delegated_smart_token_cannot_mint_a_token_for_an_existing_application(self):
+        application = ServiceApplication.objects.create(
+            name='HK Labs', service_id='hk-labs-admin-test', scopes='patient/*.read')
+        response = self._bearer().post(
+            f'{self.URL}{application.pk}/tokens/', {'label': 'minted'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(application.tokens.exists())
+
+    def test_a_delegated_smart_token_cannot_read_the_application_list(self):
+        self.assertEqual(self._bearer().get(self.URL).status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_a_staff_session_still_administers_applications(self):
+        client = APIClient()
+        # A real session login, not force_authenticate: the boundary is defined
+        # by which authenticator succeeded, and forcing bypasses all of them.
+        self.assertTrue(client.login(username='ops@test.com', password='ops-pass'))
+        response = client.post(
+            self.URL,
+            {'name': 'ETL', 'service_id': 'etl-service', 'scopes': 'patient/*.read'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        created = ServiceApplication.objects.get(service_id='etl-service')
+        minted = client.post(f'{self.URL}{created.pk}/tokens/', {'label': 'first'}, format='json')
+        self.assertEqual(minted.status_code, status.HTTP_201_CREATED)
+        self.assertIn('token', minted.data)
+
+    def test_http_basic_is_not_an_interactive_session(self):
+        """ENABLE_BASIC_AUTH is supported, and Basic also reports no token."""
+        from rest_framework.authentication import BasicAuthentication, SessionAuthentication
+        from patient_portal.api.permissions import is_interactive_session
+
+        class _Request:
+            def __init__(self, authenticator, auth=None):
+                self.successful_authenticator = authenticator
+                self.auth = auth
+
+        self.assertFalse(is_interactive_session(_Request(BasicAuthentication())))
+        self.assertTrue(is_interactive_session(_Request(SessionAuthentication())))
+        self.assertTrue(is_interactive_session(_Request(
+            BasicAuthentication(), auth=TokenClaims(
+                issuer='https://securetoken.google.com/proj', sub='uid-1', email='p@test.com',
+                name='', raw={},
+            ))))
+
+
+class CodeMappingLockTest(TestCase):
+    """Tests for pessimistic edit locks on SourceCodeConceptMapping."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.alice = Identity.objects.create_user(
+            email='alice_lock@test.com', password='x', is_staff=True,
+        )
+        cls.bob = Identity.objects.create_user(
+            email='bob_lock@test.com', password='x', is_staff=True,
+        )
+        cls.org = Organization.objects.create(name='Lock Test Org', slug='lock-test-org')
+        GroupAccess.objects.create(identity=cls.alice, org=cls.org, role='org_admin')
+        GroupAccess.objects.create(identity=cls.bob, org=cls.org, role='org_admin')
+
+        domain, _ = Domain.objects.get_or_create(
+            domain_id='Measurement',
+            defaults={'domain_name': 'Measurement', 'domain_concept_id': 21},
+        )
+        concept_class, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Lab Test',
+            defaults={'concept_class_name': 'Lab Test', 'concept_class_concept_id': 0},
+        )
+        labs_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HK-Labs',
+            defaults={
+                'vocabulary_name': 'HealthKey Labs',
+                'vocabulary_reference': 'HealthKey local vocabulary',
+                'vocabulary_version': 'local',
+                'vocabulary_concept_id': 0,
+            },
+        )
+        cls.concept = Concept.objects.create(
+            concept_id=9990001,
+            concept_name='Lock Test Concept',
+            domain=domain,
+            vocabulary=labs_vocab,
+            concept_class=concept_class,
+            standard_concept=None,
+            concept_code='hkl:lock-test',
+            valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+        cls.mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='LOCK-TEST-CODE',
+            source_code_description='Lock test code',
+            domain_id='Measurement',
+            omop_table='measurement',
+            target_concept=cls.concept,
+            status='proposed',
+            origin='import',
+        )
+
+    def _lock_url(self):
+        return f'/api/v1/code-mappings/{self.mapping.pk}/lock/'
+
+    def _detail_url(self):
+        return f'/api/v1/code-mappings/{self.mapping.pk}/'
+
+    # ── Acquire ──────────────────────────────────────────────────────
+
+    def test_acquire_lock(self):
+        self.client.force_login(self.alice)
+        resp = self.client.post(self._lock_url(), content_type='application/json')
+        self.assertEqual(resp.status_code, 200)
+        self.mapping.refresh_from_db()
+        self.assertEqual(self.mapping.locked_by_id, self.alice.pk)
+        self.assertIsNotNone(self.mapping.locked_at)
+
+    def test_acquire_lock_idempotent(self):
+        self.client.force_login(self.alice)
+        self.client.post(self._lock_url(), content_type='application/json')
+        resp = self.client.post(self._lock_url(), content_type='application/json')
+        self.assertEqual(resp.status_code, 200)
+
+    def test_acquire_lock_conflict(self):
+        """Another user cannot acquire the lock while it is held."""
+        self.mapping.locked_by = self.alice
+        self.mapping.locked_at = timezone.now()
+        self.mapping.save(update_fields=['locked_by', 'locked_at'])
+
+        self.client.force_login(self.bob)
+        resp = self.client.post(self._lock_url(), content_type='application/json')
+        self.assertEqual(resp.status_code, 423)
+        self.assertIn('locked_by', resp.json())
+
+    def test_acquire_lock_expired(self):
+        """An expired lock can be taken over."""
+        self.mapping.locked_by = self.alice
+        self.mapping.locked_at = timezone.now() - timedelta(minutes=16)
+        self.mapping.save(update_fields=['locked_by', 'locked_at'])
+
+        self.client.force_login(self.bob)
+        resp = self.client.post(self._lock_url(), content_type='application/json')
+        self.assertEqual(resp.status_code, 200)
+        self.mapping.refresh_from_db()
+        self.assertEqual(self.mapping.locked_by_id, self.bob.pk)
+
+    # ── Release ──────────────────────────────────────────────────────
+
+    def test_release_lock(self):
+        self.mapping.locked_by = self.alice
+        self.mapping.locked_at = timezone.now()
+        self.mapping.save(update_fields=['locked_by', 'locked_at'])
+
+        self.client.force_login(self.alice)
+        resp = self.client.delete(self._lock_url())
+        self.assertEqual(resp.status_code, 204)
+        self.mapping.refresh_from_db()
+        self.assertIsNone(self.mapping.locked_by_id)
+
+    def test_release_lock_by_staff(self):
+        self.mapping.locked_by = self.alice
+        self.mapping.locked_at = timezone.now()
+        self.mapping.save(update_fields=['locked_by', 'locked_at'])
+
+        self.client.force_login(self.bob)  # bob is also staff
+        resp = self.client.delete(self._lock_url())
+        self.assertEqual(resp.status_code, 204)
+
+    def test_release_lock_denied_for_non_holder(self):
+        """A non-staff, non-holder cannot release another user's lock."""
+        non_staff = Identity.objects.create_user(
+            email='nostaff_lock@test.com', password='x', is_staff=False,
+        )
+        GroupAccess.objects.create(identity=non_staff, org=self.org, role='org_admin')
+
+        self.mapping.locked_by = self.alice
+        self.mapping.locked_at = timezone.now()
+        self.mapping.save(update_fields=['locked_by', 'locked_at'])
+
+        self.client.force_login(non_staff)
+        resp = self.client.delete(self._lock_url())
+        self.assertEqual(resp.status_code, 403)
+
+    # ── PATCH guarded ────────────────────────────────────────────────
+
+    def test_patch_rejected_when_locked_by_another(self):
+        self.mapping.locked_by = self.alice
+        self.mapping.locked_at = timezone.now()
+        self.mapping.save(update_fields=['locked_by', 'locked_at'])
+
+        self.client.force_login(self.bob)
+        resp = self.client.patch(
+            self._detail_url(),
+            {'status': 'approved'},
+            content_type='application/json',
+        )
+        self.assertEqual(resp.status_code, 423)
+
+    def test_patch_allowed_by_lock_holder(self):
+        self.mapping.locked_by = self.alice
+        self.mapping.locked_at = timezone.now()
+        self.mapping.save(update_fields=['locked_by', 'locked_at'])
+
+        self.client.force_login(self.alice)
+        resp = self.client.patch(
+            self._detail_url(),
+            {'notes': 'updated by lock holder'},
+            content_type='application/json',
+        )
+        self.assertEqual(resp.status_code, 200)
+
+    # ── Lock info in response ────────────────────────────────────────
+
+    def test_lock_info_in_list_response(self):
+        self.mapping.locked_by = self.alice
+        self.mapping.locked_at = timezone.now()
+        self.mapping.save(update_fields=['locked_by', 'locked_at'])
+
+        self.client.force_login(self.alice)
+        resp = self.client.get('/api/v1/code-mappings/')
+        self.assertEqual(resp.status_code, 200)
+        rows = resp.json()
+        locked_row = next((r for r in rows if r.get('mapping_id') == self.mapping.pk), None)
+        self.assertIsNotNone(locked_row)
+        self.assertIsNotNone(locked_row['locked_by_username'])
+        self.assertIsNotNone(locked_row['locked_at'])

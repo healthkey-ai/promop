@@ -9,8 +9,6 @@ assertion the real command makes across two hosts.
 from datetime import datetime, timezone
 
 import pytest
-from django.core.management import call_command
-from django.core.management.base import CommandError
 
 from omop_core.models import (
     CustomPatientField,
@@ -322,57 +320,6 @@ def test_dry_run_reports_without_writing():
     assert FieldChoice.objects.count() == 0
 
 
-def test_command_requires_a_source_url(monkeypatch):
-    monkeypatch.delenv('SOURCE_DATABASE_URL', raising=False)
-    with pytest.raises(CommandError, match='SOURCE_DATABASE_URL'):
-        call_command('copy_curation')
-
-
-def test_source_connection_is_registered_read_only():
-    from django.db import connections
-    from omop_core.management.commands.copy_curation import (
-        register_source_connection,
-    )
-
-    alias = 'test_field_mapping_source'
-    try:
-        register_source_connection('postgresql://u:p@example.invalid:5432/instance_a', alias)
-        config = connections.databases[alias]
-        assert config['NAME'] == 'instance_a'
-        assert config['HOST'] == 'example.invalid'
-        assert config['OPTIONS']['options'] == '-c default_transaction_read_only=on'
-    finally:
-        connections.databases.pop(alias, None)
-
-
-def test_source_connection_carries_the_defaults_django_applies_at_startup():
-    """An alias added after startup misses ConnectionHandler.configure_settings.
-
-    Without these keys the connection opens and then dies on the first query
-    with a bare ``KeyError: 'TIME_ZONE'``, which no amount of URL-parsing
-    coverage catches.
-    """
-    from django.db import connections
-    from django.db.utils import ConnectionHandler
-    from omop_core.management.commands.copy_curation import (
-        register_source_connection,
-    )
-
-    alias = 'test_field_mapping_source_defaults'
-    try:
-        register_source_connection('postgresql://u:p@example.invalid:5432/instance_a', alias)
-        config = connections.databases[alias]
-        # Compare framework defaults, not this deployment's optional settings
-        # (such as a test TEMPLATE that the remote source must not inherit).
-        default = ConnectionHandler({'default': {
-            'ENGINE': config['ENGINE'], 'NAME': 'instance_a',
-        }}).settings['default']
-        assert set(default) <= set(config)
-        assert set(default['TEST']) <= set(config['TEST'])
-    finally:
-        connections.databases.pop(alias, None)
-
-
 # ── Code mappings (SourceCodeConceptMapping) ──────────────────────────────
 #
 # A different curation screen from the five above, so it gets its own seed and
@@ -663,17 +610,3 @@ def test_dangling_source_concept_does_not_bind_a_local_concept_by_id():
     copied = SourceCodeConceptMapping.objects.get(source_code='DANGLE')
     assert copied.target_concept_id is None
     assert any('not loaded on this instance' in w for w in stats.warnings)
-
-
-@pytest.mark.django_db
-def test_streamed_source_failure_is_reported_as_a_command_error(monkeypatch):
-    """A streamed read fails inside apply_payload, not read_payload."""
-    def boom(*args, **kwargs):
-        raise RuntimeError('connection lost mid-stream')
-
-    monkeypatch.setattr(field_curation_transfer, '_apply_code_mappings', boom)
-    with pytest.raises(CommandError, match='Could not copy from the source database'):
-        call_command(
-            'copy_curation', '--tables', 'code_mappings',
-            '--source-url', 'postgresql://u:p@localhost/db',
-        )

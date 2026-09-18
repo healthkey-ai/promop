@@ -23,6 +23,11 @@ _EXTRA_SECRET_KEYS: tuple[str, ...] = (
     'AUDIT_HMAC_KEY',
     'EXPORT_SIGNING_KEY',
     'SERVICE_AUTH_TOKEN',
+    # Defence in depth for key-named context data. The control that keeps
+    # service secrets out of events is `include_local_variables: False` below:
+    # the plaintext pairs live in a local named `credentials`, which no key
+    # denylist would match. Cite that one as evidence, not this line.
+    'SERVICE_AUTH_TOKENS',
     # Consistency with the entries around it rather than a live control: the
     # scrubber reaches request data, extra, breadcrumbs and frame vars, and
     # nothing writes a key by this name into any of them while

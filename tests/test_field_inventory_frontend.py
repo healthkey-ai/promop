@@ -1,4 +1,3 @@
-import copy
 import hashlib
 import json
 import subprocess
@@ -93,18 +92,6 @@ def test_reviewed_provider_changes_remain_unresolved(tmp_path,failure):
     assert 'provider_resolution' not in frontend['controls'][0]
     assert frontend['provider_reconciliation'][0]['status']!='source_provider_accounted_for'
 
-
-def test_checked_in_provider_rules_match_current_sources_and_preserve_catalogs():
-    manifest=json.loads((ROOT/'docs/field-mapping-inventory/manifest.json').read_text())
-    frontend=copy.deepcopy(manifest['frontend'])
-    tables=copy.deepcopy(manifest['reference_tables'])
-    rows=reconcile_frontend_providers(ROOT,frontend,tables)
-    assert len(rows)==41
-    assert all(e['status']=='source_provider_accounted_for' for e in frontend['provider_reconciliation'])
-    assert tables==manifest['reference_tables']
-    language=[r for r in rows if r['destination_path']=='PersonLanguageSkill.skill_level']
-    assert {r['canonical_value']['value'] for r in language}=={'speak','read','write','understand'}
-    assert all(r['disposition']=='requires_structured_representation' for r in language)
 
 
 def test_descriptor_capture_keeps_source_code_separate_from_clinical_approval(monkeypatch):

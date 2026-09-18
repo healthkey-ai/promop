@@ -29,7 +29,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from omop_core.models import SuggestRun
+from omop_core.models import SourceCodeConceptMapping, SuggestRun
 
 # What a run may attempt when it is genuinely queued: bounded by
 # CELERY_TASK_TIME_LIMIT (900s default) against ~3.5s per code, with wide margin.
@@ -172,12 +172,23 @@ def execute_preview(run_id: str, params: dict) -> None:
         runs.update(activity=events, retrieved=int(event['stage'] in ('ranking', 'result')))
 
     try:
-        result = suggest_one_mapping(**params['preview'], activity=activity)
+        preview_params = dict(params['preview'])
+        preview_params['ranking_model'] = params.get('ranking_model', 'anthropic')
+        result = suggest_one_mapping(**preview_params, activity=activity)
         activity({'stage': 'result', **params['preview'], **result, 'dry_run': True, 'updated': False})
         runs.update(state=SuggestRun.SUCCESS, done=1, retrieved=1, finished_at=timezone.now())
     except Exception as exc:  # noqa: BLE001 - retain partial candidates on failure
         activity({'stage': 'failure', 'note': str(exc)[:2000]})
         runs.update(state=SuggestRun.FAILURE, error=str(exc)[:2000], finished_at=timezone.now())
+
+
+def _release_batch_locks(params: dict) -> None:
+    """Release edit locks acquired by a batch suggest run."""
+    locked_ids = params.get('_locked_mapping_ids')
+    if locked_ids:
+        SourceCodeConceptMapping.objects.filter(id__in=locked_ids).update(
+            locked_by=None, locked_at=None,
+        )
 
 
 def execute_run(run_id: str, params: dict) -> None:
@@ -191,7 +202,8 @@ def execute_run(run_id: str, params: dict) -> None:
         return
 
     from omop_core.mapping.suggestions import (
-        SUGGESTION_MODEL_VERSION, suggest_mappings, suggestable_queryset,
+        DEFAULT_RANKING_MODEL, SUGGESTION_MODEL_VERSION, suggest_mappings,
+        suggestable_queryset,
     )
 
     run = SuggestRun.objects.filter(pk=run_id).first()
@@ -245,6 +257,7 @@ def execute_run(run_id: str, params: dict) -> None:
             resuggest=params['resuggest'],
             progress=progress,
             activity=activity,
+            ranking_model=params.get('ranking_model', 'anthropic'),
         )
     except Exception as exc:                      # noqa: BLE001 - record, never crash the worker
         activity({'stage': 'failure', 'note': str(exc)[:2000]})
@@ -252,6 +265,7 @@ def execute_run(run_id: str, params: dict) -> None:
             state=SuggestRun.FAILURE, error=str(exc)[:2000],
             finished_at=timezone.now(),
         )
+        _release_batch_locks(params)
         return
 
     landed: dict[str, int] = {}
@@ -277,13 +291,16 @@ def execute_run(run_id: str, params: dict) -> None:
     # re-running only re-declines them, so "run Suggest again" would be advice
     # that goes nowhere. Once every code has been tried this reads 0, which is
     # the honest answer: the next thing to move it is a new model version.
+    ranking_model = params.get('ranking_model', DEFAULT_RANKING_MODEL)
+    attempt_stamp = f'{SUGGESTION_MODEL_VERSION}-{ranking_model}'
     try:
         remaining = suggestable_queryset(
             params.get('tables') or None,
             source_vocabulary_id=params['source_vocabulary_id'],
             min_occurrences=params['min_occurrences'],
             resuggest=params['resuggest'],
-        ).exclude(last_suggest_attempt=SUGGESTION_MODEL_VERSION).count()
+            ranking_model=ranking_model,
+        ).exclude(last_suggest_attempt=attempt_stamp).count()
     except Exception:                             # noqa: BLE001 - a count must not fail a run
         remaining = 0
 
@@ -299,3 +316,4 @@ def execute_run(run_id: str, params: dict) -> None:
         landed_in=landed,
         finished_at=timezone.now(),
     )
+    _release_batch_locks(params)

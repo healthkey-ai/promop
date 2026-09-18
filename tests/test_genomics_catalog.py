@@ -198,7 +198,10 @@ def test_nonpositive_assessments_do_not_become_detected_markers(setup, assessmen
         'interpretation': 'Pathogenic', 'assessment': assessment})
     record.refresh_from_db()
     assert record.genomics_tp53[0]['assessment'] == assessment
-    assert record.tp53_disruption is None
+    # 'absent' assessment maps to status='absent' via effective_status,
+    # yielding False (tested negative); others yield None (unknown).
+    expected = False if assessment == 'absent' else None
+    assert record.tp53_disruption is expected
     assert not record.molecular_markers
     save_variant(person, {'assessment': 'present'}, saved['id'])
     record.refresh_from_db()
@@ -256,16 +259,19 @@ def test_effective_registry_is_complete_and_does_not_mutate_frozen_catalog(setup
 
 
 @pytest.mark.parametrize('assessment', ['absent', 'indeterminate', 'no_call', 'not_tested'])
-def test_tp53_aggregate_returns_json_null_after_positive_evidence_is_cleared(setup, assessment):
+def test_tp53_aggregate_after_positive_evidence_is_cleared(setup, assessment):
     person, record, staff = setup
     saved = save_variant(person, {'gene': 'TP53', 'interpretation': 'Pathogenic'})
     record.refresh_from_db()
     assert record.tp53_disruption is True
     save_variant(person, {'assessment': assessment}, saved['id'])
     record.refresh_from_db()
-    assert record.tp53_disruption is None
+    # 'absent' maps to status='absent' → False (tested negative);
+    # others map to 'indeterminate' → None (unknown).
+    expected = False if assessment == 'absent' else None
+    assert record.tp53_disruption is expected
     client = APIClient()
     client.force_authenticate(staff)
     response = client.get(f'/api/patient-info/{person.pk}/')
     assert response.status_code == 200
-    assert response.data['patient_info']['tp53_disruption'] is None
+    assert response.data['patient_info']['tp53_disruption'] is expected

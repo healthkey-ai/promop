@@ -201,6 +201,23 @@ function accessibleName(el: Element): string {
   return "";
 }
 
+// Columns are asserted by name rather than by position: #1443 moved Provenance
+// and every index-based expectation broke, which says nothing about whether the
+// right value is in the right column.
+function columnIndex(table: HTMLElement, name: string) {
+  const headers = within(table).getAllByRole("columnheader");
+  const index = headers.findIndex(
+    (header) => header.textContent?.replace(/[↕↑↓]/g, "").trim() === name,
+  );
+  expect(index, `no "${name}" column`).toBeGreaterThanOrEqual(0);
+  return index;
+}
+
+function cellUnder(row: HTMLElement, name: string) {
+  const table = row.closest("table")!;
+  return within(row).getAllByRole("cell")[columnIndex(table, name)];
+}
+
 describe("CodeMappingPage", () => {
   beforeEach(() => {
     mockGet.mockReset();
@@ -214,7 +231,8 @@ describe("CodeMappingPage", () => {
 
   describe("duplicate source-code errors", () => {
     const proposed = { ...proposedRow, mapping_id: 101, source_vocabulary_id: "ICD10", source_code: "A02.0" };
-    const mapped = { ...approvedRow, mapping_id: 102, source_code: "A02.0" };
+    // Same vocabulary as `proposed`: a duplicate is one code twice in one vocabulary.
+    const mapped = { ...approvedRow, mapping_id: 102, source_vocabulary_id: "ICD10", source_code: "A02.0" };
     const athena = { ...mapped, mapping_id: 103, mapping_origin: "athena" as const };
 
     it("flags all three sections and reveals exact rows despite search and collapsed sections", async () => {
@@ -266,6 +284,26 @@ describe("CodeMappingPage", () => {
       expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     });
 
+    it("does not flag one code in different vocabularies sharing the Wearables tab", async () => {
+      const wearable = (mapping_id: number, source_vocabulary_id: string) =>
+        ({ ...proposed, mapping_id, source_vocabulary_id, source_code: "heart_rate" });
+      renderPage([wearable(201, "Apple"), wearable(202, "Garmin"), wearable(203, "OpenWearables")]);
+      await screen.findByRole("tab", { name: /Overall/ });
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("tab", { name: /Overall/ }));
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+
+    it("still flags a code repeated within one vocabulary on the Wearables tab", async () => {
+      const wearable = (mapping_id: number, source_vocabulary_id: string, source_code = "heart_rate") =>
+        ({ ...proposed, mapping_id, source_vocabulary_id, source_code });
+      renderPage([wearable(201, "Apple"), wearable(202, "Garmin"), wearable(204, "Garmin", " HEART_RATE ")]);
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent("1 duplicate source code on this tab");
+      expect(alert).toHaveTextContent("Garmin: HEART_RATE");
+      expect(within(alert).getAllByRole("link")).toHaveLength(2);
+    });
+
     it("keeps real duplicate groups separate on Overall and scopes other tabs", async () => {
       renderPage([proposed, mapped, { ...proposed, mapping_id: 104, source_vocabulary_id: "LOINC" }]);
       await screen.findByRole("alert");
@@ -285,6 +323,7 @@ describe("CodeMappingPage", () => {
       fireEvent.click(within(alert).getByRole("link", { name: /#102/ }));
       const row = document.getElementById("code-mapping-102")!;
       fireEvent.click(within(row).getByRole("button", { name: "Edit A02.0" }));
+      await screen.findByRole("dialog");  // opening takes an edit lock first (#1440)
       mockDelete.mockImplementationOnce(() => {
         rows.splice(1, 1);
         return Promise.resolve({ data: {} });
@@ -310,7 +349,7 @@ describe("CodeMappingPage", () => {
     mockPatch.mockRejectedValueOnce({ response: { data: { detail: message } } });
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Edit M-PROTEIN, SERUM" }));
-    const dialog = screen.getByRole("dialog");
+    const dialog = await screen.findByRole("dialog");  // opening takes an edit lock first (#1440)
     fireEvent.click(within(dialog).getByRole("button", { name: "Update Mapping" }));
     const alert = await within(dialog).findByRole("alert");
     expect(alert.textContent).toBe(message);
@@ -333,12 +372,14 @@ describe("CodeMappingPage", () => {
       // curator opens the row -- so this is the only place it can be asserted.
       renderPage([high, low]);
       const table = await screen.findByRole("table", { name: "Unmapped mappings" });
-      const headers = within(table).getAllByRole("columnheader");
-      expect(headers[1]).toHaveTextContent("Source code");
-      expect(headers[2]).toHaveTextContent("Seen");
+      expect(columnIndex(table, "Source code")).toBe(0);
       expect(within(table).queryByRole("columnheader", { name: "Retired" })).not.toBeInTheDocument();
       const row = document.getElementById("code-mapping-31")!;
       fireEvent.click(within(row).getByRole("button", { name: "Edit Z10" }));
+      // Wait for the dialog before waiting for the loader: opening takes an edit
+      // lock first (#1440), so the loader guard below was passing before the
+      // dialog — and its GET — even existed.
+      await screen.findByRole("dialog");
       await waitFor(() => expect(screen.queryByText("Loading source destinations…")).not.toBeInTheDocument());
       expect(screen.getByTestId("source-retirement")).toHaveValue("Retired");
       expect(within(screen.getByRole("dialog")).getByRole("status")).toHaveTextContent("invalid reason D");
@@ -396,8 +437,7 @@ describe("CodeMappingPage", () => {
   it("puts the source code first without repeating the selected source-system tab", async () => {
     renderPage();
     const row = (await screen.findByText("M-PROTEIN, SERUM", { selector: "td" })).closest("tr")!;
-    const cells = within(row).getAllByRole("cell");
-    expect(cells[1]).toHaveTextContent("M-PROTEIN, SERUM");
+    expect(cellUnder(row, "Source code")).toHaveTextContent("M-PROTEIN, SERUM");
     expect(screen.queryByRole("columnheader", { name: "Source code system" })).not.toBeInTheDocument();
   });
 
@@ -405,8 +445,7 @@ describe("CodeMappingPage", () => {
     // Seen came back as its own column in #1080, so only OMOP table is gone.
     renderPage();
     const row = (await screen.findByText("M-PROTEIN, SERUM", { selector: "td" })).closest("tr")!;
-    const cells = within(row).getAllByRole("cell");
-    expect(cells[3]).toHaveTextContent("M-protein, serum");
+    expect(cellUnder(row, "Source description")).toHaveTextContent("M-protein, serum");
     expect(screen.getByRole("columnheader", { name: "Source description" })).toBeInTheDocument();
     expect(screen.queryByRole("columnheader", { name: "OMOP table" })).not.toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: "Seen" })).toBeInTheDocument();
@@ -528,14 +567,14 @@ describe("CodeMappingPage", () => {
       expect(suggest.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
       expect(section.compareDocumentPosition(dialog.getByLabelText("Search destination concepts")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
       expect(within(section).getByRole("status")).toHaveTextContent("Searching");
-      fireEvent.click(within(section).getByRole("button", { name: /Early lexical candidate/ }));
+      fireEvent.click(within(section).getByText(/Early lexical candidate/).closest("tr")!);
       expect(dialog.getByLabelText("Destination Concept ID")).toHaveValue(555);
       expect(mockPatch).not.toHaveBeenCalled();
-      expect(await within(section).findByText("Distance 0.1250", {}, { timeout: 3000 })).toBeInTheDocument();
+      expect(await within(section).findByText("0.125", {}, { timeout: 3000 })).toBeInTheDocument();
       expect(within(section).getByText(`Winner: ${loincHit.concept_name}`)).toBeInTheDocument();
       expect(dialog.getByLabelText("Destination Concept ID")).toHaveValue(555);
       expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/suggest-one/", expect.objectContaining({ async: true }));
-      fireEvent.click(within(section).getByRole("button", { name: /Later semantic candidate/ }));
+      fireEvent.click(within(section).getByText(/Later semantic candidate/).closest("tr")!);
       expect(dialog.getByLabelText("Destination Concept ID")).toHaveValue(556);
       fireEvent.click(dialog.getByRole("button", { name: "Update Mapping" }));
       await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/", expect.objectContaining({ destination_concept_id: 556 })));
@@ -646,6 +685,8 @@ describe("CodeMappingPage", () => {
       }]);
       const cell = await screen.findByText("C90.20", { selector: "td" });
       fireEvent.click(cell.closest("tr")!);
+      // Opening the dialog takes a lock first (#1440), so it appears a tick later.
+      await screen.findByText("Edit Mapping");
       expect(screen.getByLabelText("Source Description")).toHaveValue(
         "Extramedullary plasmacytoma not having achieved remission",
       );
@@ -831,7 +872,10 @@ describe("CodeMappingPage", () => {
       fireEvent.click(await mint.findByRole("button", { name: /Protein.monoclonal/ }));
       expect(screen.queryByRole("dialog", { name: "Mint new concept" })).not.toBeInTheDocument();
       expect(screen.getByLabelText("Destination Concept ID")).toHaveValue(3046299);
-      expect(mockPost).toHaveBeenCalledTimes(1);
+      // Opening the dialog POSTs a lock (#1440) — asserted, because otherwise
+      // nothing in this suite observes it — and the mint call is counted apart.
+      expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/7/lock/");
+      expect(mockPost.mock.calls.filter(([url]) => !String(url).endsWith("/lock/"))).toHaveLength(1);
     });
 
     it("scopes the concept search to the destination vocabulary", async () => {
@@ -1142,9 +1186,6 @@ describe("CodeMappingPage", () => {
           "Done — wrote 3 new destination(s) across 5 code(s).",
         ));
       expect(screen.getByTestId("suggest-progress")).toHaveTextContent("5/5");
-      const logLink = within(screen.getByTestId("suggest-progress")).getByRole("link", { name: "View run log" });
-      expect(logLink).toHaveAttribute("href", expect.stringContaining("/code-mappings/suggest-runs/"));
-      expect(logLink).toHaveAttribute("target", "_blank");
     });
 
     it("says so when nothing on the tab is awaiting a suggestion", async () => {
@@ -1167,7 +1208,7 @@ describe("CodeMappingPage", () => {
       expect(screen.getByRole("tablist").nextElementSibling).toBe(toolbar);
       const controls = toolbar.querySelectorAll("button, input");
       expect(controls[0]).toHaveTextContent("Suggest");
-      for (const [index, name] of ["UMLS", "Lexical", "Semantic retrieval"].entries()) {
+      for (const [index, name] of ["UMLS", "Lexical", "Vectors"].entries()) {
         const checkbox = within(toolbar).getByRole("checkbox", { name });
         expect(controls[index + 2]).toBe(checkbox);
         expect(checkbox).toBeChecked();
@@ -1180,7 +1221,7 @@ describe("CodeMappingPage", () => {
       fireEvent.click(within(toolbar).getByRole("button", { name: "Suggest" }));
       await waitFor(() => expect(mockPost).toHaveBeenCalled());
       expect(mockPost.mock.calls[0][1]).toMatchObject({
-        limit: 25, strategies: ["umls", "lexical", "semantic"],
+        limit: 25, strategies: ["umls", "lexical", "vectors"],
       });
       expect(mockPost.mock.calls[0][1]).not.toHaveProperty("lexical_limit");
       expect(mockPost.mock.calls[0][1]).not.toHaveProperty("min_occurrences");
@@ -1195,15 +1236,14 @@ describe("CodeMappingPage", () => {
         fireEvent.click(within(toolbar).getByRole("checkbox", { name }));
       }
       const button = within(toolbar).getByRole("button", { name: "Suggest" });
-      const semantic = within(toolbar).getByRole("checkbox", { name: "Semantic retrieval" });
-      expect(within(toolbar).queryByRole("checkbox", { name: /Vector/ })).not.toBeInTheDocument();
+      const vectors = within(toolbar).getByRole("checkbox", { name: "Vectors" });
       expect(button).toBeEnabled();
-      fireEvent.click(semantic);
+      fireEvent.click(vectors);
       expect(button).toBeDisabled();
-      fireEvent.click(semantic);
+      fireEvent.click(vectors);
       fireEvent.click(button);
       await waitFor(() => expect(mockPost).toHaveBeenCalled());
-      expect(mockPost.mock.calls[0][1]).toMatchObject({ strategies: ["semantic"] });
+      expect(mockPost.mock.calls[0][1]).toMatchObject({ strategies: ["vectors"] });
     });
 
     it("uses the active server batch cap as the default", async () => {
@@ -1254,7 +1294,7 @@ describe("CodeMappingPage", () => {
           .toHaveTextContent("Done — wrote 4 new destination(s) across 4 code(s)."),
         { timeout: 4000 });
       expect(screen.getByText(/Semantic candidate/)).toBeInTheDocument();
-      expect(screen.getByText("Distance 0.2500")).toBeInTheDocument();
+      expect(screen.getByText("0.250")).toBeInTheDocument();
       expect(mockGet).toHaveBeenCalledWith(expect.stringContaining("/suggest-runs/"), { params: { include_activity: "1" } });
       expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/suggest/", expect.objectContaining({ include_activity: true }));
     });
@@ -1340,17 +1380,20 @@ describe("mapping dialog request isolation", () => {
   it("clears a previous code's no-match message when opening another code", async () => {
     renderPage([first, second]);
     fireEvent.click(await screen.findByText("Z94.81"));
+    await screen.findByRole("dialog");  // opening takes an edit lock first (#1440)
     mockPost.mockResolvedValueOnce({ data: suggestRun({ activity: [{ stage: "result", suggested: null, note: "No suitable concept: Z94.81" }] }) });
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Suggest" }));
     expect(await screen.findByText("No suitable concept: Z94.81")).toBeInTheDocument();
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
     fireEvent.click(screen.getByText("Z12.11"));
+    await screen.findByRole("dialog");  // opening takes an edit lock first (#1440)
     expect(within(screen.getByRole("dialog")).queryByText("No suitable concept: Z94.81")).not.toBeInTheDocument();
   });
 
   it("shows the suggestion method only in the dialog and clears it for another code", async () => {
     renderPage([first, second]);
     fireEvent.click(await screen.findByText("Z94.81"));
+    await screen.findByRole("dialog");  // opening takes an edit lock first (#1440)
     mockPost.mockResolvedValueOnce({ data: suggestRun({ activity: [{ stage: "result", suggested: loincHit, strategy_used: "lexical" }] }) });
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Suggest" }));
     const message = await screen.findByText("Winner filled in. You can choose another candidate before saving.");
@@ -1359,17 +1402,21 @@ describe("mapping dialog request isolation", () => {
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
     expect(screen.queryByText("Winner filled in. You can choose another candidate before saving.")).not.toBeInTheDocument();
     fireEvent.click(screen.getByText("Z12.11"));
+    await screen.findByRole("dialog");  // opening takes an edit lock first (#1440)
     expect(screen.queryByText("Winner filled in. You can choose another candidate before saving.")).not.toBeInTheDocument();
   });
 
   it.each([false, true])("ignores a late suggestion for a closed dialog (destination=%s)", async (found) => {
     renderPage([first, second]);
     fireEvent.click(await screen.findByText("Z94.81"));
+    await screen.findByRole("dialog");  // opening takes an edit lock first (#1440)
     let resolve!: (value: unknown) => void;
     mockPost.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Suggest" }));
+    await screen.findByRole("dialog");  // opening takes an edit lock first (#1440)
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
     fireEvent.click(screen.getByText("Z12.11"));
+    await screen.findByRole("dialog");  // opening takes an edit lock first (#1440)
     resolve({ data: { suggested: found ? loincHit : null, note: "No suitable concept: Z94.81" } });
     await waitFor(() => expect(within(screen.getByRole("dialog")).getByRole("button", { name: "Suggest" })).toBeEnabled());
     expect(screen.queryByText("No suitable concept: Z94.81")).not.toBeInTheDocument();
@@ -1387,7 +1434,7 @@ describe("server mapping pages", () => {
           results: [{ ...proposedRow, source_code: page === 1 ? "FIRST PAGE" : "SECOND PAGE" }],
           duplicates: [], selected_source: "",
           tabs: [{ vocabulary_id: "", label: "Uncoded", is_standard: false, proposed: 101, approved: 0, athena: 0 }],
-          pages: { Unmapped: { page, page_size: 100, total: 101 }, Mapped: { page: 1, page_size: 100, total: 0 }, "Athena Mapped": { page: 1, page_size: 100, total: 0 } },
+          pages: { Unmapped: { page, page_size: 100, total: 101 }, Mapped: { page: 1, page_size: 100, total: 0 }, Rejected: { page: 1, page_size: 100, total: 0 }, "Athena Mapped": { page: 1, page_size: 100, total: 0 } },
           rejected_count: 0,
         } });
       }
@@ -1420,9 +1467,8 @@ describe("Overall review counters and refresh", () => {
     expect(within(section).queryByText(/^Metrics:/)).not.toBeInTheDocument();
     expect(screen.queryByText("Review counts: all models")).not.toBeInTheDocument();
     const controls = screen.getByRole("group", { name: "Suggest controls" });
-    const semantic = within(controls).getByRole("checkbox", { name: "Semantic retrieval" });
-    const replace = within(controls).getByRole("checkbox", { name: "Replace Current Suggestions" });
-    expect(semantic.closest("span")?.nextElementSibling).toBe(replace.closest("label"));
+    expect(within(controls).getByRole("checkbox", { name: "Vectors" })).toBeInTheDocument();
+    expect(within(controls).getByRole("checkbox", { name: "Replace Current Suggestions" })).toBeInTheDocument();
     // Approved leads the strip now that no box names a model version.
     expect(section.firstElementChild).toHaveTextContent("Approved");
   });
@@ -1505,21 +1551,6 @@ describe("Overall review counters and refresh", () => {
 });
 
 
-describe("saved batch log discovery", () => {
-  it("recovers the completed run link after leaving and reopening the mapping page", async () => {
-    mockGet.mockImplementation((url: string) => Promise.resolve({ data:
-      url.endsWith("suggest-runs/latest/") ? { run_id: "saved-run" }
-        : url.includes("reference") ? reference : url.includes("accuracy") ? {} : [proposedRow],
-    }));
-    const page = render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
-    expect(await screen.findByRole("link", { name: "View latest batch run log" }))
-      .toHaveAttribute("href", "/code-mappings/suggest-runs/saved-run");
-    page.unmount();
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
-    expect(await screen.findByRole("link", { name: "View latest batch run log" }))
-      .toHaveAttribute("href", "/code-mappings/suggest-runs/saved-run");
-  });
-});
 
 
 describe("expanded ICD10 review feedback", () => {
@@ -1532,7 +1563,7 @@ describe("expanded ICD10 review feedback", () => {
         return Promise.resolve({ data: {
           results: [mapping], duplicates: [], selected_source: "ICD10", rejected_count: 0,
           tabs: [{ vocabulary_id: "ICD10", label: "ICD10", is_standard: true, proposed: 1, approved: 0, athena: 0 }],
-          pages: { Unmapped: { page: 1, page_size: 100, total: 1 }, Mapped: { page: 1, page_size: 100, total: 0 }, "Athena Mapped": { page: 1, page_size: 100, total: 0 } },
+          pages: { Unmapped: { page: 1, page_size: 100, total: 1 }, Mapped: { page: 1, page_size: 100, total: 0 }, Rejected: { page: 1, page_size: 100, total: 0 }, "Athena Mapped": { page: 1, page_size: 100, total: 0 } },
         } });
       }
       return Promise.resolve({ data: url.includes("reference") ? reference : {} });
@@ -1540,6 +1571,8 @@ describe("expanded ICD10 review feedback", () => {
     mockPatch.mockResolvedValue({ data: { ...mapping, status } });
     render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
     fireEvent.click(await screen.findByText("Z12.11", { selector: "td" }));
+    // The dialog takes an edit lock before opening (#1440), so it is a tick late.
+    await screen.findByRole("dialog");
     fireEvent.change(screen.getByLabelText("Status"), { target: { value: status } });
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Update Mapping" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());

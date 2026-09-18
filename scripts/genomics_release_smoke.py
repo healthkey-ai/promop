@@ -57,7 +57,7 @@ def run_smoke(session, base_url, person_id, run_id):
             if status == 'absent' and item.get('allelic_frequency') is not None:
                 raise RuntimeError('Absence retained an incompatible VAF')
             record = request('GET')['patient_info']
-            expected = True if status == 'present' else None
+            expected = True if status == 'present' else (False if status == 'absent' else None)
             if record['tp53_disruption'] is not expected:
                 raise RuntimeError('Finding state did not reach the TP53 aggregate')
             if not any(v['id'] == item_id and v['status'] == status for v in record['genomics_tp53']):

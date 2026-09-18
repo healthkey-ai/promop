@@ -61,8 +61,8 @@ TABLES = ('mappings', 'custom_fields', 'choices', 'formulas', 'synonyms',
 # supported for explicit migrations, but copying them by default would broaden
 # a field-mapping copy into unrelated configuration.
 DEFAULT_TABLES = ('mappings', 'synonyms')
-# code_mappings stays out of the default set: it is a different screen, and
-# copy_curation must not silently start moving it for existing callers.
+# code_mappings stays out of the default set: it is a different screen and it
+# steers ingest. copy_reference_data asks for every table explicitly.
 
 # Columns copied verbatim for each mapping. Excludes id, concept (re-resolved),
 # reviewer (cleared), and the auto timestamps.

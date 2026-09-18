@@ -21,8 +21,10 @@
 services:
   db:
     # pgvector, not the base stack's postgres:15: migration 0204 skips creating
-    # `concept_embedding` when the vector extension is unavailable, and a later
-    # migration then fails on the missing table, so `migrate` never completes.
+    # `concept_embedding` when the vector extension is unavailable. `migrate`
+    # still completes (#1430), but this stack needs vector reranking, and a
+    # table skipped at migration time has to be created by hand later (see
+    # docs/semantic-retrieval.md).
     image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: promop

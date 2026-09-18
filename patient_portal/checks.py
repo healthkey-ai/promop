@@ -200,3 +200,39 @@ def security_posture_check(app_configs, **kwargs):
             id='patient_portal.E006',
         ))
     return issues
+
+
+@register(Tags.security, deploy=True)
+def service_token_scope_check(app_configs, **kwargs):
+    """Report environment service grants asking for scopes the cap does not list.
+
+    `ALLOWED_SCOPES` is enforced by the serializer, the token importer and now
+    the model, but `SERVICE_AUTH_TOKENS` is parsed straight out of the
+    environment. An unrecognised scope grants nothing — `ScopedTokenPermission`
+    intersects against fixed sets — so this is a warning rather than an error:
+    the deployment is not unsafe, its configuration is just not doing what it
+    says.
+    """
+    from patient_portal.service_tokens import ALLOWED_SCOPES
+
+    warnings = []
+    grants = getattr(settings, 'SERVICE_AUTH_TOKENS', {})
+    # settings.py validates this at import, but the check also runs before
+    # migrate on every deploy: a traceback here fails the deploy with no message.
+    configured = [
+        (service_id, (grant or {}).get('scopes', ''))
+        for service_id, grant in (grants.items() if isinstance(grants, dict) else [])
+        if isinstance(grant, dict)
+    ]
+    if (getattr(settings, 'SERVICE_AUTH_TOKEN', '') or '').strip():
+        configured.append(('SERVICE_AUTH_TOKEN', getattr(settings, 'SERVICE_AUTH_SCOPES', '')))
+    for service_id, scopes in configured:
+        unsupported = set((scopes or '').split()) - ALLOWED_SCOPES
+        if unsupported:
+            warnings.append(Warning(
+                f'Service grant {service_id} requests unsupported scope(s): '
+                f'{" ".join(sorted(unsupported))}.',
+                hint='Unrecognised scopes grant nothing; use a scope from ALLOWED_SCOPES.',
+                id='patient_portal.W007',
+            ))
+    return warnings

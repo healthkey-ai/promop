@@ -4,6 +4,155 @@ All notable changes to PRomop are documented here.
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- **Copying between instances** — models are classified as system, reference or
+  patient data (`omop_core/services/instance_data.py`). `copy_curation` is
+  renamed `copy_reference_data` and now also copies lookups, therapy reference data,
+  mapping destination candidates and HealthKey concepts.
+  New `copy_patient` copies patients, by id or `--filter-org-id`, with every
+  link remapped.
+
+## [1.3.0] — 2026-09-16
+
+251 commits since 1.2.0. The defining changes are genomics, federation, and
+code mapping intelligence: cytogenetic and molecular markers land as structured
+OMOP facts, the patient UI ships as a Module Federation remote, and Suggest
+learns three retrieval strategies with accuracy tracking.
+
+### Added
+
+- **Genomics tab** — structured entry for cytogenetic markers (del(17p),
+  del(11q), t(4;14), t(14;16), gain(1q), etc.), TP53 disruption status, clone
+  fraction, and molecular findings. Values stored as coded OMOP Observations
+  with LOINC concepts; derived markers projected onto PatientRecord for
+  eligibility matching (#1166, #1208, #1209, #1249).
+- **`populate_genomics_sample_data`** management command seeds realistic
+  genomics profiles on sample patients (#1213).
+- **Module Federation** — patient info and lab results exposed as federation
+  remotes (`PatientInfo`, `LabResults` bridges) for the ht-phr host app.
+  Federated patient view includes History tab and conditionally-shown Disease
+  tab (#1114, #1362, #1364).
+- **OMOP pages through clinical transport** — federated views fetch paginated
+  OMOP data through the clinical transport layer (#1366).
+- **History tab** — Summary tab renamed to History; trend chart icons added to
+  Labs tab. Concept display names exposed on History tab endpoints (#1343,
+  #1355).
+- **Clinical Summary tab** — read-only clinical summary view (#1192).
+- **Disease selector on General tab** — disease selector moved from standalone
+  control to General tab; Disease tab shown conditionally based on selection
+  (#1348).
+- **Multi-strategy Suggest** — code mapping suggestions use a three-tier
+  waterfall: UMLS CUI bridge, lexical trigram retrieval, and vector reranking.
+  Per-code cost dropped from 17.8s to 3.5s. Runs queued on Celery with
+  progress polling; inline fallback for deployments without Redis (#1081,
+  #1093).
+- **Suggest accuracy dashboard** — tracks suggestion acceptance rates by model
+  version and source vocabulary, with per-tab and overall metrics (#1058,
+  #6404).
+- **UMLS source enrichment** — source code mappings enriched with UMLS
+  preferred names and CUI metadata for curator context (#12e7ee2).
+- **Bulk OMOP updates and deletes** — `PATCH /bulk_update/` and
+  `POST /bulk_delete/` on the five clinical endpoints for batch corrections
+  and reconciliation (#e4439074).
+- **ICD-10 tab consolidation** — ICD-10-CM merged into the ICD-10 tab with
+  UMLS lookup and SNOMED candidate concept resolution (#1028, #1042, #1044).
+- **Treatment tab overhaul** — PatientRecord-first writes, complete treatment
+  editors with supportive courses, dated history, and line-of-therapy tracking
+  (#1139, #1160).
+- **Trial favorites and saved filters** — per-user trial favorites, registered
+  interest, and saved filter persistence (#1142).
+- **Conditional preferences writes** — `If-Match` / `If-Unmodified-Since` on
+  preferences PATCH to prevent lost updates (#1312).
+- **Patient list enrichment** — clinical context badges, audience views,
+  genomics and therapy counts, and sample stage population (#1234, #1254).
+- **Code mapping copy between instances** — `copy_curation --tables
+  code_mappings` copies `SourceCodeConceptMapping` rows between PRomop
+  deployments, re-resolving concept FKs by vocabulary and code (#f7593832).
+- **LOINC unit display in code mappings** — `measurement_type` and
+  `suggested_unit` shown on mapping rows, destination options, and as a
+  dedicated "Unit" field in the Destination panel. Broad coverage via
+  `LoincCodeClass.example_units` from `Loinc.csv` (~41k codes with units)
+  (#1376, #1381, #1382).
+- **Semantic retrieval for mappings** — context-grounded search expansion using
+  embeddings for mapping suggestions (#1164).
+- **Sentry error monitoring** behind `SENTRY_DSN` environment variable.
+- **PROlog survey runner** — PROlog integrated as a Django app (v0.1.0 through
+  v0.4.2), replacing the project's own survey feature. Survey responses bound
+  to PRomop-minted persons; runner frontend served when mounted (#1328).
+- **ARTEMIS episode materialization** — adapter for episode artifact generation
+  with source interval validation and stale artifact rejection.
+- **Destination count and Seen count columns** in Code Mappings table (#1080).
+- **PRomop branding** — logo on every page, administration titles, browser tab
+  title and favicon (#1262, #1264, #1287, #1305).
+- **HealthTree CSV occurrence frequencies** loaded into Seen counts (#1105).
+- **Patient record attestation** and admin-gated field visibility (#1165).
+- **Vocabulary content checksums** — verifiable checksums published on
+  vocabulary releases (#1222).
+
+### Changed
+
+- **`promop` is canonical** — project renamed from `ctomop` with deployment
+  compatibility retained (#1294).
+- **Browser auth switched from OAuth tokens to sessions** — eliminates token
+  refresh races and simplifies the frontend auth flow (#1216).
+- **Refresh performance** — linear scans converted to O(1) index lookups in
+  `refresh_patient_record`, reducing derivation cost on large patients (#1248).
+- **Profile writes unified** through PatientRecord PATCH, skipping the OMOP
+  read-back for direct edits (#1159, #1163).
+- **Security controls decoupled from DEBUG** — production security posture no
+  longer tied to the debug flag (#1211).
+- **CI optimized** — backend suites run concurrently, skipped for
+  frontend-only changes, and documentation-only changes skip application
+  suites entirely (#1270, #1291, #1320).
+- **Legacy `/api/` sunset extended** to 2026-12-01 (#271).
+- **Python 3.12 required** for Render deploys and local development.
+- **Date of birth correctable** via person endpoint.
+
+### Fixed
+
+- **FHIR and CSV uploads restored** for organization admins and staff (#1261).
+- **Scoped Org Admins** can edit patient records (#1252).
+- **Sensitive profile fields** gated behind staff access (#1206).
+- **Password reset** targets active local identities only (#1302).
+- **HTTPS-only OAuth redirect** boundary enforced as documented (#1339).
+- **SMART scopes** enforced for shared service tokens (#1085).
+- **Service identity security** — staff-managed application tokens (#1218).
+- **Breast cancer question codes** corrected for Ki-67, methodology and nodal
+  status (#1227).
+- **TP53 disease prevalence** matched by substring instead of exact name
+  (#1357); `tp53_disruption` returns `False` for absent status instead of
+  `None` (#1359).
+- **ANC and platelet projection units** normalized (#1289).
+- **Render worker** can run any management command without HTTP config (#1338).
+- **Cytogenetic multiselect** — each value mapped to its own Observation
+  (#1208).
+- **Startup contract** — `prepare_production_database` replaces retired concept
+  seeder, bounded vocabulary bootstrap (#1124).
+- **Mapping dialog** — retired concept metadata, destination search by OMOP
+  concept ID, UMLS check, curated source value fallback (#968, #970).
+- **Suggest** — multi-CUI overflow, embedding resilience to connection drops,
+  snapshot-based recomputation skip, suggestion provenance versioning.
+- Multiple migration graph conflicts resolved across concurrent branches.
+
+### Migration notes
+
+| Item | Details |
+|------|---------|
+| Migration endpoint | `omop_core.0238_loinc_code_class_example_units` |
+| Total migrations | 239 (up from 202 in v1.2.0) |
+| Post-migrate step | Run `load_loinc_classes` with a LOINC archive to populate `example_units` |
+| Breaking changes | None — all additions are backwards-compatible |
+
+### Known issues
+
+- `{beat}/min` unit display strips braced text in the frontend (#1383) —
+  display-only, data is correct.
+
+---
+
 ## [1.0.0] — 2026-07-04
 
 First stable release. Deployed in production across the HealthTree Foundation and CancerBot,
