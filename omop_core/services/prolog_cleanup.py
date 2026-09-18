@@ -17,13 +17,17 @@ from django.db import connection
 # Every PROlog table that ends up referencing a Person, leaf-first.
 #
 # Each entry is a DELETE with one `{persons}` placeholder for a subquery (or a
-# list) yielding person ids. `surveyanswer` and `surveyconsent` hang off the
-# response; `surveyadministration` off the invitation; the rest name the person
-# directly.
+# list) yielding person ids. `surveyanswer`, `surveyconsent`, `surveylinkedcontact`
+# and `surveycaptureconsent` hang off the response; `surveyadministration` off
+# the invitation; the rest name the person directly.
 _STATEMENTS = (
     "DELETE FROM prolog_surveys_surveyanswer WHERE response_id IN "
     "(SELECT id FROM prolog_surveys_surveyresponse WHERE participant_id IN ({persons}))",
     "DELETE FROM prolog_surveys_surveyconsent WHERE response_id IN "
+    "(SELECT id FROM prolog_surveys_surveyresponse WHERE participant_id IN ({persons}))",
+    "DELETE FROM prolog_surveys_surveylinkedcontact WHERE response_id IN "
+    "(SELECT id FROM prolog_surveys_surveyresponse WHERE participant_id IN ({persons}))",
+    "DELETE FROM prolog_surveys_surveycaptureconsent WHERE response_id IN "
     "(SELECT id FROM prolog_surveys_surveyresponse WHERE participant_id IN ({persons}))",
     "DELETE FROM prolog_surveys_surveyresponse WHERE participant_id IN ({persons})",
     # After the responses: a response points at an administration, not the

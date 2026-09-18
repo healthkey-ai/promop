@@ -79,8 +79,10 @@ from patient_portal.models import BreakGlassGrant, PatientInvitation, PatientUse
 from prolog_surveys.models import (
     MintedParticipant,
     SurveyAnswer,
+    SurveyCaptureConsent,
     SurveyConsent,
     SurveyInvitation,
+    SurveyLinkedContact,
     SurveyResponse,
     SurveyVersion,
 )
@@ -153,6 +155,8 @@ PATIENT_TABLES: tuple[PatientTable, ...] = (
     PatientTable(SurveyResponse, 'participant_id'),
     PatientTable(SurveyAnswer, 'response__participant_id'),
     PatientTable(SurveyConsent, 'response__participant_id'),
+    PatientTable(SurveyLinkedContact, 'response__participant_id'),
+    PatientTable(SurveyCaptureConsent, 'response__participant_id'),
     PatientTable(MintedParticipant, 'participant_id'),
 )
 
