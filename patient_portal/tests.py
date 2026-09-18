@@ -15092,32 +15092,77 @@ class OrgPatientSignupTest(TestCase):
             GroupAccess.objects.filter(identity=identity, org=self.org, role='analyst').exists()
         )
 
-    def test_signup_private_org_gets_patient_role(self):
-        """Private org signup (via domain trust) assigns patient role."""
-        from omop_core.models import OrgTrust
+    def _private_org_with_patients(self):
         private_org = Organization.objects.create(
             name='Private Clinic', slug='private-clinic',
             allows_patient_signup=False,
         )
-        # Grant domain trust so the endpoint allows signup without
-        # allows_patient_signup=True.
+        for person_id in (77801, 77802):
+            PatientRecord.objects.create(
+                person=Person.objects.create(person_id=person_id),
+                organization=private_org,
+            )
+        return private_org
+
+    def test_signup_trusted_domain_gets_analyst_role(self):
+        """A private org that trusts the email domain grants analyst (#1454)."""
+        from omop_core.models import OrgTrust
+        private_org = self._private_org_with_patients()
         OrgTrust.objects.create(
             granting_org=private_org,
             trusted_domain='private-clinic.com',
         )
         client = APIClient()
         resp = client.post('/api/v1/orgs/private-clinic/patient-signup/', {
-            'email': 'user@private-clinic.com',
+            'email': 'user@Private-Clinic.com',
             'password': 'Str0ng!Pass99',
             'given_name': 'Private',
             'family_name': 'User',
         })
         self.assertEqual(resp.status_code, 201)
         identity = Identity.objects.get(email='user@private-clinic.com')
-        self.assertTrue(
-            GroupAccess.objects.filter(
-                identity=identity, org=private_org, role='patient',
-            ).exists()
+        self.assertEqual(
+            list(GroupAccess.objects.filter(identity=identity, org=private_org)
+                 .values_list('role', flat=True)),
+            ['analyst'],
+        )
+
+        # The grant is only the means: what #1454 reported is that the user was
+        # routed and scoped as a patient.
+        user = client.get('/api/v1/user/').data['user']
+        self.assertFalse(user['is_patient'])
+        self.assertEqual(
+            client.get('/api/v1/patient-records/77801/').status_code, 200,
+        )
+
+    def test_signup_invitation_only_gets_patient_role(self):
+        """An invitation alone does not make a self-signup an analyst.
+
+        Signup does not verify the address, so it must not hand out read access
+        to a private org on the strength of a matching invitation; the invited
+        role is claimed with the invitation token instead.
+        """
+        from datetime import timedelta
+        private_org = self._private_org_with_patients()
+        OrgInvitation.objects.create(
+            org=private_org, email='invited@elsewhere.com', role='doctor',
+            token='t' * 64, expires_at=timezone.now() + timedelta(days=7),
+        )
+        client = APIClient()
+        resp = client.post('/api/v1/orgs/private-clinic/patient-signup/', {
+            'email': 'invited@elsewhere.com',
+            'password': 'Str0ng!Pass99',
+        })
+        self.assertEqual(resp.status_code, 201)
+        identity = Identity.objects.get(email='invited@elsewhere.com')
+        self.assertEqual(
+            list(GroupAccess.objects.filter(identity=identity, org=private_org)
+                 .values_list('role', flat=True)),
+            ['patient'],
+        )
+        self.assertTrue(client.get('/api/v1/user/').data['user']['is_patient'])
+        self.assertEqual(
+            client.get('/api/v1/patient-records/77801/').status_code, 404,
         )
 
     def test_demo_signup_user_sees_all_org_patients(self):
