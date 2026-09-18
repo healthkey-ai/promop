@@ -309,7 +309,9 @@ function duplicateScopeForRow(row: CodeMappingRow): string {
 
 function sectionForRow(row: CodeMappingRow): MappingSection {
   if (row.mapping_origin === "athena") return "Athena Mapped";
-  return row.status === "approved" ? "Mapped" : "Unmapped";
+  if (row.status === "approved") return "Mapped";
+  if (row.status === "rejected") return "Rejected";
+  return "Unmapped";
 }
 
 function mappingRowId(row: CodeMappingRow): string {
@@ -318,7 +320,7 @@ function mappingRowId(row: CodeMappingRow): string {
   ]))}`;
 }
 
-type MappingSection = "Unmapped" | "Mapped" | "Athena Mapped";
+type MappingSection = "Unmapped" | "Mapped" | "Rejected" | "Athena Mapped";
 type SortColumn = "origin_system" | "source_code" | "occurrence_count" | "source_code_description"
   | "destination_concept_name" | "destination_concept_id" | "destination_count" | "status";
 type SectionSort = { column: SortColumn; descending: boolean };
@@ -471,7 +473,7 @@ type BrowseResponse = {
   pages: Record<MappingSection, { page: number; page_size: number; total: number }>;
   rejected_count: number;
 };
-const sectionNames: MappingSection[] = ["Unmapped", "Mapped", "Athena Mapped"];
+const sectionNames: MappingSection[] = ["Unmapped", "Mapped", "Rejected", "Athena Mapped"];
 
 export default function CodeMappingPage() {
   const navigate = useNavigate();
@@ -498,8 +500,8 @@ export default function CodeMappingPage() {
   const [activeVocabulary, setActiveVocabulary] = useState<string | null>(null);
   const [unmappedCollapsed, setUnmappedCollapsed] = useState(false);
   const [mappedCollapsed, setMappedCollapsed] = useState(true);
+  const [rejectedCollapsed, setRejectedCollapsed] = useState(true);
   const [athenaCollapsed, setAthenaCollapsed] = useState(true);
-  const [showRejected, setShowRejected] = useState(false);
   const [sectionSorts, setSectionSorts] = useState<Partial<Record<MappingSection, SectionSort>>>({});
   const [navigationTarget, setNavigationTarget] = useState<{ id: string } | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
@@ -570,7 +572,7 @@ export default function CodeMappingPage() {
     setLoading(true);
     setError("");
     const params: Record<string, string | number> = {
-      browse: 1, search: debouncedSearch, show_rejected: String(showRejected),
+      browse: 1, search: debouncedSearch,
     };
     if (activeVocabulary !== null) params.source = activeVocabulary;
     sectionNames.forEach((section, index) => {
@@ -602,7 +604,7 @@ export default function CodeMappingPage() {
     } finally {
       if (sequence === loadSequence.current) setLoading(false);
     }
-  }, [activeVocabulary, debouncedSearch, showRejected, pages, sectionSorts]);
+  }, [activeVocabulary, debouncedSearch, pages, sectionSorts]);
 
   const refreshCurrent = useRef(fetchAll);
   useEffect(() => { refreshCurrent.current = fetchAll; }, [fetchAll]);
@@ -703,9 +705,9 @@ export default function CodeMappingPage() {
   const revealDuplicate = (row: CodeMappingRow) => {
     if (browse) { openEditDialog(row); return; }
     setSearchQuery("");
-    if (row.status === "rejected") setShowRejected(true);
     if (row.mapping_origin === "athena") setAthenaCollapsed(false);
     else if (row.status === "approved") setMappedCollapsed(false);
+    else if (row.status === "rejected") setRejectedCollapsed(false);
     else setUnmappedCollapsed(false);
     // An object also retriggers navigation when the same link is clicked twice.
     setNavigationTarget({ id: mappingRowId(row) });
@@ -722,11 +724,6 @@ export default function CodeMappingPage() {
     if (browse) return rows;
     const q = searchQuery.trim().toLowerCase();
     return rows.filter((row) => {
-      // Rejected rows are hidden but reachable. Filtering them out with no way
-      // back would strand the source code for good: it appears in neither
-      // section, cannot be re-opened to un-reject, and re-creating it trips the
-      // (source_vocabulary_id, source_code) unique constraint.
-      if (row.status === "rejected" && !showRejected) return false;
       // A query is an intentional escape hatch from the current tab: a
       // curator should not have to try every code system to find an incoming
       // code. With no query, retain the focused, one-vocabulary-at-a-time
@@ -742,22 +739,20 @@ export default function CodeMappingPage() {
         String(row.destination_concept_id),
       ].some((value) => (value || "").toLowerCase().includes(q));
     });
-  }, [rows, searchQuery, selectedVocabulary, showRejected, browse]);
+  }, [rows, searchQuery, selectedVocabulary, browse]);
 
-  // Three-section layout: UNMAPPED / MAPPED / ATHENA MAPPED.
+  // Four-section layout: UNMAPPED / MAPPED / REJECTED / ATHENA MAPPED.
   const athenaRows = useMemo(
     () => visibleRows.filter((r) => r.mapping_origin === "athena").sort(browse ? () => 0 : byOccurrence),
     [visibleRows, browse],
   );
   const unmappedRows = useMemo(
-    () => visibleRows.filter((r) => r.mapping_origin !== "athena" && r.status !== "approved").sort(browse ? () => 0 : byOccurrence),
+    () => visibleRows.filter((r) => r.mapping_origin !== "athena" && r.status !== "approved" && r.status !== "rejected").sort(browse ? () => 0 : byOccurrence),
     [visibleRows, browse],
   );
-  const rejectedCount = useMemo(
-    () => browse?.rejected_count ?? rows.filter((r) => r.status === "rejected"
-      && r.mapping_origin !== "athena"
-      && tabForRow(r) === selectedVocabulary).length,
-    [rows, selectedVocabulary, browse],
+  const rejectedRows = useMemo(
+    () => visibleRows.filter((r) => r.mapping_origin !== "athena" && r.status === "rejected").sort(browse ? () => 0 : byOccurrence),
+    [visibleRows, browse],
   );
   const mappedRows = useMemo(
     () => visibleRows.filter((r) => r.mapping_origin !== "athena" && r.status === "approved").sort(browse ? () => 0 : byOccurrence),
@@ -1076,8 +1071,7 @@ export default function CodeMappingPage() {
     if (!saved?.mapping_id || !saved.status) return;
     // Reflect a successful server write immediately, never a speculative
     // approval. Background reload reconciles ordering, totals and other users.
-    setRows((current) => current.map((row) => row.mapping_id === saved.mapping_id ? saved : row)
-      .filter((row) => !browse || showRejected || row.status !== "rejected"));
+    setRows((current) => current.map((row) => row.mapping_id === saved.mapping_id ? saved : row));
     setBrowse((current) => {
       const previous = current?.results.find((row) => row.mapping_id === saved.mapping_id);
       if (!current || !previous || previous.status === saved.status
@@ -1085,7 +1079,6 @@ export default function CodeMappingPage() {
           || previous.mapping_origin === "athena") return current;
       const pages = { ...current.pages };
       for (const [row, delta] of [[previous, -1], [saved, 1]] as const) {
-        if (row.status === "rejected" && !showRejected) continue;
         const section = sectionForRow(row);
         pages[section] = { ...pages[section], total: Math.max(0, pages[section].total + delta) };
       }
@@ -1336,8 +1329,12 @@ export default function CodeMappingPage() {
     if (!row.mapping_id) return;
     setError("");
     try {
-      await api.delete(`/v1/code-mappings/${row.mapping_id}/`);
+      const response = await api.delete(`/v1/code-mappings/${row.mapping_id}/`);
       closeDialog();
+      if (response.status === 200 && response.data?.mapping_id) {
+        // Backend cleared the destination instead of deleting; apply locally.
+        applySavedMapping(response.data as CodeMappingRow);
+      }
       await refreshCurrent.current();
     } catch {
       setError("Failed to delete code mapping.");
@@ -1557,6 +1554,7 @@ export default function CodeMappingPage() {
                   if (tab.vocabulary_id === OVERALL_TAB) {
                     setUnmappedCollapsed(true);
                     setMappedCollapsed(true);
+                    setRejectedCollapsed(true);
                     setAthenaCollapsed(true);
                   }
                 }}
@@ -1784,20 +1782,10 @@ export default function CodeMappingPage() {
           </button>
           {!unmappedCollapsed && (
             <>
-          <div className="mb-2 flex items-center justify-between gap-3">
+          <div className="mb-2">
             <p className="text-xs text-slate-500">
               The destination concept exists — an import minted or chose it — but no curator has confirmed it.
             </p>
-            {rejectedCount > 0 && (
-              <label className="flex shrink-0 items-center gap-1.5 text-xs text-slate-600">
-                <input
-                  type="checkbox"
-                  checked={showRejected}
-                  onChange={(e) => { setPages({}); setShowRejected(e.target.checked); }}
-                />
-                Show {rejectedCount} rejected
-              </label>
-            )}
           </div>
           {renderTable(unmappedRows, "Nothing awaiting review in this vocabulary.", "Unmapped")}
             </>
@@ -1815,6 +1803,20 @@ export default function CodeMappingPage() {
           </button>
           {!mappedCollapsed && renderTable(mappedRows, "No approved mappings in this vocabulary.", "Mapped")}
         </section>
+
+        {(rejectedRows.length > 0 || (browse?.pages.Rejected?.total ?? 0) > 0) && (
+          <section className="mb-6">
+            <button
+              type="button"
+              onClick={() => setRejectedCollapsed((v) => !v)}
+              className="mb-2 inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-slate-700"
+            >
+              {rejectedCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+              Rejected <span className="font-normal text-slate-500">({browse?.pages.Rejected?.total ?? rejectedRows.length})</span>
+            </button>
+            {!rejectedCollapsed && renderTable(rejectedRows, "No rejected mappings in this vocabulary.", "Rejected")}
+          </section>
+        )}
 
         {athenaRows.length > 0 && (
           <section>

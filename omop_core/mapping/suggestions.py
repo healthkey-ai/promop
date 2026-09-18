@@ -516,9 +516,9 @@ def suggestable_queryset(omop_table=None, *, source_vocabulary_id=None,
     source text does (75,257 of staging's 85,318 rows), and re-deriving it would
     spend a model call to make the answer worse.
 
-    **``proposed`` only.**  ``approved`` is a curator's sign-off and ``rejected``
-    is equally a decision; re-proposing a rejected code put it back at the front
-    of the queue on every run, where it spent a model call and created nothing.
+    **``proposed`` and ``rejected``.**  ``approved`` is a curator's sign-off.
+    Rejected rows whose destination was cleared are back in the queue and eligible
+    for new suggestions — the rejection was of a specific proposal, not the code.
 
     Codes without destinations come first regardless of provenance, ordered
     by Seen count descending. Among eligible replacements, codes not tried by
@@ -537,7 +537,7 @@ def suggestable_queryset(omop_table=None, *, source_vocabulary_id=None,
     machine_set = Q(origin_system='') | Q(origin_system__istartswith='suggest')
     rows = (
         SourceCodeConceptMapping.objects
-        .filter(status='proposed')
+        .filter(status__in=['proposed', 'rejected'])
         .select_related('source_concept')
     )
     # None means every clinical table, which is what the embedding precompute
