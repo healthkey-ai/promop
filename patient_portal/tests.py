@@ -21052,7 +21052,25 @@ class CodeMappingApiTest(TestCase):
             {'reviewed C90.00', 'reviewed MULTIPLE MYELOMA'},
         )
 
-    def test_delete_removes_one_mapping_and_leaves_the_sibling(self):
+    def test_delete_without_a_destination_removes_one_row_and_leaves_the_sibling(self):
+        """A queue entry with nothing to clear is still deleted outright.
+
+        #1441 made DELETE clear a destination rather than remove the row, but
+        only when there is a destination to clear.
+        """
+        self.client.force_authenticate(user=self.staff)
+        sibling = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='ICD10CM',
+            source_code='C90.00',
+            omop_table='measurement',
+        )
+        resp = self.client.delete(f'/api/v1/code-mappings/{sibling.id}/')
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(SourceCodeConceptMapping.objects.filter(id=sibling.id).exists())
+        self.assertTrue(SourceCodeConceptMapping.objects.filter(id=self.mapping.id).exists())
+
+    def test_delete_with_a_destination_clears_it_and_leaves_the_sibling(self):
+        """The row stays in the queue so it can receive new proposals."""
         self.client.force_authenticate(user=self.staff)
         sibling = SourceCodeConceptMapping.objects.create(
             source_vocabulary_id='ICD10CM',
@@ -21060,10 +21078,14 @@ class CodeMappingApiTest(TestCase):
             target_concept=self.standard,
             destination_vocabulary_id='LOINC',
             omop_table='measurement',
+            status='approved',
         )
         resp = self.client.delete(f'/api/v1/code-mappings/{sibling.id}/')
-        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
-        self.assertFalse(SourceCodeConceptMapping.objects.filter(id=sibling.id).exists())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        sibling.refresh_from_db()
+        self.assertIsNone(sibling.target_concept_id)
+        self.assertEqual(sibling.destination_vocabulary_id, '')
+        self.assertEqual(sibling.status, 'proposed')
         self.assertTrue(SourceCodeConceptMapping.objects.filter(id=self.mapping.id).exists())
 
     def test_blank_source_systems_stay_distinct(self):
