@@ -37,10 +37,14 @@ never recorded a code.
 """
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field as dataclass_field
+from itertools import groupby
 
 from django.db import transaction
+from django.db.models import Case, CharField, F, Value, When
+from django.db.models.functions import Lower, Trim
 
 from omop_core.models import (
     Concept,
@@ -52,6 +56,7 @@ from omop_core.models import (
     FieldSynonym,
     SourceCodeConceptMapping,
 )
+from omop_core.services.source_vocabularies import ICD10CM_MERGE, VOCABULARY_OID_ALIASES
 
 # Table keys, in dependency order: a CustomPatientField requires its mapping, so
 # mappings are written first and pruned last.
@@ -86,6 +91,10 @@ _CODE_MAPPING_CONCEPT_FKS = (
     'source_concept', 'target_concept', 'suggested_target_concept',
 )
 
+# Spellings the code mapping tabs show as one vocabulary. Matching on the raw
+# spelling copied ICD10:A41.9 next to an existing ICD10CM:A41.9.
+_VOCABULARY_ALIASES: dict[str, str] = {**ICD10CM_MERGE, **VOCABULARY_OID_ALIASES}
+
 # A real source table is ~117k rows. Held as one list it does not fit in a
 # 512Mi job, and neither does a dict of every local row to match against.
 CODE_MAPPING_CHUNK: int = 2000
@@ -105,6 +114,8 @@ class TransferStats:
     suppressed_warnings: int = 0
     # Prune needs the source keys, but streaming does not keep the rows.
     code_mapping_keys: set[tuple[str, str]] = dataclass_field(default_factory=set)
+    # Target rows already written from a source row, so a later chunk leaves them alone.
+    claimed_code_mappings: set[int] = dataclass_field(default_factory=set)
 
     def warn(self, message: str) -> None:
         """Keep the first _WARNING_CAP warnings and count the rest."""
@@ -234,29 +245,29 @@ def _code_mapping_row(m: SourceCodeConceptMapping) -> dict[str, object]:
     }
 
 
+def _code_key(vocabulary_id: str, source_code: str) -> tuple[str, str]:
+    """The code a mapping is about, whatever spelling of its vocabulary it uses."""
+    return _VOCABULARY_ALIASES.get(vocabulary_id, vocabulary_id), source_code.strip(' ').lower()
+
+
+def _canonical_vocabulary() -> Case:
+    """SQL version of the vocabulary part of _code_key."""
+    return Case(
+        *(When(source_vocabulary_id=alias, then=Value(target)) for alias, target in _VOCABULARY_ALIASES.items()),
+        default=F('source_vocabulary_id'), output_field=CharField(),
+    )
+
+
 def iter_code_mappings(using: str) -> Iterator[dict[str, object]]:
     """Yield source-code mapping rows without materializing the table."""
     queryset = (
         SourceCodeConceptMapping.objects.using(using)
         .select_related(*_CODE_MAPPING_CONCEPT_FKS)
-        .order_by('source_vocabulary_id', 'source_code')
+        # Rows for one code stay next to each other, so a chunk rarely splits them.
+        .order_by(_canonical_vocabulary(), Lower(Trim('source_code')), 'source_vocabulary_id')
     )
     for m in queryset.iterator(chunk_size=CODE_MAPPING_CHUNK):
         yield _code_mapping_row(m)
-
-
-def _chunked(
-    rows: Iterable[dict[str, object]], size: int,
-) -> Iterator[list[dict[str, object]]]:
-    """Group rows into lists of at most size, consuming lazily."""
-    chunk: list[dict[str, object]] = []
-    for row in rows:
-        chunk.append(row)
-        if len(chunk) >= size:
-            yield chunk
-            chunk = []
-    if chunk:
-        yield chunk
 
 
 def apply_payload(
@@ -472,16 +483,36 @@ def _apply_synonyms(rows: list[dict], stats: TransferStats) -> None:
 def _apply_code_mappings(
     rows: Iterable[dict[str, object]], stats: TransferStats,
 ) -> None:
-    """Write source-code mappings, keyed on (source_vocabulary_id, source_code).
+    """Sync source-code mappings by code, whatever vocabulary spelling each side uses.
 
-    Blank vocabulary is a real value, an uncoded lab name, so those rows key
-    correctly instead of colliding.
+    The source is the truth: for each code the rows here are updated, created or
+    deleted until they match the source rows. Blank vocabulary is a real value,
+    an uncoded lab name, so those rows key correctly instead of colliding.
 
     occurrence_count, first_seen and last_seen are not copied. They count this
     instance own ingest traffic, so the source numbers would misattribute it.
     """
-    for chunk in _chunked(rows, CODE_MAPPING_CHUNK):
+    for chunk in _chunked_by_code(rows, CODE_MAPPING_CHUNK):
         _apply_code_mapping_chunk(chunk, stats)
+
+
+def _chunked_by_code(
+    rows: Iterable[dict[str, object]], size: int,
+) -> Iterator[list[dict[str, object]]]:
+    """Chunks of about size rows that never split the rows of one code.
+
+    A split code would have its other spellings deleted by one chunk and
+    recreated by the next.
+    """
+    chunk: list[dict[str, object]] = []
+    for row in rows:
+        key = _code_key(row['source_vocabulary_id'], row['source_code'])
+        if len(chunk) >= size and _code_key(chunk[-1]['source_vocabulary_id'], chunk[-1]['source_code']) != key:
+            yield chunk
+            chunk = []
+        chunk.append(row)
+    if chunk:
+        yield chunk
 
 
 def _concept_caches(
@@ -521,52 +552,74 @@ def _concept_caches(
 def _apply_code_mapping_chunk(
     rows: list[dict[str, object]], stats: TransferStats,
 ) -> None:
-    """Write one chunk, matching only the local rows it could touch."""
-    keys = [(row['source_vocabulary_id'], row['source_code']) for row in rows]
-    stats.code_mapping_keys.update(keys)
-    existing = {
-        (m.source_vocabulary_id, m.source_code): m
-        for m in SourceCodeConceptMapping.objects.filter(
-            source_vocabulary_id__in={v for v, _ in keys},
-            source_code__in={c for _, c in keys},
-        )
-    }
+    """Sync one chunk: per code update what is here, create what is missing, delete extras."""
+    stats.code_mapping_keys.update((row['source_vocabulary_id'], row['source_code']) for row in rows)
+    targets = _target_code_mappings(rows, stats)
     by_code, by_id = _concept_caches(rows)
-    for row in rows:
-        key = (row['source_vocabulary_id'], row['source_code'])
-        label = f"{row['source_vocabulary_id'] or '(uncoded)'}:{row['source_code']}"
-        values = {name: row[name] for name in _CODE_MAPPING_FIELDS}
-        for fk in _CODE_MAPPING_CONCEPT_FKS:
-            ref = row.get(fk) or {}
-            values[fk] = _resolve_concept_ref(
-                ref.get('vocabulary_id') or '',
-                ref.get('concept_code') or '',
-                ref.get('concept_id'),
-                f'{label} ({fk})',
-                stats,
-                by_code, by_id,
-                # The source concept is select_related, so a missing one means
-                # the source FK dangles. Its id names nothing we can trust.
-                allow_id_fallback=False,
-            )
-        # Attribution does not cross instances, see module docstring.
-        values['reviewer'] = None
-        values['created_by'] = None
-        values['updated_by'] = None
+    rows = sorted(rows, key=lambda r: _code_key(r['source_vocabulary_id'], r['source_code']))
+    for key, group in groupby(rows, key=lambda r: _code_key(r['source_vocabulary_id'], r['source_code'])):
+        group = list(group)
+        here = targets.get(key, [])
+        exact = {(m.source_vocabulary_id, m.source_code): m for m in here}
+        paired = {id(row): exact.pop((row['source_vocabulary_id'], row['source_code']), None) for row in group}
+        spare = sorted(exact.values(), key=lambda m: m.pk)
+        for row in group:
+            if paired[id(row)] is None and spare:
+                paired[id(row)] = spare.pop(0)
+        # Deleted first: a paired row may take the spelling of an extra.
+        if spare:
+            SourceCodeConceptMapping.objects.filter(pk__in=[m.pk for m in spare]).delete()
+            stats._bump(stats.deleted, 'code_mappings', len(spare))
+        for row in group:
+            _write_code_mapping(row, paired[id(row)], stats, by_code, by_id)
 
-        mapping = existing.get(key)
-        if mapping is None:
-            SourceCodeConceptMapping.objects.create(
-                source_vocabulary_id=row['source_vocabulary_id'],
-                source_code=row['source_code'],
-                **values,
-            )
-            stats._bump(stats.created, 'code_mappings')
-            continue
+
+def _target_code_mappings(
+    rows: list[dict[str, object]], stats: TransferStats,
+) -> dict[tuple[str, str], list[SourceCodeConceptMapping]]:
+    """Rows here with the same codes as the chunk, under any spelling, not yet claimed."""
+    keys = {_code_key(row['source_vocabulary_id'], row['source_code']) for row in rows}
+    canonical = {vocabulary for vocabulary, _ in keys}
+    spellings = canonical | {alias for alias, target in _VOCABULARY_ALIASES.items() if target in canonical}
+    found: dict[tuple[str, str], list[SourceCodeConceptMapping]] = defaultdict(list)
+    candidates = SourceCodeConceptMapping.objects.filter(source_vocabulary_id__in=spellings).alias(
+        code=Lower(Trim('source_code')),
+    ).filter(code__in={code for _, code in keys}).exclude(pk__in=stats.claimed_code_mappings)
+    for mapping in candidates:
+        key = _code_key(mapping.source_vocabulary_id, mapping.source_code)
+        if key in keys:
+            found[key].append(mapping)
+    return found
+
+
+def _write_code_mapping(
+    row: dict[str, object], mapping: SourceCodeConceptMapping | None, stats: TransferStats,
+    by_code: dict[tuple[str, str], Concept], by_id: dict[int, Concept],
+) -> None:
+    """Create the row, or overwrite mapping with it, spelling included."""
+    label = f"{row['source_vocabulary_id'] or '(uncoded)'}:{row['source_code']}"
+    values = {name: row[name] for name in _CODE_MAPPING_FIELDS}
+    for fk in _CODE_MAPPING_CONCEPT_FKS:
+        ref = row.get(fk) or {}
+        values[fk] = _resolve_concept_ref(
+            ref.get('vocabulary_id') or '', ref.get('concept_code') or '', ref.get('concept_id'),
+            f'{label} ({fk})', stats, by_code, by_id,
+            # The source concept is select_related, so a missing one means
+            # the source FK dangles. Its id names nothing we can trust.
+            allow_id_fallback=False,
+        )
+    # Attribution does not cross instances, see module docstring.
+    values.update(reviewer=None, created_by=None, updated_by=None,
+                  source_vocabulary_id=row['source_vocabulary_id'], source_code=row['source_code'])
+    if mapping is None:
+        mapping = SourceCodeConceptMapping.objects.create(**values)
+        stats._bump(stats.created, 'code_mappings')
+    else:
         for name, value in values.items():
             setattr(mapping, name, value)
         mapping.save(update_fields=[*values, 'updated_at'])
         stats._bump(stats.updated, 'code_mappings')
+    stats.claimed_code_mappings.add(mapping.pk)
 
 
 def _prune(payload: dict, tables: tuple[str, ...], stats: TransferStats) -> None:

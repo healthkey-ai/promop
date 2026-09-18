@@ -299,21 +299,32 @@ def apply_patient(
     payload: PatientPayload, organization: Organization, target_person_id: int | None = None,
     replace: bool = False, dry_run: bool = False,
 ) -> PatientCopyStats:
-    """Write a read_patient payload as a patient of organization, in one transaction."""
+    """Write a read_patient payload as a patient of organization, in one transaction.
+
+    The patient gets a person_id from this database. Source ids belong to the
+    source instance, where the same number is somebody else.
+    """
     stats = PatientCopyStats()
-    person_id = target_person_id or payload['person']['person_id']
+    source_id = payload['person']['person_id']
     try:
         with transaction.atomic(), suppress_patient_record_refresh():
-            if Person.objects.filter(person_id=person_id).exists():
+            already_here = copied_person_id(source_id)
+            if already_here is not None:
                 if not replace:
                     raise PatientCopyError(
-                        f'Person {person_id} already exists here. Use --replace or --target-person-id.'
+                        f'Person {source_id} was already copied here as {already_here}. Use --replace.'
                     )
-                delete_patient(person_id)
+                delete_patient(already_here)
+            person_id = target_person_id or _new_ids(Person, 'person_id', 1)[0]
+            if target_person_id and Person.objects.filter(person_id=target_person_id).exists():
+                if not replace:
+                    raise PatientCopyError(f'Person {target_person_id} already exists here. Use --replace.')
+                delete_patient(target_person_id)
             _Copier(payload, organization, person_id, stats).run()
             refresh_patient_record(Person.objects.get(person_id=person_id))
             # The source record may have no org, or there may be no source record at all.
             PatientRecord.objects.filter(person_id=person_id).update(organization=organization)
+            _record_copy(source_id, person_id, organization)
             stats.person_id = person_id
             if dry_run:
                 raise _Rollback
@@ -358,12 +369,7 @@ class _Copier:
 
     def _copy_person(self) -> None:
         """Copy the person and their address under new ids."""
-        location = self.payload['location']
-        location_id = None
-        if location is not None:
-            location_id = _new_ids(Location, 'location_id', 1)[0]
-            Location.objects.create(**{**location, 'location_id': location_id})
-            self.stats.created['Location'] += 1
+        location_id = self._location_id()
         values = self._with_concepts(Person, self.payload['person'])
         # actor_iss and actor_sub link a login on the source instance.
         values.update(person_id=self.person_id, location_id=location_id, provider_id=None,
@@ -371,6 +377,20 @@ class _Copier:
         Person.objects.create(**values)
         self.ids[Person][self.payload['person']['person_id']] = self.person_id
         self.stats.created['Person'] += 1
+
+    def _location_id(self) -> int | None:
+        """The id here of the patient's address, reusing an identical one."""
+        location = self.payload['location']
+        if location is None:
+            return None
+        address = {k: v for k, v in location.items() if k != 'location_id'}
+        here = Location.objects.filter(**address).order_by('location_id').values_list('location_id', flat=True).first()
+        if here is not None:
+            return here
+        location_id = _new_ids(Location, 'location_id', 1)[0]
+        Location.objects.create(**address, location_id=location_id)
+        self.stats.created['Location'] += 1
+        return location_id
 
     def _copy_table(self, model: type[Model], rows: list[Columns]) -> None:
         """Insert rows under new ids and remember old id to new id."""
@@ -537,6 +557,27 @@ def _new_ids(model: type[Model], attname: str, count: int) -> list[int]:
         cursor.execute(sql.SQL('LOCK TABLE {} IN SHARE ROW EXCLUSIVE MODE').format(sql.Identifier(table)))
     start = (model.objects.aggregate(top=Max(attname))['top'] or 0) + 1
     return list(range(start, start + count))
+
+
+# Marks which source patient a local person came from, so a re-run finds them.
+COPY_SOURCE: str = 'copy_patient'
+
+
+def copied_person_id(source_person_id: int) -> int | None:
+    """person_id here of a patient already copied from that source id."""
+    return ProvenanceRecord.objects.filter(
+        source=COPY_SOURCE, source_user_id=str(source_person_id),
+        content_type=ContentType.objects.get_for_model(Person),
+    ).values_list('object_id', flat=True).first()
+
+
+def _record_copy(source_person_id: int, person_id: int, organization: Organization) -> None:
+    """Record where this patient came from."""
+    ProvenanceRecord.objects.create(
+        source=COPY_SOURCE, source_user_id=str(source_person_id), target_patient_id=str(person_id),
+        content_type=ContentType.objects.get_for_model(Person), object_id=person_id,
+        organization=organization,
+    )
 
 
 def delete_patient(person_id: int) -> None:
