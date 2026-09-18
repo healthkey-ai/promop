@@ -179,10 +179,10 @@ follicular lymphoma, chronic lymphocytic leukemia, breast cancer, and diffuse la
 lymphoma). No data from either deployment appears in this paper or in the repository; every
 result reported here uses synthetic patients.
 
-Three systems consume `PatientRecord` rather than deriving patient state themselves: PRism, a
-population analytics dashboard; EXACT, a clinical trial matching engine; and a separately
-developed patient-portal host application, which loads PRomop's patient-record interface at
-runtime as a Module Federation remote. Sharing one derivation eliminated a class of bugs in
+Three open-source systems consume `PatientRecord` rather than deriving patient state
+themselves: PRism [@PRism], a population analytics dashboard; EXACT [@EXACT], a clinical trial
+matching engine; and a patient-portal application [@PHR], which loads PRomop's patient-record
+interface at runtime as a Module Federation remote. Sharing one derivation eliminated a class of bugs in
 which applications disagreed about the same patient.
 
 The project has been developed on GitHub since September 2025: roughly 1,900
