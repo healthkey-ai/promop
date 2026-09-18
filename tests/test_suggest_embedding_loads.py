@@ -278,6 +278,23 @@ def test_dispatch_runs_after_commit(settings, broker, django_capture_on_commit_c
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize('broker', ('', 'redis://localhost:6379/0'))
+def test_dispatch_skips_when_table_is_missing(settings, broker, caplog,
+                                               django_capture_on_commit_callbacks):
+    """A pgvector-less database (#1430) must not crash every loader's precompute."""
+    settings.CELERY_BROKER_URL = broker
+    with patch('omop_core.tasks.precompute_suggest_embeddings_task.delay') as queued, patch(
+            'omop_core.services.embedding_jobs.run_suggest_embeddings') as inline, patch(
+            'omop_core.services.embedding_jobs.concept_embedding_table_exists',
+            return_value=False):
+        with django_capture_on_commit_callbacks(execute=True):
+            dispatch_suggest_embeddings()
+    queued.assert_not_called()
+    inline.assert_not_called()
+    assert 'concept_embedding does not exist' in caplog.text
+
+
+@pytest.mark.django_db
 def test_rollback_discards_dispatch(django_capture_on_commit_callbacks):
     with django_capture_on_commit_callbacks(execute=True) as callbacks:
         with pytest.raises(RuntimeError):

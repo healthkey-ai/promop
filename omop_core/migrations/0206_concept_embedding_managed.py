@@ -7,50 +7,30 @@ Django's model state moves in two steps:
 2. AlterField changes the placeholder BinaryField to pgvector's VectorField so
    Django tooling knows the real column type.
 
-Both are state-only here.  The matching DDL runs from ``align_embedding_column``
-instead, because the table this migration alters is not created by Django:
-0204 creates ``concept_embedding`` with raw SQL, and *skips* it on a server that
-does not ship pgvector.  On such a server there is no column to alter, and the
-unconditional ``ALTER TABLE`` that AlterField used to emit failed with
-``relation "concept_embedding" does not exist`` — so ``migrate`` could not build
-a database from empty on a stock PostgreSQL image at all (#1430).  Deployments
-created before this migration never noticed, because their table already
-existed.
+Both are **state-only**, wrapped in SeparateDatabaseAndState with no database
+operations.  The table this migration describes is not created by Django: 0204
+creates ``concept_embedding`` with raw SQL, already as ``vector(384)``, and
+*skips* it on a server that does not ship pgvector.  On such a server there is
+no column to alter, and the unconditional ``ALTER TABLE`` that a declarative
+AlterField emits failed with ``relation "concept_embedding" does not exist`` —
+so ``migrate`` could not build a database from empty on a stock PostgreSQL
+image at all (#1430).  Deployments created before this migration never
+noticed, because their table already existed.
 
-Where the table does exist the emitted SQL is unchanged from the declarative
-AlterField, so already-migrated databases are unaffected.
+There is no DDL to emit even where the table does exist: 0204 is the only
+creator and 0205's unmanaged CreateModel produces none, so every reachable
+column is ``vector(384)`` already.  A RunPython alternative was rejected
+because ``sqlmigrate`` executes RunPython inside SeparateDatabaseAndState for
+real, against the target database.
+
+Invariant for later migrations: after this one the model state says the table
+is managed, but on a pgvector-less database it does not exist.  Any future
+operation on ConceptEmbedding (AddIndex, AddField, AlterField ...) must be
+state-only or guard on the table's existence, or it reintroduces #1430.
+CI runs on a pgvector image, so it will not catch the regression.
 """
-import logging
-
 import pgvector.django.vector
 from django.db import migrations
-
-logger = logging.getLogger(__name__)
-
-
-def align_embedding_column(apps, schema_editor):
-    """Give ``concept_embedding.embedding`` the real vector(384) column type.
-
-    A no-op in practice on databases whose table came from 0204 (it already
-    creates the column as ``vector(384)``); it exists so a table created
-    elsewhere ends up matching the model.  When 0204 skipped the table there is
-    nothing to align, and the model state still advances so that a later
-    ``makemigrations`` does not see a phantom change.
-    """
-    connection = schema_editor.connection
-    if 'concept_embedding' not in connection.introspection.table_names():
-        logger.warning(
-            'concept_embedding does not exist — migration 0204 skipped it '
-            'because the pgvector extension is not available on this server. '
-            'Leaving it uncreated; vector reranking in code-mapping suggest '
-            'stays unavailable until pgvector is installed.'
-        )
-        return
-    with connection.cursor() as cur:
-        cur.execute(
-            'ALTER TABLE "concept_embedding" ALTER COLUMN "embedding" '
-            'TYPE vector(384) USING "embedding"::vector(384)'
-        )
 
 
 class Migration(migrations.Migration):
@@ -72,11 +52,6 @@ class Migration(migrations.Migration):
                     field=pgvector.django.vector.VectorField(dimensions=384),
                 ),
             ],
-            database_operations=[
-                migrations.RunPython(
-                    align_embedding_column,
-                    migrations.RunPython.noop,
-                ),
-            ],
+            database_operations=[],
         ),
     ]
