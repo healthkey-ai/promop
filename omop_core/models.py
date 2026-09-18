@@ -1990,6 +1990,17 @@ class SourceCodeConceptMapping(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # ── Pessimistic edit lock ───────────────────────────────────────────
+    locked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='+',
+        help_text='User currently editing this mapping. Cleared on save or timeout.',
+    )
+    locked_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text='When the lock was acquired. Expires after MAPPING_LOCK_TIMEOUT_MINUTES.',
+    )
+
     class Meta:
         db_table = 'source_code_concept_mapping'
         indexes = [
