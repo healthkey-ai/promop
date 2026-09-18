@@ -39,7 +39,7 @@ class Command(BaseCommand):
             deleted = 0
             # Walk forward on pk rather than re-running LIMIT from the start
             # each time. The rows this deletes are exactly the ones the partial
-            # index in 0019 excludes — it covers active deliveries — so an
+            # index in 0021 excludes — it covers active deliveries — so an
             # unbounded re-scan per batch is quadratic at the size retention
             # exists to handle.
             #

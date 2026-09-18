@@ -7,7 +7,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("patient_portal", "0018_webhooksubscription_webhookdelivery_and_more"),
+        ("patient_portal", "0020_webhooksubscription_webhookdelivery_and_more"),
     ]
 
     operations = [

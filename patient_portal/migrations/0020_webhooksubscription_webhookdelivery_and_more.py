@@ -11,7 +11,10 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ("omop_core", "0230_cytogenetic_marker_choices"),
-        ("patient_portal", "0017_seed_service_application_names"),
+        # Renumbered from 0018 onto #1380's migrations, which kept those numbers.
+        # Both branches descended from 0017, so merging them unchanged would have
+        # left two leaf nodes and broken `migrate`.
+        ("patient_portal", "0019_seed_legacy_service_application"),
     ]
 
     operations = [
