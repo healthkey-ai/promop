@@ -1990,6 +1990,17 @@ class SourceCodeConceptMapping(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # ── Pessimistic edit lock ───────────────────────────────────────────
+    locked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='+',
+        help_text='User currently editing this mapping. Cleared on save or timeout.',
+    )
+    locked_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text='When the lock was acquired. Expires after MAPPING_LOCK_TIMEOUT_MINUTES.',
+    )
+
     class Meta:
         db_table = 'source_code_concept_mapping'
         indexes = [
@@ -4474,6 +4485,11 @@ class ConceptEmbedding(models.Model):
     Populated by ``manage.py build_concept_embeddings`` and queried by the
     vector-similarity tier of the code-mapping suggest pipeline.  Uses pgvector
     for cosine-distance indexing.
+
+    The table is created by migration 0204's raw SQL, which skips it on a
+    server without pgvector, and 0206 is state-only (#1430).  So on such a
+    server this model is managed but its table does not exist: a migration
+    that touches it must be state-only or guard on the table's existence.
     """
     concept = models.OneToOneField(
         Concept, primary_key=True, on_delete=models.CASCADE,

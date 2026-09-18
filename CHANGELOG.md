@@ -4,6 +4,17 @@ All notable changes to PRomop are documented here.
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- **Copying between instances** — models are classified as system, reference or
+  patient data (`omop_core/services/instance_data.py`). `copy_curation` is
+  renamed `copy_reference_data` and now also copies lookups, therapy reference data,
+  mapping destination candidates and HealthKey concepts.
+  New `copy_patient` copies patients, by id or `--filter-org-id`, with every
+  link remapped.
+
 ## [1.3.0] — 2026-09-16
 
 251 commits since 1.2.0. The defining changes are genomics, federation, and

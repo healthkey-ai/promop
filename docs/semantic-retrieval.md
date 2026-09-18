@@ -62,6 +62,43 @@ No additional service or LLM is required. Install PROMOP's existing
 `concept_embedding` must contain BAAI/bge-small-en-v1.5 embeddings (384
 dimensions) of concept names, generated with the same model as query encoding.
 
+### On a server without pgvector
+
+`migrate` still runs to completion on a stock PostgreSQL image: migration 0204
+skips `concept_embedding` when the server has no `vector` extension available,
+and 0206 is state-only, so it has nothing to alter. Every other table is built
+as usual, so an application that does not use semantic retrieval can deploy
+against plain PostgreSQL. What degrades:
+
+- Semantic retrieval and vector reranking catch the `relation does not exist`
+  error and return nothing, at the cost of a warning per source code in a
+  Suggest run. (`vector_rerank` finds no stored vectors; `semantic_candidates`
+  logs the traceback.)
+- The precompute that every vocabulary and mapping loader dispatches after
+  commit is skipped with one warning instead of failing the loader.
+
+If the server ships pgvector but the application role is not a superuser,
+`pg_available_extensions` lists the extension and 0204 tries `CREATE EXTENSION
+vector`, which fails with `permission denied`. Have a DBA create the extension
+in the database first; the migration then finds it and proceeds.
+
+Both migrations are recorded as applied, so installing pgvector afterwards does
+not bring the table back on its own. Create it with the DDL 0204 would have
+run, then populate it as above (`build_concept_embeddings` rebuilds the index,
+but the automatic precompute path only inserts rows, so create the index too):
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE TABLE IF NOT EXISTS concept_embedding (
+    concept_id  INTEGER PRIMARY KEY
+        REFERENCES concept(concept_id) ON DELETE CASCADE,
+    embedding   vector(384) NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_concept_embedding_cosine
+    ON concept_embedding USING ivfflat (embedding vector_cosine_ops)
+    WITH (lists = 1000);
+```
+
 Build embeddings for the vocabulary coverage you intend to search:
 
 ```sh

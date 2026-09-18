@@ -57,8 +57,12 @@ def browse_mappings(mappings, params, serialize):
     tab_rows = mappings if source == OVERALL else mappings.filter(source_vocabulary_id__in=source_tab_vocabularies(source))
     # Only duplicate groups need full rows. Window filtering preserves every
     # member, including rejected rows outside the current page/search.
-    alias_cases = [When(source_vocabulary_id=key, then=Value(canonical_source(key)))
-                   for key in set(vocab.ICD10CM_MERGE) | set(vocab.VOCABULARY_OID_ALIASES) | set(vocab.WEARABLE_SOURCE_VOCABULARIES)]
+    # A duplicate is one code twice in one *vocabulary*, not twice on one tab:
+    # the Wearables tab holds Apple, Garmin and OpenWearables, ingest resolves
+    # on the exact vocabulary, and the same code in two of them is two
+    # legitimate mappings. Only an OID spelling is the same vocabulary.
+    alias_cases = [When(source_vocabulary_id=key, then=Value(canonical))
+                   for key, canonical in vocab.VOCABULARY_OID_ALIASES.items()]
     duplicate_ids = tab_rows.order_by().annotate(
         canonical=Case(*alias_cases, default=F('source_vocabulary_id'), output_field=CharField()),
         code=Upper(Trim('source_code')),
@@ -90,16 +94,15 @@ def browse_mappings(mappings, params, serialize):
         totals = {key: sum(bucket.get(key, 0) for bucket in selected_counts)
                   for key in ('unmapped', 'mapped', 'athena', 'rejected', 'athena_rejected')}
     rejected = totals['rejected']
-    if params.get('show_rejected') != 'true':
-        filtered = filtered.exclude(status='rejected')
     section_queries = {
-        'Unmapped': filtered.exclude(origin_system='athena').exclude(status='approved'),
+        'Unmapped': filtered.exclude(origin_system='athena').exclude(status__in=['approved', 'rejected']),
         'Mapped': filtered.exclude(origin_system='athena').filter(status='approved'),
+        'Rejected': filtered.exclude(origin_system='athena').filter(status='rejected'),
         'Athena Mapped': filtered.filter(origin_system='athena'),
     }
     pages, selected_ids = {}, []
-    section_totals = [totals['unmapped'] + (rejected if params.get('show_rejected') == 'true' else 0),
-                      totals['mapped'], totals['athena'] + (totals['athena_rejected'] if params.get('show_rejected') == 'true' else 0)]
+    section_totals = [totals['unmapped'], totals['mapped'], rejected,
+                      totals['athena'] + totals['athena_rejected']]
     for index, (section, query) in enumerate(section_queries.items()):
         try:
             requested_page = max(1, int(params.get(f'page_{index}', 1)))
@@ -119,7 +122,7 @@ def browse_mappings(mappings, params, serialize):
         ids = list(query.order_by(ordering, 'source_code', 'id').values_list('pk', flat=True)[(page - 1) * PAGE_SIZE:page * PAGE_SIZE])
         selected_ids.extend(ids)
         pages[section] = dict(page=page, page_size=PAGE_SIZE, total=total)
-    # Load all three bounded sections together, preserving their selected order.
+    # Load all bounded sections together, preserving their selected order.
     page_rows = {row.pk: row for row in with_destination_counts(mappings.filter(pk__in=selected_ids))}
     results = [page_rows[pk] for pk in selected_ids if pk in page_rows]
     metadata = mapping_source_retirement(results + duplicates)

@@ -516,9 +516,9 @@ def suggestable_queryset(omop_table=None, *, source_vocabulary_id=None,
     source text does (75,257 of staging's 85,318 rows), and re-deriving it would
     spend a model call to make the answer worse.
 
-    **``proposed`` only.**  ``approved`` is a curator's sign-off and ``rejected``
-    is equally a decision; re-proposing a rejected code put it back at the front
-    of the queue on every run, where it spent a model call and created nothing.
+    **``proposed`` and ``rejected``.**  ``approved`` is a curator's sign-off.
+    Rejected rows whose destination was cleared are back in the queue and eligible
+    for new suggestions — the rejection was of a specific proposal, not the code.
 
     Codes without destinations come first regardless of provenance, ordered
     by Seen count descending. Among eligible replacements, codes not tried by
@@ -537,7 +537,7 @@ def suggestable_queryset(omop_table=None, *, source_vocabulary_id=None,
     machine_set = Q(origin_system='') | Q(origin_system__istartswith='suggest')
     rows = (
         SourceCodeConceptMapping.objects
-        .filter(status='proposed')
+        .filter(status__in=['proposed', 'rejected'])
         .select_related('source_concept')
     )
     # None means every clinical table, which is what the embedding precompute
@@ -1286,12 +1286,13 @@ def _prepare(*, source_code, source_vocabulary_id, source_text, domain_id,
             description=source_text, source_concept=None, umls_name='',
             domain_id=domain_id, omop_table='',
         )
-    if not definitive:
-        loaded_source = source_context.get('loaded_source_concept') or {}
-        candidates = enrich_candidates(
-            candidates, source_text or source_code, loaded_source.get('concept_id'),
-            min_similarity=MIN_TRIGRAM_SCORE,
-        )
+    # Always enrich — even UMLS-only candidates benefit from synonym/
+    # relationship data that helps the ranker make an informed choice.
+    loaded_source = source_context.get('loaded_source_concept') or {}
+    candidates = enrich_candidates(
+        candidates, source_text or source_code, loaded_source.get('concept_id'),
+        min_similarity=MIN_TRIGRAM_SCORE,
+    )
     job = {
         'candidates': candidates,
         'umls_cui': umls_cui,
@@ -1307,10 +1308,9 @@ def _prepare(*, source_code, source_vocabulary_id, source_text, domain_id,
         'strategy_used': None,
         'vector_reranked': any('vector_score' in c for c in candidates),
     }
-    if definitive:
-        job['chosen'] = candidates[0]
-        job['strategy_used'] = STRATEGY_UMLS
-        job['note'] = f'UMLS CUI bridge ({umls_cui}): exact cross-vocabulary equivalency.'
+    # UMLS candidates carry umls_score=1.0 so the ranker sees the signal,
+    # but we no longer short-circuit — let the ranking model weigh all
+    # evidence (UMLS, lexical, vector) and pick the winner.
     return job
 
 
@@ -1356,6 +1356,9 @@ def rank_jobs(jobs, on_ranked=None, ranking_model=DEFAULT_RANKING_MODEL):
             record(job, *rank(job))
         return jobs
 
+    # Rank concurrently but emit `on_ranked` in original job order so the
+    # activity log preserves the occurrence-count ordering the curator expects.
+    results: dict[int, tuple] = {}
     with ThreadPoolExecutor(max_workers=min(RANK_CONCURRENCY, len(pending))) as pool:
         futures = {pool.submit(rank, job): job for job in pending}
         for future in as_completed(futures):
@@ -1363,19 +1366,21 @@ def rank_jobs(jobs, on_ranked=None, ranking_model=DEFAULT_RANKING_MODEL):
             try:
                 chosen, note, alternatives, ranking_timings = future.result()
             except Exception as exc:              # noqa: BLE001 - degrade, never fail
-                # rank_candidates already swallows its own failures; this is the
-                # backstop for anything that escapes it, so one bad code cannot
-                # take down a whole Suggest run.
                 logger.warning('Ranking raised for %r: %s', job['source_code'], exc)
                 job['ranking_failed'] = True
                 chosen, note, alternatives, ranking_timings = None, 'Ranking failed; no destination proposed.', None, None
-            record(job, chosen, note, alternatives, ranking_timings)
+            results[id(job)] = (chosen, note, alternatives, ranking_timings)
+    for job in pending:
+        record(job, *results[id(job)])
     return jobs
 
 
-def rank_and_expand_jobs(jobs, on_ranked=None, ranking_model=DEFAULT_RANKING_MODEL):
-    """One initial selection and at most one query-expansion/selection retry."""
-    rank_jobs(jobs, on_ranked=on_ranked, ranking_model=ranking_model)
+def _query_expand_failed_jobs(jobs, on_ranked=None, ranking_model=DEFAULT_RANKING_MODEL):
+    """Query-expansion retry for jobs the ranker declined.
+
+    Called after the initial ranking pass.  Generates an alternative search
+    query via the LLM, retrieves new candidates, and re-ranks once.
+    """
     pending = [job for job in jobs if job['chosen'] is None
                and not job.get('ranking_failed')
                and {STRATEGY_LEXICAL, STRATEGY_VECTORS, STRATEGY_SEMANTIC}.intersection(job['strategies'])
@@ -1439,6 +1444,12 @@ def rank_and_expand_jobs(jobs, on_ranked=None, ranking_model=DEFAULT_RANKING_MOD
         if on_ranked is not None:
             on_ranked(job)
     return jobs
+
+
+def rank_and_expand_jobs(jobs, on_ranked=None, ranking_model=DEFAULT_RANKING_MODEL):
+    """One initial selection and at most one query-expansion/selection retry."""
+    rank_jobs(jobs, on_ranked=on_ranked, ranking_model=ranking_model)
+    return _query_expand_failed_jobs(jobs, on_ranked=on_ranked, ranking_model=ranking_model)
 
 
 def suggest_source_code(*, source_vocabulary_id, source_code, source_text, omop_table):
@@ -1589,8 +1600,39 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
 
     report('retrieving', 0)
 
-    # Phase 1 -- everything that reads the database, serially.
+    def ranked(job):
+        emit('ranked', **source(job['mapping']), suggested=job['chosen'],
+             note=job['note'], strategy_used=job['strategy_used'], candidates=job['candidates'],
+             alternatives=job.get('alternatives'),
+             ranking_timings=job.get('ranking_timings'))
+
+    def _rank_one(job):
+        """Rank a single job.  Runs in a worker thread — no DB access."""
+        return rank_candidates_dispatch(
+            job['source_code'], job['candidates'],
+            source_description=job['source_text'],
+            source_context=job.get('source_context'),
+            require_model_selection=False,
+            ranking_model=ranking_model,
+        )
+
+    def _record_ranking(job, chosen, note, alternatives=None, ranking_timings=None):
+        job['chosen'], job['note'] = chosen, note
+        if alternatives is not None:
+            job['alternatives'] = alternatives
+        if ranking_timings is not None:
+            job['ranking_timings'] = ranking_timings
+        if chosen is not None:
+            job['strategy_used'] = chosen.get('retrieval') or STRATEGY_LEXICAL
+
+    # Phases 1+2 -- retrieve serially, submit ranking as each code completes.
+    # Ranking is an API call (~3.5s) that overlaps with the next code's DB
+    # retrieval (~2.5s), cutting wall-clock time significantly.
+    # With only one code there is nothing to overlap, so rank inline.
+    use_pool = len(mappings) > 1
     jobs = []
+    rank_pool = ThreadPoolExecutor(max_workers=RANK_CONCURRENCY) if use_pool else None
+    rank_futures: dict[int, 'Future'] = {}  # id(job) -> Future
     for mapping in mappings:
         emit('retrieving', **source(mapping))
         source_concept = mapping.source_concept or _find_source_concept(
@@ -1625,18 +1667,47 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
         emit('retrieved', **{**source(mapping), 'source_description': description},
              candidates_considered=len(job['candidates']), umls_cui=job['umls_cui'],
              vector_reranked=job['vector_reranked'])
+
+        # Submit ranking immediately — runs in parallel with next retrieval.
+        if job['chosen'] is None and job['candidates']:
+            if rank_pool is not None:
+                rank_futures[id(job)] = rank_pool.submit(_rank_one, job)
+            else:
+                # Single code — rank inline, no thread overhead.
+                try:
+                    _record_ranking(job, *_rank_one(job))
+                except Exception as exc:  # noqa: BLE001 - degrade, never fail
+                    logger.warning('Ranking raised for %r: %s', job['source_code'], exc)
+                    job['ranking_failed'] = True
+                    job['note'] = 'Ranking failed; no destination proposed.'
+                ranked(job)
+        elif job['chosen'] is None and not job['candidates']:
+            job['note'] = 'No candidate concept found by any enabled strategy.'
+            ranked(job)
+        else:
+            ranked(job)
+
         report('retrieving', len(jobs))
 
-    # Ranking workers touch no database; optional retry retrieval stays on this thread.
-    emit('ranking', note='Ranking retrieved candidates; multiple codes may be ranked concurrently.')
+    # Collect ranking results in original job order so the activity log
+    # preserves the occurrence-count ordering the curator expects.
+    for job in jobs:
+        fut = rank_futures.get(id(job))
+        if fut is None:
+            continue
+        try:
+            chosen, note, alternatives, ranking_timings = fut.result()
+            _record_ranking(job, chosen, note, alternatives, ranking_timings)
+        except Exception as exc:  # noqa: BLE001 - degrade, never fail
+            logger.warning('Ranking raised for %r: %s', job['source_code'], exc)
+            job['ranking_failed'] = True
+            job['note'] = 'Ranking failed; no destination proposed.'
+        ranked(job)
+    if rank_pool is not None:
+        rank_pool.shutdown(wait=False)
 
-    def ranked(job):
-        emit('ranked', **source(job['mapping']), suggested=job['chosen'],
-             note=job['note'], strategy_used=job['strategy_used'], candidates=job['candidates'],
-             alternatives=job.get('alternatives'),
-             ranking_timings=job.get('ranking_timings'))
-
-    rank_and_expand_jobs(jobs, on_ranked=ranked, ranking_model=ranking_model)
+    # Query expansion on codes the ranker declined — same as before.
+    _query_expand_failed_jobs(jobs, on_ranked=ranked, ranking_model=ranking_model)
     report('writing', 0)
 
     # Phase 3 -- the writes, serially.

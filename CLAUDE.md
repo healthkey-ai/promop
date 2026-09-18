@@ -428,11 +428,12 @@ DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" DEBUG=True \
 cd frontend && npm test -- --run
 ```
 
-**Both backend suites must be run.** Django's test runner discovers only
-`omop_core.tests` and `patient_portal.tests`; the `tests/` package is
-pytest-based and is invisible to it. CI runs both as of PR #426 — before that
-the pytest package had never run in CI and sat at 14 failures for some time
-without anyone noticing.
+**There are two backend suites, and CI runs both.** Django's test runner
+discovers only `omop_core.tests` and `patient_portal.tests`; the `tests/`
+package is pytest-based and is invisible to it. CI runs them as isolated
+parallel jobs, and the required `Backend tests` check passes only when both do.
+The commands above are for running a suite, or part of one, locally — see the
+rule below for when that is called for.
 
 ### Rule: Feature Branch + PR for Every Code Change
 
@@ -441,15 +442,46 @@ without anyone noticing.
 1. File a GitHub issue describing the work item
 2. `git checkout -b <descriptive-branch-name>` before writing any code
 3. Commit the work on the feature branch
-4. Run the test suites (see below)
+4. Run the targeted tests for the change (see below)
 5. Open a PR targeting `dev`
 6. Perform a code review on the PR. **Stop and present the review to the user before merging** — the user must read the review and approve the merge.
    - **Exception — small, local, low-risk fixes** (typos, docstring updates, single-line bug fixes, config tweaks): these may proceed all the way through to a merge into `dev` without waiting for user review, provided the code review found no unfixable issues.
 7. **After the PR merges into `dev` successfully, delete the feature branch.** Prefer `gh pr merge --delete-branch`, which removes the remote branch as part of the merge. Then delete the local copy (`git branch -d <branch>`) and remove any worktree created for it (`git worktree remove <path>`). Do not leave merged feature branches lingering locally or on the remote.
 
-### Rule: Run Tests Before Every Push
+### Rule: Targeted Tests Before a Push, CI for the Full Suites
 
-**For changes to code, tests, configuration, dependencies or runtime data, run both test suites before pushing.** Do not push if any test is failing. Documentation-only changes follow the exception in `AGENTS.md`: review content, links and `git diff --check`; application suites are not required.
+**GitHub CI is the gate for the full suites. Do not run the full Django or
+pytest suite locally before a push.** CI runs both in parallel on every PR and
+they are required checks, so a local full run repeats it serially — about 7
+minutes against `promop_test`, which every local session shares, so two
+sessions testing at once void each other's results.
+
+Before pushing a change to code, tests, configuration, dependencies or runtime
+data, run only:
+
+- **The tests the change touches** — the test files you added or edited, and
+  the ones covering the modules you changed:
+  ```bash
+  DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" DEBUG=True \
+    .venv/bin/python -m pytest -q tests/test_mapping_browse.py
+  DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" \
+    .venv/bin/python manage.py test patient_portal.tests.SomeTestCase --noinput
+  ```
+- **For frontend changes:** the affected component tests, plus `npm run lint`
+  and `npm run build` (see "Frontend Lint" below — neither `tsc` nor the tests
+  catch what lint does).
+
+Do not push if any of those fail. Then **wait for CI to pass before merging**;
+a red required check blocks the merge, and a failure there is fixed on the
+branch and re-pushed, not reproduced first with a local full run.
+
+Run a full suite locally only when CI cannot answer the question: reproducing a
+CI failure that a targeted run does not show, or working on the test
+infrastructure itself. Check `pgrep -fl "pytest|manage.py test"` first, run the
+two suites sequentially, and run each once.
+
+Documentation-only changes follow the exception in `AGENTS.md`: review content,
+links and `git diff --check`; application suites are not required.
 
 **Local PostgreSQL setup** (one-time, postgresql@18 via Homebrew, port 5433):
 
@@ -775,89 +807,76 @@ If `remoteEntry.js` returns 500 on staging, check that `WHITENOISE_ROOT` points 
 
 ---
 
-## Copying Curation Between Instances
+## Copying Data Between Instances
 
-`copy_curation` moves hand-curated mapping data from another PRomop instance
-into this one — both the `/field-mappings` tables and, opt-in, the
-`/code-mappings` table. The curation is manual reviewer work, so it is copied
-rather than redone.
+Every model is one of three kinds, listed in `omop_core/services/instance_data.py`.
+`tests/test_instance_data.py` fails when a new model has no kind.
 
-It was named `copy_field_mappings` until it grew the second screen; the old
-name is gone, not aliased.
+| Kind | What | Moved by |
+|---|---|---|
+| system | accounts, tokens, sessions, tenancy, audit, caches | never copied |
+| reference | what is needed to import patients: mappings, lookups, therapy reference, HealthKey concepts | `copy_reference_data` |
+| patient | what is known about one person | `copy_patient` |
 
 `DATABASE_URL` and `SECRET_KEY` come from `.env`; only the source is given here.
 See [above](#secret-key-on-a-shared-database).
 
 ```bash
-SOURCE_DATABASE_URL="postgresql://..." \
-  .venv/bin/python manage.py copy_curation --dry-run
-SOURCE_DATABASE_URL="postgresql://..." \
-  .venv/bin/python manage.py copy_curation
+SOURCE_DATABASE_URL="postgresql://..." .venv/bin/python manage.py copy_reference_data --dry-run
+SOURCE_DATABASE_URL="postgresql://..." .venv/bin/python manage.py copy_patient 12345 --org healthtree --dry-run
+SOURCE_DATABASE_URL="postgresql://..." .venv/bin/python manage.py copy_patient --filter-org-id 26 --org healthtree
 ```
 
-Destination is `DATABASE_URL`. The source is opened as a second connection
-registered at runtime (not in `settings.DATABASES`, so the test runner does not
-try to build a test database for it) and, on PostgreSQL, in a
-`default_transaction_read_only` session — the command never writes to the source.
+Both write to `DATABASE_URL` and open the source read-only. `copy_reference_data`
+runs in one transaction; `copy_patient` uses one transaction per patient.
+Copy reference data before patients: concepts and therapy regimens resolve by code.
 
-By default the command copies the two datasets loaded by the field-mapping
-screen: `FieldConceptMapping` and `FieldSynonym`. Existing rows with the same
-natural key are always overwritten. Related field-curation tables can be
-included explicitly with `--tables`:
+### copy_reference_data
 
-| Table | Natural key |
-|---|---|
-| `FieldConceptMapping` | `field_name` |
-| `CustomPatientField` | `field_name` (its mapping is `PROTECT`, so mappings are written first) |
-| `FieldChoice` + `FieldChoiceCode` | `(field_name, display)`; codes are replaced wholesale |
-| `FieldFormula` | `field_name` |
-| `FieldSynonym` | `(field_name, synonym_text)` |
-| `SourceCodeConceptMapping` | `(source_vocabulary_id, source_code)` — see below |
+Rows match on a natural key (`code`, `slug`, `(source_vocabulary_id, source_code)`),
+never on the source pk, and are overwritten from the source. Links travel as
+the related row's natural key. Concepts travel as `(vocabulary_id, concept_code)`:
+Athena ids agree across instances, HealthKey-minted ids do not. A concept not
+loaded here is cleared and reported.
 
-`--dry-run` rolls back, and `--prune` also deletes local rows the source lacks
-(off by default, so a copy is additive). Everything runs in one transaction
-against the local database. To migrate the entire related curation set, pass
-`--tables mappings custom_fields choices formulas synonyms`.
+Reference data with a release loader is not copied: Athena vocabularies
+(`load_athena_vocabularies`), UMLS, LOINC classes and survey definitions. Only
+HealthKey-minted concepts are copied, under this instance's own ids.
 
-### Code mappings are opt-in
+`--prune` deletes field and code mappings the source lacks. It never deletes
+lookups or therapy reference rows, because patient data can point at them.
 
-`--tables code_mappings` copies `SourceCodeConceptMapping` — the
-**`/code-mappings`** screen, not `/field-mappings`. Never in the default set:
-ingest reads that table (`services/code_mapping.resolve_source_code`), so an
-approved row decides what a later import resolves to. Copying one changes ingest
-behaviour; `--prune` deletes live resolution rules.
+Code mappings steer ingest (`resolve_source_code`), so copying an approved row
+changes what a later import resolves to. `occurrence_count`, `first_seen` and
+`last_seen` stay local. `reviewer` / `created_by` / `updated_by` are cleared:
+the same Identity id is a different person on another instance.
 
-There are also seven file-based loaders for this table (`load_mappings`,
-`import_*_crossmaps`, `sync_athena_mappings`). Prefer those where one fits — an
-artifact diffs in git.
+The field-mapping tables go through `field_curation_transfer`, whose payload is
+also the `dump_field_curation` fixture format. Keep that payload stable.
 
-Two rules apply to this table only:
+### copy_patient
 
-- **All three concept FKs are re-resolved** (`source_concept`, `target_concept`,
-  `suggested_target_concept`). They are `db_constraint=False`, so a stale source
-  id would be *accepted* and silently name a different concept. Unresolvable
-  references are nulled and warned about.
-- **`occurrence_count` / `first_seen` / `last_seen` are not copied** — they count
-  this deployment's own ingest traffic.
+Patients are selected on the source by ids, `--filter-*` flags, or both, which
+narrows the ids. Filters combine with AND. A run needs at least one id or filter,
+so it cannot copy every patient by accident. `--filter-org-id` is the org id on
+the source. A failed patient is reported, the rest continue, and the command
+exits non-zero.
 
-Two things deliberately do not survive the trip:
+Every row gets a new id. Foreign keys, plain integer references
+(`visit_detail_id`, `episode_id`) and polymorphic ones (`EpisodeEvent.event_id`,
+`measurement_event_id`, resolved through the field concept named `table.column`)
+follow the copied rows. A missing concept becomes 0 where required, else null.
 
-- **Row IDs.** Matching is on the natural key — the two instances number rows
-  independently.
-- **`reviewer` / `created_by` / `updated_by`.** These point at `Identity` rows
-  whose IDs mean a different person on each instance, so they are cleared. A
-  wrong attribution is worse than none.
-
-Concept FKs are **re-resolved by `(vocabulary_id, concept_code)`**, not copied
-as an id. Athena concept ids are stable across instances, but locally minted
-concepts (`Concept.source == 'HealthKey'`) are numbered per instance, so the
-same id can name a different concept on the target. A concept the target has
-not loaded leaves the mapping's concept null and logs a warning; the rest of the
-mapping still lands.
-
-Logic lives in `omop_core/services/field_curation_transfer.py`, split into
-`read_payload(using)` and `apply_payload(payload)` so the round trip is testable
-without a second test database (`tests/test_copy_curation.py`).
+- The patient keeps their `person_id` if it is free. Otherwise pass
+  `--target-person-id`, or `--replace`, which refuses when system data (a login,
+  a FHIR connection, an invitation) points at the person here.
+- `PatientRecord` is copied and re-derived, so user edits survive and derived
+  therapy ids follow this instance's reference data. It joins `--org`.
+- Stored document files are not copied; those rows are skipped and reported.
+- Source timestamps are kept, including `auto_now` ones. Revision authors are
+  source Identity ids, so they are cleared, except `system`.
+- Only some OMOP tables have a pk sequence. Tables without one allocate above
+  `MAX(pk)` under a table lock.
 
 ---
 
@@ -919,38 +938,38 @@ enqueue_unmapped_source_codes` still does that scan, as the batch job it is: it
 creates empty queue rows with blank provenance, which is exactly the state
 Suggest looks for. So the split is **enqueue, then suggest**.
 
-### One retrieval and one ranking, not a waterfall of three
+### Three independent retrieval paths, one ranking call
 
 ```
 UMLS CUI bridge ──► exactly one standard concept? ──► done, no model call
        │ no
        ▼
-Lexical trigram ──► best N survivors (N from the UI, default 10)
+   ┌────────────────┐
+   │  In parallel:   │
+   │  Lexical trigram │──► best N by trigram similarity
+   │  Vector cosine   │──► best N by embedding distance
+   └────────────────┘
+       │
+       ▼  merge (union, enrich overlaps with both scores)
        │
        ▼
-Vector rerank ────► reorder those N by embedding cosine
-       │
-       ▼
-One ranking call ─► the model picks one, or declines
+One ranking call ─► the model picks one from the merged pool, or declines
 ```
 
-The old shape gave each tier its own ranker call and took the first that
-answered, so a code that fell through UMLS and vectors paid for three calls at
-4-6s each and usually got the lexical answer anyway. Vectors were also a
-*retrieval* tier, cosine-scanning 1.5M stored vectors per code (2.6-2.9s). They
-are a good ordering and a bad filter, so they now rerank the shortlist instead:
-one query embedding (~25ms) plus a primary-key lookup of at most N stored
-vectors.
+UMLS, lexical, and vectors are **three independent retrieval paths** that run
+concurrently and merge into one candidate pool. `semantic_candidates()` does a
+full cosine similarity search against the `ConceptEmbedding` table — it is real
+retrieval, not reranking. Lexical and vector results are often mostly disjoint
+because trigram similarity and embedding cosine are different signals.
+`vector_rerank()` exists in the code but is unused.
 
-Measured on staging, per code: **17.8s → 3.5s**.
-
-Where the remaining time goes, per code:
+Where the time goes, per code:
 
 | Stage | Cost |
 |---|---|
-| lexical trigram retrieval | ~2.5s (**67%**, and serial) |
-| ranking model call | 3.5s each, but concurrent (`RANK_CONCURRENCY`) and only for codes UMLS did not settle |
-| vector rerank | ~0.3s stored-vector lookup + ~0.025s query embedding |
+| lexical trigram retrieval | ~2.5s (**67%**, serial) |
+| vector cosine retrieval | ~0.3s (query embedding ~25ms + cosine search) |
+| ranking model call | ~3.5s each, but concurrent (`RANK_CONCURRENCY`) and only for codes UMLS did not settle |
 | embedding model load | ~5s, **once per gunicorn worker**, on its first Suggest |
 
 ### The run is queued, and how big it may be depends on that
@@ -1000,70 +1019,40 @@ row would be found again and recreated. Now that Suggest reads the tab, a
 deleted row is a code that has left the queue for good, taking its
 `occurrence_count` and `first_seen` with it.
 
-### Vectors cannot run alone
+### Vectors alone are not enough
 
-It reranks what retrieval found and retrieves nothing itself, so a run with
-neither UMLS nor Lexical would report "no candidate concept" for every code. The
-API rejects that combination and the checkbox disables itself.
+Vectors retrieve by semantic similarity but the ranking model needs at least
+one candidate with a code and name to evaluate. A run with neither UMLS nor
+Lexical would report "no candidate concept" for every code. The API rejects
+that combination and the checkbox disables itself.
 
-### The embeddings the reranker reads
+### Concept embeddings
 
-`vector_rerank` **never embeds a candidate on the fly**. It reads
-`concept_embedding` by primary key and demotes any candidate that has no stored
-vector below the ones it could score. So an unpopulated table does not make
-Suggest slower — it makes it stop reranking, silently.
+`semantic_candidates()` searches the `ConceptEmbedding` table by cosine
+distance. Any standard concept without an embedding is invisible to vector
+retrieval.
 
 `manage.py build_concept_embeddings` embeds every standard concept (1,523,060
-rows, ~2.8 hours). `manage.py precompute_suggest_embeddings` embeds only the
-concepts the queue can actually retrieve — it walks the eligible rows, takes
-each one's top-N lexical candidates plus UMLS candidates, and embeds the union.
-The original lexical-only staging sample retrieved **287 concepts** rather than
-1.5M. `--measure` reports the cost and writes nothing:
-
-```bash
-manage.py precompute_suggest_embeddings --measure
-manage.py precompute_suggest_embeddings --measure --source-vocabulary ICD10
-```
-
-Retrieval is the expensive half of that command too (one trigram query per queue
-row), which is why it is a command and not part of a click.
+rows, ~2.8 hours on first run). It is **resumable** — it skips already-embedded
+concepts, so an incremental run after a vocabulary load only embeds the new
+concepts.
 
 After a successful `load_athena_vocabularies` (including `--concepts-only`),
 `load_mappings`, `sync_athena_mappings`, `load_umls_release`, `sync_umls_release`,
 or any `import_*crossmap*` command,
-candidate precomputation runs automatically (#1092). With `CELERY_BROKER_URL`
-configured, `omop_core.precompute_suggest_embeddings` runs on a Celery worker;
+`build_concept_embeddings` is dispatched automatically. With `CELERY_BROKER_URL`
+configured, `omop_core.build_concept_embeddings` runs on a Celery worker;
 without it, the command runs inline. Dispatch is deferred until commit and
 nested mapping loads dispatch only once, after the outer load succeeds.
 Dry runs and failed loads do not dispatch. Workers need sentence-transformers
-and access to `BAAI/bge-small-en-v1.5`; failures propagate rather than recording
-successful maintenance. A configured broker failure is not silently run inline.
+and access to `BAAI/bge-small-en-v1.5`. `--skip-suggest-embeddings` (or
+`--skip-embeddings`) on a loader suppresses the build for that load and its
+nested loaders.
 
-The automatic run uses `--min-occurrences 1 --lexical-limit 100` to cover all
-eligible queue rows and the largest shortlist the UI allows. It inserts only
-missing vectors. `--skip-suggest-embeddings` on a loader suppresses maintenance
-for that load and its nested loaders, useful when doing an initial bulk import
-followed by `build_concept_embeddings`.
-
-`SuggestEmbeddingSnapshot` persists the candidate union by precompute options
-and model/retrieval version. One SQL query compares order-independent content
-checksums of concepts, synonyms, eligible queue rows, and relevant UMLS source
-terms and CUI siblings, and checks that every
-cached candidate still has a vector. Unchanged inputs and complete vectors
-return without lexical retrieval, model loading, or writes. This query scans
-the input tables; "one query" does not mean constant-time work. Changed input
-content (including same-count replacements and bulk SQL writes) invalidates the
-snapshot. A deleted vector is rebuilt from the saved candidate IDs. Changed
-shortlist/minimum-count options have separate snapshots. Increment
-`retrieval_version` in the command when candidate selection changes.
-
-`--measure` never writes snapshots or vectors. `--force` re-embeds candidates;
-use it after changing the embedding model, since the existing vector table does
-not record model versions. Existing vectors are otherwise retained, including
-when a vocabulary load changes a concept's name. Maintenance is asynchronous
-when queued: candidates become available after the worker completes, not before
-the loader returns. A changed queue or vocabulary requires retrieval again and
-can take minutes on a large queue; the command is not universally seconds-long.
+`manage.py precompute_suggest_embeddings` is a lighter alternative that embeds
+only concepts the suggest queue can currently retrieve. It is available for
+diagnostics (`--measure`) but is no longer auto-dispatched, because vector
+retrieval needs all standard concepts embedded, not just the queue's candidates.
 
 ---
 

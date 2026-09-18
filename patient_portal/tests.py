@@ -24192,6 +24192,17 @@ class MappingStatsTest(MappingHubTestBase):
 
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
+    def test_analyst_can_see_stats(self):
+        analyst = Identity.objects.create_user(
+            email='analyst-mapping@test.com', password='testpass',
+        )
+        GroupAccess.objects.create(
+            identity=analyst, org=self.admin_org, role='analyst',
+        )
+        self.client.force_authenticate(user=analyst)
+        resp = self.client.get('/api/v1/mapping-stats/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
     def test_regular_user_forbidden(self):
         self.client.force_authenticate(user=self.regular)
         resp = self.client.get('/api/v1/mapping-stats/')
@@ -27200,3 +27211,184 @@ class ServiceTokenAdministrationBoundaryTest(TestCase):
                 issuer='https://securetoken.google.com/proj', sub='uid-1', email='p@test.com',
                 name='', raw={},
             ))))
+
+
+class CodeMappingLockTest(TestCase):
+    """Tests for pessimistic edit locks on SourceCodeConceptMapping."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.alice = Identity.objects.create_user(
+            email='alice_lock@test.com', password='x', is_staff=True,
+        )
+        cls.bob = Identity.objects.create_user(
+            email='bob_lock@test.com', password='x', is_staff=True,
+        )
+        cls.org = Organization.objects.create(name='Lock Test Org', slug='lock-test-org')
+        GroupAccess.objects.create(identity=cls.alice, org=cls.org, role='org_admin')
+        GroupAccess.objects.create(identity=cls.bob, org=cls.org, role='org_admin')
+
+        domain, _ = Domain.objects.get_or_create(
+            domain_id='Measurement',
+            defaults={'domain_name': 'Measurement', 'domain_concept_id': 21},
+        )
+        concept_class, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Lab Test',
+            defaults={'concept_class_name': 'Lab Test', 'concept_class_concept_id': 0},
+        )
+        labs_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HK-Labs',
+            defaults={
+                'vocabulary_name': 'HealthKey Labs',
+                'vocabulary_reference': 'HealthKey local vocabulary',
+                'vocabulary_version': 'local',
+                'vocabulary_concept_id': 0,
+            },
+        )
+        cls.concept = Concept.objects.create(
+            concept_id=9990001,
+            concept_name='Lock Test Concept',
+            domain=domain,
+            vocabulary=labs_vocab,
+            concept_class=concept_class,
+            standard_concept=None,
+            concept_code='hkl:lock-test',
+            valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+        cls.mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='LOCK-TEST-CODE',
+            source_code_description='Lock test code',
+            domain_id='Measurement',
+            omop_table='measurement',
+            target_concept=cls.concept,
+            status='proposed',
+            origin='import',
+        )
+
+    def _lock_url(self):
+        return f'/api/v1/code-mappings/{self.mapping.pk}/lock/'
+
+    def _detail_url(self):
+        return f'/api/v1/code-mappings/{self.mapping.pk}/'
+
+    # ── Acquire ──────────────────────────────────────────────────────
+
+    def test_acquire_lock(self):
+        self.client.force_login(self.alice)
+        resp = self.client.post(self._lock_url(), content_type='application/json')
+        self.assertEqual(resp.status_code, 200)
+        self.mapping.refresh_from_db()
+        self.assertEqual(self.mapping.locked_by_id, self.alice.pk)
+        self.assertIsNotNone(self.mapping.locked_at)
+
+    def test_acquire_lock_idempotent(self):
+        self.client.force_login(self.alice)
+        self.client.post(self._lock_url(), content_type='application/json')
+        resp = self.client.post(self._lock_url(), content_type='application/json')
+        self.assertEqual(resp.status_code, 200)
+
+    def test_acquire_lock_conflict(self):
+        """Another user cannot acquire the lock while it is held."""
+        self.mapping.locked_by = self.alice
+        self.mapping.locked_at = timezone.now()
+        self.mapping.save(update_fields=['locked_by', 'locked_at'])
+
+        self.client.force_login(self.bob)
+        resp = self.client.post(self._lock_url(), content_type='application/json')
+        self.assertEqual(resp.status_code, 423)
+        self.assertIn('locked_by', resp.json())
+
+    def test_acquire_lock_expired(self):
+        """An expired lock can be taken over."""
+        self.mapping.locked_by = self.alice
+        self.mapping.locked_at = timezone.now() - timedelta(minutes=16)
+        self.mapping.save(update_fields=['locked_by', 'locked_at'])
+
+        self.client.force_login(self.bob)
+        resp = self.client.post(self._lock_url(), content_type='application/json')
+        self.assertEqual(resp.status_code, 200)
+        self.mapping.refresh_from_db()
+        self.assertEqual(self.mapping.locked_by_id, self.bob.pk)
+
+    # ── Release ──────────────────────────────────────────────────────
+
+    def test_release_lock(self):
+        self.mapping.locked_by = self.alice
+        self.mapping.locked_at = timezone.now()
+        self.mapping.save(update_fields=['locked_by', 'locked_at'])
+
+        self.client.force_login(self.alice)
+        resp = self.client.delete(self._lock_url())
+        self.assertEqual(resp.status_code, 204)
+        self.mapping.refresh_from_db()
+        self.assertIsNone(self.mapping.locked_by_id)
+
+    def test_release_lock_by_staff(self):
+        self.mapping.locked_by = self.alice
+        self.mapping.locked_at = timezone.now()
+        self.mapping.save(update_fields=['locked_by', 'locked_at'])
+
+        self.client.force_login(self.bob)  # bob is also staff
+        resp = self.client.delete(self._lock_url())
+        self.assertEqual(resp.status_code, 204)
+
+    def test_release_lock_denied_for_non_holder(self):
+        """A non-staff, non-holder cannot release another user's lock."""
+        non_staff = Identity.objects.create_user(
+            email='nostaff_lock@test.com', password='x', is_staff=False,
+        )
+        GroupAccess.objects.create(identity=non_staff, org=self.org, role='org_admin')
+
+        self.mapping.locked_by = self.alice
+        self.mapping.locked_at = timezone.now()
+        self.mapping.save(update_fields=['locked_by', 'locked_at'])
+
+        self.client.force_login(non_staff)
+        resp = self.client.delete(self._lock_url())
+        self.assertEqual(resp.status_code, 403)
+
+    # ── PATCH guarded ────────────────────────────────────────────────
+
+    def test_patch_rejected_when_locked_by_another(self):
+        self.mapping.locked_by = self.alice
+        self.mapping.locked_at = timezone.now()
+        self.mapping.save(update_fields=['locked_by', 'locked_at'])
+
+        self.client.force_login(self.bob)
+        resp = self.client.patch(
+            self._detail_url(),
+            {'status': 'approved'},
+            content_type='application/json',
+        )
+        self.assertEqual(resp.status_code, 423)
+
+    def test_patch_allowed_by_lock_holder(self):
+        self.mapping.locked_by = self.alice
+        self.mapping.locked_at = timezone.now()
+        self.mapping.save(update_fields=['locked_by', 'locked_at'])
+
+        self.client.force_login(self.alice)
+        resp = self.client.patch(
+            self._detail_url(),
+            {'notes': 'updated by lock holder'},
+            content_type='application/json',
+        )
+        self.assertEqual(resp.status_code, 200)
+
+    # ── Lock info in response ────────────────────────────────────────
+
+    def test_lock_info_in_list_response(self):
+        self.mapping.locked_by = self.alice
+        self.mapping.locked_at = timezone.now()
+        self.mapping.save(update_fields=['locked_by', 'locked_at'])
+
+        self.client.force_login(self.alice)
+        resp = self.client.get('/api/v1/code-mappings/')
+        self.assertEqual(resp.status_code, 200)
+        rows = resp.json()
+        locked_row = next((r for r in rows if r.get('mapping_id') == self.mapping.pk), None)
+        self.assertIsNotNone(locked_row)
+        self.assertIsNotNone(locked_row['locked_by_username'])
+        self.assertIsNotNone(locked_row['locked_at'])

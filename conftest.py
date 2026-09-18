@@ -60,6 +60,116 @@ _PK_SEQUENCES = [
 ]
 
 
+def _seed_reference_data():
+    """Create the reference rows that most tests depend on.
+
+    Uses ``get_or_create`` throughout so it is safe to call repeatedly — a
+    no-op when the data already exists, and a full re-seed when a
+    ``transaction=True`` test has flushed the tables.
+    """
+    from omop_core.models import (
+        Concept,
+        ConceptClass,
+        Domain,
+        SctEligibility,
+        StemCellTransplant,
+        Vocabulary,
+    )
+
+    Vocabulary.objects.get_or_create(
+        vocabulary_id='Type Concept',
+        defaults={'vocabulary_name': 'OMOP Type Concept',
+                  'vocabulary_reference': 'OMOP generated',
+                  'vocabulary_version': 'v5', 'vocabulary_concept_id': 0},
+    )
+    Domain.objects.get_or_create(
+        domain_id='Type Concept',
+        defaults={'domain_name': 'Type Concept', 'domain_concept_id': 0},
+    )
+    ConceptClass.objects.get_or_create(
+        concept_class_id='Type Concept',
+        defaults={'concept_class_name': 'Type Concept', 'concept_class_concept_id': 0},
+    )
+    Vocabulary.objects.get_or_create(
+        vocabulary_id='None',
+        defaults={'vocabulary_name': 'None',
+                  'vocabulary_reference': '', 'vocabulary_version': '',
+                  'vocabulary_concept_id': 0},
+    )
+    Domain.objects.get_or_create(
+        domain_id='Metadata',
+        defaults={'domain_name': 'Metadata', 'domain_concept_id': 0},
+    )
+    ConceptClass.objects.get_or_create(
+        concept_class_id='Undefined',
+        defaults={'concept_class_name': 'Undefined', 'concept_class_concept_id': 0},
+    )
+    Concept.objects.get_or_create(
+        concept_id=0,
+        defaults={
+            'concept_name': 'No matching concept', 'domain_id': 'Metadata',
+            'vocabulary_id': 'None', 'concept_class_id': 'Undefined',
+            'concept_code': 'No matching concept',
+            'valid_start_date': '1970-01-01', 'valid_end_date': '2099-12-31',
+        },
+    )
+    Concept.objects.get_or_create(
+        concept_id=32817,
+        defaults={
+            'concept_name': 'EHR', 'domain_id': 'Type Concept',
+            'vocabulary_id': 'Type Concept', 'concept_class_id': 'Type Concept',
+            'standard_concept': 'S', 'concept_code': 'OMOP4976890',
+            'valid_start_date': '1970-01-01', 'valid_end_date': '2099-12-31',
+        },
+    )
+    # Tobacco smoking status answer concepts — needed by the question/answer
+    # pattern used in enrich_breast_cancer_omop_data (#451).
+    # First ensure the LOINC vocabulary and Meas Value domain exist.
+    Vocabulary.objects.get_or_create(
+        vocabulary_id='LOINC',
+        defaults={'vocabulary_name': 'Logical Observation Identifiers Names and Codes',
+                  'vocabulary_reference': 'https://loinc.org',
+                  'vocabulary_version': '2.77', 'vocabulary_concept_id': 0},
+    )
+    Domain.objects.get_or_create(
+        domain_id='Meas Value',
+        defaults={'domain_name': 'Meas Value', 'domain_concept_id': 0},
+    )
+    ConceptClass.objects.get_or_create(
+        concept_class_id='Answer',
+        defaults={'concept_class_name': 'Answer', 'concept_class_concept_id': 0},
+    )
+    for cid, name, code in [
+        (45879404, 'Never smoker',             'LA18978-9'),
+        (45883458, 'Former smoker',            'LA15920-4'),
+        (45881517, 'Current every day smoker', 'LA18976-3'),
+    ]:
+        Concept.objects.get_or_create(
+            concept_id=cid,
+            defaults={
+                'concept_name': name, 'domain_id': 'Meas Value',
+                'vocabulary_id': 'LOINC', 'concept_class_id': 'Answer',
+                'standard_concept': 'S', 'concept_code': code,
+                'valid_start_date': '1970-01-01', 'valid_end_date': '2099-12-31',
+            },
+        )
+
+    for code, title in [
+        ('eligibleAuto', 'eligible for autologous SCT'),
+        ('eligibleAllo', 'eligible for allogeneic SCT'),
+        ('ineligibleAuto', 'ineligible for autologous SCT'),
+        ('ineligibleAllo', 'ineligible for allogeneic SCT'),
+    ]:
+        SctEligibility.objects.get_or_create(code=code, defaults={'title': title})
+
+    for code, title in [
+        ('autologousSCT', 'autologous SCT'),
+        ('allogeneicSCT', 'allogeneic SCT'),
+        ('tandemSCT', 'tandem SCT'),
+    ]:
+        StemCellTransplant.objects.get_or_create(code=code, defaults={'title': title})
+
+
 @pytest.fixture(scope='session')
 def django_db_setup(django_db_setup, django_db_blocker):
     """Extend pytest-django's test DB setup with the schema side-effects
@@ -67,14 +177,6 @@ def django_db_setup(django_db_setup, django_db_blocker):
     same name so this runs strictly after the test DB/tables exist."""
     with django_db_blocker.unblock():
         from django.db import connection
-        from omop_core.models import (
-            Concept,
-            ConceptClass,
-            Domain,
-            SctEligibility,
-            StemCellTransplant,
-            Vocabulary,
-        )
 
         with connection.cursor() as cursor:
             for table, pk_field in _PK_SEQUENCES:
@@ -86,95 +188,29 @@ def django_db_setup(django_db_setup, django_db_blocker):
                     [seq_name],
                 )
 
-        Vocabulary.objects.get_or_create(
-            vocabulary_id='Type Concept',
-            defaults={'vocabulary_name': 'OMOP Type Concept',
-                      'vocabulary_reference': 'OMOP generated',
-                      'vocabulary_version': 'v5', 'vocabulary_concept_id': 0},
-        )
-        Domain.objects.get_or_create(
-            domain_id='Type Concept',
-            defaults={'domain_name': 'Type Concept', 'domain_concept_id': 0},
-        )
-        ConceptClass.objects.get_or_create(
-            concept_class_id='Type Concept',
-            defaults={'concept_class_name': 'Type Concept', 'concept_class_concept_id': 0},
-        )
-        Vocabulary.objects.get_or_create(
-            vocabulary_id='None',
-            defaults={'vocabulary_name': 'None',
-                      'vocabulary_reference': '', 'vocabulary_version': '',
-                      'vocabulary_concept_id': 0},
-        )
-        Domain.objects.get_or_create(
-            domain_id='Metadata',
-            defaults={'domain_name': 'Metadata', 'domain_concept_id': 0},
-        )
-        ConceptClass.objects.get_or_create(
-            concept_class_id='Undefined',
-            defaults={'concept_class_name': 'Undefined', 'concept_class_concept_id': 0},
-        )
-        Concept.objects.get_or_create(
-            concept_id=0,
-            defaults={
-                'concept_name': 'No matching concept', 'domain_id': 'Metadata',
-                'vocabulary_id': 'None', 'concept_class_id': 'Undefined',
-                'concept_code': 'No matching concept',
-                'valid_start_date': '1970-01-01', 'valid_end_date': '2099-12-31',
-            },
-        )
-        Concept.objects.get_or_create(
-            concept_id=32817,
-            defaults={
-                'concept_name': 'EHR', 'domain_id': 'Type Concept',
-                'vocabulary_id': 'Type Concept', 'concept_class_id': 'Type Concept',
-                'standard_concept': 'S', 'concept_code': 'OMOP4976890',
-                'valid_start_date': '1970-01-01', 'valid_end_date': '2099-12-31',
-            },
-        )
-        # Tobacco smoking status answer concepts — needed by the question/answer
-        # pattern used in enrich_breast_cancer_omop_data (#451).
-        # First ensure the LOINC vocabulary and Meas Value domain exist.
-        Vocabulary.objects.get_or_create(
-            vocabulary_id='LOINC',
-            defaults={'vocabulary_name': 'Logical Observation Identifiers Names and Codes',
-                      'vocabulary_reference': 'https://loinc.org',
-                      'vocabulary_version': '2.77', 'vocabulary_concept_id': 0},
-        )
-        Domain.objects.get_or_create(
-            domain_id='Meas Value',
-            defaults={'domain_name': 'Meas Value', 'domain_concept_id': 0},
-        )
-        ConceptClass.objects.get_or_create(
-            concept_class_id='Answer',
-            defaults={'concept_class_name': 'Answer', 'concept_class_concept_id': 0},
-        )
-        for cid, name, code in [
-            (45879404, 'Never smoker',             'LA18978-9'),
-            (45883458, 'Former smoker',            'LA15920-4'),
-            (45881517, 'Current every day smoker', 'LA18976-3'),
-        ]:
-            Concept.objects.get_or_create(
-                concept_id=cid,
-                defaults={
-                    'concept_name': name, 'domain_id': 'Meas Value',
-                    'vocabulary_id': 'LOINC', 'concept_class_id': 'Answer',
-                    'standard_concept': 'S', 'concept_code': code,
-                    'valid_start_date': '1970-01-01', 'valid_end_date': '2099-12-31',
-                },
-            )
+        _seed_reference_data()
 
-        for code, title in [
-            ('eligibleAuto', 'eligible for autologous SCT'),
-            ('eligibleAllo', 'eligible for allogeneic SCT'),
-            ('ineligibleAuto', 'ineligible for autologous SCT'),
-            ('ineligibleAllo', 'ineligible for allogeneic SCT'),
-        ]:
-            SctEligibility.objects.get_or_create(code=code, defaults={'title': title})
 
-        for code, title in [
-            ('autologousSCT', 'autologous SCT'),
-            ('allogeneicSCT', 'allogeneic SCT'),
-            ('tandemSCT', 'tandem SCT'),
-        ]:
-            StemCellTransplant.objects.get_or_create(code=code, defaults={'title': title})
+@pytest.fixture(autouse=True)
+def _reseed_if_flushed(request, django_db_blocker):
+    """Re-seed reference data when a ``transaction=True`` test has flushed it.
+
+    ``transaction=True`` tests (Django's ``TransactionTestCase``) truncate
+    every table on teardown, destroying the session-scoped seed data. Without
+    this, any test that runs *after* a transactional one on the same worker
+    (relevant under pytest-xdist) fails on missing FK targets like concept 0.
+
+    The guard query (``Concept.objects.filter(concept_id=0).exists()``) is a
+    single lightweight SELECT per test and short-circuits when data is intact.
+    Non-DB tests skip the check entirely.
+    """
+    if request.node.get_closest_marker('django_db') is None:
+        yield
+        return
+    # The test's own DB setup has already run (this fixture is function-scoped
+    # and autouse, so pytest resolves it after _django_db_helper).  Access the
+    # DB to check whether seed data survived.
+    from omop_core.models import Concept
+    if not Concept.objects.filter(concept_id=0).exists():
+        _seed_reference_data()
+    yield

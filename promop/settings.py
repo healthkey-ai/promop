@@ -273,6 +273,9 @@ AUTH_USER_MODEL = "patient_portal.Identity"
 # if it times out. Model loading/encoding is outside this database timeout.
 SUGGEST_SEMANTIC_TIMEOUT_MS = max(1, int(os.environ.get('SUGGEST_SEMANTIC_TIMEOUT_MS', '3000')))
 
+# How long a curator's edit lock on a code mapping stays active (minutes).
+MAPPING_LOCK_TIMEOUT_MINUTES = max(1, int(os.environ.get('MAPPING_LOCK_TIMEOUT_MINUTES', '15')))
+
 AUTHENTICATION_BACKENDS = [
     "patient_portal.backends.EmailBackend",
 ]

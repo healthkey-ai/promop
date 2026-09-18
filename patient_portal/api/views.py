@@ -8489,9 +8489,9 @@ def mapping_stats(request):
 
     GET /api/v1/mapping-stats/
     Returns counts for field mappings, code mappings, and therapy reference data.
-    Restricted to staff or org_admin users.
+    Any professional role (staff, org_admin, doctor, analyst) can view.
     """
-    if not has_org_admin_access(request.user):
+    if not has_professional_access(request.user):
         return Response({'detail': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldConceptMapping
@@ -10254,6 +10254,8 @@ def _serialize_code_mapping_row(concept, mapping=None, source_metadata=None, des
             'concept_vocabulary_id': '',
             'domain': '',
             'concept_class_id': '',
+            'locked_by_username': _user_display(mapping.locked_by) if mapping and mapping.locked_by_id else None,
+            'locked_at': (mapping.locked_at.isoformat() if mapping and mapping.locked_at else None),
         }
     return {
         **source_metadata,
@@ -10318,6 +10320,9 @@ def _serialize_code_mapping_row(concept, mapping=None, source_metadata=None, des
         # Unit info for LOINC Measurement concepts — helps curators assess
         # mapping quality without opening a concept search.
         **_concept_unit_fields(concept),
+        # Edit lock
+        'locked_by_username': _user_display(mapping.locked_by) if mapping and mapping.locked_by_id else None,
+        'locked_at': (mapping.locked_at.isoformat() if mapping and mapping.locked_at else None),
     }
 
 
@@ -10712,7 +10717,7 @@ def code_mapping_list(request):
 
     if request.method == 'GET':
         mappings = SourceCodeConceptMapping.objects.select_related(
-            'target_concept', 'created_by', 'reviewer')
+            'target_concept', 'created_by', 'reviewer', 'locked_by')
         from omop_core.services.athena_mapping_guard import without_icd10_athena_duplicates
         mappings = without_icd10_athena_duplicates(mappings)
         if request.query_params.get('browse') == '1':
@@ -10794,7 +10799,7 @@ def code_mapping_detail(request, mapping_id):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     mapping = SourceCodeConceptMapping.objects.filter(id=mapping_id).select_related(
-        'target_concept', 'created_by', 'reviewer').first()
+        'target_concept', 'created_by', 'reviewer', 'locked_by').first()
     if mapping is None:
         return Response({'detail': 'Mapping not found.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -10811,10 +10816,44 @@ def code_mapping_detail(request, mapping_id):
                 {'detail': 'Only org admins and staff can delete approved mappings.'},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        mapping.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        try:
+            _check_mapping_lock(mapping, request.user)
+        except MappingLocked as exc:
+            return exc.as_response()
+        # If the mapping has no destination and is still proposed, truly delete
+        # the row — it is an unwanted queue entry with nothing to clear.
+        if mapping.target_concept_id is None and mapping.status == 'proposed':
+            mapping.delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        # Otherwise, clear the destination but keep the source code in the
+        # queue so it can receive new proposals.
+        mapping.target_concept = None
+        mapping.suggested_target_concept = None
+        mapping.destination_vocabulary_id = ''
+        mapping.status = 'proposed'
+        mapping.reviewer = None
+        mapping.reviewed_at = None
+        mapping.suggestion_outcome = ''
+        mapping.suggestion_model_version = ''
+        mapping.last_suggest_attempt = ''
+        mapping.suggest_strategy = ''
+        mapping.umls_cui = ''
+        mapping.origin_system = ''
+        mapping.locked_by = None
+        mapping.locked_at = None
+        mapping.save()
+        mapping.destination_candidates.all().delete()
+        from omop_core.services.mapping_destinations import destination_options
+        payload = _serialize_code_mapping_row(
+            None, mapping, destination_count=len(destination_options(mapping)),
+        )
+        return Response(payload)
 
     # PATCH — approval check is inside _upsert_source_code_mapping.
+    try:
+        _check_mapping_lock(mapping, request.user)
+    except MappingLocked as exc:
+        return exc.as_response()
     data = request.data
     concept = (
         _get_destination_concept(data)
@@ -10827,6 +10866,92 @@ def code_mapping_detail(request, mapping_id):
     payload = _serialize_code_mapping_row(concept, mapping, destination_count=len(destination_options(mapping)))
     payload['repoint'] = repoint
     return Response(payload)
+
+
+# ── Mapping edit locks ──────────────────────────────────────────────────
+
+def _is_lock_active(mapping):
+    """True when *mapping* carries a non-expired edit lock."""
+    if mapping.locked_by_id is None:
+        return False
+    timeout = timedelta(minutes=settings.MAPPING_LOCK_TIMEOUT_MINUTES)
+    return mapping.locked_at and (timezone.now() - mapping.locked_at) < timeout
+
+
+def _check_mapping_lock(mapping, user):
+    """Raise 423 if *mapping* is locked by another active user.
+
+    Returns silently when the mapping is unlocked, expired, or held by *user*.
+    """
+    if not _is_lock_active(mapping):
+        return
+    if mapping.locked_by_id == user.pk:
+        return
+    raise MappingLocked(mapping)
+
+
+class MappingLocked(Exception):
+    """Raised when a mapping is locked by another user."""
+
+    def __init__(self, mapping):
+        self.mapping = mapping
+
+    def as_response(self):
+        return Response(
+            {
+                'detail': 'Mapping is locked by another user.',
+                'locked_by': _user_display(self.mapping.locked_by),
+                'locked_at': self.mapping.locked_at.isoformat() if self.mapping.locked_at else None,
+            },
+            status=423,
+        )
+
+
+@api_view(['POST', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def code_mapping_lock(request, mapping_id):
+    """Acquire or release an edit lock on a mapping.
+
+    POST: acquire (or refresh) the lock.  Idempotent for the same user.
+    DELETE: release the lock.  Only the holder or staff may release.
+    """
+    if not _can_manage_field_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    with transaction.atomic():
+        mapping = (
+            SourceCodeConceptMapping.objects
+            .select_for_update(of=('self',))
+            .filter(id=mapping_id)
+            .select_related('locked_by')
+            .first()
+        )
+        if mapping is None:
+            return Response({'detail': 'Mapping not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if request.method == 'POST':
+            try:
+                _check_mapping_lock(mapping, request.user)
+            except MappingLocked as exc:
+                return exc.as_response()
+            mapping.locked_by = request.user
+            mapping.locked_at = timezone.now()
+            mapping.save(update_fields=['locked_by', 'locked_at'])
+            return Response({
+                'locked_by': _user_display(request.user),
+                'locked_at': mapping.locked_at.isoformat(),
+            })
+
+        # DELETE — release
+        if mapping.locked_by_id is not None and mapping.locked_by_id != request.user.pk and not request.user.is_staff:
+            return Response(
+                {'detail': 'Only the lock holder or staff can release a lock.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        mapping.locked_by = None
+        mapping.locked_at = None
+        mapping.save(update_fields=['locked_by', 'locked_at'])
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 @api_view(['POST'])
@@ -10961,10 +11086,35 @@ def code_mapping_suggest(request):
 
     # Counted before the run starts so the page has a denominator to show from
     # the first poll, rather than a bar that fills against a moving total.
-    expected = len(suggestable_mappings(
+    batch_rows = suggestable_mappings(
         list(tables), source_vocabulary_id=source_vocab,
         min_occurrences=min_occurrences, limit=limit, resuggest=replace,
-    ))
+    )
+    batch_ids = [m.pk for m in batch_rows]
+    expected = len(batch_ids)
+
+    # Lock the batch: reject if any row is locked by another user.
+    if batch_ids:
+        conflicting = list(
+            SourceCodeConceptMapping.objects
+            .filter(id__in=batch_ids)
+            .exclude(locked_by__isnull=True)
+            .exclude(locked_by=request.user)
+            .filter(locked_at__gt=timezone.now() - timedelta(minutes=settings.MAPPING_LOCK_TIMEOUT_MINUTES))
+            .values_list('id', flat=True)
+        )
+        if conflicting:
+            return Response(
+                {
+                    'detail': 'Some mappings are locked by another user.',
+                    'locked_mapping_ids': conflicting,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        # Lock all batch rows for this suggest run.
+        SourceCodeConceptMapping.objects.filter(id__in=batch_ids).update(
+            locked_by=request.user, locked_at=timezone.now(),
+        )
 
     from omop_core.services.suggest_jobs import selection_summary
     params = {
@@ -10977,6 +11127,7 @@ def code_mapping_suggest(request):
         'lexical_limit': lexical_limit,
         'resuggest': replace,
         'ranking_model': ranking_model,
+        '_locked_mapping_ids': batch_ids,  # for lock release on completion
     }
     run = SuggestRun.objects.create(
         source_vocabulary_id=source_vocab,
@@ -11070,9 +11221,20 @@ def code_mapping_suggest_one(request):
             {'ranking_model': f'Must be one of {sorted(RANKING_MODELS)}.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
+    source_vocabulary_id = str(request.data.get('source_vocabulary_id') or '')
+    # Check lock: if another user holds the lock, reject suggest-one.
+    existing = SourceCodeConceptMapping.objects.filter(
+        source_vocabulary_id=source_vocabulary_id, source_code=source_code,
+    ).select_related('locked_by').first()
+    if existing:
+        try:
+            _check_mapping_lock(existing, request.user)
+        except MappingLocked as exc:
+            return exc.as_response()
+
     params = {
         'source_code': source_code,
-        'source_vocabulary_id': str(request.data.get('source_vocabulary_id') or ''),
+        'source_vocabulary_id': source_vocabulary_id,
         'omop_table': omop_table,
         'source_description': str(request.data.get('source_code_description') or ''),
         'strategies': strategies,

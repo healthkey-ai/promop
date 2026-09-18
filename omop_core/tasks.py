@@ -7,11 +7,11 @@ from celery import shared_task
 from omop_core.models import Person
 
 
-@shared_task(name='omop_core.precompute_suggest_embeddings')
-def precompute_suggest_embeddings_task():
-    from omop_core.services.embedding_jobs import run_suggest_embeddings
+@shared_task(name='omop_core.build_concept_embeddings')
+def build_concept_embeddings_task():
+    from omop_core.services.embedding_jobs import run_build_concept_embeddings
 
-    run_suggest_embeddings()
+    run_build_concept_embeddings()
 
 
 @shared_task(name='omop_core.refresh_patient_record')
