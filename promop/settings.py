@@ -11,8 +11,10 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 import os
+import json
 from pathlib import Path
 import dj_database_url
+from celery.schedules import crontab
 from dotenv import load_dotenv
 from corsheaders.defaults import default_headers
 
@@ -649,6 +651,66 @@ else:
 CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', '')
 CELERY_RESULT_BACKEND = os.environ.get('CELERY_RESULT_BACKEND', CELERY_BROKER_URL)
 CELERY_TASK_SERIALIZER = 'json'
+# Explicit opt-in avoids webhook queries on ordinary clinical writes.
+WEBHOOKS_ENABLED = _env_bool('WEBHOOKS_ENABLED', False)
+
+
+def _webhook_inbound_sources(raw):
+    """Validate at startup, like parse_service_tokens does for its own config.
+
+    A bare json.loads accepts a valid non-object ('[]', '"x"') that then raises
+    AttributeError on .get() for every inbound request instead of failing at
+    boot, which is the wrong end to find out.
+    """
+    from django.core.exceptions import ImproperlyConfigured
+
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        raise ImproperlyConfigured('WEBHOOK_INBOUND_SOURCES must be a JSON object.') from None
+    if not isinstance(value, dict):
+        raise ImproperlyConfigured('WEBHOOK_INBOUND_SOURCES must be a JSON object.')
+    for source_id, entry in value.items():
+        if not isinstance(source_id, str) or not isinstance(entry, dict):
+            raise ImproperlyConfigured(
+                'WEBHOOK_INBOUND_SOURCES maps a source id to an object.')
+        if not entry.get('secret') or not isinstance(entry['secret'], str):
+            raise ImproperlyConfigured(
+                f'WEBHOOK_INBOUND_SOURCES["{source_id}"] needs a non-empty string secret.')
+        if not entry.get('organization') or not isinstance(entry['organization'], str):
+            raise ImproperlyConfigured(
+                f'WEBHOOK_INBOUND_SOURCES["{source_id}"] needs an organization slug.')
+    return value
+
+
+WEBHOOK_INBOUND_SOURCES = _webhook_inbound_sources(
+    os.environ.get('WEBHOOK_INBOUND_SOURCES', '{}'))
+WEBHOOK_INBOUND_RATE = os.environ.get('WEBHOOK_INBOUND_RATE', '600/minute')
+# Per-IP, applied before signature verification so unverifiable traffic is
+# bounded too. Deliberately above WEBHOOK_INBOUND_RATE: a verified sender must
+# hit its own source quota first, not this one.
+WEBHOOK_INGRESS_RATE = os.environ.get('WEBHOOK_INGRESS_RATE', '1200/minute')
+# How many proxies of our own sit in front of the inbound endpoint. The ingress
+# bucket counts back this far from the end of X-Forwarded-For, so a caller
+# cannot mint a fresh bucket by prepending values to a header it controls.
+# Render terminates with one; set 0 to key on REMOTE_ADDR instead.
+WEBHOOK_TRUSTED_PROXY_DEPTH = int(os.environ.get('WEBHOOK_TRUSTED_PROXY_DEPTH', '1'))
+WEBHOOK_RETENTION_DAYS = int(os.environ.get('WEBHOOK_RETENTION_DAYS', '30'))
+CELERY_BEAT_SCHEDULE = {
+    'recover-webhook-deliveries': {
+        'task': 'patient_portal.tasks.dispatch_pending_webhooks',
+        'schedule': 60.0,
+    },
+    # Retention has to run somewhere, and the scheduler this deployment already
+    # runs is that somewhere — a separate cron service would be a second thing
+    # to keep configured. A fixed hour rather than an interval, so a redeploy
+    # (which resets beat's schedule file) cannot push it a day out.
+    'prune-webhook-history': {
+        'task': 'patient_portal.tasks.prune_webhook_history',
+        'schedule': crontab(hour=3, minute=30),
+    },
+}
+CELERY_BROKER_CONNECTION_TIMEOUT = 2
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_ACCEPT_CONTENT = ['json']
 
@@ -680,8 +742,8 @@ CELERY_BROKER_TRANSPORT_OPTIONS = {
     # The refresh endpoint enqueues inside the request, so an unreachable
     # broker has to fail fast. Unset, kombu waits on the connect indefinitely
     # and the caller sits there until gunicorn kills the worker.
-    'socket_connect_timeout': 5,
-    'socket_timeout': 5,
+    'socket_connect_timeout': 2,
+    'socket_timeout': 2,
 }
 # How long a caller can still poll a finished task id.
 CELERY_RESULT_EXPIRES = int(os.environ.get('CELERY_RESULT_EXPIRES', '86400'))

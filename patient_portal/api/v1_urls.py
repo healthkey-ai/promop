@@ -1,3 +1,4 @@
+from .webhook_views import InboundWebhookView, WebhookSubscriptionViewSet
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 from .concept_mint import mint_destination
@@ -68,6 +69,7 @@ from .break_glass import break_glass
 from .service_applications import ServiceApplicationViewSet
 
 router = DefaultRouter()
+router.register(r'webhooks/subscriptions', WebhookSubscriptionViewSet, basename='webhook-subscription')
 router.register(r'service-applications', ServiceApplicationViewSet, basename='service-applications')
 
 router.register(r'user', CurrentUserViewSet, basename='v1-user')
@@ -98,6 +100,7 @@ router.register(r'surveys', SurveyViewSet, basename='v1-surveys')
 router.register(r'survey-responses', PatientSurveyResponseViewSet, basename='v1-survey-responses')
 
 urlpatterns = [
+    path('webhooks/inbound/', InboundWebhookView.as_view(), name='webhook-inbound'),
     path('therapy-outcomes/', therapy_outcomes, name='v1-therapy-outcomes'),
     # The surveys the PROlog runner serves, for the portal's Surveys tab.
     path('prolog-surveys/', PrologSurveyListView.as_view(), name='v1-prolog-surveys'),

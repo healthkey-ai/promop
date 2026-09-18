@@ -1,0 +1,1197 @@
+import hashlib
+import hmac
+import json
+import socket
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
+from pathlib import Path
+from unittest.mock import Mock, PropertyMock, patch
+
+import pytest
+from django.db import close_old_connections, connection, transaction
+from django.test.utils import CaptureQueriesContext
+from django.utils import timezone
+from rest_framework.test import APIClient
+
+from omop_core.models import GroupAccess, Organization, PatientDocument, PatientRecord, Person
+from patient_portal.api.fhir.sync import AGGREGATION_EXT_URL
+from patient_portal.models import Identity, InboundWebhookEvent, WebhookDelivery, WebhookSubscription
+from patient_portal.tasks import deliver_webhook, dispatch_pending_webhooks
+from patient_portal.webhooks import (
+    compute_hmac_signature, encode_payload, enqueue_delivery, publish_event,
+    resolve_webhook_url, send_webhook,
+)
+
+pytestmark = pytest.mark.django_db
+
+
+@pytest.fixture
+def setup(settings):
+    settings.WEBHOOKS_ENABLED = True
+    from django.core.cache import cache
+    cache.clear()
+    settings.CELERY_BROKER_URL = ''
+    org = Organization.objects.create(name='Webhook tenant', slug='webhook-tenant')
+    other = Organization.objects.create(name='Other tenant', slug='webhook-other')
+    person = Person.objects.create(person_id=420001)
+    PatientRecord.objects.create(person=person, organization=org)
+    user = Identity.objects.create_user(email='webhook-admin@example.org')
+    GroupAccess.objects.create(identity=user, org=org, role='org_admin')
+    settings.WEBHOOK_INBOUND_SOURCES = {
+        'lab-system': {'secret': 'test-source-secret', 'organization': org.slug},
+    }
+    subscription = WebhookSubscription.objects.create(
+        organization=org, url='https://subscriber.example/events',
+        event_types=['patient.changed', 'lab.updated', 'document.received', 'foundation.synced'],
+    )
+    return org, other, person, user, subscription
+
+
+def inbound(payload=None, signature=None, source='lab-system', **headers):
+    payload = payload or {'id': 'event-1', 'type': 'lab.updated', 'data': {'person_id': 420001}}
+    body = payload if isinstance(payload, bytes) else encode_payload(payload)
+    timestamp = headers.pop('HTTP_X_HEALTHKEY_TIMESTAMP', str(int(time.time())))
+    return APIClient().post(
+        '/api/v1/webhooks/inbound/', body, content_type='application/json',
+        HTTP_X_HEALTHKEY_SOURCE=source,
+        HTTP_X_HEALTHKEY_TIMESTAMP=timestamp,
+        HTTP_X_HEALTHKEY_SIGNATURE=signature if signature is not None else compute_hmac_signature(body, 'test-source-secret', timestamp),
+        **headers,
+    )
+
+
+def test_hmac_matches_standard():
+    payload = b'{"exact": "bytes"}\n'
+    expected = 'sha256=' + hmac.new(b'secret', payload, hashlib.sha256).hexdigest()
+    assert compute_hmac_signature(payload, 'secret') == expected
+    assert compute_hmac_signature(payload.rstrip(), 'secret') != expected
+
+
+@pytest.mark.parametrize('signature', ['', 'invalid', 'sha256=' + '0' * 64, 'é'])
+def test_inbound_rejects_bad_signature(setup, signature):
+    assert inbound(signature=signature).status_code == 401
+    assert not InboundWebhookEvent.objects.exists()
+
+
+def test_unknown_source_cannot_select_org(setup):
+    assert inbound(source='other').status_code == 401
+    assert not WebhookDelivery.objects.exists()
+
+
+@pytest.mark.parametrize('event_type', ['lab.updated', 'document.received', 'foundation.synced'])
+def test_inbound_dispatch_and_deduplication(setup, event_type):
+    org, other, person, user, subscription = setup
+    WebhookSubscription.objects.create(organization=other, url=subscription.url, event_types=[event_type])
+    payload = {'id': 'event-1', 'type': event_type, 'data': {'person_id': person.pk, 'resource_id': 'external-42'}}
+    assert inbound(payload, HTTP_IDEMPOTENCY_KEY='event-1').status_code == 202
+    assert inbound(payload).data['duplicate'] is True
+    assert InboundWebhookEvent.objects.get().processed_at is not None
+    delivery = WebhookDelivery.objects.get()
+    assert delivery.subscription_id == subscription.pk
+    assert delivery.payload['type'] == event_type
+    assert delivery.payload['data']['resource_id'] == 'external-42'
+
+
+def test_id_reuse_with_changed_payload_conflicts(setup):
+    assert inbound().status_code == 202
+    assert inbound({'id': 'event-1', 'type': 'document.received', 'data': {'person_id': 420001}}).status_code == 409
+    assert WebhookDelivery.objects.count() == 1
+
+
+@pytest.mark.parametrize('payload', [
+    b'not JSON', b'null', b'[]', b'{}',
+    {'id': 'x', 'type': 'unsupported', 'data': {'person_id': 420001}},
+    {'id': 'x', 'type': 'lab.updated', 'data': {'person_id': 'invalid'}},
+    {'id': 'x', 'type': 'lab.updated', 'data': {}},
+])
+def test_signed_invalid_payload_rejected(setup, payload):
+    assert inbound(payload).status_code == 400
+    assert not InboundWebhookEvent.objects.exists()
+
+
+def test_source_cannot_notify_another_tenant(setup):
+    org, other, person, user, subscription = setup
+    PatientRecord.objects.filter(person=person).update(organization=other)
+    assert inbound().status_code == 400
+    assert not WebhookDelivery.objects.exists()
+
+
+def test_unsigned_idempotency_key_must_match_signed_id(setup):
+    assert inbound(HTTP_IDEMPOTENCY_KEY='different').status_code == 400
+
+
+def test_subscription_management_and_secret_visibility(setup):
+    org, other, person, user, subscription = setup
+    client = APIClient()
+    client.force_authenticate(user)
+    with patch('patient_portal.api.webhook_views.validate_webhook_url'):
+        response = client.post('/api/v1/webhooks/subscriptions/', {
+            'organization': org.pk, 'url': subscription.url, 'event_types': ['lab.updated'],
+        }, format='json')
+        assert response.status_code == 201
+        assert len(response.data['secret']) >= 32
+        assert client.post('/api/v1/webhooks/subscriptions/', {
+            'organization': other.pk, 'url': subscription.url, 'event_types': ['lab.updated'],
+        }, format='json').status_code == 400
+    assert 'secret' not in client.get(f'/api/v1/webhooks/subscriptions/{subscription.pk}/').data
+    assert subscription.secret not in client.get('/api/v1/webhooks/subscriptions/').content.decode()
+    alien = WebhookSubscription.objects.create(organization=other, url=subscription.url, event_types=['lab.updated'])
+    assert client.get(f'/api/v1/webhooks/subscriptions/{alien.pk}/deliveries/').status_code == 404
+    assert client.patch(f'/api/v1/webhooks/subscriptions/{alien.pk}/', {'active': False}, format='json').status_code == 404
+    assert client.patch(f'/api/v1/webhooks/subscriptions/{subscription.pk}/', {'organization': other.pk}, format='json').status_code == 400
+    assert client.patch(f'/api/v1/webhooks/subscriptions/{subscription.pk}/', {'active': False}, format='json').status_code == 200
+
+
+def test_patient_and_expired_admin_cannot_manage_subscriptions(setup):
+    org, other, person, user, subscription = setup
+    client = APIClient()
+    assert client.get('/api/v1/webhooks/subscriptions/').status_code in (401, 403)
+    client.force_authenticate(user)
+    GroupAccess.objects.filter(identity=user).update(role='patient')
+    assert client.get('/api/v1/webhooks/subscriptions/').status_code == 403
+    GroupAccess.objects.filter(identity=user).update(role='org_admin', expires_at=timezone.now() - timedelta(seconds=1))
+    assert client.get('/api/v1/webhooks/subscriptions/').status_code == 403
+
+
+def test_subscription_url_errors_never_expose_exception_details(setup):
+    client = APIClient()
+    client.force_authenticate(setup[3])
+    # Patch the shared implementation, not the view-local alias: DRF copies the
+    # model-field validator onto the serializer field, so the model path is the
+    # one that produces this error and the alias is never reached on a failure.
+    with patch('patient_portal.webhooks.validate_webhook_url', side_effect=ValueError('private resolver details')):
+        response = client.post('/api/v1/webhooks/subscriptions/', {
+            'organization': setup[0].pk,
+            'url': 'https://subscriber.example/events',
+            'event_types': ['lab.updated'],
+        }, format='json')
+    assert response.status_code == 400
+    assert str(response.data['url'][0]) == 'Webhook URL must resolve only to public HTTPS addresses on port 443.'
+    assert 'private resolver details' not in response.content.decode()
+
+
+def test_rollback_discards_event_and_queue_dispatch(setup, django_capture_on_commit_callbacks):
+    with patch('patient_portal.webhooks.enqueue_delivery') as enqueue:
+        with django_capture_on_commit_callbacks(execute=True):
+            with pytest.raises(RuntimeError), transaction.atomic():
+                publish_event(setup[0].pk, 'patient.changed', {'person_id': setup[2].pk})
+                raise RuntimeError('rollback')
+        enqueue.assert_not_called()
+    assert not WebhookDelivery.objects.exists()
+
+
+def test_model_changes_queue_only_after_commit(setup, django_capture_on_commit_callbacks):
+    with patch('patient_portal.webhooks.enqueue_delivery') as enqueue:
+        with django_capture_on_commit_callbacks(execute=True):
+            PatientDocument.objects.create(person=setup[2], doc_type='OTHER')
+            enqueue.assert_not_called()
+            assert WebhookDelivery.objects.get().payload['type'] == 'document.received'
+        enqueue.assert_called_once()
+
+
+def test_lab_sync_bulk_write_emits_one_notification(setup, django_capture_on_commit_callbacks):
+    org, other, person, user, subscription = setup
+    user.is_staff = True
+    user.save(update_fields=['is_staff'])
+    client = APIClient()
+    client.force_authenticate(user)
+    with patch('patient_portal.webhooks.enqueue_delivery') as enqueue:
+        with django_capture_on_commit_callbacks(execute=True):
+            response = client.post('/api/lab-results/sync/', {
+                'person_id': person.pk,
+                'measurements': [{'test_name': 'Webhook lab', 'value': '42', 'measured_at': '2026-09-12'}],
+            }, format='json')
+            assert response.status_code == 201, response.data
+            enqueue.assert_not_called()
+        enqueue.assert_called_once()
+    delivery = WebhookDelivery.objects.get()
+    assert delivery.payload['type'] == 'lab.updated'
+    assert delivery.payload['data']['count'] == 1
+
+
+def test_tp53_reconciliation_notifies_only_when_it_applies_a_change(setup):
+    """`reconcile_tp53_cache --apply` writes with QuerySet.update(), which no
+    post_save receiver sees. Without an explicit publish the subscriber keeps a
+    stale tp53_disruption until some unrelated save happens to touch the row."""
+    from io import StringIO
+
+    from django.core.management import call_command
+
+    org, other, person, user, subscription = setup
+    # No source findings, so the reconciled value is None; the stored False is
+    # what the command has to correct, and correcting it is the change event.
+    record = PatientRecord.objects.get(person=person)
+    PatientRecord.objects.filter(pk=record.pk).update(tp53_disruption=False)
+
+    WebhookDelivery.objects.all().delete()
+    call_command('reconcile_tp53_cache', person_id=person.pk, stdout=StringIO())
+    assert not WebhookDelivery.objects.exists(), 'preview changes nothing and must stay silent'
+
+    call_command('reconcile_tp53_cache', person_id=person.pk, apply=True, stdout=StringIO())
+    delivery = WebhookDelivery.objects.get()
+    assert delivery.subscription_id == subscription.pk
+    assert delivery.payload['type'] == 'patient.changed'
+    assert delivery.payload['data'] == {
+        'person_id': person.pk, 'resource_id': str(record.pk),
+        'resource_type': 'omop_core.patientrecord', 'operation': 'saved',
+    }
+    record.refresh_from_db()
+    assert record.tp53_disruption is None
+
+    WebhookDelivery.objects.all().delete()
+    call_command('reconcile_tp53_cache', person_id=person.pk, apply=True, stdout=StringIO())
+    assert not WebhookDelivery.objects.exists(), 'a no-op re-run must not notify again'
+
+
+def test_tp53_reconciliation_holds_pending_edits_without_notifying(setup):
+    from io import StringIO
+
+    from django.core.management import call_command
+
+    org, other, person, user, subscription = setup
+    PatientRecord.objects.filter(person=person).update(
+        tp53_disruption=False, user_edited_fields=['tp53_disruption'])
+    WebhookDelivery.objects.all().delete()
+    call_command('reconcile_tp53_cache', person_id=person.pk, apply=True, stdout=StringIO())
+    assert not WebhookDelivery.objects.exists()
+    assert PatientRecord.objects.get(person=person).tp53_disruption is False
+
+
+_SYNC_BUNDLE = {
+    'resourceType': 'Bundle', 'type': 'collection',
+    'entry': [
+        {'resource': {'resourceType': 'Patient', 'id': 'p1'}},
+        {'resource': {
+            'resourceType': 'Observation', 'subject': {'reference': 'Patient/p1'},
+            'code': {'coding': [{'system': 'http://loinc.org', 'code': '718-7',
+                                 'display': 'Hemoglobin'}]},
+            'effectiveDateTime': '2026-02-01',
+            'valueQuantity': {'value': 13.2, 'unit': 'g/dL'},
+        }},
+        {'resource': {
+            'resourceType': 'Condition', 'subject': {'reference': 'Patient/p1'},
+            'code': {'coding': [{'system': 'http://snomed.info/sct', 'code': '254837009'}],
+                     'text': 'Malignant neoplasm of breast'},
+            'onsetDateTime': '2025-11-15',
+        }},
+    ],
+}
+
+
+@pytest.fixture
+def sync_client(setup, settings):
+    settings.SERVICE_AUTH_SCOPES = 'patient/*.write'
+    service_user = Identity.objects.create(issuer='urn:service', sub='webhook-fhir-sync')
+    service_user.set_unusable_password()
+    service_user.save(update_fields=['password'])
+    client = APIClient()
+    client.force_authenticate(user=service_user, token='service-token')
+    return client
+
+
+def _sync(client, person, bundle=None):
+    return client.post('/api/v1/fhir/sync/', {
+        'person_id': person.pk, 'bundle': bundle or _SYNC_BUNDLE,
+    }, format='json')
+
+
+def test_fhir_sync_notifies_once_per_table_and_stays_quiet_when_idempotent(setup, sync_client):
+    """The sync view writes with bulk_create, which fires no signal, so these
+    ingested rows reach a subscriber only if the path publishes explicitly."""
+    org, other, person, user, subscription = setup
+    WebhookDelivery.objects.all().delete()
+
+    assert _sync(sync_client, person).status_code == 201
+    by_type = {}
+    for delivery in WebhookDelivery.objects.all():
+        by_type.setdefault(delivery.payload['type'], []).append(delivery.payload['data'])
+    assert set(by_type) == {'lab.updated', 'patient.changed'}
+    assert by_type['lab.updated'][0]['resource_type'] == 'omop_core.measurement'
+    assert by_type['lab.updated'][0]['count'] == 1
+    assert [d['resource_type'] for d in by_type['patient.changed']] == ['omop_core.conditionoccurrence']
+    assert by_type['patient.changed'][0]['count'] == 1
+
+    WebhookDelivery.objects.all().delete()
+    assert _sync(sync_client, person).status_code == 201
+    assert not WebhookDelivery.objects.exists(), 'an idempotent re-sync changes nothing and must stay silent'
+
+
+def test_fhir_sync_emits_one_event_per_table_across_ingest_helpers(setup, sync_client):
+    """Measurement is written by both the discrete and the daily-rollup helper,
+    and DrugExposure by both medications and immunizations. Publishing inside
+    each helper would split one bundle into two events per table, each with a
+    partial count."""
+    org, other, person, user, subscription = setup
+    bundle = {
+        'resourceType': 'Bundle', 'type': 'collection',
+        'entry': [
+            {'resource': {'resourceType': 'Patient', 'id': 'p1'}},
+            # discrete lab
+            {'resource': {
+                'resourceType': 'Observation', 'subject': {'reference': 'Patient/p1'},
+                'code': {'coding': [{'system': 'http://loinc.org', 'code': '718-7',
+                                     'display': 'Hemoglobin'}]},
+                'effectiveDateTime': '2026-02-01',
+                'valueQuantity': {'value': 13.2, 'unit': 'g/dL'},
+            }},
+            # daily rollup — same table, different helper
+            {'resource': {
+                'resourceType': 'Observation', 'subject': {'reference': 'Patient/p1'},
+                'extension': [{'url': AGGREGATION_EXT_URL, 'valueCode': 'daily'}],
+                'code': {'coding': [{'system': 'http://loinc.org', 'code': '55423-8',
+                                     'display': 'Step count'}]},
+                'effectivePeriod': {'start': '2026-02-02T00:00:00Z',
+                                    'end': '2026-02-02T23:59:59Z'},
+                'valueQuantity': {'value': 8000, 'unit': 'steps'},
+            }},
+            # medication and immunization — both DrugExposure, different helpers
+            {'resource': {
+                'resourceType': 'MedicationStatement', 'subject': {'reference': 'Patient/p1'},
+                'medicationCodeableConcept': {'text': 'AC-T'},
+                'effectivePeriod': {'start': '2025-12-01'},
+            }},
+            {'resource': {
+                'resourceType': 'Immunization', 'patient': {'reference': 'Patient/p1'},
+                'status': 'completed',
+                'vaccineCode': {'text': 'Influenza vaccine'},
+                'occurrenceDateTime': '2025-10-01',
+            }},
+        ],
+    }
+    WebhookDelivery.objects.all().delete()
+    assert _sync(sync_client, person, bundle).status_code == 201
+
+    per_table = {}
+    for delivery in WebhookDelivery.objects.all():
+        data = delivery.payload['data']
+        per_table.setdefault(data['resource_type'], []).append(data['count'])
+    assert all(len(counts) == 1 for counts in per_table.values()), per_table
+    assert per_table.get('omop_core.measurement') == [2], per_table
+    assert per_table.get('omop_core.drugexposure') == [2], per_table
+
+
+def test_fhir_sync_counts_a_twice_matched_rollup_row_once(setup, sync_client):
+    """Two bundle entries under different display text can resolve to the same
+    stored daily row — the rollup path matches on source value OR concept. It
+    is then saved twice but changed once, so the count must not report two."""
+    from omop_core.models import Measurement
+    from tests.factories import ConceptFactory, DomainFactory, VocabularyFactory
+
+    # Without a resolvable concept every display string is its own row and the
+    # OR-match never fires, so the concept has to exist for this to be the
+    # scenario it claims to be.
+    ConceptFactory(
+        concept_name='Step count', concept_code='55423-8', standard_concept='S',
+        vocabulary=VocabularyFactory(vocabulary_id='LOINC', vocabulary_name='LOINC'),
+        domain=DomainFactory(domain_id='Measurement', domain_name='Measurement'),
+    )
+
+    org, other, person, user, subscription = setup
+
+    def rollup(display, value):
+        return {'resource': {
+            'resourceType': 'Observation', 'subject': {'reference': 'Patient/p1'},
+            'extension': [{'url': AGGREGATION_EXT_URL, 'valueCode': 'daily'}],
+            'code': {'coding': [{'system': 'http://loinc.org', 'code': '55423-8',
+                                 'display': display}]},
+            'effectivePeriod': {'start': '2026-02-02T00:00:00Z',
+                                'end': '2026-02-02T23:59:59Z'},
+            'valueQuantity': {'value': value, 'unit': 'steps'},
+        }}
+
+    seed = {'resourceType': 'Bundle', 'type': 'collection',
+            'entry': [{'resource': {'resourceType': 'Patient', 'id': 'p1'}},
+                      rollup('Step count', 8000)]}
+    assert _sync(sync_client, person, seed).status_code == 201
+    stored = Measurement.objects.filter(person=person).count()
+
+    # Same concept and day, two different display strings, both differing from
+    # what is stored: each resolves to the one existing row.
+    again = {'resourceType': 'Bundle', 'type': 'collection',
+             'entry': [{'resource': {'resourceType': 'Patient', 'id': 'p1'}},
+                       rollup('Steps', 9000), rollup('Step Count (daily)', 9500)]}
+    WebhookDelivery.objects.all().delete()
+    assert _sync(sync_client, person, again).status_code == 201
+
+    measurement_events = [d.payload['data'] for d in WebhookDelivery.objects.all()
+                          if d.payload['data']['resource_type'] == 'omop_core.measurement']
+    assert Measurement.objects.filter(person=person).count() == stored, 'no new row: both entries match the stored one'
+    assert len(measurement_events) == 1, measurement_events
+    assert measurement_events[0]['count'] == 1, measurement_events
+
+
+def test_fhir_sync_collapse_of_stacked_duplicates_is_not_a_patient_event(setup, sync_client):
+    """Collapsing internal stacked rows is bookkeeping. Before the fix it was
+    the only thing the sync path notified about: one event per deleted
+    duplicate, and none for the rows actually ingested."""
+    from omop_core.models import ConditionOccurrence
+
+    org, other, person, user, subscription = setup
+    assert _sync(sync_client, person).status_code == 201
+    original = ConditionOccurrence.objects.get(person=person)
+
+    duplicate = ConditionOccurrence.objects.get(pk=original.pk)
+    duplicate.pk = None
+    duplicate.condition_occurrence_id = original.condition_occurrence_id + 10_000
+    duplicate.save()
+    assert ConditionOccurrence.objects.filter(person=person).count() == 2
+
+    WebhookDelivery.objects.all().delete()
+    assert _sync(sync_client, person).status_code == 201
+
+    assert ConditionOccurrence.objects.filter(person=person).count() == 1, 'the duplicate should be collapsed'
+    payloads = [d.payload for d in WebhookDelivery.objects.all()]
+    assert all(p['data'].get('operation') != 'deleted' for p in payloads), payloads
+    assert len(payloads) == 1 and payloads[0]['data']['count'] == 1
+
+
+def test_write_boundary_is_only_taken_when_webhooks_are_on(settings):
+    """The transaction is not free — a single-row POST runs the patient-record
+    derivation inside it — and it buys nothing with no outbox to protect, so
+    a deployment with webhooks off keeps the behaviour that shipped before."""
+    from contextlib import nullcontext
+
+    from patient_portal.api.views import _webhook_write_atomic
+
+    settings.WEBHOOKS_ENABLED = False
+    assert isinstance(_webhook_write_atomic(), nullcontext)
+    settings.WEBHOOKS_ENABLED = True
+    assert not isinstance(_webhook_write_atomic(), nullcontext)
+
+
+def test_bulk_publish_honours_the_suppressor(setup):
+    from patient_portal.webhooks import publish_patient_bulk_change, suppress_webhook_events
+
+    org, other, person, user, subscription = setup
+    WebhookDelivery.objects.all().delete()
+    with suppress_webhook_events():
+        publish_patient_bulk_change(person.pk, 'measurement', 3)
+    assert not WebhookDelivery.objects.exists()
+    publish_patient_bulk_change(person.pk, 'measurement', 3)
+    assert WebhookDelivery.objects.count() == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_clinical_write_rolls_back_when_the_outbox_insert_fails(setup):
+    """The outbox row has to commit with the row it describes.
+
+    Without a transaction around the DRF write the document is already
+    committed when the receiver runs, so a failing insert would leave a
+    persisted document that no subscriber ever hears about.
+    """
+    org, other, person, user, subscription = setup
+    user.is_staff = True
+    user.save(update_fields=['is_staff'])
+    client = APIClient()
+    client.force_authenticate(user)
+
+    before = PatientDocument.objects.count()
+    with patch('patient_portal.webhooks.WebhookDelivery.objects.create',
+               side_effect=RuntimeError('outbox unavailable')):
+        with pytest.raises(RuntimeError):
+            client.post('/api/v1/documents/', {
+                'person': person.pk, 'doc_type': 'OTHER', 'title': 'Atomic boundary',
+            }, format='json')
+
+    assert PatientDocument.objects.count() == before, 'the document must not survive a failed outbox insert'
+    assert not WebhookDelivery.objects.exists()
+
+    response = client.post('/api/v1/documents/', {
+        'person': person.pk, 'doc_type': 'OTHER', 'title': 'Atomic boundary',
+    }, format='json')
+    assert response.status_code == 201, response.data
+    assert PatientDocument.objects.count() == before + 1
+    assert WebhookDelivery.objects.get().payload['type'] == 'document.received'
+
+
+@pytest.mark.parametrize('operation', ['update', 'delete'])
+def test_bulk_changes_notify_even_when_refresh_is_skipped(setup, operation):
+    user = setup[3]
+    user.is_staff = True
+    user.save(update_fields=['is_staff'])
+    client = APIClient()
+    client.force_authenticate(user)
+    response = client.post('/api/lab-results/sync/', {
+        'person_id': setup[2].pk,
+        'measurements': [{'test_name': 'Webhook bulk', 'value': '42', 'measured_at': '2026-09-12'}],
+    }, format='json')
+    assert response.status_code == 201, response.data
+    measurement_id = response.data['measurement_ids'][0]
+    WebhookDelivery.objects.all().delete()
+    body = ({'ids': [measurement_id]} if operation == 'delete' else
+            [{'measurement_id': measurement_id, 'value_as_number': 43}])
+    send = client.post if operation == 'delete' else client.patch
+    response = send(f'/api/v1/measurements/bulk_{operation}/?skip_refresh=true', body, format='json')
+    assert response.status_code == 200, response.data
+    delivery = WebhookDelivery.objects.get()
+    assert delivery.payload['type'] == ('patient.changed' if operation == 'delete' else 'lab.updated')
+    assert delivery.payload['data']['count'] == 1
+
+
+@pytest.fixture
+def delivery(setup):
+    return WebhookDelivery.objects.create(subscription=setup[4], payload={'id': 'event', 'type': 'lab.updated', 'data': {}})
+
+
+def test_successful_delivery_and_duplicate_task(delivery):
+    with patch('patient_portal.tasks.send_webhook', return_value=204) as send:
+        deliver_webhook(str(delivery.pk))
+        deliver_webhook(str(delivery.pk))
+        send.assert_called_once()
+    delivery.refresh_from_db()
+    assert delivery.status == 'delivered'
+    assert delivery.attempts == 1
+    assert delivery.delivered_at is not None
+
+
+@pytest.mark.parametrize('response_status', [301, 400, 401, 429, 500, 503])
+def test_retry_backoff_and_five_attempt_limit(delivery, response_status, django_capture_on_commit_callbacks):
+    with patch('patient_portal.tasks.send_webhook', return_value=response_status) as send:
+        with patch('patient_portal.tasks.enqueue_delivery') as enqueue:
+            for attempt in range(1, 6):
+                with django_capture_on_commit_callbacks(execute=True):
+                    deliver_webhook(str(delivery.pk))
+                delivery.refresh_from_db()
+                assert delivery.attempts == attempt
+                assert delivery.response_status == response_status
+                if attempt < 5:
+                    assert delivery.status == 'retry'
+                    assert enqueue.call_args.kwargs['countdown'] == 30 * 2 ** (attempt - 1)
+                    deliver_webhook(str(delivery.pk))
+                    assert send.call_count == attempt
+                    WebhookDelivery.objects.filter(pk=delivery.pk).update(next_attempt_at=timezone.now())
+            assert delivery.status == 'dead_letter'
+            deliver_webhook(str(delivery.pk))
+            assert send.call_count == 5
+            assert enqueue.call_count == 4
+
+
+def test_network_errors_are_redacted_and_retried(delivery):
+    with patch('patient_portal.tasks.send_webhook', side_effect=OSError('secret in a URL')):
+        deliver_webhook(str(delivery.pk))
+    delivery.refresh_from_db()
+    assert delivery.status == 'retry'
+    assert delivery.error == 'connection_error'
+
+
+def test_disabled_subscription_is_not_delivered(delivery):
+    WebhookSubscription.objects.filter(pk=delivery.subscription_id).update(active=False)
+    with patch('patient_portal.tasks.send_webhook') as send:
+        deliver_webhook(str(delivery.pk))
+        send.assert_not_called()
+    delivery.refresh_from_db()
+    assert delivery.status == 'cancelled'
+    assert delivery.attempts == 0
+
+
+def test_broker_failure_retains_outbox_for_sweep(delivery, settings):
+    settings.CELERY_BROKER_URL = 'redis://unavailable'
+    with patch('patient_portal.tasks.deliver_webhook.apply_async', side_effect=OSError):
+        enqueue_delivery(delivery.pk)
+    delivery.refresh_from_db()
+    assert delivery.status == 'pending'
+    with patch('patient_portal.tasks.enqueue_delivery') as enqueue:
+        dispatch_pending_webhooks()
+        enqueue.assert_called_once_with(delivery.pk)
+
+
+def test_lost_worker_lease_recovers_with_attempt_limit(delivery):
+    WebhookDelivery.objects.filter(pk=delivery.pk).update(status='sending', attempts=5)
+    with patch('patient_portal.tasks.send_webhook') as send:
+        deliver_webhook(str(delivery.pk))
+        send.assert_not_called()
+    delivery.refresh_from_db()
+    assert delivery.status == 'dead_letter'
+
+
+@pytest.mark.parametrize('url', [
+    'http://example.com/', 'https://user:password@example.com/',
+    'https://example.com:8080/', 'https://example.com/#fragment',
+])
+def test_unsafe_url_schemes_and_credentials(url):
+    with pytest.raises(ValueError):
+        resolve_webhook_url(url)
+
+
+@pytest.mark.parametrize('address', ['127.0.0.1', '10.0.0.1', '169.254.169.254', '::1', 'fd00::1', '::ffff:127.0.0.1'])
+def test_private_destinations_rejected(address):
+    with patch('socket.getaddrinfo', return_value=[(socket.AF_INET, 1, 6, '', (address, 443))]):
+        with pytest.raises(ValueError):
+            resolve_webhook_url('https://subscriber.example/')
+
+
+def test_transport_pins_ip_verifies_tls_signs_bytes_and_disables_redirects():
+    response = Mock(status=302)
+    with patch('socket.getaddrinfo', return_value=[(socket.AF_INET, 1, 6, '', ('8.8.8.8', 443))]):
+        with patch('patient_portal.webhooks.urllib3.HTTPSConnectionPool') as pool:
+            pool.return_value.urlopen.return_value = response
+            assert send_webhook('https://subscriber.example/path?a=1', {'id': 'x'}, 'secret', 'delivery') == 302
+    assert pool.call_args.args == ('8.8.8.8',)
+    assert pool.call_args.kwargs['server_hostname'] == 'subscriber.example'
+    assert pool.call_args.kwargs['assert_hostname'] == 'subscriber.example'
+    assert pool.call_args.kwargs['cert_reqs'] == 'CERT_REQUIRED'
+    args, kwargs = pool.return_value.urlopen.call_args
+    assert args == ('POST', '/path?a=1')
+    assert kwargs['redirect'] is False
+    assert kwargs['retries'] is False
+    assert kwargs['preload_content'] is False
+    sent_ts = kwargs['headers']['X-HealthKey-Timestamp']
+    assert kwargs['headers']['X-HealthKey-Signature'] == compute_hmac_signature(
+        kwargs['body'], 'secret', sent_ts)
+    response.close.assert_called_once()
+
+
+@pytest.mark.parametrize('url,address,hostname,host_header', [
+    ('https://[2606:4700:4700::1111]/', '2606:4700:4700::1111', '2606:4700:4700::1111', '[2606:4700:4700::1111]'),
+    ('https://bücher.example/', '8.8.8.8', 'xn--bcher-kva.example', 'xn--bcher-kva.example'),
+])
+def test_transport_normalizes_ipv6_and_idna_hosts(url, address, hostname, host_header):
+    with patch('socket.getaddrinfo', return_value=[(socket.AF_INET6, 1, 6, '', (address, 443))]) as dns:
+        with patch('patient_portal.webhooks.urllib3.HTTPSConnectionPool') as pool:
+            pool.return_value.urlopen.return_value = Mock(status=200)
+            send_webhook(url, {'id': 'event'}, 'secret', 'delivery')
+    assert dns.call_args.args[0] == hostname
+    assert pool.call_args.kwargs['server_hostname'] == hostname
+    assert pool.return_value.urlopen.call_args.kwargs['headers']['Host'] == host_header
+
+
+@pytest.mark.django_db(transaction=True)
+def test_concurrent_duplicate_inbound_events(setup):
+    def receive():
+        close_old_connections()
+        try:
+            return inbound().status_code
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: receive(), range(2)))
+    assert sorted(results) == [200, 202]
+    assert InboundWebhookEvent.objects.count() == 1
+    assert WebhookDelivery.objects.count() == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_concurrent_delivery_tasks_send_once(delivery):
+    def run():
+        close_old_connections()
+        try:
+            deliver_webhook(str(delivery.pk))
+        finally:
+            close_old_connections()
+
+    with patch('patient_portal.tasks.send_webhook', return_value=200) as send:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            list(executor.map(lambda _: run(), range(2)))
+        send.assert_called_once()
+    delivery.refresh_from_db()
+    assert delivery.attempts == 1
+
+
+@pytest.mark.parametrize('timestamp', ['', 'abc', '１２３', '-1', '9' * 30, '0'])
+def test_inbound_requires_valid_recent_timestamp(setup, timestamp):
+    # Invalid timestamp need not be signed: all fail before dispatch.
+    assert inbound(signature='invalid', HTTP_X_HEALTHKEY_TIMESTAMP=timestamp).status_code == 401
+    assert not InboundWebhookEvent.objects.exists()
+
+
+@pytest.mark.parametrize('offset', [-301, 301])
+def test_correctly_signed_stale_or_future_request_rejected(setup, offset):
+    assert inbound(HTTP_X_HEALTHKEY_TIMESTAMP=str(int(time.time()) + offset)).status_code == 401
+    assert not WebhookDelivery.objects.exists()
+
+
+def test_timestamp_is_part_of_signed_bytes(setup):
+    body = encode_payload({'id': 'event-1', 'type': 'lab.updated', 'data': {'person_id': 420001}})
+    timestamp = str(int(time.time()))
+    signature = compute_hmac_signature(body, 'test-source-secret', str(int(timestamp) - 1))
+    assert inbound(body, signature=signature, HTTP_X_HEALTHKEY_TIMESTAMP=timestamp).status_code == 401
+    expected = 'sha256=' + hmac.new(b'test-source-secret', timestamp.encode() + b'.' + body, hashlib.sha256).hexdigest()
+    assert compute_hmac_signature(body, 'test-source-secret', timestamp) == expected
+
+
+def test_inbound_quota_is_per_authenticated_source(setup, settings):
+    settings.WEBHOOK_INBOUND_RATE = '2/minute'
+    settings.WEBHOOK_INBOUND_SOURCES['second-source'] = settings.WEBHOOK_INBOUND_SOURCES['lab-system']
+    for _ in range(3):
+        assert inbound(signature='invalid').status_code == 401
+    assert inbound().status_code == 202
+    assert inbound().status_code == 200
+    response = inbound()
+    assert response.status_code == 429
+    assert int(response['Retry-After']) > 0
+    assert inbound(source='second-source').status_code == 202
+
+
+def test_subscription_validation_does_not_resolve_dns(setup):
+    client = APIClient()
+    client.force_authenticate(setup[3])
+    with patch('socket.getaddrinfo', side_effect=AssertionError('DNS in request')):
+        result = client.post('/api/v1/webhooks/subscriptions/', {
+            'organization': setup[0].pk, 'url': 'https://unresolvable.example/events',
+            'event_types': ['lab.updated'],
+        }, format='json')
+        assert result.status_code == 201, result.data
+        assert client.patch(f"/api/v1/webhooks/subscriptions/{result.data['id']}/", {
+            'url': 'https://another.example/events',
+        }, format='json').status_code == 200
+
+
+def test_disabled_webhooks_add_no_queries(setup, settings, django_assert_num_queries):
+    from django.db.models.signals import post_save
+    from patient_portal.webhooks import patient_data_changed, publish_patient_bulk_change
+    settings.WEBHOOKS_ENABLED = False
+    with django_assert_num_queries(0), patch('patient_portal.webhooks.enqueue_delivery') as enqueue:
+        patient_data_changed(PatientDocument, PatientDocument(person_id=setup[2].pk), signal=post_save)
+        publish_patient_bulk_change(setup[2].pk, 'measurement', 1)
+        publish_event(setup[0].pk, 'patient.changed', {})
+        dispatch_pending_webhooks()
+        enqueue.assert_not_called()
+    assert inbound().status_code == 503
+
+
+def test_broker_enqueue_disables_retry_and_result_backend(delivery, settings):
+    settings.CELERY_BROKER_URL = 'redis://unavailable'
+    with patch('patient_portal.tasks.deliver_webhook.apply_async') as enqueue:
+        enqueue_delivery(delivery.pk)
+    assert enqueue.call_args.kwargs['retry'] is False
+    assert enqueue.call_args.kwargs['ignore_result'] is True
+
+
+def test_webhooks_registered_only_in_current_api_and_schema(setup):
+    from django.urls import resolve
+    from drf_spectacular.generators import SchemaGenerator
+    from patient_portal.api import v1_urls, urls
+    from patient_portal.api.webhook_views import InboundWebhookView
+    assert resolve('/api/v1/webhooks/inbound/').func.view_class is InboundWebhookView
+    assert all('webhook' not in prefix for prefix, _, _ in urls.router.registry)
+    assert not any(getattr(pattern, 'name', None) == 'webhook-inbound' for pattern in urls.urlpatterns)
+    assert 'Deprecation' not in inbound()
+    schema = SchemaGenerator(patterns=v1_urls.urlpatterns).get_schema(public=True)
+    assert '/webhooks/inbound/' in schema['paths']
+    assert '/webhooks/subscriptions/' in schema['paths']
+
+
+def test_prune_keeps_active_recent_and_unprocessed_rows(delivery, setup):
+    from django.core.management import call_command
+    from io import StringIO
+    old = timezone.now() - timedelta(days=40)
+    retained = []
+    terminal = []
+    for status in ['pending', 'retry', 'sending', 'delivered', 'dead_letter', 'cancelled']:
+        row = WebhookDelivery.objects.create(subscription=setup[4], payload={}, status=status)
+        WebhookDelivery.objects.filter(pk=row.pk).update(created_at=old, next_attempt_at=old)
+        (retained if status in ['pending', 'retry', 'sending'] else terminal).append(row.pk)
+    assert inbound().status_code == 202
+    event = InboundWebhookEvent.objects.get()
+    InboundWebhookEvent.objects.filter(pk=event.pk).update(received_at=old, processed_at=old)
+    call_command('prune_webhooks', dry_run=True, stdout=StringIO())
+    assert WebhookDelivery.objects.filter(pk__in=terminal).count() == 3
+    call_command('prune_webhooks', batch_size=1, stdout=StringIO())
+    assert WebhookDelivery.objects.filter(pk__in=retained).count() == 3
+    assert WebhookDelivery.objects.filter(pk=delivery.pk).exists()
+    assert not WebhookDelivery.objects.filter(pk__in=terminal).exists()
+    assert not InboundWebhookEvent.objects.exists()
+    # An old captured signature remains invalid after deduplication storage is pruned.
+    assert inbound(HTTP_X_HEALTHKEY_TIMESTAMP=str(int(old.timestamp()))).status_code == 401
+
+
+@pytest.mark.parametrize('fail', [False, True])
+def test_fhir_outbox_shares_patient_transaction(setup, django_capture_on_commit_callbacks, fail):
+    from io import BytesIO
+    from patient_portal.tests import _make_vocab_fixtures, _make_fhir_bundle
+    from patient_portal.webhooks import publish_patient_bulk_change
+    _make_vocab_fixtures()
+    client = APIClient()
+    client.force_authenticate(setup[3])
+    upload = BytesIO(json.dumps(_make_fhir_bundle()).encode())
+    upload.name = 'bundle.json'
+    seen = []
+
+    def publish(*args, **kwargs):
+        from django.db import connection
+        # TestCase's outer transaction plus the upload's patient savepoint.
+        assert connection.savepoint_ids
+        publish_patient_bulk_change(*args, **kwargs)
+        seen.append(True)
+        if fail:
+            raise RuntimeError('force failure after outbox creation')
+
+    # Refresh is a final required step after the bulk events have been persisted.
+    with patch('patient_portal.webhooks.enqueue_delivery') as enqueue:
+        with django_capture_on_commit_callbacks(execute=True):
+            if fail:
+                with patch('patient_portal.api.views.refresh_patient_record', side_effect=RuntimeError('rollback')):
+                    response = client.post('/api/v1/patient-records/upload_fhir/', {'file': upload}, format='multipart')
+            else:
+                with patch('patient_portal.webhooks.publish_patient_bulk_change', side_effect=publish):
+                    response = client.post('/api/v1/patient-records/upload_fhir/', {'file': upload}, format='multipart')
+            enqueue.assert_not_called()
+        assert response.status_code == 200, response.data
+        if fail:
+            assert response.data['errors']
+            assert not WebhookDelivery.objects.exists()
+            assert not Person.objects.filter(given_name='Jane', family_name='Smith').exists()
+            enqueue.assert_not_called()
+        else:
+            assert not response.data['errors'], response.data
+            assert seen
+            assert WebhookDelivery.objects.exists()
+            assert enqueue.called
+
+
+# --- review findings on #1318 ---------------------------------------------
+
+def test_subscription_mutations_require_csrf(setup):
+    """A subscription names where this org's patient events are sent, so a page
+    an admin merely visits must not be able to create or delete one. The project
+    default session backend is CSRF-exempt, so the viewset has to opt back in."""
+    org, other, person, user, subscription = setup
+    client = APIClient(enforce_csrf_checks=True)
+    client.force_login(user)
+    with patch('patient_portal.api.webhook_views.validate_webhook_url'):
+        created = client.post('/api/v1/webhooks/subscriptions/', {
+            'organization': org.pk, 'url': 'https://attacker.example/collect',
+            'event_types': ['patient.changed'],
+        }, format='json')
+    assert created.status_code == 403, created.data
+    assert not WebhookSubscription.objects.filter(url='https://attacker.example/collect').exists()
+    assert client.delete(f'/api/v1/webhooks/subscriptions/{subscription.pk}/').status_code == 403
+    assert WebhookSubscription.objects.filter(pk=subscription.pk).exists()
+    # Reading is still fine without a token.
+    assert client.get('/api/v1/webhooks/subscriptions/').status_code == 200
+
+
+def test_disclosed_secret_is_not_cacheable(setup):
+    org, other, person, user, subscription = setup
+    client = APIClient()
+    client.force_authenticate(user)
+    with patch('patient_portal.api.webhook_views.validate_webhook_url'):
+        response = client.post('/api/v1/webhooks/subscriptions/', {
+            'organization': org.pk, 'url': subscription.url, 'event_types': ['lab.updated'],
+        }, format='json')
+    assert response.status_code == 201
+    assert response['Cache-Control'] == 'no-store'
+    assert response['Pragma'] == 'no-cache'
+
+
+def test_unverified_inbound_traffic_is_metered(setup, settings):
+    """The source quota keys on a verified source, so it cannot bound traffic
+    that never verifies. Without an ingress bucket, bad signatures are free."""
+    from django.core.cache import cache
+
+    settings.WEBHOOK_INGRESS_RATE = '5/minute'
+    cache.clear()
+    try:
+        seen = [inbound(signature='wrong').status_code for _ in range(8)]
+        assert 429 in seen, seen
+        assert seen.index(429) >= 5, seen
+        # A caller cannot mint a fresh bucket by prepending to a header it
+        # controls: the key counts back from the end of the chain.
+        spoofed = inbound(signature='wrong',
+                          HTTP_X_FORWARDED_FOR='9.9.9.9, 127.0.0.1').status_code
+        assert spoofed == 429, spoofed
+    finally:
+        cache.clear()
+
+
+def test_a_verified_source_meets_its_own_quota_first(setup, settings):
+    """The ingress bucket sits above the per-source rate on purpose: metering
+    unverified traffic must not cap a legitimate sender below its quota."""
+    from django.core.cache import cache
+
+    settings.WEBHOOK_INGRESS_RATE = '1200/minute'
+    settings.WEBHOOK_INBOUND_RATE = '600/minute'
+    cache.clear()
+    try:
+        codes = set()
+        for i in range(70):
+            codes.add(inbound(payload={
+                'id': f'quota-{i}', 'type': 'lab.updated', 'data': {'person_id': 420001},
+            }).status_code)
+        assert codes == {202}, codes
+    finally:
+        cache.clear()
+
+
+def test_csrf_protected_endpoint_still_serves_its_real_callers(setup):
+    """The CSRF fix must deny the cross-site POST without denying the two ways
+    this endpoint is legitimately called."""
+    org, other, person, user, subscription = setup
+
+    # 1. A session caller that does send the token — same pattern as
+    #    test_session_admin_upload_with_csrf_succeeds.
+    from django.middleware.csrf import _get_new_csrf_string
+
+    session = APIClient(enforce_csrf_checks=True)
+    session.force_login(user)
+    csrf = _get_new_csrf_string()
+    session.cookies['csrftoken'] = csrf
+    session.credentials(HTTP_X_CSRFTOKEN=csrf)
+    with patch('patient_portal.api.webhook_views.validate_webhook_url'):
+        created = session.post(
+            '/api/v1/webhooks/subscriptions/',
+            {'organization': org.pk, 'url': 'https://legit.example/events',
+             'event_types': ['lab.updated']},
+            format='json',
+        )
+    assert created.status_code == 201, created.data
+
+    # 2. A header-authenticated caller, which carries no cookie and so is not
+    #    subject to CSRF at all.
+    user.is_staff = True
+    user.save(update_fields=['is_staff'])
+    bearer = APIClient(enforce_csrf_checks=True)
+    bearer.force_authenticate(user, token='service-token')
+    assert bearer.get('/api/v1/webhooks/subscriptions/').status_code == 200
+
+
+def test_oversized_body_is_refused_before_it_is_read(setup):
+    """Refused on the declared length, so a 2.5MB body is never buffered.
+
+    Asserting the status alone is not enough — a size check placed after
+    `request.body` also answers 413 — so this makes reading the body an error
+    and shows the request is refused without it.
+    """
+    big = b'{"id": "e", "type": "lab.updated", "data": {"person_id": 420001}, "pad": "' + b'x' * 70000 + b'"}'
+    boom = PropertyMock(side_effect=AssertionError('the body was buffered'))
+    with patch('django.http.HttpRequest.body', new_callable=lambda: property(boom)):
+        assert inbound(payload=big, signature='sha256=' + '0' * 64).status_code == 413
+    # And a correctly signed oversized body is refused too.
+    assert inbound(payload=big).status_code == 413
+
+
+def test_outbound_signature_binds_a_timestamp(setup):
+    """Inbound rejects a body-only signature as replayable; outbound owes
+    subscribers the same construction."""
+    response = Mock(status=200)
+    with patch('socket.getaddrinfo', return_value=[(socket.AF_INET, 1, 6, '', ('8.8.8.8', 443))]):
+        with patch('patient_portal.webhooks.urllib3.HTTPSConnectionPool') as pool:
+            pool.return_value.urlopen.return_value = response
+            send_webhook('https://subscriber.example/events', {'id': 'x'}, 'shhh', 'delivery-1')
+    headers = pool.return_value.urlopen.call_args.kwargs['headers']
+    body = pool.return_value.urlopen.call_args.kwargs['body']
+    ts = headers['X-HealthKey-Timestamp']
+    assert ts.isdigit() and abs(time.time() - int(ts)) < 60
+    assert headers['X-HealthKey-Signature'] == compute_hmac_signature(body, 'shhh', ts)
+    # The body-only signature must no longer verify: that is the replayable one.
+    assert headers['X-HealthKey-Signature'] != compute_hmac_signature(body, 'shhh')
+
+
+def test_unknown_source_still_runs_the_comparison(setup):
+    """An unknown source id must not answer measurably sooner than a known one
+    with a bad signature."""
+    with patch('patient_portal.api.webhook_views.hmac.compare_digest',
+               wraps=hmac.compare_digest) as compare:
+        assert inbound(source='no-such-source', signature='sha256=' + '0' * 64).status_code == 401
+    assert compare.called, 'the signature comparison was short-circuited away'
+
+
+def test_embedded_beat_is_off_unless_asked_for(tmp_path):
+    """Beat is a singleton; a default of on breaks the moment a worker service
+    gets a second replica."""
+    import os
+    import subprocess
+
+    root = Path(__file__).resolve().parent.parent
+    celery = tmp_path / 'celery'
+    celery.write_text('#!/bin/bash\nprintf "%s" "$*"\n')
+    celery.chmod(0o755)
+    env = {'PATH': f'{tmp_path}:{os.environ["PATH"]}',
+           'CELERY_BROKER_URL': 'redis://example.invalid',
+           'DATABASE_URL': 'postgresql://example.invalid', 'SECRET_KEY': 'test-only'}
+    result = subprocess.run(['bash', str(root / 'start-worker.sh')],
+                            env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert '--beat' not in result.stdout
+
+
+@pytest.mark.parametrize('raw', ['[]', '"x"', '{oops', '{"s": {}}', '{"s": {"secret": "k"}}'])
+def test_inbound_sources_config_is_rejected_at_startup(raw):
+    """A valid non-object passes json.loads and then raises AttributeError on
+    every inbound request instead of failing at boot."""
+    from django.core.exceptions import ImproperlyConfigured
+
+    from promop.settings import _webhook_inbound_sources
+
+    with pytest.raises(ImproperlyConfigured):
+        _webhook_inbound_sources(raw)
+
+
+def test_prune_walks_forward_instead_of_rescanning(setup):
+    """Each batch starts after the last pk rather than re-running LIMIT from the
+    beginning of the same unindexed scan."""
+    from io import StringIO
+
+    from django.core.management import call_command
+
+    org, other, person, user, subscription = setup
+    stale = timezone.now() - timedelta(days=90)
+    for _ in range(5):
+        delivery = WebhookDelivery.objects.create(
+            subscription=subscription, payload={'id': 'x'}, status='delivered')
+        WebhookDelivery.objects.filter(pk=delivery.pk).update(
+            created_at=stale, next_attempt_at=stale, delivered_at=stale)
+    out = StringIO()
+    with CaptureQueriesContext(connection) as queries:
+        call_command('prune_webhooks', batch_size=2, stdout=out)
+    assert 'pruned 5' in out.getvalue()
+    assert not WebhookDelivery.objects.exists()
+    # The batch SELECTs must carry an advancing lower bound. Without it every
+    # batch re-runs LIMIT from the start of the same scan, which is what makes
+    # the old version quadratic — and deleting the rows looks identical.
+    selects = [q['sql'] for q in queries.captured_queries
+               if q['sql'].lstrip().upper().startswith('SELECT')
+               and 'webhookdelivery' in q['sql'].lower()]
+    bounded = [sql for sql in selects if '"id" > ' in sql]
+    assert len(selects) >= 3, selects
+    assert len(bounded) >= 2, selects
+
+
+def test_subscription_url_is_validated_by_the_model_not_only_the_api(setup):
+    """A shell or a data migration must not be able to write an SSRF target."""
+    from django.core.exceptions import ValidationError as DjangoValidationError
+
+    org = setup[0]
+    for url in ('http://10.0.0.1/hook', 'https://192.168.0.5/hook',
+                'https://user:pw@example.org/hook', 'https://example.org:8443/hook'):
+        subscription = WebhookSubscription(organization=org, url=url, event_types=['lab.updated'])
+        with pytest.raises(DjangoValidationError) as error:
+            subscription.full_clean()
+        assert 'url' in error.value.message_dict, url
+    WebhookSubscription(
+        organization=org, url='https://subscriber.example/events',
+        event_types=['lab.updated'],
+    ).full_clean()
+
+
+def test_a_relayed_event_carries_the_source_it_came_from(setup):
+    """Each hop mints a fresh id, so the dedup cannot see a cycle; the marker
+    lets the partner that fed us recognise its own event coming back."""
+    response = inbound()
+    assert response.status_code == 202
+    delivery = WebhookDelivery.objects.filter(
+        payload__type='lab.updated', payload__origin__isnull=False).first()
+    assert delivery is not None
+    assert delivery.payload['origin'] == {'source': 'lab-system', 'event_id': 'event-1'}
+
+
+def test_an_event_we_originate_carries_no_origin_marker(setup):
+    org, other, person, user, subscription = setup
+    publish_event(org.pk, 'patient.changed', {'person_id': person.person_id})
+    delivery = WebhookDelivery.objects.filter(payload__type='patient.changed').first()
+    assert delivery is not None
+    assert 'origin' not in delivery.payload
+
+
+def test_retention_is_scheduled_where_the_deployment_runs_beat(settings):
+    """The docs ask for a daily prune; beat is the process that has to run it."""
+    from celery.schedules import crontab
+
+    entry = settings.CELERY_BEAT_SCHEDULE['prune-webhook-history']
+    assert entry['task'] == 'patient_portal.tasks.prune_webhook_history'
+    assert isinstance(entry['schedule'], crontab)
+
+
+def test_the_retention_task_runs_the_command(setup):
+    from patient_portal.tasks import prune_webhook_history
+
+    org, other, person, user, subscription = setup
+    stale = timezone.now() - timedelta(days=90)
+    delivery = WebhookDelivery.objects.create(
+        subscription=subscription, payload={'id': 'x'}, status='delivered')
+    WebhookDelivery.objects.filter(pk=delivery.pk).update(
+        created_at=stale, next_attempt_at=stale, delivered_at=stale)
+    prune_webhook_history()
+    assert not WebhookDelivery.objects.filter(pk=delivery.pk).exists()
+
+
+def test_the_batch_sentinel_is_typed_to_each_models_key(setup):
+    """WebhookDelivery is keyed by UUID and InboundWebhookEvent by an integer."""
+    import uuid as uuid_module
+
+    from django.db import models as django_models
+
+    from patient_portal.models import InboundWebhookEvent as Inbound
+
+    assert isinstance(WebhookDelivery._meta.pk, django_models.UUIDField)
+    assert not isinstance(Inbound._meta.pk, django_models.UUIDField)
+    # The nil UUID sorts below every generated one, so the first batch sees the
+    # whole table rather than skipping rows.
+    assert uuid_module.UUID(int=0) < uuid_module.uuid4()
+
+
+@pytest.fixture
+def trusted_professional(setup):
+    """A doctor at org A holding an organization trust into org B.
+
+    This is the shape that made a trust an egress authority: the trust is
+    granted so the professional can work with B's patients, and it also reached
+    subscription creation, which names where B's patient events are sent.
+    """
+    from omop_core.models import OrgTrust
+
+    org, other, person, user, subscription = setup
+    professional = Identity.objects.create_user(email='doctor@trusted.example')
+    GroupAccess.objects.create(identity=professional, org=other, role='doctor')
+    OrgTrust.objects.create(granting_org=org, trusted_org=other)
+    client = APIClient()
+    client.force_authenticate(user=professional)
+    return client, org, other, professional
+
+
+def test_a_trust_no_longer_reaches_subscription_creation(trusted_professional):
+    client, org, other, professional = trusted_professional
+    from omop_core.services.access import get_admin_orgs, get_direct_admin_orgs
+
+    # The trust still grants data access; it no longer grants egress config.
+    assert org in get_admin_orgs(professional)
+    assert org not in get_direct_admin_orgs(professional)
+    response = client.post('/api/v1/webhooks/subscriptions/', {
+        'organization': org.pk, 'url': 'https://attacker.example/collect',
+        'event_types': ['patient.changed'],
+    }, format='json')
+    assert response.status_code in (400, 403), response.data
+    assert not WebhookSubscription.objects.filter(url='https://attacker.example/collect').exists()
+
+
+def test_a_trust_cannot_redirect_or_delete_an_existing_subscription(trusted_professional):
+    client, org, other, professional = trusted_professional
+    subscription = WebhookSubscription.objects.get(organization=org)
+
+    # 403 when the caller administers nothing directly, 404 once the narrowed
+    # queryset is the only thing hiding the row — both are refusals, and which
+    # one fires is not a property worth pinning.
+    patched = client.patch(f'/api/v1/webhooks/subscriptions/{subscription.pk}/',
+                           {'url': 'https://attacker.example/collect'}, format='json')
+    assert patched.status_code in (403, 404), patched.data
+    assert client.delete(
+        f'/api/v1/webhooks/subscriptions/{subscription.pk}/').status_code in (403, 404)
+    subscription.refresh_from_db()
+    assert subscription.url == 'https://subscriber.example/events'
+    assert WebhookSubscription.objects.filter(pk=subscription.pk).exists()
+
+
+def test_a_trust_still_reads_the_subscriptions_it_could_always_see(trusted_professional):
+    client, org, other, professional = trusted_professional
+    listing = client.get('/api/v1/webhooks/subscriptions/')
+    assert listing.status_code == 200
+    rows = listing.data['results'] if isinstance(listing.data, dict) else listing.data
+    urls = [row['url'] for row in rows]
+    assert 'https://subscriber.example/events' in urls
+
+
+def test_a_direct_org_admin_still_administers_its_own_subscriptions(setup):
+    org, other, person, user, subscription = setup
+    client = APIClient()
+    client.force_authenticate(user=user)  # live org_admin grant on org
+    response = client.post('/api/v1/webhooks/subscriptions/', {
+        'organization': org.pk, 'url': 'https://partner.example/events',
+        'event_types': ['patient.changed'],
+    }, format='json')
+    assert response.status_code == 201, response.data
+    assert response.data['secret']
+    created = WebhookSubscription.objects.get(url='https://partner.example/events')
+    assert client.patch(f'/api/v1/webhooks/subscriptions/{created.pk}/',
+                        {'active': False}, format='json').status_code == 200

@@ -164,7 +164,9 @@ provides the original reporting design context.
 
 Applications consume patient state through the [API surface](API_SURFACE.md).
 [FHIR export](fhir-export-architecture.md) describes patient download and integration
-exports. Consumers that need a local vocabulary mirror use the
+exports. [Webhook notifications](webhooks_architecture.md) cover the push
+direction: signed inbound events, organization-scoped subscriptions, transactional
+delivery, and retention. Consumers that need a local vocabulary mirror use the
 [vocabulary cache protocol](vocab-consumer-cache-protocol.md); [ADR 0001](adr/0001-vocabulary-source-of-truth.md)
 records vocabulary authority and distribution decisions. The
 [field/value plan](field_concept_mapping_plan.md#vocabulary-distribution-and-mapping-provenance)

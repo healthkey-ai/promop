@@ -23,6 +23,11 @@ _EXTRA_SECRET_KEYS: tuple[str, ...] = (
     'AUDIT_HMAC_KEY',
     'EXPORT_SIGNING_KEY',
     'SERVICE_AUTH_TOKEN',
+    # Consistency with the entries around it rather than a live control: the
+    # scrubber reaches request data, extra, breadcrumbs and frame vars, and
+    # nothing writes a key by this name into any of them while
+    # include_local_variables stays False below.
+    'WEBHOOK_INBOUND_SOURCES',
     'ANTHROPIC_API_KEY',
     'MAILGUN_API_KEY',
     'ADMIN_PASSWORD',
