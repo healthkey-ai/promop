@@ -53,6 +53,10 @@
   runtime-data, shared configuration, mixed, and unknown changes run them.
 - Django and pytest run in isolated parallel jobs. The required `Backend tests`
   check succeeds only when both pass; detector failures retain full coverage.
+- CI is the gate for the full suites. Before a push, run only the tests the
+  change touches (plus `npm run lint` and `npm run build` for frontend work);
+  do not run the full Django or pytest suite locally. Wait for the required
+  checks before merging. See "Targeted Tests Before a Push" in `CLAUDE.md`.
 
 ## Documentation naming and ownership
 

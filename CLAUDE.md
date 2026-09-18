@@ -398,11 +398,12 @@ DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" DEBUG=True \
 cd frontend && npm test -- --run
 ```
 
-**Both backend suites must be run.** Django's test runner discovers only
-`omop_core.tests` and `patient_portal.tests`; the `tests/` package is
-pytest-based and is invisible to it. CI runs both as of PR #426 — before that
-those 166 tests had never run in CI and sat at 14 failures for some time
-without anyone noticing.
+**There are two backend suites, and CI runs both.** Django's test runner
+discovers only `omop_core.tests` and `patient_portal.tests`; the `tests/`
+package is pytest-based and is invisible to it. CI runs them as isolated
+parallel jobs, and the required `Backend tests` check passes only when both do.
+The commands above are for running a suite, or part of one, locally — see the
+rule below for when that is called for.
 
 ### Rule: Feature Branch + PR for Every Code Change
 
@@ -411,15 +412,46 @@ without anyone noticing.
 1. File a GitHub issue describing the work item
 2. `git checkout -b <descriptive-branch-name>` before writing any code
 3. Commit the work on the feature branch
-4. Run the test suites (see below)
+4. Run the targeted tests for the change (see below)
 5. Open a PR targeting `dev`
 6. Perform a code review on the PR. **Stop and present the review to the user before merging** — the user must read the review and approve the merge.
    - **Exception — small, local, low-risk fixes** (typos, docstring updates, single-line bug fixes, config tweaks): these may proceed all the way through to a merge into `dev` without waiting for user review, provided the code review found no unfixable issues.
 7. **After the PR merges into `dev` successfully, delete the feature branch.** Prefer `gh pr merge --delete-branch`, which removes the remote branch as part of the merge. Then delete the local copy (`git branch -d <branch>`) and remove any worktree created for it (`git worktree remove <path>`). Do not leave merged feature branches lingering locally or on the remote.
 
-### Rule: Run Tests Before Every Push
+### Rule: Targeted Tests Before a Push, CI for the Full Suites
 
-**For changes to code, tests, configuration, dependencies or runtime data, run both test suites before pushing.** Do not push if any test is failing. Documentation-only changes follow the exception in `AGENTS.md`: review content, links and `git diff --check`; application suites are not required.
+**GitHub CI is the gate for the full suites. Do not run the full Django or
+pytest suite locally before a push.** CI runs both in parallel on every PR and
+they are required checks, so a local full run repeats it serially — about 7
+minutes against `promop_test`, which every local session shares, so two
+sessions testing at once void each other's results.
+
+Before pushing a change to code, tests, configuration, dependencies or runtime
+data, run only:
+
+- **The tests the change touches** — the test files you added or edited, and
+  the ones covering the modules you changed:
+  ```bash
+  DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" DEBUG=True \
+    .venv/bin/python -m pytest -q tests/test_mapping_browse.py
+  DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" \
+    .venv/bin/python manage.py test patient_portal.tests.SomeTestCase --noinput
+  ```
+- **For frontend changes:** the affected component tests, plus `npm run lint`
+  and `npm run build` (see "Frontend Lint" below — neither `tsc` nor the tests
+  catch what lint does).
+
+Do not push if any of those fail. Then **wait for CI to pass before merging**;
+a red required check blocks the merge, and a failure there is fixed on the
+branch and re-pushed, not reproduced first with a local full run.
+
+Run a full suite locally only when CI cannot answer the question: reproducing a
+CI failure that a targeted run does not show, or working on the test
+infrastructure itself. Check `pgrep -fl "pytest|manage.py test"` first, run the
+two suites sequentially, and run each once.
+
+Documentation-only changes follow the exception in `AGENTS.md`: review content,
+links and `git diff --check`; application suites are not required.
 
 **Local PostgreSQL setup** (one-time, postgresql@18 via Homebrew, port 5433):
 
