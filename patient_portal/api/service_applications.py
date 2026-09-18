@@ -47,12 +47,11 @@ class ServiceApplicationSerializer(serializers.ModelSerializer):
             # that way on purpose — but clearing it while a live token exists
             # reaches the same dead end as issuing one on a scopeless
             # application: a token that grants nothing, with the environment
-            # fallback already refused. Revoked tokens grant nothing either way,
-            # so they do not block it: otherwise the instruction below could
-            # never be followed, tokens having no delete route.
-            raise serializers.ValidationError(
-                'Clearing scopes would leave this application\'s tokens granting '
-                'nothing. Revoke them first, or choose scopes.')
+            # fallback already refused. "Live" excludes revoked and expired
+            # tokens, which grant nothing anyway; counting them would make the
+            # instruction in the message impossible to follow, tokens having no
+            # delete route.
+            raise serializers.ValidationError(ServiceApplication.SCOPES_IN_USE)
         return ' '.join(sorted(scopes))
 
 
@@ -96,11 +95,25 @@ class ServiceApplicationViewSet(viewsets.ModelViewSet):
         # PATCH and a token issuance can each pass their check against the
         # other's stale state and commit a live token on a scopeless
         # application — the state both checks exist to prevent.
-        return ServiceApplication.objects.select_for_update().get(pk=application.pk)
+        return self.get_queryset().select_for_update().get(pk=application.pk)
 
+    # get_object() locks for every unsafe method, and select_for_update outside a
+    # transaction raises — so every unsafe handler is atomic, including the two
+    # that http_method_names does not currently route: routing them should not
+    # fail on the lock. DELETE would still need handling of its own, because
+    # ServiceAccessToken.application is on_delete=PROTECT and destroying an
+    # application that ever had a token raises ProtectedError.
     @transaction.atomic
     def partial_update(self, request, *args, **kwargs):
         return super().partial_update(request, *args, **kwargs)
+
+    @transaction.atomic
+    def update(self, request, *args, **kwargs):
+        return super().update(request, *args, **kwargs)
+
+    @transaction.atomic
+    def destroy(self, request, *args, **kwargs):
+        return super().destroy(request, *args, **kwargs)
 
     def check_permissions(self, request):
         super().check_permissions(request)

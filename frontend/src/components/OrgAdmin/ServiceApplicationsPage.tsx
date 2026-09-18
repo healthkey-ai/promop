@@ -57,7 +57,7 @@ function firstServerMessage(err: unknown): string {
   // Only strings the API put inside a field or a list. A bare string body is a
   // 500/502 error page, and pasting its HTML into the banner is worse than the
   // generic message the caller falls back to.
-  if (typeof data === 'string' || !data || typeof data !== 'object') return '';
+  if (!data || typeof data !== 'object') return '';  // a string body is an error page
   return texts(data).find(text => text.trim().length > 0) ?? '';
 }
 

@@ -438,6 +438,9 @@ class ServiceApplication(models.Model):
     class Meta:
         ordering = ['name', 'pk']
 
+    SCOPES_IN_USE = ('Clearing scopes would leave this application\'s live tokens '
+                     'granting nothing. Revoke them first, or choose scopes.')
+
     def live_tokens(self):
         """Tokens that can still authenticate: not revoked, not past their expiry.
 
@@ -459,9 +462,7 @@ class ServiceApplication(models.Model):
         if (self.scopes or '').split() or not self.pk:
             return
         if self.live_tokens().exists():
-            raise ValidationError({'scopes': [
-                'Clearing scopes would leave this application\'s live tokens granting '
-                'nothing. Revoke them first, or choose scopes.']})
+            raise ValidationError({'scopes': [self.SCOPES_IN_USE]})
 
     def __str__(self):
         return self.name
