@@ -54,12 +54,38 @@ def test_aliases_global_search_rejected_and_sections(browse):
 
 def test_duplicates_include_off_page_and_rejected_members(browse):
     row('MATCH', occurrence_count=0)
-    row(' match ', source_vocabulary_id='ICD10CM', status='rejected')
+    row(' match ', status='rejected')
     for i in range(101):
         row(f'X{i}', occurrence_count=100)
     data = browse(search='X').data
     assert {r['source_code'] for r in data['duplicates']} == {'MATCH', ' match '}
     assert len(data['results']) == 100
+
+
+@pytest.mark.parametrize('source', ['OpenWearables', '__overall__'])
+def test_same_code_in_different_vocabularies_on_one_tab_is_not_a_duplicate(browse, source):
+    # Wearables consolidates three vocabularies; ingest resolves on the exact one.
+    for vocabulary in ('Apple', 'Garmin', 'OpenWearables'):
+        row('heart_rate', source_vocabulary_id=vocabulary)
+    row('A02.0')
+    row('A02.0', source_vocabulary_id='ICD10CM')
+    assert browse(source=source).data['duplicates'] == []
+    assert browse(source='ICD10').data['duplicates'] == []
+
+
+def test_duplicate_within_one_vocabulary_on_a_shared_tab_is_still_reported(browse):
+    row('steps', source_vocabulary_id='Garmin')
+    row(' STEPS ', source_vocabulary_id='Garmin', status='rejected')
+    row('steps', source_vocabulary_id='Apple')
+    data = browse(source='OpenWearables').data
+    assert {(r['source_vocabulary_id'], r['source_code']) for r in data['duplicates']} == {
+        ('Garmin', 'steps'), ('Garmin', ' STEPS ')}
+
+
+def test_oid_spelling_of_a_vocabulary_is_the_same_vocabulary(browse):
+    row('123', source_vocabulary_id='SNOMED')
+    row('123', source_vocabulary_id='urn:oid:2.16.840.1.113883.6.96')
+    assert len(browse(source='SNOMED').data['duplicates']) == 2
 
 
 def test_bad_paging_or_sort_is_a_validation_error(browse):
