@@ -62,6 +62,28 @@ No additional service or LLM is required. Install PROMOP's existing
 `concept_embedding` must contain BAAI/bge-small-en-v1.5 embeddings (384
 dimensions) of concept names, generated with the same model as query encoding.
 
+### On a server without pgvector
+
+`migrate` still runs to completion on a stock PostgreSQL image: migration 0204
+skips `concept_embedding` when the server has no `vector` extension available,
+and 0206 logs a warning instead of altering a table that is not there. Every
+other table is built as usual, so an application that does not use semantic
+retrieval can deploy against plain PostgreSQL. Vector reranking is simply
+unavailable — `vector_rerank` finds no stored vectors and stops reranking.
+
+Both migrations are recorded as applied, so installing pgvector afterwards does
+not bring the table back on its own. Create it with the DDL 0204 would have
+run, then populate it as above:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE TABLE IF NOT EXISTS concept_embedding (
+    concept_id  INTEGER PRIMARY KEY
+        REFERENCES concept(concept_id) ON DELETE CASCADE,
+    embedding   vector(384) NOT NULL
+);
+```
+
 Build embeddings for the vocabulary coverage you intend to search:
 
 ```sh
