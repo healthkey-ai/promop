@@ -20,6 +20,7 @@ affiliations:
     index: 1
 date: 18 September 2026
 bibliography: paper.bib
+archive_doi: https://doi.org/10.5281/zenodo.21194709
 ---
 
 # Summary
