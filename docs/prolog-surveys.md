@@ -110,6 +110,7 @@ investigating. Neither is the container's health check.
 PROLOG_DEFINITION_DIRS=/data/surveys   # *.json instruments, loaded as drafts
 PROLOG_THEME_DIRS=/data/themes         # one directory per theme, each with theme.json
 PROLOG_LEGAL_DIRS=/data/legal          # privacy.md — served at /s/<slug>/privacy
+PROLOG_MACHINE_LANGUAGES=es,pt         # languages served as disclosed machine translations (else unset)
 ```
 
 Each is read by the app as a **Django setting**, and `promop/settings.py` is

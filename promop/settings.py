@@ -766,5 +766,12 @@ PROLOG_LEGAL_DIRS = [d for d in os.environ.get('PROLOG_LEGAL_DIRS', '').split(os
 # prolog_surveys.views.runner_index reads settings.RUNNER_DIST directly.
 RUNNER_DIST = Path(os.environ['PROLOG_RUNNER_DIST']) if os.environ.get('PROLOG_RUNNER_DIST') else None
 
+# Languages this deployment serves as machine translations, e.g. "es,pt". PROlog
+# refuses to activate a version whose translations are unreviewed unless the
+# deployment names them here — a statement that respondents will read machine
+# translations, which the runner discloses to them (PROlog DEF-5).
+PROLOG_MACHINE_LANGUAGES = [
+    lang.strip() for lang in os.environ.get('PROLOG_MACHINE_LANGUAGES', '').split(',') if lang.strip()
+]
 PROLOG_PUBLIC_URL = os.environ.get('PROLOG_PUBLIC_URL', APP_BASE_URL)
 PROLOG_EMAIL_FROM = os.environ.get('PROLOG_EMAIL_FROM', DEFAULT_FROM_EMAIL)
