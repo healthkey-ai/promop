@@ -464,7 +464,7 @@ data, run only:
   ```bash
   DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" DEBUG=True \
     .venv/bin/python -m pytest -q tests/test_mapping_browse.py
-  DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" \
+  DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" DEBUG=True \
     .venv/bin/python manage.py test patient_portal.tests.SomeTestCase --noinput
   ```
 - **For frontend changes:** the affected component tests, plus `npm run lint`
