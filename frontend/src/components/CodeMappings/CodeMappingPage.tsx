@@ -292,6 +292,19 @@ function tabForRow(row: CodeMappingRow): string {
   return VOCABULARY_ALIASES[row.source_vocabulary_id] ?? row.source_vocabulary_id;
 }
 
+/**
+ * Which vocabulary a row's source code is unique within. Not the tab: Apple,
+ * Garmin and OpenWearables share the Wearables tab but are separate
+ * vocabularies, so one code in two of them is two mappings, not a duplicate.
+ * Only an OID spelling names the same vocabulary.
+ */
+const SAME_VOCABULARY_SPELLINGS: Record<string, string> = {
+  "urn:oid:2.16.840.1.113883.6.96": "SNOMED",
+};
+function duplicateScopeForRow(row: CodeMappingRow): string {
+  return SAME_VOCABULARY_SPELLINGS[row.source_vocabulary_id] ?? row.source_vocabulary_id;
+}
+
 function sectionForRow(row: CodeMappingRow): MappingSection {
   if (row.mapping_origin === "athena") return "Athena Mapped";
   return row.status === "approved" ? "Mapped" : "Unmapped";
@@ -670,11 +683,12 @@ export default function CodeMappingPage() {
   const duplicateCodes = useMemo(() => {
     const groups = new Map<string, { code: string; vocabulary: string; rows: CodeMappingRow[] }>();
     for (const row of browse?.duplicates ?? rows) {
-      const vocabulary = tabForRow(row);
-      if (!overallTab && vocabulary !== selectedVocabulary) continue;
+      if (!overallTab && tabForRow(row) !== selectedVocabulary) continue;
+      const vocabulary = duplicateScopeForRow(row);
       const code = row.source_code.trim().toUpperCase();
       if (!code) continue;
-      // Overall must not treat, for example, LOINC:123 and ICD10:123 as duplicates.
+      // Keyed on the vocabulary, not the tab: LOINC:123 and ICD10:123 are not
+      // duplicates on Overall, nor Apple:123 and Garmin:123 on Wearables.
       const key = JSON.stringify([vocabulary, code]);
       const group = groups.get(key) ?? { code, vocabulary, rows: [] };
       group.rows.push(row);

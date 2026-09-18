@@ -57,8 +57,12 @@ def browse_mappings(mappings, params, serialize):
     tab_rows = mappings if source == OVERALL else mappings.filter(source_vocabulary_id__in=source_tab_vocabularies(source))
     # Only duplicate groups need full rows. Window filtering preserves every
     # member, including rejected rows outside the current page/search.
-    alias_cases = [When(source_vocabulary_id=key, then=Value(canonical_source(key)))
-                   for key in set(vocab.ICD10CM_MERGE) | set(vocab.VOCABULARY_OID_ALIASES) | set(vocab.WEARABLE_SOURCE_VOCABULARIES)]
+    # A duplicate is one code twice in one *vocabulary*, not twice on one tab:
+    # the Wearables tab holds Apple, Garmin and OpenWearables, ingest resolves
+    # on the exact vocabulary, and the same code in two of them is two
+    # legitimate mappings. Only an OID spelling is the same vocabulary.
+    alias_cases = [When(source_vocabulary_id=key, then=Value(canonical))
+                   for key, canonical in vocab.VOCABULARY_OID_ALIASES.items()]
     duplicate_ids = tab_rows.order_by().annotate(
         canonical=Case(*alias_cases, default=F('source_vocabulary_id'), output_field=CharField()),
         code=Upper(Trim('source_code')),
