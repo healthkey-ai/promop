@@ -41,12 +41,16 @@ class ServiceApplicationSerializer(serializers.ModelSerializer):
         scopes = set(value.split())
         if scopes - ALLOWED_SCOPES:
             raise serializers.ValidationError('Select supported service scopes.')
-        if not scopes and self.instance is not None and self.instance.tokens.exists():
-            # Blank is storable — migration 0019 seeds the legacy kill switch that
-            # way on purpose — but clearing it after a token exists reaches the
-            # same dead end as issuing one on a scopeless application: a live
-            # token that grants nothing, with the environment fallback already
-            # refused.
+        live_tokens = (self.instance is not None
+                       and self.instance.tokens.filter(revoked_at__isnull=True).exists())
+        if not scopes and live_tokens:
+            # Blank is storable — migration 0019 seeds the legacy kill switch
+            # that way on purpose — but clearing it while a live token exists
+            # reaches the same dead end as issuing one on a scopeless
+            # application: a token that grants nothing, with the environment
+            # fallback already refused. Revoked tokens grant nothing either way,
+            # so they do not block it: otherwise the instruction below could
+            # never be followed, tokens having no delete route.
             raise serializers.ValidationError(
                 'Clearing scopes would leave this application\'s tokens granting '
                 'nothing. Revoke them first, or choose scopes.')

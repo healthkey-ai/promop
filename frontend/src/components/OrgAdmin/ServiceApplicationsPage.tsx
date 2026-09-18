@@ -46,6 +46,17 @@ function expiringSoon(token: Token, applicationActive: boolean) {
   return days !== null && days > 0 && days <= EXPIRY_WARNING_DAYS;
 }
 
+function firstServerMessage(err: unknown): string {
+  const data = (err as { response?: { data?: unknown } })?.response?.data;
+  const texts = (value: unknown): string[] => {
+    if (typeof value === 'string') return [value];
+    if (Array.isArray(value)) return value.flatMap(texts);
+    if (value && typeof value === 'object') return Object.values(value).flatMap(texts);
+    return [];
+  };
+  return texts(data).find(text => text.trim().length > 0) ?? '';
+}
+
 function localInput(when: Date) {
   const shifted = new Date(when.getTime() - when.getTimezoneOffset() * 60 * 1000);
   return shifted.toISOString().slice(0, 16);
@@ -123,11 +134,11 @@ export default function ServiceApplicationsPage() {
       setIssued({ token: response.data.token, appName: selected.name }); setTokenLabel('');
       await load();
     } catch (err) {
-      // The server states the exact bound it refused (e.g. the maximum
-      // lifetime); a generic message would leave the operator guessing.
-      const detail = (err as { response?: { data?: Record<string, string[] | string> } })
-        .response?.data?.expires_at;
-      setError(Array.isArray(detail) ? detail[0] : detail
+      // Whatever the server refused, say what it said: it names the exact bound
+      // for an expiry and what to do first for a scopeless application. Reading
+      // one known key would have dropped the message that matters most, on the
+      // cutover flow that needs it.
+      setError(firstServerMessage(err)
         || 'Could not create the token. Check the label, expiry, and application status.');
     }
     finally { setBusy(false); }

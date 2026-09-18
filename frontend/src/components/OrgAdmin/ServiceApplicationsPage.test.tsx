@@ -50,6 +50,16 @@ describe('Service applications', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create token' }));
     expect(await screen.findByText('Expiration cannot be more than 365 days away.')).toBeInTheDocument();
   });
+  it('shows a scope refusal from the cutover flow, not a generic message', async () => {
+    mocks.post.mockRejectedValueOnce({ response: { data: { scopes: [
+      'Set the application scopes before issuing a token: a token with no scopes grants nothing.',
+    ] } } });
+    renderPage(); await selectApp();
+    fireEvent.change(screen.getByLabelText(/Token label/), { target: { value: 'Cutover' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create token' }));
+    expect(await screen.findByText(/Set the application scopes before issuing a token/)).toBeInTheDocument();
+    expect(screen.queryByText(/Check the label, expiry/)).not.toBeInTheDocument();
+  });
   it('falls back to a readable message when the server says nothing specific', async () => {
     mocks.post.mockRejectedValueOnce(new Error('network'));
     renderPage(); await selectApp();

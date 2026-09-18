@@ -27416,6 +27416,21 @@ class ScopelessTokenIssueTest(TestCase):
         application.refresh_from_db()
         self.assertEqual(application.scopes, 'patient/*.read')
 
+    def test_scopes_can_be_cleared_once_every_token_is_revoked(self):
+        """The refusal says to revoke first, and tokens have no delete route, so
+
+        counting revoked ones would make the instruction impossible to follow.
+        """
+        from patient_portal.service_applications import issue_token
+
+        application = ServiceApplication.objects.create(
+            name='ETL', service_id='etl-revoked', scopes='patient/*.read')
+        record, _ = issue_token(application, 'retired')
+        self.client.post(f'{self.URL}{application.pk}/tokens/{record.pk}/revoke/')
+        response = self.client.patch(
+            f'{self.URL}{application.pk}/', {'scopes': ''}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+
     def test_scopes_can_still_be_cleared_before_any_token_is_issued(self):
         application = ServiceApplication.objects.create(
             name='ETL', service_id='etl-blankable', scopes='patient/*.read')
