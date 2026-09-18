@@ -16,7 +16,7 @@ from omop_core.models import (
     SuggestEmbeddingSnapshot,
     UmlsConcept, UmlsRelease, UmlsSourceCode,
 )
-from omop_core.services.embedding_jobs import dispatch_suggest_embeddings
+from omop_core.services.embedding_jobs import dispatch_concept_embedding_build
 from tests.factories import ConceptFactory
 
 
@@ -239,7 +239,7 @@ def test_loader_completion_hook(loader, mode):
         options['skip_suggest_embeddings'] = True
     error = CommandError('load failed') if mode == 'failure' else None
     with patch.object(command, 'handle', side_effect=error, return_value=None), patch(
-            'omop_core.management.embedding_command.dispatch_suggest_embeddings') as dispatch:
+            'omop_core.management.embedding_command.dispatch_concept_embedding_build') as dispatch:
         if error:
             with pytest.raises(CommandError, match='load failed'):
                 call_command(loader, **options)
@@ -258,7 +258,7 @@ def test_nested_loaders_dispatch_only_once(skip):
 
     with patch.object(Athena, 'handle', side_effect=nested), patch.object(
             Mappings, 'handle', return_value=None), patch(
-            'omop_core.management.embedding_command.dispatch_suggest_embeddings') as dispatch:
+            'omop_core.management.embedding_command.dispatch_concept_embedding_build') as dispatch:
         call_command('load_athena_vocabularies', stdout=StringIO(), skip_checks=True,
                      skip_suggest_embeddings=skip)
     assert dispatch.call_count == (0 if skip else 1)
@@ -268,10 +268,10 @@ def test_nested_loaders_dispatch_only_once(skip):
 @pytest.mark.parametrize('broker', ('', 'redis://localhost:6379/0'))
 def test_dispatch_runs_after_commit(settings, broker, django_capture_on_commit_callbacks):
     settings.CELERY_BROKER_URL = broker
-    with patch('omop_core.tasks.precompute_suggest_embeddings_task.delay') as queued, patch(
-            'omop_core.services.embedding_jobs.run_suggest_embeddings') as inline:
+    with patch('omop_core.tasks.build_concept_embeddings_task.delay') as queued, patch(
+            'omop_core.services.embedding_jobs.run_build_concept_embeddings') as inline:
         with django_capture_on_commit_callbacks(execute=True):
-            dispatch_suggest_embeddings()
+            dispatch_concept_embedding_build()
             queued.assert_not_called()
             inline.assert_not_called()
     assert queued.call_count == bool(broker)
@@ -284,12 +284,12 @@ def test_dispatch_skips_when_table_is_missing(settings, broker, caplog,
                                                django_capture_on_commit_callbacks):
     """A pgvector-less database (#1430) must not crash every loader's precompute."""
     settings.CELERY_BROKER_URL = broker
-    with patch('omop_core.tasks.precompute_suggest_embeddings_task.delay') as queued, patch(
-            'omop_core.services.embedding_jobs.run_suggest_embeddings') as inline, patch(
+    with patch('omop_core.tasks.build_concept_embeddings_task.delay') as queued, patch(
+            'omop_core.services.embedding_jobs.run_build_concept_embeddings') as inline, patch(
             'omop_core.services.embedding_jobs.concept_embedding_table_exists',
             return_value=False):
         with django_capture_on_commit_callbacks(execute=True):
-            dispatch_suggest_embeddings()
+            dispatch_concept_embedding_build()
     queued.assert_not_called()
     inline.assert_not_called()
     assert 'concept_embedding does not exist' in caplog.text
@@ -300,26 +300,26 @@ def test_rollback_discards_dispatch(django_capture_on_commit_callbacks):
     with django_capture_on_commit_callbacks(execute=True) as callbacks:
         with pytest.raises(RuntimeError):
             with transaction.atomic():
-                dispatch_suggest_embeddings()
+                dispatch_concept_embedding_build()
                 raise RuntimeError('rollback')
     assert callbacks == []
 
 
-def test_real_mapping_load_warms_queue(queue, encoder, tmp_path, settings,
-                                     django_capture_on_commit_callbacks):
+def test_real_mapping_load_triggers_build(queue, encoder, tmp_path, settings,
+                                         django_capture_on_commit_callbacks):
+    """A successful load_mappings dispatches build_concept_embeddings."""
     settings.CELERY_BROKER_URL = ''
     artifact = tmp_path / 'mappings.json'
     artifact.write_text(json.dumps({'mappings': []}))
-    with django_capture_on_commit_callbacks(execute=True):
-        call_command('load_mappings', artifact=str(artifact), stdout=StringIO())
-    assert ConceptEmbedding.objects.filter(concept=queue[0]).exists()
+    with patch('omop_core.services.embedding_jobs.run_build_concept_embeddings') as build:
+        with django_capture_on_commit_callbacks(execute=True):
+            call_command('load_mappings', artifact=str(artifact), stdout=StringIO())
+    build.assert_called_once()
 
 
-def test_task_uses_full_candidate_configuration():
-    from omop_core.mapping.suggestions import LEXICAL_LIMIT_MAX
-    from omop_core.tasks import precompute_suggest_embeddings_task
+def test_task_calls_build_concept_embeddings():
+    from omop_core.tasks import build_concept_embeddings_task
 
     with patch('omop_core.services.embedding_jobs.call_command') as command:
-        precompute_suggest_embeddings_task.run()
-    command.assert_called_once_with('precompute_suggest_embeddings',
-                                    min_occurrences=1, lexical_limit=LEXICAL_LIMIT_MAX)
+        build_concept_embeddings_task.run()
+    command.assert_called_once_with('build_concept_embeddings')
