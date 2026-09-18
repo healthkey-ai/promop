@@ -29,7 +29,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from omop_core.models import SuggestRun
+from omop_core.models import SourceCodeConceptMapping, SuggestRun
 
 # What a run may attempt when it is genuinely queued: bounded by
 # CELERY_TASK_TIME_LIMIT (900s default) against ~3.5s per code, with wide margin.
@@ -182,6 +182,15 @@ def execute_preview(run_id: str, params: dict) -> None:
         runs.update(state=SuggestRun.FAILURE, error=str(exc)[:2000], finished_at=timezone.now())
 
 
+def _release_batch_locks(params: dict) -> None:
+    """Release edit locks acquired by a batch suggest run."""
+    locked_ids = params.get('_locked_mapping_ids')
+    if locked_ids:
+        SourceCodeConceptMapping.objects.filter(id__in=locked_ids).update(
+            locked_by=None, locked_at=None,
+        )
+
+
 def execute_run(run_id: str, params: dict) -> None:
     """Do the work for one SuggestRun and record how it went.
 
@@ -256,6 +265,7 @@ def execute_run(run_id: str, params: dict) -> None:
             state=SuggestRun.FAILURE, error=str(exc)[:2000],
             finished_at=timezone.now(),
         )
+        _release_batch_locks(params)
         return
 
     landed: dict[str, int] = {}
@@ -306,3 +316,4 @@ def execute_run(run_id: str, params: dict) -> None:
         landed_in=landed,
         finished_at=timezone.now(),
     )
+    _release_batch_locks(params)

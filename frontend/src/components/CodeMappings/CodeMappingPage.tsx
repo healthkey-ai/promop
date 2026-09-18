@@ -67,6 +67,8 @@ interface CodeMappingRow {
   mapping_origin?: "athena" | "healthkey";
   measurement_type?: "qualitative" | "quantitative";
   suggested_unit?: string;
+  locked_by_username?: string | null;
+  locked_at?: string | null;
 }
 
 interface ConceptResult {
@@ -781,12 +783,27 @@ export default function CodeMappingPage() {
     setDialogMode("new");
   };
 
-  const openEditDialog = (row: CodeMappingRow) => {
+  const openEditDialog = async (row: CodeMappingRow) => {
     setSuggestionMessage("");
     dialogRequest.current += 1;
     setError("");
     setSearchingConcepts(false);
     setCheckingUmls(false);
+    // Acquire edit lock before opening the dialog.
+    if (row.mapping_id) {
+      try {
+        await api.post(`/v1/code-mappings/${row.mapping_id}/lock/`);
+      } catch (err) {
+        const resp = err && typeof err === "object" && "response" in err
+          ? (err as { response?: { status?: number; data?: { detail?: string; locked_by?: string } } }).response
+          : undefined;
+        if (resp?.status === 423) {
+          setError(`Locked by ${resp.data?.locked_by || "another user"}.`);
+          return;
+        }
+        // Non-lock errors — still open the dialog, editing may work.
+      }
+    }
     setSelectedRow(row);
     setForm(buildEditForm(row, reference));
     setSearchVocabulary(row.destination_vocabulary_id || "");
@@ -804,6 +821,10 @@ export default function CodeMappingPage() {
     setSearchingConcepts(false);
     setCheckingUmls(false);
     setMintOpen(false);
+    // Release edit lock when closing.
+    if (selectedRow?.mapping_id) {
+      api.delete(`/v1/code-mappings/${selectedRow.mapping_id}/lock/`).catch(() => {});
+    }
     setDialogMode(null);
     setSelectedRow(null);
     setSaving(false);
@@ -1358,7 +1379,10 @@ export default function CodeMappingPage() {
               }`}
             >
               <td className="px-4 py-3 text-xs text-slate-700">{row.origin_system || "—"}</td>
-              <td className="px-4 py-3 font-mono text-xs text-slate-900">{row.source_code}</td>
+              <td className="px-4 py-3 font-mono text-xs text-slate-900">
+                {row.locked_by_username && <span title={`Locked by ${row.locked_by_username}`} className="mr-1 text-amber-500">&#128274;</span>}
+                {row.source_code}
+              </td>
               <td className="px-4 py-3 text-right font-mono text-xs text-slate-700">{row.occurrence_count || 0}</td>
               <td className="px-4 py-3 text-xs text-slate-700">{row.source_code_description || "—"}</td>
               <td className="px-4 py-3">
