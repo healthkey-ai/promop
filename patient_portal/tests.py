@@ -25729,6 +25729,15 @@ class PrologSurveyDeletionTest(TestCase):
             response=response, consent_version='1.0', text_hash='x' * 8,
             language='en', agreed_at=timezone.now(),
         )
+        # PROlog 0.4.5: an address kept beside the response, and a consent
+        # given with it — both hang off the response and must go with it.
+        from prolog_surveys.models import SurveyCaptureConsent, SurveyLinkedContact
+        SurveyLinkedContact.objects.create(
+            response=response, email='deletion@example.org', language='en', consent_text='n',
+        )
+        SurveyCaptureConsent.objects.create(
+            response=response, key='contact', text='c', text_hash='y' * 8, language='en',
+        )
         SurveyInvitation.objects.create(
             survey=version.survey, participant_id=person.person_id
         )

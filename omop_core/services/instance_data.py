@@ -94,6 +94,9 @@ PATIENT: frozenset[str] = frozenset({
     'omop_oncology.StemTable',
     'prolog_surveys.MintedParticipant', 'prolog_surveys.SurveyAnswer',
     'prolog_surveys.SurveyConsent', 'prolog_surveys.SurveyResponse',
+    # An address kept beside a response, and the consents given with one:
+    # both name the person, so they go where the answers go.
+    'prolog_surveys.SurveyCaptureConsent', 'prolog_surveys.SurveyLinkedContact',
 })
 
 
