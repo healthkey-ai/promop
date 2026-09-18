@@ -38,6 +38,19 @@ GET  /api/v1/orgs/{slug}/public/
 POST /api/orgs/{slug}/invite/      role=patient
 ```
 
+The role a self-signup receives depends on why the org was offered to that visitor:
+
+| Org is reachable because | `GroupAccess` role |
+|---|---|
+| `allows_patient_signup` (public demo org) | `analyst` |
+| it trusts the email domain (`OrgTrust.trusted_domain`) | `analyst` |
+| a pending `OrgInvitation` only | `patient` |
+
+A domain trust already entitles the user to the org's patients, and a `patient` grant beside
+the `PatientUser` link would make `patient_person_for()` scope them to their own record
+(#1454). Signup does not verify the address, so an invitation alone yields only self-access;
+the invited role is claimed with the invitation token through accept-invite.
+
 Org serializers expose `allows_patient_signup` so admins can enable or disable public
 signup. User responses include the org data needed for org-scoped patient routing.
 
