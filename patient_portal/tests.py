@@ -27143,15 +27143,454 @@ class CreateSmartAppRedirectSchemeTest(TestCase):
             self._application().redirect_uris, 'https://client.example.invalid/callback')
 
 
-from patient_portal.models import ServiceApplication  # noqa: E402
+from patient_portal.models import ServiceAccessToken, ServiceApplication  # noqa: E402
 from patient_portal.api.providers.base import TokenClaims  # noqa: E402
+
+
+class ServiceScopeCapTest(TestCase):
+    """ALLOWED_SCOPES was stated in one place and enforced in another (#1218 review)."""
+
+    def test_the_model_rejects_a_scope_outside_the_cap(self):
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
+        application = ServiceApplication(
+            name='Rogue', service_id='rogue-service', scopes='patient/*.read patient/*.delete')
+        with self.assertRaises(DjangoValidationError) as ctx:
+            application.full_clean()
+        self.assertIn('scopes', ctx.exception.message_dict)
+        self.assertIn('patient/*.delete', str(ctx.exception))
+
+    def test_the_model_accepts_every_supported_scope(self):
+        from patient_portal.service_tokens import ALLOWED_SCOPES
+
+        application = ServiceApplication(
+            name='ETL', service_id='etl-full', scopes=' '.join(sorted(ALLOWED_SCOPES)))
+        application.full_clean()
+
+    def test_the_django_admin_form_enforces_the_same_cap(self):
+        """Admin is a model form, so it must inherit the field validator."""
+        from django.contrib import admin as django_admin
+
+        model_admin = django_admin.site._registry[ServiceApplication]
+        form_class = model_admin.get_form(None)
+        form = form_class(data={
+            'name': 'Rogue', 'service_id': 'rogue-admin', 'description': '',
+            'owner_contact': '', 'scopes': 'system/*.delete', 'is_active': True,
+        })
+        self.assertFalse(form.is_valid())
+        self.assertIn('scopes', form.errors)
+
+    def test_an_environment_grant_with_an_unsupported_scope_is_reported(self):
+        from patient_portal.checks import service_token_scope_check
+
+        with override_settings(
+            SERVICE_AUTH_TOKENS={'etl': {'token': 'x' * 40, 'scopes': 'patient/*.read bogus/scope'}},
+            SERVICE_AUTH_TOKEN='', SERVICE_AUTH_SCOPES='patient/*.read',
+        ):
+            issues = service_token_scope_check(None)
+        self.assertEqual([issue.id for issue in issues], ['patient_portal.W007'])
+        self.assertIn('bogus/scope', issues[0].msg)
+        self.assertNotIn('x' * 40, issues[0].msg)
+
+    def test_the_legacy_grant_is_only_checked_when_it_is_configured(self):
+        from patient_portal.checks import service_token_scope_check
+
+        with override_settings(SERVICE_AUTH_TOKENS={}, SERVICE_AUTH_TOKEN='',
+                               SERVICE_AUTH_SCOPES='patient/*.reed'):
+            self.assertEqual(service_token_scope_check(None), [])
+        with override_settings(SERVICE_AUTH_TOKENS={}, SERVICE_AUTH_TOKEN='legacy-secret',
+                               SERVICE_AUTH_SCOPES='patient/*.reed'):
+            issues = service_token_scope_check(None)
+        self.assertEqual([issue.id for issue in issues], ['patient_portal.W007'])
+        self.assertNotIn('legacy-secret', issues[0].msg)
+
+    def test_a_malformed_service_token_setting_does_not_crash_the_deploy_check(self):
+        from patient_portal.checks import service_token_scope_check
+
+        with override_settings(SERVICE_AUTH_TOKENS='not-a-mapping', SERVICE_AUTH_TOKEN=''):
+            self.assertEqual(service_token_scope_check(None), [])
+
+    def test_a_conforming_environment_grant_is_silent(self):
+        from patient_portal.checks import service_token_scope_check
+
+        with override_settings(
+            SERVICE_AUTH_TOKENS={'etl': {'token': 'x' * 40, 'scopes': 'system/etl.write'}},
+            SERVICE_AUTH_TOKEN='', SERVICE_AUTH_SCOPES='patient/*.read',
+        ):
+            self.assertEqual(service_token_scope_check(None), [])
+
+
+class ServiceTokenLifetimeTest(TestCase):
+    """A static bearer secret with no refresh step needs a bounded lifetime."""
+
+    def test_an_expiry_beyond_the_cap_is_rejected(self):
+        from patient_portal.api.service_applications import (
+            MAX_TOKEN_LIFETIME, TokenIssueSerializer,
+        )
+
+        serializer = TokenIssueSerializer(data={
+            'label': 'forever', 'expires_at': '2999-01-01T00:00:00Z'})
+        self.assertFalse(serializer.is_valid())
+        self.assertIn(str(MAX_TOKEN_LIFETIME.days), str(serializer.errors['expires_at']))
+
+    def test_an_expiry_inside_the_cap_is_accepted(self):
+        from patient_portal.api.service_applications import (
+            MAX_TOKEN_LIFETIME, TokenIssueSerializer,
+        )
+
+        expires = timezone.now() + MAX_TOKEN_LIFETIME - timedelta(days=1)
+        serializer = TokenIssueSerializer(data={
+            'label': 'annual', 'expires_at': expires.isoformat()})
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+    def test_an_omitted_expiry_is_accepted_and_then_bounded_at_issue(self):
+        """The form's blank field must not be the way to mint a permanent token."""
+        from patient_portal.api.service_applications import TokenIssueSerializer
+        from patient_portal.service_applications import MAX_TOKEN_LIFETIME, issue_token
+
+        serializer = TokenIssueSerializer(data={'label': 'unbounded', 'expires_at': None})
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+        application = ServiceApplication.objects.create(name='ETL', service_id='etl-default-expiry')
+        record, _ = issue_token(application, 'no expiry given')
+        self.assertIsNotNone(record.expires_at)
+        expected = timezone.now() + MAX_TOKEN_LIFETIME
+        self.assertLess(abs((record.expires_at - expected).total_seconds()), 60)
+
+    def test_an_explicit_expiry_is_kept_as_given(self):
+        from patient_portal.service_applications import issue_token
+
+        application = ServiceApplication.objects.create(name='ETL', service_id='etl-explicit-expiry')
+        chosen = timezone.now() + timedelta(days=30)
+        record, _ = issue_token(application, 'thirty days', expires_at=chosen)
+        self.assertEqual(record.expires_at, chosen)
+
+    def test_the_api_mints_a_bounded_token_when_the_field_is_left_blank(self):
+        from patient_portal.service_applications import MAX_TOKEN_LIFETIME
+
+        staff = Identity.objects.create_user(email='lifetime-admin@test.com', password='ops-pass')
+        staff.is_staff = True
+        staff.save(update_fields=['is_staff'])
+        client = APIClient()
+        self.assertTrue(client.login(username='lifetime-admin@test.com', password='ops-pass'))
+        created = client.post('/api/v1/service-applications/', {
+            'name': 'Blank expiry', 'service_id': 'blank-expiry', 'scopes': 'patient/*.read',
+        }, format='json')
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED, created.data)
+        minted = client.post(f'/api/v1/service-applications/{created.data["id"]}/tokens/',
+                             {'label': 'blank'}, format='json')
+        self.assertEqual(minted.status_code, status.HTTP_201_CREATED, minted.data)
+        self.assertIsNotNone(minted.data['expires_at'])
+        record = ServiceAccessToken.objects.get(pk=minted.data['id'])
+        expected = timezone.now() + MAX_TOKEN_LIFETIME
+        self.assertLess(abs((record.expires_at - expected).total_seconds()), 60)
+
+    def test_importing_existing_credentials_is_left_unbounded_for_now(self):
+        """Imported tokens are already distributed, so expiring them is a
+
+        scheduled outage rather than a control. Tracked in #1423, which outlives
+        #1375; this test keeps the exception visible instead of assumed.
+        """
+        import json
+        import os
+        import tempfile
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        application = ServiceApplication.objects.create(name='ETL', service_id='etl-import')
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, 'tokens.json')
+            with open(path, 'w') as handle:
+                json.dump({'etl-import': {'token': 'x' * 48, 'scopes': 'patient/*.read'}}, handle)
+            call_command('import_service_tokens', '--file', path, stdout=StringIO())
+        self.assertIsNone(application.tokens.get().expires_at)
+
+    def test_an_expiry_beyond_the_ceiling_is_clamped_rather_than_stored(self):
+        """The serializer refuses one; a caller that skips it must not slip past."""
+        from patient_portal.service_applications import MAX_TOKEN_LIFETIME, issue_token
+
+        application = ServiceApplication.objects.create(name='ETL', service_id='etl-clamped')
+        record, _ = issue_token(
+            application, 'forever', expires_at=timezone.now() + timedelta(days=4000))
+        expected = timezone.now() + MAX_TOKEN_LIFETIME
+        self.assertLess(abs((record.expires_at - expected).total_seconds()), 60)
+
+
+class LegacyGrantMigrationGuardsTest(TestCase):
+    """0019 rewrites a row 0017 seeded, so its guards decide what it may touch."""
+
+    @staticmethod
+    def _migration():
+        from importlib import import_module
+
+        return import_module('patient_portal.migrations.0019_seed_legacy_service_application')
+
+    def _run(self, func):
+        from django.apps import apps as global_apps
+        from django.db import connection
+
+        func(global_apps, connection.schema_editor())
+
+    def test_the_managed_row_is_labelled_even_when_it_already_has_a_token(self):
+        """The documented setup imports a token onto hk-labs, and that is exactly
+
+        the deployment that needs to be told which row is the kill switch.
+        """
+        migration = self._migration()
+        managed = ServiceApplication.objects.get(service_id='hk-labs')
+        ServiceApplication.objects.filter(pk=managed.pk).update(description='')
+        ServiceAccessToken.objects.create(
+            application=managed, label='imported', digest='a' * 64, suffix='abcd')
+
+        self._run(migration.seed_legacy_application)
+
+        managed.refresh_from_db()
+        self.assertEqual(managed.description, migration.MANAGED_NOTE)
+
+    def test_an_operators_own_description_is_never_overwritten(self):
+        migration = self._migration()
+        ServiceApplication.objects.filter(service_id='hk-labs').update(
+            description='OPS-4412: owned by the labs integration squad')
+
+        self._run(migration.seed_legacy_application)
+
+        self.assertEqual(
+            ServiceApplication.objects.get(service_id='hk-labs').description,
+            'OPS-4412: owned by the labs integration squad')
+
+    def test_a_rollback_clears_only_the_note_this_migration_wrote(self):
+        migration = self._migration()
+        ServiceApplication.objects.filter(service_id='hk-labs').update(
+            description=migration.MANAGED_NOTE)
+
+        self._run(migration.drop_legacy_application)
+
+        self.assertEqual(ServiceApplication.objects.get(service_id='hk-labs').description, '')
+
+    def test_a_rollback_keeps_a_note_an_operator_appended_to(self):
+        """Prefix-matching here would eat the operator's half of the sentence."""
+        migration = self._migration()
+        appended = migration.MANAGED_NOTE + ' Owned by OPS-4412.'
+        ServiceApplication.objects.filter(service_id='hk-labs').update(description=appended)
+
+        self._run(migration.drop_legacy_application)
+
+        self.assertEqual(ServiceApplication.objects.get(service_id='hk-labs').description, appended)
+
+    def test_a_rollback_keeps_an_hk_labs_sync_row_somebody_created_by_hand(self):
+        """Active and tokenless is not the same as "what this migration wrote"."""
+        migration = self._migration()
+        ServiceApplication.objects.filter(service_id='hk-labs-sync').delete()
+        ServiceApplication.objects.create(
+            service_id='hk-labs-sync', name='Labs sync (ours)',
+            description='Created by ops before the migration', scopes='patient/*.write')
+
+        self._run(migration.drop_legacy_application)
+
+        kept = ServiceApplication.objects.get(service_id='hk-labs-sync')
+        self.assertEqual(kept.description, 'Created by ops before the migration')
+
+    def test_the_forward_is_idempotent_on_a_row_it_already_labelled(self):
+        migration = self._migration()
+        self._run(migration.seed_legacy_application)
+        self._run(migration.seed_legacy_application)
+        self.assertEqual(
+            ServiceApplication.objects.filter(service_id='hk-labs-sync').count(), 1)
+
+
+class ScopelessTokenIssueTest(TestCase):
+    """Issuing on hk-labs-sync is a cutover, and a scopeless token is not one."""
+
+    URL = '/api/v1/service-applications/'
+
+    def setUp(self):
+        self.staff = Identity.objects.create_user(email='cutover@test.com', password='ops-pass')
+        self.staff.is_staff = True
+        self.staff.save(update_fields=['is_staff'])
+        self.client = APIClient()
+        self.assertTrue(self.client.login(username='cutover@test.com', password='ops-pass'))
+
+    def test_a_token_cannot_be_issued_while_the_application_has_no_scopes(self):
+        application = ServiceApplication.objects.get(service_id='hk-labs-sync')
+        self.assertEqual(application.scopes, '')
+        response = self.client.post(
+            f'{self.URL}{application.pk}/tokens/', {'label': 'cutover'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('scopes', str(response.data).lower())
+        # The environment credential must still work: issuing is what stops it.
+        self.assertFalse(application.tokens.exists())
+
+    def test_the_refusal_is_keyed_to_the_field_so_a_client_can_show_it(self):
+        """A bare string serialises to a list, which the Org Admin page drops on
+
+        the floor in favour of a generic message naming label and expiry — the
+        two things that are fine.
+        """
+        application = ServiceApplication.objects.get(service_id='hk-labs-sync')
+        response = self.client.post(
+            f'{self.URL}{application.pk}/tokens/', {'label': 'cutover'}, format='json')
+        self.assertIsInstance(response.data, dict)
+        self.assertIn('scopes', response.data)
+
+    def test_scopes_cannot_be_cleared_once_a_token_exists(self):
+        """Otherwise the same dead end is reachable from the other direction."""
+        from patient_portal.service_applications import issue_token
+
+        application = ServiceApplication.objects.create(
+            name='ETL', service_id='etl-clearable', scopes='patient/*.read')
+        issue_token(application, 'live')
+        response = self.client.patch(
+            f'{self.URL}{application.pk}/', {'scopes': ''}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('scopes', response.data)
+        application.refresh_from_db()
+        self.assertEqual(application.scopes, 'patient/*.read')
+
+    def test_django_admin_cannot_clear_scopes_a_live_token_depends_on(self):
+        """The serializer's rule does not reach admin; the model's clean() does."""
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
+        from patient_portal.service_applications import issue_token
+
+        application = ServiceApplication.objects.create(
+            name='ETL', service_id='etl-admin-clear', scopes='patient/*.read')
+        issue_token(application, 'live')
+        application.scopes = ''
+        with self.assertRaises(DjangoValidationError) as ctx:
+            application.full_clean()
+        self.assertIn('scopes', ctx.exception.message_dict)
+
+    def test_an_expired_token_does_not_block_clearing_scopes(self):
+        """stored_credential already refuses it, so requiring a revocation would
+
+        make the operator retire a credential that is dead anyway.
+        """
+        from patient_portal.service_applications import issue_token
+
+        application = ServiceApplication.objects.create(
+            name='ETL', service_id='etl-expired', scopes='patient/*.read')
+        record, _ = issue_token(application, 'stale')
+        ServiceAccessToken.objects.filter(pk=record.pk).update(
+            expires_at=timezone.now() - timedelta(days=1))
+        response = self.client.patch(
+            f'{self.URL}{application.pk}/', {'scopes': ''}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+
+    def test_scopes_can_be_cleared_once_every_token_is_revoked(self):
+        """The refusal says to revoke first, and tokens have no delete route, so
+
+        counting revoked ones would make the instruction impossible to follow.
+        """
+        from patient_portal.service_applications import issue_token
+
+        application = ServiceApplication.objects.create(
+            name='ETL', service_id='etl-revoked', scopes='patient/*.read')
+        record, _ = issue_token(application, 'retired')
+        self.client.post(f'{self.URL}{application.pk}/tokens/{record.pk}/revoke/')
+        response = self.client.patch(
+            f'{self.URL}{application.pk}/', {'scopes': ''}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+
+    def test_scopes_can_still_be_cleared_before_any_token_is_issued(self):
+        application = ServiceApplication.objects.create(
+            name='ETL', service_id='etl-blankable', scopes='patient/*.read')
+        response = self.client.patch(
+            f'{self.URL}{application.pk}/', {'scopes': ''}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+
+    def test_importing_a_scopeless_entry_is_refused(self):
+        import json
+        import os
+        import tempfile
+        from io import StringIO
+
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, 'tokens.json')
+            with open(path, 'w') as handle:
+                json.dump({'hk-labs-sync': {'token': 'y' * 48, 'scopes': ''}}, handle)
+            with self.assertRaises(CommandError) as ctx:
+                call_command('import_service_tokens', '--file', path, stdout=StringIO())
+        self.assertIn('no scopes', str(ctx.exception))
+
+    def test_setting_scopes_first_lets_the_cutover_proceed(self):
+        application = ServiceApplication.objects.get(service_id='hk-labs-sync')
+        self.client.patch(f'{self.URL}{application.pk}/',
+                          {'scopes': 'patient/*.read'}, format='json')
+        response = self.client.post(
+            f'{self.URL}{application.pk}/tokens/', {'label': 'cutover'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+
+
+class LegacyServiceGrantKillSwitchTest(TestCase):
+    """Disabling the application must stop the environment credential (#1218 review)."""
+
+    LEGACY_TOKEN = 'legacy-env-secret-token-value-0001'
+
+    def _authenticate(self):
+        from patient_portal.api.authentication import ServiceTokenAuthentication
+        from rest_framework.test import APIRequestFactory
+
+        request = APIRequestFactory().get('/api/v1/patient-records/')
+        request.META['HTTP_AUTHORIZATION'] = f'Bearer {self.LEGACY_TOKEN}'
+        return ServiceTokenAuthentication().authenticate(request)
+
+    def test_the_seeded_application_matches_the_legacy_credentials_service_id(self):
+        application = ServiceApplication.objects.get(service_id='hk-labs-sync')
+        self.assertTrue(application.is_active)
+        self.assertFalse(application.tokens.exists())
+        # No scopes: while the environment credential is live, its scopes come
+        # from SERVICE_AUTH_SCOPES, and a guess here would narrow them at cutover.
+        self.assertEqual(application.scopes, '')
+
+    def test_a_rollback_keeps_an_operators_disabled_kill_switch(self):
+        """Deleting a disabled row on rollback would re-arm the credential."""
+        from importlib import import_module
+
+        from django.apps import apps as global_apps
+        from django.db import connection
+
+        migration = import_module(
+            'patient_portal.migrations.0019_seed_legacy_service_application')
+        ServiceApplication.objects.filter(service_id='hk-labs-sync').update(is_active=False)
+        migration.drop_legacy_application(global_apps, connection.schema_editor())
+        self.assertTrue(ServiceApplication.objects.filter(service_id='hk-labs-sync').exists())
+
+    def test_a_rollback_removes_the_untouched_seeded_row(self):
+        from importlib import import_module
+
+        from django.apps import apps as global_apps
+        from django.db import connection
+
+        migration = import_module(
+            'patient_portal.migrations.0019_seed_legacy_service_application')
+        migration.drop_legacy_application(global_apps, connection.schema_editor())
+        self.assertFalse(ServiceApplication.objects.filter(service_id='hk-labs-sync').exists())
+
+    @override_settings(SERVICE_AUTH_TOKEN=LEGACY_TOKEN, SERVICE_AUTH_TOKENS={},
+                       SERVICE_AUTH_SCOPES='patient/*.read')
+    def test_the_legacy_credential_works_while_the_application_is_enabled(self):
+        identity, credential = self._authenticate()
+        self.assertEqual(credential.service_id, 'hk-labs-sync')
+
+    @override_settings(SERVICE_AUTH_TOKEN=LEGACY_TOKEN, SERVICE_AUTH_TOKENS={},
+                       SERVICE_AUTH_SCOPES='patient/*.read')
+    def test_disabling_the_application_stops_the_legacy_credential(self):
+        from rest_framework.exceptions import AuthenticationFailed
+
+        ServiceApplication.objects.filter(service_id='hk-labs-sync').update(is_active=False)
+        with self.assertRaises(AuthenticationFailed):
+            self._authenticate()
 
 
 class ServiceTokenAdministrationBoundaryTest(TestCase):
     """Who may mint a service credential — #1218 review, finding 3.
 
-    A service credential never expires, is not bound to any patient, and
-    survives revocation of whatever grant was used to create it. Minting one
+    A service credential is not bound to any patient, outlives the grant used to
+    create it, and — before #1380 bounded it — never expired. Minting one
     must therefore require an interactive staff session, not a token a staff
     user delegated to somebody else's application.
     """

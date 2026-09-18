@@ -12,15 +12,27 @@ credential that is none of those things. Org administrators and patients cannot
 administer tokens either. Session-authenticated mutations enforce CSRF even when
 other API routes retain legacy session behavior.
 
-Select an app to create a labeled token with an optional expiry. Copy the secret
+Select an app to create a labeled token. The expiry is optional only in the
+sense that you need not pick one: leaving it blank issues a token expiring in 365
+days, the maximum, because a service credential is a static bearer secret with no
+refresh step and its lifetime is the whole of its exposure. An explicit expiry
+beyond that maximum is refused. Credentials imported with `import_service_tokens`
+keep whatever expiry they already had, including none; bounding those needs a
+rotation plan and is tracked in
+[#1423](https://github.com/healthkey-ai/promop/issues/1423). Copy the secret
 immediately: it is shown only in the creation response and is never retrievable
 later. The database stores a SHA-256 digest of the randomly generated 384-bit
 secret and its last four characters. List/detail/admin pages never expose the
 secret or digest. Share it through a secret manager or an expiring link restricted
 to its intended recipient.
 
-To rotate without an outage, create a replacement, deliver it, update the caller,
-then revoke the old token. An app can have multiple active tokens. Revoking a
+Rotation is not optional any more. Every token issued here expires — 365 days
+out when the field is left blank — and an expired credential fails
+authentication outright rather than falling back to any environment grant, so
+the integration stops. The token list flags a token inside 30 days of its
+expiry; nothing emails anybody, so the list is where you find out. To rotate
+without an outage, create a replacement, deliver it, update the caller, then
+revoke the old token. An app can have multiple active tokens. Revoking a
 token, changing scopes, or disabling an app applies to subsequent authentication
 requests immediately; already-authenticated requests may finish. Re-enabling an
 app does not restore a revoked token. Last-used timestamps update at most every
@@ -35,8 +47,17 @@ see [the migration guide](service-token-migration.md).
 ## Seed existing distributed tokens
 
 Migrations seed editable application records for **ETL (Nikita)**, **HT-PHR
-(Vlad)**, **HK-Labs (Vlad)**, and **EXACT (Leonid)**. No credentials or credential
-hashes are committed to migrations. Import the private file containing the
+(Vlad)**, **HK-Labs (Vlad)**, **EXACT (Leonid)**, and **HK-Labs (legacy
+environment grant)** with service ID `hk-labs-sync`. No credentials or credential
+hashes are committed to migrations.
+
+The last one is the kill switch for the legacy `SERVICE_AUTH_TOKEN` environment
+credential, which authenticates as `hk-labs-sync` rather than `hk-labs`:
+disabling it stops that credential, and disabling **HK-Labs** does not. It is
+seeded with no scopes, because while the environment credential is live its
+scopes come from `SERVICE_AUTH_SCOPES` — set them before issuing a managed token
+that replaces it. The `hk-labs` row carries a description saying the same thing,
+unless a deployment had already written its own. Import the private file containing the
 already-generated tokens against the intended deployment database:
 
 ```bash

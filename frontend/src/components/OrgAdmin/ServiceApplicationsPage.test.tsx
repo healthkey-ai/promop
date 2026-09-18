@@ -42,6 +42,99 @@ describe('Service applications', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss token' }));
     expect(screen.queryByDisplayValue('newly-generated-test-secret')).not.toBeInTheDocument(); storage.mockRestore();
   });
+  it('shows the bound the server refused rather than a generic failure', async () => {
+    mocks.post.mockRejectedValueOnce({ response: { data: {
+      expires_at: ['Expiration cannot be more than 365 days away.'] } } });
+    renderPage(); await selectApp();
+    fireEvent.change(screen.getByLabelText(/Token label/), { target: { value: 'Too long' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create token' }));
+    expect(await screen.findByText('Expiration cannot be more than 365 days away.')).toBeInTheDocument();
+  });
+  it('shows a scope refusal from the cutover flow, not a generic message', async () => {
+    mocks.post.mockRejectedValueOnce({ response: { data: { scopes: [
+      'Set the application scopes before issuing a token: a token with no scopes grants nothing.',
+    ] } } });
+    renderPage(); await selectApp();
+    fireEvent.change(screen.getByLabelText(/Token label/), { target: { value: 'Cutover' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create token' }));
+    expect(await screen.findByText(/Set the application scopes before issuing a token/)).toBeInTheDocument();
+    expect(screen.queryByText(/Check the label, expiry/)).not.toBeInTheDocument();
+  });
+  it('shows a disabled-application refusal too', async () => {
+    mocks.post.mockRejectedValueOnce({ response: { data: { is_active: [
+      'Enable the application before creating a token.'] } } });
+    renderPage(); await selectApp();
+    fireEvent.change(screen.getByLabelText(/Token label/), { target: { value: 'Attempt' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create token' }));
+    expect(await screen.findByText('Enable the application before creating a token.')).toBeInTheDocument();
+  });
+  it('does not paste a server error page into the banner', async () => {
+    mocks.post.mockRejectedValueOnce({ response: { data:
+      '<!doctype html><html><head><title>Server Error (500)</title></head></html>' } });
+    renderPage(); await selectApp();
+    fireEvent.change(screen.getByLabelText(/Token label/), { target: { value: 'Attempt' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create token' }));
+    expect(await screen.findByText(/Could not create the token/)).toBeInTheDocument();
+    expect(screen.queryByText(/doctype html/)).not.toBeInTheDocument();
+  });
+  it('falls back to a readable message when the server says nothing specific', async () => {
+    mocks.post.mockRejectedValueOnce(new Error('network'));
+    renderPage(); await selectApp();
+    fireEvent.change(screen.getByLabelText(/Token label/), { target: { value: 'Whatever' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create token' }));
+    expect(await screen.findByText(/Could not create the token/)).toBeInTheDocument();
+  });
+  it('warns about a token approaching its expiry, where the operator already looks', async () => {
+    const soon = new Date(Date.now() + 9 * 24 * 60 * 60 * 1000).toISOString();
+    mocks.get.mockResolvedValue({ data: [{ ...app, tokens: [{ ...app.tokens[0], expires_at: soon }] }] });
+    renderPage(); await selectApp();
+    expect(await screen.findByText(/expires in 9 days — rotate it/)).toBeInTheDocument();
+  });
+  it('never offers an expiry the server would refuse', async () => {
+    renderPage(); await selectApp();
+    const input = screen.getByLabelText(/Expires at/) as HTMLInputElement;
+    expect(new Date(input.max).getTime()).toBeLessThanOrEqual(Date.now() + 365 * 24 * 60 * 60 * 1000);
+    expect(new Date(input.max).getTime()).toBeGreaterThan(Date.now() + 362 * 24 * 60 * 60 * 1000);
+  });
+  it('never offers an expiry the server would refuse across a DST transition', async () => {
+    // CI runs in UTC, which has no transitions, so the assertion above cannot see
+    // the bug this guards: the offset is read at the ceiling instant, and where
+    // the shifted wall clock crosses a transition the printed maximum maps back
+    // to a later instant. Node honours a TZ switch at runtime, so pin both the
+    // zone and the clock to the worst case — 365 days after this instant lands
+    // inside Santiago's spring-forward.
+    const zone = process.env.TZ;
+    process.env.TZ = 'America/Santiago';
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date('2026-09-05T06:00:00Z'));
+    try {
+      const ceiling = Date.now() + 365 * 24 * 60 * 60 * 1000;
+      renderPage(); await selectApp();
+      const input = screen.getByLabelText(/Expires at/) as HTMLInputElement;
+      expect(new Date(input.max).getTime()).toBeLessThanOrEqual(ceiling);
+    } finally {
+      vi.useRealTimers();
+      // Assigning undefined would store the string "undefined", which Node reads
+      // as an invalid zone and resolves as UTC — leaking into whatever runs next
+      // in this worker.
+      if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone;
+    }
+  });
+  it('does not tell anyone to rotate a token they already revoked', async () => {
+    const soon = new Date(Date.now() + 9 * 24 * 60 * 60 * 1000).toISOString();
+    mocks.get.mockResolvedValue({ data: [{ ...app, tokens: [
+      { ...app.tokens[0], expires_at: soon, revoked_at: '2026-09-15T10:00:00Z' }] }] });
+    renderPage(); await selectApp();
+    expect(await screen.findByText(/Revoked/)).toBeInTheDocument();
+    expect(screen.queryByText(/rotate it/)).not.toBeInTheDocument();
+  });
+  it('does not warn about tokens of a disabled application', async () => {
+    const soon = new Date(Date.now() + 9 * 24 * 60 * 60 * 1000).toISOString();
+    mocks.get.mockResolvedValue({ data: [{ ...app, is_active: false, tokens: [
+      { ...app.tokens[0], expires_at: soon }] }] });
+    renderPage(); await selectApp();
+    expect(screen.queryByText(/rotate it/)).not.toBeInTheDocument();
+  });
   it('requires explicit confirmation to revoke a specific token', async () => {
     renderPage(); await selectApp(); fireEvent.click(screen.getByRole('button', { name: 'Revoke Initial token' }));
     expect(screen.getByRole('alertdialog')).toBeInTheDocument(); expect(mocks.post).not.toHaveBeenCalled();

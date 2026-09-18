@@ -1,10 +1,13 @@
 import uuid
 
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
+from django.core.exceptions import ValidationError
 from django.core.validators import RegexValidator
 from django.db import models
 from django.db.models import Q
 from django.utils import timezone
+
+from patient_portal.service_tokens import validate_service_scopes
 
 
 class IdentityManager(BaseUserManager):
@@ -426,13 +429,40 @@ class ServiceApplication(models.Model):
     ])
     description = models.TextField(blank=True)
     owner_contact = models.CharField(max_length=255, blank=True)
-    scopes = models.CharField(max_length=512, default='patient/*.read', blank=True)
+    scopes = models.CharField(max_length=512, default='patient/*.read', blank=True,
+                              validators=[validate_service_scopes])
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ['name', 'pk']
+
+    SCOPES_IN_USE = ('Clearing scopes would leave this application\'s live tokens '
+                     'granting nothing. Revoke them first, or choose scopes.')
+
+    def live_tokens(self):
+        """Tokens that can still authenticate: not revoked, not past their expiry.
+
+        An expired token is refused by stored_credential already, so counting it
+        would make an operator revoke credentials that are dead anyway.
+        """
+        return self.tokens.filter(revoked_at__isnull=True).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()))
+
+    def clean(self):
+        """Blank scopes are storable, but not while a live token depends on them.
+
+        The field validator cannot express this — it sees a value, not the row —
+        and the serializer's copy of the rule does not reach Django admin, which
+        edits `scopes` as free text for any staff user. That is the same gap the
+        scope cap fell through before it moved onto the field.
+        """
+        super().clean()
+        if (self.scopes or '').split() or not self.pk:
+            return
+        if self.live_tokens().exists():
+            raise ValidationError({'scopes': [self.SCOPES_IN_USE]})
 
     def __str__(self):
         return self.name
