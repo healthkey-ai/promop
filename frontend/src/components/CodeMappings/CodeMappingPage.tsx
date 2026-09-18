@@ -1360,10 +1360,10 @@ export default function CodeMappingPage() {
       <table aria-label={`${section} mappings`} className="w-full border-collapse text-left text-sm">
         <thead className="bg-slate-100 text-xs uppercase text-slate-600">
           <tr>
-            {header("Provenance", "origin_system")}
             {header("Source code", "source_code")}
             {header("Seen", "occurrence_count")}
             {header("Source description", "source_code_description")}
+            {header("Provenance", "origin_system")}
             {header("Destination concept", "destination_concept_name")}
             {header("Concept ID", "destination_concept_id")}
             {header("Dest count", "destination_count")}
@@ -1389,13 +1389,13 @@ export default function CodeMappingPage() {
                 navigationTarget?.id === mappingRowId(row) ? "bg-red-50" : ""
               }`}
             >
-              <td className="px-4 py-3 text-xs text-slate-700">{row.origin_system || "—"}</td>
               <td className="px-4 py-3 font-mono text-xs text-slate-900">
                 {row.locked_by_username && <span title={`Locked by ${row.locked_by_username}`} className="mr-1 text-amber-500">&#128274;</span>}
                 {row.source_code}
               </td>
               <td className="px-4 py-3 text-right font-mono text-xs text-slate-700">{row.occurrence_count || 0}</td>
               <td className="px-4 py-3 text-xs text-slate-700">{row.source_code_description || "—"}</td>
+              <td className="px-4 py-3 text-xs text-slate-700">{row.origin_system || "—"}</td>
               <td className="px-4 py-3">
                 <div className="font-medium text-slate-950">{row.destination_concept_name}</div>
                 <div className="font-mono text-xs text-slate-500">
@@ -1839,7 +1839,7 @@ export default function CodeMappingPage() {
             onSubmit={submitForm}
             role="dialog"
             aria-label={dialogMode === "new" ? "New Mapping" : "Edit Mapping"}
-            className="w-full max-w-3xl rounded-md bg-white shadow-xl"
+            className="w-full max-w-4xl rounded-md bg-white shadow-xl"
           >
             <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
               <h2 className="text-lg font-semibold text-slate-950">
