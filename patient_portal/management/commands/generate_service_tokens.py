@@ -22,7 +22,10 @@ class Command(BaseCommand):
         grants = {}
         for specification in options["service"]:
             service_id, separator, scope = specification.partition("=")
-            if not separator or service_id in grants:
+            if not separator or service_id in grants or not scope.split():
+                # A scopeless grant generates a secret that can never authorize
+                # anything, and import_service_tokens refuses the whole file —
+                # after it has been written and possibly distributed.
                 raise CommandError("Use a unique service ID=scopes for each --service.")
             grants[service_id] = {"token": secrets.token_urlsafe(48), "scopes": scope}
         try:

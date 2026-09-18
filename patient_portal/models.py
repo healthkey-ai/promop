@@ -1,6 +1,7 @@
 import uuid
 
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
+from django.core.exceptions import ValidationError
 from django.core.validators import RegexValidator
 from django.db import models
 from django.db.models import Q
@@ -436,6 +437,22 @@ class ServiceApplication(models.Model):
 
     class Meta:
         ordering = ['name', 'pk']
+
+    def clean(self):
+        """Blank scopes are storable, but not while a live token depends on them.
+
+        The field validator cannot express this — it sees a value, not the row —
+        and the serializer's copy of the rule does not reach Django admin, which
+        edits `scopes` as free text for any staff user. That is the same gap the
+        scope cap fell through before it moved onto the field.
+        """
+        super().clean()
+        if self.scopes.split() or not self.pk:
+            return
+        if self.tokens.filter(revoked_at__isnull=True).exists():
+            raise ValidationError({'scopes': [
+                'Clearing scopes would leave this application\'s live tokens granting '
+                'nothing. Revoke them first, or choose scopes.']})
 
     def __str__(self):
         return self.name

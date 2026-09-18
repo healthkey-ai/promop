@@ -60,6 +60,14 @@ describe('Service applications', () => {
     expect(await screen.findByText(/Set the application scopes before issuing a token/)).toBeInTheDocument();
     expect(screen.queryByText(/Check the label, expiry/)).not.toBeInTheDocument();
   });
+  it('shows a disabled-application refusal too', async () => {
+    mocks.post.mockRejectedValueOnce({ response: { data: { is_active: [
+      'Enable the application before creating a token.'] } } });
+    renderPage(); await selectApp();
+    fireEvent.change(screen.getByLabelText(/Token label/), { target: { value: 'Attempt' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create token' }));
+    expect(await screen.findByText('Enable the application before creating a token.')).toBeInTheDocument();
+  });
   it('falls back to a readable message when the server says nothing specific', async () => {
     mocks.post.mockRejectedValueOnce(new Error('network'));
     renderPage(); await selectApp();
@@ -97,7 +105,10 @@ describe('Service applications', () => {
       expect(new Date(input.max).getTime()).toBeLessThanOrEqual(ceiling);
     } finally {
       vi.useRealTimers();
-      process.env.TZ = zone;
+      // Assigning undefined would store the string "undefined", which Node reads
+      // as an invalid zone and resolves as UTC — leaking into whatever runs next
+      // in this worker.
+      if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone;
     }
   });
   it('does not tell anyone to rotate a token they already revoked', async () => {

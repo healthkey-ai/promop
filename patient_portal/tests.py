@@ -27416,6 +27416,20 @@ class ScopelessTokenIssueTest(TestCase):
         application.refresh_from_db()
         self.assertEqual(application.scopes, 'patient/*.read')
 
+    def test_django_admin_cannot_clear_scopes_a_live_token_depends_on(self):
+        """The serializer's rule does not reach admin; the model's clean() does."""
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
+        from patient_portal.service_applications import issue_token
+
+        application = ServiceApplication.objects.create(
+            name='ETL', service_id='etl-admin-clear', scopes='patient/*.read')
+        issue_token(application, 'live')
+        application.scopes = ''
+        with self.assertRaises(DjangoValidationError) as ctx:
+            application.full_clean()
+        self.assertIn('scopes', ctx.exception.message_dict)
+
     def test_scopes_can_be_cleared_once_every_token_is_revoked(self):
         """The refusal says to revoke first, and tokens have no delete route, so
 
