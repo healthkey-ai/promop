@@ -185,7 +185,7 @@ matching engine; and a patient-portal application [@PHR], which loads PRomop's p
 interface at runtime as a Module Federation remote. Sharing one derivation eliminated a class of bugs in
 which applications disagreed about the same patient.
 
-The project has been developed on GitHub since September 2025: roughly 1,900
+The project has been developed in the open, in a public GitHub repository, since September 2025: roughly 1,900
 commits, more than 700 pull requests, four tagged versions (v1.0.0–v1.3.0) with a
 changelog, Zenodo-archived releases, and continuous integration running two backend test suites
 and the frontend suite on every pull request. Four developers have contributed code (see
