@@ -833,20 +833,18 @@ class OrgPatientSignupView(APIView):
             )
 
         domain = email.rsplit('@', 1)[1]
-        invitation_or_domain_access = (
-            OrgInvitation.objects.filter(
-                org=org,
-                email__iexact=email,
-                confirmed_at__isnull=True,
-                cancelled_at__isnull=True,
-                expires_at__gt=timezone.now(),
-            ).exists()
-            or OrgTrust.objects.filter(
-                granting_org=org,
-                trusted_domain__iexact=domain,
-            ).exists()
-        )
-        if not org.allows_patient_signup and not invitation_or_domain_access:
+        has_invitation = OrgInvitation.objects.filter(
+            org=org,
+            email__iexact=email,
+            confirmed_at__isnull=True,
+            cancelled_at__isnull=True,
+            expires_at__gt=timezone.now(),
+        ).exists()
+        has_domain_trust = OrgTrust.objects.filter(
+            granting_org=org,
+            trusted_domain__iexact=domain,
+        ).exists()
+        if not (org.allows_patient_signup or has_invitation or has_domain_trust):
             return Response(
                 {'error': 'This organization does not allow direct patient signup.'},
                 status=status.HTTP_403_FORBIDDEN,
@@ -915,9 +913,18 @@ class OrgPatientSignupView(APIView):
                 refresh_patient_record(person)
 
                 # Grant access to this org.  Public demo orgs get 'analyst'
-                # so the user can browse all sample patients (read-only);
-                # private orgs get 'patient' (self-access only).
-                signup_role = 'analyst' if org.allows_patient_signup else 'patient'
+                # so the user can browse all sample patients (read-only).  So
+                # does an org that trusts the email domain: the trust already
+                # entitles that user to the org's patients (services/access.py),
+                # and a 'patient' grant beside the PatientUser link would make
+                # patient_person_for() scope them to their own record instead.
+                # Invitation-only signups get 'patient' (self-access only); the
+                # invitation's own role is claimed through accept-invite.
+                signup_role = (
+                    'analyst'
+                    if org.allows_patient_signup or has_domain_trust
+                    else 'patient'
+                )
                 GroupAccess.objects.get_or_create(
                     identity=identity,
                     org=org,
