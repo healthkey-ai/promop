@@ -938,10 +938,10 @@ enqueue_unmapped_source_codes` still does that scan, as the batch job it is: it
 creates empty queue rows with blank provenance, which is exactly the state
 Suggest looks for. So the split is **enqueue, then suggest**.
 
-### Three independent retrieval paths, one ranking call
+### Three retrieval paths, then Anthropic or Jev chooses the winner
 
 ```
-UMLS CUI bridge ──► exactly one standard concept? ──► done, no model call
+UMLS CUI bridge ──► exactly one standard concept? ──► done, no ranking call
        │ no
        ▼
    ┌────────────────┐
@@ -953,15 +953,22 @@ UMLS CUI bridge ──► exactly one standard concept? ──► done, no model
        ▼  merge (union, enrich overlaps with both scores)
        │
        ▼
-One ranking call ─► the model picks one from the merged pool, or declines
+Anthropic or Jev ─► picks one from the merged pool with confidence levels, or declines
 ```
 
-UMLS, lexical, and vectors are **three independent retrieval paths** that run
-concurrently and merge into one candidate pool. `semantic_candidates()` does a
-full cosine similarity search against the `ConceptEmbedding` table — it is real
+UMLS, lexical, and vectors are **three independent retrieval paths** that
+contribute candidates to one merged pool. `semantic_candidates()` does a full
+cosine similarity search against the `ConceptEmbedding` table — it is real
 retrieval, not reranking. Lexical and vector results are often mostly disjoint
 because trigram similarity and embedding cosine are different signals.
-`vector_rerank()` exists in the code but is unused.
+`vector_rerank()` exists in the code but is unused in the default pipeline.
+
+`rank_candidates_dispatch()` routes the merged pool to the configured ranking
+model: **Anthropic** (Claude, the default), **Jev** (Typesafe API), or
+**both** (concurrent, highest confidence wins). The ranker scores each candidate
+with a qualitative confidence level (high / medium / low, mapped to numeric
+values) and either picks a winner or declines. A declined code stays in the
+queue for the next run.
 
 Where the time goes, per code:
 
@@ -969,7 +976,7 @@ Where the time goes, per code:
 |---|---|
 | lexical trigram retrieval | ~2.5s (**67%**, serial) |
 | vector cosine retrieval | ~0.3s (query embedding ~25ms + cosine search) |
-| ranking model call | ~3.5s each, but concurrent (`RANK_CONCURRENCY`) and only for codes UMLS did not settle |
+| ranking call (Anthropic or Jev) | ~3.5s each, but concurrent (`RANK_CONCURRENCY`) and only for codes UMLS did not settle |
 | embedding model load | ~5s, **once per gunicorn worker**, on its first Suggest |
 
 ### The run is queued, and how big it may be depends on that
