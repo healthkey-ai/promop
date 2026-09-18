@@ -18,13 +18,13 @@ For a fresh clinical or production database, use this order. Do not substitute
 the retired `seed_omop_concepts` development fixture for a full Athena load.
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py migrate omop_core 0200 --noinput
 
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py load_athena_vocabularies --gdrive
 
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py migrate --noinput
 ```
 
@@ -47,7 +47,7 @@ PRomop ships a generator that produces realistic FHIR R4 Bundles for multiple di
 Start with 10 multiple myeloma patients:
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py generate_fhir_bundle \
     --disease mm \
     --count 10 \
@@ -106,7 +106,7 @@ Expected output for 10 patients:
 Specify an organization slug — it is created automatically if it does not exist:
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py import_fhir_bundle /tmp/mm_bundle.json \
     --org demo-org \
     --batch-size 5 \
@@ -209,11 +209,11 @@ Repeat steps 2–4 with a different disease type and a different org slug to see
 cohorts side by side:
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py generate_fhir_bundle \
     --disease fl --count 10 --seed 42 --output /tmp/fl_bundle.json
 
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py import_fhir_bundle /tmp/fl_bundle.json \
     --org demo-org --batch-size 5
 

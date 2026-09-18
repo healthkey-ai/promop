@@ -100,6 +100,19 @@ DATABASE_URL="${STAGING_DATABASE_URL:-$DATABASE_URL}" \
   .venv/bin/python manage.py migrate
 ```
 
+<a id="secret-key-on-a-shared-database"></a>
+Settings will not load without `SECRET_KEY` either. This command leaves it to
+`.env`, which supplies it alongside the two DSNs — deliberately, because against a
+shared database it has to be **the deployment's** key. `AUDIT_HMAC_KEY` and
+`EXPORT_SIGNING_KEY` fall back to `SECRET_KEY` when unset, so a placeholder writes
+audit rows and export signatures the deployed service cannot verify, and
+`SECRET_KEY="$SECRET_KEY"` is worse than useless: the shell expands it to empty
+before Django starts, and `load_dotenv()` does not override a variable that is
+already set, so the command fails for exactly the people whose `.env` would have
+worked. If your `.env` has no `SECRET_KEY`, export the deployment's before running.
+Against a throwaway local database, `DEBUG=True` skips the guard and overrides
+nothing — that is the form the test commands above use.
+
 `start.sh` runs `migrate` on every Render deploy, so migrations pushed to `main` are auto-applied in production.
 
 ### 3. DRF Serializer (`patient_portal/api/serializers.py`)
@@ -385,12 +398,29 @@ describe('LabsTab - new_field', () => {
 
 ### Running Tests
 
+`promop/settings.py` enforces the production configuration when `DEBUG` is not
+true, so passing only `DATABASE_URL` exits before the suite starts — under the
+Django runner with this exact error:
+
+```
+django.core.exceptions.ImproperlyConfigured: Missing required production settings:
+  - SECRET_KEY must be set to a strong random value (current value is the insecure default)
+```
+
+`DEBUG=True` skips that guard and is what CI uses. A real `SECRET_KEY` satisfies
+it instead, but only for `manage.py`: the host checks are skipped for management
+commands and not under pytest, so that route additionally needs `ALLOWED_HOSTS`
+and `CORS_ALLOWED_ORIGINS`. `DEBUG=True` is the simpler of the two, and the
+commands below use it. Worth knowing because the suite does not *fail* without
+it, it does not *start*, so the error reads like a broken environment rather
+than a missing variable.
+
 ```bash
 # Backend tests, Django runner — omop_core + patient_portal
-DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" DEBUG=True \
   .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput
 
-# Backend tests, pytest — the tests/ package (18 files, 166 tests)
+# Backend tests, pytest — the tests/ package
 DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" DEBUG=True \
   .venv/bin/python -m pytest -q
 
@@ -434,7 +464,7 @@ data, run only:
   ```bash
   DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" DEBUG=True \
     .venv/bin/python -m pytest -q tests/test_mapping_browse.py
-  DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" \
+  DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" DEBUG=True \
     .venv/bin/python manage.py test patient_portal.tests.SomeTestCase --noinput
   ```
 - **For frontend changes:** the affected component tests, plus `npm run lint`
@@ -497,7 +527,7 @@ psql -p 5433 -U postgres -d template1 \
   -c "CREATE EXTENSION IF NOT EXISTS vector"
 
 # Apply migrations
-DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" DEBUG=True \
   .venv/bin/python manage.py migrate --noinput
 
 # Connect (use @18 bin directly — the system psql binary has an OpenSSL crash
@@ -577,6 +607,11 @@ On ingest, both comma-split lists are filtered against the live vocabulary table
 
 ### Seeding sample data
 
+These need `SECRET_KEY` as well, from `.env` or exported — the DSN is yours to
+supply and this command writes, so the key has to be the one belonging to whatever
+it points at. Add `DEBUG=True` instead only when that is a throwaway local database.
+See [above](#secret-key-on-a-shared-database).
+
 ```bash
 # Seed random SCT data onto MM PatientRecord rows that have no SCT data yet
 DATABASE_URL="..." python manage.py populate_sct_sample_data
@@ -595,9 +630,13 @@ When a migration remaps or truncates a controlled-vocabulary JSONField, follow t
 
 Run the audit command against the target database to surface any values that the migration does not recognise:
 
+`SECRET_KEY` comes from `.env` here too, and it must be staging's: this runs
+against real data. See [above](#secret-key-on-a-shared-database).
+
 ```bash
 # Staging — prefer STAGING_DATABASE_URL, fall back to DATABASE_URL
-DATABASE_URL="${STAGING_DATABASE_URL:-$DATABASE_URL}" python manage.py audit_sct_history
+DATABASE_URL="${STAGING_DATABASE_URL:-$DATABASE_URL}" \
+  python manage.py audit_sct_history
 ```
 
 Production is not reachable from a local `.env`; run the audit there from the Render shell.
@@ -724,6 +763,11 @@ suite both pass on the offending shape, so neither catches it. CI's job is
 
 To audit whether the DB and model are in sync at any time:
 
+`SECRET_KEY` comes from `.env`, and it must be the key of whatever that `.env`
+points at — staging, per the table below. See
+[above](#secret-key-on-a-shared-database). Production is not reachable locally;
+run this from the Render shell instead.
+
 ```bash
 DATABASE_URL="$DATABASE_URL" \
   .venv/bin/python manage.py shell -c "
@@ -773,6 +817,9 @@ Every model is one of three kinds, listed in `omop_core/services/instance_data.p
 | system | accounts, tokens, sessions, tenancy, audit, caches | never copied |
 | reference | what is needed to import patients: mappings, lookups, therapy reference, HealthKey concepts | `copy_reference_data` |
 | patient | what is known about one person | `copy_patient` |
+
+`DATABASE_URL` and `SECRET_KEY` come from `.env`; only the source is given here.
+See [above](#secret-key-on-a-shared-database).
 
 ```bash
 SOURCE_DATABASE_URL="postgresql://..." .venv/bin/python manage.py copy_reference_data --dry-run

@@ -83,14 +83,14 @@ LOINC destination concepts to exist. Do not use the retired
 `seed_omop_concepts` development fixture in a deployed environment.
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py migrate omop_core 0200 --noinput
 ```
 
 ### 4. Load the full Athena vocabulary
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py load_athena_vocabularies --gdrive
 ```
 
@@ -114,14 +114,14 @@ Only after the vocabulary load succeeds, apply the migrations that seed and
 validate mappings against those concepts:
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py migrate --noinput
 ```
 
 ### 6. Create a superuser
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py setup_admin
 ```
 
@@ -167,7 +167,7 @@ invisible to it. Run both.
 
 ```bash
 # Backend — Django runner (omop_core + patient_portal)
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" DEBUG=True \
   .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput
 
 # Backend — pytest (the tests/ package)
