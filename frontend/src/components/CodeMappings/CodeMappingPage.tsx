@@ -3,7 +3,7 @@ import IndividualSuggestCandidates from "./IndividualSuggestCandidates";
 import SuggestCandidates, { type CandidateActivity } from "./SuggestCandidates";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, Check, ChevronDown, ChevronRight, Pencil, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, ChevronRight, Download, Pencil, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
 import api from "@/api/axios";
 import MintConceptDialog from "./MintConceptDialog";
 import ConceptInputDetails from "@/components/UI/ConceptInputDetails";
@@ -69,6 +69,80 @@ interface CodeMappingRow {
   suggested_unit?: string;
   locked_by_username?: string | null;
   locked_at?: string | null;
+}
+
+const EXPORT_COLUMNS: (keyof CodeMappingRow)[] = [
+  "source_vocabulary_id", "source_code", "source_code_description",
+  "occurrence_count", "origin_system", "destination_concept_id",
+  "destination_concept_name", "destination_concept_code",
+  "destination_vocabulary_id", "destination_domain_id", "status",
+  "reviewer", "reviewed_at", "notes",
+];
+
+function downloadFile(content: string, filename: string, mime: string) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function escapeCsvField(value: unknown): string {
+  const s = value == null ? "" : String(value);
+  if (s.includes(",") || s.includes('"') || s.includes("\n")) {
+    return `"${s.replace(/"/g, '""')}"`;
+  }
+  return s;
+}
+
+function downloadMappings(rows: CodeMappingRow[], section: string, format: "csv" | "json") {
+  const timestamp = new Date().toISOString().slice(0, 10);
+  const safeName = section.toLowerCase().replace(/\s+/g, "-");
+  if (format === "json") {
+    const data = rows.map((row) => {
+      const obj: Record<string, unknown> = {};
+      for (const col of EXPORT_COLUMNS) obj[col] = row[col] ?? null;
+      return obj;
+    });
+    downloadFile(JSON.stringify(data, null, 2), `code-mappings-${safeName}-${timestamp}.json`, "application/json");
+  } else {
+    const header = EXPORT_COLUMNS.join(",");
+    const lines = rows.map((row) => EXPORT_COLUMNS.map((col) => escapeCsvField(row[col])).join(","));
+    downloadFile([header, ...lines].join("\n"), `code-mappings-${safeName}-${timestamp}.csv`, "text/csv");
+  }
+}
+
+function DownloadMenu({ rows, section }: { rows: CodeMappingRow[]; section: string }) {
+  const [open, setOpen] = useState(false);
+  if (rows.length === 0) return null;
+  return (
+    <span className="relative ml-2 inline-block">
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
+        className="inline-flex items-center gap-1 text-xs font-normal normal-case tracking-normal text-slate-500 hover:text-slate-700"
+        title={`Download ${section}`}
+      >
+        <Download size={12} /> Download
+      </button>
+      {open && (
+        <span className="absolute left-0 top-full z-10 mt-1 flex flex-col rounded border border-slate-200 bg-white shadow-md">
+          <button type="button" className="whitespace-nowrap px-3 py-1.5 text-left text-xs hover:bg-slate-50"
+            onClick={(e) => { e.stopPropagation(); downloadMappings(rows, section, "csv"); setOpen(false); }}>
+            CSV
+          </button>
+          <button type="button" className="whitespace-nowrap px-3 py-1.5 text-left text-xs hover:bg-slate-50"
+            onClick={(e) => { e.stopPropagation(); downloadMappings(rows, section, "json"); setOpen(false); }}>
+            JSON
+          </button>
+        </span>
+      )}
+    </span>
+  );
 }
 
 interface ConceptResult {
@@ -1771,6 +1845,12 @@ export default function CodeMappingPage() {
           </div>
         )}
 
+        <div className="mb-4 flex items-center">
+          <span className="text-sm font-semibold uppercase tracking-wide text-slate-700">All</span>
+          <span className="ml-1 text-sm font-normal text-slate-500">({visibleRows.length})</span>
+          <DownloadMenu rows={visibleRows} section={`All-${selectedVocabulary}`} />
+        </div>
+
         <section className="mb-6">
           <button
             type="button"
@@ -1780,6 +1860,7 @@ export default function CodeMappingPage() {
             {unmappedCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
             Unmapped <span className="font-normal text-slate-500">({browse?.pages.Unmapped.total ?? unmappedRows.length})</span>
           </button>
+          <DownloadMenu rows={unmappedRows} section="Unmapped" />
           {!unmappedCollapsed && (
             <>
           <div className="mb-2">
@@ -1801,6 +1882,7 @@ export default function CodeMappingPage() {
             {mappedCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
             Mapped <span className="font-normal text-slate-500">({browse?.pages.Mapped.total ?? mappedRows.length})</span>
           </button>
+          <DownloadMenu rows={mappedRows} section="Mapped" />
           {!mappedCollapsed && renderTable(mappedRows, "No approved mappings in this vocabulary.", "Mapped")}
         </section>
 
@@ -1814,6 +1896,7 @@ export default function CodeMappingPage() {
               {rejectedCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
               Rejected <span className="font-normal text-slate-500">({browse?.pages.Rejected?.total ?? rejectedRows.length})</span>
             </button>
+            <DownloadMenu rows={rejectedRows} section="Rejected" />
             {!rejectedCollapsed && renderTable(rejectedRows, "No rejected mappings in this vocabulary.", "Rejected")}
           </section>
         )}
@@ -1828,6 +1911,7 @@ export default function CodeMappingPage() {
               {athenaCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
               Athena Mapped <span className="font-normal text-slate-500">({browse?.pages["Athena Mapped"].total ?? athenaRows.length})</span>
             </button>
+            <DownloadMenu rows={athenaRows} section="Athena Mapped" />
             {!athenaCollapsed && renderTable(athenaRows, "No Athena mappings in this vocabulary.", "Athena Mapped", { hideStatus: true })}
           </section>
         )}
