@@ -891,38 +891,38 @@ enqueue_unmapped_source_codes` still does that scan, as the batch job it is: it
 creates empty queue rows with blank provenance, which is exactly the state
 Suggest looks for. So the split is **enqueue, then suggest**.
 
-### One retrieval and one ranking, not a waterfall of three
+### Three independent retrieval paths, one ranking call
 
 ```
 UMLS CUI bridge ──► exactly one standard concept? ──► done, no model call
        │ no
        ▼
-Lexical trigram ──► best N survivors (N from the UI, default 10)
+   ┌────────────────┐
+   │  In parallel:   │
+   │  Lexical trigram │──► best N by trigram similarity
+   │  Vector cosine   │──► best N by embedding distance
+   └────────────────┘
+       │
+       ▼  merge (union, enrich overlaps with both scores)
        │
        ▼
-Vector rerank ────► reorder those N by embedding cosine
-       │
-       ▼
-One ranking call ─► the model picks one, or declines
+One ranking call ─► the model picks one from the merged pool, or declines
 ```
 
-The old shape gave each tier its own ranker call and took the first that
-answered, so a code that fell through UMLS and vectors paid for three calls at
-4-6s each and usually got the lexical answer anyway. Vectors were also a
-*retrieval* tier, cosine-scanning 1.5M stored vectors per code (2.6-2.9s). They
-are a good ordering and a bad filter, so they now rerank the shortlist instead:
-one query embedding (~25ms) plus a primary-key lookup of at most N stored
-vectors.
+UMLS, lexical, and vectors are **three independent retrieval paths** that run
+concurrently and merge into one candidate pool. `semantic_candidates()` does a
+full cosine similarity search against the `ConceptEmbedding` table — it is real
+retrieval, not reranking. Lexical and vector results are often mostly disjoint
+because trigram similarity and embedding cosine are different signals.
+`vector_rerank()` exists in the code but is unused.
 
-Measured on staging, per code: **17.8s → 3.5s**.
-
-Where the remaining time goes, per code:
+Where the time goes, per code:
 
 | Stage | Cost |
 |---|---|
-| lexical trigram retrieval | ~2.5s (**67%**, and serial) |
-| ranking model call | 3.5s each, but concurrent (`RANK_CONCURRENCY`) and only for codes UMLS did not settle |
-| vector rerank | ~0.3s stored-vector lookup + ~0.025s query embedding |
+| lexical trigram retrieval | ~2.5s (**67%**, serial) |
+| vector cosine retrieval | ~0.3s (query embedding ~25ms + cosine search) |
+| ranking model call | ~3.5s each, but concurrent (`RANK_CONCURRENCY`) and only for codes UMLS did not settle |
 | embedding model load | ~5s, **once per gunicorn worker**, on its first Suggest |
 
 ### The run is queued, and how big it may be depends on that
@@ -972,70 +972,40 @@ row would be found again and recreated. Now that Suggest reads the tab, a
 deleted row is a code that has left the queue for good, taking its
 `occurrence_count` and `first_seen` with it.
 
-### Vectors cannot run alone
+### Vectors alone are not enough
 
-It reranks what retrieval found and retrieves nothing itself, so a run with
-neither UMLS nor Lexical would report "no candidate concept" for every code. The
-API rejects that combination and the checkbox disables itself.
+Vectors retrieve by semantic similarity but the ranking model needs at least
+one candidate with a code and name to evaluate. A run with neither UMLS nor
+Lexical would report "no candidate concept" for every code. The API rejects
+that combination and the checkbox disables itself.
 
-### The embeddings the reranker reads
+### Concept embeddings
 
-`vector_rerank` **never embeds a candidate on the fly**. It reads
-`concept_embedding` by primary key and demotes any candidate that has no stored
-vector below the ones it could score. So an unpopulated table does not make
-Suggest slower — it makes it stop reranking, silently.
+`semantic_candidates()` searches the `ConceptEmbedding` table by cosine
+distance. Any standard concept without an embedding is invisible to vector
+retrieval.
 
 `manage.py build_concept_embeddings` embeds every standard concept (1,523,060
-rows, ~2.8 hours). `manage.py precompute_suggest_embeddings` embeds only the
-concepts the queue can actually retrieve — it walks the eligible rows, takes
-each one's top-N lexical candidates plus UMLS candidates, and embeds the union.
-The original lexical-only staging sample retrieved **287 concepts** rather than
-1.5M. `--measure` reports the cost and writes nothing:
-
-```bash
-manage.py precompute_suggest_embeddings --measure
-manage.py precompute_suggest_embeddings --measure --source-vocabulary ICD10
-```
-
-Retrieval is the expensive half of that command too (one trigram query per queue
-row), which is why it is a command and not part of a click.
+rows, ~2.8 hours on first run). It is **resumable** — it skips already-embedded
+concepts, so an incremental run after a vocabulary load only embeds the new
+concepts.
 
 After a successful `load_athena_vocabularies` (including `--concepts-only`),
 `load_mappings`, `sync_athena_mappings`, `load_umls_release`, `sync_umls_release`,
 or any `import_*crossmap*` command,
-candidate precomputation runs automatically (#1092). With `CELERY_BROKER_URL`
-configured, `omop_core.precompute_suggest_embeddings` runs on a Celery worker;
+`build_concept_embeddings` is dispatched automatically. With `CELERY_BROKER_URL`
+configured, `omop_core.build_concept_embeddings` runs on a Celery worker;
 without it, the command runs inline. Dispatch is deferred until commit and
 nested mapping loads dispatch only once, after the outer load succeeds.
 Dry runs and failed loads do not dispatch. Workers need sentence-transformers
-and access to `BAAI/bge-small-en-v1.5`; failures propagate rather than recording
-successful maintenance. A configured broker failure is not silently run inline.
+and access to `BAAI/bge-small-en-v1.5`. `--skip-suggest-embeddings` (or
+`--skip-embeddings`) on a loader suppresses the build for that load and its
+nested loaders.
 
-The automatic run uses `--min-occurrences 1 --lexical-limit 100` to cover all
-eligible queue rows and the largest shortlist the UI allows. It inserts only
-missing vectors. `--skip-suggest-embeddings` on a loader suppresses maintenance
-for that load and its nested loaders, useful when doing an initial bulk import
-followed by `build_concept_embeddings`.
-
-`SuggestEmbeddingSnapshot` persists the candidate union by precompute options
-and model/retrieval version. One SQL query compares order-independent content
-checksums of concepts, synonyms, eligible queue rows, and relevant UMLS source
-terms and CUI siblings, and checks that every
-cached candidate still has a vector. Unchanged inputs and complete vectors
-return without lexical retrieval, model loading, or writes. This query scans
-the input tables; "one query" does not mean constant-time work. Changed input
-content (including same-count replacements and bulk SQL writes) invalidates the
-snapshot. A deleted vector is rebuilt from the saved candidate IDs. Changed
-shortlist/minimum-count options have separate snapshots. Increment
-`retrieval_version` in the command when candidate selection changes.
-
-`--measure` never writes snapshots or vectors. `--force` re-embeds candidates;
-use it after changing the embedding model, since the existing vector table does
-not record model versions. Existing vectors are otherwise retained, including
-when a vocabulary load changes a concept's name. Maintenance is asynchronous
-when queued: candidates become available after the worker completes, not before
-the loader returns. A changed queue or vocabulary requires retrieval again and
-can take minutes on a large queue; the command is not universally seconds-long.
+`manage.py precompute_suggest_embeddings` is a lighter alternative that embeds
+only concepts the suggest queue can currently retrieve. It is available for
+diagnostics (`--measure`) but is no longer auto-dispatched, because vector
+retrieval needs all standard concepts embedded, not just the queue's candidates.
 
 ---
 
