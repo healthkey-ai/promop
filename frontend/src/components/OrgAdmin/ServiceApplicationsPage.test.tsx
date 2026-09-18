@@ -66,10 +66,29 @@ describe('Service applications', () => {
   it('never offers an expiry the server would refuse', async () => {
     renderPage(); await selectApp();
     const input = screen.getByLabelText(/Expires at/) as HTMLInputElement;
-    // The picker reads `max` as local wall-clock; parsed back it must land inside
-    // the server's 365-day bound, in this timezone and across a DST transition.
     expect(new Date(input.max).getTime()).toBeLessThanOrEqual(Date.now() + 365 * 24 * 60 * 60 * 1000);
     expect(new Date(input.max).getTime()).toBeGreaterThan(Date.now() + 362 * 24 * 60 * 60 * 1000);
+  });
+  it('never offers an expiry the server would refuse across a DST transition', async () => {
+    // CI runs in UTC, which has no transitions, so the assertion above cannot see
+    // the bug this guards: the offset is read at the ceiling instant, and where
+    // the shifted wall clock crosses a transition the printed maximum maps back
+    // to a later instant. Node honours a TZ switch at runtime, so pin both the
+    // zone and the clock to the worst case — 365 days after this instant lands
+    // inside Santiago's spring-forward.
+    const zone = process.env.TZ;
+    process.env.TZ = 'America/Santiago';
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date('2026-09-05T06:00:00Z'));
+    try {
+      const ceiling = Date.now() + 365 * 24 * 60 * 60 * 1000;
+      renderPage(); await selectApp();
+      const input = screen.getByLabelText(/Expires at/) as HTMLInputElement;
+      expect(new Date(input.max).getTime()).toBeLessThanOrEqual(ceiling);
+    } finally {
+      vi.useRealTimers();
+      process.env.TZ = zone;
+    }
   });
   it('does not tell anyone to rotate a token they already revoked', async () => {
     const soon = new Date(Date.now() + 9 * 24 * 60 * 60 * 1000).toISOString();

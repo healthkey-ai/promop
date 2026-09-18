@@ -41,6 +41,15 @@ class ServiceApplicationSerializer(serializers.ModelSerializer):
         scopes = set(value.split())
         if scopes - ALLOWED_SCOPES:
             raise serializers.ValidationError('Select supported service scopes.')
+        if not scopes and self.instance is not None and self.instance.tokens.exists():
+            # Blank is storable — migration 0019 seeds the legacy kill switch that
+            # way on purpose — but clearing it after a token exists reaches the
+            # same dead end as issuing one on a scopeless application: a live
+            # token that grants nothing, with the environment fallback already
+            # refused.
+            raise serializers.ValidationError(
+                'Clearing scopes would leave this application\'s tokens granting '
+                'nothing. Revoke them first, or choose scopes.')
         return ' '.join(sorted(scopes))
 
 
@@ -99,17 +108,17 @@ class ServiceApplicationViewSet(viewsets.ModelViewSet):
     def create_token(self, request, pk=None):
         application = self.get_object()
         if not application.is_active:
-            raise ValidationError('Enable the application before creating a token.')
+            raise ValidationError({'is_active': ['Enable the application before creating a token.']})
         if not application.scopes.strip():
             # Issuing here is a cutover: check_environment_fallback refuses the
             # environment grant as soon as this application has any token, and a
             # token carrying no scopes grants nothing — so the integration would
             # go down and its replacement would not work. hk-labs-sync is seeded
             # scopeless on purpose (migration 0019), which makes this reachable.
-            raise ValidationError(
+            raise ValidationError({'scopes': [
                 'Set the application scopes before issuing a token: a token with no '
                 'scopes grants nothing, and issuing one stops any environment '
-                'credential for this service.')
+                'credential for this service.']})
         serializer = TokenIssueSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         record, secret = issue_token(application, actor=request.user, **serializer.validated_data)

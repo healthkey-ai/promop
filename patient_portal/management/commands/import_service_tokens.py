@@ -28,6 +28,11 @@ class Command(BaseCommand):
             scopes = grant.get('scopes', 'patient/*.read')
             if len(secret) < 32 or set(scopes.split()) - ALLOWED_SCOPES:
                 raise CommandError('Import requires strong tokens (at least 32 characters) and supported scopes.')
+            if not scopes.split():
+                # A registered token whose application has no scopes grants
+                # nothing, and registering it stops any environment credential
+                # for that service — the same dead end create_token refuses.
+                raise CommandError(f'Service {service_id} has no scopes; a token for it would grant nothing.')
             app, _ = ServiceApplication.objects.get_or_create(
                 service_id=service_id, defaults={'name': service_id, 'scopes': scopes},
             )

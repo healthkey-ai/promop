@@ -27390,6 +27390,56 @@ class ScopelessTokenIssueTest(TestCase):
         # The environment credential must still work: issuing is what stops it.
         self.assertFalse(application.tokens.exists())
 
+    def test_the_refusal_is_keyed_to_the_field_so_a_client_can_show_it(self):
+        """A bare string serialises to a list, which the Org Admin page drops on
+
+        the floor in favour of a generic message naming label and expiry — the
+        two things that are fine.
+        """
+        application = ServiceApplication.objects.get(service_id='hk-labs-sync')
+        response = self.client.post(
+            f'{self.URL}{application.pk}/tokens/', {'label': 'cutover'}, format='json')
+        self.assertIsInstance(response.data, dict)
+        self.assertIn('scopes', response.data)
+
+    def test_scopes_cannot_be_cleared_once_a_token_exists(self):
+        """Otherwise the same dead end is reachable from the other direction."""
+        from patient_portal.service_applications import issue_token
+
+        application = ServiceApplication.objects.create(
+            name='ETL', service_id='etl-clearable', scopes='patient/*.read')
+        issue_token(application, 'live')
+        response = self.client.patch(
+            f'{self.URL}{application.pk}/', {'scopes': ''}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('scopes', response.data)
+        application.refresh_from_db()
+        self.assertEqual(application.scopes, 'patient/*.read')
+
+    def test_scopes_can_still_be_cleared_before_any_token_is_issued(self):
+        application = ServiceApplication.objects.create(
+            name='ETL', service_id='etl-blankable', scopes='patient/*.read')
+        response = self.client.patch(
+            f'{self.URL}{application.pk}/', {'scopes': ''}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+
+    def test_importing_a_scopeless_entry_is_refused(self):
+        import json
+        import os
+        import tempfile
+        from io import StringIO
+
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, 'tokens.json')
+            with open(path, 'w') as handle:
+                json.dump({'hk-labs-sync': {'token': 'y' * 48, 'scopes': ''}}, handle)
+            with self.assertRaises(CommandError) as ctx:
+                call_command('import_service_tokens', '--file', path, stdout=StringIO())
+        self.assertIn('no scopes', str(ctx.exception))
+
     def test_setting_scopes_first_lets_the_cutover_proceed(self):
         application = ServiceApplication.objects.get(service_id='hk-labs-sync')
         self.client.patch(f'{self.URL}{application.pk}/',
