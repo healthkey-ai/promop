@@ -2,6 +2,7 @@
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers, status, viewsets
+from rest_framework.permissions import SAFE_METHODS
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -41,9 +42,7 @@ class ServiceApplicationSerializer(serializers.ModelSerializer):
         scopes = set(value.split())
         if scopes - ALLOWED_SCOPES:
             raise serializers.ValidationError('Select supported service scopes.')
-        live_tokens = (self.instance is not None
-                       and self.instance.tokens.filter(revoked_at__isnull=True).exists())
-        if not scopes and live_tokens:
+        if not scopes and self.instance is not None and self.instance.live_tokens().exists():
             # Blank is storable — migration 0019 seeds the legacy kill switch
             # that way on purpose — but clearing it while a live token exists
             # reaches the same dead end as issuing one on a scopeless
@@ -88,6 +87,20 @@ class ServiceApplicationViewSet(viewsets.ModelViewSet):
     serializer_class = ServiceApplicationSerializer
     queryset = ServiceApplication.objects.prefetch_related('tokens').all()
     pagination_class = None
+
+    def get_object(self):
+        application = super().get_object()
+        if self.request.method in SAFE_METHODS:
+            return application
+        # Hold the row for the rest of the request. Otherwise a scope-clearing
+        # PATCH and a token issuance can each pass their check against the
+        # other's stale state and commit a live token on a scopeless
+        # application — the state both checks exist to prevent.
+        return ServiceApplication.objects.select_for_update().get(pk=application.pk)
+
+    @transaction.atomic
+    def partial_update(self, request, *args, **kwargs):
+        return super().partial_update(request, *args, **kwargs)
 
     def check_permissions(self, request):
         super().check_permissions(request)

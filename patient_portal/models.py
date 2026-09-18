@@ -438,6 +438,15 @@ class ServiceApplication(models.Model):
     class Meta:
         ordering = ['name', 'pk']
 
+    def live_tokens(self):
+        """Tokens that can still authenticate: not revoked, not past their expiry.
+
+        An expired token is refused by stored_credential already, so counting it
+        would make an operator revoke credentials that are dead anyway.
+        """
+        return self.tokens.filter(revoked_at__isnull=True).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()))
+
     def clean(self):
         """Blank scopes are storable, but not while a live token depends on them.
 
@@ -449,7 +458,7 @@ class ServiceApplication(models.Model):
         super().clean()
         if self.scopes.split() or not self.pk:
             return
-        if self.tokens.filter(revoked_at__isnull=True).exists():
+        if self.live_tokens().exists():
             raise ValidationError({'scopes': [
                 'Clearing scopes would leave this application\'s live tokens granting '
                 'nothing. Revoke them first, or choose scopes.']})

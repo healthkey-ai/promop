@@ -27430,6 +27430,22 @@ class ScopelessTokenIssueTest(TestCase):
             application.full_clean()
         self.assertIn('scopes', ctx.exception.message_dict)
 
+    def test_an_expired_token_does_not_block_clearing_scopes(self):
+        """stored_credential already refuses it, so requiring a revocation would
+
+        make the operator retire a credential that is dead anyway.
+        """
+        from patient_portal.service_applications import issue_token
+
+        application = ServiceApplication.objects.create(
+            name='ETL', service_id='etl-expired', scopes='patient/*.read')
+        record, _ = issue_token(application, 'stale')
+        ServiceAccessToken.objects.filter(pk=record.pk).update(
+            expires_at=timezone.now() - timedelta(days=1))
+        response = self.client.patch(
+            f'{self.URL}{application.pk}/', {'scopes': ''}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+
     def test_scopes_can_be_cleared_once_every_token_is_revoked(self):
         """The refusal says to revoke first, and tokens have no delete route, so
 
