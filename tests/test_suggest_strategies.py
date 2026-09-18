@@ -381,11 +381,11 @@ class TestSuggestableMappings:
         queue_row('SIGNED OFF', status='approved')
         assert suggestable_mappings('measurement') == []
 
-    def test_rejected_is_equally_a_decision(self):
-        """Re-proposing put it back at the front of the queue on every run,
-        where it spent a model call and created nothing."""
+    def test_rejected_without_destination_is_eligible(self):
+        """A rejected row with no destination is back in the queue: the
+        rejection was of a specific proposal, not the code itself."""
         queue_row('TURNED DOWN', status='rejected')
-        assert suggestable_mappings('measurement') == []
+        assert [m.source_code for m in suggestable_mappings('measurement')] == ['TURNED DOWN']
 
     def test_a_row_that_already_has_a_destination_is_skipped(self, measurement_concept):
         queue_row('HAS ONE', target_concept=measurement_concept)

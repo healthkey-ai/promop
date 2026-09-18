@@ -1,9 +1,10 @@
 import pytest
 from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
 
-from omop_core.models import SourceCodeConceptMapping
-from patient_portal.api.views import code_mapping_list
+from omop_core.models import MappingDestinationCandidate, SourceCodeConceptMapping
+from patient_portal.api.views import code_mapping_detail, code_mapping_list
 from patient_portal.models import Identity
+from tests.factories import ConceptFactory
 
 pytestmark = pytest.mark.django_db
 
@@ -45,9 +46,10 @@ def test_aliases_global_search_rejected_and_sections(browse):
     row('D', source_vocabulary_id='LOINC', source_code_description='distinctive phrase')
     row('E', origin_system='athena', status='approved')
     data = browse(source='ICD10').data
-    assert {r['source_code'] for r in data['results']} == {'A', 'B', 'E'}
+    # Rejected rows now appear in their own section, always visible.
+    assert {r['source_code'] for r in data['results']} == {'A', 'B', 'C', 'E'}
     assert data['rejected_count'] == 1
-    assert len(browse(source='ICD10', show_rejected='true').data['results']) == 4
+    assert data['pages']['Rejected']['total'] == 1
     assert [r['source_code'] for r in browse(source='ICD10', search='distinctive').data['results']] == ['D']
     assert browse(source='').data['results'] == []
 
@@ -94,18 +96,19 @@ def test_bad_paging_or_sort_is_a_validation_error(browse):
 
 
 @pytest.mark.parametrize('search', ['', 'CODE'])
-@pytest.mark.parametrize('show_rejected', ['false', 'true'])
-def test_combined_counts_preserve_all_sections_and_rejections(browse, search, show_rejected):
+def test_combined_counts_preserve_all_sections_and_rejections(browse, search):
     row('CODE-A', source_vocabulary_id='ICD10CM')
     row('CODE-B', status='approved')
     row('CODE-C', status='rejected')
     row('CODE-D', source_vocabulary_id='LOINC', status='approved')
     row('CODE-E', origin_system='athena', status='approved')
     row('CODE-F', origin_system='athena', status='rejected')
-    data = browse(source='ICD10CM', search=search, show_rejected=show_rejected).data
-    assert data['pages']['Unmapped']['total'] == (2 if show_rejected == 'true' else 1)
+    data = browse(source='ICD10CM', search=search).data
+    # Rejected rows always appear in their own section now.
+    assert data['pages']['Unmapped']['total'] == 1
     assert data['pages']['Mapped']['total'] == (2 if search else 1)
-    assert data['pages']['Athena Mapped']['total'] == (2 if show_rejected == 'true' else 1)
+    assert data['pages']['Rejected']['total'] == 1
+    assert data['pages']['Athena Mapped']['total'] == 2
     assert data['rejected_count'] == 1
     assert len(data['results']) == sum(page['total'] for page in data['pages'].values())
 
@@ -195,3 +198,58 @@ def test_plain_list_exposes_pagination_headers_only_to_allowed_origins(settings,
     else:
         assert 'Access-Control-Allow-Origin' not in response
         assert 'Access-Control-Expose-Headers' not in response
+
+
+# ── DELETE clears destination instead of removing ──────────────────────
+
+
+@pytest.fixture
+def staff_user():
+    return Identity.objects.create_user(email='staff-delete@example.test', is_staff=True)
+
+
+def _delete(user, mapping_id):
+    request = APIRequestFactory().delete(f'/api/v1/code-mappings/{mapping_id}/')
+    force_authenticate(request, user=user)
+    return code_mapping_detail(request, mapping_id=mapping_id)
+
+
+def test_delete_with_destination_clears_instead_of_removing(staff_user):
+    """DELETE on a mapping with a destination clears the destination, keeping the row."""
+    concept = ConceptFactory(concept_id=999999, concept_name='Test Concept', concept_code='12345')
+    mapping = row('TEST-CODE', status='approved', target_concept=concept,
+                  destination_vocabulary_id='SNOMED')
+    MappingDestinationCandidate.objects.create(
+        mapping=mapping, target_vocabulary_id='SNOMED',
+        target_concept_code='12345', target_concept=concept,
+    )
+    response = _delete(staff_user, mapping.id)
+    assert response.status_code == 200
+    mapping.refresh_from_db()
+    assert mapping.target_concept_id is None
+    assert mapping.status == 'proposed'
+    assert mapping.destination_vocabulary_id == ''
+    assert mapping.reviewer_id is None
+    assert mapping.suggestion_model_version == ''
+    assert mapping.last_suggest_attempt == ''
+    assert not MappingDestinationCandidate.objects.filter(mapping=mapping).exists()
+
+
+def test_delete_without_destination_truly_deletes(staff_user):
+    """DELETE on a proposed mapping with no destination removes the row."""
+    mapping = row('JUNK-CODE')
+    response = _delete(staff_user, mapping.id)
+    assert response.status_code == 204
+    assert not SourceCodeConceptMapping.objects.filter(id=mapping.id).exists()
+
+
+def test_delete_rejected_mapping_clears_destination(staff_user):
+    """DELETE on a rejected mapping with a destination clears it."""
+    concept = ConceptFactory(concept_id=999998, concept_name='Rejected Concept', concept_code='99998')
+    mapping = row('REJECTED-CODE', status='rejected', target_concept=concept,
+                  destination_vocabulary_id='SNOMED')
+    response = _delete(staff_user, mapping.id)
+    assert response.status_code == 200
+    mapping.refresh_from_db()
+    assert mapping.target_concept_id is None
+    assert mapping.status == 'proposed'
