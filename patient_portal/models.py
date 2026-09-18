@@ -456,7 +456,7 @@ class ServiceApplication(models.Model):
         scope cap fell through before it moved onto the field.
         """
         super().clean()
-        if self.scopes.split() or not self.pk:
+        if (self.scopes or '').split() or not self.pk:
             return
         if self.live_tokens().exists():
             raise ValidationError({'scopes': [

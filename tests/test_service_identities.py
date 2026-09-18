@@ -183,9 +183,17 @@ def test_generator_creates_private_file_without_logging_or_overwriting_secrets(t
     assert all(len(entry['token']) >= 64 for entry in config.values())
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
     assert all(entry['token'] not in stdout.getvalue() for entry in config.values())
-    with pytest.raises(CommandError):
-        call_command('generate_service_tokens', service=['etl='], output=str(output))
+    # A valid grant, so this exercises the O_EXCL guard rather than tripping on
+    # scope validation before the file is ever opened.
+    with pytest.raises(CommandError, match='Cannot create output file'):
+        call_command('generate_service_tokens',
+                     service=['etl=patient/*.read'], output=str(output))
     assert json.loads(output.read_text()) == config
+    for specification in ('etl=', 'etl=patient/*.readd'):
+        with pytest.raises(CommandError, match='supported scopes'):
+            call_command('generate_service_tokens', service=[specification],
+                         output=str(output.parent / 'unwritten.json'))
+    assert not (output.parent / 'unwritten.json').exists()
 
 
 @pytest.mark.django_db

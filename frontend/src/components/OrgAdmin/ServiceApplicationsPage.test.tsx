@@ -68,6 +68,15 @@ describe('Service applications', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create token' }));
     expect(await screen.findByText('Enable the application before creating a token.')).toBeInTheDocument();
   });
+  it('does not paste a server error page into the banner', async () => {
+    mocks.post.mockRejectedValueOnce({ response: { data:
+      '<!doctype html><html><head><title>Server Error (500)</title></head></html>' } });
+    renderPage(); await selectApp();
+    fireEvent.change(screen.getByLabelText(/Token label/), { target: { value: 'Attempt' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create token' }));
+    expect(await screen.findByText(/Could not create the token/)).toBeInTheDocument();
+    expect(screen.queryByText(/doctype html/)).not.toBeInTheDocument();
+  });
   it('falls back to a readable message when the server says nothing specific', async () => {
     mocks.post.mockRejectedValueOnce(new Error('network'));
     renderPage(); await selectApp();
