@@ -131,11 +131,10 @@ OMOP CDM tables  (Measurement, ConditionOccurrence, DrugExposure, Episode …)
 ```
 
 Three alternatives were weighed. *Query-time SQL views* are never stale but pay the full join
-cost on every read. *Database materialized views* cannot
-express the derivation: line-of-therapy inference, unit normalization, and vocabulary lookups are
+cost on every read. *Database materialized views* cannot express the derivation: line-of-therapy inference, unit normalization, and vocabulary lookups are
 procedural, and a materialized view refreshes for every patient at once rather than for the one
-who changed. A *FHIR-native store* would give up the OMOP vocabularies and the OHDSI tooling. We
-therefore derive in application code (Django [@Django]), per patient.
+who changed. A *FHIR-native store* would give up the OMOP vocabularies and the OHDSI tooling.
+PRomop therefore derives in application code (Django [@Django]), per patient.
 
 This accepts a higher write cost for a much lower read cost. A representative 20-criterion
 eligibility check over raw OMOP requires 27–39 joins; against `PatientRecord` it is a predicate
@@ -158,8 +157,8 @@ ratio. A companion preprint [@Blum2026] reports further benchmarks.
 
 The write cost proved the harder half of the trade-off. Derivation initially ran from Django
 `post_save` signals on every OMOP row — simple and always consistent, but derivation time grows
-with a patient's history, and for a bulk-loaded patient one row-level write cost 12–32 s. The design now derives once per ingested bundle or bulk batch rather than
-once per row, and lets bulk clients defer derivation and request it explicitly, in which case it
+with a patient's history, and for a bulk-loaded patient one row-level write cost 12–32 s. The design now
+derives once per ingested bundle or bulk batch rather than once per row, and lets bulk clients defer derivation and request it explicitly, in which case it
 runs on a task queue (Celery) and reports success or failure through a status endpoint.
 Derivation clears and rebuilds every field, so it is idempotent and a duplicate or retried job
 is harmless. The price is a short window in which `PatientRecord` trails the OMOP tables, which
@@ -186,12 +185,11 @@ developed patient-portal host application, which loads PRomop's patient-record i
 runtime as a Module Federation remote. Sharing one derivation eliminated a class of bugs in
 which applications disagreed about the same patient.
 
-The project has been developed in the open on GitHub since September 2025: roughly 1,900
+The project has been developed on GitHub since September 2025: roughly 1,900
 commits, more than 700 pull requests, four tagged versions (v1.0.0–v1.3.0) with a
 changelog, Zenodo-archived releases, and continuous integration running two backend test suites
 and the frontend suite on every pull request. Four developers have contributed code (see
-*Acknowledgements*), and changes land through reviewed pull requests. With the synthetic generators, archived benchmark cohort, and
-Docker Compose setup, the software can be installed, exercised, and benchmarked without real
+*Acknowledgements*), and changes land through reviewed pull requests. With the synthetic generators, archived benchmark cohort, and Docker Compose setup, the software can be installed, exercised, and benchmarked without real
 patient data.
 
 # AI Usage Disclosure
