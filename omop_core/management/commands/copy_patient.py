@@ -6,10 +6,10 @@ Usage::
     SOURCE_DATABASE_URL="postgresql://..." manage.py copy_patient --filter-org-id 26 --org healthtree
 
 Patients are selected on the source by ids, filters, or both. Each patient is
-copied in its own transaction, so one failure does not undo the others. A
-patient keeps their person_id when it is free here. Otherwise pass --replace,
-or --target-person-id for a single patient. Copy reference data first
-(copy_reference_data): concepts and therapy regimens resolve by code.
+copied in its own transaction, so one failure does not undo the others. Ids are
+allocated here, never taken from the source. Copying the same patient twice
+needs --replace. Copy reference data first (copy_reference_data): concepts and
+therapy regimens resolve by code.
 """
 import os
 from typing import Any
@@ -39,11 +39,12 @@ class Command(BaseCommand):
         )
         parser.add_argument('--org', required=True, help='Slug of the organization here the patients join.')
         parser.add_argument(
-            '--target-person-id', type=int, help='person_id to use here. Only for a single patient.',
+            '--target-person-id', type=int,
+            help='Force a person_id here instead of the next free one. Only for a single patient.',
         )
         parser.add_argument(
             '--replace', action='store_true',
-            help='Delete a patient already here with the same person_id first.',
+            help='Re-copy a patient copied from this source before, replacing what is here.',
         )
         parser.add_argument('--source-url', help='Source database URL. Defaults to $SOURCE_DATABASE_URL.')
         parser.add_argument('--dry-run', action='store_true', help='Report what would change and roll back.')

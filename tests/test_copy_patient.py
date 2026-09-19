@@ -126,9 +126,8 @@ def test_every_row_is_copied_under_new_ids(patient: Person):
         target = model.objects.get(person_id=TARGET_ID)
         assert source.pk != target.pk
     assert NoteNlp.objects.get(note__person_id=TARGET_ID).note_id != 50
-    target_location = Person.objects.get(person_id=TARGET_ID).location_id
-    assert target_location not in (None, 77)
-    assert Location.objects.get(location_id=target_location).city == 'Tulsa'
+    # The address is shared, not duplicated: it is the same address.
+    assert Person.objects.get(person_id=TARGET_ID).location_id == 77
 
 
 def test_links_point_at_the_copied_rows(patient: Person):
@@ -234,13 +233,46 @@ def test_replace_keeps_a_location_a_care_site_uses(patient: Person):
     assert CareSite.objects.get(care_site_id=1).location_id == 88
 
 
-def test_existing_person_needs_replace(patient: Person):
-    PersonFactory(person_id=TARGET_ID)
-    with pytest.raises(PatientCopyError, match='already exists'):
-        _copy()
+def test_person_id_comes_from_this_database(patient: Person):
+    """Source ids belong to the source, where the same number is somebody else."""
+    stranger = PersonFactory(person_id=SOURCE_ID + 1)
 
-    _copy(replace=True)
-    assert Measurement.objects.filter(person_id=TARGET_ID).count() == 1
+    stats = apply_patient(read_patient('default', SOURCE_ID), OrganizationFactory(slug='target-org'))
+
+    assert stats.person_id not in (SOURCE_ID, stranger.person_id)
+    assert Measurement.objects.filter(person_id=stats.person_id).count() == 1
+
+
+def test_copying_twice_needs_replace_and_does_not_duplicate(patient: Person):
+    org = OrganizationFactory(slug='target-org')
+    first = apply_patient(read_patient('default', SOURCE_ID), org)
+
+    with pytest.raises(PatientCopyError, match='already copied'):
+        apply_patient(read_patient('default', SOURCE_ID), org)
+
+    second = apply_patient(read_patient('default', SOURCE_ID), org, replace=True)
+    assert not Person.objects.filter(person_id=first.person_id).exists()
+    assert Person.objects.exclude(person_id=SOURCE_ID).count() == 1
+    assert Measurement.objects.filter(person_id=second.person_id).count() == 1
+
+
+def test_an_identical_address_is_reused(patient: Person):
+    """The source address already exists here, so no second row for it."""
+    stats = apply_patient(read_patient('default', SOURCE_ID), OrganizationFactory(slug='target-org'))
+
+    assert Person.objects.get(person_id=stats.person_id).location_id == 77
+    assert Location.objects.filter(city='Tulsa').count() == 1
+
+
+def test_an_unknown_address_gets_its_own_row(patient: Person):
+    payload = read_patient('default', SOURCE_ID)
+    Location.objects.filter(location_id=77).update(city='Elsewhere')
+
+    stats = apply_patient(payload, OrganizationFactory(slug='target-org'))
+
+    location_id = Person.objects.get(person_id=stats.person_id).location_id
+    assert location_id != 77
+    assert Location.objects.get(location_id=location_id).city == 'Tulsa'
 
 
 def test_replace_refuses_a_person_with_a_login(patient: Person):
@@ -309,14 +341,16 @@ def test_bulk_copies_the_org_and_reports_failures_without_stopping(patient: Pers
 
     args = ['copy_patient', '--filter-org-id', str(source_org), '--org', 'target-org',
             '--source-url', 'postgresql://u:p@localhost/db']
-    # Both already exist here, since source and target are the same database.
-    with pytest.raises(CommandError, match=r'Copied 0 of 2 patients.*Failed: \[501, 502\]'):
-        call_command(*args)
-
     out = StringIO()
-    call_command(*args, '--replace', stdout=out)
+    call_command(*args, stdout=out)
+
     assert 'Copied 2 of 2 patients' in out.getvalue()
-    assert PatientRecord.objects.filter(person_id__in=[501, 502], organization__slug='target-org').count() == 2
+    assert PatientRecord.objects.filter(organization__slug='target-org').count() == 2
+    # The source ids stay with the source patients.
+    assert PatientRecord.objects.filter(person_id__in=[501, 502], organization__slug='target-org').count() == 0
+
+    with pytest.raises(CommandError, match='Copied 0 of 2 patients'):
+        call_command(*args)
 
 
 def test_target_person_id_needs_exactly_one_patient(patient: Person, source_is_this_database: None):

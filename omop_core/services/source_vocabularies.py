@@ -194,6 +194,28 @@ VOCABULARY_OID_ALIASES = {
     'urn:oid:2.16.840.1.113883.6.96': 'SNOMED',
 }
 
+# OMOP vocabulary_id → UMLS root_source (SAB), for the UMLS bridge in Suggest
+# and for naming source codes from UMLS atoms. ICD10CM must precede ICD10:
+# Suggest's reverse map (SAB → vocabulary) keeps the first vocabulary it sees
+# for a shared SAB. MedDRA and CPT4 are licensed and absent from Athena on our
+# deployments, so UMLS is the only place their names come from.
+VOCAB_TO_UMLS_ROOT = {
+    'SNOMED': 'SNOMEDCT_US',
+    'ICD10CM': 'ICD10CM',
+    'ICD10': 'ICD10CM',       # HT-One ICD-10 codes are ICD-10-CM format
+    'ICD10PCS': 'ICD10PCS',
+    'LOINC': 'LNC',
+    'RxNorm': 'RXNORM',
+    'CPT4': 'CPT',
+    'HCPCS': 'HCPCS',
+    'NDC': 'NDC',
+    'CVX': 'CVX',
+    'ICD9CM': 'ICD9CM',
+    'MeSH': 'MSH',
+    'NDFRT': 'MED-RT',
+    'MedDRA': 'MDR',
+}
+
 # Standard vocabularies — their concepts are already standard, so they appear
 # at the end of the tab strip as reference rather than work queue.
 STANDARD_SOURCE_VOCABULARIES = {'LOINC', 'SNOMED'}

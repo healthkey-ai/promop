@@ -868,9 +868,12 @@ Every row gets a new id. Foreign keys, plain integer references
 `measurement_event_id`, resolved through the field concept named `table.column`)
 follow the copied rows. A missing concept becomes 0 where required, else null.
 
-- The patient keeps their `person_id` if it is free. Otherwise pass
-  `--target-person-id`, or `--replace`, which refuses when system data (a login,
+- Every id comes from this database, `person_id` included: a source id belongs
+  to the source instance, where the same number is a different patient. The copy
+  is recorded as a `ProvenanceRecord` (`source='copy_patient'`), so copying the
+  same patient twice needs `--replace`, which refuses when system data (a login,
   a FHIR connection, an invitation) points at the person here.
+- An address that already exists here is reused; only a new one is inserted.
 - `PatientRecord` is copied and re-derived, so user edits survive and derived
   therapy ids follow this instance's reference data. It joins `--org`.
 - Stored document files are not copied; those rows are skipped and reported.
