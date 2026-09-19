@@ -30,6 +30,7 @@ moment ingest creates its row.
 import logging
 
 from django.db import connections
+from psycopg import sql
 
 from omop_core.services.source_vocabularies import (
     ICD10CM_MERGE, VOCABULARY_OID_ALIASES, VOCAB_TO_UMLS_ROOT,
@@ -51,12 +52,18 @@ UMLS_ROOTS = list(VOCAB_TO_UMLS_ROOT.items()) + [
     if canonical in VOCAB_TO_UMLS_ROOT
 ]
 
-# A row is unnamed when its description is blank or just echoes the code.
-_UNNAMED = "(m.source_code_description = '' OR m.source_code_description = m.source_code)"
 
 
 def _values(pairs):
-    return ', '.join(['(%s, %s)'] * len(pairs)), [v for pair in pairs for v in pair]
+    """A ``(%s, %s), ...`` VALUES list for *pairs* and its flattened params."""
+    return sql.SQL(', ').join([sql.SQL('(%s, %s)')] * len(pairs)), [v for pair in pairs for v in pair]
+
+
+# Composed with psycopg's sql module rather than string formatting: the table
+# names are identifiers from the models' _meta and every value is a bound
+# parameter, and composition is what makes that visible to a reader (and to
+# bandit, whose B608 cannot tell a quoted identifier from user input).
+_UNNAMED = sql.SQL("(m.source_code_description = '' OR m.source_code_description = m.source_code)")
 
 
 def backfill_source_descriptions(Mapping, Concept, UmlsSourceCode, *, using='default',
@@ -68,54 +75,56 @@ def backfill_source_descriptions(Mapping, Concept, UmlsSourceCode, *, using='def
     every pass to rows with a larger id, so a caller that has just inserted a
     batch can name only that batch.
     """
-    mapping = Mapping._meta.db_table
-    concept = Concept._meta.db_table
-    umls = UmlsSourceCode._meta.db_table
-    scope = ' AND m.id > %s' if min_id is not None else ''
+    mapping = sql.Identifier(Mapping._meta.db_table)
+    concept = sql.Identifier(Concept._meta.db_table)
+    umls = sql.Identifier(UmlsSourceCode._meta.db_table)
+    scope = sql.SQL(' AND m.id > %s') if min_id is not None else sql.SQL('')
+    gap_scope = sql.SQL(' AND gap.id > %s') if min_id is not None else sql.SQL('')
     scope_params = [min_id] if min_id is not None else []
     counts = {}
     with connections[using].cursor() as cursor:
         # Tier 1a: same vocabulary id in Athena.
-        cursor.execute(f'''
-            UPDATE "{mapping}" AS m
+        cursor.execute(sql.SQL('''
+            UPDATE {mapping} AS m
             SET source_code_description = LEFT(c.concept_name, %s)
-            FROM "{concept}" AS c
-            WHERE {_UNNAMED}{scope}
+            FROM {concept} AS c
+            WHERE {unnamed}{scope}
               AND c.vocabulary_id = m.source_vocabulary_id
               AND c.concept_code = m.source_code
               AND c.concept_name <> ''
-        ''', [DESCRIPTION_MAX, *scope_params])
+        ''').format(mapping=mapping, concept=concept, unnamed=_UNNAMED, scope=scope),
+            [DESCRIPTION_MAX, *scope_params])
         counts['athena'] = cursor.rowcount
 
         # Tier 1b: aliases and fallbacks over what is still unnamed.
         values, params = _values(ATHENA_ALIASES)
-        cursor.execute(f'''
-            UPDATE "{mapping}" AS m
+        cursor.execute(sql.SQL('''
+            UPDATE {mapping} AS m
             SET source_code_description = LEFT(c.concept_name, %s)
             FROM (VALUES {values}) AS alias(source_vocabulary_id, athena_vocabulary_id)
-            JOIN "{concept}" AS c ON c.vocabulary_id = alias.athena_vocabulary_id
-            WHERE {_UNNAMED}{scope}
+            JOIN {concept} AS c ON c.vocabulary_id = alias.athena_vocabulary_id
+            WHERE {unnamed}{scope}
               AND m.source_vocabulary_id = alias.source_vocabulary_id
               AND c.concept_code = m.source_code
               AND c.concept_name <> ''
-        ''', [DESCRIPTION_MAX, *params, *scope_params])
+        ''').format(mapping=mapping, concept=concept, values=values, unnamed=_UNNAMED, scope=scope),
+            [DESCRIPTION_MAX, *params, *scope_params])
         counts['athena_alias'] = cursor.rowcount
 
         # Tier 2: the best UMLS atom per remaining row; fills the UMLS name too
         # when that is blank.
         values, params = _values(UMLS_ROOTS)
-        gap_scope = scope.replace('m.id', 'gap.id')
-        cursor.execute(f'''
-            UPDATE "{mapping}" AS m
+        cursor.execute(sql.SQL('''
+            UPDATE {mapping} AS m
             SET source_code_description = LEFT(best.name, %s),
                 umls_source_name = CASE WHEN m.umls_source_name = '' THEN best.name
                                         ELSE m.umls_source_name END
             FROM (
                 SELECT DISTINCT ON (gap.id) gap.id, u.name
-                FROM "{mapping}" AS gap
+                FROM {mapping} AS gap
                 JOIN (VALUES {values}) AS sab(source_vocabulary_id, root_source)
                   ON sab.source_vocabulary_id = gap.source_vocabulary_id
-                JOIN "{umls}" AS u
+                JOIN {umls} AS u
                   ON u.root_source = sab.root_source AND u.code = gap.source_code
                 WHERE (gap.source_code_description = ''
                        OR gap.source_code_description = gap.source_code){gap_scope}
@@ -124,13 +133,14 @@ def backfill_source_descriptions(Mapping, Concept, UmlsSourceCode, *, using='def
                          length(u.name) DESC, u.name
             ) AS best
             WHERE m.id = best.id
-        ''', [DESCRIPTION_MAX, *params, *scope_params])
+        ''').format(mapping=mapping, umls=umls, values=values, gap_scope=gap_scope),
+            [DESCRIPTION_MAX, *params, *scope_params])
         counts['umls'] = cursor.rowcount
 
-        cursor.execute(f'''
-            SELECT count(*) FROM "{mapping}" AS m
-            WHERE {_UNNAMED}{scope} AND m.source_vocabulary_id <> ''
-        ''', scope_params)
+        cursor.execute(sql.SQL('''
+            SELECT count(*) FROM {mapping} AS m
+            WHERE {unnamed}{scope} AND m.source_vocabulary_id <> ''
+        ''').format(mapping=mapping, unnamed=_UNNAMED, scope=scope), scope_params)
         counts['still_unnamed'] = cursor.fetchone()[0]
     logger.info(
         'source descriptions: athena=%s athena_alias=%s umls=%s still_unnamed=%s%s',
