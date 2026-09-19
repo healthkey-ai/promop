@@ -889,6 +889,51 @@ describe("CodeMappingPage", () => {
       });
     });
 
+    it("searches active, standard concepts unless the curator widens it", async () => {
+      // #1465: retired and non-standard concepts are opt-in.
+      await openDialog();
+      const searches = () => mockGet.mock.calls.filter((c) => c[0] === "/v1/concepts/search/");
+      fireEvent.change(screen.getByLabelText("Search destination concepts"), {
+        target: { value: "monoclonal" },
+      });
+      await waitFor(() => expect(searches()).toHaveLength(1));
+      expect(searches()[0][1].params).not.toHaveProperty("include_retired");
+      expect(searches()[0][1].params).not.toHaveProperty("include_non_standard");
+
+      fireEvent.click(screen.getByLabelText("Include retired"));
+      await waitFor(() => expect(searches()).toHaveLength(2));
+      expect(searches()[1][1].params.include_retired).toBe("true");
+      expect(searches()[1][1].params).not.toHaveProperty("include_non_standard");
+
+      fireEvent.click(screen.getByLabelText("Include non-standard"));
+      await waitFor(() => expect(searches()).toHaveLength(3));
+      expect(searches()[2][1].params).toMatchObject({ include_retired: "true", include_non_standard: "true" });
+    });
+
+    it("labels each search result as standard, non-standard or retired", async () => {
+      // #1465: curators asked where a code "came from" because nothing said a
+      // result was a retired extension concept.
+      await openDialog();
+      const otherRequests = mockGet.getMockImplementation()!;
+      mockGet.mockImplementation((url: string, ...rest: unknown[]) => {
+        if (url !== "/v1/concepts/search/") return otherRequests(url, ...rest);
+        {
+          return Promise.resolve({ data: { results: [
+            loincHit,
+            { ...loincHit, concept_id: 3545451, concept_code: "833581000000104", standard_concept: null, invalid_reason: "U" },
+            { ...loincHit, concept_id: 2000000001, concept_code: "HK-1", standard_concept: null, invalid_reason: null },
+          ] } });
+        }
+      });
+      fireEvent.change(screen.getByLabelText("Search destination concepts"), {
+        target: { value: "monoclonal" },
+      });
+      const retired = await screen.findByText("833581000000104");
+      expect(retired.closest("button")).toHaveTextContent("Retired");
+      expect(screen.getByText("33358-3").closest("button")).toHaveTextContent("Standard");
+      expect(screen.getByText("HK-1").closest("button")).toHaveTextContent("Non-standard");
+    });
+
     it("sends one search for a typed word, not one per keystroke", async () => {
       // #1466: each keystroke used to start its own server query.
       await openDialog();

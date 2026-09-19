@@ -35,14 +35,18 @@ standard_concept char(1)    'S' = standard OMOP concept; NULL = non-standard sou
 
 ### Indexes on `concept`
 
-Two indexes make concept lookups fast:
+Three indexes make concept lookups fast:
 
 ```sql
--- Primary path: exact vocabulary + code match (covers LOINC, SNOMED, RxNorm lookups)
-CREATE INDEX ix_concept_vocab_code ON concept (vocabulary_id, concept_code);
+-- Exact vocabulary + code match (LOINC, SNOMED, RxNorm lookups); also the uniqueness rule
+CREATE UNIQUE INDEX uq_concept_vocabulary_code ON concept (vocabulary_id, concept_code);
 
--- Fallback path: name-based search
-CREATE INDEX ix_concept_name_trgm ON concept USING gin (concept_name gin_trgm_ops);
+-- Name search. On UPPER(...) because Django compiles `icontains` to UPPER(col) LIKE UPPER(...)
+CREATE INDEX ix_concept_name_upper_trgm ON concept USING gin (upper(concept_name) gin_trgm_ops);
+
+-- Case-insensitive code search (#1466). Without it the code branch of concepts/search is
+-- unindexable, and the planner then drops the trigram index for the whole OR
+CREATE INDEX ix_concept_code_upper ON concept (upper(concept_code));
 ```
 
 ### Concept search API
@@ -52,13 +56,13 @@ The supported API for searching and browsing OMOP concepts is documented in
 
 | Endpoint | Use |
 |---|---|
-| `GET /api/v1/concepts/search/?q=creatinine` | Case-insensitive substring search on `concept_name`, with optional exact filters for `vocabulary_id`, `domain_id`, `concept_class_id`, and `standard_concept` |
+| `GET /api/v1/concepts/search/?q=creatinine` | Case-insensitive search on `concept_name`, exact `concept_code` or `concept_id`, best match first. Returns active, standard (or locally minted) concepts unless `include_retired` / `include_non_standard` is passed. Optional exact filters for `vocabulary_id`, `domain_id`, `concept_class_id`, and `standard_concept` |
 | `GET /api/v1/concepts/?domain_id=Measurement&concept_class_id=Lab%20Test` | Filtered concept browsing without a text query |
 | `GET /api/v1/concepts/lookup/?lookup=LOINC:2160-0` | Batch translation from `(vocabulary_id, concept_code)` to OMOP `concept_id` |
 
 Search and browse responses are paginated, default to 25 results, cap `page_size` at 100, and
 return the same concept fields listed above. The search endpoint requires `q` to be at least
-two characters; the browse endpoint requires at least one of `vocabulary_id`, `domain_id`, or
+three characters (a trigram); the browse endpoint requires at least one of `vocabulary_id`, `domain_id`, or
 `concept_class_id` so production deployments do not accidentally page across the full Athena
 concept table.
 

@@ -7063,7 +7063,7 @@ class ConceptSearchTest(_ConceptFixtureBase):
     def test_search_by_name_substring(self):
         # Membership assertions, not exact counts — seed migrations may add
         # concepts whose names also match (same convention as ConceptListTest).
-        resp = self.client.get(self.URL, {'q': 'creatinine', 'page_size': 100}, **self._auth())
+        resp = self.client.get(self.URL, {'q': 'creatinine', 'page_size': 100, 'include_non_standard': 'true'}, **self._auth())
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         results = resp.json()['results']
         ids = {r['concept_id'] for r in results}
@@ -7076,7 +7076,7 @@ class ConceptSearchTest(_ConceptFixtureBase):
         self.assertTrue(all('creatinine' in r['concept_name'].lower() for r in results))
 
     def test_measurement_results_identify_input_type_and_suggested_unit(self):
-        resp = self.client.get(self.URL, {'q': 'creatinine', 'page_size': 100}, **self._auth())
+        resp = self.client.get(self.URL, {'q': 'creatinine', 'page_size': 100, 'include_non_standard': 'true'}, **self._auth())
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         results = {item['concept_id']: item for item in resp.json()['results']}
         self.assertEqual(results[self.creatinine_serum.concept_id]['measurement_type'], 'quantitative')
@@ -7307,7 +7307,7 @@ class ConceptSearchTest(_ConceptFixtureBase):
             (870004, 'Zorblax', 'RK4', 'S'),
             (870005, 'Unrelated finding', 'ZORBLAX', 'S'),
         ])
-        resp = self.client.get(self.URL, {'q': 'zorblax', 'vocabulary_id': 'RANKV'}, **self._auth())
+        resp = self.client.get(self.URL, {'q': 'zorblax', 'vocabulary_id': 'RANKV', 'include_non_standard': 'true'}, **self._auth())
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(
             [r['concept_id'] for r in resp.json()['results']],
@@ -7362,7 +7362,7 @@ class ConceptSearchTest(_ConceptFixtureBase):
             self.assertIn(index, plan, f'concepts/search did not use {index}:\n{plan}')
 
     def test_pagination_page_size(self):
-        resp = self.client.get(self.URL, {'q': 'creatinine', 'page_size': 2}, **self._auth())
+        resp = self.client.get(self.URL, {'q': 'creatinine', 'page_size': 2, 'include_non_standard': 'true'}, **self._auth())
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         data = resp.json()
         self.assertGreaterEqual(data['count'], 3)
@@ -7387,6 +7387,72 @@ class ConceptSearchTest(_ConceptFixtureBase):
         )
         self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
 
+    # -- default scope: what may be a destination (#1465) ---------------------
+
+    def _scope_concepts(self):
+        """One concept of each kind, all matching 'quibble', in one vocabulary."""
+        self._probe_concepts([
+            (872001, 'Quibble standard', 'QB1', 'S'),
+            (872002, 'Quibble non-standard', 'QB2', None),
+            (872003, 'Quibble classification', 'QB3', 'C'),
+            (872004, 'Quibble retired', 'QB4', None),
+            (872005, 'Quibble retired standard', 'QB5', 'S'),
+            (872006, 'Quibble minted here', 'QB6', None),
+        ])
+        Concept.objects.filter(concept_id__in=(872004, 872005)).update(invalid_reason='U')
+        Concept.objects.filter(concept_id=872006).update(source='HealthKey')
+
+    def _quibble_ids(self, **params):
+        resp = self.client.get(
+            self.URL, {'q': 'quibble', 'vocabulary_id': 'RANKV', **params}, **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        return {r['concept_id'] for r in resp.json()['results']}
+
+    def test_default_returns_only_active_standard_or_locally_minted(self):
+        self._scope_concepts()
+        # 872006 is non-standard by construction but is what imports point at.
+        self.assertEqual(self._quibble_ids(), {872001, 872006})
+
+    def test_include_retired_adds_retired_but_not_non_standard(self):
+        self._scope_concepts()
+        self.assertEqual(self._quibble_ids(include_retired='true'), {872001, 872005, 872006})
+
+    def test_include_non_standard_adds_non_standard_but_not_retired(self):
+        self._scope_concepts()
+        self.assertEqual(
+            self._quibble_ids(include_non_standard='true'),
+            {872001, 872002, 872003, 872006},
+        )
+
+    def test_both_flags_return_everything(self):
+        self._scope_concepts()
+        self.assertEqual(
+            self._quibble_ids(include_retired='true', include_non_standard='true'),
+            {872001, 872002, 872003, 872004, 872005, 872006},
+        )
+
+    def test_explicit_standard_concept_filter_overrides_the_default(self):
+        """A caller asking for classification concepts is choosing, not defaulting."""
+        self._scope_concepts()
+        self.assertEqual(self._quibble_ids(standard_concept='C'), {872003})
+
+    def test_flags_are_off_unless_truthy(self):
+        self._scope_concepts()
+        self.assertEqual(self._quibble_ids(include_retired='false', include_non_standard='0'),
+                         {872001, 872006})
+
+    def test_retired_concept_is_not_found_by_its_code_or_id_by_default(self):
+        """The code and id branches are scoped too, not just the name match."""
+        self._scope_concepts()
+        for query in ('QB4', '872004'):
+            resp = self.client.get(self.URL, {'q': query}, **self._auth())
+            self.assertNotIn(872004, {r['concept_id'] for r in resp.json()['results']})
+            resp = self.client.get(
+                self.URL, {'q': query, 'include_retired': 'true', 'include_non_standard': 'true'},
+                **self._auth(),
+            )
+            self.assertIn(872004, {r['concept_id'] for r in resp.json()['results']})
 
 class ConceptListTest(_ConceptFixtureBase):
     """GET /api/v1/concepts/ (issue #213)"""
@@ -21495,6 +21561,87 @@ class CodeMappingApiTest(TestCase):
         self.assertIn('HK-Labs', dest_ids)
         self.assertTrue(next(v for v in dest if v['vocabulary_id'] == 'HK-Labs')['is_local'])
         self.assertFalse(next(v for v in dest if v['vocabulary_id'] == 'LOINC')['is_local'])
+
+    def test_reference_does_not_offer_icd10cm_as_a_destination_scope(self):
+        """#1465: ICD10CM holds no standard concepts, so it cannot be a destination."""
+        # Present on the instance, so its absence is the rule and not an accident.
+        Vocabulary.objects.get_or_create(
+            vocabulary_id='ICD10CM',
+            defaults={'vocabulary_name': 'ICD-10-CM', 'vocabulary_concept_id': 0},
+        )
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/code-mappings/reference/')
+        dest_ids = {v['vocabulary_id'] for v in resp.data['destination_vocabularies']}
+        self.assertNotIn('ICD10CM', dest_ids)
+        self.assertIn('LOINC', dest_ids)
+
+    # -- audit_retired_mapping_destinations (#1465) ---------------------------
+
+    def _retire_standard_with_replacement(self):
+        from omop_core.models import ConceptRelationship, Relationship
+        successor = Concept.objects.create(
+            concept_id=3046300, concept_name='Protein.monoclonal successor',
+            domain=self.domain, vocabulary=self.loinc_vocab,
+            concept_class=self.concept_class, standard_concept='S',
+            concept_code='33358-4', valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+        Relationship.objects.get_or_create(
+            relationship_id='Concept replaced by',
+            defaults={
+                'relationship_name': 'Concept replaced by', 'is_hierarchical': 0,
+                'defines_ancestry': 0, 'reverse_relationship_id': 'Concept replaces',
+                'relationship_concept_id': 0,
+            },
+        )
+        ConceptRelationship.objects.create(
+            concept_1=self.standard, concept_2=successor,
+            relationship_id='Concept replaced by',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        Concept.objects.filter(pk=self.standard.pk).update(invalid_reason='U')
+        return successor
+
+    def test_audit_reports_a_retired_destination_with_its_replacement(self):
+        from io import StringIO
+        successor = self._retire_standard_with_replacement()
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='ICD10', source_code='F98.8', omop_table='measurement',
+            target_concept=self.standard, destination_vocabulary_id='LOINC',
+            status='approved', origin='import',
+        )
+        out = StringIO()
+        with self.assertRaises(SystemExit) as raised:
+            call_command('audit_retired_mapping_destinations', stdout=out)
+        self.assertEqual(raised.exception.code, 1)
+        report = out.getvalue()
+        self.assertIn('ICD10:F98.8', report)
+        self.assertIn(f'-> {successor.concept_id} LOINC:33358-4', report)
+        self.assertIn('1 mapping(s)', report)
+
+        # Read-only: the mapping still points where it did.
+        self.assertEqual(
+            SourceCodeConceptMapping.objects.get(source_code='F98.8').target_concept_id,
+            self.standard.concept_id,
+        )
+
+    def test_audit_is_quiet_and_exits_zero_when_nothing_is_retired(self):
+        from io import StringIO
+        out = StringIO()
+        call_command('audit_retired_mapping_destinations', stdout=out)
+        self.assertIn('No mapping points at a retired concept', out.getvalue())
+
+    def test_audit_status_filter(self):
+        from io import StringIO
+        self._retire_standard_with_replacement()
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='ICD10', source_code='Z76.82', omop_table='measurement',
+            target_concept=self.standard, destination_vocabulary_id='LOINC',
+            status='proposed', origin='import',
+        )
+        out = StringIO()
+        call_command('audit_retired_mapping_destinations', '--status', 'approved', stdout=out)
+        self.assertIn('No mapping points at a retired concept', out.getvalue())
 
     def test_deprecated_vocabularies_alias_still_serves(self):
         """The alias kept "for one release" 500'd on every call.

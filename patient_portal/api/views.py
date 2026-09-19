@@ -7946,6 +7946,38 @@ def _serialize_concept(concept, versions=None):
     return payload
 
 
+def _truthy_param(query_params, name):
+    return (query_params.get(name) or '').strip().lower() in ('1', 'true', 'yes')
+
+
+def _destination_concepts(queryset, query_params):
+    """Narrow a concept search to what may be a mapping destination (#1465).
+
+    Search used to return every concept in the vocabulary. Two thirds of SNOMED
+    is retired, so that is mostly what a curator was offered, and picking one is
+    how retired concepts became approved destinations.
+
+    Active only, unless `include_retired`. Standard only, unless
+    `include_non_standard` -- "standard" rather than "a different code system
+    from the source", because LOINC->LOINC and SNOMED->SNOMED are correct
+    mappings while ICD-10, CPT4 and MedDRA hold no standard concepts at all, so
+    this rule excludes them as destinations without naming them. Concepts
+    authored here (`source='HealthKey'`, the HK-* buckets) are non-standard by
+    construction and are what imports point at, so they stay searchable.
+
+    An explicit `standard_concept` filter is the caller choosing, and wins.
+    """
+    if not _truthy_param(query_params, 'include_retired'):
+        # Athena writes NULL for an active concept; a hand-made row may hold ''.
+        queryset = queryset.filter(Q(invalid_reason__isnull=True) | Q(invalid_reason=''))
+    if not (
+        _truthy_param(query_params, 'include_non_standard')
+        or query_params.get('standard_concept')
+    ):
+        queryset = queryset.filter(Q(standard_concept='S') | Q(source='HealthKey'))
+    return queryset
+
+
 def _concept_match_ordering(query, concept_id):
     """Order search hits by how well they match, best first (#1466).
 
@@ -8014,7 +8046,12 @@ def concept_search(request):
         domain_id         optional exact-match filter (e.g. Measurement)
         concept_class_id  optional exact-match filter (e.g. Lab Test)
         standard_concept  optional exact-match filter (S or C)
+        include_retired       'true' to also return concepts with an invalid_reason
+        include_non_standard  'true' to also return non-standard concepts
         page / page_size  pagination (page_size capped at 100)
+
+    By default only concepts usable as a destination are returned: active, and
+    either standard or authored on this instance (#1465).
 
     Response 200: paginated {count, next, previous, results: [concept, ...]}
     """
@@ -8042,7 +8079,7 @@ def concept_search(request):
             concept_id = int(numeric_id)
             search_filter |= Q(concept_id=concept_id)
     queryset = _apply_concept_filters(
-        Concept.objects.filter(search_filter),
+        _destination_concepts(Concept.objects.filter(search_filter), request.query_params),
         request.query_params,
     )
     # Show a curator what kind of input a Measurement mapping expects when the
@@ -10200,8 +10237,12 @@ def _is_local_vocabulary_id(vocabulary_id):
 # Standard vocabularies a curator re-points a proposed mapping into. These get
 # destination tabs: a mapping whose destination an SME moved to a LOINC concept
 # has to be visible somewhere, or their own output disappears on them.
+# Vocabularies the dialog offers to scope a destination search to. Each holds
+# standard concepts. ICD10CM was listed and holds none -- every ICD-10-CM concept
+# is non-standard and maps *to* SNOMED -- so scoping to it could only ever offer
+# a same-system, non-standard destination (#1465).
 _STANDARD_DESTINATION_VOCABULARIES = (
-    'SNOMED', 'LOINC', 'RxNorm', 'RxNorm Extension', 'ICD10CM', 'HemOnc',
+    'SNOMED', 'LOINC', 'RxNorm', 'RxNorm Extension', 'HemOnc',
 )
 
 
