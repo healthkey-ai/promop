@@ -28,7 +28,7 @@ from omop_core.mapping.code_resolution import (
     _DOMAIN_FOR_TABLE,
 )
 from omop_core.mapping.suggestions import DEFAULT_MIN_OCCURRENCES, unmapped_source_values
-from omop_core.models import SourceCodeConceptMapping
+from omop_core.models import Concept, SourceCodeConceptMapping, UmlsSourceCode
 
 
 class Command(BaseCommand):
@@ -120,6 +120,19 @@ class Command(BaseCommand):
                 landed = SourceCodeConceptMapping.objects.count() - before
             total += landed
             self.stdout.write(f'{table}: enqueued {landed} of {len(rows)} row(s).')
+
+        if not dry_run:
+            # A queue row is born with only its code. Name it from Athena/UMLS
+            # now so the curator never meets a bare code (#1464); the service
+            # writes only empty descriptions, so this is cheap once the
+            # backlog is gone.
+            from omop_core.services.source_descriptions import backfill_source_descriptions
+
+            counts = backfill_source_descriptions(
+                SourceCodeConceptMapping, Concept, UmlsSourceCode,
+            )
+            named = counts['athena'] + counts['athena_alias'] + counts['umls']
+            self.stdout.write(f'Described {named} row(s); {counts["still_empty"]} still without a name.')
 
         verb = 'would enqueue' if dry_run else 'enqueued'
         self.stdout.write(self.style.SUCCESS(f'Done: {verb} {total} row(s).'))
