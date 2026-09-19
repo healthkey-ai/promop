@@ -20,6 +20,7 @@ proposes.
 """
 from django.core.management.base import BaseCommand
 from django.db import transaction
+from django.db.models import Max
 from django.utils import timezone
 
 from omop_core.mapping.code_resolution import (
@@ -65,6 +66,7 @@ class Command(BaseCommand):
         now = timezone.now()
         total = 0
 
+        id_before = SourceCodeConceptMapping.objects.aggregate(Max('id'))['id__max'] or 0
         for table in tables:
             values = unmapped_source_values(
                 table,
@@ -121,18 +123,22 @@ class Command(BaseCommand):
             total += landed
             self.stdout.write(f'{table}: enqueued {landed} of {len(rows)} row(s).')
 
-        if not dry_run:
-            # A queue row is born with only its code. Name it from Athena/UMLS
-            # now so the curator never meets a bare code (#1464); the service
-            # writes only empty descriptions, so this is cheap once the
-            # backlog is gone.
+        if total and not dry_run:
+            # The rows above were born with only their code. Name them from
+            # Athena/UMLS now so the curator never meets a bare code (#1464).
+            # Scoped to this run's ids: the backlog was named by migration
+            # 0244, and a queue-wide pass would rescan 85k rows to report
+            # residue this run did not create.
             from omop_core.services.source_descriptions import backfill_source_descriptions
 
             counts = backfill_source_descriptions(
-                SourceCodeConceptMapping, Concept, UmlsSourceCode,
+                SourceCodeConceptMapping, Concept, UmlsSourceCode, min_id=id_before,
             )
             named = counts['athena'] + counts['athena_alias'] + counts['umls']
-            self.stdout.write(f'Described {named} row(s); {counts["still_empty"]} still without a name.')
+            self.stdout.write(
+                f'Named {named} of the new row(s); {counts["still_unnamed"]} '
+                f'have no name in Athena or UMLS.'
+            )
 
         verb = 'would enqueue' if dry_run else 'enqueued'
         self.stdout.write(self.style.SUCCESS(f'Done: {verb} {total} row(s).'))

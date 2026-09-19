@@ -150,21 +150,9 @@ SYNONYM_BONUS = 0.05
 # ---------------------------------------------------------------------------
 # Maps OMOP vocabulary_id → UMLS SAB (root_source in umls_source_code).
 # Verified against staging data (195 distinct root_source values).
-VOCAB_TO_UMLS_ROOT = {
-    'SNOMED': 'SNOMEDCT_US',
-    'ICD10CM': 'ICD10CM',
-    'ICD10': 'ICD10CM',       # HT-One ICD-10 codes are ICD-10-CM format
-    'ICD10PCS': 'ICD10PCS',
-    'LOINC': 'LNC',
-    'RxNorm': 'RXNORM',
-    'CPT4': 'CPT',
-    'HCPCS': 'HCPCS',
-    'NDC': 'NDC',
-    'CVX': 'CVX',
-    'ICD9CM': 'ICD9CM',
-    'MeSH': 'MSH',
-    'NDFRT': 'MED-RT',
-}
+# Lives in services.source_vocabularies so the description backfill and the
+# migrations can share it without importing this module.
+from omop_core.services.source_vocabularies import VOCAB_TO_UMLS_ROOT  # noqa: E402
 
 # Reverse: UMLS SAB → OMOP vocabulary_id (for sibling-code lookups).
 # Multiple OMOP vocabs can map to the same UMLS SAB (ICD10CM and ICD10 both
