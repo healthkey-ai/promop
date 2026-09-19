@@ -38,6 +38,8 @@ SYSTEM: frozenset[str] = frozenset({
     # Bookkeeping and derived caches, rebuilt by their own commands.
     'omop_core.CdmSource', 'omop_core.ConceptEmbedding', 'omop_core.RegimenMappingGap',
     'omop_core.SuggestEmbeddingSnapshot', 'omop_core.SuggestRun',
+    # Derived from concept + concept_synonym; rebuilt locally, never copied.
+    'omop_core.SuggestSynonymTerm',
     'omop_core.VocabularyRelease', 'omop_core.VocabularyVersionHistory',
     # Outreach state, not answers.
     'prolog_surveys.ParticipantMergeCandidate', 'prolog_surveys.SurveyAdministration',
