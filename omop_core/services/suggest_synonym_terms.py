@@ -13,22 +13,24 @@ from omop_core.models import SUGGEST_DESTINATION_DOMAINS, SuggestSynonymTerm
 # mapping.suggestions.lexical_candidates, which still applies them to whatever
 # this table returns -- so a stale row can cost a slot in the shortlist but can
 # never put an ineligible concept in front of the ranker.
-_ELIGIBLE = """
-    c.standard_concept = 'S' AND c.invalid_reason IS NULL AND c.domain_id = ANY(%(domains)s)
-"""
-
-_INSERT_MISSING = f"""
+#
+# The eligibility clause is written out in both statements rather than
+# interpolated: these are complete SQL literals with bound parameters only, which
+# is what the SAST gate (bandit B608) requires and is easier to read in a log.
+_INSERT_MISSING = """
     INSERT INTO suggest_synonym_term (concept_id, domain_id, term)
     SELECT DISTINCT s.concept_id, c.domain_id, UPPER(s.concept_synonym_name)
     FROM concept_synonym s
     JOIN concept c ON c.concept_id = s.concept_id
-    WHERE {_ELIGIBLE}
+    WHERE c.standard_concept = 'S'
+      AND c.invalid_reason IS NULL
+      AND c.domain_id = ANY(%(domains)s)
     ON CONFLICT (concept_id, md5(term)) DO NOTHING
 """
 
 # A term goes when its concept stopped being eligible, moved domain, or the
 # synonym itself was removed by a vocabulary load.
-_DELETE_STALE = f"""
+_DELETE_STALE = """
     DELETE FROM suggest_synonym_term t
     WHERE NOT EXISTS (
         SELECT 1
@@ -37,7 +39,9 @@ _DELETE_STALE = f"""
         WHERE c.concept_id = t.concept_id
           AND c.domain_id = t.domain_id
           AND UPPER(s.concept_synonym_name) = t.term
-          AND {_ELIGIBLE}
+          AND c.standard_concept = 'S'
+          AND c.invalid_reason IS NULL
+          AND c.domain_id = ANY(%(domains)s)
     )
 """
 
