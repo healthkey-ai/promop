@@ -44,7 +44,7 @@ class Migration(migrations.Migration):
     # there is nobody to block.
 
     dependencies = [
-        ('omop_core', '0244_concept_suggest_domain_trgm_indexes'),
+        ('omop_core', '0245_concept_suggest_domain_trgm_indexes'),
     ]
 
     operations = [

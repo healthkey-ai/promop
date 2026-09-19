@@ -35,7 +35,7 @@ class Migration(migrations.Migration):
     atomic = False
 
     dependencies = [
-        ('omop_core', '0243_concept_ix_concept_code_upper'),
+        ('omop_core', '0244_backfill_source_descriptions'),
     ]
 
     operations = [
