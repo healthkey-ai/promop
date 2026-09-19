@@ -637,9 +637,14 @@ class TestSuggestAPIStrategies:
         hit = {
             'concept_id': measurement_concept.pk, 'concept_name': measurement_concept.concept_name,
             'concept_code': measurement_concept.concept_code, 'vocabulary_id': 'LOINC',
+            'concept_class_id': measurement_concept.concept_class_id,
+            'domain_id': measurement_concept.domain_id,
             'retrieval': 'umls', 'umls_score': 1,
         }
         monkeypatch.setattr('omop_core.mapping.suggestions.umls_candidates', lambda *args: ([hit], 'C123'))
+        # Since #1420 the ranker weighs every candidate; no model runs here.
+        monkeypatch.setattr('omop_core.mapping.suggestions.rank_candidates',
+                            lambda source_value, candidates, *a, **k: (candidates[0], 'ranked', []))
         def lexical(*args, **kwargs):
             run = SuggestRun.objects.exclude(pk=batch.pk).get()
             response = self.client.get(f'/api/v1/code-mappings/suggest-runs/{run.pk}/?include_activity=1')
@@ -801,9 +806,13 @@ class TestSuggestRunLifecycle:
             'concept_id': measurement_concept.pk,
             'concept_name': measurement_concept.concept_name,
             'concept_code': measurement_concept.concept_code,
-            'vocabulary_id': 'LOINC', 'retrieval': 'umls', 'umls_score': 1,
+            'vocabulary_id': 'LOINC', 'concept_class_id': measurement_concept.concept_class_id,
+            'domain_id': measurement_concept.domain_id, 'retrieval': 'umls', 'umls_score': 1,
         }
         monkeypatch.setattr('omop_core.mapping.suggestions.umls_candidates', lambda *args: ([hit], 'C123'))
+        # Since #1420 the ranker weighs every candidate; no model runs here.
+        monkeypatch.setattr('omop_core.mapping.suggestions.rank_candidates',
+                            lambda source_value, candidates, *a, **k: (candidates[0], 'ranked', []))
 
         def lexical(*args, **kwargs):
             events = SuggestRun.objects.latest('created_at').activity
@@ -1390,7 +1399,11 @@ class TestICD10UmlsLookup:
 @pytest.mark.parametrize('cui_count', [3, 6])
 def test_suggest_persists_all_bridge_cuis_without_varchar_overflow(
     cui_count, umls_release, condition_domain, snomed_vocab, icd10cm_vocab, concept_class,
+    monkeypatch,
 ):
+    # Since #1420 the ranker weighs every candidate; no model runs here.
+    monkeypatch.setattr('omop_core.mapping.suggestions.rank_candidates',
+                        lambda source_value, candidates, *a, **k: (candidates[0], 'ranked', []))
     target = ConceptFactory(
         concept_id=777001, concept_code='44054006', concept_name='Test destination',
         vocabulary=snomed_vocab, domain=condition_domain, concept_class=concept_class,
