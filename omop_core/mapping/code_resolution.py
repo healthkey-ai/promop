@@ -162,6 +162,22 @@ def _direct_concept(source_vocabulary_id, source_code):
     ).first()
 
 
+def _description_for(source_vocabulary_id, source_code, source_text):
+    """The display text for a new queue row.
+
+    FHIR sync passes the code itself when a Coding has no display, and the
+    resolve endpoint and crossmap importers pass nothing; either way the
+    curator would meet a bare code (#1464). Ask the vocabularies before
+    settling for that.
+    """
+    from omop_core.services.source_descriptions import describe_source_code
+
+    text = (source_text or '')[:255]
+    if text and text != source_code:
+        return text
+    return describe_source_code(source_vocabulary_id or '', source_code) or text
+
+
 def _record_proposal(*, source_vocabulary_id, source_code, source_text,
                      concept, omop_table, source_system, notes='', is_suggestion=False):
     """Create or bump the proposed mapping for a code an import had to invent.
@@ -191,7 +207,9 @@ def _record_proposal(*, source_vocabulary_id, source_code, source_text,
                 return SourceCodeConceptMapping.objects.create(
                     source_vocabulary_id=source_vocabulary_id or '',
                     source_code=source_code,
-                    source_code_description=(source_text or '')[:255],
+                    source_code_description=_description_for(
+                        source_vocabulary_id, source_code, source_text,
+                    ),
                     # Without this a gap row carries no domain, and the UI has
                     # nothing to place it by -- it appeared in no tab at all.
                     domain_id=_DOMAIN_FOR_TABLE.get(omop_table, ''),
