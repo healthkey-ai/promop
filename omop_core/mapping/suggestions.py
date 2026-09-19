@@ -88,6 +88,7 @@ from omop_core.models import (
     ConceptEmbedding,
     ConceptSynonym,
     SourceCodeConceptMapping,
+    SuggestSynonymTerm,
     UmlsSourceCode,
 )
 
@@ -681,18 +682,39 @@ def lexical_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
 
     # Synonyms are a separate index and a separate signal; merged by concept,
     # keeping whichever route scored higher.
-    synonym_hits = (
-        ConceptSynonym.objects
-        .filter(concept__standard_concept='S', concept__invalid_reason__isnull=True,
-                **({'concept__domain_id': domain_id} if domain_id else {}))
-        .annotate(name_upper=Upper('concept_synonym_name'))
-        .filter(name_upper__trigram_similar=query)
-        .annotate(score=TrigramSimilarity(Upper('concept_synonym_name'), query))
-        .filter(score__gt=MIN_TRIGRAM_SCORE)
-        .values('concept_id')
-        .annotate(score=Max('score'))
-        .order_by('-score')[:limit]
-    )
+    #
+    # The domain-scoped table is the fast path (#1467). concept_synonym has no
+    # domain or standing of its own, so its trigram index returns loosely similar
+    # synonyms from every domain -- 30,000 to 160,000 rows per code on staging,
+    # each scored, nearly all discarded by the join. suggest_synonym_term holds
+    # the same text with the domain beside it and a partial index per domain.
+    # Scores are identical: `term` is UPPER(concept_synonym_name).
+    from omop_core.services import suggest_synonym_terms
+    if suggest_synonym_terms.is_populated(domain_id):
+        synonym_hits = (
+            SuggestSynonymTerm.objects
+            .filter(domain_id=domain_id, term__trigram_similar=query)
+            .annotate(score=TrigramSimilarity('term', query))
+            .filter(score__gt=MIN_TRIGRAM_SCORE)
+            .values('concept_id')
+            .annotate(score=Max('score'))
+            .order_by('-score')[:limit]
+        )
+    else:
+        # No domain (ICD-10 searches all of them), or a table nobody has built:
+        # search concept_synonym directly. Slow, but complete.
+        synonym_hits = (
+            ConceptSynonym.objects
+            .filter(concept__standard_concept='S', concept__invalid_reason__isnull=True,
+                    **({'concept__domain_id': domain_id} if domain_id else {}))
+            .annotate(name_upper=Upper('concept_synonym_name'))
+            .filter(name_upper__trigram_similar=query)
+            .annotate(score=TrigramSimilarity(Upper('concept_synonym_name'), query))
+            .filter(score__gt=MIN_TRIGRAM_SCORE)
+            .values('concept_id')
+            .annotate(score=Max('score'))
+            .order_by('-score')[:limit]
+        )
     synonym_scores = {h['concept_id']: h['score'] + SYNONYM_BONUS for h in synonym_hits}
 
     merged = {}
