@@ -1004,7 +1004,7 @@ of its own — those live on `concept` — and a partial index cannot look acros
 join. It is derived, never edited: `services.suggest_synonym_terms.refresh()`
 deletes what stopped being eligible, then inserts what is missing (that order:
 a concept that changed domain would otherwise collide with its own old row).
-`load_athena_vocabularies` runs it after every full load; migration `0245`
+`load_athena_vocabularies` runs it after every full load; migration `0246`
 backfilled instances that already had a vocabulary.
 
 Measured on staging over the same 28 real queue rows, synonym retrieval went
