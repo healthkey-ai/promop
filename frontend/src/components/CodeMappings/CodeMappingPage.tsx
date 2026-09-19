@@ -158,6 +158,13 @@ interface ConceptResult {
   suggested_unit?: string;
 }
 
+interface SearchScope {
+  retired: boolean;
+  nonStandard: boolean;
+}
+
+const DEFAULT_SEARCH_SCOPE: SearchScope = { retired: false, nonStandard: false };
+
 interface DestinationOption extends Omit<ConceptResult, "concept_id"> {
   concept_id: number | null;
   selectable: boolean;
@@ -469,6 +476,10 @@ const TIP = {
     "The OMOP clinical table the fact is stored in. Follows from Domain.",
   search:
     "Search OMOP concepts by name or code. Suggest seeds the search from the source description.",
+  search_include_retired:
+    "Retired concepts are hidden because they should not be new destinations. Turn this on only to find the retired concept a mapping already points at.",
+  search_include_non_standard:
+    "Only standard concepts (and HealthKey's own HK-* concepts) are offered, since OMOP analytics read standard concepts. Turn this on to see non-standard ones, such as ICD-10 or source-vocabulary codes.",
   search_vocabulary:
     "Which vocabulary the search looks in. Defaults to the destination's own vocabulary; widen it to re-point a minted HK-* mapping at a standard concept.",
   status:
@@ -597,6 +608,10 @@ export default function CodeMappingPage() {
   const [selectedRow, setSelectedRow] = useState<CodeMappingRow | null>(null);
   const [form, setForm] = useState<MappingForm>(emptyForm);
   const [searchVocabulary, setSearchVocabulary] = useState("");
+  // What the destination search leaves out unless asked (#1465). Off by
+  // default: a retired or non-standard concept is almost never the right
+  // destination, and offering them is how they came to be approved.
+  const [searchScope, setSearchScope] = useState<SearchScope>(DEFAULT_SEARCH_SCOPE);
   const [conceptSearchQuery, setConceptSearchQuery] = useState("");
   const [conceptResults, setConceptResults] = useState<ConceptResult[]>([]);
   const [destinationOptions, setDestinationOptions] = useState<DestinationOption[]>([]);
@@ -864,6 +879,7 @@ export default function CodeMappingPage() {
     setSelectedRow(null);
     setForm({ ...emptyForm });
     setSearchVocabulary("");
+    setSearchScope(DEFAULT_SEARCH_SCOPE);
     setConceptSearchQuery("");
     setConceptResults([]);
     setUmlsCheckMessage("");
@@ -894,7 +910,15 @@ export default function CodeMappingPage() {
     }
     setSelectedRow(row);
     setForm(buildEditForm(row, reference));
-    setSearchVocabulary(row.destination_vocabulary_id || "");
+    // Open scoped to the row's own destination vocabulary when the dialog can
+    // offer it; otherwise search everything rather than show a scope the
+    // dropdown has no entry for (an ICD10CM destination, say).
+    setSearchVocabulary(
+      reference.destination_vocabularies.some((v) => v.vocabulary_id === row.destination_vocabulary_id)
+        ? row.destination_vocabulary_id || ""
+        : "",
+    );
+    setSearchScope(DEFAULT_SEARCH_SCOPE);
     setConceptSearchQuery("");
     setConceptResults([]);
     setUmlsCheckMessage("");
@@ -1026,7 +1050,7 @@ export default function CodeMappingPage() {
     conceptSearchAbort.current?.abort();
   }, []);
 
-  const searchConcepts = (query: string, vocabulary = searchVocabulary) => {
+  const searchConcepts = (query: string, vocabulary = searchVocabulary, scope = searchScope) => {
     // Keep the raw value in state and trim only for the request. Trimming
     // before setState meant typing a space produced the same string back, React
     // re-rendered without it, and a multi-word search could never be typed.
@@ -1058,6 +1082,8 @@ export default function CodeMappingPage() {
         // Scope to the destination vocabulary so a curator after a LOINC code is
         // not wading through a million SNOMED hits.
         if (vocabulary) params.vocabulary_id = vocabulary;
+        if (scope.retired) params.include_retired = "true";
+        if (scope.nonStandard) params.include_non_standard = "true";
         const resp = await api.get("/v1/concepts/search/", { params, signal: controller.signal });
         if (request === dialogRequest.current) setConceptResults(resp.data.results || resp.data || []);
       } catch {
@@ -2228,10 +2254,37 @@ export default function CodeMappingPage() {
                       <HelpTip tip={TIP.search_vocabulary} />
                     </div>
                   </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-600">
+                    <span>Showing active, standard concepts.</span>
+                    {([
+                      ["retired", "Include retired", TIP.search_include_retired],
+                      ["nonStandard", "Include non-standard", TIP.search_include_non_standard],
+                    ] as const).map(([key, label, tip]) => (
+                      <span key={key} className="flex items-center gap-1">
+                        <label className="flex items-center gap-1" title={tip}>
+                          <input
+                            type="checkbox"
+                            checked={searchScope[key]}
+                            onChange={(e) => {
+                              const next = { ...searchScope, [key]: e.target.checked };
+                              setSearchScope(next);
+                              void searchConcepts(conceptSearchQuery, searchVocabulary, next);
+                            }}
+                          />
+                          {label}
+                        </label>
+                        <HelpTip tip={tip} />
+                      </span>
+                    ))}
+                  </div>
                   <div className="mt-2 max-h-40 overflow-y-auto rounded-md border border-slate-200">
                     {searchingConcepts && <div className="px-3 py-2 text-sm text-slate-500">Searching...</div>}
                     {!searchingConcepts && conceptResults.length === 0 && conceptSearchQuery.length >= 3 && (
-                      <div className="px-3 py-2 text-sm text-slate-500">No suggestions found.</div>
+                      <div className="px-3 py-2 text-sm text-slate-500">
+                        {searchScope.retired && searchScope.nonStandard
+                          ? "No suggestions found."
+                          : "No active, standard concepts found. Widen the search with the options above."}
+                      </div>
                     )}
                     {!searchingConcepts && conceptResults.map((concept) => (
                       <button
@@ -2242,7 +2295,19 @@ export default function CodeMappingPage() {
                       >
                         <span className="grid grid-cols-[8rem_1fr_6rem] gap-2">
                           <span className="font-mono text-slate-700">{concept.concept_code}</span>
-                          <span className="text-slate-900">{concept.concept_name}</span>
+                          <span className="text-slate-900">
+                            {concept.concept_name}
+                            {/* Why a code "looks wrong" (#1465): say what kind of
+                                concept it is instead of leaving the curator to
+                                infer it from the code's shape. */}
+                            {concept.invalid_reason ? (
+                              <span className="ml-2 rounded bg-red-100 px-1 text-[10px] font-semibold uppercase text-red-800">Retired</span>
+                            ) : concept.standard_concept === "S" ? (
+                              <span className="ml-2 rounded bg-emerald-100 px-1 text-[10px] font-semibold uppercase text-emerald-800">Standard</span>
+                            ) : (
+                              <span className="ml-2 rounded bg-amber-100 px-1 text-[10px] font-semibold uppercase text-amber-800">Non-standard</span>
+                            )}
+                          </span>
                           <span className="font-mono text-slate-500">{concept.vocabulary_id}</span>
                         </span>
                         <ConceptInputDetails {...concept} />
