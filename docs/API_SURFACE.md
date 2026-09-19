@@ -816,6 +816,15 @@ Query params:
 | `page` | no | 1-based page number |
 | `page_size` | no | Defaults to 25; capped at 100 |
 
+`q` also matches an exact `concept_code` (case-insensitive) and, when numeric, an OMOP
+`concept_id`.
+
+Results are ordered by match quality, best first: exact code or id, exact name, name starting
+with `q`, any other match; within each, standard concepts first, then shorter names, then
+`concept_id`. (Before #1466 the order was `concept_id`.) The order is stable, so paging is
+safe. A client that pages the whole vocabulary should use `GET /api/v1/concepts/`, which stays
+ordered by `concept_id`.
+
 **Request**
 ```
 GET /api/v1/concepts/search/?q=creatinine&vocabulary_id=LOINC&domain_id=Measurement&page_size=10

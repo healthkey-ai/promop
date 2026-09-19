@@ -321,6 +321,9 @@ const describeSuggestRun = (run: SuggestRunProgress) => {
 };
 
 const SUGGEST_POLL_INTERVAL_MS = 1000;
+// Long enough that a word typed at normal speed is one request, short enough
+// that the pause is not felt once the curator stops.
+const CONCEPT_SEARCH_DEBOUNCE_MS = 250;
 // Consecutive, not cumulative: a run lasting minutes may lose the odd poll.
 const SUGGEST_POLL_MAX_FAILURES = 5;
 // Allow the worker's default 15-minute limit plus time waiting in the queue.
@@ -558,6 +561,8 @@ export default function CodeMappingPage() {
   const loadSequence = useRef(0);
   const dialogRequest = useRef(0);
   const dialogChoice = useRef<number | null>(null);
+  const conceptSearchTimer = useRef<number | null>(null);
+  const conceptSearchAbort = useRef<AbortController | null>(null);
   const [individualSuggestion, setIndividualSuggestion] = useState<{ request: number; activity: CandidateActivity[]; running: boolean } | null>(null);
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [rows, setRows] = useState<CodeMappingRow[]>([]);
@@ -1016,32 +1021,51 @@ export default function CodeMappingPage() {
     }
   };
 
-  const searchConcepts = async (query: string, vocabulary = searchVocabulary) => {
+  useEffect(() => () => {
+    if (conceptSearchTimer.current !== null) window.clearTimeout(conceptSearchTimer.current);
+    conceptSearchAbort.current?.abort();
+  }, []);
+
+  const searchConcepts = (query: string, vocabulary = searchVocabulary) => {
     // Keep the raw value in state and trim only for the request. Trimming
     // before setState meant typing a space produced the same string back, React
     // re-rendered without it, and a multi-word search could never be typed.
     const request = ++dialogRequest.current;
     setConceptSearchQuery(query);
-    setSearchingConcepts(false);
     setCheckingUmls(false);
+    // At most one search is ever outstanding (#1466). Firing one per keystroke
+    // queued a second-long query per letter behind each other on the server —
+    // discarding the stale responses here did not stop the server running them.
+    if (conceptSearchTimer.current !== null) window.clearTimeout(conceptSearchTimer.current);
+    conceptSearchTimer.current = null;
+    conceptSearchAbort.current?.abort();
+    conceptSearchAbort.current = null;
     const q = query.trim();
     if (q.length < 3) {
+      setSearchingConcepts(false);
       setConceptResults([]);
       return;
     }
     setSearchingConcepts(true);
-    try {
-      const params: Record<string, string> = { q, limit: "25" };
-      // Scope to the destination vocabulary so a curator after a LOINC code is
-      // not wading through a million SNOMED hits.
-      if (vocabulary) params.vocabulary_id = vocabulary;
-      const resp = await api.get("/v1/concepts/search/", { params });
-      if (request === dialogRequest.current) setConceptResults(resp.data.results || resp.data || []);
-    } catch {
-      if (request === dialogRequest.current) setConceptResults([]);
-    } finally {
-      if (request === dialogRequest.current) setSearchingConcepts(false);
-    }
+    conceptSearchTimer.current = window.setTimeout(async () => {
+      conceptSearchTimer.current = null;
+      // The dialog moved on (closed, suggested, picked a concept) while waiting.
+      if (request !== dialogRequest.current) return;
+      const controller = new AbortController();
+      conceptSearchAbort.current = controller;
+      try {
+        const params: Record<string, string> = { q, limit: "25" };
+        // Scope to the destination vocabulary so a curator after a LOINC code is
+        // not wading through a million SNOMED hits.
+        if (vocabulary) params.vocabulary_id = vocabulary;
+        const resp = await api.get("/v1/concepts/search/", { params, signal: controller.signal });
+        if (request === dialogRequest.current) setConceptResults(resp.data.results || resp.data || []);
+      } catch {
+        if (request === dialogRequest.current) setConceptResults([]);
+      } finally {
+        if (request === dialogRequest.current) setSearchingConcepts(false);
+      }
+    }, CONCEPT_SEARCH_DEBOUNCE_MS);
   };
 
   const suggestCurrentCode = async () => {
