@@ -607,6 +607,13 @@ class Concept(models.Model):
                 OpClass(Upper('concept_name'), name='gin_trgm_ops'),
                 name='ix_concept_name_upper_trgm',
             ),
+            # `concept_code__iexact` compiles to `UPPER(concept_code::text) =
+            # UPPER(...)`. With no index on that expression the code branch of
+            # concepts/search could not be served by any index, and because it is
+            # OR-ed with the name match the *whole* predicate fell back to
+            # filtering every row of the vocabulary (~1s on SNOMED, #1466).
+            # With it the planner can BitmapOr this, the trigram index and the pk.
+            models.Index(Upper('concept_code'), name='ix_concept_code_upper'),
         ]
         constraints = [
             models.UniqueConstraint(

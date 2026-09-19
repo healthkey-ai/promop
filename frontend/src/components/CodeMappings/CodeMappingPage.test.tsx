@@ -889,6 +889,34 @@ describe("CodeMappingPage", () => {
       });
     });
 
+    it("sends one search for a typed word, not one per keystroke", async () => {
+      // #1466: each keystroke used to start its own server query.
+      await openDialog();
+      const box = screen.getByLabelText("Search destination concepts");
+      for (const value of ["mon", "mono", "monoc", "monocl", "monoclonal"]) {
+        fireEvent.change(box, { target: { value } });
+      }
+      await waitFor(() => {
+        expect(mockGet.mock.calls.filter((c) => c[0] === "/v1/concepts/search/")).toHaveLength(1);
+      });
+      const [call] = mockGet.mock.calls.filter((c) => c[0] === "/v1/concepts/search/");
+      expect(call[1].params.q).toBe("monoclonal");
+    });
+
+    it("aborts the search in flight when the query changes", async () => {
+      await openDialog();
+      const box = screen.getByLabelText("Search destination concepts");
+      const searches = () => mockGet.mock.calls.filter((c) => c[0] === "/v1/concepts/search/");
+      fireEvent.change(box, { target: { value: "monoclonal" } });
+      await waitFor(() => expect(searches()).toHaveLength(1));
+      const first: AbortSignal = searches()[0][1].signal;
+      expect(first.aborted).toBe(false);
+      fireEvent.change(box, { target: { value: "monoclonal protein" } });
+      expect(first.aborted).toBe(true);
+      await waitFor(() => expect(searches()).toHaveLength(2));
+      expect(searches()[1][1].signal.aborted).toBe(false);
+    });
+
     it("lets the search scope widen so a mint can be re-pointed at a standard concept", async () => {
       await openDialog();
       fireEvent.change(screen.getByLabelText("Search vocabulary"), { target: { value: "LOINC" } });

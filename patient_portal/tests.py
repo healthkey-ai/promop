@@ -7278,6 +7278,89 @@ class ConceptSearchTest(_ConceptFixtureBase):
         self.assertIn('ix_concept_name_upper_trgm', plan,
                       f'concepts/search did not use the trigram index:\n{plan}')
 
+    def _probe_concepts(self, rows):
+        """Create concepts in a private vocabulary; rows are (id, name, code, standard)."""
+        import datetime
+        from omop_core.models import Concept, Vocabulary, Domain, ConceptClass
+        v, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='RANKV', defaults={'vocabulary_name': 'rank', 'vocabulary_concept_id': 0})
+        d, _ = Domain.objects.get_or_create(
+            domain_id='Condition', defaults={'domain_name': 'Condition', 'domain_concept_id': 19})
+        cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Clinical Finding',
+            defaults={'concept_class_name': 'Clinical Finding', 'concept_class_concept_id': 0})
+        Concept.objects.bulk_create([
+            Concept(concept_id=cid, concept_name=name, concept_code=code,
+                    standard_concept=standard, domain=d, vocabulary=v, concept_class=cc,
+                    valid_start_date=datetime.date(1970, 1, 1),
+                    valid_end_date=datetime.date(2099, 12, 31))
+            for cid, name, code, standard in rows
+        ])
+
+    def test_results_are_ordered_by_match_quality(self):
+        """#1466: the first page is the best matches, not the lowest concept ids."""
+        self._probe_concepts([
+            # Lowest id is the worst match, so pk ordering would put it first.
+            (870001, 'Cutaneous zorblax of lower limb', 'RK1', 'S'),
+            (870002, 'Zorblax of skin', 'RK2', None),
+            (870003, 'Zorblax of bone', 'RK3', 'S'),
+            (870004, 'Zorblax', 'RK4', 'S'),
+            (870005, 'Unrelated finding', 'ZORBLAX', 'S'),
+        ])
+        resp = self.client.get(self.URL, {'q': 'zorblax', 'vocabulary_id': 'RANKV'}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [r['concept_id'] for r in resp.json()['results']],
+            [
+                870005,  # exact code
+                870004,  # exact name
+                870003,  # prefix, standard
+                870002,  # prefix, non-standard
+                870001,  # contains
+            ],
+        )
+
+    def test_concept_id_match_ranks_first(self):
+        self._probe_concepts([
+            (870011, 'Finding mentioning 870012 in its name', 'RK11', 'S'),
+            (870012, 'Plain finding', 'RK12', 'S'),
+        ])
+        resp = self.client.get(self.URL, {'q': '870012', 'vocabulary_id': 'RANKV'}, **self._auth())
+        self.assertEqual([r['concept_id'] for r in resp.json()['results']], [870012, 870011])
+
+    def test_every_search_branch_is_served_by_an_index(self):
+        """#1466: one unindexable OR branch makes the planner drop all the indexes.
+
+        `UPPER(concept_code) = ...` had no index, so the name match lost its
+        trigram index too and every row of the vocabulary was filtered by hand.
+        Assert on the predicate and ordering the view really builds. No
+        vocabulary filter: on a test-sized table that index is legitimately the
+        cheapest way in, which would hide whether the OR itself is indexable.
+        """
+        from django.db import connection
+        from django.db.models import Q
+        from patient_portal.api.views import (
+            _concept_match_ordering, _concept_name_search_filter,
+        )
+        self._probe_concepts([
+            (871000 + i, f'Index probe finding {i:04d}', f'IP{i}', 'S') for i in range(600)
+        ])
+        query = '871421'
+        search = (
+            _concept_name_search_filter(query)
+            | Q(concept_code__iexact=query)
+            | Q(concept_id=int(query))
+        )
+        with connection.cursor() as cur:
+            cur.execute('ANALYZE concept')
+            cur.execute('SET LOCAL enable_seqscan = off')
+            plan = (
+                Concept.objects.filter(search)
+                .order_by(*_concept_match_ordering(query, int(query)))[:25].explain()
+            )
+        for index in ('ix_concept_name_upper_trgm', 'ix_concept_code_upper', 'concept_pkey'):
+            self.assertIn(index, plan, f'concepts/search did not use {index}:\n{plan}')
+
     def test_pagination_page_size(self):
         resp = self.client.get(self.URL, {'q': 'creatinine', 'page_size': 2}, **self._auth())
         self.assertEqual(resp.status_code, status.HTTP_200_OK)

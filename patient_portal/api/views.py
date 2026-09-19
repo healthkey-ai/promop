@@ -18,7 +18,8 @@ from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
 from django.db import IntegrityError, models, transaction
-from django.db.models import Count, Q, F, Prefetch
+from django.db.models import Case, Count, F, IntegerField, Prefetch, Q, When
+from django.db.models.functions import Length
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
@@ -7945,12 +7946,45 @@ def _serialize_concept(concept, versions=None):
     return payload
 
 
-def _paginated_concept_response(queryset, request):
-    # Order by the pk: concept_name has only a GIN trigram index (usable for
-    # icontains, not ORDER BY), so sorting by name would force a full sort of
-    # the matched set on every page request.
+def _concept_match_ordering(query, concept_id):
+    """Order search hits by how well they match, best first (#1466).
+
+    Ordering by pk put whatever Athena numbered first at the top, so the 25-row
+    page a curator sees was arbitrary and "lymphoma" opened on obscure
+    morphology codes. Rank instead: an exact code or id, then an exact name,
+    then a name that starts with the query, then any other match; standard
+    concepts ahead of non-standard within a rank, shorter names (the more
+    general concept) ahead of longer ones.
+
+    The sort runs over the matched set only, which the indexes have already
+    narrowed. It also takes `ORDER BY concept_id LIMIT n` away from the planner,
+    which for a rare term chose to walk the whole primary key looking for 25
+    matches that did not exist (~2s on staging).
+    """
+    best = Q(concept_code__iexact=query)
+    if concept_id is not None:
+        best |= Q(concept_id=concept_id)
+    return (
+        Case(
+            When(best, then=0),
+            When(concept_name__iexact=query, then=1),
+            When(concept_name__istartswith=query, then=2),
+            default=3,
+            output_field=IntegerField(),
+        ),
+        Case(When(standard_concept='S', then=0), default=1, output_field=IntegerField()),
+        Length('concept_name'),
+        'concept_id',
+    )
+
+
+def _paginated_concept_response(queryset, request, ordering=('concept_id',)):
+    # Default to the pk: concept_name has only a GIN trigram index (usable for
+    # icontains, not ORDER BY), so sorting a *listing* by name would force a full
+    # sort of a vocabulary on every page request. A search passes its own
+    # ordering, over a matched set small enough to sort.
     paginator = ConceptPagination()
-    page = paginator.paginate_queryset(queryset.order_by('concept_id'), request)
+    page = paginator.paginate_queryset(queryset.order_by(*ordering), request)
     versions = _vocab_version_map()
     response = paginator.get_paginated_response([_serialize_concept(c, versions) for c in page])
     return _set_release_etag(request, response)
@@ -7994,13 +8028,18 @@ def concept_search(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    # Every branch of this OR has to be indexable, or the planner abandons the
+    # indexes for all of them and filters each row of the vocabulary instead
+    # (#1466): the name by ix_concept_name_upper_trgm, the code by
+    # ix_concept_code_upper, the id by the pk.
     search_filter = _concept_name_search_filter(query) | Q(concept_code__iexact=query)
     # Numeric vocabulary codes and OMOP IDs share the same search box. Keep
     # both interpretations, but never cast an arbitrary-length code to a DB ID.
+    concept_id = None
     numeric_id = query.lstrip('0') or '0'
     if numeric_id.isascii() and numeric_id.isdecimal() and len(numeric_id) <= 10:
-        concept_id = int(numeric_id)
-        if concept_id <= 2_147_483_647:
+        if int(numeric_id) <= 2_147_483_647:
+            concept_id = int(numeric_id)
             search_filter |= Q(concept_id=concept_id)
     queryset = _apply_concept_filters(
         Concept.objects.filter(search_filter),
@@ -8008,7 +8047,9 @@ def concept_search(request):
     )
     # Show a curator what kind of input a Measurement mapping expects when the
     # available OMOP/LOINC data lets us classify it safely.
-    response = _paginated_concept_response(queryset, request)
+    response = _paginated_concept_response(
+        queryset, request, ordering=_concept_match_ordering(query, concept_id),
+    )
     for item in response.data.get('results', []):
         # The display-name conventions and curated unit map are LOINC-specific;
         # do not infer an input type for another vocabulary from them.
