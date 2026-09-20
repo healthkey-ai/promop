@@ -6,7 +6,8 @@ IVFFlat index.
 
 Designed for remote databases (Render): writes in small batches (64 rows),
 auto-reconnects on connection drops, and skips concepts already embedded so
-a re-run picks up where the last one left off.
+a re-run picks up where the last one left off, including a failed index build.
+Index rebuilds temporarily raise maintenance_work_mem to at least 512MB.
 
 Usage:
     manage.py build_concept_embeddings                     # all standard concepts
@@ -17,8 +18,8 @@ Usage:
 import logging
 import time
 
-from django.core.management.base import BaseCommand
-from django.db import connection
+from django.core.management.base import BaseCommand, CommandError
+from django.db import connection, transaction
 
 from omop_core.models import Concept
 
@@ -55,18 +56,6 @@ class Command(BaseCommand):
         vocab_id = options['vocabulary_id']
         force = options['force']
 
-        try:
-            from sentence_transformers import SentenceTransformer
-        except ImportError:
-            self.stderr.write(
-                'sentence-transformers is not installed. '
-                'Run: pip install sentence-transformers'
-            )
-            return
-
-        self.stdout.write(f'Loading model {MODEL_NAME}...')
-        model = SentenceTransformer(MODEL_NAME)
-
         # Load concept IDs + names into memory so we don't hold a server-side
         # cursor open for the entire run.  ~1.5M rows × ~60 bytes ≈ 90MB.
         self.stdout.write('Loading concept list...')
@@ -93,7 +82,22 @@ class Command(BaseCommand):
         total = len(all_concepts)
         if total == 0:
             self.stdout.write('Nothing to embed.')
+            self._rebuild_index()
+            self.stdout.write('Done.')
             return
+
+        # An index-only retry must not download/load the model or require its
+        # optional dependencies when all embeddings have already been saved.
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as exc:
+            raise CommandError(
+                'sentence-transformers is not installed. '
+                'Run: pip install sentence-transformers'
+            ) from exc
+
+        self.stdout.write(f'Loading model {MODEL_NAME}...')
+        model = SentenceTransformer(MODEL_NAME)
 
         self.stdout.write(f'Embedding {total} concepts in batches of {batch_size}...')
 
@@ -124,10 +128,26 @@ class Command(BaseCommand):
         elapsed = time.time() - t0
         self.stdout.write(f'\nEmbedded {processed} concepts in {elapsed:.1f}s.')
 
-        # Rebuild the IVFFlat index now that rows exist.
+        self._rebuild_index()
+        self.stdout.write('Done.')
+
+    def _rebuild_index(self):
+        """Repair a missing index, rolling back to the old one on failure."""
         self.stdout.write('Rebuilding IVFFlat index...')
         self._ensure_connection()
-        with connection.cursor() as cur:
+        # Keep DROP + CREATE atomic so failure does not discard a usable index.
+        # The local setting is reverted at transaction end, including on error.
+        with transaction.atomic(), connection.cursor() as cur:
+            # 1000 lists, 50k training samples and 384 dimensions need roughly
+            # 273MB including k-means bounds. Allow headroom without lowering a
+            # larger operator-configured limit or changing the server default.
+            cur.execute("""
+                SELECT set_config('maintenance_work_mem',
+                    GREATEST(
+                        pg_size_bytes(current_setting('maintenance_work_mem')),
+                        pg_size_bytes('512MB')
+                    )::text || 'B', true)
+            """)
             cur.execute('DROP INDEX IF EXISTS ix_concept_embedding_cosine')
             cur.execute("""
                 CREATE INDEX ix_concept_embedding_cosine
@@ -135,7 +155,6 @@ class Command(BaseCommand):
                     USING ivfflat (embedding vector_cosine_ops)
                     WITH (lists = 1000)
             """)
-        self.stdout.write('Done.')
 
     def _existing_ids(self):
         """Set of concept_ids that already have embeddings."""
