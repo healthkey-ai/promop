@@ -154,3 +154,10 @@ not a count of distinct affected people across both markers. Custom approved
 question overrides were excluded. Recheck source evidence and affected cohorts
 before applying a staging backfill; the numbers alone cannot establish a missing
 unit or authorize a source-data repair.
+
+## Instance-selected LOINC units
+
+Lab result views and the additive normalized measurement API support an
+instance-wide canonical unit per LOINC concept. See
+[canonical units architecture](canonical_units_architecture.md) for configuration,
+validated conversions, source preservation and the fixed-unit integration boundary.

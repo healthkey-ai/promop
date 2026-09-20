@@ -2268,11 +2268,33 @@ class LoincCodeClass(models.Model):
         help_text='EXAMPLE_UNITS from Loinc.csv; empty when LOINC defines no unit.',
     )
 
+    property = models.CharField(max_length=40, blank=True, default='')
+    scale_type = models.CharField(max_length=20, blank=True, default='')
+
     class Meta:
         db_table = 'loinc_code_class'
 
     def __str__(self):
         return f"{self.loinc_num} → {self.loinc_class_id}"
+
+
+class CanonicalUnitPreference(models.Model):
+    """Instance-wide choice for a standard LOINC measurement, with optimistic revision."""
+    concept = models.OneToOneField(Concept, on_delete=models.PROTECT, primary_key=True)
+    unit = models.CharField(max_length=40, blank=True, default='')
+    property = models.CharField(max_length=40)
+    revision = models.PositiveIntegerField(default=0)
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class CanonicalUnitChange(models.Model):
+    preference = models.ForeignKey(CanonicalUnitPreference, on_delete=models.PROTECT)
+    previous_unit = models.CharField(max_length=40, blank=True)
+    unit = models.CharField(max_length=40, blank=True)
+    revision = models.PositiveIntegerField()
+    changed_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    changed_at = models.DateTimeField(auto_now_add=True)
 
 
 # Choice classes for PatientRecord model

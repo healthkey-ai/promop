@@ -33,6 +33,8 @@ SYSTEM: frozenset[str] = frozenset({
     'omop_core.Organization', 'omop_core.PatientGroup',
     'omop_core.PatientGroupMembership', 'omop_core.PersonalRepresentative',
     'omop_core.FhirConnection', 'omop_core.FhirOauthState',
+    # Instance-specific unit policy and its audit history must not follow vocabulary copies.
+    'omop_core.CanonicalUnitPreference', 'omop_core.CanonicalUnitChange',
     # Holds this deployment's own SMART client registration.
     'omop_core.Institution',
     # Bookkeeping and derived caches, rebuilt by their own commands.

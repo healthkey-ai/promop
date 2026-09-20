@@ -173,7 +173,7 @@ export default function LabsTab({ formData, onChange }: Props) {
                     <ChartIconButton
                       label={label}
                       group={group}
-                      onClick={() => setChartDialog({ label, group })}
+                      onClick={() => setChartDialog({ label: group.values[0]?.normalized ? `${label.split(" (")[0]} (${group.unit})` : label, group })}
                     />
                   </div>
                 )}

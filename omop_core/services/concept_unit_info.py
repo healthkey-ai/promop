@@ -89,8 +89,17 @@ def concept_unit_fields(concept):
     unit = loinc_units.get(concept.concept_code, '')
     mtype = measurement_input_type(concept.concept_name, unit)
     result = {}
+    examples = get_loinc_example_units().get(concept.concept_code, [])
+    if examples:
+        result['example_units'] = examples
     if mtype:
         result['measurement_type'] = mtype
     if unit:
         result['suggested_unit'] = unit
     return result
+
+
+@lru_cache(maxsize=1)
+def get_loinc_example_units():
+    return {code: list(dict.fromkeys(u.strip() for u in units.split(';') if u.strip()))
+            for code, units in _db_loinc_units().items()}

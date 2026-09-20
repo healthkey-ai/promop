@@ -124,6 +124,10 @@ class Command(BaseCommand):
                 raise CommandError(f'File not found: {loinc_path}')
             self._load_code_class_mapping(loinc_path)
 
+        from omop_core.services.concept_unit_info import get_loinc_to_unit, get_loinc_example_units
+        get_loinc_to_unit.cache_clear()
+        get_loinc_example_units.cache_clear()
+
     def _load_classes(self, path):
         count = 0
         batch = []
@@ -161,6 +165,8 @@ class Command(BaseCommand):
                     loinc_num=loinc_num,
                     loinc_class_id=loinc_class,
                     example_units=example_units,
+                    property=row.get('PROPERTY', '').strip(),
+                    scale_type=row.get('SCALE_TYP', '').strip(),
                 ))
                 count += 1
                 if len(batch) >= BATCH:
@@ -168,7 +174,7 @@ class Command(BaseCommand):
                         batch, ignore_conflicts=False,
                         update_conflicts=True,
                         unique_fields=['loinc_num'],
-                        update_fields=['loinc_class_id', 'example_units'],
+                        update_fields=['loinc_class_id', 'example_units', 'property', 'scale_type'],
                     )
                     batch = []
         if batch:
@@ -176,7 +182,7 @@ class Command(BaseCommand):
                 batch, ignore_conflicts=False,
                 update_conflicts=True,
                 unique_fields=['loinc_num'],
-                update_fields=['loinc_class_id', 'example_units'],
+                update_fields=['loinc_class_id', 'example_units', 'property', 'scale_type'],
             )
         self.stdout.write(
             f'Loaded {count} LOINC code → class mappings '

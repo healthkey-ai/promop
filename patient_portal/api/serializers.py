@@ -1066,11 +1066,19 @@ class DrugExposureSerializer(serializers.ModelSerializer):
 
 class MeasurementSerializer(serializers.ModelSerializer):
     concept_name = serializers.SerializerMethodField()
+    normalized = serializers.SerializerMethodField()
+
+    def get_normalized(self, obj):
+        from omop_core.services.canonical_units import policies, measurement_normalized
+        if '_canonical_units' not in self.context:
+            self.context['_canonical_units'] = policies()
+        return measurement_normalized(obj, self.context['_canonical_units'])
+
 
     class Meta:
         model = Measurement
         fields = [
-            'measurement_id', 'person', 'measurement_concept',
+            'measurement_id', 'person', 'measurement_concept', 'normalized',
             'concept_name',
             'measurement_date', 'measurement_datetime',
             'measurement_type_concept', 'operator_concept',
