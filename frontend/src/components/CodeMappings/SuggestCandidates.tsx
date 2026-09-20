@@ -1,5 +1,6 @@
 import { useState } from "react";
-import api from "@/api/axios";
+import InlineDestinationPicker from "./InlineDestinationPicker";
+import { destinationError, saveMappingDestination } from "./destinationSearch";
 
 export type SuggestCandidate = {
   concept_id: number;
@@ -39,6 +40,8 @@ type Props = {
   activity: CandidateActivity[];
   finished: boolean;
   onSaved?: () => void;
+  canApprove?: boolean;
+  vocabularies?: { vocabulary_id: string; vocabulary_name: string }[];
 };
 
 const STRATEGY_LABELS: Record<string, string> = { umls: "U", lexical: "L", vectors: "V", semantic: "V" };
@@ -76,7 +79,10 @@ function mergeCandidates(searches: CandidateActivity[], ranked?: CandidateActivi
   return [...byId.values()];
 }
 
-export default function SuggestCandidates({ activity, finished, onSaved }: Props) {
+export default function SuggestCandidates({ activity, finished, onSaved, canApprove = false, vocabularies = [] }: Props) {
+  const [editing, setEditing] = useState<number | null>(null);
+  const [needsAttentionOnly, setNeedsAttentionOnly] = useState(false);
+  const [savedNames, setSavedNames] = useState<Record<number, string>>({});
   const [saving, setSaving] = useState<number | null>(null);
   const [selected, setSelected] = useState<Record<number, number>>({});
   const [error, setError] = useState("");
@@ -92,14 +98,11 @@ export default function SuggestCandidates({ activity, finished, onSaved }: Props
     setSaving(mappingId);
     setError("");
     try {
-      await api.patch(`/v1/code-mappings/${mappingId}/`, {
-        destination_concept_id: candidate.concept_id,
-        status: "proposed",
-      });
+      await saveMappingDestination(mappingId, candidate.concept_id);
       setSelected(current => ({ ...current, [mappingId]: candidate.concept_id }));
       onSaved?.();
-    } catch {
-      setError("Could not save the alternative candidate. Please try again.");
+    } catch (failure) {
+      setError(`Could not save the alternative candidate. ${destinationError(failure)}`);
     } finally {
       setSaving(null);
     }
@@ -127,6 +130,20 @@ export default function SuggestCandidates({ activity, finished, onSaved }: Props
     return undefined;
   };
 
+  const needsAttention = (mappingId: number, events: CandidateActivity[]) => {
+    if (selected[mappingId] !== undefined) return false;
+    const ranked = events.filter(event => event.stage === "ranked").at(-1);
+    const result = events.filter(event => event.stage === "result").at(-1);
+    const winner = (result ?? ranked)?.suggested;
+    if (!winner) return true;
+    const scores = (ranked?.alternatives ?? []).filter(item => item.concept_id === winner.concept_id);
+    // Use the ranker's existing "low" band, below 40%. Unknown confidence
+    // does not mean low confidence; runs from older versions may omit it.
+    return scores.length > 0 && Math.max(...scores.map(item => item.confidence)) < 0.4;
+  };
+  const attentionCount = [...groups].filter(([id, events]) => needsAttention(id, events)).length;
+  const visibleGroups = [...groups].filter(([id, events]) => !needsAttentionOnly || needsAttention(id, events));
+
   return <section aria-label="Suggestion candidates" className="mb-4 space-y-3 rounded-md border border-slate-200 bg-white p-4">
     <button type="button" className="flex w-full items-center justify-between text-left"
       onClick={() => setCollapsed(c => !c)} aria-expanded={!collapsed}>
@@ -134,10 +151,16 @@ export default function SuggestCandidates({ activity, finished, onSaved }: Props
       <span className="text-slate-400">{collapsed ? "+" : "\u2212"}</span>
     </button>
     {!collapsed && <>
-      <p className="text-sm text-slate-600">Candidates appear as each search finishes. After the run finishes, you can choose an alternative and review it in the mapping table.</p>
+      <p className="text-sm text-slate-600">Candidates appear as each search finishes. After the run finishes, choose an alternative or search for a different destination here.</p>
       {error && <p role="alert" className="text-sm text-rose-700">{error}</p>}
       {!groups.size && <p role="status" className="text-sm">{finished ? "No candidates recorded for this run." : "Waiting for candidates\u2026"}</p>}
-      {[...groups].map(([mappingId, events]) => {
+      {finished && <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
+        <input type="checkbox" checked={needsAttentionOnly} onChange={event => { setNeedsAttentionOnly(event.target.checked); setEditing(null); }} />
+        Needs attention ({attentionCount})
+        <span className="font-normal text-xs text-slate-500">No destination or confidence below 40% in this run</span>
+      </label>}
+      {needsAttentionOnly && !visibleGroups.length && <p role="status" className="text-sm text-slate-600">No remaining mappings need attention in this run.</p>}
+      {visibleGroups.map(([mappingId, events]) => {
         const source = events[0];
         const description = sourceDescription(events);
         const result = events.filter(event => event.stage === "result").at(-1);
@@ -190,6 +213,22 @@ export default function SuggestCandidates({ activity, finished, onSaved }: Props
           </table>}
           {ranked && <p className="mt-2 text-sm font-medium">{winner ? `Winner: ${winner.concept_name}` : "No destination proposed"}</p>}
           {(result ?? ranked)?.note && <p className="mt-1 text-sm text-slate-600">{(result ?? ranked)?.note}</p>}
+          {savedNames[mappingId] && <p role="status" className="mt-2 text-sm font-medium text-green-800">Saved: {savedNames[mappingId]}</p>}
+          {finished && !result?.dry_run && <div className="mt-3">
+            {editing === mappingId ? <InlineDestinationPicker key={mappingId} mappingId={mappingId}
+              sourceLabel={`${source.source_vocabulary_id || "Uncoded"}:${source.source_code}${description ? ` — ${description}` : ""}`}
+              canApprove={canApprove} vocabularies={vocabularies}
+              onCancel={() => setEditing(null)} onSaved={(_saved, concept) => {
+                setSelected(current => ({ ...current, [mappingId]: concept.concept_id }));
+                setSavedNames(current => ({ ...current, [mappingId]: concept.concept_name }));
+                setEditing(null);
+                onSaved?.();
+              }} /> : <button type="button" disabled={saving !== null}
+                aria-label={`Search destination for ${source.source_code}`}
+                onClick={() => setEditing(mappingId)} className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40">
+                Search for another destination
+              </button>}
+          </div>}
           {ranked?.ranking_timings && <p className="mt-1 text-xs text-slate-500">
             Ranking: {Object.entries(ranked.ranking_timings).map(([k, v]) =>
               `${k.replace(/_ms$/, "")} ${(v / 1000).toFixed(1)}s`

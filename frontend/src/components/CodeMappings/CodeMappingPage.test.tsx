@@ -229,6 +229,30 @@ describe("CodeMappingPage", () => {
     mockDelete.mockResolvedValue({ data: {} });
   });
 
+  it("lets a curator choose a destination inline without opening the edit dialog", async () => {
+    renderPage([proposedRow]);
+    const previousGet = mockGet.getMockImplementation()!;
+    mockGet.mockImplementation((url: string, ...rest: unknown[]) => url === "/v1/code-mappings/7/"
+      ? Promise.resolve({ data: proposedRow }) : previousGet(url, ...rest));
+    mockPatch.mockResolvedValue({ data: { ...proposedRow, destination_concept_id: loincHit.concept_id, origin_system: "curator" } });
+    const trigger = await screen.findByRole("button", { name: "Choose destination for M-PROTEIN, SERUM" });
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    fireEvent.click(trigger);
+    const input = await screen.findByRole("combobox", { name: "Search destination concepts inline" });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    fireEvent.change(input, { target: { value: "monoclonal" } });
+    fireEvent.click(await screen.findByRole("option", { name: /Protein.monoclonal/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Save choice" }));
+    await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/", {
+      destination_concept_id: loincHit.concept_id, status: "proposed",
+    }));
+    await waitFor(() => expect(screen.queryByRole("combobox", { name: "Search destination concepts inline" })).not.toBeInTheDocument());
+    expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/7/lock/");
+    expect(mockDelete).toHaveBeenCalledWith("/v1/code-mappings/7/lock/");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
   describe("duplicate source-code errors", () => {
     const proposed = { ...proposedRow, mapping_id: 101, source_vocabulary_id: "ICD10", source_code: "A02.0" };
     // Same vocabulary as `proposed`: a duplicate is one code twice in one vocabulary.
