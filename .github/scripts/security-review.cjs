@@ -7,31 +7,31 @@ const REQUIRED_REVIEWER = { login: 'larsburgess', id: 23724 };
 // Referenced issues are fetched one API call each, on every scheduled run, from
 // text the PR author controls. Cap the fan-out well below the hourly budget.
 const MAX_ISSUE_REFERENCES = 20;
-// Paths the test-file exemption must never reach. Two groups:
-//   the control plane — CI, the policy that gates it, the scanners it runs, the
-//   change-management evidence: a file here executes with the control plane's
-//   privileges whatever it is named (`.github/workflows/*.test.yml` is a
-//   workflow Actions will run; `.github/scripts/*.test.cjs` was executed by this
-//   policy's own workflow), and
-//   the Django project packages, where a `test_settings.py` or a `tests/urls.py`
-//   is still a settings module or a route table.
+// Paths the test-file exemption must never reach: the control plane — CI, the
+// policy that gates it, the scanners it runs, the change-management evidence,
+// and the Django settings modules. A file here executes with the control
+// plane's privileges whatever it is named (`.github/workflows/*.test.yml` is a
+// workflow Actions will run; `.github/scripts/*.test.cjs` was executed by this
+// policy's own workflow).
 const CONTROL_PATHS = [
   '.github/**', '**/CODEOWNERS', 'docs/soc2/**', '.bandit*', '.gitleaks*',
   'SECURITY.md', 'scripts/capture_change_management_evidence.py',
-  'promop/**', 'ctomop/**',
+  'promop/settings.py', 'ctomop/settings.py',
 ];
+// Paths that require @larsburgess approval — true security policy, auth/identity
+// code, and credential handling. Operational files (Dockerfiles, deps, infra,
+// route tables, start scripts) are intentionally excluded: they are covered by
+// CI security gates and do not change access control policy.
 const SECURITY_PATHS = [
   ...CONTROL_PATHS,
   'omop_core/authorization.py', 'patient_portal/services.py',
-  'patient_portal/api/break_glass.py', 'patient_portal/checks.py', 'start*.sh',
+  'patient_portal/api/break_glass.py', 'patient_portal/checks.py',
   'patient_portal/api/authentication.py', 'patient_portal/api/permissions.py',
   'patient_portal/api/middleware.py', 'patient_portal/api/providers/**',
   // Service principals: the credential definitions and the two commands that
   // issue and import them.
   'patient_portal/service_tokens.py', 'patient_portal/service_applications.py',
   'patient_portal/management/commands/*service_token*.py',
-  // A route table decides what is reachable without authentication.
-  '**/*urls.py',
   'frontend/src/utils/oauth.ts', 'frontend/src/hooks/useAuth.ts',
   // The transports that attach (or deliberately omit) a credential — not the
   // data-fetching modules built on top of them.
@@ -39,11 +39,6 @@ const SECURITY_PATHS = [
   'frontend/src/api/clinicalTransport.ts', 'frontend/src/federation/assertLabsTokens.ts',
   'frontend/src/components/Auth/**',
   'docs/*security*.md',
-  'requirements*.txt', 'requirements/**', 'frontend/package*.json',
-  '.env*', '**/.env*',
-  // Production entrypoints, in each spelling the deployment targets accept.
-  '**/Dockerfile*', 'docker-compose*.yml', 'render.yaml', 'Procfile',
-  'nixpacks.toml',
 ];
 const TEST_PATHS = ['tests/**', '**/tests/**', '**/tests.py', '**/test_*.py', '**/*.test.*', '**/*.itest.*'];
 

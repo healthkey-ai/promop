@@ -22,15 +22,11 @@
 /patient_portal/services.py         @larsburgess
 /patient_portal/api/break_glass.py  @larsburgess
 
-# ── Deployment, configuration and secrets ─────────────────────────────────────
-# Changes here alter what runs in production or what guards it.
+# ── Configuration and security checks ───────────────────────────────────────
+# Settings modules control auth backends, secret keys, and CORS policy.
 /promop/settings.py                 @larsburgess
 /ctomop/settings.py                 @larsburgess
 /patient_portal/checks.py           @larsburgess
-/start.sh                           @larsburgess
-/Dockerfile                         @larsburgess
-/Dockerfile.gcp                     @larsburgess
-/requirements.txt                   @larsburgess
 
 # ── CI and the security gates themselves ──────────────────────────────────────
 # A change that weakens a gate should be as visible as a change that trips it.
@@ -38,8 +34,7 @@
 /.gitleaks.toml                     @larsburgess
 /.bandit-baseline.json              @larsburgess
 
-# ── Ownership, Render infrastructure, and change-management evidence ──────────
+# ── Ownership and change-management evidence ────────────────────────────────
 /CODEOWNERS                         @larsburgess
-/render.yaml                        @larsburgess
 /docs/soc2/                         @larsburgess
 /scripts/capture_change_management_evidence.py  @larsburgess

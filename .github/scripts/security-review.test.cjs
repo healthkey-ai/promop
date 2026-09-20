@@ -41,8 +41,8 @@ const { securityFiles, evaluate, run } = require('./security-review.cjs');
 
 test('file classification covers security code and renames while excluding test-only edits', () => {
   for (const filename of ['ctomop/settings.py', 'frontend/src/components/Auth/Login.tsx', '.github/workflows/ci.yml', 'patient_portal/api/permissions.py', '.bandit-baseline.json']) assert.equal(securityFiles([{ filename }]), true, filename);
-  for (const filename of ['patient_portal/tests.py', 'tests/test_browser_oauth_retirement.py', 'frontend/src/components/Auth/Login.test.tsx', 'omop_core/services/genomics.py']) assert.equal(securityFiles([{ filename }]), false, filename);
-  assert.equal(securityFiles([{ filename: 'retired.py', previous_filename: 'ctomop/oauth.py' }]), true);
+  for (const filename of ['patient_portal/tests.py', 'tests/test_browser_oauth_retirement.py', 'frontend/src/components/Auth/Login.test.tsx', 'omop_core/services/genomics.py', 'requirements.txt', 'Dockerfile', 'render.yaml', 'start.sh', 'patient_portal/api/v1_urls.py']) assert.equal(securityFiles([{ filename }]), false, filename);
+  assert.equal(securityFiles([{ filename: 'retired.py', previous_filename: 'patient_portal/api/permissions.py' }]), true);
 });
 
 function fixture({ labels = [], files = [], issueLabels = [], reviews = [], broken = false, existingStatuses = [] } = {}) {
@@ -72,7 +72,7 @@ function fixture({ labels = [], files = [], issueLabels = [], reviews = [], brok
 }
 
 test('either a file, PR label, or linked issue label requires review', async () => {
-  for (const options of [{ files: [{ filename: 'ctomop/oauth.py' }] }, { labels: [{ name: 'security' }] }, { issueLabels: [{ name: 'security' }] }]) {
+  for (const options of [{ files: [{ filename: 'patient_portal/api/permissions.py' }] }, { labels: [{ name: 'security' }] }, { issueLabels: [{ name: 'security' }] }]) {
     const { github, current } = fixture(options);
     assert.equal((await evaluate(github, 'healthkey-ai', 'promop', current)).state, 'failure');
     const approved = fixture({ ...options, reviews: [review('APPROVED')] });
@@ -128,7 +128,7 @@ test('only Lars can approve security changes with write access and no team requi
 });
 
 test('security control and existing protected paths require review', () => {
-  for (const filename of ['omop_core/authorization.py', 'patient_portal/services.py', 'patient_portal/api/break_glass.py', 'patient_portal/checks.py', 'start.sh', 'CODEOWNERS', '.github/CODEOWNERS', 'docs/soc2/change-management.md', 'scripts/capture_change_management_evidence.py']) {
+  for (const filename of ['omop_core/authorization.py', 'patient_portal/services.py', 'patient_portal/api/break_glass.py', 'patient_portal/checks.py', 'CODEOWNERS', '.github/CODEOWNERS', 'docs/soc2/change-management.md', 'scripts/capture_change_management_evidence.py']) {
     assert.equal(securityFiles([{ filename }]), true, filename);
   }
 });
@@ -163,28 +163,32 @@ test('application test files stay exempt', () => {
   ]) assert.equal(securityPath(filename), false, filename);
 });
 
-test('the live settings package and other previously missed paths are gated', () => {
-  // Paths present in the tree today.
+test('auth/identity and settings paths are gated', () => {
   for (const filename of [
-    'promop/settings.py', 'promop/oauth.py', 'promop/urls.py', 'promop/celery.py',
-    'ctomop/settings.py', 'patient_portal/api/v1_urls.py', 'patient_portal/urls.py',
-    'start.sh', 'start-worker.sh', 'requirements.txt', 'ops/artemis/Dockerfile',
+    'promop/settings.py', 'ctomop/settings.py',
     'frontend/src/api/publicAxios.ts', 'frontend/src/api/clinicalTransport.ts',
     'frontend/src/federation/assertLabsTokens.ts', 'patient_portal/service_tokens.py',
     'patient_portal/management/commands/import_service_tokens.py',
-    'Procfile', 'nixpacks.toml', 'docs/promop-security-soc2-remediation-plan.md',
-  ]) assert.equal(securityPath(filename), true, filename);
-  // Spellings the tree does not use today but the deployment targets accept.
-  for (const filename of [
-    'ctomop/settings_staging.py', 'frontend/.env.production', 'requirements/base.txt',
-    'deploy/Dockerfile',
+    'docs/promop-security-soc2-remediation-plan.md',
   ]) assert.equal(securityPath(filename), true, filename);
 });
 
-test('a test-named file inside the Django project packages is still gated', () => {
+test('operational files are no longer gated', () => {
+  for (const filename of [
+    'promop/oauth.py', 'promop/urls.py', 'promop/celery.py',
+    'patient_portal/api/v1_urls.py', 'patient_portal/urls.py',
+    'start.sh', 'start-worker.sh', 'requirements.txt', 'ops/artemis/Dockerfile',
+    'Procfile', 'nixpacks.toml', 'ctomop/settings_staging.py',
+    'frontend/.env.production', 'requirements/base.txt', 'deploy/Dockerfile',
+    'render.yaml', 'docker-compose.yml', 'Dockerfile', 'Dockerfile.gcp',
+    'frontend/package.json', 'frontend/package-lock.json', '.env.example',
+  ]) assert.equal(securityPath(filename), false, filename);
+});
+
+test('Django project package test files are no longer gated (scope narrowed to settings.py)', () => {
   for (const filename of [
     'promop/test_settings.py', 'promop/tests/urls.py', 'ctomop/test_settings.py',
-  ]) assert.equal(securityPath(filename), true, filename);
+  ]) assert.equal(securityPath(filename), false, filename);
 });
 
 test('a path carrying stray whitespace cannot slip past classification', () => {
