@@ -16,7 +16,7 @@ pytestmark = pytest.mark.django_db
 
 @pytest.fixture
 def setup():
-    actor = Identity.objects.create_user(email='trusted-admin@example.test')
+    actor = Identity.objects.create_user(email='trusted-admin@example.test', email_verified_at=timezone.now())
     source, target = OrganizationFactory(), OrganizationFactory()
     record = PatientRecordFactory(organization=target)
     client = APIClient()

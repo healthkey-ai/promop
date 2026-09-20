@@ -136,4 +136,9 @@ def reset_password(request):
         return Response({'error': reuse_error}, status=status.HTTP_400_BAD_REQUEST)
 
     set_new_password(identity, new, must_change=False)
+    # The reset link only ever goes to the account's own address, so completing
+    # it is the same proof a verification link gives.
+    identity.mark_email_verified()
+    from patient_portal.api.email_verification import promote_trusted_domain_grants
+    promote_trusted_domain_grants(identity)
     return Response({'detail': 'Password has been reset. You can now sign in.'})

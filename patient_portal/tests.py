@@ -8314,6 +8314,7 @@ class OrgDiseaseStatsTest(TestCase):
         self.assertEqual(counts['cll'], 1)
 
     def test_domain_trust_inflates_accessible_count(self):
+        self.org_admin.mark_email_verified()
         from omop_core.models import OrgTrust
         # org_b grants access to users with @t.com — org_admin has email admin@t.com
         OrgTrust.objects.create(granting_org=self.org_b, trusted_domain='t.com')
@@ -8476,6 +8477,7 @@ class OrgAdminPatientListScopingTest(TestCase):
 
     def test_domain_trust_admin_sees_trusted_org_patients(self):
         trusted_admin = Identity.objects.create_user(email='trusted@t.com', password='x')
+        trusted_admin.mark_email_verified()
         OrgTrust.objects.create(granting_org=self.org_a, trusted_domain='t.com')
         resp = self._get(trusted_admin)
         self.assertEqual(resp.status_code, 200)
@@ -8868,6 +8870,7 @@ class OrgTrustAccessTest(TestCase):
         GroupAccess.objects.create(identity=self.direct_user, org=self.org_a, role='org_admin')
 
         self.domain_user = _make_user('user@trusted.com')
+        self.domain_user.mark_email_verified()
 
         self.no_access_user = _make_user('noone@other.com')
 
@@ -9319,6 +9322,7 @@ class OrgViewSetTrustedAdminTest(TestCase):
     def setUp(self):
         self.client = APIClient()
         self.user = _make_user('trusted@partner.com')
+        self.user.mark_email_verified()
         self.org = _make_org('Trusted Org', 'trusted-org')
         self.client.force_authenticate(user=self.user)
 
@@ -9460,7 +9464,7 @@ class OrgInvitationFlowTest(TestCase):
 
     def test_confirm_does_not_overwrite_existing_account_password(self):
         existing = Identity.objects.create_user(
-            email='has-acct@example.com', password='Existing-pass-1')
+            email='has-acct@example.com', password='Existing-pass-1', email_verified_at=timezone.now())
         invitation = self._invite('has-acct@example.com')
         resp = APIClient().post('/api/orgs/confirm-invitation/',
                                 {'token': invitation.token, 'password': 'Attempt-override-9'})
@@ -9478,7 +9482,7 @@ class OrgInvitationFlowTest(TestCase):
         self.assertEqual(resp.data['org_name'], self.org.name)
 
     def test_lookup_no_password_for_existing_account(self):
-        Identity.objects.create_user(email='lookup-existing@example.com', password='Existing-pass-1')
+        Identity.objects.create_user(email='lookup-existing@example.com', password='Existing-pass-1', email_verified_at=timezone.now())
         invitation = self._invite('lookup-existing@example.com')
         resp = APIClient().get('/api/v1/orgs/invitation-lookup/', {'token': invitation.token})
         self.assertEqual(resp.status_code, 200, resp.data)
@@ -9724,7 +9728,7 @@ class OrgInvitationFlowTest(TestCase):
         self.assertFalse(claims.email_verified)
 
     def test_invite_existing_user_grants_access_immediately(self):
-        invitee = Identity.objects.create_user(email='existing-user@example.com', password='pass')
+        invitee = Identity.objects.create_user(email='existing-user@example.com', password='pass', email_verified_at=timezone.now())
         resp = self.client.post('/api/orgs/invite-org/invite/', {
             'email': 'existing-user@example.com',
             'role': 'analyst',
@@ -9736,7 +9740,7 @@ class OrgInvitationFlowTest(TestCase):
         )
 
     def test_invite_existing_user_updates_existing_org_role(self):
-        invitee = Identity.objects.create_user(email='role-update@example.com', password='pass')
+        invitee = Identity.objects.create_user(email='role-update@example.com', password='pass', email_verified_at=timezone.now())
         GroupAccess.objects.create(
             identity=invitee,
             org=self.org,
@@ -9754,7 +9758,7 @@ class OrgInvitationFlowTest(TestCase):
         self.assertEqual(grant.redirect_url, '')
 
     def test_invite_existing_user_does_not_downgrade_org_admin(self):
-        invitee = Identity.objects.create_user(email='admin-role@example.com', password='pass')
+        invitee = Identity.objects.create_user(email='admin-role@example.com', password='pass', email_verified_at=timezone.now())
         GroupAccess.objects.create(identity=invitee, org=self.org, role='org_admin')
         resp = self.client.post('/api/orgs/invite-org/invite/', {
             'email': 'admin-role@example.com',
@@ -9781,7 +9785,7 @@ class OrgInvitationFlowTest(TestCase):
         from django.utils import timezone
         from patient_portal.models import Identity
         # Create the identity for the invited email
-        invitee = Identity.objects.create_user(email='invitee@example.com', password='pass')
+        invitee = Identity.objects.create_user(email='invitee@example.com', password='pass', email_verified_at=timezone.now())
         token = _secrets.token_hex(32)
         OrgInvitation.objects.create(
             org=self.org, email='invitee@example.com', role='doctor',
@@ -9800,7 +9804,7 @@ class OrgInvitationFlowTest(TestCase):
 
     def test_confirm_analyst_invitation_returns_redirect_url(self):
         from django.utils import timezone
-        invitee = Identity.objects.create_user(email='analyst-invitee@example.com', password='pass')
+        invitee = Identity.objects.create_user(email='analyst-invitee@example.com', password='pass', email_verified_at=timezone.now())
         token = _secrets.token_hex(32)
         OrgInvitation.objects.create(
             org=self.org,
@@ -9860,7 +9864,7 @@ class OrgInvitationFlowTest(TestCase):
 
     def test_email_failure_still_creates_invitation(self):
         from unittest.mock import patch
-        invitee = Identity.objects.create_user(email='failmail@example.com', password='pass')
+        invitee = Identity.objects.create_user(email='failmail@example.com', password='pass', email_verified_at=timezone.now())
         with patch('patient_portal.api.org_views.send_mail', side_effect=Exception('SMTP error')):
             resp = self.client.post('/api/orgs/invite-org/invite/', {
                 'email': 'failmail@example.com',
@@ -10070,6 +10074,7 @@ class UserSerializerOrgAdminTest(TestCase):
     def test_is_org_admin_true_with_domain_trust(self):
         OrgTrust.objects.create(granting_org=self.org, trusted_domain='example.com')
         trusted_user = _make_user('trusted@example.com')
+        trusted_user.mark_email_verified()
         self.client.force_authenticate(user=trusted_user)
         resp = self.client.get('/api/user/')
         self.assertEqual(resp.status_code, 200)
@@ -10077,6 +10082,7 @@ class UserSerializerOrgAdminTest(TestCase):
         self.assertTrue(data.get('is_org_admin'))
 
     def test_org_accesses_include_invited_and_trusted_domain_orgs(self):
+        self.user.mark_email_verified()
         invited_org = _make_org('Invited Org', 'invited-org')
         pending_org = _make_org('Pending Org', 'pending-org')
         domain_org = _make_org('Domain Org', 'domain-org')
@@ -15253,8 +15259,11 @@ class OrgPatientSignupTest(TestCase):
             )
         return private_org
 
-    def test_signup_trusted_domain_gets_analyst_role(self):
-        """A private org that trusts the email domain grants analyst (#1454)."""
+    def test_signup_trusted_domain_gets_analyst_role_once_the_email_is_verified(self):
+        """#1454 + email verification: a trusted domain earns analyst, but only
+        for an address the account has proved it owns."""
+        import re
+        from django.core import mail
         from omop_core.models import OrgTrust
         private_org = self._private_org_with_patients()
         OrgTrust.objects.create(
@@ -15269,20 +15278,32 @@ class OrgPatientSignupTest(TestCase):
             'family_name': 'User',
         })
         self.assertEqual(resp.status_code, 201)
+        self.assertTrue(resp.data['email_verification_required'])
+        self.assertTrue(resp.data['verification_email_sent'])
         identity = Identity.objects.get(email='user@private-clinic.com')
-        self.assertEqual(
-            list(GroupAccess.objects.filter(identity=identity, org=private_org)
-                 .values_list('role', flat=True)),
-            ['analyst'],
-        )
 
-        # The grant is only the means: what #1454 reported is that the user was
-        # routed and scoped as a patient.
+        def roles():
+            return list(GroupAccess.objects.filter(identity=identity, org=private_org)
+                        .values_list('role', flat=True))
+
+        # Typed, not proved: self-access only, and nobody else's record.
+        self.assertEqual(roles(), ['patient'])
+        user = client.get('/api/v1/user/').data['user']
+        self.assertTrue(user['is_patient'])
+        self.assertFalse(user['email_verified'])
+        self.assertEqual(client.get('/api/v1/patient-records/77801/').status_code, 404)
+
+        # Follow the emailed link.
+        self.assertEqual(mail.outbox[-1].to, ['user@private-clinic.com'])
+        token = re.search(r'verify-email\?token=(\S+)', mail.outbox[-1].body).group(1)
+        verified = APIClient().post('/api/v1/auth/verify-email/', {'token': token})
+        self.assertEqual(verified.status_code, 200)
+
+        self.assertEqual(roles(), ['analyst'])
         user = client.get('/api/v1/user/').data['user']
         self.assertFalse(user['is_patient'])
-        self.assertEqual(
-            client.get('/api/v1/patient-records/77801/').status_code, 200,
-        )
+        self.assertTrue(user['email_verified'])
+        self.assertEqual(client.get('/api/v1/patient-records/77801/').status_code, 200)
 
     def test_signup_invitation_only_gets_patient_role(self):
         """An invitation alone does not make a self-signup an analyst.
@@ -15441,6 +15462,293 @@ class OrgPatientSignupTest(TestCase):
     EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
     APP_BASE_URL='https://app.test',
 )
+class SelfSignupEmailTrustTest(TestCase):
+    """A self-signed-up address is a claim, and nothing may be granted on a claim.
+
+    Self-signup takes an email and a password and signs the user in. Two things
+    then trusted that address, and each was a way to read patients the person
+    had no right to:
+
+    * a domain trust gives every account "at" a domain another organization's
+      patients, so signing up anywhere as ``x@trusted-domain`` reached them;
+    * inviting someone creates a passwordless placeholder account that already
+      holds the invited role, and signup would set a password on it -- handing
+      the role to whoever typed the address, without the invitation token.
+    """
+
+    PASSWORD = 'Str0ng!Pass99'
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()  # DRF throttle state leaks between tests.
+        self.public = Organization.objects.create(
+            name='Public Demo', slug='public-demo', allows_patient_signup=True,
+        )
+        self.private = Organization.objects.create(name='Private Clinic', slug='private-clinic')
+        self.patient = Person.objects.create(person_id=88101)
+        PatientRecord.objects.create(person=self.patient, organization=self.private)
+
+    def _signup(self, email, slug='public-demo'):
+        client = APIClient()
+        resp = client.post(f'/api/v1/orgs/{slug}/patient-signup/',
+                           {'email': email, 'password': self.PASSWORD})
+        return client, resp
+
+    def _token_from_last_email(self):
+        import re
+        from django.core import mail
+        return re.search(r'verify-email\?token=(\S+)', mail.outbox[-1].body).group(1)
+
+    def _reads_private_patient(self, client):
+        return client.get('/api/v1/patient-records/88101/').status_code
+
+    # -- the domain-trust route ------------------------------------------------
+
+    def test_unverified_address_at_a_trusted_domain_reaches_nothing(self):
+        """The attack: sign up at a public org, claiming a trusted domain."""
+        from omop_core.models import OrgTrust
+        OrgTrust.objects.create(granting_org=self.private, trusted_domain='trusted.org')
+        client, resp = self._signup('attacker@trusted.org')
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(self._reads_private_patient(client), 404)
+        user = client.get('/api/v1/user/').data['user']
+        self.assertFalse(user['email_verified'])
+        self.assertNotIn('private-clinic', {a['org_slug'] for a in user['org_accesses']})
+
+    def test_verified_address_at_a_trusted_domain_is_trusted(self):
+        """The legitimate user is not locked out: the link restores the trust."""
+        from omop_core.models import OrgTrust
+        OrgTrust.objects.create(granting_org=self.private, trusted_domain='trusted.org')
+        client, _ = self._signup('real@trusted.org')
+        self.assertEqual(self._reads_private_patient(client), 404)
+        resp = APIClient().post('/api/v1/auth/verify-email/', {'token': self._token_from_last_email()})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._reads_private_patient(client), 200)
+
+    def test_invitation_acceptance_and_federated_logins_count_as_verified(self):
+        local = Identity.objects.create_user(email='typed@trusted.org', password=self.PASSWORD)
+        self.assertFalse(local.has_verified_email)
+        self.assertEqual(local.verified_email_domain, '')
+        federated = Identity.objects.create(issuer='https://idp.example', sub='abc', email='sso@Trusted.org')
+        self.assertFalse(federated.has_verified_email)
+        federated.mark_email_verified()
+        self.assertTrue(federated.has_verified_email)
+        self.assertEqual(federated.verified_email_domain, 'trusted.org')
+        staff = Identity.objects.create_user(email='ops@trusted.org', password=self.PASSWORD, is_staff=True)
+        self.assertTrue(staff.has_verified_email)
+        self.assertFalse(Identity(issuer='https://idp.example', sub='x', email='').has_verified_email)
+
+    # -- the placeholder route -------------------------------------------------
+
+    def test_signup_cannot_take_over_an_invited_account(self):
+        """The attack: type an invited doctor's address into the signup form."""
+        admin = Identity.objects.create_user(email='admin@private-clinic.com', password=self.PASSWORD)
+        GroupAccess.objects.create(identity=admin, org=self.private, role='org_admin')
+        inviter = APIClient()
+        inviter.force_authenticate(user=admin)
+        invited = inviter.post('/api/orgs/private-clinic/invite/',
+                               {'email': 'doctor@elsewhere.com', 'role': 'doctor'})
+        self.assertEqual(invited.status_code, 201)
+        placeholder = Identity.objects.get(email='doctor@elsewhere.com')
+        self.assertFalse(placeholder.has_usable_password())
+        self.assertTrue(GroupAccess.objects.filter(identity=placeholder, role='doctor').exists())
+
+        # Offered on the Sign Up tab because of the invitation -- and refused.
+        client, resp = self._signup('doctor@elsewhere.com', slug='private-clinic')
+        self.assertEqual(resp.status_code, 409)
+        self.assertIn('invitation', resp.data['error'])
+        placeholder.refresh_from_db()
+        self.assertFalse(placeholder.has_usable_password())
+        self.assertNotIn('_auth_user_id', client.session)
+        self.assertEqual(self._reads_private_patient(client), 401)
+
+        # Nor through a public org, where signup is otherwise open to anyone.
+        client, resp = self._signup('Doctor@Elsewhere.com')
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(Identity.objects.filter(email__iexact='doctor@elsewhere.com').count(), 1)
+
+    def test_accepting_the_invitation_verifies_the_address(self):
+        from django.core import mail
+        admin = Identity.objects.create_user(email='admin@private-clinic.com', password=self.PASSWORD)
+        GroupAccess.objects.create(identity=admin, org=self.private, role='org_admin')
+        inviter = APIClient()
+        inviter.force_authenticate(user=admin)
+        inviter.post('/api/orgs/private-clinic/invite/', {'email': 'doctor@elsewhere.com', 'role': 'doctor'})
+        token = OrgInvitation.objects.get(email='doctor@elsewhere.com').token
+        self.assertIn(token, mail.outbox[-1].body)
+        resp = APIClient().post('/api/orgs/confirm-invitation/', {'token': token, 'password': self.PASSWORD})
+        self.assertIn(resp.status_code, (200, 201), getattr(resp, 'data', None))
+        self.assertTrue(Identity.objects.get(email='doctor@elsewhere.com').has_verified_email)
+
+    # -- the link itself -------------------------------------------------------
+
+    def test_inviting_an_existing_unverified_login_waits_for_mailbox_proof(self):
+        client, _ = self._signup('doctor@elsewhere.com')
+        identity = Identity.objects.get(email='doctor@elsewhere.com')
+        admin = Identity.objects.create_user(email='operator@example.com', is_staff=True)
+        inviter = APIClient()
+        inviter.force_authenticate(admin)
+        response = inviter.post('/api/orgs/private-clinic/invite/',
+                                {'email': identity.email, 'role': 'doctor'})
+        self.assertEqual(response.status_code, 201)
+        self.assertFalse(response.data['access_granted'])
+        self.assertFalse(GroupAccess.objects.filter(identity=identity, org=self.private).exists())
+        self.assertEqual(self._reads_private_patient(client), 404)
+        self.assertNotIn('private-clinic', {
+            entry['org_slug'] for entry in client.get('/api/v1/user/').data['user']['org_accesses']
+        })
+        invitation = OrgInvitation.objects.get(email=identity.email)
+        lookup = APIClient().get('/api/v1/orgs/invitation-lookup/', {'token': invitation.token})
+        self.assertTrue(lookup.data['needs_password'])
+        accepted = APIClient().post('/api/orgs/confirm-invitation/', {
+            'token': invitation.token, 'password': 'Mailbox-Owner-Password-42!',
+        })
+        self.assertEqual(accepted.status_code, 200, accepted.data)
+        identity.refresh_from_db()
+        self.assertTrue(identity.has_verified_email)
+        self.assertFalse(identity.check_password(self.PASSWORD))
+        self.assertIn(self._reads_private_patient(client), (401, 403))
+
+    def test_verification_works_with_a_session_cookie_and_without_csrf_token(self):
+        client = APIClient(enforce_csrf_checks=True)
+        identity = Identity.objects.create_user(email='verify@example.com', password=self.PASSWORD)
+        client.force_login(identity)
+        from patient_portal.api.email_verification import make_verification_link
+        token = make_verification_link(identity).split('token=')[1]
+        response = client.post('/api/v1/auth/verify-email/', {'token': token})
+        self.assertEqual(response.status_code, 200, response.data)
+
+    def test_federated_verification_requires_matching_verified_claim(self):
+        from patient_portal.api.authentication import PartnerAuthentication
+        from patient_portal.api.providers.base import TokenClaims
+        identity = Identity.objects.create(issuer='https://idp.example', sub='federated',
+                                           email='claimed@trusted.org')
+        claims = TokenClaims(issuer=identity.issuer, sub=identity.sub,
+                             email=identity.email, email_verified=False, name=None, raw={})
+        self.assertFalse(PartnerAuthentication._get_or_create_identity(claims).has_verified_email)
+        claims.email_verified = True
+        self.assertTrue(PartnerAuthentication._get_or_create_identity(claims).has_verified_email)
+
+    def test_migration_preserves_proved_accounts_and_removes_unverified_email_grants(self):
+        from django.apps import apps
+        from importlib import import_module
+        from omop_core.models import OrgTrust
+        local = Identity.objects.create_user(email='legacy@trusted.org', password=self.PASSWORD)
+        OrgTrust.objects.create(granting_org=self.private, trusted_domain='trusted.org')
+        grant = GroupAccess.objects.create(identity=local, org=self.private, role='analyst')
+        pending = Identity.objects.create_user(email='pending@example.com', password=self.PASSWORD)
+        admin = Identity.objects.create_user(email='migration-operator@example.com', is_staff=True)
+        invitation = OrgInvitation.objects.create(org=self.private, email=pending.email,
+            role='doctor', invited_by=admin, token='d'*64,
+            expires_at=timezone.now()+timedelta(days=1))
+        GroupAccess.objects.create(identity=pending, org=self.private, role='doctor', granted_by=admin)
+        proved = Identity.objects.create_user(email='proved@example.com')
+        OrgInvitation.objects.create(org=self.private, email=proved.email, role='doctor',
+            token='e'*64, confirmed_at=timezone.now(), expires_at=timezone.now()+timedelta(days=1))
+        migration = import_module('patient_portal.migrations.0020_identity_email_verified_at')
+        migration.backfill(apps, None)
+        grant.refresh_from_db()
+        self.assertEqual(grant.role, 'patient')
+        self.assertFalse(GroupAccess.objects.filter(identity=pending, org=self.private).exists())
+        local.refresh_from_db()
+        proved.refresh_from_db()
+        self.assertFalse(local.has_verified_email)
+        self.assertTrue(proved.has_verified_email)
+
+    def test_verification_does_not_promote_an_explicit_patient_membership(self):
+        from patient_portal.api.email_verification import make_verification_link
+        from omop_core.models import OrgTrust
+        identity = Identity.objects.create_user(email='patient@trusted.org', password=self.PASSWORD)
+        OrgTrust.objects.create(granting_org=self.private, trusted_domain='trusted.org')
+        grant = GroupAccess.objects.create(identity=identity, org=self.private, role='patient')
+        token = make_verification_link(identity).split('token=')[1]
+        self.assertEqual(APIClient().post('/api/v1/auth/verify-email/', {'token': token}).status_code, 200)
+        grant.refresh_from_db()
+        self.assertEqual(grant.role, 'patient')
+
+    def test_changing_the_email_clears_its_verification(self):
+        identity = Identity.objects.create_user(email='first@example.com', password=self.PASSWORD)
+        identity.mark_email_verified()
+        identity.email = 'second@trusted.org'
+        identity.save(update_fields=['email'])
+        identity.refresh_from_db()
+        self.assertFalse(identity.has_verified_email)
+        self.assertEqual(identity.verified_email_domain, '')
+
+    def test_a_link_proves_only_the_address_it_was_sent_to(self):
+        from patient_portal.api.email_verification import make_verification_link
+        identity = Identity.objects.create_user(email='first@example.com', password=self.PASSWORD)
+        token = make_verification_link(identity).split('token=')[1]
+        Identity.objects.filter(pk=identity.pk).update(email='second@trusted.org')
+        resp = APIClient().post('/api/v1/auth/verify-email/', {'token': token})
+        self.assertEqual(resp.status_code, 400)
+        identity.refresh_from_db()
+        self.assertIsNone(identity.email_verified_at)
+
+    def test_bad_expired_and_missing_tokens_are_refused(self):
+        from unittest import mock
+        from patient_portal.api import email_verification
+        identity = Identity.objects.create_user(email='user@example.com', password=self.PASSWORD)
+        token = email_verification.make_verification_link(identity).split('token=')[1]
+        for bad in ('', 'not-a-token', token[:-2] + 'xx'):
+            self.assertEqual(
+                APIClient().post('/api/v1/auth/verify-email/', {'token': bad}).status_code, 400, bad,
+            )
+        with mock.patch.object(email_verification, 'MAX_AGE_SECONDS', -1):
+            self.assertEqual(
+                APIClient().post('/api/v1/auth/verify-email/', {'token': token}).status_code, 400,
+            )
+        identity.refresh_from_db()
+        self.assertIsNone(identity.email_verified_at)
+        # A deactivated account cannot be verified into life.
+        Identity.objects.filter(pk=identity.pk).update(is_active=False)
+        self.assertEqual(
+            APIClient().post('/api/v1/auth/verify-email/', {'token': token}).status_code, 400,
+        )
+
+    def test_resend_requires_a_session_and_stops_once_verified(self):
+        from django.core import mail
+        self.assertIn(
+            APIClient().post('/api/v1/auth/verify-email/resend/').status_code, (401, 403),
+        )
+        client, _ = self._signup('user@example.com')
+        sent_before = len(mail.outbox)
+        self.assertEqual(client.post('/api/v1/auth/verify-email/resend/').status_code, 200)
+        self.assertEqual(len(mail.outbox), sent_before + 1)
+        APIClient().post('/api/v1/auth/verify-email/', {'token': self._token_from_last_email()})
+        self.assertEqual(client.post('/api/v1/auth/verify-email/resend/').status_code, 200)
+        self.assertEqual(len(mail.outbox), sent_before + 1)
+
+    def test_a_mail_failure_does_not_fail_the_signup(self):
+        from unittest import mock
+        with mock.patch('patient_portal.api.email_verification.send_mail', side_effect=OSError('smtp down')):
+            client, resp = self._signup('user@example.com')
+        self.assertEqual(resp.status_code, 201)
+        self.assertFalse(resp.data['verification_email_sent'])
+        self.assertTrue(Identity.objects.filter(email='user@example.com').exists())
+
+    def test_completing_a_password_reset_verifies_the_address(self):
+        from patient_portal.api.password_reset import make_reset_link
+        from urllib.parse import parse_qs, urlparse
+        client, _ = self._signup('user@example.com')
+        identity = Identity.objects.get(email='user@example.com')
+        query = parse_qs(urlparse(make_reset_link(identity)).query)
+        resp = APIClient().post('/api/v1/auth/reset-password/', {
+            'uid': query['uid'][0], 'token': query['token'][0], 'new_password': 'An0ther!Str0ngPass',
+        })
+        self.assertEqual(resp.status_code, 200, getattr(resp, 'data', None))
+        identity.refresh_from_db()
+        self.assertTrue(identity.has_verified_email)
+
+    def test_an_unverified_address_is_not_matched_to_a_person(self):
+        """resolve_or_create_person links by email; a typed address must not."""
+        from patient_portal.services import resolve_or_create_person
+        victim = Person.objects.create(person_id=88102, email='victim@example.com')
+        identity = Identity.objects.create_user(email='victim@example.com', password=self.PASSWORD)
+        person = resolve_or_create_person(identity)
+        self.assertNotEqual(person.person_id, victim.person_id)
+
+
 class SelfServicePasswordResetTest(TestCase):
     """Test the public POST /api/v1/auth/request-reset/ endpoint."""
 

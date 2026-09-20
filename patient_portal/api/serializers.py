@@ -31,6 +31,9 @@ class UserSerializer(serializers.ModelSerializer):
     person_id = serializers.SerializerMethodField()
     effective_roles = serializers.SerializerMethodField()
     patient_delegations = serializers.SerializerMethodField()
+    # False means access that depends on the address (a trusted domain) is off
+    # until the user follows the emailed link; the app shows a prompt.
+    email_verified = serializers.BooleanField(source='has_verified_email', read_only=True)
 
     class Meta:
         model = Identity
@@ -38,7 +41,7 @@ class UserSerializer(serializers.ModelSerializer):
             'id', 'sub', 'email', 'name', 'is_staff', 'is_superuser',
             'is_org_admin', 'org_accesses', 'is_patient', 'person_id',
             'effective_roles', 'patient_delegations',
-            'must_change_password',
+            'must_change_password', 'email_verified',
         ]
         read_only_fields = ['must_change_password']
 
@@ -135,17 +138,18 @@ class UserSerializer(serializers.ModelSerializer):
                 'expires_at': grant.expires_at, 'access_via': ['explicit_grant'],
                 'group_name': grant.group.name if grant.group_id else None,
             })
-        for invitation in OrgInvitation.objects.filter(
-            email__iexact=obj.email, confirmed_at__isnull=True,
-            cancelled_at__isnull=True, expires_at__gt=timezone.now(),
-            org__is_active=True,
-        ).select_related('org').order_by('id'):
-            accesses.append({
-                'org_name': invitation.org.name, 'org_slug': invitation.org.slug,
-                'role': None, 'pending_role': invitation.role,
-                'expires_at': invitation.expires_at,
-                'access_via': ['invitation_pending'],
-            })
+        if obj.has_verified_email:
+            for invitation in OrgInvitation.objects.filter(
+                email__iexact=obj.email, confirmed_at__isnull=True,
+                cancelled_at__isnull=True, expires_at__gt=timezone.now(),
+                org__is_active=True,
+            ).select_related('org').order_by('id'):
+                accesses.append({
+                    'org_name': invitation.org.name, 'org_slug': invitation.org.slug,
+                    'role': None, 'pending_role': invitation.role,
+                    'expires_at': invitation.expires_at,
+                    'access_via': ['invitation_pending'],
+                })
         for role in self._trust_roles(obj):
             accesses.append({
                 'org_name': role['org_name'], 'org_slug': role['org_slug'],

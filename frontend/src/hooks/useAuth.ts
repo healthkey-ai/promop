@@ -45,6 +45,9 @@ export interface User {
   // refuses every /api/ request except change-password until the password is
   // reset, and the SPA shows a blocking change-password screen.
   must_change_password?: boolean;
+  // False until a self-signed-up account follows its emailed link. Access that
+  // depends on the address (a trusted email domain) is off meanwhile.
+  email_verified?: boolean;
 }
 
 export const useAuth = () => {

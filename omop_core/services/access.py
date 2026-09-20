@@ -30,9 +30,13 @@ def build_trusting_map(org_list) -> 'dict[int, set[int]]':
     # Domain trusts: find email domains of each org's users via GroupAccess
     org_user_domains: dict[int, set[str]] = {oid: set() for oid in org_ids}
 
+    # Only addresses the account has proved it owns count toward a domain
+    # trust -- the same rule get_accessible_orgs applies to one user.
+    verified = Q(identity__email_verified_at__isnull=False)
+
     # org_admin grants have a direct org FK
     for row in GroupAccess.objects.filter(
-        org_id__in=org_ids,
+        verified, org_id__in=org_ids,
     ).values('org_id', 'identity__email'):
         email = row['identity__email'] or ''
         if '@' in email:
@@ -40,7 +44,7 @@ def build_trusting_map(org_list) -> 'dict[int, set[int]]':
 
     # group-member grants go through group__organization
     for row in GroupAccess.objects.filter(
-        group__organization_id__in=org_ids,
+        verified, group__organization_id__in=org_ids,
     ).values('group__organization_id', 'identity__email'):
         org_id = row['group__organization_id']
         email = row['identity__email'] or ''
@@ -113,11 +117,12 @@ def get_visible_orgs(user) -> QuerySet:
     ) if direct_ids else set()
 
     # Domain trusts: active orgs that trust the user's email domain
-    email = (getattr(user, 'email', '') or '')
-    user_domain = email.split('@')[1] if '@' in email else ''
+    # Verified only: a domain trust hands out another organization's patients,
+    # and self-signup lets anyone type any address.
+    user_domain = getattr(user, 'verified_email_domain', '')
     trusted_by_domain = set(
         OrgTrust.objects.filter(
-            trusted_domain=user_domain,
+            trusted_domain__iexact=user_domain,
             granting_org__is_active=True,
         ).values_list('granting_org_id', flat=True)
     ) if user_domain else set()
@@ -169,10 +174,11 @@ def get_admin_access_paths(user):
         })
     # Preserve domain-trust policy: patient-only organization memberships do
     # not inherit admin authority just because their email matches a domain.
-    domain = (getattr(user, 'email', '') or '').partition('@')[2]
+    # Verified only -- see get_accessible_orgs.
+    domain = getattr(user, 'verified_email_domain', '')
     if domain and not (org_grants and not professional):
         for trust in OrgTrust.objects.filter(
-            trusted_domain=domain, granting_org__is_active=True,
+            trusted_domain__iexact=domain, granting_org__is_active=True,
         ).select_related('granting_org').order_by('id'):
             paths.append({
                 'org': trust.granting_org, 'source': 'domain_trust',
