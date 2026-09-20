@@ -1,7 +1,9 @@
 import PageTitle from '@/components/Branding/PageTitle';
 import IndividualSuggestCandidates from "./IndividualSuggestCandidates";
+import InlineDestinationPicker from "./InlineDestinationPicker";
+import { searchDestinationConcepts } from "./destinationSearch";
 import SuggestCandidates, { type CandidateActivity } from "./SuggestCandidates";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, ChevronDown, ChevronRight, Download, Pencil, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
 import api from "@/api/axios";
@@ -604,6 +606,7 @@ export default function CodeMappingPage() {
     umls: true, lexical: true, vectors: true,
   });
   const [rankingModel, setRankingModel] = useState<"anthropic" | "jev" | "both">("anthropic");
+  const [inlineMappingId, setInlineMappingId] = useState<number | null>(null);
   const [dialogMode, setDialogMode] = useState<"new" | "edit" | null>(null);
   const [selectedRow, setSelectedRow] = useState<CodeMappingRow | null>(null);
   const [form, setForm] = useState<MappingForm>(emptyForm);
@@ -891,6 +894,7 @@ export default function CodeMappingPage() {
   }, [reference, form.domain_id, form.source_vocabulary_id]);
 
   const openNewDialog = () => {
+    setInlineMappingId(null);
     setSuggestionMessage("");
     dialogRequest.current += 1;
     setError("");
@@ -908,6 +912,7 @@ export default function CodeMappingPage() {
   };
 
   const openEditDialog = async (row: CodeMappingRow) => {
+    setInlineMappingId(null);
     setSuggestionMessage("");
     dialogRequest.current += 1;
     setError("");
@@ -1098,14 +1103,8 @@ export default function CodeMappingPage() {
       const controller = new AbortController();
       conceptSearchAbort.current = controller;
       try {
-        const params: Record<string, string> = { q, limit: "25" };
-        // Scope to the destination vocabulary so a curator after a LOINC code is
-        // not wading through a million SNOMED hits.
-        if (vocabulary) params.vocabulary_id = vocabulary;
-        if (scope.retired) params.include_retired = "true";
-        if (scope.nonStandard) params.include_non_standard = "true";
-        const resp = await api.get("/v1/concepts/search/", { params, signal: controller.signal });
-        if (request === dialogRequest.current) setConceptResults(resp.data.results || resp.data || []);
+        const matches = await searchDestinationConcepts(q, vocabulary, controller.signal, scope);
+        if (request === dialogRequest.current) setConceptResults(matches);
       } catch {
         if (request === dialogRequest.current) setConceptResults([]);
       } finally {
@@ -1518,13 +1517,14 @@ export default function CodeMappingPage() {
         </thead>
         <tbody className="divide-y divide-slate-100">
           {(browse ? sectionRows : sortMappingRows(sectionRows, sort)).map((row) => (
+            <Fragment key={mappingRowId(row)}>
             <tr
-              key={mappingRowId(row)}
               id={mappingRowId(row)}
               role="button"
               tabIndex={0}
               onClick={() => openEditDialog(row)}
               onKeyDown={(e) => {
+                if (e.target !== e.currentTarget) return;
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
                   openEditDialog(row);
@@ -1552,6 +1552,13 @@ export default function CodeMappingPage() {
                 {(row.measurement_type || row.suggested_unit) && (
                   <ConceptInputDetails domain_id={row.destination_domain_id || ""} measurement_type={row.measurement_type} suggested_unit={row.suggested_unit} />
                 )}
+                {section === "Unmapped" && row.mapping_id && <button type="button"
+                  aria-label={`Choose destination for ${row.source_code}`}
+                  aria-expanded={inlineMappingId === row.mapping_id}
+                  onClick={event => { event.stopPropagation(); setInlineMappingId(current => current === row.mapping_id ? null : row.mapping_id); }}
+                  className="mt-2 inline-flex items-center gap-1 rounded border border-slate-300 px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100">
+                  <Search size={12} />{row.destination_concept_id ? "Change destination" : "Choose destination"}
+                </button>}
               </td>
               <td className="px-4 py-3 font-mono text-xs text-slate-900">{row.destination_concept_id}</td>
               <td className={`px-4 py-3 text-center font-mono text-xs font-medium ${row.destination_count !== 1 ? "text-red-600" : "text-slate-700"}`}>{row.destination_count ?? 0}</td>
@@ -1596,6 +1603,22 @@ export default function CodeMappingPage() {
               </td>
               )}
             </tr>
+            {inlineMappingId === row.mapping_id && row.mapping_id && <tr>
+              <td colSpan={colCount} className="bg-slate-50 p-3">
+                <InlineDestinationPicker key={row.mapping_id} mappingId={row.mapping_id}
+                  sourceLabel={`${row.source_vocabulary_id || "Uncoded"}:${row.source_code} — ${row.source_code_description}`}
+                  vocabularies={reference.destination_vocabularies}
+                  initialVocabulary={reference.destination_vocabularies.some(item => item.vocabulary_id === row.destination_vocabulary_id) ? row.destination_vocabulary_id : ""}
+                  canApprove={canApprove} onCancel={() => setInlineMappingId(null)}
+                  onSaved={(saved, concept) => {
+                    applySavedMapping(saved as CodeMappingRow);
+                    setInlineMappingId(null);
+                    setBanner(`${row.source_code}: saved ${concept.concept_name}${saved.status === "approved" ? " and approved the mapping" : " for review"}.`);
+                    void refreshCurrent.current();
+                  }} />
+              </td>
+            </tr>}
+            </Fragment>
           ))}
           {sectionRows.length === 0 && (
             <tr>
@@ -1823,6 +1846,7 @@ export default function CodeMappingPage() {
         {suggestRun && <SuggestCandidates key={suggestRun.run_id}
           activity={suggestRun.activity ?? []}
           finished={suggestRun.state === "success" || suggestRun.state === "failure"}
+          canApprove={canApprove} vocabularies={reference.destination_vocabularies}
           onSaved={() => { void refreshCurrent.current(); }} />}
 
 

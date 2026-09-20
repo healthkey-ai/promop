@@ -3,7 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import SuggestCandidates, { type CandidateActivity } from "./SuggestCandidates";
 
 const patch = vi.fn();
-vi.mock("@/api/axios", () => ({ default: { patch: (...args: unknown[]) => patch(...args) } }));
+const get = vi.fn();
+const post = vi.fn();
+const remove = vi.fn();
+vi.mock("@/api/axios", () => ({ default: { delete: (...args: unknown[]) => remove(...args), get: (...args: unknown[]) => get(...args), post: (...args: unknown[]) => post(...args), patch: (...args: unknown[]) => patch(...args) } }));
 const winner = { concept_id: 1, concept_name: "Exact match", concept_code: "A", vocabulary_id: "SNOMED" };
 const alternative = { concept_id: 2, concept_name: "Alternative match", concept_code: "B", vocabulary_id: "SNOMED", vector_distance: 0.123456 };
 const source = { mapping_id: 7, source_code: "LOCAL", source_vocabulary_id: "Local" };
@@ -17,7 +20,12 @@ const results: CandidateActivity[] = [
   { ...source, stage: "ranked", suggested: winner, candidates: [winner, alternative] },
   { ...source, stage: "result", suggested: winner, updated: true },
 ];
-beforeEach(() => { patch.mockReset(); });
+beforeEach(() => {
+  vi.resetAllMocks();
+  post.mockResolvedValue({ data: {} });
+  remove.mockResolvedValue({ data: {} });
+  get.mockResolvedValue({ data: { mapping_id: 7, destination_concept_id: 1, status: "proposed" } });
+});
 
 describe("progressive suggestion candidates", () => {
   it("shows candidates as they arrive, then the winner and selectable alternatives", async () => {
@@ -70,5 +78,48 @@ describe("progressive suggestion candidates", () => {
     expect(rows.length).toBe(2);
     // Strategy badge shows both UMLS and Lexical
     expect(screen.getByText("UL")).toBeInTheDocument();
+  });
+});
+
+
+describe("batch manual destination search", () => {
+  it("offers manual search for declined rows and filters the run by low confidence", async () => {
+    const activity: CandidateActivity[] = [
+      ...results,
+      { ...source, mapping_id: 8, source_code: "DECLINED", stage: "result", suggested: null, updated: false },
+      { ...source, mapping_id: 9, source_code: "LOW", stage: "ranked", suggested: winner, alternatives: [{ concept_id: 1, confidence: 0.2 }] },
+      { ...source, mapping_id: 9, source_code: "LOW", stage: "result", suggested: winner, updated: true },
+    ];
+    render(<SuggestCandidates activity={activity} finished />);
+    fireEvent.click(screen.getByRole("checkbox", { name: /Needs attention/ }));
+    expect(screen.queryByRole("button", { name: "Search destination for LOCAL" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Search destination for LOW" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Search destination for DECLINED" }));
+    expect(await screen.findByRole("combobox", { name: "Search destination concepts inline" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("saves a manual pick for a declined row and removes it from needs attention", async () => {
+    const onSaved = vi.fn();
+    get.mockImplementation((url: string) => Promise.resolve({ data: url.includes("/search/")
+      ? { results: [{ ...alternative, domain_id: "Condition", standard_concept: "S" }] }
+      : { mapping_id: 7, destination_concept_id: null, status: "proposed" } }));
+    patch.mockResolvedValue({ data: { mapping_id: 7, destination_concept_id: 2, status: "proposed" } });
+    render(<SuggestCandidates activity={[{ ...source, stage: "result", suggested: null, updated: false }]} finished onSaved={onSaved} />);
+    fireEvent.click(screen.getByRole("checkbox", { name: /Needs attention/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Search destination for LOCAL" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Search destination concepts inline" }), { target: { value: "alternative" } });
+    fireEvent.click(await screen.findByRole("option", { name: /Alternative match/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Save choice" }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(patch).toHaveBeenCalledWith("/v1/code-mappings/7/", { destination_concept_id: 2, status: "proposed" });
+    expect(await screen.findByText("No remaining mappings need attention in this run.")).toBeInTheDocument();
+  });
+
+  it("keeps manual search unavailable while a run is writing or when it was a dry run", () => {
+    const { rerender } = render(<SuggestCandidates activity={results} finished={false} />);
+    expect(screen.queryByRole("button", { name: /Search destination for/ })).not.toBeInTheDocument();
+    rerender(<SuggestCandidates activity={results.map(event => ({ ...event, dry_run: true }))} finished />);
+    expect(screen.queryByRole("button", { name: /Search destination for/ })).not.toBeInTheDocument();
   });
 });
