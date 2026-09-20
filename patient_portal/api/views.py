@@ -84,6 +84,7 @@ from omop_core.mapping.code_resolution import (
     resolve_source_code,
 )
 from omop_core.mapping.suggestions import (
+    CURATOR_PROVENANCE,
     ALL_STRATEGIES,
     DEFAULT_RANKING_MODEL,
     DEFAULT_STRATEGIES,
@@ -10657,7 +10658,12 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     # provenance if a deployment missed the data migration.  Do not make a
     # curator's current review depend on that historical repair: capture the
     # target that was on the proposed row and version it atomically here.
-    is_suggestion = mapping is not None and mapping.origin_system.lower().startswith('suggest')
+    # A row the model proposed keeps that history even after a curator's edit
+    # re-stamps its provenance (below): suggested_target_concept is the record.
+    is_suggestion = mapping is not None and (
+        mapping.origin_system.lower().startswith('suggest')
+        or mapping.suggested_target_concept_id is not None
+    )
     if was_proposed and is_suggestion and not mapping.suggestion_outcome:
         original_target_id = mapping.suggested_target_concept_id or mapping.target_concept_id
         if not mapping.suggestion_model_version:
@@ -10695,6 +10701,18 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
         and concept is not None
         and previous_concept_id != concept.concept_id
     )
+    # A curator who picks a different destination has decided it, even when
+    # they cannot approve (admin-only). From here the row is not a suggestion:
+    # Suggest's Replace re-answers only rows with blank or suggest* provenance,
+    # so this stamp is what keeps their pick from being overwritten (#1469).
+    # Approved rows are already protected by status and keep the provenance
+    # the accuracy figures read.
+    if (
+        mapping is not None and concept is not None
+        and concept.concept_id != previous_concept_id
+        and status_value != 'approved'
+    ):
+        values['origin_system'] = CURATOR_PROVENANCE
     if status_value == 'approved' and (not was_approved or destination_moved):
         values['reviewer'] = user
         values['reviewed_at'] = timezone.now()
