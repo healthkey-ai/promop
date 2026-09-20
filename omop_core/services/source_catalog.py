@@ -4,6 +4,10 @@ from django.db.models.functions import Upper
 
 from omop_core.models import SourceVocabulary, SourceVocabularyTerm
 
+ATTRIBUTIONS = {
+    'NCIt': 'NCI Thesaurus, National Cancer Institute, CC BY 4.0. Imported publisher content.',
+    'MeSH': 'Courtesy of the U.S. National Library of Medicine. Pinned snapshot; may not reflect the latest NLM data.',
+}
 
 def serialize_term(term):
     return {
@@ -52,6 +56,7 @@ def catalog_response(vocabulary_id, *, code='', query='', include_retired=False)
         'release_version': vocabulary.release_version,
         'term_count': vocabulary.term_count,
         'source_url': vocabulary.source_url,
+        'attribution': ATTRIBUTIONS.get(vocabulary_id, ''),
         'term': serialize_term(term) if term else None,
         'results': [serialize_term(t) for t in search_source_terms(
             vocabulary_id, query, include_retired=include_retired,

@@ -5,7 +5,7 @@ services:
     repo: https://github.com/healthkey-ai/promop
     branch: main
     autoDeploy: true
-    buildCommand: "pip install -r requirements.txt && cd frontend && npm install && npm run build && cd .. && python manage.py collectstatic --noinput"
+    buildCommand: "python scripts/verify_source_catalog_snapshots.py && pip install -r requirements.txt && cd frontend && npm install && npm run build && cd .. && python manage.py collectstatic --noinput"
     startCommand: "chmod +x start.sh && ./start.sh"
     envVars:
       - key: PYTHON_VERSION
@@ -92,7 +92,7 @@ services:
     branch: main
     autoDeploy: true
     # No frontend build: the worker serves nothing.
-    buildCommand: "pip install -r requirements.txt"
+    buildCommand: "python scripts/verify_source_catalog_snapshots.py && pip install -r requirements.txt"
     startCommand: "celery -A promop worker --loglevel=info"
     envVars:
       - key: PYTHON_VERSION
@@ -137,7 +137,7 @@ services:
     repo: https://github.com/healthkey-ai/promop
     branch: dev
     autoDeploy: true
-    buildCommand: pip install -r requirements.txt && cd frontend && npm install && npm run build && cd .. && python manage.py
+    buildCommand: python scripts/verify_source_catalog_snapshots.py && pip install -r requirements.txt && cd frontend && npm install && npm run build && cd .. && python manage.py
       collectstatic --noinput
     startCommand: chmod +x start.sh && ./start.sh
     envVars:
@@ -202,7 +202,7 @@ services:
     region: oregon
     autoDeploy: true
     plan: 1c-2g
-    buildCommand: pip install -r requirements.txt
+    buildCommand: python scripts/verify_source_catalog_snapshots.py && pip install -r requirements.txt
     startCommand: bash start-worker.sh
     envVars:
       - key: SECRET_KEY

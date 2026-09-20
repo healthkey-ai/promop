@@ -14,11 +14,17 @@ export interface SourceTerm {
   retired: boolean;
   release_version: string;
   source_url: string;
+  metadata?: {
+    registry_numbers?: string[];
+    pharmacological_actions?: { code: string; name: string }[];
+    mapped_headings?: { code: string; name: string }[];
+  };
 }
 interface CatalogResponse {
   available: boolean;
   term: SourceTerm | null;
   results: SourceTerm[];
+  attribution?: string;
 }
 
 interface Props {
@@ -84,7 +90,11 @@ function Lookup({ vocabularyId, code, onSelect }: Props) {
       {term.synonyms.length > 0 && <p><span className="font-medium">Synonyms: </span>{term.synonyms.join('; ')}</p>}
       {term.semantic_types.length > 0 && <p><span className="font-medium">Semantic types: </span>{term.semantic_types.join('; ')}</p>}
       {term.parents.length > 0 && <p><span className="font-medium">Parent codes: </span>{term.parents.join(', ')}</p>}
+      {!!term.metadata?.registry_numbers?.length && <p><span className="font-medium">Registry identifiers: </span>{term.metadata.registry_numbers.join('; ')}</p>}
+      {!!term.metadata?.pharmacological_actions?.length && <p><span className="font-medium">Pharmacological actions: </span>{term.metadata.pharmacological_actions.map(a => a.name).join('; ')}</p>}
+      {!!term.metadata?.mapped_headings?.length && <p><span className="font-medium">MeSH headings: </span>{term.metadata.mapped_headings.map(h => `${h.name} (${h.code})`).join('; ')}</p>}
       <p className="text-xs text-slate-500">{term.vocabulary_id} release {term.release_version}{term.status ? ` · ${term.status}` : ''}</p>
     </div>}
+    {response.data.attribution && <p className="text-xs text-slate-500">{response.data.attribution}</p>}
   </div>;
 }

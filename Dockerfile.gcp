@@ -12,6 +12,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 COPY . .
 
+RUN python scripts/verify_source_catalog_snapshots.py
+
 RUN python manage.py collectstatic --noinput --clear || true
 
 FROM node:20-slim AS frontend

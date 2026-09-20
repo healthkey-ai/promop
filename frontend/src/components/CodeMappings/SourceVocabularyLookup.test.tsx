@@ -48,3 +48,15 @@ it('flags an explicitly looked-up retired code', async () => {
   render(<SourceVocabularyLookup vocabularyId="NCIt" code={term.code} onSelect={vi.fn()} />);
   expect(await screen.findByRole('status')).toHaveTextContent('retired or obsolete');
 });
+
+it('shows MeSH substance metadata and publisher attribution', async () => {
+  get.mockResolvedValue({ data: { available: true, results: [],
+    attribution: 'Courtesy of the U.S. National Library of Medicine.',
+    term: { ...term, vocabulary_id: 'MeSH', code: 'D000077269', name: 'Lenalidomide',
+      metadata: { registry_numbers: ['F0P408N6V4'], pharmacological_actions: [{ code: 'D020533', name: 'Angiogenesis Inhibitors' }] } },
+  } });
+  render(<SourceVocabularyLookup vocabularyId="MeSH" code="D000077269" onSelect={vi.fn()} />);
+  expect(await screen.findByText(/F0P408N6V4/)).toBeInTheDocument();
+  expect(screen.getByText(/Angiogenesis Inhibitors/)).toBeInTheDocument();
+  expect(screen.getByText(/Courtesy of the U.S. National Library of Medicine/)).toBeInTheDocument();
+});

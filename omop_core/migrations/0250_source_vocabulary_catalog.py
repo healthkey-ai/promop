@@ -9,7 +9,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('omop_core', '0248_merge_review_and_email_verification'),
+        ('omop_core', '0249_canonical_loinc_units'),
     ]
 
     operations = [
