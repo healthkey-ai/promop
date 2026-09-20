@@ -464,6 +464,41 @@ describe("CodeMappingPage", () => {
     expect(await screen.findByText("C90.00", { selector: "td" })).toBeInTheDocument();
   });
 
+  it("labels cross-tab hits with their coding system in browse mode (#963)", async () => {
+    // The page always asks for browse=1, and the server answers a query with
+    // rows from every coding system (mapping_browse: `mappings if search`).
+    const pages = { Unmapped: { page: 1, page_size: 100, total: 1 }, Mapped: { page: 1, page_size: 100, total: 1 },
+      Rejected: { page: 1, page_size: 100, total: 0 }, "Athena Mapped": { page: 1, page_size: 100, total: 0 } };
+    const tabs = [
+      { vocabulary_id: "", label: "Uncoded", is_standard: false, proposed: 1, approved: 0, athena: 0 },
+      { vocabulary_id: "ICD10", label: "ICD-10", is_standard: false, proposed: 0, approved: 1, athena: 0 },
+    ];
+    mockGet.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
+      if (url === "/v1/code-mappings/") {
+        const search = String(config?.params?.search || "");
+        return Promise.resolve({ data: {
+          results: search ? [proposedRow, approvedRow].filter((r) => r.source_code.includes(search)) : [proposedRow],
+          duplicates: [], selected_source: "", rejected_count: 0, tabs, pages,
+        } });
+      }
+      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+    });
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+    // One tab's rows: nothing to label.
+    expect(screen.queryByRole("columnheader", { name: "System" })).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Search mappings" }), { target: { value: "C90.00" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Mapped/ }));
+    const row = (await screen.findByText("C90.00", { selector: "td" })).closest("tr")!;
+    expect(cellUnder(row, "System")).toHaveTextContent("ICD-10");
+    expect(await screen.findByText(/Searching all coding systems — 1 match from other tabs/)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Search mappings" }), { target: { value: "" } });
+    await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+    await waitFor(() => expect(screen.queryByRole("columnheader", { name: "System" })).not.toBeInTheDocument());
+  });
+
   it("splits proposed and approved into Unmapped and Mapped sections", async () => {
     renderPage();
     expect(await screen.findByText(/Unmapped/)).toBeInTheDocument();
