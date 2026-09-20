@@ -425,12 +425,15 @@ function sortMappingRows(rows: CodeMappingRow[], sort?: SectionSort): CodeMappin
     const left = a[sort.column];
     const right = b[sort.column];
     // Unknown values stay last in either direction.
-    if (left == null) return right == null ? 0 : 1;
-    if (right == null) return -1;
-    const comparison = typeof left === "number" || typeof left === "boolean"
+    if (left == null && right != null) return 1;
+    if (right == null && left != null) return -1;
+    const comparison = left == null ? 0 : typeof left === "number" || typeof left === "boolean"
       ? Number(left) - Number(right)
       : String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: "base" });
-    return sort.descending ? -comparison : comparison;
+    return (sort.descending ? -comparison : comparison)
+      || (sort.column === "origin_system"
+        ? byOccurrence(a, b) || (a.mapping_id ?? 0) - (b.mapping_id ?? 0)
+        : 0);
   });
 }
 
@@ -592,7 +595,9 @@ export default function CodeMappingPage() {
   const [mappedCollapsed, setMappedCollapsed] = useState(true);
   const [rejectedCollapsed, setRejectedCollapsed] = useState(true);
   const [athenaCollapsed, setAthenaCollapsed] = useState(true);
-  const [sectionSorts, setSectionSorts] = useState<Partial<Record<MappingSection, SectionSort>>>({});
+  const [sectionSorts, setSectionSorts] = useState<Partial<Record<MappingSection, SectionSort>>>({
+    Unmapped: { column: "origin_system", descending: false },
+  });
   const [navigationTarget, setNavigationTarget] = useState<{ id: string } | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
   const [suggesting, setSuggesting] = useState(false);

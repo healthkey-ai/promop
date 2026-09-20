@@ -388,7 +388,26 @@ describe("CodeMappingPage", () => {
       expect(within(screen.getByRole("dialog")).queryByRole("status")).not.toBeInTheDocument();
     });
 
-    it.each(["Provenance", "Source code", "Seen", "Source description", "Destination concept", "Concept ID", "Dest count", "Status"])(
+    it("defaults Unmapped to Provenance with Seen descending within each group", async () => {
+      renderPage([
+        { ...high, origin_system: "suggest v0.4", occurrence_count: 200 },
+        { ...low, origin_system: "curator", occurrence_count: 3 },
+        { ...high, mapping_id: 33, source_code: "Z20", origin_system: "curator", occurrence_count: 20 },
+        { ...low, mapping_id: 34, source_code: "A1", origin_system: "curator", occurrence_count: 20 },
+      ]);
+      const table = await screen.findByRole("table", { name: "Unmapped mappings" });
+      const button = within(table).getByRole("button", { name: "Provenance" });
+      expect(button.closest("th")).toHaveAttribute("aria-sort", "ascending");
+      expect(ids(table)).toEqual(["code-mapping-34", "code-mapping-33", "code-mapping-32", "code-mapping-31"]);
+      fireEvent.click(button);
+      expect(button.closest("th")).toHaveAttribute("aria-sort", "descending");
+      expect(ids(table)).toEqual(["code-mapping-31", "code-mapping-34", "code-mapping-33", "code-mapping-32"]);
+      fireEvent.click(button);
+      expect(button.closest("th")).toHaveAttribute("aria-sort", "ascending");
+      expect(ids(table)).toEqual(["code-mapping-34", "code-mapping-33", "code-mapping-32", "code-mapping-31"]);
+    });
+
+    it.each(["Source code", "Seen", "Source description", "Destination concept", "Concept ID", "Dest count", "Status"])(
       "sorts %s ascending and descending", async (column) => {
         renderPage([high, low]);
         const table = await screen.findByRole("table", { name: "Unmapped mappings" });
@@ -1550,9 +1569,16 @@ describe("server mapping pages", () => {
     });
     render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
     expect(await screen.findByText("FIRST PAGE")).toBeInTheDocument();
+    expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({
+      order_0: "origin_system", order_1: "-occurrence_count", order_2: "-occurrence_count", order_3: "-occurrence_count",
+    }) });
+    expect(screen.getByTitle("Sort Unmapped by Provenance").closest("th")).toHaveAttribute("aria-sort", "ascending");
     expect(screen.getByText("Page 1 of 2 · 101 mappings")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
     expect(await screen.findByText("SECOND PAGE")).toBeInTheDocument();
+    expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({
+      page_0: 2, order_0: "origin_system",
+    }) });
     fireEvent.click(screen.getByTitle("Sort Unmapped by Seen"));
     await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ page_0: 1, order_0: "occurrence_count" }) }));
   });
