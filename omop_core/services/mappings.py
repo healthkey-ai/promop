@@ -68,7 +68,7 @@ LAB_FIELD_TO_LOINC = {
     'height':                         ('8302-2',   'cm',              'Body height'),
     'systolic_blood_pressure':        ('8480-6',   'mm[Hg]',          'Systolic blood pressure'),
     'diastolic_blood_pressure':       ('8462-4',   'mm[Hg]',          'Diastolic blood pressure'),
-    'heartrate':                      ('8867-4',   '/min',            'Heart rate'),
+    'heartrate':                      ('8867-4',   '{beats}/min',     'Heart rate'),
     # Performance status
     'ecog_performance_status':        ('89247-1',  '{score}',         'ECOG Performance Status score'),
     'karnofsky_performance_score':    ('89243-0',  '{score}',         'Karnofsky Performance Status score'),
