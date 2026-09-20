@@ -68,7 +68,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # The deployed mapping artifact is in Git LFS. Fetch it in CI so
+          # Mapping and publisher catalog artifacts are in Git LFS. Fetch them so
           # packaging/runtime checks exercise the same asset as production.
           lfs: true
 
@@ -193,6 +193,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - uses: actions/setup-python@v5
         with:

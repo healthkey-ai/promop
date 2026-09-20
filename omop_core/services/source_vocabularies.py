@@ -52,6 +52,7 @@ _CONDITION_SYSTEMS = (
     ('HPO', 'HPO — human phenotype ontology'),
     ('MedDRA', 'MedDRA — adverse events, regulatory and trial data'),
     ('NCIt', 'NCIt — NCI thesaurus; oncology fallback'),
+    ('MeSH', 'MeSH — diseases and biomedical terminology'),
     ('ICPC', 'ICPC-2 — European primary care'),
     ('CIEL', 'CIEL — interface terminology'),
     ('Nebraska Lexicon', 'Nebraska Lexicon — interface terminology'),
@@ -60,6 +61,8 @@ _CONDITION_SYSTEMS = (
 )
 
 _PROCEDURE_SYSTEMS = (
+    ('NCIt', 'NCIt — oncology procedures'),
+    ('MeSH', 'MeSH — biomedical procedures'),
     ('SNOMED', 'SNOMED CT procedures — OMOP standard'),
     ('CPT4', 'CPT-4 — US professional services'),
     ('HCPCS', 'HCPCS Level II — US supplies and services'),
@@ -75,6 +78,8 @@ _PROCEDURE_SYSTEMS = (
 
 _DRUG_SYSTEMS = (
     ('RxNorm', 'RxNorm — OMOP standard for drugs'),
+    ('NCIt', 'NCIt — oncology drugs, investigational agents and regimens'),
+    ('MeSH', 'MeSH — substances, drug aliases and investigational agents'),
     ('RxNorm Extension', 'RxNorm Extension — OMOP, non-US drugs'),
     ('NDC', 'NDC — US package level; very common in dispensing data'),
     ('ATC', 'ATC — WHO classification, common outside the US'),
@@ -96,6 +101,8 @@ _DRUG_SYSTEMS = (
 )
 
 _MEASUREMENT_SYSTEMS = (
+    ('NCIt', 'NCIt — oncology measurements and biomarkers'),
+    ('MeSH', 'MeSH — biomedical measurements and findings'),
     ('LOINC', 'LOINC — OMOP standard for labs and measurements'),
     ('SNOMED', 'SNOMED CT — findings and qualitative results'),
     ('CIEL', 'CIEL — interface terminology'),
@@ -117,6 +124,7 @@ _OBSERVATION_SYSTEMS = (
     ('ICD10', 'ICD-10 — Z-code equivalents (merged with ICD-10-CM)'),
     ('HCPCS', 'HCPCS — assessments and screenings'),
     ('NCIt', 'NCIt — NCI thesaurus'),
+    ('MeSH', 'MeSH — biomedical terminology'),
     ('PPI', 'PPI — participant-provided information (surveys)'),
 )
 
@@ -214,6 +222,7 @@ VOCAB_TO_UMLS_ROOT = {
     'MeSH': 'MSH',
     'NDFRT': 'MED-RT',
     'MedDRA': 'MDR',
+    'NCIt': 'NCI',
 }
 
 # Standard vocabularies — their concepts are already standard, so they appear

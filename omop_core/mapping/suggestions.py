@@ -1539,6 +1539,11 @@ def _source_description(mapping, source_concept):
         or (source_concept.concept_name if source_concept else '')
         or umls_name
     )
+    if not description:
+        from omop_core.services.source_catalog import lookup_source_term
+        term = lookup_source_term(mapping.source_vocabulary_id, mapping.source_code)
+        if term:
+            description = term.name
     return description, umls_name
 
 

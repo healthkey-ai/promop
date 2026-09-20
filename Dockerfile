@@ -35,6 +35,8 @@ WORKDIR /app
 # Copy ALL application files
 COPY . .
 
+RUN python scripts/verify_source_catalog_snapshots.py
+
 # Verify patient_portal directory exists
 RUN ls -la /app/patient_portal/
 
