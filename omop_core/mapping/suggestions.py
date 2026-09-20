@@ -20,7 +20,8 @@ scan, as the batch job it always was; see its docstring.
 only thing that ever set it was a previous Suggest run. An ``HT-One`` or
 ``HT-FHIR`` row carries a destination its importer asserted, and re-deriving
 that from the source text would overwrite a better answer with a worse one.
-``approved`` and ``rejected`` are decisions and are never touched.
+Approved rows are never touched. A different replacement for a rejected
+suggestion returns to Proposed; the old suggestion's feedback is archived.
 
 Retrieval then ranking, and the order within retrieval is the point:
 
@@ -1789,7 +1790,6 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
             current = (
                 SourceCodeConceptMapping.objects.select_for_update()
                 .filter(pk=mapping.pk)
-                .values('status', 'target_concept_id', 'origin_system')
                 .first()
             )
             if not _row_still_open(current, selected_target_id=mapping.target_concept_id,
@@ -1800,10 +1800,24 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
                 emit('result', **entry, dry_run=False)
                 report('writing', len(results))
                 continue
+            # All write decisions below must use the locked, current row:
+            # notes and source metadata may have been edited while ranking.
+            mapping = current
             concept = (
                 Concept.objects.filter(concept_id=chosen['concept_id']).first()
                 if chosen else None
             )
+            if (
+                mapping.status == 'rejected' and concept is not None
+                and concept.pk == (mapping.target_concept_id or mapping.suggested_target_concept_id)
+                and not athena_duplicate
+            ):
+                entry.update(suggested=None, note='This suggestion was rejected; left as rejected.',
+                             strategy_used=None, updated=False)
+                results.append(entry)
+                emit('result', **entry, dry_run=False)
+                report('writing', len(results))
+                continue
             # Read before it is overwritten below: it is how we tell a note this
             # code left on an earlier run from one ingest or a curator supplied.
             attempted_before = bool(mapping.last_suggest_attempt)
@@ -1817,6 +1831,23 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
             fields = ['last_suggest_attempt', 'suggest_strategy', 'umls_cui', 'updated_at']
 
             if concept is not None and not athena_duplicate:
+                if mapping.suggestion_outcome:
+                    from omop_core.models import MappingSuggestionReview
+                    MappingSuggestionReview.objects.create(
+                        mapping=mapping,
+                        source_vocabulary_id=mapping.source_vocabulary_id,
+                        source_code=mapping.source_code,
+                        suggested_target_concept_id=(
+                            mapping.suggested_target_concept_id or mapping.target_concept_id
+                        ),
+                        suggestion_model_version=mapping.suggestion_model_version,
+                        suggestion_outcome=mapping.suggestion_outcome,
+                    )
+                mapping.status = 'proposed'
+                mapping.suggestion_outcome = ''
+                mapping.reviewer = None
+                mapping.reviewed_at = None
+                fields += ['status', 'suggestion_outcome', 'reviewer', 'reviewed_at']
                 mapping.target_concept = concept
                 mapping.suggested_target_concept = concept
                 mapping.destination_vocabulary_id = concept.vocabulary_id
@@ -1853,7 +1884,7 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
             # is blank, so a note ingest supplied through _record_proposal survives
             # too. Only a note left by a previous run of this code is rewritten.
             ours = attempted_before and mapping.updated_by_id is None
-            if not mapping.notes or ours:
+            if (not mapping.notes and mapping.updated_by_id is None) or ours:
                 mapping.notes = note
                 fields.append('notes')
             # Source-side enrichment is written only when it was missing: these
@@ -1886,11 +1917,11 @@ def _row_still_open(current, *, selected_target_id, selected_provenance):
     hand. Provenance is compared, not classified: a row an importer raised
     with no destination is a candidate whatever its provenance says.
     """
-    if current is None or current['status'] not in ('proposed', 'rejected'):
+    if current is None or current.status not in ('proposed', 'rejected'):
         return False
     return (
-        current['target_concept_id'] == selected_target_id
-        and (current['origin_system'] or '') == (selected_provenance or '')
+        current.target_concept_id == selected_target_id
+        and (current.origin_system or '') == (selected_provenance or '')
     )
 
 

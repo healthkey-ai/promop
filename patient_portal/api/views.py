@@ -31,7 +31,7 @@ from django.core.validators import validate_email
 from omop_core.models import (
     Organization,
     Person, PatientRecord, Concept, ConceptClass, Domain, ProvenanceRecord, Vocabulary,
-    SourceCodeConceptMapping, SuggestRun, UmlsSourceCode,
+    SourceCodeConceptMapping, MappingSuggestionReview, SuggestRun, UmlsSourceCode,
     ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
     Observation, ProcedureOccurrence, VisitOccurrence, VisitDetail, Location, Death,
     PatientDocument, PatientTrialEnrollment, TrialSearchPreferences,
@@ -10545,7 +10545,7 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     # silently un-approved, and the re-point skipped while its destination
     # moved -- the silent-approval failure, through the POST door.
     if mapping is None and data.get('mapping_id'):
-        mapping = SourceCodeConceptMapping.objects.filter(id=data['mapping_id']).first()
+        mapping = SourceCodeConceptMapping.objects.select_for_update().filter(id=data['mapping_id']).first()
         if mapping is None:
             raise serializers.ValidationError({'mapping_id': 'Mapping not found.'})
 
@@ -10883,6 +10883,7 @@ def code_mapping_list(request):
 
 @api_view(['GET', 'PATCH', 'DELETE'])
 @permission_classes([IsAuthenticated])
+@transaction.atomic
 def code_mapping_detail(request, mapping_id):
     """Edit or delete one mapping.
 
@@ -10898,8 +10899,11 @@ def code_mapping_detail(request, mapping_id):
     if not _can_manage_field_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
-    mapping = SourceCodeConceptMapping.objects.filter(id=mapping_id).select_related(
-        'target_concept', 'created_by', 'reviewer', 'locked_by').first()
+    mappings = SourceCodeConceptMapping.objects.filter(id=mapping_id).select_related(
+        'target_concept', 'created_by', 'reviewer', 'locked_by')
+    if request.method != 'GET':
+        mappings = mappings.select_for_update(of=('self',))
+    mapping = mappings.first()
     if mapping is None:
         return Response({'detail': 'Mapping not found.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -11457,11 +11461,15 @@ def _suggestion_accuracy_from_counts(counts):
     }
 
 
-def _suggestion_accuracy_payload(queryset, model_version=None):
-    if model_version:
-        queryset = queryset.filter(suggestion_model_version=model_version)
-    counts = dict(queryset.values_list('suggestion_outcome').annotate(total=Count('id')))
-    return _suggestion_accuracy_from_counts(counts)
+def _suggestion_accuracy_groups():
+    """Current suggestions and archived reviews, in one bounded grouped query."""
+    def groups(model):
+        return model.objects.filter(suggestion_model_version__gt='').order_by().values(
+            'source_vocabulary_id', 'suggestion_model_version', 'suggestion_outcome',
+        ).annotate(total=Count('id'))
+
+    # ALL matters: equal groups in the two tables are independent reviews.
+    return groups(SourceCodeConceptMapping).union(groups(MappingSuggestionReview), all=True)
 
 
 def _suggestion_version_key(version):
@@ -11469,11 +11477,6 @@ def _suggestion_version_key(version):
         return tuple(int(part) for part in version.removeprefix('v').split('.'))
     except ValueError:
         return (0,)
-
-
-def _suggestion_versions(queryset):
-    return sorted(queryset.exclude(suggestion_model_version='').values_list(
-        'suggestion_model_version', flat=True).distinct(), key=_suggestion_version_key, reverse=True)
 
 
 @api_view(['GET'])
@@ -11485,13 +11488,9 @@ def code_mapping_accuracy(request):
     from collections import Counter, defaultdict
     from omop_core.services.mapping_browse import canonical_source
 
-    # One small grouped query replaces several round trips for every tab.
-    grouped = SourceCodeConceptMapping.objects.filter(suggestion_model_version__gt='').order_by().values(
-        'source_vocabulary_id', 'suggestion_model_version', 'suggestion_outcome',
-    ).annotate(total=Count('id'))
     sources = defaultdict(lambda: defaultdict(Counter))
     overall_versions = defaultdict(Counter)
-    for group in grouped:
+    for group in _suggestion_accuracy_groups():
         source = canonical_source(group['source_vocabulary_id'])
         version, outcome, total = (group['suggestion_model_version'], group['suggestion_outcome'], group['total'])
         sources[source][version][outcome] += total
@@ -11538,14 +11537,20 @@ def code_mapping_accuracy(request):
 def code_mapping_accuracy_dashboard(request):
     if not _can_manage_field_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
-    base = SourceCodeConceptMapping.objects.filter(suggestion_model_version__gt='')
-    versions = _suggestion_versions(base)
+    from collections import Counter, defaultdict
+    counts = defaultdict(Counter)
+    totals = Counter()
+    for group in _suggestion_accuracy_groups():
+        outcome, total = group['suggestion_outcome'], group['total']
+        counts[group['suggestion_model_version']][outcome] += total
+        totals[outcome] += total
+    versions = sorted(counts, key=_suggestion_version_key, reverse=True)
     return Response({
         'models': [
-            {'model_version': version, **_suggestion_accuracy_payload(base, version)}
+            {'model_version': version, **_suggestion_accuracy_from_counts(counts[version])}
             for version in versions
         ],
-        'overall': _suggestion_accuracy_payload(base) if versions else None,
+        'overall': _suggestion_accuracy_from_counts(totals) if versions else None,
     })
 
 
