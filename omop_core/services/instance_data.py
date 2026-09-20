@@ -64,6 +64,7 @@ REFERENCE_FROM_RELEASE: dict[str, str] = {
     **dict.fromkeys((
         'omop_core.UmlsConcept', 'omop_core.UmlsRelease', 'omop_core.UmlsSourceCode',
     ), 'load_umls_release'),
+    **dict.fromkeys(('omop_core.SourceVocabulary', 'omop_core.SourceVocabularyTerm'), 'load_ncit_source'),
     **dict.fromkeys(('omop_core.LoincClass', 'omop_core.LoincCodeClass'), 'load_loinc_classes'),
     **dict.fromkeys((
         'prolog_surveys.Survey', 'prolog_surveys.SurveyOption',

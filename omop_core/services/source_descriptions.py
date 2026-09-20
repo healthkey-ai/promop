@@ -174,6 +174,10 @@ def describe_source_code(source_vocabulary_id, source_code):
         )
         if name:
             return name[:DESCRIPTION_MAX]
+    from omop_core.services.source_catalog import lookup_source_term
+    source_term = lookup_source_term(source_vocabulary_id, source_code)
+    if source_term:
+        return source_term.name[:DESCRIPTION_MAX]
     root = dict(UMLS_ROOTS).get(source_vocabulary_id)
     if not root:
         return ''

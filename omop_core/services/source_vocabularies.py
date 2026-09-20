@@ -60,6 +60,7 @@ _CONDITION_SYSTEMS = (
 )
 
 _PROCEDURE_SYSTEMS = (
+    ('NCIt', 'NCIt — oncology procedures'),
     ('SNOMED', 'SNOMED CT procedures — OMOP standard'),
     ('CPT4', 'CPT-4 — US professional services'),
     ('HCPCS', 'HCPCS Level II — US supplies and services'),
@@ -75,6 +76,7 @@ _PROCEDURE_SYSTEMS = (
 
 _DRUG_SYSTEMS = (
     ('RxNorm', 'RxNorm — OMOP standard for drugs'),
+    ('NCIt', 'NCIt — oncology drugs, investigational agents and regimens'),
     ('RxNorm Extension', 'RxNorm Extension — OMOP, non-US drugs'),
     ('NDC', 'NDC — US package level; very common in dispensing data'),
     ('ATC', 'ATC — WHO classification, common outside the US'),
@@ -96,6 +98,7 @@ _DRUG_SYSTEMS = (
 )
 
 _MEASUREMENT_SYSTEMS = (
+    ('NCIt', 'NCIt — oncology measurements and biomarkers'),
     ('LOINC', 'LOINC — OMOP standard for labs and measurements'),
     ('SNOMED', 'SNOMED CT — findings and qualitative results'),
     ('CIEL', 'CIEL — interface terminology'),
@@ -214,6 +217,7 @@ VOCAB_TO_UMLS_ROOT = {
     'MeSH': 'MSH',
     'NDFRT': 'MED-RT',
     'MedDRA': 'MDR',
+    'NCIt': 'NCI',
 }
 
 # Standard vocabularies — their concepts are already standard, so they appear

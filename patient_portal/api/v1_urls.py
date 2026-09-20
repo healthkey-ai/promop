@@ -2,6 +2,7 @@ from .canonical_units import canonical_unit
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 from .concept_mint import mint_destination
+from .source_catalog import source_catalog
 from .supportive_therapies import SupportiveTherapyViewSet, therapy_outcomes
 
 from .views import (
@@ -163,6 +164,7 @@ urlpatterns = [
     path('code-mappings/suggest-one/', code_mapping_suggest_one, name='v1-code-mapping-suggest-one'),
     path('code-mappings/suggest-runs/latest/', code_mapping_latest_suggest_run, name='v1-code-mapping-latest-suggest-run'),
     path('code-mappings/suggest-runs/<uuid:run_id>/', code_mapping_suggest_run, name='v1-code-mapping-suggest-run'),
+    path('code-mappings/source-catalog/', source_catalog, name='v1-source-catalog'),
     path('code-mappings/check-umls/', code_mapping_check_umls, name='v1-code-mapping-check-umls'),
     path('code-mappings/lookup/', code_mapping_lookup, name='v1-code-mapping-lookup'),
     path('code-mappings/accuracy/', code_mapping_accuracy, name='v1-code-mapping-accuracy'),

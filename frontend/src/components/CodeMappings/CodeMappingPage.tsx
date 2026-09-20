@@ -2,6 +2,7 @@ import CanonicalUnitEditor from "./CanonicalUnitEditor";
 import PageTitle from '@/components/Branding/PageTitle';
 import IndividualSuggestCandidates from "./IndividualSuggestCandidates";
 import InlineDestinationPicker from "./InlineDestinationPicker";
+import SourceVocabularyLookup from "./SourceVocabularyLookup";
 import { searchDestinationConcepts } from "./destinationSearch";
 import SuggestCandidates, { type CandidateActivity } from "./SuggestCandidates";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -2129,6 +2130,16 @@ export default function CodeMappingPage() {
                     </button>
                     {umlsCheckMessage && <span className="pb-2 text-sm text-slate-600">{umlsCheckMessage}</span>}
                   </div>
+
+                  <SourceVocabularyLookup
+                    vocabularyId={form.source_vocabulary_id}
+                    code={form.source_code}
+                    onSelect={(term) => {
+                      setField("source_code", term.code);
+                      setField("source_code_description", term.name.slice(0, 255));
+                      setField("source_concept_id", "");
+                    }}
+                  />
 
                   <Field id="source_code_description" label="Source Description" tip={TIP.source_description}>
                     <input

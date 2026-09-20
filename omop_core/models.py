@@ -4647,3 +4647,40 @@ class UmlsSourceCode(models.Model):
             name='uq_umls_source_code_term',
         )]
         indexes = [models.Index(fields=['root_source', 'code'], name='umls_source_root_so_9d0e39_idx')]
+
+
+class SourceVocabulary(models.Model):
+    """Current publisher release for source terminology outside OMOP."""
+    vocabulary_id = models.CharField(max_length=50, primary_key=True)
+    name = models.CharField(max_length=255)
+    release_version = models.CharField(max_length=50)
+    source_url = models.URLField(max_length=1000)
+    archive_sha256 = models.CharField(max_length=64)
+    term_count = models.PositiveIntegerField(default=0)
+    loaded_at = models.DateTimeField()
+
+    class Meta:
+        db_table = 'source_vocabulary'
+
+
+class SourceVocabularyTerm(models.Model):
+    """Publisher code and metadata; never an OMOP destination concept."""
+    vocabulary = models.ForeignKey(SourceVocabulary, on_delete=models.CASCADE)
+    code = models.CharField(max_length=255)
+    name = models.TextField()
+    definition = models.TextField(blank=True)
+    synonyms = models.JSONField(default=list)
+    parents = models.JSONField(default=list)
+    semantic_types = models.JSONField(default=list)
+    status = models.CharField(max_length=255, blank=True)
+    retired = models.BooleanField(default=False)
+    metadata = models.JSONField(default=dict)
+    search_text = models.TextField()
+
+    class Meta:
+        db_table = 'source_vocabulary_term'
+        constraints = [models.UniqueConstraint(
+            fields=['vocabulary', 'code'], name='uq_source_vocab_term_code',
+        )]
+        indexes = [GinIndex(OpClass(Upper('search_text'), name='gin_trgm_ops'),
+                            name='ix_source_vocab_search_trgm')]
