@@ -32,10 +32,12 @@ MAX_AGE_SECONDS = 3 * 24 * 60 * 60
 
 
 class VerifyEmailThrottle(AnonRateThrottle):
+    scope = 'email_verification'
     rate = '10/minute'
 
 
 class ResendVerificationThrottle(UserRateThrottle):
+    scope = 'email_verification_resend'
     rate = '3/minute'
 
 

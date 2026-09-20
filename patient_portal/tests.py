@@ -15719,6 +15719,14 @@ class SelfSignupEmailTrustTest(TestCase):
         self.assertEqual(client.post('/api/v1/auth/verify-email/resend/').status_code, 200)
         self.assertEqual(len(mail.outbox), sent_before + 1)
 
+    def test_normal_api_traffic_does_not_consume_the_resend_limit(self):
+        client, _ = self._signup('resend@example.com')
+        for _ in range(4):
+            self.assertEqual(client.get('/api/v1/user/').status_code, 200)
+        for _ in range(3):
+            self.assertEqual(client.post('/api/v1/auth/verify-email/resend/').status_code, 200)
+        self.assertEqual(client.post('/api/v1/auth/verify-email/resend/').status_code, 429)
+
     def test_a_mail_failure_does_not_fail_the_signup(self):
         from unittest import mock
         with mock.patch('patient_portal.api.email_verification.send_mail', side_effect=OSError('smtp down')):
