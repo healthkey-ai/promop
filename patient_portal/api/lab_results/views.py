@@ -362,7 +362,8 @@ class ResultsSummaryView(APIView):
 
                 values.append({
                     'normalized': normalize(preferences.get(cid), row['value_as_number'],
-                        row['unit_source_value'] or (row['unit_concept_code'] if row['unit_vocabulary_id'] == 'UCUM' else None),
+                        row['unit_source_value'] if (row['unit_source_value'] or '').strip() else
+                        (row['unit_concept_code'] if row['unit_vocabulary_id'] == 'UCUM' else None),
                         row['range_low'], row['range_high']),
                     'measurement_id': row['measurement_id'],
                     'value': row['value_as_number'],

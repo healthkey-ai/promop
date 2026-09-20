@@ -866,7 +866,9 @@ describe("CodeMappingPage", () => {
     it("resolves a hand-typed destination concept id on blur", async () => {
       await openDialog();
       const input = screen.getByLabelText("Destination Concept ID");
-      mockGet.mockImplementationOnce(() => Promise.resolve({ data: loincHit }));
+      const previousGet = mockGet.getMockImplementation();
+      mockGet.mockImplementation((url: string, ...args: unknown[]) => url === "/v1/concepts/3046299/"
+        ? Promise.resolve({ data: loincHit }) : previousGet?.(url, ...args));
       fireEvent.change(input, { target: { value: "3046299" } });
       fireEvent.blur(input, { target: { value: "3046299" } });
 

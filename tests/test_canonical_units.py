@@ -205,3 +205,18 @@ def test_vocabulary_property_change_invalidates_normalization(setup_units):
     result = measurement_normalized(row, policies())
     assert result['value'] is None
     assert 'vocabulary changed' in result['error']
+
+
+def test_summary_and_detail_agree_on_blank_unit_fallback(setup_units):
+    from tests.factories import VocabularyFactory
+    client, _, concept, url = setup_units
+    client.put(url, {'unit': 'g/dL', 'revision': 0}, format='json')
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    unit = ConceptFactory(vocabulary=VocabularyFactory(vocabulary_id='UCUM'), concept_code='g/L')
+    row = MeasurementFactory(person=person, measurement_concept=concept, value_as_number=20,
+                             unit_source_value='   ', unit_concept=unit)
+    detail = client.get(f'/api/v1/measurements/{row.pk}/').json()['normalized']
+    summary = client.get(f'/api/v1/lab-results/summary/?person_id={person.pk}').json()['results'][0]['values'][0]['normalized']
+    assert detail == summary
+    assert Decimal(str(detail['value'])) == 2
