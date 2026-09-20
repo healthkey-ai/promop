@@ -405,7 +405,7 @@ function mappingRowId(row: CodeMappingRow): string {
 }
 
 type MappingSection = "Unmapped" | "Mapped" | "Rejected" | "Athena Mapped";
-type SortColumn = "origin_system" | "source_code" | "source_vocabulary_id" | "occurrence_count" | "source_code_description"
+type SortColumn = "origin_system" | "source_code" | "occurrence_count" | "source_code_description"
   | "destination_concept_name" | "destination_concept_id" | "destination_count" | "status";
 type SectionSort = { column: SortColumn; descending: boolean };
 
@@ -835,17 +835,25 @@ export default function CodeMappingPage() {
     });
   }, [rows, searchQuery, selectedVocabulary, browse]);
 
-  // A query on a specific tab searches every coding system (#963). Rows that
-  // came from another tab carry no system in the table's usual columns, so
-  // say which tab each hit belongs to while the search is active.
-  const crossTabSearch = !browse && !overallTab && searchQuery.trim() !== "";
-  const crossTabHits = useMemo(
-    () => (crossTabSearch ? visibleRows.filter((row) => tabForRow(row) !== selectedVocabulary).length : 0),
-    [crossTabSearch, visibleRows, selectedVocabulary],
+  // Rows can arrive from other tabs: in browse mode the server searches every
+  // coding system whenever a query is set, and the client filter above does
+  // the same in legacy mode. Such hits carry no system in the table's usual
+  // columns, so label them with their tab while any are on screen (#963).
+  // Keyed on the rows, not on how they got here.
+  const tabLabels = useMemo(
+    () => new Map(vocabularyTabs.map((tab) => [tab.vocabulary_id, tab.label])),
+    [vocabularyTabs],
   );
   const systemLabel = (row: CodeMappingRow) =>
-    vocabularyTabs.find((tab) => tab.vocabulary_id === tabForRow(row))?.label
-    ?? (row.source_vocabulary_id || "Uncoded");
+    tabLabels.get(tabForRow(row)) ?? (row.source_vocabulary_id || "Uncoded");
+  const foreignHits = useMemo(
+    () => (overallTab ? 0 : visibleRows.filter((row) => tabForRow(row) !== selectedVocabulary).length),
+    [overallTab, visibleRows, selectedVocabulary],
+  );
+  const showSystemColumn = foreignHits > 0;
+  // The debounced query is what the server has answered, so the message
+  // describes the rows on screen rather than re-announcing every keystroke.
+  const crossTabSearch = !overallTab && debouncedSearch.trim() !== "";
 
   // Four-section layout: UNMAPPED / MAPPED / REJECTED / ATHENA MAPPED.
   const athenaRows = useMemo(
@@ -1478,7 +1486,7 @@ export default function CodeMappingPage() {
   };
 
   const renderTable = (sectionRows: CodeMappingRow[], emptyText: string, section: MappingSection, { hideStatus = false }: { hideStatus?: boolean } = {}) => {
-    const colCount = 7 + (hideStatus ? 0 : 2);
+    const colCount = 7 + (showSystemColumn ? 1 : 0) + (hideStatus ? 0 : 2);
     const sort = sectionSorts[section];
     const pagination = browse?.pages[section];
     const header = (label: string, column: SortColumn) => (
@@ -1497,7 +1505,7 @@ export default function CodeMappingPage() {
         <thead className="bg-slate-100 text-xs uppercase text-slate-600">
           <tr>
             {header("Source code", "source_code")}
-            {crossTabSearch && header("System", "source_vocabulary_id")}
+            {showSystemColumn && <th className="px-4 py-3 font-semibold">System</th>}
             {header("Seen", "occurrence_count")}
             {header("Source description", "source_code_description")}
             {header("Provenance", "origin_system")}
@@ -1530,7 +1538,7 @@ export default function CodeMappingPage() {
                 {row.locked_by_username && <span title={`Locked by ${row.locked_by_username}`} className="mr-1 text-amber-500">&#128274;</span>}
                 {row.source_code}
               </td>
-              {crossTabSearch && (
+              {showSystemColumn && (
                 <td className="px-4 py-3 text-xs text-slate-700">{systemLabel(row)}</td>
               )}
               <td className="px-4 py-3 text-right font-mono text-xs text-slate-700">{row.occurrence_count || 0}</td>
@@ -1676,8 +1684,8 @@ export default function CodeMappingPage() {
           {crossTabSearch && (
             <p className="mt-1 text-xs text-slate-600" role="status">
               Searching all coding systems
-              {crossTabHits > 0
-                ? ` — ${crossTabHits} match${crossTabHits === 1 ? "" : "es"} from other tabs; the System column says which.`
+              {foreignHits > 0
+                ? ` — ${foreignHits} match${foreignHits === 1 ? "" : "es"} from other tabs; the System column says which.`
                 : " — every match is on this tab."}
             </p>
           )}

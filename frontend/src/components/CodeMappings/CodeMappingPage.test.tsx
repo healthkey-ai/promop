@@ -454,8 +454,6 @@ describe("CodeMappingPage", () => {
   it("searches mappings across source-vocabulary tabs", async () => {
     renderPage();
     await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
-    // Without a query the table is one tab's, so it does not repeat the system.
-    expect(screen.queryByRole("columnheader", { name: "System" })).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByRole("textbox", { name: "Search mappings" }), {
       target: { value: "C90.00" },
@@ -463,13 +461,42 @@ describe("CodeMappingPage", () => {
     // The matching ICD-10-CM row lives in the non-active tab and is approved,
     // so expand its section after the global search has located it.
     fireEvent.click(screen.getByRole("button", { name: /^Mapped/ }));
+    expect(await screen.findByText("C90.00", { selector: "td" })).toBeInTheDocument();
+  });
+
+  it("labels cross-tab hits with their coding system in browse mode (#963)", async () => {
+    // The page always asks for browse=1, and the server answers a query with
+    // rows from every coding system (mapping_browse: `mappings if search`).
+    const pages = { Unmapped: { page: 1, page_size: 100, total: 1 }, Mapped: { page: 1, page_size: 100, total: 1 },
+      Rejected: { page: 1, page_size: 100, total: 0 }, "Athena Mapped": { page: 1, page_size: 100, total: 0 } };
+    const tabs = [
+      { vocabulary_id: "", label: "Uncoded", is_standard: false, proposed: 1, approved: 0, athena: 0 },
+      { vocabulary_id: "ICD10", label: "ICD-10", is_standard: false, proposed: 0, approved: 1, athena: 0 },
+    ];
+    mockGet.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
+      if (url === "/v1/code-mappings/") {
+        const search = String(config?.params?.search || "");
+        return Promise.resolve({ data: {
+          results: search ? [proposedRow, approvedRow].filter((r) => r.source_code.includes(search)) : [proposedRow],
+          duplicates: [], selected_source: "", rejected_count: 0, tabs, pages,
+        } });
+      }
+      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+    });
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+    // One tab's rows: nothing to label.
+    expect(screen.queryByRole("columnheader", { name: "System" })).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Search mappings" }), { target: { value: "C90.00" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Mapped/ }));
     const row = (await screen.findByText("C90.00", { selector: "td" })).closest("tr")!;
-    // A cross-tab hit says which coding system it came from (#963).
     expect(cellUnder(row, "System")).toHaveTextContent("ICD-10");
-    expect(screen.getByRole("status")).toHaveTextContent(/Searching all coding systems — 1 match from other tabs/);
+    expect(await screen.findByText(/Searching all coding systems — 1 match from other tabs/)).toBeInTheDocument();
 
     fireEvent.change(screen.getByRole("textbox", { name: "Search mappings" }), { target: { value: "" } });
-    expect(screen.queryByRole("columnheader", { name: "System" })).not.toBeInTheDocument();
+    await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+    await waitFor(() => expect(screen.queryByRole("columnheader", { name: "System" })).not.toBeInTheDocument());
   });
 
   it("splits proposed and approved into Unmapped and Mapped sections", async () => {
