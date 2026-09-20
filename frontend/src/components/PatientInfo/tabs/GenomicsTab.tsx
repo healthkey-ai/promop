@@ -180,8 +180,8 @@ export default function GenomicsTab({ formData, readOnly = false }: {
           onClick={() => { if (!busy && !draft) { setViewing(v); setDeleting(null); } }}
           onKeyDown={e => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); setViewing(v); } }}
           className="border-b align-top cursor-pointer hover:bg-muted/50">
-          <td className="p-2 font-medium">{v.gene || '—'}</td>
-          <td className="p-2 break-words max-w-xs">{v.variant || v.variant_name || v.genomic_dna_change || 'Not recorded'}
+          <td className="p-2 font-medium">{v.gene?.toUpperCase() || '—'}</td>
+          <td className="p-2 break-words max-w-xs">{v.variant_name || v.variant || v.genomic_dna_change || 'Not recorded'}
             {markerFor(v)?.kind === 'abnormality' && <span className="block text-xs text-muted-foreground">{markerFor(v)?.label}</span>}
           </td>
           <td className="p-2">{findingStatus(v)}</td>
