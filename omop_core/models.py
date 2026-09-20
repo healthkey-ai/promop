@@ -374,6 +374,10 @@ class GroupAccess(models.Model):
         null=True, blank=True, related_name='access_grants',
     )
     role = models.CharField(max_length=20, choices=ROLE_CHOICES)
+    pending_email_verification = models.BooleanField(
+        default=False,
+        help_text="Self-signup grant waiting for verified domain access.",
+    )
     redirect_url = models.URLField(max_length=500, blank=True, default='')
     expires_at = models.DateTimeField(null=True, blank=True)
     granted_at = models.DateTimeField(auto_now_add=True)

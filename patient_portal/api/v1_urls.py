@@ -64,6 +64,7 @@ from .patient_signup import PatientSignupView
 from .audit_views import AuditEventViewSet
 from .representatives import PersonalRepresentativeViewSet
 from .password_reset import request_password_reset, reset_password
+from .email_verification import resend_verification_email, verify_email
 from .break_glass import break_glass
 
 from .service_applications import ServiceApplicationViewSet
@@ -108,6 +109,8 @@ urlpatterns = [
     path('auth/change-password/', change_password, name='v1-change-password'),
     path('auth/request-reset/', request_password_reset, name='v1-request-reset'),
     path('auth/reset-password/', reset_password, name='v1-reset-password'),
+    path('auth/verify-email/', verify_email, name='v1-verify-email'),
+    path('auth/verify-email/resend/', resend_verification_email, name='v1-verify-email-resend'),
     path('break-glass/', break_glass, name='v1-break-glass'),
     path('derivation-status/<str:task_id>/', derivation_status,
          name='v1-derivation-status'),

@@ -140,7 +140,10 @@ def resolve_or_create_person(identity, email=None, allow_create=True, email_veri
         return pu.person
 
     if email_verified is None:
-        email_verified = getattr(identity, 'is_local', False)
+        # Was `is_local`, which treated every email/password account as verified --
+        # including one that self-signed-up with somebody else's address, which
+        # would then be linked to that person's record by the match below.
+        email_verified = getattr(identity, 'has_verified_email', False)
 
     email = (email or getattr(identity, 'email', None) or "").strip()
     if email and email_verified:

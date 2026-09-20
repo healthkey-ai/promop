@@ -15,7 +15,7 @@ pytestmark = pytest.mark.django_db
 
 
 def user(email='person@example.test', **kwargs):
-    return Identity.objects.create_user(email=email, password=None, **kwargs)
+    return Identity.objects.create_user(email=email, password=None, email_verified_at=timezone.now(), **kwargs)
 
 
 def test_patient_and_professional_roles_are_both_reported_with_scope():
@@ -152,3 +152,15 @@ def test_organization_trust_does_not_expand_recursively():
     assert set(get_admin_orgs(actor)) == {target}
     assert {r['org_slug'] for r in UserSerializer(actor).data['effective_roles']
             if r['role'] == 'org_admin'} == {target.slug}
+
+
+def test_unverified_email_does_not_expose_pending_invitations_or_trust_roles():
+    actor = Identity.objects.create_user(email='unverified@example.test')
+    org = OrganizationFactory()
+    OrgTrust.objects.create(granting_org=org, trusted_domain='example.test')
+    OrgInvitation.objects.create(org=org, email=actor.email, role='org_admin',
+        token='c'*64, expires_at=timezone.now()+timedelta(days=1))
+    data = UserSerializer(actor).data
+    assert data['org_accesses'] == []
+    assert data['effective_roles'] == []
+    assert not data['is_org_admin']

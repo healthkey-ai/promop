@@ -25,6 +25,8 @@ vi.mock("@/components/Auth/Login", () => ({ Login: () => <div>LOGIN</div> }));
 vi.mock("@/components/Auth/AcceptInvite", () => ({ default: () => <div>ACCEPT_INVITE</div> }));
 vi.mock("@/components/Auth/AcceptPatientInvite", () => ({ default: () => <div>ACCEPT_PATIENT_INVITE</div> }));
 vi.mock("@/components/Auth/ResetPassword", () => ({ default: () => <div>RESET_PASSWORD</div> }));
+vi.mock("@/components/Auth/VerifyEmail", () => ({ default: () => <div>VERIFY_EMAIL</div> }));
+vi.mock("@/components/Auth/VerifyEmailBanner", () => ({ default: () => <div>VERIFY_BANNER</div> }));
 vi.mock("@/components/Auth/ChangePassword", () => ({ default: () => <div>CHANGE_PASSWORD</div> }));
 vi.mock("@/components/Auth/OrgLogin", () => ({ default: () => <div>ORG_LOGIN</div> }));
 vi.mock("@/components/Auth/OrgSignup", () => ({ default: () => <div>ORG_SIGNUP</div> }));
@@ -216,6 +218,34 @@ describe("App force-password-change gate (TI.1.1#09)", () => {
     renderAt("/reset-password");
     expect(screen.getByText("RESET_PASSWORD")).toBeInTheDocument();
     expect(screen.queryByText("CHANGE_PASSWORD")).not.toBeInTheDocument();
+  });
+});
+
+describe("unverified email banner", () => {
+  it("prompts a signed-in user whose address is not confirmed, without blocking the page", () => {
+    mockUseAuth.mockReturnValue({
+      ...baseAuth,
+      currentUser: { id: 1, is_patient: true, person_id: 5, email_verified: false },
+    });
+    renderAt("/");
+    expect(screen.getByText("VERIFY_BANNER")).toBeInTheDocument();
+    expect(screen.getByText("PATIENT_HOME")).toBeInTheDocument();
+  });
+
+  it.each([{ email_verified: true }, {}])("stays out of the way otherwise: %j", (flags) => {
+    // `{}` is a backend that predates the field: no banner rather than a false alarm.
+    mockUseAuth.mockReturnValue({
+      ...baseAuth,
+      currentUser: { id: 1, is_patient: true, person_id: 5, ...flags },
+    });
+    renderAt("/");
+    expect(screen.queryByText("VERIFY_BANNER")).not.toBeInTheDocument();
+  });
+
+  it("serves the verification page to a logged-out visitor", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: null });
+    renderAt("/verify-email");
+    expect(screen.getByText("VERIFY_EMAIL")).toBeInTheDocument();
   });
 });
 

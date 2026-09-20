@@ -28,6 +28,8 @@ import TherapyMappingPage from "@/components/TherapyMappings/TherapyMappingPage"
 import OrgLogin from "@/components/Auth/OrgLogin";
 import OrgSignup from "@/components/Auth/OrgSignup";
 import ForgotPassword from "@/components/Auth/ForgotPassword";
+import VerifyEmail from "@/components/Auth/VerifyEmail";
+import VerifyEmailBanner from "@/components/Auth/VerifyEmailBanner";
 import UserProfilePage from "@/components/User/UserProfilePage";
 import { useAuth } from "@/hooks/useAuth";
 
@@ -64,7 +66,7 @@ function AppRoutes() {
   const { currentUser, loading: authLoading, refresh, logout } = useAuth();
   const location = useLocation();
 
-  const publicPaths = ['/accept-invite', '/accept-patient-invite', '/reset-password', '/forgot-password', '/login', '/auth/callback'];
+  const publicPaths = ['/accept-invite', '/accept-patient-invite', '/reset-password', '/forgot-password', '/verify-email', '/login', '/auth/callback'];
   const isPublicPath = (path: string) =>
     publicPaths.includes(path) || /^\/org\/[^/]+\/(login|signup|forgot-password|accept-invite)$/.test(path);
   if (authLoading && !isPublicPath(location.pathname)) {
@@ -80,7 +82,7 @@ function AppRoutes() {
   // backend independently refuses every other /api/ request meanwhile, so this
   // is a UX affordance over a server-enforced rule. Public auth pages (reset
   // link, invite acceptance) are exempt so those flows can still complete.
-  const forceChangeExemptPaths = ['/reset-password', '/forgot-password', '/accept-invite', '/accept-patient-invite'];
+  const forceChangeExemptPaths = ['/reset-password', '/forgot-password', '/verify-email', '/accept-invite', '/accept-patient-invite'];
   const isForceChangeExempt = (path: string) =>
     forceChangeExemptPaths.includes(path) || /^\/org\/[^/]+\/(login|signup|forgot-password|accept-invite)$/.test(path);
   if (
@@ -117,7 +119,13 @@ function AppRoutes() {
     return element;
   };
 
+  // A prompt, not a gate: the account works, only address-derived access waits.
+  // Strictly `=== false` so a backend that predates the field shows nothing.
+  const showVerifyBanner = currentUser?.email_verified === false && !isPublicPath(location.pathname);
+
   return (
+    <>
+    {showVerifyBanner && <VerifyEmailBanner email={currentUser?.email} />}
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/auth/callback" element={<Navigate to="/" replace />} />
@@ -128,6 +136,7 @@ function AppRoutes() {
       <Route path="/accept-patient-invite" element={<AcceptPatientInvite />} />
       <Route path="/reset-password" element={<ResetPassword />} />
       <Route path="/forgot-password" element={<ForgotPassword />} />
+      <Route path="/verify-email" element={<VerifyEmail />} />
 
       <Route path="/org/:slug/login" element={<OrgLogin />} />
       <Route path="/org/:slug/signup" element={<OrgSignup />} />
@@ -170,6 +179,7 @@ function AppRoutes() {
 
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+    </>
   );
 }
 

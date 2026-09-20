@@ -192,6 +192,9 @@ class PartnerAuthentication(BaseAuthentication):
             if claims.name and identity.name != claims.name:
                 identity.name = claims.name
                 identity.save(update_fields=["name"])
+        if (claims.email and claims.email_verified
+                and identity.email.lower() == claims.email.lower()):
+            identity.mark_email_verified()
         return identity
 
 
@@ -205,7 +208,7 @@ def _ensure_person(identity, claims=None):
         email_verified = claims.email_verified
     elif identity.email:
         email = identity.email
-        email_verified = identity.is_local
+        email_verified = identity.has_verified_email
     else:
         email_verified = False
 
