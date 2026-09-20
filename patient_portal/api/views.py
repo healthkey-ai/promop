@@ -7265,7 +7265,7 @@ class DrugExposureViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _Provena
 class MeasurementViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = MeasurementSerializer
     permission_classes = [EtlPatientCrudPermission, PatientSelfScopePermission]
-    queryset = Measurement.objects.select_related('measurement_concept').all()
+    queryset = Measurement.objects.select_related('measurement_concept', 'unit_concept').all()
     clinical_filter_fields = {
         'concept_param': 'measurement_concept_id',
         'concept_field': 'measurement_concept_id',

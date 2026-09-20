@@ -122,7 +122,7 @@ export default function InlineDestinationPicker({ mappingId, sourceLabel, vocabu
             onClick={() => choose(concept)} className={`block w-full border-b border-slate-100 px-3 py-2 text-left hover:bg-slate-100 ${activeIndex === index ? 'bg-slate-100' : ''}`}>
             <span className="font-medium text-slate-950">{concept.concept_name}</span>
             <span className="mt-0.5 block text-xs text-slate-500">{concept.vocabulary_id}:{concept.concept_code} · OMOP {concept.concept_id}</span>
-            {(concept.measurement_type || concept.suggested_unit) && <ConceptInputDetails domain_id={concept.domain_id} measurement_type={concept.measurement_type} suggested_unit={concept.suggested_unit} />}
+            {(concept.measurement_type || concept.suggested_unit) && <ConceptInputDetails domain_id={concept.domain_id} measurement_type={concept.measurement_type} suggested_unit={concept.suggested_unit} example_units={concept.example_units} />}
           </button>
         </li>)}
       </ul>}

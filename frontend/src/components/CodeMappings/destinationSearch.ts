@@ -11,6 +11,7 @@ export interface DestinationConcept {
   invalid_reason?: string | null;
   measurement_type?: 'qualitative' | 'quantitative';
   suggested_unit?: string;
+  example_units?: string[];
 }
 
 export interface SavedMapping {

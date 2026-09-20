@@ -1,3 +1,4 @@
+import CanonicalUnitEditor from "./CanonicalUnitEditor";
 import PageTitle from '@/components/Branding/PageTitle';
 import IndividualSuggestCandidates from "./IndividualSuggestCandidates";
 import InlineDestinationPicker from "./InlineDestinationPicker";
@@ -69,6 +70,7 @@ interface CodeMappingRow {
   mapping_origin?: "athena" | "healthkey";
   measurement_type?: "qualitative" | "quantitative";
   suggested_unit?: string;
+  example_units?: string[];
   locked_by_username?: string | null;
   locked_at?: string | null;
 }
@@ -158,6 +160,7 @@ interface ConceptResult {
   invalid_reason?: string | null;
   measurement_type?: "qualitative" | "quantitative";
   suggested_unit?: string;
+  example_units?: string[];
 }
 
 interface SearchScope {
@@ -251,6 +254,7 @@ interface MappingForm {
   omop_table: string;
   measurement_type: string;
   suggested_unit: string;
+  example_units: string[];
   status: "proposed" | "approved" | "rejected";
   notes: string;
 }
@@ -271,6 +275,7 @@ const emptyForm: MappingForm = {
   omop_table: "",
   measurement_type: "",
   suggested_unit: "",
+  example_units: [],
   status: "proposed",
   notes: "",
 };
@@ -553,6 +558,7 @@ function buildEditForm(row: CodeMappingRow, reference: Reference): MappingForm {
     omop_table: row.destination_omop_table || omopTableFor(reference, domainId),
     measurement_type: row.measurement_type || "",
     suggested_unit: row.suggested_unit || "",
+    example_units: row.example_units || [],
     status: row.status === "unmapped" ? "proposed" : row.status,
     notes: row.notes || "",
   };
@@ -1032,6 +1038,7 @@ export default function CodeMappingPage() {
         omop_table: (adoptDomain ? "" : prev.omop_table) || omopTableFor(reference, domainId),
         measurement_type: concept.measurement_type || "",
         suggested_unit: concept.suggested_unit || "",
+        example_units: concept.example_units || [],
       };
     });
   };
@@ -1555,7 +1562,7 @@ export default function CodeMappingPage() {
                   {row.destination_vocabulary_id}:{row.destination_concept_code}
                 </div>
                 {(row.measurement_type || row.suggested_unit) && (
-                  <ConceptInputDetails domain_id={row.destination_domain_id || ""} measurement_type={row.measurement_type} suggested_unit={row.suggested_unit} />
+                  <ConceptInputDetails domain_id={row.destination_domain_id || ""} measurement_type={row.measurement_type} suggested_unit={row.suggested_unit} example_units={row.example_units} />
                 )}
                 {section === "Unmapped" && row.mapping_id && <button type="button"
                   aria-label={`Choose destination for ${row.source_code}`}
@@ -2451,13 +2458,15 @@ export default function CodeMappingPage() {
                   {form.suggested_unit && (
                     <ReadOnlyField
                       id="suggested_unit"
-                      label="Unit"
-                      tip="Standard unit for this measurement concept, from LOINC."
+                      label="Suggested unit"
+                      tip="A suggested unit, not a unit mandated by Athena. The instance canonical unit is configured below."
                       value={form.suggested_unit}
                       testId="suggested-unit"
                     />
                   )}
                 </div>
+                {form.destination_concept_id && form.destination_vocabulary_id === "LOINC" && form.destination_domain_id === "Measurement" &&
+                  <CanonicalUnitEditor key={form.destination_concept_id} conceptId={Number(form.destination_concept_id)} />}
                 <div className="mt-3 flex justify-end">
                   <button type="button" onClick={() => setMintOpen(true)} className="rounded border border-sky-300 px-3 py-2 text-sm text-sky-700">Mint new concept</button>
                 </div>

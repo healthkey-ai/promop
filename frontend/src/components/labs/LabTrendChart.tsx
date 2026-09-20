@@ -27,7 +27,7 @@ interface ChartPoint {
 }
 
 export function LabTrendChart({ values, unit }: Props) {
-  const numeric = values.filter((r) => r.value != null) as Array<LabResultValue & { value: number }>;
+  const numeric = values.filter((r) => r.value != null && r.unit === unit) as Array<LabResultValue & { value: number }>;
   if (numeric.length === 0) {
     return (
       <EmptyState

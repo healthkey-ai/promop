@@ -1,3 +1,4 @@
+from .canonical_units import canonical_unit
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 from .concept_mint import mint_destination
@@ -126,6 +127,7 @@ urlpatterns = [
     path('vocab-releases/latest/snapshot/<str:table>/', VocabSnapshotView.as_view(), {'release_id': None}, name='v1-vocab-snapshot-latest'),
     path('vocabularies/<str:model_name>/', vocabulary_list, name='v1-vocabulary-list'),
     path('concepts/lookup/', concept_lookup, name='v1-concept-lookup'),
+    path('concepts/<int:concept_id>/canonical-unit/', canonical_unit, name='v1-canonical-unit'),
     path('concepts/search/', concept_search, name='v1-concept-search'),
     path('concepts/candidates/', concept_candidates, name='v1-concept-candidates'),
     path('concepts/synonyms/', concept_synonym_search, name='v1-concept-synonym-search'),

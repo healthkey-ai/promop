@@ -1,3 +1,4 @@
+import type { NormalizedMeasurement } from '@/utils/normalizedLabs';
 /** Row types returned by the five OMOP clinical CRUD endpoints. */
 
 export interface ConditionRow {
@@ -43,6 +44,7 @@ export interface DrugExposureRow {
 }
 
 export interface MeasurementRow {
+  normalized?: NormalizedMeasurement | null;
   measurement_id: number;
   person: number;
   measurement_concept: number | null;

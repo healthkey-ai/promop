@@ -161,6 +161,8 @@ class Command(BaseCommand):
                     loinc_num=loinc_num,
                     loinc_class_id=loinc_class,
                     example_units=example_units,
+                    property=row.get('PROPERTY', '').strip(),
+                    scale_type=row.get('SCALE_TYP', '').strip(),
                 ))
                 count += 1
                 if len(batch) >= BATCH:
@@ -168,7 +170,7 @@ class Command(BaseCommand):
                         batch, ignore_conflicts=False,
                         update_conflicts=True,
                         unique_fields=['loinc_num'],
-                        update_fields=['loinc_class_id', 'example_units'],
+                        update_fields=['loinc_class_id', 'example_units', 'property', 'scale_type'],
                     )
                     batch = []
         if batch:
@@ -176,7 +178,7 @@ class Command(BaseCommand):
                 batch, ignore_conflicts=False,
                 update_conflicts=True,
                 unique_fields=['loinc_num'],
-                update_fields=['loinc_class_id', 'example_units'],
+                update_fields=['loinc_class_id', 'example_units', 'property', 'scale_type'],
             )
         self.stdout.write(
             f'Loaded {count} LOINC code → class mappings '
