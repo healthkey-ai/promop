@@ -18,6 +18,13 @@ function createMockClient() {
   } as unknown as AxiosInstance;
 }
 
+const sourceResult = {
+  measurement_id: 42, value: 20, value_string: null, unit: "g/L",
+  range_low: 10, range_high: 30, status: "in_range", measured_at: "2026-09-20",
+  source: null, lab_name: null, report_filename: null,
+  normalized: { value: 2, unit: "g/dL", range_low: 1, range_high: 3, revision: 1, error: null },
+};
+
 let qc: QueryClient;
 
 function wrapper({ children }: { children: ReactNode }) {
@@ -34,7 +41,7 @@ describe("useLabResultsSummary", () => {
   it("fetches summary with default params", async () => {
     const client = createMockClient();
     (client.get as ReturnType<typeof vi.fn>).mockResolvedValue({
-      data: { count: 1, next: null, previous: null, results: [{ concept_id: 1 }] },
+      data: { count: 1, next: null, previous: null, results: [{ concept_id: 1, values: [sourceResult] }] },
     });
 
     const { result } = renderHook(
@@ -47,6 +54,8 @@ describe("useLabResultsSummary", () => {
       params: { page: 1, page_size: 50 },
     });
     expect(result.current.data?.results).toHaveLength(1);
+    expect(result.current.data?.results[0].values[0]).toMatchObject({ value: 2, unit: "g/dL", range_low: 1, range_high: 3 });
+    expect(result.current.data?.results[0].values[0].original).toMatchObject({ value: 20, unit: "g/L" });
   });
 
   it("is disabled when apiClient is undefined", () => {
@@ -63,10 +72,10 @@ describe("useLabValues", () => {
     const client = createMockClient();
     (client.get as ReturnType<typeof vi.fn>).mockResolvedValue({
       data: {
-        count: 2,
+        count: 1,
         next: null,
         previous: null,
-        results: [],
+        results: [sourceResult],
         concept_id: 100,
         concept_code: "718-7",
         concept_name: "Hemoglobin",
@@ -85,6 +94,8 @@ describe("useLabValues", () => {
       params: { concept_code: "718-7", page: 1, page_size: 50 },
     });
     expect(result.current.data?.concept_name).toBe("Hemoglobin");
+    expect(result.current.data?.results[0]).toMatchObject({ value: 2, unit: "g/dL", range_low: 1, range_high: 3 });
+    expect(result.current.data?.results[0].original).toMatchObject({ value: 20, unit: "g/L" });
   });
 
   it("is disabled when conceptCode is empty", () => {
