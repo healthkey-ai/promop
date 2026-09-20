@@ -26,6 +26,7 @@ it('searches synonyms without losing input focus and selects a source', async ()
   get.mockResolvedValue({ data: { available: true, term: null, results: [term] } });
   fireEvent.change(input, { target: { value: 'r-iss' } });
   expect(input).toHaveFocus();
+  expect(fireEvent.keyDown(input, { key: 'Enter' })).toBe(false);
   fireEvent.click(await screen.findByRole('button', { name: /C141394/ }));
   expect(select).toHaveBeenCalledWith(term);
 });

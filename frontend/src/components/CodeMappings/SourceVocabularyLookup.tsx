@@ -65,7 +65,8 @@ function Lookup({ vocabularyId, code, onSelect }: Props) {
       Search {vocabularyId} source codes
     </label>
     <input id="source-vocabulary-search" className={INPUT_CLASS} value={query}
-      placeholder="Code, name or synonym" onChange={event => setQuery(event.target.value)} />
+      placeholder="Code, name or synonym" onChange={event => setQuery(event.target.value)}
+      onKeyDown={event => { if (event.key === 'Enter') event.preventDefault(); }} />
     {query.trim().length >= 2 && <ul aria-label="Source vocabulary results" className="max-h-60 overflow-auto rounded border border-slate-200">
       {results.map(result => <li key={result.code}>
         <button type="button" className="w-full px-3 py-2 text-left text-sm hover:bg-sky-50"
