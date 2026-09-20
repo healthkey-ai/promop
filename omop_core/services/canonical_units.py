@@ -12,7 +12,7 @@ UNIT_GROUPS = {
              'mg/mL': '1', 'ug/L': '.000001', 'ug/mL': '.001', 'ng/mL': '.000001', 'pg/mL': '.000000001'},
     'SCnc': {'mol/L': '1', 'mmol/L': '.001', 'umol/L': '.000001', 'nmol/L': '.000000001'},
     'NCnc': {'/L': '1', '/uL': '1000000', '10*3/uL': '1000000000', '10*9/L': '1000000000', '10*6/uL': '1000000000000', '10*12/L': '1000000000000'},
-    'CCnc': {'kat/L': '1', 'ukat/L': '.000001', 'U/L': '0.00000001666666666666666666666666667', 'U/mL': '0.00001666666666666666666666666667'},
+    'CCnc': {'kat/L': '60000000', 'ukat/L': '60', 'U/L': '1', 'U/mL': '1000'},
     'Time': {'s': '1', 'min': '60', 'h': '3600', 'd': '86400'},
     'Mass': {'g': '1', 'mg': '.001', 'ug': '.000001', 'kg': '1000'},
     'Len': {'m': '1', 'cm': '.01', 'mm': '.001'},
@@ -39,8 +39,10 @@ def property_for(concept, metadata=None):
     if concept.vocabulary_id != 'LOINC' or concept.domain_id != 'Measurement':
         return ''
     # Authoritative imported PROPERTY takes precedence; unknown properties fail closed.
+    if metadata and metadata.scale_type not in ('', 'Qn'):
+        return ''
     if metadata and metadata.property:
-        return metadata.property if metadata.scale_type in ('', 'Qn') else ''
+        return metadata.property
     match = re.search(r'\[([^]]+)\]', concept.concept_name or '')
     return PROPERTY_NAMES.get(match.group(1).lower(), '') if match else ''
 
@@ -58,7 +60,9 @@ def convert(value, source, target, property_code):
         number = Decimal(str(value))
         if not number.is_finite():
             raise ValueError('Invalid numeric value.')
-        if property_code == 'Temp':
+        if source == target:
+            result = number
+        elif property_code == 'Temp':
             celsius = (number - 32) * Decimal(5) / 9 if source == '[degF]' else number
             result = celsius * 9 / 5 + 32 if target == '[degF]' else celsius
         else:
@@ -72,8 +76,16 @@ def convert(value, source, target, property_code):
 
 def policies():
     """A fresh request snapshot; never cache instance choices across requests/workers."""
-    from omop_core.models import CanonicalUnitPreference
-    return {p.concept_id: p for p in CanonicalUnitPreference.objects.exclude(unit='')}
+    from omop_core.models import CanonicalUnitPreference, LoincCodeClass
+    configured = list(CanonicalUnitPreference.objects.exclude(unit='').select_related('concept'))
+    metadata = LoincCodeClass.objects.filter(loinc_num__in=[p.concept.concept_code for p in configured]).in_bulk()
+    for preference in configured:
+        concept = preference.concept
+        prop = property_for(concept, metadata.get(concept.concept_code))
+        if (concept.standard_concept != 'S' or concept.invalid_reason or prop != preference.property
+                or preference.unit not in UNIT_GROUPS.get(prop, {})):
+            preference.validation_error = 'The vocabulary changed; an administrator must review the canonical unit setting.'
+    return {p.concept_id: p for p in configured}
 
 
 def normalize(preference, value, source_unit, low=None, high=None):
@@ -82,7 +94,11 @@ def normalize(preference, value, source_unit, low=None, high=None):
     result = {'unit': preference.unit, 'revision': preference.revision,
               'value': None, 'range_low': None, 'range_high': None, 'error': None}
     try:
-        # Validate units even for an empty result; never reinterpret value_string.
+        if getattr(preference, 'validation_error', None):
+            raise ValueError(preference.validation_error)
+        if value is None:
+            raise ValueError('No numeric result is available to convert; inspect the original result.')
+        # Never reinterpret value_string or infer missing units.
         convert(0, source_unit, preference.unit, preference.property)
         result.update(value=convert(value, source_unit, preference.unit, preference.property),
                       range_low=convert(low, source_unit, preference.unit, preference.property),
@@ -97,5 +113,6 @@ def measurement_normalized(measurement, preferences):
     if not unit or not unit.strip():
         concept = measurement.unit_concept
         unit = concept.concept_code if concept and concept.vocabulary_id == 'UCUM' else None
-    return normalize(preferences.get(measurement.measurement_concept_id),
+    concept_id = measurement.measurement_concept_id or measurement.measurement_source_concept_id
+    return normalize(preferences.get(concept_id),
                      measurement.value_as_number, unit, measurement.range_low, measurement.range_high)

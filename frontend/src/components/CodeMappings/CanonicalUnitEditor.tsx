@@ -15,6 +15,7 @@ export default function CanonicalUnitEditor({ conceptId }: { conceptId: number }
   useEffect(() => {
     let active = true;
     api.get<UnitSetting>(`/v1/concepts/${conceptId}/canonical-unit/`).then(({ data }) => {
+      if (!Array.isArray(data.available_units) || !Array.isArray(data.example_units)) throw new Error('Invalid unit settings');
       if (active) { setSetting(data); setUnit(data.unit); }
     }).catch(() => { if (active) setError('Could not load unit settings. Reopen this mapping to retry.'); });
     return () => { active = false; };

@@ -169,6 +169,7 @@ function suggestRun(overrides: Record<string, unknown> = {}) {
 
 function renderPage(rows: TestMappingRow[] = [proposedRow, approvedRow]) {
   mockGet.mockImplementation((url: string) => {
+    if (url.endsWith("/canonical-unit/")) return Promise.resolve({ data: { unit: "", revision: 0, available_units: ["mg/dL", "g/L"], example_units: ["mg/dL"], can_edit: true } });
     if (url === "/v1/code-mappings/") return Promise.resolve({ data: [...rows] });
     if (url === "/v1/code-mappings/reference/") return Promise.resolve({ data: reference });
     if (url === "/v1/concepts/search/") {
@@ -936,7 +937,7 @@ describe("CodeMappingPage", () => {
       fireEvent.change(screen.getByLabelText("Search destination concepts"), {
         target: { value: "monoclonal" },
       });
-      expect(await screen.findByText("Quantitative · Unit: mg/dL")).toBeInTheDocument();
+      expect(await screen.findByText("Quantitative · Suggested unit: mg/dL")).toBeInTheDocument();
     });
 
     it("selects a reviewed mint candidate as the mapping destination", async () => {

@@ -123,8 +123,9 @@ function ResultDetail({
             <ul className="divide-y divide-border">
               {values.map((r) => (
                 <li key={r.measurement_id} className="flex items-center gap-3 px-4 py-3">
-                  {r.normalized?.error && <span role="status" className="text-xs text-amber-700">Unit conversion unavailable: {r.normalized.error}</span>
+                  {r.normalized?.error && <span role="status" className="text-xs text-amber-700">Unit conversion unavailable: {r.normalized.error}</span>}
                   <div className="min-w-0 flex-1">
+                    {r.original && <p className="text-xs text-muted-foreground">Original: {formatValue(r.original)} {r.original.unit || "(unit missing)"}</p>}
                     <div className="flex items-baseline gap-2">
                       <span className="font-mono text-sm text-foreground">
                         {formatValue(r)}

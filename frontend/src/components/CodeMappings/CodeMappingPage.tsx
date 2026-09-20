@@ -2465,7 +2465,7 @@ export default function CodeMappingPage() {
                     />
                   )}
                 </div>
-                {form.destination_concept_id && form.destination_vocabulary_id === "LOINC" && form.destination_domain_id === "Measurement" &&
+                {form.destination_concept_id && form.destination_vocabulary_id === "LOINC" && form.omop_table === "measurement" &&
                   <CanonicalUnitEditor key={form.destination_concept_id} conceptId={Number(form.destination_concept_id)} />}
                 <div className="mt-3 flex justify-end">
                   <button type="button" onClick={() => setMintOpen(true)} className="rounded border border-sky-300 px-3 py-2 text-sm text-sky-700">Mint new concept</button>

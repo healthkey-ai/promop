@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from omop_core.services.concept_unit_info import (
     concept_unit_fields,
     get_loinc_to_unit,
+    get_loinc_example_units,
     measurement_input_type,
 )
 
@@ -79,9 +80,11 @@ class TestGetLoincToUnitDBFallback:
     def setup_method(self):
         # Clear the lru_cache so each test gets a fresh lookup.
         get_loinc_to_unit.cache_clear()
+        get_loinc_example_units.cache_clear()
 
     def teardown_method(self):
         get_loinc_to_unit.cache_clear()
+        get_loinc_example_units.cache_clear()
 
     def test_db_units_included(self):
         from omop_core.models import LoincClass, LoincCodeClass
@@ -125,4 +128,4 @@ class TestGetLoincToUnitDBFallback:
         )
         c = _make_concept(concept_code='99992-0', concept_name='Some analyte')
         result = concept_unit_fields(c)
-        assert result == {'measurement_type': 'quantitative', 'suggested_unit': 'ng/mL'}
+        assert result == {'measurement_type': 'quantitative', 'suggested_unit': 'ng/mL', 'example_units': ['ng/mL']}

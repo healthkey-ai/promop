@@ -26,6 +26,8 @@ def canonical_unit(request, concept_id):
     preference = CanonicalUnitPreference.objects.filter(concept=concept).first()
     revision = preference.revision if preference else 0
     if request.method == 'PUT':
+        if not isinstance(request.data, dict):
+            return Response({'detail': 'Expected a unit setting object.'}, status=400)
         if type(request.data.get('revision')) is not int or request.data['revision'] != revision:
             return Response({'detail': 'This unit setting changed. Reload it before saving.'}, status=409)
         unit = request.data.get('unit')
