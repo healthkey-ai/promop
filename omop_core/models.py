@@ -2133,6 +2133,31 @@ class SourceCodeConceptMapping(models.Model):
         return f"{source}:{self.source_code} -> {self.target_concept_id}"
 
 
+class MappingSuggestionReview(models.Model):
+    """Feedback on a reviewed suggestion replaced by a later Suggest run.
+
+    The mapping holds its current suggestion. Move its completed review here
+    atomically before replacing it, so accuracy counts each review once.
+    Snapshot source and concept IDs so later edits do not rewrite the evidence.
+    """
+
+    mapping = models.ForeignKey(
+        SourceCodeConceptMapping, on_delete=models.SET_NULL, null=True,
+        related_name='suggestion_reviews',
+    )
+    source_vocabulary_id = models.CharField(max_length=50, blank=True)
+    source_code = models.CharField(max_length=100)
+    suggested_target_concept_id = models.BigIntegerField(null=True)
+    suggestion_model_version = models.CharField(max_length=20)
+    suggestion_outcome = models.CharField(
+        max_length=12, choices=SourceCodeConceptMapping.SUGGESTION_OUTCOME_CHOICES,
+    )
+    archived_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'mapping_suggestion_review'
+
+
 class MappingDestinationCandidate(models.Model):
     """An imported alternative; it does not change the chosen clinical mapping."""
 
