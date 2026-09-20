@@ -454,6 +454,8 @@ describe("CodeMappingPage", () => {
   it("searches mappings across source-vocabulary tabs", async () => {
     renderPage();
     await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+    // Without a query the table is one tab's, so it does not repeat the system.
+    expect(screen.queryByRole("columnheader", { name: "System" })).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByRole("textbox", { name: "Search mappings" }), {
       target: { value: "C90.00" },
@@ -461,7 +463,13 @@ describe("CodeMappingPage", () => {
     // The matching ICD-10-CM row lives in the non-active tab and is approved,
     // so expand its section after the global search has located it.
     fireEvent.click(screen.getByRole("button", { name: /^Mapped/ }));
-    expect(await screen.findByText("C90.00", { selector: "td" })).toBeInTheDocument();
+    const row = (await screen.findByText("C90.00", { selector: "td" })).closest("tr")!;
+    // A cross-tab hit says which coding system it came from (#963).
+    expect(cellUnder(row, "System")).toHaveTextContent("ICD-10");
+    expect(screen.getByRole("status")).toHaveTextContent(/Searching all coding systems — 1 match from other tabs/);
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Search mappings" }), { target: { value: "" } });
+    expect(screen.queryByRole("columnheader", { name: "System" })).not.toBeInTheDocument();
   });
 
   it("splits proposed and approved into Unmapped and Mapped sections", async () => {
