@@ -108,7 +108,8 @@ def browse_mappings(mappings, params, serialize):
             requested_page = max(1, int(params.get(f'page_{index}', 1)))
         except (ValueError, TypeError):
             raise ValidationError({'page': 'Page must be an integer.'})
-        order = params.get(f'order_{index}', '-occurrence_count')
+        default_order = 'origin_system' if section == 'Unmapped' else '-occurrence_count'
+        order = params.get(f'order_{index}', default_order)
         field = ORDER_FIELDS.get(order.lstrip('-'))
         if field is None:
             raise ValidationError({'order': 'Unknown sort column.'})
@@ -119,7 +120,10 @@ def browse_mappings(mappings, params, serialize):
         if field == 'destination_count':
             query = with_destination_counts(query)
         ordering = F(field).desc(nulls_last=True) if order.startswith('-') else F(field).asc(nulls_last=True)
-        ids = list(query.order_by(ordering, 'source_code', 'id').values_list('pk', flat=True)[(page - 1) * PAGE_SIZE:page * PAGE_SIZE])
+        # Keep the most frequently seen codes first within each provenance
+        # group, including when the curator reverses the group order.
+        secondary = ['-occurrence_count'] if field == 'origin_system' else []
+        ids = list(query.order_by(ordering, *secondary, 'source_code', 'id').values_list('pk', flat=True)[(page - 1) * PAGE_SIZE:page * PAGE_SIZE])
         selected_ids.extend(ids)
         pages[section] = dict(page=page, page_size=PAGE_SIZE, total=total)
     # Load all bounded sections together, preserving their selected order.
