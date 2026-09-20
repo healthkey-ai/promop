@@ -48,6 +48,50 @@ def test_production_yaml_keeps_http_settings_on_web_service():
     assert 'SERVICE_AUTH_SCOPES' not in env
 
 
+@pytest.mark.parametrize('service_name', ['promop', 'promop-worker'])
+@pytest.mark.parametrize('verifier_state', ['absent', 'valid', 'invalid'])
+def test_production_build_supports_older_main_and_enforces_present_verifier(
+    tmp_path, service_name, verifier_state,
+):
+    config = yaml.safe_load((ROOT / 'render.yaml').read_text())
+    service = next(s for s in config['services'] if s['name'] == service_name)
+    command = service['buildCommand']
+    (tmp_path / 'frontend').mkdir()
+    if verifier_state != 'absent':
+        (tmp_path / 'scripts').mkdir()
+        (tmp_path / 'scripts' / 'verify_source_catalog_snapshots.py').write_text('placeholder')
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    # Exercise the actual Blueprint shell command without installing packages.
+    # The Python stub mimics both the reported missing-file error and a failed
+    # checksum check, so neither can be hidden by the command's conditionals.
+    stub = '''#!/bin/sh
+printf '%s %s\\n' "${0##*/}" "$*" >> "$BUILD_TEST_LOG"
+if [ "${0##*/}" = python ] && [ "$1" = scripts/verify_source_catalog_snapshots.py ]; then
+    [ -f "$1" ] || exit 2
+    [ "$BUILD_TEST_VERIFIER" != invalid ] || exit 7
+fi
+'''
+    for name in ('python', 'pip', 'npm'):
+        path = bin_dir / name
+        path.write_text(stub)
+        path.chmod(0o755)
+    log = tmp_path / 'commands.log'
+    env = {**os.environ, 'PATH': f'{bin_dir}:{os.environ["PATH"]}',
+           'BUILD_TEST_LOG': str(log), 'BUILD_TEST_VERIFIER': verifier_state}
+    result = subprocess.run(['/bin/sh', '-c', command], cwd=tmp_path, env=env, capture_output=True, text=True)
+    calls = log.read_text().splitlines()
+    if verifier_state == 'invalid':
+        assert result.returncode == 7
+        assert calls == ['python scripts/verify_source_catalog_snapshots.py']
+    else:
+        assert result.returncode == 0, result.stderr
+        assert 'pip install -r requirements.txt' in calls
+        assert ('python scripts/verify_source_catalog_snapshots.py' in calls) == (verifier_state == 'valid')
+        if service_name == 'promop':
+            assert calls[-1] == 'python manage.py collectstatic --noinput'
+
+
 @pytest.mark.parametrize('missing', ['CELERY_BROKER_URL', 'DATABASE_URL', 'SECRET_KEY'])
 def test_worker_refuses_missing_required_configuration(missing):
     env = {'PATH': os.environ['PATH'], 'CELERY_BROKER_URL': 'redis://example.invalid',
