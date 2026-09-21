@@ -11,6 +11,8 @@ interface Props {
   domains: { domain_id: string; label: string }[];
   initialDomain: string;
   initialName: string;
+  initialVocabulary?: string;
+  initialCode?: string;
   sourceCode: string;
   sourceVocabulary: string;
   onSelect: (concept: Concept) => void;
@@ -18,8 +20,8 @@ interface Props {
 }
 
 export default function MintConceptDialog(props: Props) {
-  const [fields, setFields] = useState({ vocabulary_id: "", concept_name: props.initialName,
-    concept_code: "", domain_id: props.initialDomain });
+  const [fields, setFields] = useState({ vocabulary_id: props.initialVocabulary || "", concept_name: props.initialName,
+    concept_code: props.initialCode || "", domain_id: props.initialDomain });
   const [review, setReview] = useState<{ candidates: Concept[]; review_token: string } | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
