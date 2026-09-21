@@ -5,7 +5,10 @@ services:
     repo: https://github.com/healthkey-ai/promop
     branch: main
     autoDeploy: true
-    buildCommand: "python scripts/verify_source_catalog_snapshots.py && pip install -r requirements.txt && cd frontend && npm install && npm run build && cd .. && python manage.py collectstatic --noinput"
+    # This shared Blueprint can advance on dev while production stays on an
+    # older main revision. Validate catalog payloads when that revision ships
+    # the verifier; a verifier failure must still stop the build.
+    buildCommand: "if [ -f scripts/verify_source_catalog_snapshots.py ]; then python scripts/verify_source_catalog_snapshots.py; fi && pip install -r requirements.txt && cd frontend && npm install && npm run build && cd .. && python manage.py collectstatic --noinput"
     startCommand: "chmod +x start.sh && ./start.sh"
     envVars:
       - key: PYTHON_VERSION
@@ -92,7 +95,7 @@ services:
     branch: main
     autoDeploy: true
     # No frontend build: the worker serves nothing.
-    buildCommand: "python scripts/verify_source_catalog_snapshots.py && pip install -r requirements.txt"
+    buildCommand: "if [ -f scripts/verify_source_catalog_snapshots.py ]; then python scripts/verify_source_catalog_snapshots.py; fi && pip install -r requirements.txt"
     startCommand: "celery -A promop worker --loglevel=info"
     envVars:
       - key: PYTHON_VERSION
