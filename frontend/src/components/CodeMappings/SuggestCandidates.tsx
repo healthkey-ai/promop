@@ -1,5 +1,6 @@
 import { useState } from "react";
 import InlineDestinationPicker from "./InlineDestinationPicker";
+import MintConceptDialog from "./MintConceptDialog";
 import { destinationError, saveMappingDestination } from "./destinationSearch";
 
 export type SuggestCandidate = {
@@ -43,6 +44,7 @@ type Props = {
   onSaved?: () => void;
   canApprove?: boolean;
   vocabularies?: { vocabulary_id: string; vocabulary_name: string }[];
+  domains?: { domain_id: string; label: string }[];
 };
 
 const STRATEGY_LABELS: Record<string, string> = { umls: "U", lexical: "L", vectors: "V", semantic: "V" };
@@ -84,8 +86,9 @@ function mergeCandidates(searches: CandidateActivity[], ranked?: CandidateActivi
   return [...byId.values()];
 }
 
-export default function SuggestCandidates({ activity, finished, onSaved, canApprove = false, vocabularies = [] }: Props) {
+export default function SuggestCandidates({ activity, finished, onSaved, canApprove = false, vocabularies = [], domains = [] }: Props) {
   const [editing, setEditing] = useState<number | null>(null);
+  const [minting, setMinting] = useState<number | null>(null);
   const [needsAttentionOnly, setNeedsAttentionOnly] = useState(false);
   const [savedNames, setSavedNames] = useState<Record<number, string>>({});
   const [saving, setSaving] = useState<number | null>(null);
@@ -129,6 +132,22 @@ export default function SuggestCandidates({ activity, finished, onSaved, canAppr
     }
   };
 
+  const mintAndSave = async (mappingId: number, concept: { concept_id: number; concept_name: string }) => {
+    setMinting(null);
+    setSaving(mappingId);
+    setError("");
+    try {
+      await saveMappingDestination(mappingId, concept.concept_id);
+      setSelected(current => ({ ...current, [mappingId]: concept.concept_id }));
+      setSavedNames(current => ({ ...current, [mappingId]: concept.concept_name }));
+      onSaved?.();
+    } catch (failure) {
+      setError(`Concept minted but could not save mapping. ${destinationError(failure)}`);
+    } finally {
+      setSaving(null);
+    }
+  };
+
   // Build a confidence lookup from the ranked event's alternatives.
   const confidenceLookup = (events: CandidateActivity[]): Map<number, Alternative[]> => {
     const ranked = events.filter(e => e.stage === "ranked").at(-1);
@@ -164,6 +183,7 @@ export default function SuggestCandidates({ activity, finished, onSaved, canAppr
   };
   const attentionCount = [...groups].filter(([id, events]) => needsAttention(id, events)).length;
   const visibleGroups = [...groups].filter(([id, events]) => !needsAttentionOnly || needsAttention(id, events));
+  const hasHkVocabularies = vocabularies.some(v => v.vocabulary_id.startsWith("HK-"));
 
   return <section aria-label="Suggestion candidates" className="mb-4 space-y-3 rounded-md border border-slate-200 bg-white p-4">
     <button type="button" className="flex w-full items-center justify-between text-left"
@@ -255,7 +275,7 @@ export default function SuggestCandidates({ activity, finished, onSaved, canAppr
           {ranked && <p className="mt-2 text-sm font-medium">{winner ? `Winner: ${winner.concept_name}` : "No destination proposed"}</p>}
           {(result ?? ranked)?.note && <p className="mt-1 text-sm text-slate-600">{(result ?? ranked)?.note}</p>}
           {savedNames[mappingId] && <p role="status" className="mt-2 text-sm font-medium text-green-800">Saved: {savedNames[mappingId]}</p>}
-          {finished && !result?.dry_run && <div className="mt-3">
+          {finished && !result?.dry_run && <div className="mt-3 flex items-center gap-2">
             {editing === mappingId ? <InlineDestinationPicker key={mappingId} mappingId={mappingId}
               sourceLabel={`${source.source_vocabulary_id || "Uncoded"}:${source.source_code}${description ? ` — ${description}` : ""}`}
               canApprove={canApprove} vocabularies={vocabularies}
@@ -264,17 +284,30 @@ export default function SuggestCandidates({ activity, finished, onSaved, canAppr
                 setSavedNames(current => ({ ...current, [mappingId]: concept.concept_name }));
                 setEditing(null);
                 onSaved?.();
-              }} /> : <button type="button" disabled={saving !== null}
-                aria-label={`Search destination for ${source.source_code}`}
-                onClick={() => setEditing(mappingId)} className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40">
-                Search for another destination
-              </button>}
+              }} /> : <>
+                <button type="button" disabled={saving !== null}
+                  aria-label={`Search destination for ${source.source_code}`}
+                  onClick={() => setEditing(mappingId)} className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40">
+                  Search for another destination
+                </button>
+                {hasHkVocabularies && domains.length > 0 && <button type="button" disabled={saving !== null}
+                  aria-label={`Mint new concept for ${source.source_code}`}
+                  onClick={() => setMinting(mappingId)} className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40">
+                  Mint new concept
+                </button>}
+              </>}
           </div>}
           {ranked?.ranking_timings && <p className="mt-1 text-xs text-slate-500">
             Ranking: {Object.entries(ranked.ranking_timings).map(([k, v]) =>
               `${k.replace(/_ms$/, "")} ${(v / 1000).toFixed(1)}s`
             ).join(" · ")}
           </p>}
+          {minting === mappingId && <MintConceptDialog
+            vocabularies={vocabularies} domains={domains}
+            initialDomain="" initialName={description || source.source_code || ""}
+            sourceCode={source.source_code || ""} sourceVocabulary={source.source_vocabulary_id || ""}
+            onClose={() => setMinting(null)}
+            onSelect={concept => void mintAndSave(mappingId, concept)} />}
         </article>;
       })}
     </>}

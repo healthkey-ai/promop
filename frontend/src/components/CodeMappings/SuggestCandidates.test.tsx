@@ -215,3 +215,52 @@ describe("standard concept badge", () => {
     expect(screen.queryByText("Classification")).not.toBeInTheDocument();
   });
 });
+
+
+const hkVocabs = [{ vocabulary_id: "HK-Labs", vocabulary_name: "Labs" }];
+const domains = [{ domain_id: "Measurement", label: "Measurement" }];
+
+describe("mint new concept from suggest results", () => {
+  it("shows Mint button when HK vocabularies and domains are available", () => {
+    render(<SuggestCandidates activity={results} finished vocabularies={hkVocabs} domains={domains} />);
+    expect(screen.getByRole("button", { name: "Mint new concept for LOCAL" })).toBeInTheDocument();
+  });
+
+  it("hides Mint button when no HK vocabularies", () => {
+    render(<SuggestCandidates activity={results} finished vocabularies={[{ vocabulary_id: "SNOMED", vocabulary_name: "SNOMED" }]} domains={domains} />);
+    expect(screen.queryByRole("button", { name: /Mint new concept/ })).not.toBeInTheDocument();
+  });
+
+  it("hides Mint button when no domains", () => {
+    render(<SuggestCandidates activity={results} finished vocabularies={hkVocabs} domains={[]} />);
+    expect(screen.queryByRole("button", { name: /Mint new concept/ })).not.toBeInTheDocument();
+  });
+
+  it("opens MintConceptDialog when clicked", () => {
+    render(<SuggestCandidates activity={results} finished vocabularies={hkVocabs} domains={domains} />);
+    fireEvent.click(screen.getByRole("button", { name: "Mint new concept for LOCAL" }));
+    expect(screen.getByRole("dialog", { name: "Mint new concept" })).toBeInTheDocument();
+  });
+
+  it("saves the minted concept as the mapping destination", async () => {
+    const onSaved = vi.fn();
+    post.mockResolvedValue({ data: { candidates: [], review_token: "tok" } });
+    patch.mockResolvedValue({ data: {} });
+    render(<SuggestCandidates activity={results} finished vocabularies={hkVocabs} domains={domains} onSaved={onSaved} />);
+    fireEvent.click(screen.getByRole("button", { name: "Mint new concept for LOCAL" }));
+    // Fill out the mint form
+    fireEvent.change(screen.getByLabelText(/Custom vocabulary group/), { target: { value: "HK-Labs" } });
+    fireEvent.change(screen.getByLabelText(/Concept code/), { target: { value: "TEST-001" } });
+    fireEvent.change(screen.getByLabelText(/Concept domain/), { target: { value: "Measurement" } });
+    // Submit review step
+    fireEvent.click(screen.getByRole("button", { name: /Check existing destinations/ }));
+    await waitFor(() => expect(post).toHaveBeenCalledOnce());
+    // Confirm none match and mint
+    fireEvent.click(screen.getByLabelText(/None of these match/));
+    post.mockResolvedValue({ data: { concept_id: 999, concept_name: "LOCAL", concept_code: "TEST-001", vocabulary_id: "HK-Labs", domain_id: "Measurement", concept_class_id: "Observation", standard_concept: null } });
+    fireEvent.click(screen.getByRole("button", { name: /Mint concept/ }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(patch).toHaveBeenCalledWith("/v1/code-mappings/7/", { destination_concept_id: 999, status: "proposed" });
+    expect(screen.getByText(/Saved: LOCAL/)).toBeInTheDocument();
+  });
+});
