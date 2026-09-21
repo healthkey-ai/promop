@@ -322,16 +322,29 @@ class InboundWebhookView(APIView):
             return Response({'detail': 'Idempotency-Key must match the signed event id.'}, status=400)
         digest = hashlib.sha256(body).hexdigest()
         with transaction.atomic():
-            if not PatientRecord.objects.filter(
-                person_id=event_data['data']['person_id'], organization=organization,
-            ).exists():
-                return Response({'detail': 'Unknown patient for this source.'}, status=400)
-            event, created = InboundWebhookEvent.objects.get_or_create(
-                source=source_id, event_id=event_data['id'], defaults={
-                    'organization': organization, 'event_type': event_data['type'],
-                    'payload_digest': digest,
-                },
-            )
+            # The replay key is consulted before the patient, so an event this
+            # endpoint already accepted keeps answering "duplicate" on retry
+            # even after that patient was deleted or moved to another
+            # organization. Answering 400 there would tell the sender an event
+            # it was told we took was rejected, and the retry never settles.
+            event = InboundWebhookEvent.objects.filter(
+                source=source_id, event_id=event_data['id'],
+            ).first()
+            created = False
+            if event is None:
+                if not PatientRecord.objects.filter(
+                    person_id=event_data['data']['person_id'], organization=organization,
+                ).exists():
+                    return Response({'detail': 'Unknown patient for this source.'}, status=400)
+                # get_or_create, not create: a concurrent request may have
+                # inserted the same key since the read above, and the unique
+                # constraint is what actually decides which one processes it.
+                event, created = InboundWebhookEvent.objects.get_or_create(
+                    source=source_id, event_id=event_data['id'], defaults={
+                        'organization': organization, 'event_type': event_data['type'],
+                        'payload_digest': digest,
+                    },
+                )
             if not created:
                 if event.payload_digest != digest or event.organization_id != organization.pk:
                     return Response({'detail': 'Event id already used with a different payload.'}, status=409)

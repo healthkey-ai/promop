@@ -117,6 +117,28 @@ def test_source_cannot_notify_another_tenant(setup):
     assert not WebhookDelivery.objects.exists()
 
 
+def test_a_replay_stays_a_duplicate_after_the_patient_leaves(setup):
+    """An event this endpoint accepted cannot become rejected later.
+
+    The sender retries because it did not see our answer, not because anything
+    changed here. If the patient has since been deleted or moved to another
+    organization, answering "unknown patient" would tell the sender an event we
+    took was refused, and its retry would never settle.
+    """
+    org, other, person, user, subscription = setup
+    assert inbound().status_code == 202
+
+    PatientRecord.objects.filter(person=person).update(organization=other)
+    replay = inbound()
+    assert replay.status_code == 200, replay.data
+    assert replay.data['duplicate'] is True
+
+    # A first-time event for a patient this source cannot name is still refused.
+    fresh = inbound({'id': 'event-2', 'type': 'lab.updated', 'data': {'person_id': 420001}})
+    assert fresh.status_code == 400, fresh.data
+    assert not InboundWebhookEvent.objects.filter(event_id='event-2').exists()
+
+
 def test_unsigned_idempotency_key_must_match_signed_id(setup):
     assert inbound(HTTP_IDEMPOTENCY_KEY='different').status_code == 400
 
