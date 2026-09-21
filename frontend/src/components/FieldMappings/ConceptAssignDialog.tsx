@@ -121,6 +121,13 @@ export function ConceptAssignDialog({
     "ProcedureOccurrence", "Measurement", "Observation", "Death",
     "Specimen", "Note", "NoteNlp",
   ];
+  // Seeded mappings use database names (measurement, condition_occurrence),
+  // while curator-created mappings can use model names (Measurement, etc.).
+  // Match either spelling for display, but preserve the stored value on save:
+  // merely opening the dialog must not count as a recipe/provenance change.
+  const selectedTableOption = OMOP_TABLES.find(
+    (table) => table.toLowerCase() === omopTable.trim().replace(/_/g, "").toLowerCase(),
+  );
 
   const doSearch = useCallback(async (q: string) => {
     if (q.length < 3) {
@@ -392,10 +399,11 @@ export function ConceptAssignDialog({
                 <select
                   id="source_table"
                   title={TIP.source_table}
-                  value={omopTable}
+                  value={selectedTableOption ?? omopTable}
                   onChange={(e) => setOmopTable(e.target.value)}
                   className={`${INPUT_CLASS} w-full`}
                 >
+                  {selectedTableOption === undefined && <option value={omopTable}>{omopTable}</option>}
                   {OMOP_TABLES.map((table) => <option key={table} value={table}>{table}</option>)}
                 </select>
               </Field>

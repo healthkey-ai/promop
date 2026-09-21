@@ -559,6 +559,29 @@ describe("FieldMappingPage", () => {
 
   // ── Phase 1b tests: edit mode ──
 
+  it("shows the genomic mapping's database table in both the list and edit dialog", async () => {
+    const field = {
+      ...MOCK_DESCRIPTORS[2],
+      field_name: "genetic_mutations.allelic_frequency",
+      tab: "genomics",
+      mapping: { ...MOCK_DESCRIPTORS[2].mapping, omop_table: "measurement" },
+    };
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/v1/field-mappings/") return Promise.resolve({ data: [field] });
+      return Promise.resolve({ data: {} });
+    });
+    renderPage();
+    fireEvent.click(await screen.findByText(/Genomics/));
+    const row = (await screen.findByText(field.field_name)).closest("tr")!;
+    expect(within(row).getByText("measurement")).toBeInTheDocument();
+    fireEvent.click(within(row).getByText("229819007"));
+    expect(screen.getByRole("combobox", { name: "Source Table" })).toHaveDisplayValue("Measurement");
+    fireEvent.click(screen.getByRole("button", { name: "Update Mapping" }));
+    await waitFor(() => expect(mockPatch).toHaveBeenCalledWith(
+      "/v1/field-mappings/1/", expect.objectContaining({ omop_table: "measurement" }),
+    ));
+  });
+
   it("opens dialog in edit mode for mapped field", async () => {
     renderPage();
     await waitFor(() => {
