@@ -1228,13 +1228,35 @@ def test_a_patient_copy_announces_one_event_per_table_not_one_per_row(setup):
         ('patient.changed', 'omop_core.person', 'bulk_saved', 1),
     ]
 
-    # --replace deletes the patient's rows before writing them again. That is
-    # one patient being rewritten, not five measurements being removed.
+    # --replace deletes the patient's rows before writing them again under new
+    # ids, so a subscriber mirroring by id is told both halves — but once per
+    # table, not once per row. That bound is the whole point: the same patient
+    # with twenty thousand measurements still costs one pair of events.
     WebhookDelivery.objects.all().delete()
     apply_patient(payload, org, target_person_id=420002, replace=True)
     replaced = [d.payload for d in WebhookDelivery.objects.all()]
-    assert not [e for e in replaced if 'deleted' in e['data']['operation']], replaced
+    assert sorted((e['data']['resource_type'], e['data']['operation'], e['data']['count'])
+                  for e in replaced) == [
+        ('omop_core.measurement', 'bulk_deleted', 5),
+        ('omop_core.measurement', 'bulk_saved', 5),
+        ('omop_core.patientdocument', 'bulk_deleted', 1),
+        ('omop_core.patientdocument', 'bulk_saved', 1),
+        ('omop_core.patientrecord', 'bulk_deleted', 1),
+        ('omop_core.patientrecord', 'bulk_saved', 1),
+        ('omop_core.person', 'bulk_deleted', 1),
+        ('omop_core.person', 'bulk_saved', 1),
+    ]
     assert Measurement.objects.filter(person_id=420002).count() == 5
+
+    # And a table that shrinks rather than emptying says how many went.
+    payload['rows']['omop_core.Measurement'] = payload['rows']['omop_core.Measurement'][:2]
+    WebhookDelivery.objects.all().delete()
+    apply_patient(payload, org, target_person_id=420002, replace=True)
+    shrunk = [(e['data']['operation'], e['data']['count'])
+              for e in (d.payload for d in WebhookDelivery.objects.all())
+              if e['data']['resource_type'] == 'omop_core.measurement']
+    assert sorted(shrunk) == [('bulk_deleted', 5), ('bulk_saved', 2)]
+    assert Measurement.objects.filter(person_id=420002).count() == 2
 
 
 def test_a_replace_that_moves_a_patient_tells_the_organization_that_lost_them(setup):

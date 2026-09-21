@@ -388,17 +388,19 @@ def _publish_copy_events(person_id: int, stats: PatientCopyStats,
             # Derived here on every copy, even when the source had no record row
             # to copy, so the write happened whether or not the copier made it.
             count = PatientRecord.objects.filter(person_id=person_id).count()
-        if count:
-            publish_patient_bulk_change(person_id, model._meta.model_name, count,
-                                        app_label=model._meta.app_label,
-                                        organization_id=organization_id)
-        elif previous_counts.get(label) and not moved:
-            # The table had rows here and the copy brought none, so --replace
-            # emptied it. Announced to the organization that held them; when the
-            # patient moved, the departure event above already covers every
-            # table at once and this organization never had the rows.
+        # A --replace deletes every row this table had before writing the new
+        # ones, under new ids, so both halves are true and a subscriber
+        # mirroring by id needs both. Bounded by tables, not by rows: that is
+        # what separates this from the per-row storm it replaces. Not when the
+        # patient moved — the departure event above covers every table at once,
+        # and this organization never held the rows.
+        if previous_counts.get(label) and not moved:
             publish_patient_bulk_change(person_id, model._meta.model_name,
                                         previous_counts[label], operation='bulk_deleted',
+                                        app_label=model._meta.app_label,
+                                        organization_id=organization_id)
+        if count:
+            publish_patient_bulk_change(person_id, model._meta.model_name, count,
                                         app_label=model._meta.app_label,
                                         organization_id=organization_id)
 
