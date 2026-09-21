@@ -2731,7 +2731,7 @@ def _get_genomics_pathology_data(person: Person, snapshot: OmopSnapshot = None) 
         # ``genetic_mutations`` remains the structured canonical projection;
         # molecular_markers is its legacy display-compatible summary.
         data['molecular_markers'] = '; '.join(
-            f"{mutation['gene'].upper()}: {mutation['variant']}"
+            f"{mutation.get('genomic_feature') or mutation['gene'].upper()}: {mutation['variant']}"
             for mutation in mutations
         )
 

@@ -69,6 +69,7 @@ def test_new_feature_round_trips_and_nongenes_do_not_create_gene_components(setu
     refresh_patient_record(person)
     record.refresh_from_db()
     assert record.genetic_mutations == [saved]
+    assert record.molecular_markers.startswith(feature + ': ')
     edited = call(person, staff, 'patch', {**saved, 'laboratory': 'Updated lab'}, saved['id'])
     assert edited.status_code == 200, edited.data
     assert edited.data['variant_description'] == 'Original lab report'
