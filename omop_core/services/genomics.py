@@ -17,6 +17,7 @@ from omop_core.services.genomics_catalog import marker_for_variant, patient_fiel
 from omop_core.services.genomics_components import component_codes, components
 from omop_core.services.genomics_vocabulary import resolve_loinc
 from omop_core.services.genomics_state import ASSESSMENT_STATUS, effective_status
+from omop_core.services.genomics_features import FEATURE_TYPES, FINDING_CATEGORIES, marker_features
 from omop_core.services.pk import next_pk
 from omop_core.services.clinical_text import OwnedTextReader, store_text
 from omop_core.signals import suppress_patient_record_refresh
@@ -92,6 +93,11 @@ def normalize_variant(payload, existing=None):
     if unknown:
         raise ValidationError({key: 'Unknown variant field.' for key in sorted(unknown)})
     data = {**(existing or {}), **payload}
+    if existing and 'gene' in payload and payload['gene'] != existing.get('gene') and 'genomic_feature' not in payload:
+        # Compatibility for old clients editing the original gene field.
+        for key in ('genomic_feature', 'feature_type', 'finding_category'):
+            if key not in payload:
+                data.pop(key, None)
     if 'mutation' in payload and 'variant' not in payload:
         data['variant'] = payload['mutation']
     if 'assay_method' in payload and 'variant_analysis_method_type' not in payload:
@@ -111,8 +117,19 @@ def normalize_variant(payload, existing=None):
         data['gene'] = 'PALB2'
     if data.get('marker_key') == 'palb1':
         data['marker_key'] = 'palb2'
-    if not data['gene'] or len(data['gene']) > 50:
-        raise ValidationError({'gene': 'Enter a gene symbol (at most 50 characters).'})
+    if not data['gene'] and not data['genomic_feature']:
+        raise ValidationError({'genomic_feature': 'Enter a genomic feature.'})
+    if len(data['gene']) > 50 or len(data['genomic_feature']) > 50:
+        raise ValidationError({'genomic_feature': 'Use at most 50 characters.'})
+    if data['feature_type'] not in ('', *FEATURE_TYPES):
+        raise ValidationError({'feature_type': 'Choose a supported feature type.'})
+    if data['finding_category'] not in ('', *FINDING_CATEGORIES):
+        raise ValidationError({'finding_category': 'Choose a supported finding category.'})
+    if 'genomic_feature' in payload and data['genomic_feature'] and not data['feature_type']:
+        raise ValidationError({'feature_type': 'Select the feature type.'})
+    if data['feature_type'] == 'Gene' and data['genomic_feature']:
+        data['genomic_feature'] = data['genomic_feature'].upper()
+        data['gene'] = data['genomic_feature']
     # A gene-only result is allowed (e.g. a test with no specific variant).
     raw_date = data.get('test_date')
     try:
@@ -335,8 +352,14 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_r
     marker = marker_for_variant(data)
     if data.get('marker_key') and marker is None:
         raise ValidationError({'marker_key': 'Unknown priority marker.'})
-    if marker and data['gene'].upper() != marker['gene'].upper():
-        raise ValidationError({'gene': 'The gene must match the selected priority marker.'})
+    if marker:
+        if data['genomic_feature']:
+            expected = marker_features(marker)
+            if (data['genomic_feature'].casefold() != expected['genomic_feature'].casefold()
+                    or data['feature_type'] != expected['feature_type']):
+                raise ValidationError({'genomic_feature': 'The feature and its type must match the selected priority marker.'})
+        elif data['gene'].upper() != marker['gene'].upper():
+            raise ValidationError({'gene': 'The gene must match the selected priority marker.'})
     parent_mapping = approved_mapping(marker['field_name']) if marker else None
     if parent_mapping and not mapping_is_usable(parent_mapping, parent=True):
         raise ValidationError({marker['field_name']: 'Variant parents must map to Measurement.'})
@@ -495,7 +518,7 @@ def replace_priority_fields(person, values, type_concept_id=32817):
             if variant_id is not None and row == before[variant_id]:
                 keep.add(variant_id)
                 continue
-            result = save_variant(person, {**row, 'gene': row.get('gene') or marker['gene'], 'marker_key': marker['key']}, variant_id, type_concept_id)
+            result = save_variant(person, {**row, 'gene': row.get('gene') or ('' if row.get('genomic_feature') else marker['gene']), 'marker_key': marker['key']}, variant_id, type_concept_id)
             keep.add(result['id'])
         for variant_id in before.keys() - keep:
             delete_variant(person, variant_id)
