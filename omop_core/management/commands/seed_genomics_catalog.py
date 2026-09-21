@@ -16,4 +16,5 @@ class Command(BaseCommand):
             import_module('omop_core.migrations.0226_seed_genomics_status_component').seed_status(apps, editor)
             import_module('omop_core.migrations.0227_seed_genomics_v2_components').seed_v2_components(apps, editor)
             import_module('omop_core.migrations.0231_genomics_variant_name_recipe').promote_variant_name(apps, editor)
+            import_module('omop_core.migrations.0252_genomic_feature_recipes').seed_feature_recipes(apps, editor)
         self.stdout.write(self.style.SUCCESS('Genomics catalog mappings seeded. Curator decisions preserved; exact untouched variant-name seeds promoted to v3.'))

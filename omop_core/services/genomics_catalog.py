@@ -74,13 +74,18 @@ def marker_for_variant(variant):
     assigned = variant.get('marker_key')
     if assigned:
         return next((m for m in markers() if m['key'] == assigned), None)
-    gene = (variant.get('gene') or '').upper()
+    gene = (variant.get('genomic_feature') or variant.get('gene') or '').upper()
     names = {str(variant.get(k) or '').lower().replace(' ', '') for k in ('variant', 'variant_name')}
     # Exact known abnormalities take precedence; do not infer a deletion from
     # a TP53 mutation, or split combined NOTCH/ATM source statements.
     for m in markers():
-        if names & {a.lower().replace(' ', '') for a in [*m['aliases'], m['label']] if a} and m['kind'] == 'abnormality':
+        aliases = [*m['aliases'], m['label']]
+        if m['key'] in ('del17p', 'del11q', 'del13q', 'trisomy12'):
+            aliases.append(m['key'])
+        if names & {a.lower().replace(' ', '') for a in aliases if a} and m['kind'] == 'abnormality':
             return m
+    if variant.get('feature_type') not in (None, '', 'Gene'):
+        return None
     return next((m for m in markers() if m['gene'].upper() == gene and m['kind'] == 'gene'), None)
 
 

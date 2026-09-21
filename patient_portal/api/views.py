@@ -1097,6 +1097,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         from omop_core.models import FieldConceptMapping
         from omop_core.services.genomics import mapping_is_usable
         from omop_core.services.genomics_catalog import catalog, disease_code, markers
+        from omop_core.services.genomics_features import marker_features
         person, error = self._genomics_access(request, pk)
         if error is not None:
             return error
@@ -1108,7 +1109,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             field_name__in=[m['field_name'] for m in selected],
         ).only('field_name', 'status', 'omop_table', 'source_value')}
         return Response({'version': catalog()['version'], 'disease': code,
-            'markers': [{**m, 'writable': mapping_is_usable(mappings.get(m['field_name']), parent=True)}
+            'markers': [{**m, **marker_features(m), 'writable': mapping_is_usable(mappings.get(m['field_name']), parent=True)}
                         for m in selected]})
 
     @action(detail=True, methods=['get', 'patch', 'delete'], url_path=r'genomics/(?P<variant_id>[0-9]+)', permission_classes=[GenomicsCrudPermission, PatientSelfScopePermission])

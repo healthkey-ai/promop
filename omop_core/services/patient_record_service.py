@@ -2731,7 +2731,7 @@ def _get_genomics_pathology_data(person: Person, snapshot: OmopSnapshot = None) 
         # ``genetic_mutations`` remains the structured canonical projection;
         # molecular_markers is its legacy display-compatible summary.
         data['molecular_markers'] = '; '.join(
-            f"{mutation['gene'].upper()}: {mutation['variant']}"
+            f"{mutation.get('genomic_feature') or mutation['gene'].upper()}: {mutation['variant']}"
             for mutation in mutations
         )
 
@@ -3648,7 +3648,9 @@ def _get_genetic_mutations(person: Person, snapshot: OmopSnapshot = None) -> dic
         mutations.append(mutation_data)
 
     from omop_core.services.genomics import enrich_variants
-    data['genetic_mutations'] = [canonicalize_variant(v) for v in enrich_variants(mutations, snapshot) if v.get('gene')]
+    from omop_core.services.genomics_features import describe_finding
+    data['genetic_mutations'] = [describe_finding(canonicalize_variant(v))
+        for v in enrich_variants(mutations, snapshot) if v.get('gene') or v.get('genomic_feature')]
     from omop_core.services.genomics_state import effective_status
     for v in data['genetic_mutations']:
         v['status'] = effective_status(v)
