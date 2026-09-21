@@ -47,7 +47,11 @@ matching active subscriptions and marks the inbound event processed in the same
 transaction. `data.person_id` must belong to the configured organization;
 `data.resource_id` is optional. Additional input fields are ignored and are not
 forwarded. Bodies are limited to 64 KiB. Invalid signatures return 401, invalid
-JSON/schema or a patient outside the source organization returns 400.
+JSON/schema or a patient outside the source organization returns 400. The
+patient rule governs a first-time event id only: a replay of an event this
+endpoint already accepted answers `duplicate` even if that patient has since
+been deleted or moved to another organization, because the sender is retrying
+an answer it missed, not asserting anything new.
 
 A relayed event carries `origin`: `{"source": ..., "event_id": ...}`, naming the
 inbound source and its event id. Events this service originates have no such key.
