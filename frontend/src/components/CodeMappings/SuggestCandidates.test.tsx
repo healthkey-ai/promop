@@ -123,3 +123,95 @@ describe("batch manual destination search", () => {
     expect(screen.queryByRole("button", { name: /Search destination for/ })).not.toBeInTheDocument();
   });
 });
+
+
+describe("approve from suggest results", () => {
+  it("approves the winner with a single click", async () => {
+    const onSaved = vi.fn();
+    patch.mockResolvedValue({ data: {} });
+    render(<SuggestCandidates activity={results} finished onSaved={onSaved} canApprove />);
+    fireEvent.click(screen.getByRole("button", { name: "Approve Exact match for LOCAL" }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(patch).toHaveBeenCalledWith("/v1/code-mappings/7/", { destination_concept_id: 1, status: "approved" });
+    expect(screen.getByText("Approved")).toBeInTheDocument();
+  });
+
+  it("approves a non-winner alternative directly (sets destination and approves)", async () => {
+    const onSaved = vi.fn();
+    patch.mockResolvedValue({ data: {} });
+    render(<SuggestCandidates activity={results} finished onSaved={onSaved} canApprove />);
+    // The alternative has both Use and Approve buttons
+    const approveButtons = screen.getAllByRole("button", { name: /Approve .* for LOCAL/ });
+    // Find the one for the alternative
+    const altApprove = approveButtons.find(b => b.getAttribute("aria-label")?.includes("Alternative match"));
+    expect(altApprove).toBeDefined();
+    fireEvent.click(altApprove!);
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(patch).toHaveBeenCalledWith("/v1/code-mappings/7/", { destination_concept_id: 2, status: "approved" });
+    expect(screen.getByText("Approved")).toBeInTheDocument();
+  });
+
+  it("does not render Approve buttons without canApprove", () => {
+    render(<SuggestCandidates activity={results} finished />);
+    expect(screen.queryByRole("button", { name: /Approve .* for/ })).not.toBeInTheDocument();
+  });
+
+  it("does not render Approve buttons for dry runs or unfinished runs", () => {
+    const { rerender } = render(<SuggestCandidates activity={results} finished={false} canApprove />);
+    expect(screen.queryByRole("button", { name: /Approve .* for/ })).not.toBeInTheDocument();
+    rerender(<SuggestCandidates activity={results.map(event => ({ ...event, dry_run: true }))} finished canApprove />);
+    expect(screen.queryByRole("button", { name: /Approve .* for/ })).not.toBeInTheDocument();
+  });
+
+  it("reports approve failures and allows retry", async () => {
+    patch.mockRejectedValue(new Error("forbidden"));
+    render(<SuggestCandidates activity={results} finished canApprove />);
+    fireEvent.click(screen.getByRole("button", { name: "Approve Exact match for LOCAL" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not approve");
+    expect(screen.queryByText("Approved")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve Exact match for LOCAL" })).toBeEnabled();
+  });
+});
+
+
+describe("standard concept badge", () => {
+  it("shows Non-std badge when a candidate is not standard", () => {
+    const nonStdCandidate = { ...alternative, standard_concept: null };
+    const stdCandidate = { ...winner, standard_concept: "S" };
+    const activity: CandidateActivity[] = [
+      { ...source, stage: "candidates", strategy: "umls", candidates: [stdCandidate] },
+      { ...source, stage: "candidates", strategy: "semantic", candidates: [nonStdCandidate] },
+      { ...source, stage: "ranked", suggested: stdCandidate, candidates: [stdCandidate, nonStdCandidate] },
+      { ...source, stage: "result", suggested: stdCandidate, updated: true },
+    ];
+    render(<SuggestCandidates activity={activity} finished />);
+    expect(screen.getByText("Non-std")).toBeInTheDocument();
+  });
+
+  it("shows Classification badge for standard_concept=C", () => {
+    const classCandidate = { ...alternative, standard_concept: "C" };
+    const stdCandidate = { ...winner, standard_concept: "S" };
+    const activity: CandidateActivity[] = [
+      { ...source, stage: "candidates", strategy: "umls", candidates: [stdCandidate] },
+      { ...source, stage: "candidates", strategy: "semantic", candidates: [classCandidate] },
+      { ...source, stage: "ranked", suggested: stdCandidate, candidates: [stdCandidate, classCandidate] },
+      { ...source, stage: "result", suggested: stdCandidate, updated: true },
+    ];
+    render(<SuggestCandidates activity={activity} finished />);
+    expect(screen.getByText("Classification")).toBeInTheDocument();
+  });
+
+  it("hides badges when all candidates are standard", () => {
+    const stdWinner = { ...winner, standard_concept: "S" };
+    const stdAlt = { ...alternative, standard_concept: "S" };
+    const activity: CandidateActivity[] = [
+      { ...source, stage: "candidates", strategy: "umls", candidates: [stdWinner] },
+      { ...source, stage: "candidates", strategy: "semantic", candidates: [stdAlt] },
+      { ...source, stage: "ranked", suggested: stdWinner, candidates: [stdWinner, stdAlt] },
+      { ...source, stage: "result", suggested: stdWinner, updated: true },
+    ];
+    render(<SuggestCandidates activity={activity} finished />);
+    expect(screen.queryByText("Non-std")).not.toBeInTheDocument();
+    expect(screen.queryByText("Classification")).not.toBeInTheDocument();
+  });
+});

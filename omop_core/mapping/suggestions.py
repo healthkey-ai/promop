@@ -295,6 +295,7 @@ def umls_candidates(source_code, source_vocabulary_id, domain_id=None):
                 'vocabulary_id': c.vocabulary_id,
                 'concept_class_id': c.concept_class_id,
                 'domain_id': c.domain_id,
+                'standard_concept': c.standard_concept,
                 'umls_score': 1.0,  # curated equivalency — max confidence
                 'retrieval': STRATEGY_UMLS,
                 'umls_cuis': sorted(shared_cuis[(c.vocabulary_id, c.concept_code)]),
@@ -349,7 +350,7 @@ def semantic_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
             ).order_by('distance').values(
                 'concept_id', 'concept__concept_name', 'concept__concept_code',
                 'concept__vocabulary_id', 'concept__concept_class_id',
-                'concept__domain_id', 'distance',
+                'concept__domain_id', 'concept__standard_concept', 'distance',
             )[:limit])
             with connection.cursor() as cursor:
                 cursor.execute("SELECT set_config('statement_timeout', %s, true)",
@@ -365,6 +366,7 @@ def semantic_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
         'vocabulary_id': row['concept__vocabulary_id'],
         'concept_class_id': row['concept__concept_class_id'],
         'domain_id': row['concept__domain_id'],
+        'standard_concept': row['concept__standard_concept'],
         # Separate from vector_score: retrieving neighbours is not reranking.
         'semantic_score': round(1 - row['distance'], 4),
         'vector_distance': round(row['distance'], 6),
@@ -747,6 +749,7 @@ def lexical_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
             'vocabulary_id': c.vocabulary_id,
             'concept_class_id': c.concept_class_id,
             'domain_id': c.domain_id,
+            'standard_concept': c.standard_concept,
             'lexical_score': round(score, 3),
             'retrieval': STRATEGY_LEXICAL,
         }

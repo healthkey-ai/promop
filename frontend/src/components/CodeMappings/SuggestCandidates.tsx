@@ -12,6 +12,7 @@ export type SuggestCandidate = {
   lexical_score?: number;
   semantic_score?: number;
   vector_distance?: number;
+  standard_concept?: string | null;
 };
 type Alternative = {
   concept_id: number;
@@ -51,6 +52,10 @@ const RANKER_STYLE: Record<string, string> = {
   anthropic: "bg-sky-100 text-sky-700",
 };
 
+const STANDARD_BADGE: Record<string, { label: string; className: string }> = {
+  C: { label: "Classification", className: "bg-slate-100 text-slate-600" },
+};
+
 type MergedCandidate = SuggestCandidate & { strategies: Set<string> };
 
 /** Deduplicate candidates across strategy events into a single list. */
@@ -85,6 +90,7 @@ export default function SuggestCandidates({ activity, finished, onSaved, canAppr
   const [savedNames, setSavedNames] = useState<Record<number, string>>({});
   const [saving, setSaving] = useState<number | null>(null);
   const [selected, setSelected] = useState<Record<number, number>>({});
+  const [approved, setApproved] = useState<Record<number, number>>({});
   const [error, setError] = useState("");
   const [collapsed, setCollapsed] = useState(false);
   const groups = new Map<number, CandidateActivity[]>();
@@ -103,6 +109,21 @@ export default function SuggestCandidates({ activity, finished, onSaved, canAppr
       onSaved?.();
     } catch (failure) {
       setError(`Could not save the alternative candidate. ${destinationError(failure)}`);
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const approve = async (mappingId: number, candidate: SuggestCandidate) => {
+    setSaving(mappingId);
+    setError("");
+    try {
+      await saveMappingDestination(mappingId, candidate.concept_id, true);
+      setSelected(current => ({ ...current, [mappingId]: candidate.concept_id }));
+      setApproved(current => ({ ...current, [mappingId]: candidate.concept_id }));
+      onSaved?.();
+    } catch (failure) {
+      setError(`Could not approve. ${destinationError(failure)}`);
     } finally {
       setSaving(null);
     }
@@ -166,10 +187,11 @@ export default function SuggestCandidates({ activity, finished, onSaved, canAppr
         const result = events.filter(event => event.stage === "result").at(-1);
         const ranked = events.filter(event => event.stage === "ranked").at(-1);
         const winner = (result ?? ranked)?.suggested;
-        const activeId = selected[mappingId] ?? winner?.concept_id;
         const searches = events.filter(event => event.stage === "candidates");
         const candidates = mergeCandidates(searches, ranked);
         const confidences = confidenceLookup(events);
+        const allStandard = candidates.every(c => c.standard_concept === undefined || c.standard_concept === "S");
+        const canAct = finished && result?.updated && !result.dry_run;
         return <article key={mappingId} className="rounded border border-slate-200 p-3">
           <h3 className="font-medium">
             {source.source_vocabulary_id || "Uncoded"}:{source.source_code}
@@ -186,11 +208,16 @@ export default function SuggestCandidates({ activity, finished, onSaved, canAppr
             <tbody>{candidates.map(candidate => {
               const confs = confidences.get(candidate.concept_id) ?? [];
               const strategies = [...candidate.strategies].map(s => STRATEGY_LABELS[s] || s).filter(Boolean).join("");
-              return <tr key={candidate.concept_id} className={`border-b border-slate-100 ${candidate.concept_id === winner?.concept_id ? "bg-sky-50" : ""}`}>
+              const isWinner = candidate.concept_id === winner?.concept_id;
+              const isSelected = selected[mappingId] === candidate.concept_id;
+              const isApproved = approved[mappingId] === candidate.concept_id;
+              const stdBadge = !allStandard && candidate.standard_concept !== "S" && candidate.standard_concept !== undefined ? (STANDARD_BADGE[candidate.standard_concept ?? ""] ?? { label: "Non-std", className: "bg-amber-100 text-amber-700" }) : null;
+              return <tr key={candidate.concept_id} className={`border-b border-slate-100 ${isWinner ? "bg-sky-50" : ""}`}>
                 <td className="py-1.5 pr-2">
                   <span>{candidate.vocabulary_id}:{candidate.concept_code}</span>
                   <span className="ml-1 text-slate-600">— {candidate.concept_name}</span>
                   <span className="ml-1 text-xs text-slate-400">OMOP {candidate.concept_id}</span>
+                  {stdBadge && <span className={`ml-1 rounded px-1 py-0.5 text-xs ${stdBadge.className}`}>{stdBadge.label}</span>}
                 </td>
                 <td className="py-1.5 px-2">
                   <span className="rounded bg-slate-100 px-1.5 py-0.5 text-xs font-mono" title={[...candidate.strategies].join(", ")}>{strategies}</span>
@@ -201,12 +228,26 @@ export default function SuggestCandidates({ activity, finished, onSaved, canAppr
                     title={conf.ranker ? `${conf.ranker} confidence` : "confidence"}>{Math.round(conf.confidence * 100)}%{conf.ranker ? ` ${conf.ranker[0].toUpperCase()}` : ""}</span>)}
                 </td>
                 <td className="py-1.5 pl-2 whitespace-nowrap">
-                  {candidate.concept_id === winner?.concept_id && <span className="font-semibold text-sky-700">Winner</span>}
-                  {selected[mappingId] === candidate.concept_id && <span role="status" className="text-xs">Selected</span>}
-                  {finished && result?.updated && !result.dry_run && candidate.concept_id !== activeId && <button
-                    type="button" disabled={saving !== null} className="rounded border px-2 py-0.5 text-xs disabled:opacity-50"
-                    aria-label={`Use ${candidate.concept_name} for ${source.source_code}`}
-                    onClick={() => void choose(mappingId, candidate)}>{saving === mappingId ? "Saving\u2026" : "Use"}</button>}
+                  {isApproved
+                    ? <span role="status" className="text-xs font-medium text-green-700">Approved</span>
+                    : <>
+                        {isWinner && <span className="font-semibold text-sky-700">Winner</span>}
+                        {isSelected && !isWinner && <span role="status" className="text-xs">Selected</span>}
+                        {canAct && !isWinner && !isSelected && <button
+                          type="button" disabled={saving !== null} className="rounded border px-2 py-0.5 text-xs disabled:opacity-50"
+                          aria-label={`Use ${candidate.concept_name} for ${source.source_code}`}
+                          onClick={() => void choose(mappingId, candidate)}>{saving === mappingId ? "Saving\u2026" : "Use"}</button>}
+                        {canApprove && canAct && (isWinner || isSelected) && <button
+                          type="button" disabled={saving !== null}
+                          className="ml-1 rounded border border-green-300 bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700 hover:bg-green-100 disabled:opacity-50"
+                          aria-label={`Approve ${candidate.concept_name} for ${source.source_code}`}
+                          onClick={() => void approve(mappingId, candidate)}>{saving === mappingId ? "Saving\u2026" : "Approve"}</button>}
+                        {canApprove && canAct && !isWinner && !isSelected && <button
+                          type="button" disabled={saving !== null}
+                          className="ml-1 rounded border border-green-300 bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700 hover:bg-green-100 disabled:opacity-50"
+                          aria-label={`Approve ${candidate.concept_name} for ${source.source_code}`}
+                          onClick={() => void approve(mappingId, candidate)}>{saving === mappingId ? "Saving\u2026" : "Approve"}</button>}
+                      </>}
                 </td>
               </tr>;
             })}</tbody>
