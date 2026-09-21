@@ -159,3 +159,4 @@ def test_preparation_loads_missing_targets_before_remaining_migrations(monkeypat
         'migrate', 'load_athena_vocabularies', 'migrate',
     ]
     assert calls[1][2]['migration_bootstrap'] is True
+    assert calls[1][2]['skip_suggest_embeddings'] is True
