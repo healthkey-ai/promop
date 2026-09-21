@@ -7063,7 +7063,7 @@ class ConceptSearchTest(_ConceptFixtureBase):
     def test_search_by_name_substring(self):
         # Membership assertions, not exact counts — seed migrations may add
         # concepts whose names also match (same convention as ConceptListTest).
-        resp = self.client.get(self.URL, {'q': 'creatinine', 'page_size': 100}, **self._auth())
+        resp = self.client.get(self.URL, {'q': 'creatinine', 'page_size': 100, 'include_non_standard': 'true'}, **self._auth())
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         results = resp.json()['results']
         ids = {r['concept_id'] for r in results}
@@ -7076,7 +7076,7 @@ class ConceptSearchTest(_ConceptFixtureBase):
         self.assertTrue(all('creatinine' in r['concept_name'].lower() for r in results))
 
     def test_measurement_results_identify_input_type_and_suggested_unit(self):
-        resp = self.client.get(self.URL, {'q': 'creatinine', 'page_size': 100}, **self._auth())
+        resp = self.client.get(self.URL, {'q': 'creatinine', 'page_size': 100, 'include_non_standard': 'true'}, **self._auth())
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         results = {item['concept_id']: item for item in resp.json()['results']}
         self.assertEqual(results[self.creatinine_serum.concept_id]['measurement_type'], 'quantitative')
@@ -7278,8 +7278,91 @@ class ConceptSearchTest(_ConceptFixtureBase):
         self.assertIn('ix_concept_name_upper_trgm', plan,
                       f'concepts/search did not use the trigram index:\n{plan}')
 
+    def _probe_concepts(self, rows):
+        """Create concepts in a private vocabulary; rows are (id, name, code, standard)."""
+        import datetime
+        from omop_core.models import Concept, Vocabulary, Domain, ConceptClass
+        v, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='RANKV', defaults={'vocabulary_name': 'rank', 'vocabulary_concept_id': 0})
+        d, _ = Domain.objects.get_or_create(
+            domain_id='Condition', defaults={'domain_name': 'Condition', 'domain_concept_id': 19})
+        cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Clinical Finding',
+            defaults={'concept_class_name': 'Clinical Finding', 'concept_class_concept_id': 0})
+        Concept.objects.bulk_create([
+            Concept(concept_id=cid, concept_name=name, concept_code=code,
+                    standard_concept=standard, domain=d, vocabulary=v, concept_class=cc,
+                    valid_start_date=datetime.date(1970, 1, 1),
+                    valid_end_date=datetime.date(2099, 12, 31))
+            for cid, name, code, standard in rows
+        ])
+
+    def test_results_are_ordered_by_match_quality(self):
+        """#1466: the first page is the best matches, not the lowest concept ids."""
+        self._probe_concepts([
+            # Lowest id is the worst match, so pk ordering would put it first.
+            (870001, 'Cutaneous zorblax of lower limb', 'RK1', 'S'),
+            (870002, 'Zorblax of skin', 'RK2', None),
+            (870003, 'Zorblax of bone', 'RK3', 'S'),
+            (870004, 'Zorblax', 'RK4', 'S'),
+            (870005, 'Unrelated finding', 'ZORBLAX', 'S'),
+        ])
+        resp = self.client.get(self.URL, {'q': 'zorblax', 'vocabulary_id': 'RANKV', 'include_non_standard': 'true'}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [r['concept_id'] for r in resp.json()['results']],
+            [
+                870005,  # exact code
+                870004,  # exact name
+                870003,  # prefix, standard
+                870002,  # prefix, non-standard
+                870001,  # contains
+            ],
+        )
+
+    def test_concept_id_match_ranks_first(self):
+        self._probe_concepts([
+            (870011, 'Finding mentioning 870012 in its name', 'RK11', 'S'),
+            (870012, 'Plain finding', 'RK12', 'S'),
+        ])
+        resp = self.client.get(self.URL, {'q': '870012', 'vocabulary_id': 'RANKV'}, **self._auth())
+        self.assertEqual([r['concept_id'] for r in resp.json()['results']], [870012, 870011])
+
+    def test_every_search_branch_is_served_by_an_index(self):
+        """#1466: one unindexable OR branch makes the planner drop all the indexes.
+
+        `UPPER(concept_code) = ...` had no index, so the name match lost its
+        trigram index too and every row of the vocabulary was filtered by hand.
+        Assert on the predicate and ordering the view really builds. No
+        vocabulary filter: on a test-sized table that index is legitimately the
+        cheapest way in, which would hide whether the OR itself is indexable.
+        """
+        from django.db import connection
+        from django.db.models import Q
+        from patient_portal.api.views import (
+            _concept_match_ordering, _concept_name_search_filter,
+        )
+        self._probe_concepts([
+            (871000 + i, f'Index probe finding {i:04d}', f'IP{i}', 'S') for i in range(600)
+        ])
+        query = '871421'
+        search = (
+            _concept_name_search_filter(query)
+            | Q(concept_code__iexact=query)
+            | Q(concept_id=int(query))
+        )
+        with connection.cursor() as cur:
+            cur.execute('ANALYZE concept')
+            cur.execute('SET LOCAL enable_seqscan = off')
+            plan = (
+                Concept.objects.filter(search)
+                .order_by(*_concept_match_ordering(query, int(query)))[:25].explain()
+            )
+        for index in ('ix_concept_name_upper_trgm', 'ix_concept_code_upper', 'concept_pkey'):
+            self.assertIn(index, plan, f'concepts/search did not use {index}:\n{plan}')
+
     def test_pagination_page_size(self):
-        resp = self.client.get(self.URL, {'q': 'creatinine', 'page_size': 2}, **self._auth())
+        resp = self.client.get(self.URL, {'q': 'creatinine', 'page_size': 2, 'include_non_standard': 'true'}, **self._auth())
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         data = resp.json()
         self.assertGreaterEqual(data['count'], 3)
@@ -7304,6 +7387,72 @@ class ConceptSearchTest(_ConceptFixtureBase):
         )
         self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
 
+    # -- default scope: what may be a destination (#1465) ---------------------
+
+    def _scope_concepts(self):
+        """One concept of each kind, all matching 'quibble', in one vocabulary."""
+        self._probe_concepts([
+            (872001, 'Quibble standard', 'QB1', 'S'),
+            (872002, 'Quibble non-standard', 'QB2', None),
+            (872003, 'Quibble classification', 'QB3', 'C'),
+            (872004, 'Quibble retired', 'QB4', None),
+            (872005, 'Quibble retired standard', 'QB5', 'S'),
+            (872006, 'Quibble minted here', 'QB6', None),
+        ])
+        Concept.objects.filter(concept_id__in=(872004, 872005)).update(invalid_reason='U')
+        Concept.objects.filter(concept_id=872006).update(source='HealthKey')
+
+    def _quibble_ids(self, **params):
+        resp = self.client.get(
+            self.URL, {'q': 'quibble', 'vocabulary_id': 'RANKV', **params}, **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        return {r['concept_id'] for r in resp.json()['results']}
+
+    def test_default_returns_only_active_standard_or_locally_minted(self):
+        self._scope_concepts()
+        # 872006 is non-standard by construction but is what imports point at.
+        self.assertEqual(self._quibble_ids(), {872001, 872006})
+
+    def test_include_retired_adds_retired_but_not_non_standard(self):
+        self._scope_concepts()
+        self.assertEqual(self._quibble_ids(include_retired='true'), {872001, 872005, 872006})
+
+    def test_include_non_standard_adds_non_standard_but_not_retired(self):
+        self._scope_concepts()
+        self.assertEqual(
+            self._quibble_ids(include_non_standard='true'),
+            {872001, 872002, 872003, 872006},
+        )
+
+    def test_both_flags_return_everything(self):
+        self._scope_concepts()
+        self.assertEqual(
+            self._quibble_ids(include_retired='true', include_non_standard='true'),
+            {872001, 872002, 872003, 872004, 872005, 872006},
+        )
+
+    def test_explicit_standard_concept_filter_overrides_the_default(self):
+        """A caller asking for classification concepts is choosing, not defaulting."""
+        self._scope_concepts()
+        self.assertEqual(self._quibble_ids(standard_concept='C'), {872003})
+
+    def test_flags_are_off_unless_truthy(self):
+        self._scope_concepts()
+        self.assertEqual(self._quibble_ids(include_retired='false', include_non_standard='0'),
+                         {872001, 872006})
+
+    def test_retired_concept_is_not_found_by_its_code_or_id_by_default(self):
+        """The code and id branches are scoped too, not just the name match."""
+        self._scope_concepts()
+        for query in ('QB4', '872004'):
+            resp = self.client.get(self.URL, {'q': query}, **self._auth())
+            self.assertNotIn(872004, {r['concept_id'] for r in resp.json()['results']})
+            resp = self.client.get(
+                self.URL, {'q': query, 'include_retired': 'true', 'include_non_standard': 'true'},
+                **self._auth(),
+            )
+            self.assertIn(872004, {r['concept_id'] for r in resp.json()['results']})
 
 class ConceptListTest(_ConceptFixtureBase):
     """GET /api/v1/concepts/ (issue #213)"""
@@ -8165,6 +8314,7 @@ class OrgDiseaseStatsTest(TestCase):
         self.assertEqual(counts['cll'], 1)
 
     def test_domain_trust_inflates_accessible_count(self):
+        self.org_admin.mark_email_verified()
         from omop_core.models import OrgTrust
         # org_b grants access to users with @t.com — org_admin has email admin@t.com
         OrgTrust.objects.create(granting_org=self.org_b, trusted_domain='t.com')
@@ -8327,6 +8477,7 @@ class OrgAdminPatientListScopingTest(TestCase):
 
     def test_domain_trust_admin_sees_trusted_org_patients(self):
         trusted_admin = Identity.objects.create_user(email='trusted@t.com', password='x')
+        trusted_admin.mark_email_verified()
         OrgTrust.objects.create(granting_org=self.org_a, trusted_domain='t.com')
         resp = self._get(trusted_admin)
         self.assertEqual(resp.status_code, 200)
@@ -8719,6 +8870,7 @@ class OrgTrustAccessTest(TestCase):
         GroupAccess.objects.create(identity=self.direct_user, org=self.org_a, role='org_admin')
 
         self.domain_user = _make_user('user@trusted.com')
+        self.domain_user.mark_email_verified()
 
         self.no_access_user = _make_user('noone@other.com')
 
@@ -9170,6 +9322,7 @@ class OrgViewSetTrustedAdminTest(TestCase):
     def setUp(self):
         self.client = APIClient()
         self.user = _make_user('trusted@partner.com')
+        self.user.mark_email_verified()
         self.org = _make_org('Trusted Org', 'trusted-org')
         self.client.force_authenticate(user=self.user)
 
@@ -9311,7 +9464,7 @@ class OrgInvitationFlowTest(TestCase):
 
     def test_confirm_does_not_overwrite_existing_account_password(self):
         existing = Identity.objects.create_user(
-            email='has-acct@example.com', password='Existing-pass-1')
+            email='has-acct@example.com', password='Existing-pass-1', email_verified_at=timezone.now())
         invitation = self._invite('has-acct@example.com')
         resp = APIClient().post('/api/orgs/confirm-invitation/',
                                 {'token': invitation.token, 'password': 'Attempt-override-9'})
@@ -9329,7 +9482,7 @@ class OrgInvitationFlowTest(TestCase):
         self.assertEqual(resp.data['org_name'], self.org.name)
 
     def test_lookup_no_password_for_existing_account(self):
-        Identity.objects.create_user(email='lookup-existing@example.com', password='Existing-pass-1')
+        Identity.objects.create_user(email='lookup-existing@example.com', password='Existing-pass-1', email_verified_at=timezone.now())
         invitation = self._invite('lookup-existing@example.com')
         resp = APIClient().get('/api/v1/orgs/invitation-lookup/', {'token': invitation.token})
         self.assertEqual(resp.status_code, 200, resp.data)
@@ -9575,7 +9728,7 @@ class OrgInvitationFlowTest(TestCase):
         self.assertFalse(claims.email_verified)
 
     def test_invite_existing_user_grants_access_immediately(self):
-        invitee = Identity.objects.create_user(email='existing-user@example.com', password='pass')
+        invitee = Identity.objects.create_user(email='existing-user@example.com', password='pass', email_verified_at=timezone.now())
         resp = self.client.post('/api/orgs/invite-org/invite/', {
             'email': 'existing-user@example.com',
             'role': 'analyst',
@@ -9587,7 +9740,7 @@ class OrgInvitationFlowTest(TestCase):
         )
 
     def test_invite_existing_user_updates_existing_org_role(self):
-        invitee = Identity.objects.create_user(email='role-update@example.com', password='pass')
+        invitee = Identity.objects.create_user(email='role-update@example.com', password='pass', email_verified_at=timezone.now())
         GroupAccess.objects.create(
             identity=invitee,
             org=self.org,
@@ -9605,7 +9758,7 @@ class OrgInvitationFlowTest(TestCase):
         self.assertEqual(grant.redirect_url, '')
 
     def test_invite_existing_user_does_not_downgrade_org_admin(self):
-        invitee = Identity.objects.create_user(email='admin-role@example.com', password='pass')
+        invitee = Identity.objects.create_user(email='admin-role@example.com', password='pass', email_verified_at=timezone.now())
         GroupAccess.objects.create(identity=invitee, org=self.org, role='org_admin')
         resp = self.client.post('/api/orgs/invite-org/invite/', {
             'email': 'admin-role@example.com',
@@ -9632,7 +9785,7 @@ class OrgInvitationFlowTest(TestCase):
         from django.utils import timezone
         from patient_portal.models import Identity
         # Create the identity for the invited email
-        invitee = Identity.objects.create_user(email='invitee@example.com', password='pass')
+        invitee = Identity.objects.create_user(email='invitee@example.com', password='pass', email_verified_at=timezone.now())
         token = _secrets.token_hex(32)
         OrgInvitation.objects.create(
             org=self.org, email='invitee@example.com', role='doctor',
@@ -9651,7 +9804,7 @@ class OrgInvitationFlowTest(TestCase):
 
     def test_confirm_analyst_invitation_returns_redirect_url(self):
         from django.utils import timezone
-        invitee = Identity.objects.create_user(email='analyst-invitee@example.com', password='pass')
+        invitee = Identity.objects.create_user(email='analyst-invitee@example.com', password='pass', email_verified_at=timezone.now())
         token = _secrets.token_hex(32)
         OrgInvitation.objects.create(
             org=self.org,
@@ -9711,7 +9864,7 @@ class OrgInvitationFlowTest(TestCase):
 
     def test_email_failure_still_creates_invitation(self):
         from unittest.mock import patch
-        invitee = Identity.objects.create_user(email='failmail@example.com', password='pass')
+        invitee = Identity.objects.create_user(email='failmail@example.com', password='pass', email_verified_at=timezone.now())
         with patch('patient_portal.api.org_views.send_mail', side_effect=Exception('SMTP error')):
             resp = self.client.post('/api/orgs/invite-org/invite/', {
                 'email': 'failmail@example.com',
@@ -9921,6 +10074,7 @@ class UserSerializerOrgAdminTest(TestCase):
     def test_is_org_admin_true_with_domain_trust(self):
         OrgTrust.objects.create(granting_org=self.org, trusted_domain='example.com')
         trusted_user = _make_user('trusted@example.com')
+        trusted_user.mark_email_verified()
         self.client.force_authenticate(user=trusted_user)
         resp = self.client.get('/api/user/')
         self.assertEqual(resp.status_code, 200)
@@ -9928,6 +10082,7 @@ class UserSerializerOrgAdminTest(TestCase):
         self.assertTrue(data.get('is_org_admin'))
 
     def test_org_accesses_include_invited_and_trusted_domain_orgs(self):
+        self.user.mark_email_verified()
         invited_org = _make_org('Invited Org', 'invited-org')
         pending_org = _make_org('Pending Org', 'pending-org')
         domain_org = _make_org('Domain Org', 'domain-org')
@@ -15092,32 +15247,92 @@ class OrgPatientSignupTest(TestCase):
             GroupAccess.objects.filter(identity=identity, org=self.org, role='analyst').exists()
         )
 
-    def test_signup_private_org_gets_patient_role(self):
-        """Private org signup (via domain trust) assigns patient role."""
-        from omop_core.models import OrgTrust
+    def _private_org_with_patients(self):
         private_org = Organization.objects.create(
             name='Private Clinic', slug='private-clinic',
             allows_patient_signup=False,
         )
-        # Grant domain trust so the endpoint allows signup without
-        # allows_patient_signup=True.
+        for person_id in (77801, 77802):
+            PatientRecord.objects.create(
+                person=Person.objects.create(person_id=person_id),
+                organization=private_org,
+            )
+        return private_org
+
+    def test_signup_trusted_domain_gets_analyst_role_once_the_email_is_verified(self):
+        """#1454 + email verification: a trusted domain earns analyst, but only
+        for an address the account has proved it owns."""
+        import re
+        from django.core import mail
+        from omop_core.models import OrgTrust
+        private_org = self._private_org_with_patients()
         OrgTrust.objects.create(
             granting_org=private_org,
             trusted_domain='private-clinic.com',
         )
         client = APIClient()
         resp = client.post('/api/v1/orgs/private-clinic/patient-signup/', {
-            'email': 'user@private-clinic.com',
+            'email': 'user@Private-Clinic.com',
             'password': 'Str0ng!Pass99',
             'given_name': 'Private',
             'family_name': 'User',
         })
         self.assertEqual(resp.status_code, 201)
+        self.assertTrue(resp.data['email_verification_required'])
+        self.assertTrue(resp.data['verification_email_sent'])
         identity = Identity.objects.get(email='user@private-clinic.com')
-        self.assertTrue(
-            GroupAccess.objects.filter(
-                identity=identity, org=private_org, role='patient',
-            ).exists()
+
+        def roles():
+            return list(GroupAccess.objects.filter(identity=identity, org=private_org)
+                        .values_list('role', flat=True))
+
+        # Typed, not proved: self-access only, and nobody else's record.
+        self.assertEqual(roles(), ['patient'])
+        user = client.get('/api/v1/user/').data['user']
+        self.assertTrue(user['is_patient'])
+        self.assertFalse(user['email_verified'])
+        self.assertEqual(client.get('/api/v1/patient-records/77801/').status_code, 404)
+
+        # Follow the emailed link.
+        self.assertEqual(mail.outbox[-1].to, ['user@private-clinic.com'])
+        token = re.search(r'verify-email\?token=(\S+)', mail.outbox[-1].body).group(1)
+        verified = APIClient().post('/api/v1/auth/verify-email/', {'token': token})
+        self.assertEqual(verified.status_code, 200)
+
+        self.assertEqual(roles(), ['analyst'])
+        user = client.get('/api/v1/user/').data['user']
+        self.assertFalse(user['is_patient'])
+        self.assertTrue(user['email_verified'])
+        self.assertEqual(client.get('/api/v1/patient-records/77801/').status_code, 200)
+
+    def test_signup_invitation_only_gets_patient_role(self):
+        """An invitation alone does not make a self-signup an analyst.
+
+        Signup does not verify the address, so it must not hand out read access
+        to a private org on the strength of a matching invitation; the invited
+        role is claimed with the invitation token instead.
+        """
+        from datetime import timedelta
+        private_org = self._private_org_with_patients()
+        OrgInvitation.objects.create(
+            org=private_org, email='invited@elsewhere.com', role='doctor',
+            token='t' * 64, expires_at=timezone.now() + timedelta(days=7),
+        )
+        client = APIClient()
+        resp = client.post('/api/v1/orgs/private-clinic/patient-signup/', {
+            'email': 'invited@elsewhere.com',
+            'password': 'Str0ng!Pass99',
+        })
+        self.assertEqual(resp.status_code, 201)
+        identity = Identity.objects.get(email='invited@elsewhere.com')
+        self.assertEqual(
+            list(GroupAccess.objects.filter(identity=identity, org=private_org)
+                 .values_list('role', flat=True)),
+            ['patient'],
+        )
+        self.assertTrue(client.get('/api/v1/user/').data['user']['is_patient'])
+        self.assertEqual(
+            client.get('/api/v1/patient-records/77801/').status_code, 404,
         )
 
     def test_demo_signup_user_sees_all_org_patients(self):
@@ -15247,6 +15462,301 @@ class OrgPatientSignupTest(TestCase):
     EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
     APP_BASE_URL='https://app.test',
 )
+class SelfSignupEmailTrustTest(TestCase):
+    """A self-signed-up address is a claim, and nothing may be granted on a claim.
+
+    Self-signup takes an email and a password and signs the user in. Two things
+    then trusted that address, and each was a way to read patients the person
+    had no right to:
+
+    * a domain trust gives every account "at" a domain another organization's
+      patients, so signing up anywhere as ``x@trusted-domain`` reached them;
+    * inviting someone creates a passwordless placeholder account that already
+      holds the invited role, and signup would set a password on it -- handing
+      the role to whoever typed the address, without the invitation token.
+    """
+
+    PASSWORD = 'Str0ng!Pass99'
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()  # DRF throttle state leaks between tests.
+        self.public = Organization.objects.create(
+            name='Public Demo', slug='public-demo', allows_patient_signup=True,
+        )
+        self.private = Organization.objects.create(name='Private Clinic', slug='private-clinic')
+        self.patient = Person.objects.create(person_id=88101)
+        PatientRecord.objects.create(person=self.patient, organization=self.private)
+
+    def _signup(self, email, slug='public-demo'):
+        client = APIClient()
+        resp = client.post(f'/api/v1/orgs/{slug}/patient-signup/',
+                           {'email': email, 'password': self.PASSWORD})
+        return client, resp
+
+    def _token_from_last_email(self):
+        import re
+        from django.core import mail
+        return re.search(r'verify-email\?token=(\S+)', mail.outbox[-1].body).group(1)
+
+    def _reads_private_patient(self, client):
+        return client.get('/api/v1/patient-records/88101/').status_code
+
+    # -- the domain-trust route ------------------------------------------------
+
+    def test_unverified_address_at_a_trusted_domain_reaches_nothing(self):
+        """The attack: sign up at a public org, claiming a trusted domain."""
+        from omop_core.models import OrgTrust
+        OrgTrust.objects.create(granting_org=self.private, trusted_domain='trusted.org')
+        client, resp = self._signup('attacker@trusted.org')
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(self._reads_private_patient(client), 404)
+        user = client.get('/api/v1/user/').data['user']
+        self.assertFalse(user['email_verified'])
+        self.assertNotIn('private-clinic', {a['org_slug'] for a in user['org_accesses']})
+
+    def test_verified_address_at_a_trusted_domain_is_trusted(self):
+        """The legitimate user is not locked out: the link restores the trust."""
+        from omop_core.models import OrgTrust
+        OrgTrust.objects.create(granting_org=self.private, trusted_domain='trusted.org')
+        client, _ = self._signup('real@trusted.org')
+        self.assertEqual(self._reads_private_patient(client), 404)
+        resp = APIClient().post('/api/v1/auth/verify-email/', {'token': self._token_from_last_email()})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._reads_private_patient(client), 200)
+
+    def test_invitation_acceptance_and_federated_logins_count_as_verified(self):
+        local = Identity.objects.create_user(email='typed@trusted.org', password=self.PASSWORD)
+        self.assertFalse(local.has_verified_email)
+        self.assertEqual(local.verified_email_domain, '')
+        federated = Identity.objects.create(issuer='https://idp.example', sub='abc', email='sso@Trusted.org')
+        self.assertFalse(federated.has_verified_email)
+        federated.mark_email_verified()
+        self.assertTrue(federated.has_verified_email)
+        self.assertEqual(federated.verified_email_domain, 'trusted.org')
+        staff = Identity.objects.create_user(email='ops@trusted.org', password=self.PASSWORD, is_staff=True)
+        self.assertTrue(staff.has_verified_email)
+        self.assertFalse(Identity(issuer='https://idp.example', sub='x', email='').has_verified_email)
+
+    # -- the placeholder route -------------------------------------------------
+
+    def test_signup_cannot_take_over_an_invited_account(self):
+        """The attack: type an invited doctor's address into the signup form."""
+        admin = Identity.objects.create_user(email='admin@private-clinic.com', password=self.PASSWORD)
+        GroupAccess.objects.create(identity=admin, org=self.private, role='org_admin')
+        inviter = APIClient()
+        inviter.force_authenticate(user=admin)
+        invited = inviter.post('/api/orgs/private-clinic/invite/',
+                               {'email': 'doctor@elsewhere.com', 'role': 'doctor'})
+        self.assertEqual(invited.status_code, 201)
+        placeholder = Identity.objects.get(email='doctor@elsewhere.com')
+        self.assertFalse(placeholder.has_usable_password())
+        self.assertTrue(GroupAccess.objects.filter(identity=placeholder, role='doctor').exists())
+
+        # Offered on the Sign Up tab because of the invitation -- and refused.
+        client, resp = self._signup('doctor@elsewhere.com', slug='private-clinic')
+        self.assertEqual(resp.status_code, 409)
+        self.assertIn('invitation', resp.data['error'])
+        placeholder.refresh_from_db()
+        self.assertFalse(placeholder.has_usable_password())
+        self.assertNotIn('_auth_user_id', client.session)
+        self.assertEqual(self._reads_private_patient(client), 401)
+
+        # Nor through a public org, where signup is otherwise open to anyone.
+        client, resp = self._signup('Doctor@Elsewhere.com')
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(Identity.objects.filter(email__iexact='doctor@elsewhere.com').count(), 1)
+
+    def test_accepting_the_invitation_verifies_the_address(self):
+        from django.core import mail
+        admin = Identity.objects.create_user(email='admin@private-clinic.com', password=self.PASSWORD)
+        GroupAccess.objects.create(identity=admin, org=self.private, role='org_admin')
+        inviter = APIClient()
+        inviter.force_authenticate(user=admin)
+        inviter.post('/api/orgs/private-clinic/invite/', {'email': 'doctor@elsewhere.com', 'role': 'doctor'})
+        token = OrgInvitation.objects.get(email='doctor@elsewhere.com').token
+        self.assertIn(token, mail.outbox[-1].body)
+        resp = APIClient().post('/api/orgs/confirm-invitation/', {'token': token, 'password': self.PASSWORD})
+        self.assertIn(resp.status_code, (200, 201), getattr(resp, 'data', None))
+        self.assertTrue(Identity.objects.get(email='doctor@elsewhere.com').has_verified_email)
+
+    # -- the link itself -------------------------------------------------------
+
+    def test_inviting_an_existing_unverified_login_waits_for_mailbox_proof(self):
+        client, _ = self._signup('doctor@elsewhere.com')
+        identity = Identity.objects.get(email='doctor@elsewhere.com')
+        admin = Identity.objects.create_user(email='operator@example.com', is_staff=True)
+        inviter = APIClient()
+        inviter.force_authenticate(admin)
+        response = inviter.post('/api/orgs/private-clinic/invite/',
+                                {'email': identity.email, 'role': 'doctor'})
+        self.assertEqual(response.status_code, 201)
+        self.assertFalse(response.data['access_granted'])
+        self.assertFalse(GroupAccess.objects.filter(identity=identity, org=self.private).exists())
+        self.assertEqual(self._reads_private_patient(client), 404)
+        self.assertNotIn('private-clinic', {
+            entry['org_slug'] for entry in client.get('/api/v1/user/').data['user']['org_accesses']
+        })
+        invitation = OrgInvitation.objects.get(email=identity.email)
+        lookup = APIClient().get('/api/v1/orgs/invitation-lookup/', {'token': invitation.token})
+        self.assertTrue(lookup.data['needs_password'])
+        accepted = APIClient().post('/api/orgs/confirm-invitation/', {
+            'token': invitation.token, 'password': 'Mailbox-Owner-Password-42!',
+        })
+        self.assertEqual(accepted.status_code, 200, accepted.data)
+        identity.refresh_from_db()
+        self.assertTrue(identity.has_verified_email)
+        self.assertFalse(identity.check_password(self.PASSWORD))
+        self.assertIn(self._reads_private_patient(client), (401, 403))
+
+    def test_verification_works_with_a_session_cookie_and_without_csrf_token(self):
+        client = APIClient(enforce_csrf_checks=True)
+        identity = Identity.objects.create_user(email='verify@example.com', password=self.PASSWORD)
+        client.force_login(identity)
+        from patient_portal.api.email_verification import make_verification_link
+        token = make_verification_link(identity).split('token=')[1]
+        response = client.post('/api/v1/auth/verify-email/', {'token': token})
+        self.assertEqual(response.status_code, 200, response.data)
+
+    def test_federated_verification_requires_matching_verified_claim(self):
+        from patient_portal.api.authentication import PartnerAuthentication
+        from patient_portal.api.providers.base import TokenClaims
+        identity = Identity.objects.create(issuer='https://idp.example', sub='federated',
+                                           email='claimed@trusted.org')
+        claims = TokenClaims(issuer=identity.issuer, sub=identity.sub,
+                             email=identity.email, email_verified=False, name=None, raw={})
+        self.assertFalse(PartnerAuthentication._get_or_create_identity(claims).has_verified_email)
+        claims.email_verified = True
+        self.assertTrue(PartnerAuthentication._get_or_create_identity(claims).has_verified_email)
+
+    def test_migration_preserves_proved_accounts_and_removes_unverified_email_grants(self):
+        from django.apps import apps
+        from importlib import import_module
+        from omop_core.models import OrgTrust
+        local = Identity.objects.create_user(email='legacy@trusted.org', password=self.PASSWORD)
+        OrgTrust.objects.create(granting_org=self.private, trusted_domain='trusted.org')
+        grant = GroupAccess.objects.create(identity=local, org=self.private, role='analyst')
+        pending = Identity.objects.create_user(email='pending@example.com', password=self.PASSWORD)
+        admin = Identity.objects.create_user(email='migration-operator@example.com', is_staff=True)
+        invitation = OrgInvitation.objects.create(org=self.private, email=pending.email,
+            role='doctor', invited_by=admin, token='d'*64,
+            expires_at=timezone.now()+timedelta(days=1))
+        GroupAccess.objects.create(identity=pending, org=self.private, role='doctor', granted_by=admin)
+        proved = Identity.objects.create_user(email='proved@example.com')
+        OrgInvitation.objects.create(org=self.private, email=proved.email, role='doctor',
+            token='e'*64, confirmed_at=timezone.now(), expires_at=timezone.now()+timedelta(days=1))
+        migration = import_module('patient_portal.migrations.0020_identity_email_verified_at')
+        migration.backfill(apps, None)
+        grant.refresh_from_db()
+        self.assertEqual(grant.role, 'patient')
+        self.assertFalse(GroupAccess.objects.filter(identity=pending, org=self.private).exists())
+        local.refresh_from_db()
+        proved.refresh_from_db()
+        self.assertFalse(local.has_verified_email)
+        self.assertTrue(proved.has_verified_email)
+
+    def test_verification_does_not_promote_an_explicit_patient_membership(self):
+        from patient_portal.api.email_verification import make_verification_link
+        from omop_core.models import OrgTrust
+        identity = Identity.objects.create_user(email='patient@trusted.org', password=self.PASSWORD)
+        OrgTrust.objects.create(granting_org=self.private, trusted_domain='trusted.org')
+        grant = GroupAccess.objects.create(identity=identity, org=self.private, role='patient')
+        token = make_verification_link(identity).split('token=')[1]
+        self.assertEqual(APIClient().post('/api/v1/auth/verify-email/', {'token': token}).status_code, 200)
+        grant.refresh_from_db()
+        self.assertEqual(grant.role, 'patient')
+
+    def test_changing_the_email_clears_its_verification(self):
+        identity = Identity.objects.create_user(email='first@example.com', password=self.PASSWORD)
+        identity.mark_email_verified()
+        identity.email = 'second@trusted.org'
+        identity.save(update_fields=['email'])
+        identity.refresh_from_db()
+        self.assertFalse(identity.has_verified_email)
+        self.assertEqual(identity.verified_email_domain, '')
+
+    def test_a_link_proves_only_the_address_it_was_sent_to(self):
+        from patient_portal.api.email_verification import make_verification_link
+        identity = Identity.objects.create_user(email='first@example.com', password=self.PASSWORD)
+        token = make_verification_link(identity).split('token=')[1]
+        Identity.objects.filter(pk=identity.pk).update(email='second@trusted.org')
+        resp = APIClient().post('/api/v1/auth/verify-email/', {'token': token})
+        self.assertEqual(resp.status_code, 400)
+        identity.refresh_from_db()
+        self.assertIsNone(identity.email_verified_at)
+
+    def test_bad_expired_and_missing_tokens_are_refused(self):
+        from unittest import mock
+        from patient_portal.api import email_verification
+        identity = Identity.objects.create_user(email='user@example.com', password=self.PASSWORD)
+        token = email_verification.make_verification_link(identity).split('token=')[1]
+        for bad in ('', 'not-a-token', token[:-2] + 'xx'):
+            self.assertEqual(
+                APIClient().post('/api/v1/auth/verify-email/', {'token': bad}).status_code, 400, bad,
+            )
+        with mock.patch.object(email_verification, 'MAX_AGE_SECONDS', -1):
+            self.assertEqual(
+                APIClient().post('/api/v1/auth/verify-email/', {'token': token}).status_code, 400,
+            )
+        identity.refresh_from_db()
+        self.assertIsNone(identity.email_verified_at)
+        # A deactivated account cannot be verified into life.
+        Identity.objects.filter(pk=identity.pk).update(is_active=False)
+        self.assertEqual(
+            APIClient().post('/api/v1/auth/verify-email/', {'token': token}).status_code, 400,
+        )
+
+    def test_resend_requires_a_session_and_stops_once_verified(self):
+        from django.core import mail
+        self.assertIn(
+            APIClient().post('/api/v1/auth/verify-email/resend/').status_code, (401, 403),
+        )
+        client, _ = self._signup('user@example.com')
+        sent_before = len(mail.outbox)
+        self.assertEqual(client.post('/api/v1/auth/verify-email/resend/').status_code, 200)
+        self.assertEqual(len(mail.outbox), sent_before + 1)
+        APIClient().post('/api/v1/auth/verify-email/', {'token': self._token_from_last_email()})
+        self.assertEqual(client.post('/api/v1/auth/verify-email/resend/').status_code, 200)
+        self.assertEqual(len(mail.outbox), sent_before + 1)
+
+    def test_normal_api_traffic_does_not_consume_the_resend_limit(self):
+        client, _ = self._signup('resend@example.com')
+        for _ in range(4):
+            self.assertEqual(client.get('/api/v1/user/').status_code, 200)
+        for _ in range(3):
+            self.assertEqual(client.post('/api/v1/auth/verify-email/resend/').status_code, 200)
+        self.assertEqual(client.post('/api/v1/auth/verify-email/resend/').status_code, 429)
+
+    def test_a_mail_failure_does_not_fail_the_signup(self):
+        from unittest import mock
+        with mock.patch('patient_portal.api.email_verification.send_mail', side_effect=OSError('smtp down')):
+            client, resp = self._signup('user@example.com')
+        self.assertEqual(resp.status_code, 201)
+        self.assertFalse(resp.data['verification_email_sent'])
+        self.assertTrue(Identity.objects.filter(email='user@example.com').exists())
+
+    def test_completing_a_password_reset_verifies_the_address(self):
+        from patient_portal.api.password_reset import make_reset_link
+        from urllib.parse import parse_qs, urlparse
+        client, _ = self._signup('user@example.com')
+        identity = Identity.objects.get(email='user@example.com')
+        query = parse_qs(urlparse(make_reset_link(identity)).query)
+        resp = APIClient().post('/api/v1/auth/reset-password/', {
+            'uid': query['uid'][0], 'token': query['token'][0], 'new_password': 'An0ther!Str0ngPass',
+        })
+        self.assertEqual(resp.status_code, 200, getattr(resp, 'data', None))
+        identity.refresh_from_db()
+        self.assertTrue(identity.has_verified_email)
+
+    def test_an_unverified_address_is_not_matched_to_a_person(self):
+        """resolve_or_create_person links by email; a typed address must not."""
+        from patient_portal.services import resolve_or_create_person
+        victim = Person.objects.create(person_id=88102, email='victim@example.com')
+        identity = Identity.objects.create_user(email='victim@example.com', password=self.PASSWORD)
+        person = resolve_or_create_person(identity)
+        self.assertNotEqual(person.person_id, victim.person_id)
+
+
 class SelfServicePasswordResetTest(TestCase):
     """Test the public POST /api/v1/auth/request-reset/ endpoint."""
 
@@ -21367,6 +21877,87 @@ class CodeMappingApiTest(TestCase):
         self.assertIn('HK-Labs', dest_ids)
         self.assertTrue(next(v for v in dest if v['vocabulary_id'] == 'HK-Labs')['is_local'])
         self.assertFalse(next(v for v in dest if v['vocabulary_id'] == 'LOINC')['is_local'])
+
+    def test_reference_does_not_offer_icd10cm_as_a_destination_scope(self):
+        """#1465: ICD10CM holds no standard concepts, so it cannot be a destination."""
+        # Present on the instance, so its absence is the rule and not an accident.
+        Vocabulary.objects.get_or_create(
+            vocabulary_id='ICD10CM',
+            defaults={'vocabulary_name': 'ICD-10-CM', 'vocabulary_concept_id': 0},
+        )
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/code-mappings/reference/')
+        dest_ids = {v['vocabulary_id'] for v in resp.data['destination_vocabularies']}
+        self.assertNotIn('ICD10CM', dest_ids)
+        self.assertIn('LOINC', dest_ids)
+
+    # -- audit_retired_mapping_destinations (#1465) ---------------------------
+
+    def _retire_standard_with_replacement(self):
+        from omop_core.models import ConceptRelationship, Relationship
+        successor = Concept.objects.create(
+            concept_id=3046300, concept_name='Protein.monoclonal successor',
+            domain=self.domain, vocabulary=self.loinc_vocab,
+            concept_class=self.concept_class, standard_concept='S',
+            concept_code='33358-4', valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+        Relationship.objects.get_or_create(
+            relationship_id='Concept replaced by',
+            defaults={
+                'relationship_name': 'Concept replaced by', 'is_hierarchical': 0,
+                'defines_ancestry': 0, 'reverse_relationship_id': 'Concept replaces',
+                'relationship_concept_id': 0,
+            },
+        )
+        ConceptRelationship.objects.create(
+            concept_1=self.standard, concept_2=successor,
+            relationship_id='Concept replaced by',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        Concept.objects.filter(pk=self.standard.pk).update(invalid_reason='U')
+        return successor
+
+    def test_audit_reports_a_retired_destination_with_its_replacement(self):
+        from io import StringIO
+        successor = self._retire_standard_with_replacement()
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='ICD10', source_code='F98.8', omop_table='measurement',
+            target_concept=self.standard, destination_vocabulary_id='LOINC',
+            status='approved', origin='import',
+        )
+        out = StringIO()
+        with self.assertRaises(SystemExit) as raised:
+            call_command('audit_retired_mapping_destinations', stdout=out)
+        self.assertEqual(raised.exception.code, 1)
+        report = out.getvalue()
+        self.assertIn('ICD10:F98.8', report)
+        self.assertIn(f'-> {successor.concept_id} LOINC:33358-4', report)
+        self.assertIn('1 mapping(s)', report)
+
+        # Read-only: the mapping still points where it did.
+        self.assertEqual(
+            SourceCodeConceptMapping.objects.get(source_code='F98.8').target_concept_id,
+            self.standard.concept_id,
+        )
+
+    def test_audit_is_quiet_and_exits_zero_when_nothing_is_retired(self):
+        from io import StringIO
+        out = StringIO()
+        call_command('audit_retired_mapping_destinations', stdout=out)
+        self.assertIn('No mapping points at a retired concept', out.getvalue())
+
+    def test_audit_status_filter(self):
+        from io import StringIO
+        self._retire_standard_with_replacement()
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='ICD10', source_code='Z76.82', omop_table='measurement',
+            target_concept=self.standard, destination_vocabulary_id='LOINC',
+            status='proposed', origin='import',
+        )
+        out = StringIO()
+        call_command('audit_retired_mapping_destinations', '--status', 'approved', stdout=out)
+        self.assertIn('No mapping points at a retired concept', out.getvalue())
 
     def test_deprecated_vocabularies_alias_still_serves(self):
         """The alias kept "for one release" 500'd on every call.

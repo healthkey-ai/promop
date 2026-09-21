@@ -19,7 +19,7 @@ from __future__ import annotations
 import uuid
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field as dataclass_field
-from typing import Any, TypedDict
+from typing import Any, NamedTuple, TypedDict
 
 from django.contrib.contenttypes.models import ContentType
 from django.db import connection, models, transaction
@@ -299,45 +299,48 @@ def apply_patient(
     payload: PatientPayload, organization: Organization, target_person_id: int | None = None,
     replace: bool = False, dry_run: bool = False,
 ) -> PatientCopyStats:
-    """Write a read_patient payload as a patient of organization, in one transaction."""
+    """Write a read_patient payload as a patient of organization, in one transaction.
+
+    The patient gets a person_id from this database. Source ids belong to the
+    source instance, where the same number is somebody else.
+    """
     from patient_portal.webhooks import suppress_webhook_events
 
     stats = PatientCopyStats()
-    person_id = target_person_id or payload['person']['person_id']
+    source_id = payload['person']['person_id']
     try:
         with transaction.atomic(), suppress_patient_record_refresh():
-            # A copy writes every table this patient has, so the per-row signals
-            # would fire once per row — and on --replace, one `deleted` per row
-            # of the data being replaced, which is not what happened to the
-            # patient. Subscribers get one aggregate per table instead, the same
-            # shape the bulk API and FHIR-sync writers publish. Inside the
-            # transaction, so the outbox rows commit with the data and a dry run
-            # takes them back.
-            previous_org_id = None
-            previous_counts: dict[str, int] = {}
+            # A copy writes every table this patient has, so the per-row
+            # signals would fire once per row — and a --replace would fire one
+            # `deleted` per row of the data being replaced. Subscribers get one
+            # aggregate per table instead, the same shape the bulk API and
+            # FHIR-sync writers publish. Inside the transaction, so the outbox
+            # rows commit with the data and a dry run takes them back.
+            removed: list[_RemovedPatient] = []
             with suppress_webhook_events():
-                if Person.objects.filter(person_id=person_id).exists():
+                already_here = copied_person_id(source_id)
+                if already_here is not None:
                     if not replace:
                         raise PatientCopyError(
-                            f'Person {person_id} already exists here. Use --replace or --target-person-id.'
+                            f'Person {source_id} was already copied here as {already_here}. Use --replace.'
                         )
-                    # Read before the delete: --replace may move the patient to
-                    # another organization, and the one losing them has to hear
-                    # about it while its record still says so. The census is for
-                    # the other direction — a source that dropped this patient's
-                    # labs leaves tables empty here, and a subscriber told only
-                    # what arrived would mirror rows that are gone.
-                    previous_org_id = (PatientRecord.objects.filter(person_id=person_id)
-                                       .values_list('organization_id', flat=True).first())
-                    previous_counts = _patient_event_counts(person_id)
-                    delete_patient(person_id)
+                    # Census before the delete, while the rows and the record
+                    # naming their organization are still here.
+                    removed.append(_census(already_here))
+                    delete_patient(already_here)
+                person_id = target_person_id or _new_ids(Person, 'person_id', 1)[0]
+                if target_person_id and Person.objects.filter(person_id=target_person_id).exists():
+                    if not replace:
+                        raise PatientCopyError(f'Person {target_person_id} already exists here. Use --replace.')
+                    removed.append(_census(target_person_id))
+                    delete_patient(target_person_id)
                 _Copier(payload, organization, person_id, stats).run()
                 refresh_patient_record(Person.objects.get(person_id=person_id))
                 # The source record may have no org, or there may be no source record at all.
                 PatientRecord.objects.filter(person_id=person_id).update(organization=organization)
+                _record_copy(source_id, person_id, organization)
             stats.person_id = person_id
-            _publish_copy_events(person_id, stats, previous_org_id, previous_counts,
-                                 organization.pk)
+            _publish_copy_events(person_id, stats, removed, organization.pk)
             if dry_run:
                 raise _Rollback
     except _Rollback:
@@ -345,18 +348,33 @@ def apply_patient(
     return stats
 
 
-def _patient_event_counts(person_id: int) -> dict[str, int]:
-    """Rows this patient has here, per table a subscriber hears about."""
+class _RemovedPatient(NamedTuple):
+    """A patient this copy deleted from here, and what they had."""
+    person_id: int
+    organization_id: int | None
+    counts: dict[str, int]
+
+
+def _census(person_id: int) -> _RemovedPatient:
+    """Rows this patient has here, per table a subscriber hears about.
+
+    Taken before the delete, while the rows and the record naming their
+    organization are still here.
+    """
     from django.apps import apps
     from patient_portal.webhooks import PATIENT_EVENT_MODELS
 
-    return {label: apps.get_model(label).objects.filter(person_id=person_id).count()
-            for label in PATIENT_EVENT_MODELS}
+    return _RemovedPatient(
+        person_id,
+        PatientRecord.objects.filter(person_id=person_id)
+        .values_list('organization_id', flat=True).first(),
+        {label: apps.get_model(label).objects.filter(person_id=person_id).count()
+         for label in PATIENT_EVENT_MODELS},
+    )
 
 
 def _publish_copy_events(person_id: int, stats: PatientCopyStats,
-                         previous_org_id: int | None, previous_counts: dict[str, int],
-                         organization_id: int) -> None:
+                         removed: list[_RemovedPatient], organization_id: int) -> None:
     """One aggregate per table for a patient this instance just wrote.
 
     Driven by the webhook model list rather than by everything the copy
@@ -364,45 +382,35 @@ def _publish_copy_events(person_id: int, stats: PatientCopyStats,
     table it never hears about from any other writer would be a new event
     shape rather than the same news by a different route.
 
-    A --replace into a different organization moves the patient. The events
-    below go to the organization that now holds them, and would leave the one
-    that lost them believing it still has data that has been deleted, so that
-    organization is told first — while `person_id` is still its own reference
-    for the patient.
+    A copy lands under a person_id of this database, and a --replace deletes
+    the rows that person_id had — possibly under a different person_id, and
+    possibly for a different organization than the one receiving the copy. So
+    each deletion is announced to the organization that actually held those
+    rows, under the person_id it knew them by, and an unassigned patient
+    produces no tenant notification at all.
     """
     from django.apps import apps
-    from patient_portal.webhooks import (
-        PATIENT_EVENT_MODELS, publish_event, publish_patient_bulk_change,
-    )
+    from patient_portal.webhooks import PATIENT_EVENT_MODELS, publish_patient_bulk_change
 
-    moved = previous_org_id is not None and previous_org_id != organization_id
-    if moved:
-        publish_event(previous_org_id, 'patient.changed', {
-            'person_id': person_id, 'resource_type': 'omop_core.person',
-            'operation': 'bulk_deleted', 'count': 1,
-        })
-    for label in PATIENT_EVENT_MODELS:
-        model = apps.get_model(label)
+    models = [(label, apps.get_model(label)) for label in PATIENT_EVENT_MODELS]
+    for gone in removed:
+        if gone.organization_id is None:
+            continue
+        for label, model in models:
+            publish_patient_bulk_change(
+                gone.person_id, model._meta.model_name, gone.counts.get(label, 0),
+                operation='bulk_deleted', app_label=model._meta.app_label,
+                organization_id=gone.organization_id,
+            )
+    for label, model in models:
         count = stats.created.get(model._meta.object_name, 0)
         if model is PatientRecord and not count:
             # Derived here on every copy, even when the source had no record row
             # to copy, so the write happened whether or not the copier made it.
             count = PatientRecord.objects.filter(person_id=person_id).count()
-        # A --replace deletes every row this table had before writing the new
-        # ones, under new ids, so both halves are true and a subscriber
-        # mirroring by id needs both. Bounded by tables, not by rows: that is
-        # what separates this from the per-row storm it replaces. Not when the
-        # patient moved — the departure event above covers every table at once,
-        # and this organization never held the rows.
-        if previous_counts.get(label) and not moved:
-            publish_patient_bulk_change(person_id, model._meta.model_name,
-                                        previous_counts[label], operation='bulk_deleted',
-                                        app_label=model._meta.app_label,
-                                        organization_id=organization_id)
-        if count:
-            publish_patient_bulk_change(person_id, model._meta.model_name, count,
-                                        app_label=model._meta.app_label,
-                                        organization_id=organization_id)
+        publish_patient_bulk_change(person_id, model._meta.model_name, count,
+                                    app_label=model._meta.app_label,
+                                    organization_id=organization_id)
 
 
 class _Copier:
@@ -441,12 +449,7 @@ class _Copier:
 
     def _copy_person(self) -> None:
         """Copy the person and their address under new ids."""
-        location = self.payload['location']
-        location_id = None
-        if location is not None:
-            location_id = _new_ids(Location, 'location_id', 1)[0]
-            Location.objects.create(**{**location, 'location_id': location_id})
-            self.stats.created['Location'] += 1
+        location_id = self._location_id()
         values = self._with_concepts(Person, self.payload['person'])
         # actor_iss and actor_sub link a login on the source instance.
         values.update(person_id=self.person_id, location_id=location_id, provider_id=None,
@@ -454,6 +457,20 @@ class _Copier:
         Person.objects.create(**values)
         self.ids[Person][self.payload['person']['person_id']] = self.person_id
         self.stats.created['Person'] += 1
+
+    def _location_id(self) -> int | None:
+        """The id here of the patient's address, reusing an identical one."""
+        location = self.payload['location']
+        if location is None:
+            return None
+        address = {k: v for k, v in location.items() if k != 'location_id'}
+        here = Location.objects.filter(**address).order_by('location_id').values_list('location_id', flat=True).first()
+        if here is not None:
+            return here
+        location_id = _new_ids(Location, 'location_id', 1)[0]
+        Location.objects.create(**address, location_id=location_id)
+        self.stats.created['Location'] += 1
+        return location_id
 
     def _copy_table(self, model: type[Model], rows: list[Columns]) -> None:
         """Insert rows under new ids and remember old id to new id."""
@@ -620,6 +637,27 @@ def _new_ids(model: type[Model], attname: str, count: int) -> list[int]:
         cursor.execute(sql.SQL('LOCK TABLE {} IN SHARE ROW EXCLUSIVE MODE').format(sql.Identifier(table)))
     start = (model.objects.aggregate(top=Max(attname))['top'] or 0) + 1
     return list(range(start, start + count))
+
+
+# Marks which source patient a local person came from, so a re-run finds them.
+COPY_SOURCE: str = 'copy_patient'
+
+
+def copied_person_id(source_person_id: int) -> int | None:
+    """person_id here of a patient already copied from that source id."""
+    return ProvenanceRecord.objects.filter(
+        source=COPY_SOURCE, source_user_id=str(source_person_id),
+        content_type=ContentType.objects.get_for_model(Person),
+    ).values_list('object_id', flat=True).first()
+
+
+def _record_copy(source_person_id: int, person_id: int, organization: Organization) -> None:
+    """Record where this patient came from."""
+    ProvenanceRecord.objects.create(
+        source=COPY_SOURCE, source_user_id=str(source_person_id), target_patient_id=str(person_id),
+        content_type=ContentType.objects.get_for_model(Person), object_id=person_id,
+        organization=organization,
+    )
 
 
 def delete_patient(person_id: int) -> None:

@@ -99,7 +99,7 @@ deleting a subscription follows `get_direct_admin_orgs`: platform staff and
 direct `org_admin` grants only. A trust is granted for data access, and naming
 where an organization's events are sent is data-egress configuration, so a trust
 does not carry it ([decision](soc2/webhook-egress-authority.md)). Writes also
-require an interactive session — a session or a partner (Firebase/SAML) token —
+require an interactive session — a session or a partner (Firebase/PHR) token —
 because creating a subscription mints a long-lived signing secret and names
 where an organization's data goes, which is credential administration and must
 require the person rather than something they handed out. So an OAuth access
@@ -126,6 +126,19 @@ with `skip_refresh=true`. New code using `bulk_create`,
 its write transaction because Django does not emit model signals for these.
 Unassigned patients do not produce tenant notifications. A clinical save may
 also refresh PatientRecord and consequently emit a separate `patient.changed`.
+
+A cross-instance patient copy (`copy_patient`) is a bulk write of every one of
+a patient's tables at once, so it announces itself the same way, one aggregate
+per table rather than one event per row — the count is what changes with the
+size of the patient, not the number of events. `--replace` deletes the rows
+that patient had here before writing the new ones under new ids, and both
+halves are announced: `bulk_deleted` with the previous count, then `bulk_saved`
+with the new one. The copy lands under a person_id of this database, which need
+not be the one the deleted rows had, and the receiving organization need not be
+the one that held them — each deletion is addressed to the organization that
+actually had those rows, under the person_id it knew them by. A subscriber
+mirroring rows by id should treat the pair as "drop what you have for that
+person_id, then re-fetch".
 
 The outbox insert is deliberately part of the writer's transaction and is not
 wrapped in a try/except: that is what makes "the row exists" and "a

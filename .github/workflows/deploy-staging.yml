@@ -3,6 +3,11 @@ name: Deploy to Staging
 on:
   push:
     branches: [dev]
+  # Deploy a branch to staging without merging: add the 'deploy-staging' label
+  # to its PR. The pull_request ref is what GCP's trust condition allows, so a
+  # plain branch push cannot authenticate.
+  pull_request:
+    types: [labeled, synchronize]
 
 concurrency:
   group: deploy-staging
@@ -30,11 +35,16 @@ jobs:
     needs: test
     if: >-
       always() &&
-      (needs.test.result == 'success' || needs.test.result == 'skipped')
+      (needs.test.result == 'success' || needs.test.result == 'skipped') &&
+      (github.event_name == 'push' ||
+       contains(github.event.pull_request.labels.*.name, 'deploy-staging'))
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Publisher catalogs must be real payloads in the migration image.
+          lfs: true
 
       - id: auth
         uses: google-github-actions/auth@v2

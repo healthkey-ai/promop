@@ -103,6 +103,24 @@ def test_alias_guard_is_symmetric_and_not_a_global_code_match(athena):
     assert athena_supplies_mapping('ICD10', 'A02.0', None)
 
 
+def _as_candidate(concept, **extra):
+    """What umls_candidates returns for a concept: the ranker reads every field."""
+    return {
+        'concept_id': concept.concept_id, 'concept_name': concept.concept_name,
+        'concept_code': concept.concept_code, 'vocabulary_id': concept.vocabulary_id,
+        'concept_class_id': concept.concept_class_id, 'domain_id': concept.domain_id,
+        'umls_score': 1.0, 'retrieval': 'umls', **extra,
+    }
+
+
+def _rank_first(monkeypatch):
+    """Since #1420 every candidate is ranked; no model runs in tests, so pick the first."""
+    monkeypatch.setattr(
+        suggestions, 'rank_candidates',
+        lambda source_value, candidates, *args, **kwargs: (candidates[0], 'ranked', []),
+    )
+
+
 @pytest.mark.parametrize('dry_run', [False, True])
 def test_batch_suggest_skips_athena_supplied_candidate(athena, monkeypatch, dry_run):
     # The queue row Suggest reads: same code as the Athena mapping, under the
@@ -111,7 +129,9 @@ def test_batch_suggest_skips_athena_supplied_candidate(athena, monkeypatch, dry_
         source_vocabulary_id='ICD10', source_code='A02.0', omop_table='condition',
         domain_id='Condition', status='proposed', origin_system='', occurrence_count=12,
     )
-    monkeypatch.setattr(suggestions, 'umls_candidates', lambda *args: ([{'concept_id': athena.target_concept_id}], 'C1'))
+    monkeypatch.setattr(suggestions, 'umls_candidates',
+                        lambda *args: ([_as_candidate(athena.target_concept)], 'C1'))
+    _rank_first(monkeypatch)
     result = suggestions.suggest_mappings('condition', strategies=['umls'], dry_run=dry_run)
     assert result[0]['suggested'] is None
     assert result[0]['note'] == ATHENA_DUPLICATE_MESSAGE
@@ -134,7 +154,9 @@ def test_batch_suggest_skips_athena_supplied_candidate(athena, monkeypatch, dry_
 
 
 def test_single_suggest_explains_athena_duplicate(athena, monkeypatch):
-    monkeypatch.setattr(suggestions, 'umls_candidates', lambda *args: ([{'concept_id': athena.target_concept_id}], 'C1'))
+    monkeypatch.setattr(suggestions, 'umls_candidates',
+                        lambda *args: ([_as_candidate(athena.target_concept)], 'C1'))
+    _rank_first(monkeypatch)
     result = suggestions.suggest_one_mapping('A02.0', 'ICD10', 'condition', strategies=['umls'])
     assert result['suggested'] is None
     assert result['note'] == ATHENA_DUPLICATE_MESSAGE

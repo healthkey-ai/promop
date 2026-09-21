@@ -1283,15 +1283,26 @@ def test_a_replace_that_moves_a_patient_tells_the_organization_that_lost_them(se
     WebhookDelivery.objects.all().delete()
     apply_patient(payload, other, target_person_id=person.pk, replace=True)
 
+    # Addressed to the organization that actually held the rows, under the
+    # person_id it knew them by — and nothing about the arrival, which is not
+    # its patient any more.
     departure = [d.payload for d in WebhookDelivery.objects.filter(subscription=subscription)]
-    assert [(e['type'], e['data']['resource_type'], e['data']['operation'])
-            for e in departure] == [
-        ('patient.changed', 'omop_core.person', 'bulk_deleted'),
+    assert sorted((e['data']['resource_type'], e['data']['operation'], e['data']['count'])
+                  for e in departure) == [
+        ('omop_core.measurement', 'bulk_deleted', 1),
+        ('omop_core.patientrecord', 'bulk_deleted', 1),
+        ('omop_core.person', 'bulk_deleted', 1),
     ], departure
-    # The organization that now holds the patient hears the arrival instead.
-    arrival = sorted(e['data']['resource_type']
-                     for e in (d.payload for d in WebhookDelivery.objects.filter(subscription=gaining)))
-    assert arrival == ['omop_core.measurement', 'omop_core.patientrecord', 'omop_core.person']
+    assert all(e['data']['person_id'] == person.pk for e in departure)
+    # The organization that now holds the patient hears the arrival instead,
+    # and is told nothing about rows it never had.
+    arrival = [d.payload for d in WebhookDelivery.objects.filter(subscription=gaining)]
+    assert sorted((e['data']['resource_type'], e['data']['operation'])
+                  for e in arrival) == [
+        ('omop_core.measurement', 'bulk_saved'),
+        ('omop_core.patientrecord', 'bulk_saved'),
+        ('omop_core.person', 'bulk_saved'),
+    ], arrival
 
 
 def test_a_replace_that_empties_a_table_says_so(setup):
@@ -1344,6 +1355,37 @@ def test_a_copy_from_a_source_without_a_patient_record_still_announces_one(setup
     assert 'omop_core.patientrecord' in [
         d.payload['data']['resource_type'] for d in WebhookDelivery.objects.all()
     ]
+
+
+def test_replacing_an_unassigned_patient_tells_no_tenant(setup):
+    """No organization held those rows, so none is told they went.
+
+    Addressing the deletions to the organization receiving the copy would tell
+    a tenant that data it never had was removed — and how much of it there was.
+    """
+    from omop_core.services.patient_transfer import apply_patient, read_patient
+    from omop_core.signals import suppress_patient_record_refresh
+    from tests.factories import ConceptFactory, MeasurementFactory
+
+    org, other, person, user, subscription = setup
+    with suppress_patient_record_refresh():
+        unassigned = Person.objects.create(person_id=420007)
+        PatientRecord.objects.create(person=unassigned, organization=None)
+        for _ in range(3):
+            MeasurementFactory(person=unassigned, measurement_concept=ConceptFactory())
+        donor = Person.objects.create(person_id=420008)
+        PatientRecord.objects.create(person=donor, organization=org)
+    payload = read_patient('default', donor.pk)
+
+    WebhookDelivery.objects.all().delete()
+    apply_patient(payload, org, target_person_id=unassigned.pk, replace=True)
+
+    events = [d.payload for d in WebhookDelivery.objects.all()]
+    assert not [e for e in events if e['data']['operation'] == 'bulk_deleted'], events
+    # The arrival is announced, because the copy does assign an organization.
+    assert {e['data']['resource_type'] for e in events} == {
+        'omop_core.person', 'omop_core.patientrecord',
+    }
 
 
 def test_a_dry_run_copy_announces_nothing(setup):

@@ -572,6 +572,7 @@ class Command(EmbeddingLoadCommand):
                 return
             if replace:
                 self._remove_stale_concepts()
+            self._refresh_suggest_synonym_terms()
             self._sync_cdm_source_metadata()
             if not skip_clinical_vocabulary_verification:
                 self._verify_required_clinical_vocabularies()
@@ -1202,6 +1203,19 @@ class Command(EmbeddingLoadCommand):
         self._cleanup('CONCEPT_ANCESTOR.csv')
         self._log(f'  ancestors: {count:,} loaded from {scanned:,} rows in {time.monotonic() - t:.0f}s')
         return count
+
+    def _refresh_suggest_synonym_terms(self):
+        """Rebuild what Suggest reads synonyms from (#1467).
+
+        A load adds synonyms and changes which concepts are standard and active.
+        suggest_synonym_term is derived from both, so without this a newly loaded
+        synonym is invisible to Suggest until someone refreshes by hand. After
+        _remove_stale_concepts, so removed concepts' terms go in the same pass.
+        """
+        from omop_core.services import suggest_synonym_terms
+        self._log('Refreshing suggest_synonym_term...')
+        inserted, deleted = suggest_synonym_terms.refresh()
+        self._log(f'  suggest_synonym_term: {inserted:,} added, {deleted:,} removed.')
 
     def _load_concept_synonym(self, dry_run):
         self._log('Loading CONCEPT_SYNONYM.csv...')

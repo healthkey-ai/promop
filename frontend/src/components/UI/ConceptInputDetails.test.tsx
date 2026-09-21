@@ -5,7 +5,7 @@ import ConceptInputDetails from "./ConceptInputDetails";
 describe("destination concept input details", () => {
   it("shows quantitative measurements with their suggested unit", () => {
     render(<ConceptInputDetails domain_id="Measurement" measurement_type="quantitative" suggested_unit="mg/dL" />);
-    expect(screen.getByText("Quantitative · Unit: mg/dL")).toBeInTheDocument();
+    expect(screen.getByText("Quantitative · Suggested unit: mg/dL")).toBeInTheDocument();
   });
   it("shows quantitative measurements without inventing units", () => {
     render(<ConceptInputDetails domain_id="Measurement" measurement_type="quantitative" />);

@@ -422,7 +422,14 @@ class OrgInviteView(APIView):
                 )
 
             identity = _get_or_create_invitee_identity(email)
-            _grant_org_access(identity, org, role, request.user, redirect_url=normalized_redirect_url)
+            # Passwordless local placeholders cannot sign in and may retain
+            # grants for verified SSO claiming. An existing unverified login
+            # must prove ownership before receiving an email-addressed grant.
+            access_granted = identity.has_verified_email or (
+                identity.is_local and not identity.has_usable_password()
+            )
+            if access_granted:
+                _grant_org_access(identity, org, role, request.user, redirect_url=normalized_redirect_url)
 
         email_warning = None
         try:
@@ -437,7 +444,7 @@ class OrgInviteView(APIView):
             confirmed_at__isnull=True, cancelled_at__isnull=True,
         ).exclude(id=invitation.id).update(cancelled_at=timezone.now())
         data = OrgInvitationSerializer(invitation).data
-        data['access_granted'] = True
+        data['access_granted'] = access_granted
         if email_warning:
             data['email_warning'] = email_warning
         return Response(data, status=status.HTTP_201_CREATED)
@@ -503,7 +510,7 @@ def confirm_invitation(request):
         invitation.role != 'patient'
         and (
             identity is None
-            or (identity.issuer == 'urn:local' and not identity.has_usable_password())
+            or (identity.is_local and (not identity.has_usable_password() or not identity.has_verified_email))
         )
     )
     if needs_password:
@@ -524,6 +531,13 @@ def confirm_invitation(request):
                 identity.is_active = True
                 identity.save(update_fields=['password', 'is_active'])
                 record_password(identity)
+
+        # The token reached the invited mailbox, so holding it proves the address
+        # -- for the account it was sent to, not for a differently-addressed one.
+        if identity is None:
+            identity = _get_or_create_invitee_identity(invitation.email)
+        if (identity.email or '').lower() == invitation.email.lower():
+            identity.mark_email_verified()
 
         # Grant access — use get_or_create rather than update_or_create to avoid
         # silently downgrading an existing higher-privilege role (e.g. org_admin → doctor).
@@ -610,7 +624,7 @@ def org_invitation_lookup(request):
         invitation.role != 'patient'
         and (
             identity is None
-            or (identity.issuer == 'urn:local' and not identity.has_usable_password())
+            or (identity.is_local and (not identity.has_usable_password() or not identity.has_verified_email))
         )
     )
     return Response({
@@ -833,95 +847,86 @@ class OrgPatientSignupView(APIView):
             )
 
         domain = email.rsplit('@', 1)[1]
-        invitation_or_domain_access = (
-            OrgInvitation.objects.filter(
-                org=org,
-                email__iexact=email,
-                confirmed_at__isnull=True,
-                cancelled_at__isnull=True,
-                expires_at__gt=timezone.now(),
-            ).exists()
-            or OrgTrust.objects.filter(
-                granting_org=org,
-                trusted_domain__iexact=domain,
-            ).exists()
-        )
-        if not org.allows_patient_signup and not invitation_or_domain_access:
+        has_invitation = OrgInvitation.objects.filter(
+            org=org,
+            email__iexact=email,
+            confirmed_at__isnull=True,
+            cancelled_at__isnull=True,
+            expires_at__gt=timezone.now(),
+        ).exists()
+        has_domain_trust = OrgTrust.objects.filter(
+            granting_org=org,
+            trusted_domain__iexact=domain,
+        ).exists()
+        if not (org.allows_patient_signup or has_invitation or has_domain_trust):
             return Response(
                 {'error': 'This organization does not allow direct patient signup.'},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        from patient_portal.services import set_new_password
-
-        # Check for existing account with this email
+        # Signup only ever creates a new account. It used to set a password on a
+        # passwordless placeholder when one existed for the address -- but
+        # inviting someone creates exactly that placeholder *with the invited
+        # role already attached*, so anyone who typed an invited address became
+        # that doctor or org admin without holding the invitation token. The
+        # token, which only the mailbox receives, is the one way to claim it.
         existing = _find_identity_by_email(email)
-        if existing and existing.has_usable_password():
+        if existing:
+            message = (
+                'An account with this email already exists. Please log in instead.'
+                if existing.has_usable_password() else
+                'This email address has a pending invitation. Use the link in the '
+                'invitation email to set up your account.'
+            )
             return Response(
-                {
-                    'error': 'An account with this email already exists. Please log in instead.',
-                    'errors': {
-                        'email': ['An account with this email already exists. Please log in instead.'],
-                    },
-                },
+                {'error': message, 'errors': {'email': [message]}},
                 status=status.HTTP_409_CONFLICT,
             )
 
         try:
             with transaction.atomic():
-                if existing:
-                    # Placeholder identity from a prior invitation — set its password
-                    identity = existing
-                    set_new_password(identity, password)
-                    if given_name:
-                        identity.name = f"{given_name} {family_name}".strip()
-                        identity.save(update_fields=['name'])
-                else:
-                    identity = Identity.objects.create_user(
-                        email=email,
-                        password=password,
-                        name=f"{given_name} {family_name}".strip(),
-                    )
+                identity = Identity.objects.create_user(
+                    email=email,
+                    password=password,
+                    name=f"{given_name} {family_name}".strip(),
+                )
 
-                # Reuse existing PatientUser link if present (e.g. from a prior invitation
-                # or signup at another org)
-                existing_pu = PatientUser.objects.filter(identity=identity).first()
-                if existing_pu:
-                    person = existing_pu.person
-                    if person.email != email:
-                        person.email = email
-                        person.save(update_fields=['email'])
-                    # Ensure a PatientRecord exists for this person in the new org
-                    PatientRecord.objects.get_or_create(
-                        person=person,
-                        organization=org,
-                    )
-                else:
-                    new_id = next_pk(Person, 'person_id')
-                    person = Person.objects.create(
-                        person_id=new_id,
-                        given_name=given_name or None,
-                        family_name=family_name or None,
-                        year_of_birth=1900,
-                        gender_source_value='unknown',
-                        race_source_value='unknown',
-                        ethnicity_source_value='unknown',
-                        email=email,
-                    )
-                    PatientRecord.objects.create(person=person, organization=org)
-                    PatientUser.objects.create(identity=identity, person=person)
+                # The identity is always new here, so it has no person yet.
+                new_id = next_pk(Person, 'person_id')
+                person = Person.objects.create(
+                    person_id=new_id,
+                    given_name=given_name or None,
+                    family_name=family_name or None,
+                    year_of_birth=1900,
+                    gender_source_value='unknown',
+                    race_source_value='unknown',
+                    ethnicity_source_value='unknown',
+                    email=email,
+                )
+                PatientRecord.objects.create(person=person, organization=org)
+                PatientUser.objects.create(identity=identity, person=person)
 
                 from omop_core.services.patient_record_service import refresh_patient_record
                 refresh_patient_record(person)
 
-                # Grant access to this org.  Public demo orgs get 'analyst'
-                # so the user can browse all sample patients (read-only);
-                # private orgs get 'patient' (self-access only).
+                # Grant access to this org.  A public demo org gives 'analyst' so
+                # the user can browse its sample patients; that depends on the
+                # org's policy, not on who the user says they are.
+                #
+                # An org that trusts the email domain should give 'analyst' too
+                # (#1454) -- but at this moment the address is only something the
+                # user typed. So it starts as 'patient' (self-access only) and
+                # verify_email promotes it once the address is proved. Invitation-
+                # only signups stay 'patient'; the invited role is claimed with
+                # the invitation token through accept-invite.
                 signup_role = 'analyst' if org.allows_patient_signup else 'patient'
                 GroupAccess.objects.get_or_create(
                     identity=identity,
                     org=org,
-                    defaults={'role': signup_role},
+                    defaults={
+                        'role': signup_role,
+                        'pending_email_verification': has_domain_trust and not org.allows_patient_signup,
+                    },
                 )
         except Exception:
             logger.exception('Unexpected error during patient signup for %s', email)
@@ -929,6 +934,10 @@ class OrgPatientSignupView(APIView):
                 {'error': 'Could not create your account. Please try again or contact support.'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+        # Outside the transaction: a mail failure must not undo the account.
+        from patient_portal.api.email_verification import send_verification_email
+        verification_sent = send_verification_email(identity)
 
         # Auto-login via session
         from django.contrib.auth import login
@@ -938,6 +947,10 @@ class OrgPatientSignupView(APIView):
             {
                 'person_id': person.person_id,
                 'redirect_url': f'/org/{slug}/',
+                # Access that depends on the address (a trusted domain) waits for
+                # this; the page tells the user to look for the email.
+                'email_verification_required': has_domain_trust and not org.allows_patient_signup,
+                'verification_email_sent': verification_sent,
             },
             status=status.HTTP_201_CREATED,
         )

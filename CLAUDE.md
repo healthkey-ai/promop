@@ -52,6 +52,7 @@ redeploy does not. See `docs/render-staging-celery.md`.
 | FHIR upload handler | `patient_portal/api/views.py` — `upload_fhir_bundle` function/view |
 | SCT sample data seeder | `omop_core/management/commands/populate_sct_sample_data.py` |
 | SCT migration audit | `omop_core/management/commands/audit_sct_history.py` |
+| Retired mapping destinations audit | `omop_core/management/commands/audit_retired_mapping_destinations.py` — read-only, exits 1 when any are found |
 | Backend tests | `omop_core/tests.py`, `patient_portal/tests.py` |
 | React tests | `frontend/src/App.test.tsx`, `frontend/src/components/**/*.test.tsx` |
 
@@ -867,9 +868,12 @@ Every row gets a new id. Foreign keys, plain integer references
 `measurement_event_id`, resolved through the field concept named `table.column`)
 follow the copied rows. A missing concept becomes 0 where required, else null.
 
-- The patient keeps their `person_id` if it is free. Otherwise pass
-  `--target-person-id`, or `--replace`, which refuses when system data (a login,
+- Every id comes from this database, `person_id` included: a source id belongs
+  to the source instance, where the same number is a different patient. The copy
+  is recorded as a `ProvenanceRecord` (`source='copy_patient'`), so copying the
+  same patient twice needs `--replace`, which refuses when system data (a login,
   a FHIR connection, an invitation) points at the person here.
+- An address that already exists here is reused; only a new one is inserted.
 - `PatientRecord` is copied and re-derived, so user edits survive and derived
   therapy ids follow this instance's reference data. It joins `--org`.
 - Stored document files are not copied; those rows are skipped and reported.
@@ -938,10 +942,10 @@ enqueue_unmapped_source_codes` still does that scan, as the batch job it is: it
 creates empty queue rows with blank provenance, which is exactly the state
 Suggest looks for. So the split is **enqueue, then suggest**.
 
-### Three independent retrieval paths, one ranking call
+### Three retrieval paths, then Anthropic or Jev chooses the winner
 
 ```
-UMLS CUI bridge ──► exactly one standard concept? ──► done, no model call
+UMLS CUI bridge ──► exactly one standard concept? ──► done, no ranking call
        │ no
        ▼
    ┌────────────────┐
@@ -953,24 +957,80 @@ UMLS CUI bridge ──► exactly one standard concept? ──► done, no model
        ▼  merge (union, enrich overlaps with both scores)
        │
        ▼
-One ranking call ─► the model picks one from the merged pool, or declines
+Anthropic or Jev ─► picks one from the merged pool with confidence levels, or declines
 ```
 
-UMLS, lexical, and vectors are **three independent retrieval paths** that run
-concurrently and merge into one candidate pool. `semantic_candidates()` does a
-full cosine similarity search against the `ConceptEmbedding` table — it is real
+UMLS, lexical, and vectors are **three independent retrieval paths** that
+contribute candidates to one merged pool. `semantic_candidates()` does a full
+cosine similarity search against the `ConceptEmbedding` table — it is real
 retrieval, not reranking. Lexical and vector results are often mostly disjoint
 because trigram similarity and embedding cosine are different signals.
-`vector_rerank()` exists in the code but is unused.
+`vector_rerank()` exists in the code but is unused in the default pipeline.
+
+`rank_candidates_dispatch()` routes the merged pool to the configured ranking
+model: **Anthropic** (Claude, the default), **Jev** (Typesafe API), or
+**both** (concurrent, highest confidence wins). The ranker scores each candidate
+with a qualitative confidence level (high / medium / low, mapped to numeric
+values) and either picks a winner or declines. A declined code stays in the
+queue for the next run.
 
 Where the time goes, per code:
 
 | Stage | Cost |
 |---|---|
-| lexical trigram retrieval | ~2.5s (**67%**, serial) |
+| lexical trigram retrieval | ~0.15s for a domain-scoped code, serial (was ~2.5s and **67%** before #1467 — see below) |
 | vector cosine retrieval | ~0.3s (query embedding ~25ms + cosine search) |
-| ranking model call | ~3.5s each, but concurrent (`RANK_CONCURRENCY`) and only for codes UMLS did not settle |
+| ranking call (Anthropic or Jev) | ~3.5s each, but concurrent (`RANK_CONCURRENCY`) and only for codes UMLS did not settle |
 | embedding model load | ~5s, **once per gunicorn worker**, on its first Suggest |
+
+### Retrieval is scoped by index, not by filter
+
+Trigram similarity is a *lossy* index operation: the GIN index returns every row
+that shares enough three-letter fragments with the source text, and Postgres
+then computes an exact similarity for each. On the whole-table indexes that was
+30,000-235,000 rows per code, scored and almost all discarded — by the domain and
+standard filters for names, by the join to `concept` for synonyms. Both whole-table
+indexes were being *used*; the cost was the recheck, so no plan fix could help.
+
+So the rows that can be an answer get indexes of their own (#1467):
+
+| Path | Index | Holds |
+|---|---|---|
+| names | `ix_concept_trgm_<domain>` — 5 partial GIN indexes on `concept` | standard, active concepts in that domain |
+| synonyms | `ix_suggest_syn_<domain>` — 5 partial GIN indexes on `suggest_synonym_term` | the uppercased synonyms of those same concepts |
+
+`suggest_synonym_term` exists because `concept_synonym` has no domain or standing
+of its own — those live on `concept` — and a partial index cannot look across a
+join. It is derived, never edited: `services.suggest_synonym_terms.refresh()`
+deletes what stopped being eligible, then inserts what is missing (that order:
+a concept that changed domain would otherwise collide with its own old row).
+`load_athena_vocabularies` runs it after every full load; migration `0246`
+backfilled instances that already had a vocabulary.
+
+Measured on staging over the same 28 real queue rows, synonym retrieval went
+**32.1s → 2.8s** with identical results on all 28; name retrieval for a
+procedure description went from ~1-3s to 25-75ms.
+
+Three rules that keep it honest:
+
+- **The index predicates are the query's filters, literally.** The planner only
+  picks a partial index it can prove applies. Change `standard_concept='S',
+  invalid_reason IS NULL, domain_id=…` in `lexical_candidates` and the indexes
+  silently stop being used.
+- **An unbuilt table falls back, it does not return less.** `is_populated(domain)`
+  is false for a test database or a never-refreshed instance, and for a search
+  with no domain (ICD-10 searches all of them); retrieval then reads
+  `concept_synonym` directly — slow, complete.
+- **`lexical_candidates` still re-checks standing on `concept`.** A term that went
+  stale since the last refresh can cost a shortlist slot; it can never put a
+  retired concept in front of the ranker.
+
+Not fixed by this: drug names. "ASPIRIN 81 MG ORAL TABLET" shares "MG ORAL TABLET"
+with ~350,000 RxNorm names, and that is one domain, so scoping cannot help
+(~4.5s). That needs a different similarity measure, not a narrower index.
+
+Cost: ~135 MB for the concept indexes and ~660 MB for the table and its indexes
+on a fully loaded instance.
 
 ### The run is queued, and how big it may be depends on that
 
@@ -1000,9 +1060,10 @@ The ceiling is a budget for the whole run, not per clinical table: a source
 vocabulary can map to five tables, and a per-table limit would let one run
 attempt five times its own ceiling.
 
-Raising it needs retrieval to get cheaper, not the timeout to get longer — each
-extra code adds another trigram query, while ranking adds ~3.5s to a run of any
-size.
+The ceilings were set when retrieval cost ~2.5s a code. #1467 cut that by an
+order of magnitude for domain-scoped codes, so they can be revisited — but
+re-measure inline batches first; drug codes and ICD-10 (no domain) did not get
+cheaper.
 
 ### What the curator is shown
 

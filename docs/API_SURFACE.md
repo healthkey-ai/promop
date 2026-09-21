@@ -812,9 +812,27 @@ Query params:
 | `vocabulary_id` | no | Exact match filter, e.g. `LOINC`, `SNOMED`, `RxNorm`, `HemOnc` |
 | `domain_id` | no | Exact match filter, e.g. `Measurement`, `Condition`, `Drug` |
 | `concept_class_id` | no | Exact match filter, e.g. `Lab Test`, `Clinical Finding` |
-| `standard_concept` | no | Exact match filter; usually `S` for standard or `C` for classification |
+| `standard_concept` | no | Exact match filter; usually `S` for standard or `C` for classification. Passing it disables the standard-only default below |
+| `include_retired` | no | `true` to also return concepts that have an `invalid_reason` |
+| `include_non_standard` | no | `true` to also return non-standard concepts |
 | `page` | no | 1-based page number |
 | `page_size` | no | Defaults to 25; capped at 100 |
+
+**Default scope (changed in #1465).** Only concepts usable as a mapping destination are
+returned: active (`invalid_reason` empty), and either standard (`standard_concept = 'S'`) or
+authored on this instance (`source = 'HealthKey'`, the `HK-*` vocabularies). Previously every
+concept in the vocabulary was returned — for SNOMED that is two-thirds retired. A client that
+needs the old behaviour passes `include_retired=true&include_non_standard=true`. The listing
+endpoint `GET /api/v1/concepts/` is unscoped, as before.
+
+`q` also matches an exact `concept_code` (case-insensitive) and, when numeric, an OMOP
+`concept_id`.
+
+Results are ordered by match quality, best first: exact code or id, exact name, name starting
+with `q`, any other match; within each, standard concepts first, then shorter names, then
+`concept_id`. (Before #1466 the order was `concept_id`.) The order is stable, so paging is
+safe. A client that pages the whole vocabulary should use `GET /api/v1/concepts/`, which stays
+ordered by `concept_id`.
 
 **Request**
 ```

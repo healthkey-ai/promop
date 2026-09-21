@@ -33,11 +33,17 @@ SYSTEM: frozenset[str] = frozenset({
     'omop_core.Organization', 'omop_core.PatientGroup',
     'omop_core.PatientGroupMembership', 'omop_core.PersonalRepresentative',
     'omop_core.FhirConnection', 'omop_core.FhirOauthState',
+    # Instance-specific unit policy and its audit history must not follow vocabulary copies.
+    'omop_core.CanonicalUnitPreference', 'omop_core.CanonicalUnitChange',
     # Holds this deployment's own SMART client registration.
     'omop_core.Institution',
     # Bookkeeping and derived caches, rebuilt by their own commands.
     'omop_core.CdmSource', 'omop_core.ConceptEmbedding', 'omop_core.RegimenMappingGap',
     'omop_core.SuggestEmbeddingSnapshot', 'omop_core.SuggestRun',
+    # Historical model-quality feedback for this instance, not a live mapping.
+    'omop_core.MappingSuggestionReview',
+    # Derived from concept + concept_synonym; rebuilt locally, never copied.
+    'omop_core.SuggestSynonymTerm',
     'omop_core.VocabularyRelease', 'omop_core.VocabularyVersionHistory',
     # Outreach state, not answers.
     'prolog_surveys.ParticipantMergeCandidate', 'prolog_surveys.SurveyAdministration',
@@ -65,6 +71,7 @@ REFERENCE_FROM_RELEASE: dict[str, str] = {
     **dict.fromkeys((
         'omop_core.UmlsConcept', 'omop_core.UmlsRelease', 'omop_core.UmlsSourceCode',
     ), 'load_umls_release'),
+    **dict.fromkeys(('omop_core.SourceVocabulary', 'omop_core.SourceVocabularyTerm'), 'load_ncit_source'),
     **dict.fromkeys(('omop_core.LoincClass', 'omop_core.LoincCodeClass'), 'load_loinc_classes'),
     **dict.fromkeys((
         'prolog_surveys.Survey', 'prolog_surveys.SurveyOption',

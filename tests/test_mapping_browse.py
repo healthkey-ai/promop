@@ -39,6 +39,36 @@ def test_pages_sort_before_slicing_and_report_full_counts(browse):
     assert browse(order_0='source_code').data['results'][0]['source_code'] == 'C000'
 
 
+@pytest.mark.parametrize('params', [{}, {'source': '__overall__'}, {'search': 'SORT-'}])
+def test_unmapped_default_groups_provenance_then_seen_before_pagination(browse, params):
+    curated = [row(f'SORT-C{i:03}', origin_system='curator', occurrence_count=i // 2) for i in range(101)]
+    suggested = row('SORT-S', origin_system='suggest v0.4', occurrence_count=1000)
+    expected = sorted(curated, key=lambda m: (-m.occurrence_count, m.source_code, m.pk)) + [suggested]
+    first = browse(**params).data
+    second = browse(page_0=2, **params).data
+    assert first['pages']['Unmapped']['total'] == 102
+    assert [r['mapping_id'] for r in first['results'] + second['results']] == [m.pk for m in expected]
+    assert [r['mapping_id'] for r in second['results']] == [curated[1].pk, suggested.pk]
+    # A caller can still override the default to prioritise Seen across groups.
+    explicit = browse(order_0='-occurrence_count', **params).data
+    assert explicit['results'][0]['mapping_id'] == suggested.pk
+
+
+def test_reversing_provenance_keeps_seen_descending_and_other_defaults(browse):
+    for status in ['proposed', 'approved', 'rejected']:
+        row(f'{status}-C', status=status, origin_system='curator', occurrence_count=100)
+        row(f'{status}-SA', status=status, origin_system='suggest v0.4', occurrence_count=1)
+        row(f'{status}-SZ', status=status, origin_system='suggest v0.4', occurrence_count=200)
+    data = browse(order_0='-origin_system').data
+    assert [r['source_code'] for r in data['results'] if r['status'] == 'proposed'] == [
+        'proposed-SZ', 'proposed-SA', 'proposed-C',
+    ]
+    for status in ['approved', 'rejected']:
+        assert [r['source_code'] for r in data['results'] if r['status'] == status] == [
+            f'{status}-SZ', f'{status}-C', f'{status}-SA',
+        ]
+
+
 def test_aliases_global_search_rejected_and_sections(browse):
     row('A', source_vocabulary_id='ICD10CM', occurrence_count=50)
     row('B', status='approved')

@@ -38,6 +38,48 @@ GET  /api/v1/orgs/{slug}/public/
 POST /api/orgs/{slug}/invite/      role=patient
 ```
 
+The role a self-signup receives depends on why the org was offered to that visitor:
+
+| Org is reachable because | `GroupAccess` role |
+|---|---|
+| `allows_patient_signup` (public demo org) | `analyst` |
+| it trusts the email domain (`OrgTrust.trusted_domain`) | `patient`, promoted to `analyst` when the address is verified |
+| a pending `OrgInvitation` only | `patient` |
+
+A public org's role comes from that org's policy. The other two depend on who the
+visitor says they are, and signup does not know that yet — see below.
+
+### A typed address is a claim
+
+Self-signup takes an email and a password and signs the user in. Until the user
+follows the link mailed to that address, `Identity.email_verified_at` is null and
+`Identity.has_verified_email` is false. **Anything that grants access because of an
+email address must read `has_verified_email` / `verified_email_domain`, never
+`email`:**
+
+- **Domain trusts** (`omop_core/services/access.py`) apply to a verified domain only.
+- **Matching a person by email** (`resolve_or_create_person`) requires a verified address.
+- **Pending invitations** appear in account responses only after verification.
+- **Signup never claims an existing account.** Passwordless invitees claim their
+  account through the emailed invitation. Invitations addressed to an existing
+  unverified login withhold the role until acceptance; acceptance requires a new
+  password so the mailbox owner replaces any unproved credentials and sessions.
+
+Proof comes from a verification link (`POST /api/v1/auth/verify-email/`), an
+emailed invitation or password reset, or a matching verified identity-provider
+claim. Operator-created local staff accounts count as verified. Migration
+`patient_portal.0020` backfills local staff and accepted invitations, restricts
+legacy private-domain signup grants, and removes unconfirmed invitation grants
+from unverified password accounts. Other local accounts confirm through the
+banner's resend action or password reset. Existing federated accounts establish
+verification on their next login with a verified claim.
+
+Only signup grants marked `pending_email_verification` are promoted; ordinary
+patient memberships retain their role.
+
+The link is a signed value bound to the account *and* the address, valid 3 days;
+nothing is stored. A mail failure never fails a signup.
+
 Org serializers expose `allows_patient_signup` so admins can enable or disable public
 signup. User responses include the org data needed for org-scoped patient routing.
 

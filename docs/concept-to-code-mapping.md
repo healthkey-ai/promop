@@ -89,7 +89,7 @@ Retrieval tiers (mirror the forward pipeline in
    prompt: "Given this standard concept, which source codes match?" Same
    claude-opus-5 call, reversed system prompt
 4. **`reverse_retrieval_pool(concept, strategies, lexical_limit)`** — combines
-   tiers, applies vector rerank if embeddings available
+   tiers into one candidate pool; Anthropic or Jev ranks the merged pool
 
 **New file:** `omop_core/services/reverse_suggest_jobs.py`
 - Mirrors `suggest_jobs.py` dispatcher pattern (Celery/Inline/Fake)

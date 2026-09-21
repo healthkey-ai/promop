@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from patient_portal.models import Identity, PatientUser
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
@@ -431,6 +432,7 @@ class AutoProvisionTest(TestCase):
 
         user = Identity.objects.create_user(
             email='newpatient@example.com',
+            email_verified_at=timezone.now(),
         )
         _ensure_person(user)
 

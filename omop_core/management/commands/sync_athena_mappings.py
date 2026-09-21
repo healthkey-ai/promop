@@ -193,3 +193,16 @@ class Command(EmbeddingLoadCommand):
                 f'{len(multi_target)} source codes had multiple Athena targets '
                 f'(first kept, extras in concept_relationship).'
             ))
+
+        # A sync follows a vocabulary load, and a load is what retires concepts
+        # that approved mappings already point at (#1465). Report, never repair:
+        # re-pointing an approved mapping changes what ingest resolves to.
+        from omop_core.management.commands.audit_retired_mapping_destinations import (
+            retired_destination_mappings,
+        )
+        retired = retired_destination_mappings().count()
+        if retired:
+            self.stdout.write(self.style.WARNING(
+                f'{retired} mapping(s) now point at a retired concept. '
+                'Run `manage.py audit_retired_mapping_destinations` to list them.'
+            ))

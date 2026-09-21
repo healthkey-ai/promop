@@ -20,7 +20,8 @@ scan, as the batch job it always was; see its docstring.
 only thing that ever set it was a previous Suggest run. An ``HT-One`` or
 ``HT-FHIR`` row carries a destination its importer asserted, and re-deriving
 that from the source text would overwrite a better answer with a worse one.
-``approved`` and ``rejected`` are decisions and are never touched.
+Approved rows are never touched. A different replacement for a rejected
+suggestion returns to Proposed; the old suggestion's feedback is archived.
 
 Retrieval then ranking, and the order within retrieval is the point:
 
@@ -88,6 +89,7 @@ from omop_core.models import (
     ConceptEmbedding,
     ConceptSynonym,
     SourceCodeConceptMapping,
+    SuggestSynonymTerm,
     UmlsSourceCode,
 )
 
@@ -115,6 +117,13 @@ DEFAULT_MIN_OCCURRENCES = 10
 # Increment this whenever a material suggestion-algorithm change is released.
 SUGGESTION_MODEL_VERSION = 'v0.4'
 SUGGESTION_PROVENANCE = f'suggest {SUGGESTION_MODEL_VERSION}'
+# Stamped by the curator edit path when a person moves a row's destination.
+# Suggest never re-answers a row with this provenance: a curator's decision is
+# not a suggestion, even before an admin approves it (#1469).
+CURATOR_PROVENANCE = 'curator'
+CURATED_DURING_RUN_MESSAGE = (
+    'A curator decided this mapping while the run was ranking it; left as they set it.'
+)
 
 # How many trigram survivors lexical retrieval hands the reranker. Ten: enough
 # that the right concept is in the list (it was third in the motivating
@@ -150,21 +159,9 @@ SYNONYM_BONUS = 0.05
 # ---------------------------------------------------------------------------
 # Maps OMOP vocabulary_id → UMLS SAB (root_source in umls_source_code).
 # Verified against staging data (195 distinct root_source values).
-VOCAB_TO_UMLS_ROOT = {
-    'SNOMED': 'SNOMEDCT_US',
-    'ICD10CM': 'ICD10CM',
-    'ICD10': 'ICD10CM',       # HT-One ICD-10 codes are ICD-10-CM format
-    'ICD10PCS': 'ICD10PCS',
-    'LOINC': 'LNC',
-    'RxNorm': 'RXNORM',
-    'CPT4': 'CPT',
-    'HCPCS': 'HCPCS',
-    'NDC': 'NDC',
-    'CVX': 'CVX',
-    'ICD9CM': 'ICD9CM',
-    'MeSH': 'MSH',
-    'NDFRT': 'MED-RT',
-}
+# Lives in services.source_vocabularies so the description backfill and the
+# migrations can share it without importing this module.
+from omop_core.services.source_vocabularies import VOCAB_TO_UMLS_ROOT  # noqa: E402
 
 # Reverse: UMLS SAB → OMOP vocabulary_id (for sibling-code lookups).
 # Multiple OMOP vocabs can map to the same UMLS SAB (ICD10CM and ICD10 both
@@ -693,18 +690,39 @@ def lexical_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
 
     # Synonyms are a separate index and a separate signal; merged by concept,
     # keeping whichever route scored higher.
-    synonym_hits = (
-        ConceptSynonym.objects
-        .filter(concept__standard_concept='S', concept__invalid_reason__isnull=True,
-                **({'concept__domain_id': domain_id} if domain_id else {}))
-        .annotate(name_upper=Upper('concept_synonym_name'))
-        .filter(name_upper__trigram_similar=query)
-        .annotate(score=TrigramSimilarity(Upper('concept_synonym_name'), query))
-        .filter(score__gt=MIN_TRIGRAM_SCORE)
-        .values('concept_id')
-        .annotate(score=Max('score'))
-        .order_by('-score')[:limit]
-    )
+    #
+    # The domain-scoped table is the fast path (#1467). concept_synonym has no
+    # domain or standing of its own, so its trigram index returns loosely similar
+    # synonyms from every domain -- 30,000 to 160,000 rows per code on staging,
+    # each scored, nearly all discarded by the join. suggest_synonym_term holds
+    # the same text with the domain beside it and a partial index per domain.
+    # Scores are identical: `term` is UPPER(concept_synonym_name).
+    from omop_core.services import suggest_synonym_terms
+    if suggest_synonym_terms.is_populated(domain_id):
+        synonym_hits = (
+            SuggestSynonymTerm.objects
+            .filter(domain_id=domain_id, term__trigram_similar=query)
+            .annotate(score=TrigramSimilarity('term', query))
+            .filter(score__gt=MIN_TRIGRAM_SCORE)
+            .values('concept_id')
+            .annotate(score=Max('score'))
+            .order_by('-score')[:limit]
+        )
+    else:
+        # No domain (ICD-10 searches all of them), or a table nobody has built:
+        # search concept_synonym directly. Slow, but complete.
+        synonym_hits = (
+            ConceptSynonym.objects
+            .filter(concept__standard_concept='S', concept__invalid_reason__isnull=True,
+                    **({'concept__domain_id': domain_id} if domain_id else {}))
+            .annotate(name_upper=Upper('concept_synonym_name'))
+            .filter(name_upper__trigram_similar=query)
+            .annotate(score=TrigramSimilarity(Upper('concept_synonym_name'), query))
+            .filter(score__gt=MIN_TRIGRAM_SCORE)
+            .values('concept_id')
+            .annotate(score=Max('score'))
+            .order_by('-score')[:limit]
+        )
     synonym_scores = {h['concept_id']: h['score'] + SYNONYM_BONUS for h in synonym_hits}
 
     merged = {}
@@ -1521,6 +1539,11 @@ def _source_description(mapping, source_concept):
         or (source_concept.concept_name if source_concept else '')
         or umls_name
     )
+    if not description:
+        from omop_core.services.source_catalog import lookup_source_term
+        term = lookup_source_term(mapping.source_vocabulary_id, mapping.source_code)
+        if term:
+            description = term.name
     return description, umls_name
 
 
@@ -1763,81 +1786,148 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
             report('writing', len(results))
             continue
 
-        concept = (
-            Concept.objects.filter(concept_id=chosen['concept_id']).first()
-            if chosen else None
-        )
-        # Read before it is overwritten below: it is how we tell a note this
-        # code left on an earlier run from one ingest or a curator supplied.
-        attempted_before = bool(mapping.last_suggest_attempt)
-        # Recorded on every row the run examined, so the next run does not
-        # re-retrieve and re-rank the same codes. Says nothing about whether a
-        # suggestion was made -- see the field's own note on the model.
-        # Include the ranking model so switching rankers gives a fresh queue.
-        mapping.last_suggest_attempt = f'{SUGGESTION_MODEL_VERSION}-{ranking_model}'
-        mapping.suggest_strategy = job['strategy_used'] or ''
-        mapping.umls_cui = job['umls_cui'] or ''
-        fields = ['last_suggest_attempt', 'suggest_strategy', 'umls_cui', 'updated_at']
+        # The row was selected when the run started and is written minutes
+        # later. If a curator approved it or moved its destination in between,
+        # that is a decision and this run must not undo it (#1469). The row is
+        # locked so a concurrent edit lands either before this check or after
+        # the save, never between.
+        with transaction.atomic():
+            current = (
+                SourceCodeConceptMapping.objects.select_for_update()
+                .filter(pk=mapping.pk)
+                .first()
+            )
+            if not _row_still_open(current, selected_target_id=mapping.target_concept_id,
+                                   selected_provenance=mapping.origin_system):
+                entry.update(suggested=None, note=CURATED_DURING_RUN_MESSAGE,
+                             strategy_used=None, updated=False)
+                results.append(entry)
+                emit('result', **entry, dry_run=False)
+                report('writing', len(results))
+                continue
+            # All write decisions below must use the locked, current row:
+            # notes and source metadata may have been edited while ranking.
+            mapping = current
+            concept = (
+                Concept.objects.filter(concept_id=chosen['concept_id']).first()
+                if chosen else None
+            )
+            if (
+                mapping.status == 'rejected' and concept is not None
+                and concept.pk == (mapping.target_concept_id or mapping.suggested_target_concept_id)
+                and not athena_duplicate
+            ):
+                entry.update(suggested=None, note='This suggestion was rejected; left as rejected.',
+                             strategy_used=None, updated=False)
+                results.append(entry)
+                emit('result', **entry, dry_run=False)
+                report('writing', len(results))
+                continue
+            # Read before it is overwritten below: it is how we tell a note this
+            # code left on an earlier run from one ingest or a curator supplied.
+            attempted_before = bool(mapping.last_suggest_attempt)
+            # Recorded on every row the run examined, so the next run does not
+            # re-retrieve and re-rank the same codes. Says nothing about whether a
+            # suggestion was made -- see the field's own note on the model.
+            # Include the ranking model so switching rankers gives a fresh queue.
+            mapping.last_suggest_attempt = f'{SUGGESTION_MODEL_VERSION}-{ranking_model}'
+            mapping.suggest_strategy = job['strategy_used'] or ''
+            mapping.umls_cui = job['umls_cui'] or ''
+            fields = ['last_suggest_attempt', 'suggest_strategy', 'umls_cui', 'updated_at']
 
-        if concept is not None and not athena_duplicate:
-            mapping.target_concept = concept
-            mapping.suggested_target_concept = concept
-            mapping.destination_vocabulary_id = concept.vocabulary_id
-            # Only now is this a suggestion. Stamping the provenance and the
-            # model version on a row we proposed nothing for would overwrite the
-            # ingest channel that raised it -- the candidate set is every queue
-            # row with no destination, whatever raised it -- and would enrol a
-            # code the pipeline never answered in the accuracy figures:
-            # code_mapping_detail treats an origin_system beginning "suggest" as
-            # a suggestion, so a curator's own hand-picked concept would later
-            # be recorded as having overridden one.
-            mapping.origin_system = SUGGESTION_PROVENANCE
-            mapping.suggestion_model_version = SUGGESTION_MODEL_VERSION
-            fields += [
-                'target_concept', 'suggested_target_concept',
-                'destination_vocabulary_id', 'origin_system',
-                'suggestion_model_version',
-            ]
-        # Notes is a free-text field a curator writes in, and the row we are
-        # writing to may not be one a Suggest run created -- the candidate set is
-        # every queue row with no destination, whatever raised it. Replacing
-        # "waiting on lab confirmation" with "No candidate concept found by any
-        # enabled strategy." loses the only copy of something a person wrote.
-        #
-        # `updated_by` is the test, not the model version: the curator edit
-        # path (_upsert_source_code_mapping) is the only writer of it in the
-        # codebase and stamps it on every save, while ingest and this path never
-        # do -- so a null means only machines have ever written here and the
-        # note is a previous run's to replace. Keying on the model version
-        # instead would protect a note only until the first run touched the row,
-        # which after one run is every row.
-        #
-        # `last_suggest_attempt` narrows it further: on the first run the field
-        # is blank, so a note ingest supplied through _record_proposal survives
-        # too. Only a note left by a previous run of this code is rewritten.
-        ours = attempted_before and mapping.updated_by_id is None
-        if not mapping.notes or ours:
-            mapping.notes = note
-            fields.append('notes')
-        # Source-side enrichment is written only when it was missing: these
-        # describe the code, not the suggestion, and a curator may have
-        # corrected them.
-        if job['source_concept'] is not None and mapping.source_concept_id is None:
-            mapping.source_concept = job['source_concept']
-            fields.append('source_concept')
-        if job['umls_source_name'] and not mapping.umls_source_name:
-            mapping.umls_source_name = job['umls_source_name'][:255]
-            fields.append('umls_source_name')
-        if job['source_description'] and not mapping.source_code_description:
-            mapping.source_code_description = job['source_description'][:255]
-            fields.append('source_code_description')
-        mapping.save(update_fields=fields)
+            if concept is not None and not athena_duplicate:
+                if mapping.suggestion_outcome:
+                    from omop_core.models import MappingSuggestionReview
+                    MappingSuggestionReview.objects.create(
+                        mapping=mapping,
+                        source_vocabulary_id=mapping.source_vocabulary_id,
+                        source_code=mapping.source_code,
+                        suggested_target_concept_id=(
+                            mapping.suggested_target_concept_id or mapping.target_concept_id
+                        ),
+                        suggestion_model_version=mapping.suggestion_model_version,
+                        suggestion_outcome=mapping.suggestion_outcome,
+                    )
+                mapping.status = 'proposed'
+                mapping.suggestion_outcome = ''
+                mapping.reviewer = None
+                mapping.reviewed_at = None
+                fields += ['status', 'suggestion_outcome', 'reviewer', 'reviewed_at']
+                mapping.target_concept = concept
+                mapping.suggested_target_concept = concept
+                mapping.destination_vocabulary_id = concept.vocabulary_id
+                # Only now is this a suggestion. Stamping the provenance and the
+                # model version on a row we proposed nothing for would overwrite the
+                # ingest channel that raised it -- the candidate set is every queue
+                # row with no destination, whatever raised it -- and would enrol a
+                # code the pipeline never answered in the accuracy figures:
+                # code_mapping_detail treats an origin_system beginning "suggest" as
+                # a suggestion, so a curator's own hand-picked concept would later
+                # be recorded as having overridden one.
+                mapping.origin_system = SUGGESTION_PROVENANCE
+                mapping.suggestion_model_version = SUGGESTION_MODEL_VERSION
+                fields += [
+                    'target_concept', 'suggested_target_concept',
+                    'destination_vocabulary_id', 'origin_system',
+                    'suggestion_model_version',
+                ]
+            # Notes is a free-text field a curator writes in, and the row we are
+            # writing to may not be one a Suggest run created -- the candidate set is
+            # every queue row with no destination, whatever raised it. Replacing
+            # "waiting on lab confirmation" with "No candidate concept found by any
+            # enabled strategy." loses the only copy of something a person wrote.
+            #
+            # `updated_by` is the test, not the model version: the curator edit
+            # path (_upsert_source_code_mapping) is the only writer of it in the
+            # codebase and stamps it on every save, while ingest and this path never
+            # do -- so a null means only machines have ever written here and the
+            # note is a previous run's to replace. Keying on the model version
+            # instead would protect a note only until the first run touched the row,
+            # which after one run is every row.
+            #
+            # `last_suggest_attempt` narrows it further: on the first run the field
+            # is blank, so a note ingest supplied through _record_proposal survives
+            # too. Only a note left by a previous run of this code is rewritten.
+            ours = attempted_before and mapping.updated_by_id is None
+            if (not mapping.notes and mapping.updated_by_id is None) or ours:
+                mapping.notes = note
+                fields.append('notes')
+            # Source-side enrichment is written only when it was missing: these
+            # describe the code, not the suggestion, and a curator may have
+            # corrected them.
+            if job['source_concept'] is not None and mapping.source_concept_id is None:
+                mapping.source_concept = job['source_concept']
+                fields.append('source_concept')
+            if job['umls_source_name'] and not mapping.umls_source_name:
+                mapping.umls_source_name = job['umls_source_name'][:255]
+                fields.append('umls_source_name')
+            if job['source_description'] and not mapping.source_code_description:
+                mapping.source_code_description = job['source_description'][:255]
+                fields.append('source_code_description')
+            mapping.save(update_fields=fields)
         entry['updated'] = True
         results.append(entry)
         emit('result', **entry, dry_run=False)
         report('writing', len(results))
 
     return results
+
+
+def _row_still_open(current, *, selected_target_id, selected_provenance):
+    """Whether a queue row is still the machine's to answer at write time.
+
+    The row was selected as proposed/rejected with a given destination and
+    provenance. Approval since then is a decision by status; a moved
+    destination or a re-stamped provenance (``curator``) is a decision by
+    hand. Provenance is compared, not classified: a row an importer raised
+    with no destination is a candidate whatever its provenance says.
+    """
+    if current is None or current.status not in ('proposed', 'rejected'):
+        return False
+    return (
+        current.target_concept_id == selected_target_id
+        and (current.origin_system or '') == (selected_provenance or '')
+    )
 
 
 def suggest_one_mapping(source_code, source_vocabulary_id, omop_table, *,

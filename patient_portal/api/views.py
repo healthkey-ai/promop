@@ -18,7 +18,8 @@ from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
 from django.db import IntegrityError, models, transaction
-from django.db.models import Count, Q, F, Prefetch
+from django.db.models import Case, Count, F, IntegerField, Prefetch, Q, When
+from django.db.models.functions import Length
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
@@ -32,7 +33,7 @@ from django.core.validators import validate_email
 from omop_core.models import (
     Organization,
     Person, PatientRecord, Concept, ConceptClass, Domain, ProvenanceRecord, Vocabulary,
-    SourceCodeConceptMapping, SuggestRun, UmlsSourceCode,
+    SourceCodeConceptMapping, MappingSuggestionReview, SuggestRun, UmlsSourceCode,
     ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
     Observation, ProcedureOccurrence, VisitOccurrence, VisitDetail, Location, Death,
     PatientDocument, PatientTrialEnrollment, TrialSearchPreferences,
@@ -85,6 +86,7 @@ from omop_core.mapping.code_resolution import (
     resolve_source_code,
 )
 from omop_core.mapping.suggestions import (
+    CURATOR_PROVENANCE,
     ALL_STRATEGIES,
     DEFAULT_RANKING_MODEL,
     DEFAULT_STRATEGIES,
@@ -7339,7 +7341,7 @@ class DrugExposureViewSet(_AtomicWriteMixin, _OmopDeferRefreshMixin, _OmopBulkCr
 class MeasurementViewSet(_AtomicWriteMixin, _OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = MeasurementSerializer
     permission_classes = [EtlPatientCrudPermission, PatientSelfScopePermission]
-    queryset = Measurement.objects.select_related('measurement_concept').all()
+    queryset = Measurement.objects.select_related('measurement_concept', 'unit_concept').all()
     clinical_filter_fields = {
         'concept_param': 'measurement_concept_id',
         'concept_field': 'measurement_concept_id',
@@ -8021,12 +8023,77 @@ def _serialize_concept(concept, versions=None):
     return payload
 
 
-def _paginated_concept_response(queryset, request):
-    # Order by the pk: concept_name has only a GIN trigram index (usable for
-    # icontains, not ORDER BY), so sorting by name would force a full sort of
-    # the matched set on every page request.
+def _truthy_param(query_params, name):
+    return (query_params.get(name) or '').strip().lower() in ('1', 'true', 'yes')
+
+
+def _destination_concepts(queryset, query_params):
+    """Narrow a concept search to what may be a mapping destination (#1465).
+
+    Search used to return every concept in the vocabulary. Two thirds of SNOMED
+    is retired, so that is mostly what a curator was offered, and picking one is
+    how retired concepts became approved destinations.
+
+    Active only, unless `include_retired`. Standard only, unless
+    `include_non_standard` -- "standard" rather than "a different code system
+    from the source", because LOINC->LOINC and SNOMED->SNOMED are correct
+    mappings while ICD-10, CPT4 and MedDRA hold no standard concepts at all, so
+    this rule excludes them as destinations without naming them. Concepts
+    authored here (`source='HealthKey'`, the HK-* buckets) are non-standard by
+    construction and are what imports point at, so they stay searchable.
+
+    An explicit `standard_concept` filter is the caller choosing, and wins.
+    """
+    if not _truthy_param(query_params, 'include_retired'):
+        # Athena writes NULL for an active concept; a hand-made row may hold ''.
+        queryset = queryset.filter(Q(invalid_reason__isnull=True) | Q(invalid_reason=''))
+    if not (
+        _truthy_param(query_params, 'include_non_standard')
+        or query_params.get('standard_concept')
+    ):
+        queryset = queryset.filter(Q(standard_concept='S') | Q(source='HealthKey'))
+    return queryset
+
+
+def _concept_match_ordering(query, concept_id):
+    """Order search hits by how well they match, best first (#1466).
+
+    Ordering by pk put whatever Athena numbered first at the top, so the 25-row
+    page a curator sees was arbitrary and "lymphoma" opened on obscure
+    morphology codes. Rank instead: an exact code or id, then an exact name,
+    then a name that starts with the query, then any other match; standard
+    concepts ahead of non-standard within a rank, shorter names (the more
+    general concept) ahead of longer ones.
+
+    The sort runs over the matched set only, which the indexes have already
+    narrowed. It also takes `ORDER BY concept_id LIMIT n` away from the planner,
+    which for a rare term chose to walk the whole primary key looking for 25
+    matches that did not exist (~2s on staging).
+    """
+    best = Q(concept_code__iexact=query)
+    if concept_id is not None:
+        best |= Q(concept_id=concept_id)
+    return (
+        Case(
+            When(best, then=0),
+            When(concept_name__iexact=query, then=1),
+            When(concept_name__istartswith=query, then=2),
+            default=3,
+            output_field=IntegerField(),
+        ),
+        Case(When(standard_concept='S', then=0), default=1, output_field=IntegerField()),
+        Length('concept_name'),
+        'concept_id',
+    )
+
+
+def _paginated_concept_response(queryset, request, ordering=('concept_id',)):
+    # Default to the pk: concept_name has only a GIN trigram index (usable for
+    # icontains, not ORDER BY), so sorting a *listing* by name would force a full
+    # sort of a vocabulary on every page request. A search passes its own
+    # ordering, over a matched set small enough to sort.
     paginator = ConceptPagination()
-    page = paginator.paginate_queryset(queryset.order_by('concept_id'), request)
+    page = paginator.paginate_queryset(queryset.order_by(*ordering), request)
     versions = _vocab_version_map()
     response = paginator.get_paginated_response([_serialize_concept(c, versions) for c in page])
     return _set_release_etag(request, response)
@@ -8056,7 +8123,12 @@ def concept_search(request):
         domain_id         optional exact-match filter (e.g. Measurement)
         concept_class_id  optional exact-match filter (e.g. Lab Test)
         standard_concept  optional exact-match filter (S or C)
+        include_retired       'true' to also return concepts with an invalid_reason
+        include_non_standard  'true' to also return non-standard concepts
         page / page_size  pagination (page_size capped at 100)
+
+    By default only concepts usable as a destination are returned: active, and
+    either standard or authored on this instance (#1465).
 
     Response 200: paginated {count, next, previous, results: [concept, ...]}
     """
@@ -8070,21 +8142,28 @@ def concept_search(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    # Every branch of this OR has to be indexable, or the planner abandons the
+    # indexes for all of them and filters each row of the vocabulary instead
+    # (#1466): the name by ix_concept_name_upper_trgm, the code by
+    # ix_concept_code_upper, the id by the pk.
     search_filter = _concept_name_search_filter(query) | Q(concept_code__iexact=query)
     # Numeric vocabulary codes and OMOP IDs share the same search box. Keep
     # both interpretations, but never cast an arbitrary-length code to a DB ID.
+    concept_id = None
     numeric_id = query.lstrip('0') or '0'
     if numeric_id.isascii() and numeric_id.isdecimal() and len(numeric_id) <= 10:
-        concept_id = int(numeric_id)
-        if concept_id <= 2_147_483_647:
+        if int(numeric_id) <= 2_147_483_647:
+            concept_id = int(numeric_id)
             search_filter |= Q(concept_id=concept_id)
     queryset = _apply_concept_filters(
-        Concept.objects.filter(search_filter),
+        _destination_concepts(Concept.objects.filter(search_filter), request.query_params),
         request.query_params,
     )
     # Show a curator what kind of input a Measurement mapping expects when the
     # available OMOP/LOINC data lets us classify it safely.
-    response = _paginated_concept_response(queryset, request)
+    response = _paginated_concept_response(
+        queryset, request, ordering=_concept_match_ordering(query, concept_id),
+    )
     for item in response.data.get('results', []):
         # The display-name conventions and curated unit map are LOINC-specific;
         # do not infer an input type for another vocabulary from them.
@@ -10235,8 +10314,12 @@ def _is_local_vocabulary_id(vocabulary_id):
 # Standard vocabularies a curator re-points a proposed mapping into. These get
 # destination tabs: a mapping whose destination an SME moved to a LOINC concept
 # has to be visible somewhere, or their own output disappears on them.
+# Vocabularies the dialog offers to scope a destination search to. Each holds
+# standard concepts. ICD10CM was listed and holds none -- every ICD-10-CM concept
+# is non-standard and maps *to* SNOMED -- so scoping to it could only ever offer
+# a same-system, non-standard destination (#1465).
 _STANDARD_DESTINATION_VOCABULARIES = (
-    'SNOMED', 'LOINC', 'RxNorm', 'RxNorm Extension', 'ICD10CM', 'HemOnc',
+    'SNOMED', 'LOINC', 'RxNorm', 'RxNorm Extension', 'HemOnc',
 )
 
 
@@ -10538,7 +10621,7 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     # silently un-approved, and the re-point skipped while its destination
     # moved -- the silent-approval failure, through the POST door.
     if mapping is None and data.get('mapping_id'):
-        mapping = SourceCodeConceptMapping.objects.filter(id=data['mapping_id']).first()
+        mapping = SourceCodeConceptMapping.objects.select_for_update().filter(id=data['mapping_id']).first()
         if mapping is None:
             raise serializers.ValidationError({'mapping_id': 'Mapping not found.'})
 
@@ -10651,7 +10734,12 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     # provenance if a deployment missed the data migration.  Do not make a
     # curator's current review depend on that historical repair: capture the
     # target that was on the proposed row and version it atomically here.
-    is_suggestion = mapping is not None and mapping.origin_system.lower().startswith('suggest')
+    # A row the model proposed keeps that history even after a curator's edit
+    # re-stamps its provenance (below): suggested_target_concept is the record.
+    is_suggestion = mapping is not None and (
+        mapping.origin_system.lower().startswith('suggest')
+        or mapping.suggested_target_concept_id is not None
+    )
     if was_proposed and is_suggestion and not mapping.suggestion_outcome:
         original_target_id = mapping.suggested_target_concept_id or mapping.target_concept_id
         if not mapping.suggestion_model_version:
@@ -10689,6 +10777,18 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
         and concept is not None
         and previous_concept_id != concept.concept_id
     )
+    # A curator who picks a different destination has decided it, even when
+    # they cannot approve (admin-only). From here the row is not a suggestion:
+    # Suggest's Replace re-answers only rows with blank or suggest* provenance,
+    # so this stamp is what keeps their pick from being overwritten (#1469).
+    # Approved rows are already protected by status and keep the provenance
+    # the accuracy figures read.
+    if (
+        mapping is not None and concept is not None
+        and concept.concept_id != previous_concept_id
+        and status_value != 'approved'
+    ):
+        values['origin_system'] = CURATOR_PROVENANCE
     if status_value == 'approved' and (not was_approved or destination_moved):
         values['reviewer'] = user
         values['reviewed_at'] = timezone.now()
@@ -10859,6 +10959,7 @@ def code_mapping_list(request):
 
 @api_view(['GET', 'PATCH', 'DELETE'])
 @permission_classes([IsAuthenticated])
+@transaction.atomic
 def code_mapping_detail(request, mapping_id):
     """Edit or delete one mapping.
 
@@ -10874,8 +10975,11 @@ def code_mapping_detail(request, mapping_id):
     if not _can_manage_field_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
-    mapping = SourceCodeConceptMapping.objects.filter(id=mapping_id).select_related(
-        'target_concept', 'created_by', 'reviewer', 'locked_by').first()
+    mappings = SourceCodeConceptMapping.objects.filter(id=mapping_id).select_related(
+        'target_concept', 'created_by', 'reviewer', 'locked_by')
+    if request.method != 'GET':
+        mappings = mappings.select_for_update(of=('self',))
+    mapping = mappings.first()
     if mapping is None:
         return Response({'detail': 'Mapping not found.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -11433,11 +11537,15 @@ def _suggestion_accuracy_from_counts(counts):
     }
 
 
-def _suggestion_accuracy_payload(queryset, model_version=None):
-    if model_version:
-        queryset = queryset.filter(suggestion_model_version=model_version)
-    counts = dict(queryset.values_list('suggestion_outcome').annotate(total=Count('id')))
-    return _suggestion_accuracy_from_counts(counts)
+def _suggestion_accuracy_groups():
+    """Current suggestions and archived reviews, in one bounded grouped query."""
+    def groups(model):
+        return model.objects.filter(suggestion_model_version__gt='').order_by().values(
+            'source_vocabulary_id', 'suggestion_model_version', 'suggestion_outcome',
+        ).annotate(total=Count('id'))
+
+    # ALL matters: equal groups in the two tables are independent reviews.
+    return groups(SourceCodeConceptMapping).union(groups(MappingSuggestionReview), all=True)
 
 
 def _suggestion_version_key(version):
@@ -11445,11 +11553,6 @@ def _suggestion_version_key(version):
         return tuple(int(part) for part in version.removeprefix('v').split('.'))
     except ValueError:
         return (0,)
-
-
-def _suggestion_versions(queryset):
-    return sorted(queryset.exclude(suggestion_model_version='').values_list(
-        'suggestion_model_version', flat=True).distinct(), key=_suggestion_version_key, reverse=True)
 
 
 @api_view(['GET'])
@@ -11461,13 +11564,9 @@ def code_mapping_accuracy(request):
     from collections import Counter, defaultdict
     from omop_core.services.mapping_browse import canonical_source
 
-    # One small grouped query replaces several round trips for every tab.
-    grouped = SourceCodeConceptMapping.objects.filter(suggestion_model_version__gt='').order_by().values(
-        'source_vocabulary_id', 'suggestion_model_version', 'suggestion_outcome',
-    ).annotate(total=Count('id'))
     sources = defaultdict(lambda: defaultdict(Counter))
     overall_versions = defaultdict(Counter)
-    for group in grouped:
+    for group in _suggestion_accuracy_groups():
         source = canonical_source(group['source_vocabulary_id'])
         version, outcome, total = (group['suggestion_model_version'], group['suggestion_outcome'], group['total'])
         sources[source][version][outcome] += total
@@ -11514,14 +11613,20 @@ def code_mapping_accuracy(request):
 def code_mapping_accuracy_dashboard(request):
     if not _can_manage_field_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
-    base = SourceCodeConceptMapping.objects.filter(suggestion_model_version__gt='')
-    versions = _suggestion_versions(base)
+    from collections import Counter, defaultdict
+    counts = defaultdict(Counter)
+    totals = Counter()
+    for group in _suggestion_accuracy_groups():
+        outcome, total = group['suggestion_outcome'], group['total']
+        counts[group['suggestion_model_version']][outcome] += total
+        totals[outcome] += total
+    versions = sorted(counts, key=_suggestion_version_key, reverse=True)
     return Response({
         'models': [
-            {'model_version': version, **_suggestion_accuracy_payload(base, version)}
+            {'model_version': version, **_suggestion_accuracy_from_counts(counts[version])}
             for version in versions
         ],
-        'overall': _suggestion_accuracy_payload(base) if versions else None,
+        'overall': _suggestion_accuracy_from_counts(totals) if versions else None,
     })
 
 

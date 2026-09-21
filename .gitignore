@@ -9,6 +9,7 @@ data/
 !/omop_core/data/code_concept_mappings.json
 !/omop_core/data/icd10_snomed_mappings.json
 !/omop_core/data/field_curation_v1.json
+!/omop_core/data/source_catalog_20260920/
 # Therapy reference CSVs are force-added (git add -f) despite this rule
 
 # Node modules and frontend build

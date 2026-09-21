@@ -1,7 +1,11 @@
+import CanonicalUnitEditor from "./CanonicalUnitEditor";
 import PageTitle from '@/components/Branding/PageTitle';
 import IndividualSuggestCandidates from "./IndividualSuggestCandidates";
+import InlineDestinationPicker from "./InlineDestinationPicker";
+import SourceVocabularyLookup from "./SourceVocabularyLookup";
+import { searchDestinationConcepts } from "./destinationSearch";
 import SuggestCandidates, { type CandidateActivity } from "./SuggestCandidates";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, ChevronDown, ChevronRight, Download, Pencil, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
 import api from "@/api/axios";
@@ -67,6 +71,7 @@ interface CodeMappingRow {
   mapping_origin?: "athena" | "healthkey";
   measurement_type?: "qualitative" | "quantitative";
   suggested_unit?: string;
+  example_units?: string[];
   locked_by_username?: string | null;
   locked_at?: string | null;
 }
@@ -156,7 +161,15 @@ interface ConceptResult {
   invalid_reason?: string | null;
   measurement_type?: "qualitative" | "quantitative";
   suggested_unit?: string;
+  example_units?: string[];
 }
+
+interface SearchScope {
+  retired: boolean;
+  nonStandard: boolean;
+}
+
+const DEFAULT_SEARCH_SCOPE: SearchScope = { retired: false, nonStandard: false };
 
 interface DestinationOption extends Omit<ConceptResult, "concept_id"> {
   concept_id: number | null;
@@ -242,6 +255,7 @@ interface MappingForm {
   omop_table: string;
   measurement_type: string;
   suggested_unit: string;
+  example_units: string[];
   status: "proposed" | "approved" | "rejected";
   notes: string;
 }
@@ -262,6 +276,7 @@ const emptyForm: MappingForm = {
   omop_table: "",
   measurement_type: "",
   suggested_unit: "",
+  example_units: [],
   status: "proposed",
   notes: "",
 };
@@ -321,6 +336,9 @@ const describeSuggestRun = (run: SuggestRunProgress) => {
 };
 
 const SUGGEST_POLL_INTERVAL_MS = 1000;
+// Long enough that a word typed at normal speed is one request, short enough
+// that the pause is not felt once the curator stops.
+const CONCEPT_SEARCH_DEBOUNCE_MS = 250;
 // Consecutive, not cumulative: a run lasting minutes may lose the odd poll.
 const SUGGEST_POLL_MAX_FAILURES = 5;
 // Allow the worker's default 15-minute limit plus time waiting in the queue.
@@ -415,12 +433,15 @@ function sortMappingRows(rows: CodeMappingRow[], sort?: SectionSort): CodeMappin
     const left = a[sort.column];
     const right = b[sort.column];
     // Unknown values stay last in either direction.
-    if (left == null) return right == null ? 0 : 1;
-    if (right == null) return -1;
-    const comparison = typeof left === "number" || typeof left === "boolean"
+    if (left == null && right != null) return 1;
+    if (right == null && left != null) return -1;
+    const comparison = left == null ? 0 : typeof left === "number" || typeof left === "boolean"
       ? Number(left) - Number(right)
       : String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: "base" });
-    return sort.descending ? -comparison : comparison;
+    return (sort.descending ? -comparison : comparison)
+      || (sort.column === "origin_system"
+        ? byOccurrence(a, b) || (a.mapping_id ?? 0) - (b.mapping_id ?? 0)
+        : 0);
   });
 }
 
@@ -466,6 +487,10 @@ const TIP = {
     "The OMOP clinical table the fact is stored in. Follows from Domain.",
   search:
     "Search OMOP concepts by name or code. Suggest seeds the search from the source description.",
+  search_include_retired:
+    "Retired concepts are hidden because they should not be new destinations. Turn this on only to find the retired concept a mapping already points at.",
+  search_include_non_standard:
+    "Only standard concepts (and HealthKey's own HK-* concepts) are offered, since OMOP analytics read standard concepts. Turn this on to see non-standard ones, such as ICD-10 or source-vocabulary codes.",
   search_vocabulary:
     "Which vocabulary the search looks in. Defaults to the destination's own vocabulary; widen it to re-point a minted HK-* mapping at a standard concept.",
   status:
@@ -534,6 +559,7 @@ function buildEditForm(row: CodeMappingRow, reference: Reference): MappingForm {
     omop_table: row.destination_omop_table || omopTableFor(reference, domainId),
     measurement_type: row.measurement_type || "",
     suggested_unit: row.suggested_unit || "",
+    example_units: row.example_units || [],
     status: row.status === "unmapped" ? "proposed" : row.status,
     notes: row.notes || "",
   };
@@ -558,6 +584,8 @@ export default function CodeMappingPage() {
   const loadSequence = useRef(0);
   const dialogRequest = useRef(0);
   const dialogChoice = useRef<number | null>(null);
+  const conceptSearchTimer = useRef<number | null>(null);
+  const conceptSearchAbort = useRef<AbortController | null>(null);
   const [individualSuggestion, setIndividualSuggestion] = useState<{ request: number; activity: CandidateActivity[]; running: boolean } | null>(null);
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [rows, setRows] = useState<CodeMappingRow[]>([]);
@@ -576,7 +604,9 @@ export default function CodeMappingPage() {
   const [mappedCollapsed, setMappedCollapsed] = useState(true);
   const [rejectedCollapsed, setRejectedCollapsed] = useState(true);
   const [athenaCollapsed, setAthenaCollapsed] = useState(true);
-  const [sectionSorts, setSectionSorts] = useState<Partial<Record<MappingSection, SectionSort>>>({});
+  const [sectionSorts, setSectionSorts] = useState<Partial<Record<MappingSection, SectionSort>>>({
+    Unmapped: { column: "origin_system", descending: false },
+  });
   const [navigationTarget, setNavigationTarget] = useState<{ id: string } | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
   const [suggesting, setSuggesting] = useState(false);
@@ -588,10 +618,15 @@ export default function CodeMappingPage() {
     umls: true, lexical: true, vectors: true,
   });
   const [rankingModel, setRankingModel] = useState<"anthropic" | "jev" | "both">("anthropic");
+  const [inlineMappingId, setInlineMappingId] = useState<number | null>(null);
   const [dialogMode, setDialogMode] = useState<"new" | "edit" | null>(null);
   const [selectedRow, setSelectedRow] = useState<CodeMappingRow | null>(null);
   const [form, setForm] = useState<MappingForm>(emptyForm);
   const [searchVocabulary, setSearchVocabulary] = useState("");
+  // What the destination search leaves out unless asked (#1465). Off by
+  // default: a retired or non-standard concept is almost never the right
+  // destination, and offering them is how they came to be approved.
+  const [searchScope, setSearchScope] = useState<SearchScope>(DEFAULT_SEARCH_SCOPE);
   const [conceptSearchQuery, setConceptSearchQuery] = useState("");
   const [conceptResults, setConceptResults] = useState<ConceptResult[]>([]);
   const [destinationOptions, setDestinationOptions] = useState<DestinationOption[]>([]);
@@ -815,6 +850,26 @@ export default function CodeMappingPage() {
     });
   }, [rows, searchQuery, selectedVocabulary, browse]);
 
+  // Rows can arrive from other tabs: in browse mode the server searches every
+  // coding system whenever a query is set, and the client filter above does
+  // the same in legacy mode. Such hits carry no system in the table's usual
+  // columns, so label them with their tab while any are on screen (#963).
+  // Keyed on the rows, not on how they got here.
+  const tabLabels = useMemo(
+    () => new Map(vocabularyTabs.map((tab) => [tab.vocabulary_id, tab.label])),
+    [vocabularyTabs],
+  );
+  const systemLabel = (row: CodeMappingRow) =>
+    tabLabels.get(tabForRow(row)) ?? (row.source_vocabulary_id || "Uncoded");
+  const foreignHits = useMemo(
+    () => (overallTab ? 0 : visibleRows.filter((row) => tabForRow(row) !== selectedVocabulary).length),
+    [overallTab, visibleRows, selectedVocabulary],
+  );
+  const showSystemColumn = foreignHits > 0;
+  // The debounced query is what the server has answered, so the message
+  // describes the rows on screen rather than re-announcing every keystroke.
+  const crossTabSearch = !overallTab && debouncedSearch.trim() !== "";
+
   // Four-section layout: UNMAPPED / MAPPED / REJECTED / ATHENA MAPPED.
   const athenaRows = useMemo(
     () => visibleRows.filter((r) => r.mapping_origin === "athena").sort(browse ? () => 0 : byOccurrence),
@@ -851,6 +906,7 @@ export default function CodeMappingPage() {
   }, [reference, form.domain_id, form.source_vocabulary_id]);
 
   const openNewDialog = () => {
+    setInlineMappingId(null);
     setSuggestionMessage("");
     dialogRequest.current += 1;
     setError("");
@@ -859,6 +915,7 @@ export default function CodeMappingPage() {
     setSelectedRow(null);
     setForm({ ...emptyForm });
     setSearchVocabulary("");
+    setSearchScope(DEFAULT_SEARCH_SCOPE);
     setConceptSearchQuery("");
     setConceptResults([]);
     setUmlsCheckMessage("");
@@ -867,6 +924,7 @@ export default function CodeMappingPage() {
   };
 
   const openEditDialog = async (row: CodeMappingRow) => {
+    setInlineMappingId(null);
     setSuggestionMessage("");
     dialogRequest.current += 1;
     setError("");
@@ -889,7 +947,15 @@ export default function CodeMappingPage() {
     }
     setSelectedRow(row);
     setForm(buildEditForm(row, reference));
-    setSearchVocabulary(row.destination_vocabulary_id || "");
+    // Open scoped to the row's own destination vocabulary when the dialog can
+    // offer it; otherwise search everything rather than show a scope the
+    // dropdown has no entry for (an ICD10CM destination, say).
+    setSearchVocabulary(
+      reference.destination_vocabularies.some((v) => v.vocabulary_id === row.destination_vocabulary_id)
+        ? row.destination_vocabulary_id || ""
+        : "",
+    );
+    setSearchScope(DEFAULT_SEARCH_SCOPE);
     setConceptSearchQuery("");
     setConceptResults([]);
     setUmlsCheckMessage("");
@@ -973,6 +1039,7 @@ export default function CodeMappingPage() {
         omop_table: (adoptDomain ? "" : prev.omop_table) || omopTableFor(reference, domainId),
         measurement_type: concept.measurement_type || "",
         suggested_unit: concept.suggested_unit || "",
+        example_units: concept.example_units || [],
       };
     });
   };
@@ -1016,32 +1083,47 @@ export default function CodeMappingPage() {
     }
   };
 
-  const searchConcepts = async (query: string, vocabulary = searchVocabulary) => {
+  useEffect(() => () => {
+    if (conceptSearchTimer.current !== null) window.clearTimeout(conceptSearchTimer.current);
+    conceptSearchAbort.current?.abort();
+  }, []);
+
+  const searchConcepts = (query: string, vocabulary = searchVocabulary, scope = searchScope) => {
     // Keep the raw value in state and trim only for the request. Trimming
     // before setState meant typing a space produced the same string back, React
     // re-rendered without it, and a multi-word search could never be typed.
     const request = ++dialogRequest.current;
     setConceptSearchQuery(query);
-    setSearchingConcepts(false);
     setCheckingUmls(false);
+    // At most one search is ever outstanding (#1466). Firing one per keystroke
+    // queued a second-long query per letter behind each other on the server —
+    // discarding the stale responses here did not stop the server running them.
+    if (conceptSearchTimer.current !== null) window.clearTimeout(conceptSearchTimer.current);
+    conceptSearchTimer.current = null;
+    conceptSearchAbort.current?.abort();
+    conceptSearchAbort.current = null;
     const q = query.trim();
     if (q.length < 3) {
+      setSearchingConcepts(false);
       setConceptResults([]);
       return;
     }
     setSearchingConcepts(true);
-    try {
-      const params: Record<string, string> = { q, limit: "25" };
-      // Scope to the destination vocabulary so a curator after a LOINC code is
-      // not wading through a million SNOMED hits.
-      if (vocabulary) params.vocabulary_id = vocabulary;
-      const resp = await api.get("/v1/concepts/search/", { params });
-      if (request === dialogRequest.current) setConceptResults(resp.data.results || resp.data || []);
-    } catch {
-      if (request === dialogRequest.current) setConceptResults([]);
-    } finally {
-      if (request === dialogRequest.current) setSearchingConcepts(false);
-    }
+    conceptSearchTimer.current = window.setTimeout(async () => {
+      conceptSearchTimer.current = null;
+      // The dialog moved on (closed, suggested, picked a concept) while waiting.
+      if (request !== dialogRequest.current) return;
+      const controller = new AbortController();
+      conceptSearchAbort.current = controller;
+      try {
+        const matches = await searchDestinationConcepts(q, vocabulary, controller.signal, scope);
+        if (request === dialogRequest.current) setConceptResults(matches);
+      } catch {
+        if (request === dialogRequest.current) setConceptResults([]);
+      } finally {
+        if (request === dialogRequest.current) setSearchingConcepts(false);
+      }
+    }, CONCEPT_SEARCH_DEBOUNCE_MS);
   };
 
   const suggestCurrentCode = async () => {
@@ -1416,7 +1498,7 @@ export default function CodeMappingPage() {
   };
 
   const renderTable = (sectionRows: CodeMappingRow[], emptyText: string, section: MappingSection, { hideStatus = false }: { hideStatus?: boolean } = {}) => {
-    const colCount = 7 + (hideStatus ? 0 : 2);
+    const colCount = 7 + (showSystemColumn ? 1 : 0) + (hideStatus ? 0 : 2);
     const sort = sectionSorts[section];
     const pagination = browse?.pages[section];
     const header = (label: string, column: SortColumn) => (
@@ -1435,6 +1517,7 @@ export default function CodeMappingPage() {
         <thead className="bg-slate-100 text-xs uppercase text-slate-600">
           <tr>
             {header("Source code", "source_code")}
+            {showSystemColumn && <th className="px-4 py-3 font-semibold">System</th>}
             {header("Seen", "occurrence_count")}
             {header("Source description", "source_code_description")}
             {header("Provenance", "origin_system")}
@@ -1447,13 +1530,14 @@ export default function CodeMappingPage() {
         </thead>
         <tbody className="divide-y divide-slate-100">
           {(browse ? sectionRows : sortMappingRows(sectionRows, sort)).map((row) => (
+            <Fragment key={mappingRowId(row)}>
             <tr
-              key={mappingRowId(row)}
               id={mappingRowId(row)}
               role="button"
               tabIndex={0}
               onClick={() => openEditDialog(row)}
               onKeyDown={(e) => {
+                if (e.target !== e.currentTarget) return;
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
                   openEditDialog(row);
@@ -1467,6 +1551,9 @@ export default function CodeMappingPage() {
                 {row.locked_by_username && <span title={`Locked by ${row.locked_by_username}`} className="mr-1 text-amber-500">&#128274;</span>}
                 {row.source_code}
               </td>
+              {showSystemColumn && (
+                <td className="px-4 py-3 text-xs text-slate-700">{systemLabel(row)}</td>
+              )}
               <td className="px-4 py-3 text-right font-mono text-xs text-slate-700">{row.occurrence_count || 0}</td>
               <td className="px-4 py-3 text-xs text-slate-700">{row.source_code_description || "—"}</td>
               <td className="px-4 py-3 text-xs text-slate-700">{row.origin_system || "—"}</td>
@@ -1476,8 +1563,15 @@ export default function CodeMappingPage() {
                   {row.destination_vocabulary_id}:{row.destination_concept_code}
                 </div>
                 {(row.measurement_type || row.suggested_unit) && (
-                  <ConceptInputDetails domain_id={row.destination_domain_id || ""} measurement_type={row.measurement_type} suggested_unit={row.suggested_unit} />
+                  <ConceptInputDetails domain_id={row.destination_domain_id || ""} measurement_type={row.measurement_type} suggested_unit={row.suggested_unit} example_units={row.example_units} />
                 )}
+                {section === "Unmapped" && row.mapping_id && <button type="button"
+                  aria-label={`Choose destination for ${row.source_code}`}
+                  aria-expanded={inlineMappingId === row.mapping_id}
+                  onClick={event => { event.stopPropagation(); setInlineMappingId(current => current === row.mapping_id ? null : row.mapping_id); }}
+                  className="mt-2 inline-flex items-center gap-1 rounded border border-slate-300 px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100">
+                  <Search size={12} />{row.destination_concept_id ? "Change destination" : "Choose destination"}
+                </button>}
               </td>
               <td className="px-4 py-3 font-mono text-xs text-slate-900">{row.destination_concept_id}</td>
               <td className={`px-4 py-3 text-center font-mono text-xs font-medium ${row.destination_count !== 1 ? "text-red-600" : "text-slate-700"}`}>{row.destination_count ?? 0}</td>
@@ -1522,6 +1616,22 @@ export default function CodeMappingPage() {
               </td>
               )}
             </tr>
+            {inlineMappingId === row.mapping_id && row.mapping_id && <tr>
+              <td colSpan={colCount} className="bg-slate-50 p-3">
+                <InlineDestinationPicker key={row.mapping_id} mappingId={row.mapping_id}
+                  sourceLabel={`${row.source_vocabulary_id || "Uncoded"}:${row.source_code} — ${row.source_code_description}`}
+                  vocabularies={reference.destination_vocabularies}
+                  initialVocabulary={reference.destination_vocabularies.some(item => item.vocabulary_id === row.destination_vocabulary_id) ? row.destination_vocabulary_id : ""}
+                  canApprove={canApprove} onCancel={() => setInlineMappingId(null)}
+                  onSaved={(saved, concept) => {
+                    applySavedMapping(saved as CodeMappingRow);
+                    setInlineMappingId(null);
+                    setBanner(`${row.source_code}: saved ${concept.concept_name}${saved.status === "approved" ? " and approved the mapping" : " for review"}.`);
+                    void refreshCurrent.current();
+                  }} />
+              </td>
+            </tr>}
+            </Fragment>
           ))}
           {sectionRows.length === 0 && (
             <tr>
@@ -1607,6 +1717,14 @@ export default function CodeMappingPage() {
               className="h-10 w-full rounded-md border border-slate-300 bg-white pl-9 pr-3 text-sm text-slate-950 outline-none focus:border-slate-700"
             />
           </label>
+          {crossTabSearch && (
+            <p className="mt-1 text-xs text-slate-600" role="status">
+              Searching all coding systems
+              {foreignHits > 0
+                ? ` — ${foreignHits} match${foreignHits === 1 ? "" : "es"} from other tabs; the System column says which.`
+                : " — every match is on this tab."}
+            </p>
+          )}
         </div>
 
         <div
@@ -1741,6 +1859,7 @@ export default function CodeMappingPage() {
         {suggestRun && <SuggestCandidates key={suggestRun.run_id}
           activity={suggestRun.activity ?? []}
           finished={suggestRun.state === "success" || suggestRun.state === "failure"}
+          canApprove={canApprove} vocabularies={reference.destination_vocabularies}
           onSaved={() => { void refreshCurrent.current(); }} />}
 
 
@@ -2012,6 +2131,16 @@ export default function CodeMappingPage() {
                     {umlsCheckMessage && <span className="pb-2 text-sm text-slate-600">{umlsCheckMessage}</span>}
                   </div>
 
+                  <SourceVocabularyLookup
+                    vocabularyId={form.source_vocabulary_id}
+                    code={form.source_code}
+                    onSelect={(term) => {
+                      setField("source_code", term.code);
+                      setField("source_code_description", term.name.slice(0, 255));
+                      setField("source_concept_id", "");
+                    }}
+                  />
+
                   <Field id="source_code_description" label="Source Description" tip={TIP.source_description}>
                     <input
                       id="source_code_description"
@@ -2204,10 +2333,37 @@ export default function CodeMappingPage() {
                       <HelpTip tip={TIP.search_vocabulary} />
                     </div>
                   </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-600">
+                    <span>Showing active, standard concepts.</span>
+                    {([
+                      ["retired", "Include retired", TIP.search_include_retired],
+                      ["nonStandard", "Include non-standard", TIP.search_include_non_standard],
+                    ] as const).map(([key, label, tip]) => (
+                      <span key={key} className="flex items-center gap-1">
+                        <label className="flex items-center gap-1" title={tip}>
+                          <input
+                            type="checkbox"
+                            checked={searchScope[key]}
+                            onChange={(e) => {
+                              const next = { ...searchScope, [key]: e.target.checked };
+                              setSearchScope(next);
+                              void searchConcepts(conceptSearchQuery, searchVocabulary, next);
+                            }}
+                          />
+                          {label}
+                        </label>
+                        <HelpTip tip={tip} />
+                      </span>
+                    ))}
+                  </div>
                   <div className="mt-2 max-h-40 overflow-y-auto rounded-md border border-slate-200">
                     {searchingConcepts && <div className="px-3 py-2 text-sm text-slate-500">Searching...</div>}
                     {!searchingConcepts && conceptResults.length === 0 && conceptSearchQuery.length >= 3 && (
-                      <div className="px-3 py-2 text-sm text-slate-500">No suggestions found.</div>
+                      <div className="px-3 py-2 text-sm text-slate-500">
+                        {searchScope.retired && searchScope.nonStandard
+                          ? "No suggestions found."
+                          : "No active, standard concepts found. Widen the search with the options above."}
+                      </div>
                     )}
                     {!searchingConcepts && conceptResults.map((concept) => (
                       <button
@@ -2218,7 +2374,19 @@ export default function CodeMappingPage() {
                       >
                         <span className="grid grid-cols-[8rem_1fr_6rem] gap-2">
                           <span className="font-mono text-slate-700">{concept.concept_code}</span>
-                          <span className="text-slate-900">{concept.concept_name}</span>
+                          <span className="text-slate-900">
+                            {concept.concept_name}
+                            {/* Why a code "looks wrong" (#1465): say what kind of
+                                concept it is instead of leaving the curator to
+                                infer it from the code's shape. */}
+                            {concept.invalid_reason ? (
+                              <span className="ml-2 rounded bg-red-100 px-1 text-[10px] font-semibold uppercase text-red-800">Retired</span>
+                            ) : concept.standard_concept === "S" ? (
+                              <span className="ml-2 rounded bg-emerald-100 px-1 text-[10px] font-semibold uppercase text-emerald-800">Standard</span>
+                            ) : (
+                              <span className="ml-2 rounded bg-amber-100 px-1 text-[10px] font-semibold uppercase text-amber-800">Non-standard</span>
+                            )}
+                          </span>
                           <span className="font-mono text-slate-500">{concept.vocabulary_id}</span>
                         </span>
                         <ConceptInputDetails {...concept} />
@@ -2301,13 +2469,15 @@ export default function CodeMappingPage() {
                   {form.suggested_unit && (
                     <ReadOnlyField
                       id="suggested_unit"
-                      label="Unit"
-                      tip="Standard unit for this measurement concept, from LOINC."
+                      label="Suggested unit"
+                      tip="A suggested unit, not a unit mandated by Athena. The instance canonical unit is configured below."
                       value={form.suggested_unit}
                       testId="suggested-unit"
                     />
                   )}
                 </div>
+                {form.destination_concept_id && form.destination_vocabulary_id === "LOINC" && form.omop_table === "measurement" &&
+                  <CanonicalUnitEditor key={form.destination_concept_id} conceptId={Number(form.destination_concept_id)} />}
                 <div className="mt-3 flex justify-end">
                   <button type="button" onClick={() => setMintOpen(true)} className="rounded border border-sky-300 px-3 py-2 text-sm text-sky-700">Mint new concept</button>
                 </div>

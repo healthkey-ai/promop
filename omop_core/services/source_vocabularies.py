@@ -52,6 +52,7 @@ _CONDITION_SYSTEMS = (
     ('HPO', 'HPO — human phenotype ontology'),
     ('MedDRA', 'MedDRA — adverse events, regulatory and trial data'),
     ('NCIt', 'NCIt — NCI thesaurus; oncology fallback'),
+    ('MeSH', 'MeSH — diseases and biomedical terminology'),
     ('ICPC', 'ICPC-2 — European primary care'),
     ('CIEL', 'CIEL — interface terminology'),
     ('Nebraska Lexicon', 'Nebraska Lexicon — interface terminology'),
@@ -60,6 +61,8 @@ _CONDITION_SYSTEMS = (
 )
 
 _PROCEDURE_SYSTEMS = (
+    ('NCIt', 'NCIt — oncology procedures'),
+    ('MeSH', 'MeSH — biomedical procedures'),
     ('SNOMED', 'SNOMED CT procedures — OMOP standard'),
     ('CPT4', 'CPT-4 — US professional services'),
     ('HCPCS', 'HCPCS Level II — US supplies and services'),
@@ -75,6 +78,8 @@ _PROCEDURE_SYSTEMS = (
 
 _DRUG_SYSTEMS = (
     ('RxNorm', 'RxNorm — OMOP standard for drugs'),
+    ('NCIt', 'NCIt — oncology drugs, investigational agents and regimens'),
+    ('MeSH', 'MeSH — substances, drug aliases and investigational agents'),
     ('RxNorm Extension', 'RxNorm Extension — OMOP, non-US drugs'),
     ('NDC', 'NDC — US package level; very common in dispensing data'),
     ('ATC', 'ATC — WHO classification, common outside the US'),
@@ -96,6 +101,8 @@ _DRUG_SYSTEMS = (
 )
 
 _MEASUREMENT_SYSTEMS = (
+    ('NCIt', 'NCIt — oncology measurements and biomarkers'),
+    ('MeSH', 'MeSH — biomedical measurements and findings'),
     ('LOINC', 'LOINC — OMOP standard for labs and measurements'),
     ('SNOMED', 'SNOMED CT — findings and qualitative results'),
     ('CIEL', 'CIEL — interface terminology'),
@@ -117,6 +124,7 @@ _OBSERVATION_SYSTEMS = (
     ('ICD10', 'ICD-10 — Z-code equivalents (merged with ICD-10-CM)'),
     ('HCPCS', 'HCPCS — assessments and screenings'),
     ('NCIt', 'NCIt — NCI thesaurus'),
+    ('MeSH', 'MeSH — biomedical terminology'),
     ('PPI', 'PPI — participant-provided information (surveys)'),
 )
 
@@ -192,6 +200,29 @@ ICD10CM_MERGE = {'ICD10CM': 'ICD10'}
 # The tab logic merges these into the canonical vocabulary.
 VOCABULARY_OID_ALIASES = {
     'urn:oid:2.16.840.1.113883.6.96': 'SNOMED',
+}
+
+# OMOP vocabulary_id → UMLS root_source (SAB), for the UMLS bridge in Suggest
+# and for naming source codes from UMLS atoms. ICD10CM must precede ICD10:
+# Suggest's reverse map (SAB → vocabulary) keeps the first vocabulary it sees
+# for a shared SAB. MedDRA and CPT4 are licensed and absent from Athena on our
+# deployments, so UMLS is the only place their names come from.
+VOCAB_TO_UMLS_ROOT = {
+    'SNOMED': 'SNOMEDCT_US',
+    'ICD10CM': 'ICD10CM',
+    'ICD10': 'ICD10CM',       # HT-One ICD-10 codes are ICD-10-CM format
+    'ICD10PCS': 'ICD10PCS',
+    'LOINC': 'LNC',
+    'RxNorm': 'RXNORM',
+    'CPT4': 'CPT',
+    'HCPCS': 'HCPCS',
+    'NDC': 'NDC',
+    'CVX': 'CVX',
+    'ICD9CM': 'ICD9CM',
+    'MeSH': 'MSH',
+    'NDFRT': 'MED-RT',
+    'MedDRA': 'MDR',
+    'NCIt': 'NCI',
 }
 
 # Standard vocabularies — their concepts are already standard, so they appear

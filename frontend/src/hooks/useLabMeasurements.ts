@@ -1,3 +1,4 @@
+import { normalizedLabValue } from '@/utils/normalizedLabs';
 import { useMemo } from "react";
 import { useInfiniteOmopQuery } from "@/hooks/useInfiniteOmopQuery";
 import type { MeasurementRow } from "@/types/omop";
@@ -15,7 +16,8 @@ function deriveStatus(
 }
 
 function measurementToLabValue(m: MeasurementRow): LabResultValue {
-  return {
+  return normalizedLabValue({
+    normalized: m.normalized,
     measurement_id: m.measurement_id,
     value: m.value_as_number,
     value_string: m.value_as_string,
@@ -27,7 +29,7 @@ function measurementToLabValue(m: MeasurementRow): LabResultValue {
     source: m.measurement_source_value,
     lab_name: null,
     report_filename: null,
-  };
+  });
 }
 
 export interface LabMeasurementGroup {
@@ -59,7 +61,7 @@ export function useLabMeasurements(personId: number | undefined) {
     for (const [key, items] of map) {
       result.set(key, {
         sourceValue: key,
-        unit: items[0].unit_source_value ?? "",
+        unit: items[0].normalized?.unit ?? items[0].unit_source_value ?? "",
         values: items.map(measurementToLabValue),
       });
     }

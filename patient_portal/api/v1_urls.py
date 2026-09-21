@@ -1,7 +1,9 @@
+from .canonical_units import canonical_unit
 from .webhook_views import InboundWebhookView, WebhookSubscriptionViewSet
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 from .concept_mint import mint_destination
+from .source_catalog import source_catalog
 from .supportive_therapies import SupportiveTherapyViewSet, therapy_outcomes
 
 from .views import (
@@ -65,6 +67,7 @@ from .patient_signup import PatientSignupView
 from .audit_views import AuditEventViewSet
 from .representatives import PersonalRepresentativeViewSet
 from .password_reset import request_password_reset, reset_password
+from .email_verification import resend_verification_email, verify_email
 from .break_glass import break_glass
 
 from .service_applications import ServiceApplicationViewSet
@@ -111,6 +114,8 @@ urlpatterns = [
     path('auth/change-password/', change_password, name='v1-change-password'),
     path('auth/request-reset/', request_password_reset, name='v1-request-reset'),
     path('auth/reset-password/', reset_password, name='v1-reset-password'),
+    path('auth/verify-email/', verify_email, name='v1-verify-email'),
+    path('auth/verify-email/resend/', resend_verification_email, name='v1-verify-email-resend'),
     path('break-glass/', break_glass, name='v1-break-glass'),
     path('derivation-status/<str:task_id>/', derivation_status,
          name='v1-derivation-status'),
@@ -126,6 +131,7 @@ urlpatterns = [
     path('vocab-releases/latest/snapshot/<str:table>/', VocabSnapshotView.as_view(), {'release_id': None}, name='v1-vocab-snapshot-latest'),
     path('vocabularies/<str:model_name>/', vocabulary_list, name='v1-vocabulary-list'),
     path('concepts/lookup/', concept_lookup, name='v1-concept-lookup'),
+    path('concepts/<int:concept_id>/canonical-unit/', canonical_unit, name='v1-canonical-unit'),
     path('concepts/search/', concept_search, name='v1-concept-search'),
     path('concepts/candidates/', concept_candidates, name='v1-concept-candidates'),
     path('concepts/synonyms/', concept_synonym_search, name='v1-concept-synonym-search'),
@@ -161,6 +167,7 @@ urlpatterns = [
     path('code-mappings/suggest-one/', code_mapping_suggest_one, name='v1-code-mapping-suggest-one'),
     path('code-mappings/suggest-runs/latest/', code_mapping_latest_suggest_run, name='v1-code-mapping-latest-suggest-run'),
     path('code-mappings/suggest-runs/<uuid:run_id>/', code_mapping_suggest_run, name='v1-code-mapping-suggest-run'),
+    path('code-mappings/source-catalog/', source_catalog, name='v1-source-catalog'),
     path('code-mappings/check-umls/', code_mapping_check_umls, name='v1-code-mapping-check-umls'),
     path('code-mappings/lookup/', code_mapping_lookup, name='v1-code-mapping-lookup'),
     path('code-mappings/accuracy/', code_mapping_accuracy, name='v1-code-mapping-accuracy'),

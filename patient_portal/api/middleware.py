@@ -251,6 +251,8 @@ _FORCE_CHANGE_EXEMPT_SUFFIXES = (
     '/auth/login',
     '/auth/request-reset/',
     '/auth/request-reset',
+    '/auth/verify-email/',
+    '/auth/verify-email/resend/',
     '/auth/reset-password/',
     '/auth/reset-password',
     '/user/',

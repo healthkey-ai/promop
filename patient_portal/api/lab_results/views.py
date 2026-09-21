@@ -1,3 +1,4 @@
+from omop_core.services.canonical_units import policies, normalize, measurement_normalized
 from collections import defaultdict
 from django.contrib.contenttypes.models import ContentType
 from django.db import connection, transaction
@@ -300,7 +301,7 @@ class ResultsSummaryView(APIView):
     )
     SELECT r.*,
            tc.concept_name AS type_concept_name,
-           uc.concept_code AS unit_concept_code
+           uc.concept_code AS unit_concept_code, uc.vocabulary_id AS unit_vocabulary_id
     FROM ranked r
     LEFT JOIN concept tc ON tc.concept_id = r.measurement_type_concept_id
     LEFT JOIN concept uc ON uc.concept_id = r.unit_concept_id
@@ -331,6 +332,7 @@ class ResultsSummaryView(APIView):
                 visit_ids.add(row['visit_occurrence_id'])
         provenance = _load_visit_provenance(visit_ids)
 
+        preferences = policies()
         cards = []
         for summary in page_summaries:
             cid = summary['effective_concept_id']
@@ -359,6 +361,10 @@ class ResultsSummaryView(APIView):
                         report_filename = prov.get('report_filename')
 
                 values.append({
+                    'normalized': normalize(preferences.get(cid), row['value_as_number'],
+                        row['unit_source_value'] if (row['unit_source_value'] or '').strip() else
+                        (row['unit_concept_code'] if row['unit_vocabulary_id'] == 'UCUM' else None),
+                        row['range_low'], row['range_high']),
                     'measurement_id': row['measurement_id'],
                     'value': row['value_as_number'],
                     'value_string': row['value_as_string'],
@@ -450,6 +456,7 @@ class ValuesView(APIView):
 
         provenance = self._load_provenance(page)
         ownership_map = self._load_ownership(page, provenance)
+        preferences = policies()
         values = []
         for m in page:
             unit_str = m.unit_source_value
@@ -465,6 +472,7 @@ class ValuesView(APIView):
             prov = provenance.get(m.visit_occurrence_id, {})
             uploads = ownership_map.get(m.measurement_id, [])
             values.append({
+                'normalized': measurement_normalized(m, preferences),
                 'measurement_id': m.measurement_id,
                 'value': m.value_as_number,
                 'value_string': m.value_as_string,
@@ -609,6 +617,7 @@ class MeasurementDetailView(APIView):
                 type_label = m.measurement_type_concept.concept_name
 
         data = {
+            'normalized': measurement_normalized(m, policies()),
             'measurement_id': m.measurement_id,
             'value': m.value_as_number,
             'value_string': m.value_as_string,

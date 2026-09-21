@@ -6,7 +6,7 @@ from django.db.models import F, Q
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.postgres.indexes import GinIndex, OpClass
-from django.db.models.functions import Upper
+from django.db.models.functions import MD5, Upper
 import re
 import uuid
 
@@ -374,6 +374,10 @@ class GroupAccess(models.Model):
         null=True, blank=True, related_name='access_grants',
     )
     role = models.CharField(max_length=20, choices=ROLE_CHOICES)
+    pending_email_verification = models.BooleanField(
+        default=False,
+        help_text="Self-signup grant waiting for verified domain access.",
+    )
     redirect_url = models.URLField(max_length=500, blank=True, default='')
     expires_at = models.DateTimeField(null=True, blank=True)
     granted_at = models.DateTimeField(auto_now_add=True)
@@ -570,6 +574,13 @@ class ConceptClass(models.Model):
         return f"{self.concept_class_id}: {self.concept_class_name}"
 
 
+# The clinical domains a code mapping can land in -- the keys of
+# services.source_vocabularies.DOMAIN_TO_TABLE, repeated here because models
+# cannot import services. tests/test_suggest_retrieval_indexes.py holds the two
+# in step.
+SUGGEST_DESTINATION_DOMAINS = ('Condition', 'Drug', 'Measurement', 'Observation', 'Procedure')
+
+
 class Concept(models.Model):
     """OMOP CDM Concept table - standardized terminologies."""
     concept_id = models.IntegerField(primary_key=True)
@@ -607,6 +618,33 @@ class Concept(models.Model):
                 OpClass(Upper('concept_name'), name='gin_trgm_ops'),
                 name='ix_concept_name_upper_trgm',
             ),
+            # `concept_code__iexact` compiles to `UPPER(concept_code::text) =
+            # UPPER(...)`. With no index on that expression the code branch of
+            # concepts/search could not be served by any index, and because it is
+            # OR-ed with the name match the *whole* predicate fell back to
+            # filtering every row of the vocabulary (~1s on SNOMED, #1466).
+            # With it the planner can BitmapOr this, the trigram index and the pk.
+            models.Index(Upper('concept_code'), name='ix_concept_code_upper'),
+            # Suggest's lexical retrieval asks for standard, active concepts in one
+            # clinical domain, but the whole-table trigram index above cannot take
+            # that into account: for a procedure description it returned ~80,000
+            # loosely matching rows from every domain, Postgres computed an exact
+            # similarity for each, and one survived the domain filter (#1467).
+            # A partial index per destination domain holds only the rows that can
+            # be an answer, so the candidate set is cut before the expensive step.
+            # The predicates must stay literally what `lexical_candidates` filters
+            # on, or the planner cannot prove the index applies and falls back to
+            # the whole-table one.
+            *[
+                GinIndex(
+                    OpClass(Upper('concept_name'), name='gin_trgm_ops'),
+                    name=f'ix_concept_trgm_{_domain.lower()}',
+                    condition=Q(
+                        standard_concept='S', invalid_reason__isnull=True, domain_id=_domain,
+                    ),
+                )
+                for _domain in SUGGEST_DESTINATION_DOMAINS
+            ],
         ]
         constraints = [
             models.UniqueConstraint(
@@ -1779,6 +1817,51 @@ class ConceptSynonym(models.Model):
         ]
 
 
+class SuggestSynonymTerm(models.Model):
+    """The synonyms Suggest can retrieve, each carrying its concept's domain.
+
+    Derived from concept_synonym and concept; rebuilt by
+    ``services.suggest_synonym_terms.refresh``, never edited by hand.
+
+    Suggest retrieves synonyms by trigram similarity, scoped to standard, active
+    concepts in one clinical domain. concept_synonym knows none of that -- domain
+    and standing live on concept -- so no index on it could narrow the search:
+    the whole-table trigram index returned every loosely similar synonym in every
+    domain, Postgres computed a similarity for each, and the join threw nearly
+    all of them away afterwards. Measured on staging that was 1-10s per code and
+    92% of retrieval time (#1467). Here the domain is a column, so a partial
+    trigram index per domain cuts the candidate set before the expensive step.
+
+    ``term`` is stored uppercased: the query text is uppercased too, so the index
+    is on the plain column and similarity() needs no UPPER() per candidate row.
+    """
+    concept = models.ForeignKey(
+        Concept, on_delete=models.DO_NOTHING, related_name='+',
+        db_column='concept_id', db_constraint=False,
+    )
+    domain_id = models.CharField(max_length=20)
+    term = models.CharField(max_length=1000)
+
+    class Meta:
+        db_table = 'suggest_synonym_term'
+        constraints = [
+            # On a hash of the term, not the term: a btree entry is capped near
+            # 2.7kB, and a 1000-character synonym in a multi-byte script exceeds
+            # it -- which would fail the insert, and with it a vocabulary load.
+            models.UniqueConstraint(
+                F('concept'), MD5('term'), name='uq_suggest_synonym_term',
+            ),
+        ]
+        indexes = [
+            GinIndex(
+                OpClass(F('term'), name='gin_trgm_ops'),
+                name=f'ix_suggest_syn_{_domain.lower()}',
+                condition=Q(domain_id=_domain),
+            )
+            for _domain in SUGGEST_DESTINATION_DOMAINS
+        ]
+
+
 class SourceToConceptMap(models.Model):
     """OMOP CDM source_to_concept_map (vocabulary) - source code → standard concept."""
     source_code = models.CharField(max_length=50)
@@ -2050,6 +2133,31 @@ class SourceCodeConceptMapping(models.Model):
         return f"{source}:{self.source_code} -> {self.target_concept_id}"
 
 
+class MappingSuggestionReview(models.Model):
+    """Feedback on a reviewed suggestion replaced by a later Suggest run.
+
+    The mapping holds its current suggestion. Move its completed review here
+    atomically before replacing it, so accuracy counts each review once.
+    Snapshot source and concept IDs so later edits do not rewrite the evidence.
+    """
+
+    mapping = models.ForeignKey(
+        SourceCodeConceptMapping, on_delete=models.SET_NULL, null=True,
+        related_name='suggestion_reviews',
+    )
+    source_vocabulary_id = models.CharField(max_length=50, blank=True)
+    source_code = models.CharField(max_length=100)
+    suggested_target_concept_id = models.BigIntegerField(null=True)
+    suggestion_model_version = models.CharField(max_length=20)
+    suggestion_outcome = models.CharField(
+        max_length=12, choices=SourceCodeConceptMapping.SUGGESTION_OUTCOME_CHOICES,
+    )
+    archived_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'mapping_suggestion_review'
+
+
 class MappingDestinationCandidate(models.Model):
     """An imported alternative; it does not change the chosen clinical mapping."""
 
@@ -2160,11 +2268,33 @@ class LoincCodeClass(models.Model):
         help_text='EXAMPLE_UNITS from Loinc.csv; empty when LOINC defines no unit.',
     )
 
+    property = models.CharField(max_length=40, blank=True, default='')
+    scale_type = models.CharField(max_length=20, blank=True, default='')
+
     class Meta:
         db_table = 'loinc_code_class'
 
     def __str__(self):
         return f"{self.loinc_num} → {self.loinc_class_id}"
+
+
+class CanonicalUnitPreference(models.Model):
+    """Instance-wide choice for a standard LOINC measurement, with optimistic revision."""
+    concept = models.OneToOneField(Concept, on_delete=models.PROTECT, primary_key=True)
+    unit = models.CharField(max_length=40, blank=True, default='')
+    property = models.CharField(max_length=40)
+    revision = models.PositiveIntegerField(default=0)
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class CanonicalUnitChange(models.Model):
+    preference = models.ForeignKey(CanonicalUnitPreference, on_delete=models.PROTECT)
+    previous_unit = models.CharField(max_length=40, blank=True)
+    unit = models.CharField(max_length=40, blank=True)
+    revision = models.PositiveIntegerField()
+    changed_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    changed_at = models.DateTimeField(auto_now_add=True)
 
 
 # Choice classes for PatientRecord model
@@ -4517,3 +4647,40 @@ class UmlsSourceCode(models.Model):
             name='uq_umls_source_code_term',
         )]
         indexes = [models.Index(fields=['root_source', 'code'], name='umls_source_root_so_9d0e39_idx')]
+
+
+class SourceVocabulary(models.Model):
+    """Current publisher release for source terminology outside OMOP."""
+    vocabulary_id = models.CharField(max_length=50, primary_key=True)
+    name = models.CharField(max_length=255)
+    release_version = models.CharField(max_length=50)
+    source_url = models.URLField(max_length=1000)
+    archive_sha256 = models.CharField(max_length=64)
+    term_count = models.PositiveIntegerField(default=0)
+    loaded_at = models.DateTimeField()
+
+    class Meta:
+        db_table = 'source_vocabulary'
+
+
+class SourceVocabularyTerm(models.Model):
+    """Publisher code and metadata; never an OMOP destination concept."""
+    vocabulary = models.ForeignKey(SourceVocabulary, on_delete=models.CASCADE)
+    code = models.CharField(max_length=255)
+    name = models.TextField()
+    definition = models.TextField(blank=True)
+    synonyms = models.JSONField(default=list)
+    parents = models.JSONField(default=list)
+    semantic_types = models.JSONField(default=list)
+    status = models.CharField(max_length=255, blank=True)
+    retired = models.BooleanField(default=False)
+    metadata = models.JSONField(default=dict)
+    search_text = models.TextField()
+
+    class Meta:
+        db_table = 'source_vocabulary_term'
+        constraints = [models.UniqueConstraint(
+            fields=['vocabulary', 'code'], name='uq_source_vocab_term_code',
+        )]
+        indexes = [GinIndex(OpClass(Upper('search_text'), name='gin_trgm_ops'),
+                            name='ix_source_vocab_search_trgm')]

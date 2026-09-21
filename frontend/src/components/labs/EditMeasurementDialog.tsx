@@ -40,7 +40,7 @@ export function EditMeasurementDialog({
         {measurement && (
           <EditForm
             key={measurement.measurement_id}
-            measurement={measurement}
+            measurement={measurement.original ?? measurement}
             onSave={onSave}
             onCancel={() => onOpenChange(false)}
             isPending={isPending}
@@ -90,6 +90,7 @@ function EditForm({
 
   return (
     <form onSubmit={handleSubmit} className="space-y-3">
+      <p className="text-xs text-muted-foreground">Edit the original result in {measurement.unit || "its source units"}. Canonical values are calculated from it.</p>
       {isQualitative ? (
         <label className="block">
           <span className="text-sm font-medium text-foreground">Value</span>

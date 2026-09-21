@@ -169,6 +169,7 @@ function suggestRun(overrides: Record<string, unknown> = {}) {
 
 function renderPage(rows: TestMappingRow[] = [proposedRow, approvedRow]) {
   mockGet.mockImplementation((url: string) => {
+    if (url.endsWith("/canonical-unit/")) return Promise.resolve({ data: { unit: "", revision: 0, available_units: ["mg/dL", "g/L"], example_units: ["mg/dL"], can_edit: true } });
     if (url === "/v1/code-mappings/") return Promise.resolve({ data: [...rows] });
     if (url === "/v1/code-mappings/reference/") return Promise.resolve({ data: reference });
     if (url === "/v1/concepts/search/") {
@@ -227,6 +228,30 @@ describe("CodeMappingPage", () => {
     mockPost.mockResolvedValue({ data: {} });
     mockPatch.mockResolvedValue({ data: {} });
     mockDelete.mockResolvedValue({ data: {} });
+  });
+
+  it("lets a curator choose a destination inline without opening the edit dialog", async () => {
+    renderPage([proposedRow]);
+    const previousGet = mockGet.getMockImplementation()!;
+    mockGet.mockImplementation((url: string, ...rest: unknown[]) => url === "/v1/code-mappings/7/"
+      ? Promise.resolve({ data: proposedRow }) : previousGet(url, ...rest));
+    mockPatch.mockResolvedValue({ data: { ...proposedRow, destination_concept_id: loincHit.concept_id, origin_system: "curator" } });
+    const trigger = await screen.findByRole("button", { name: "Choose destination for M-PROTEIN, SERUM" });
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    fireEvent.click(trigger);
+    const input = await screen.findByRole("combobox", { name: "Search destination concepts inline" });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    fireEvent.change(input, { target: { value: "monoclonal" } });
+    fireEvent.click(await screen.findByRole("option", { name: /Protein.monoclonal/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Save choice" }));
+    await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/", {
+      destination_concept_id: loincHit.concept_id, status: "proposed",
+    }));
+    await waitFor(() => expect(screen.queryByRole("combobox", { name: "Search destination concepts inline" })).not.toBeInTheDocument());
+    expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/7/lock/");
+    expect(mockDelete).toHaveBeenCalledWith("/v1/code-mappings/7/lock/");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   describe("duplicate source-code errors", () => {
@@ -388,7 +413,26 @@ describe("CodeMappingPage", () => {
       expect(within(screen.getByRole("dialog")).queryByRole("status")).not.toBeInTheDocument();
     });
 
-    it.each(["Provenance", "Source code", "Seen", "Source description", "Destination concept", "Concept ID", "Dest count", "Status"])(
+    it("defaults Unmapped to Provenance with Seen descending within each group", async () => {
+      renderPage([
+        { ...high, origin_system: "suggest v0.4", occurrence_count: 200 },
+        { ...low, origin_system: "curator", occurrence_count: 3 },
+        { ...high, mapping_id: 33, source_code: "Z20", origin_system: "curator", occurrence_count: 20 },
+        { ...low, mapping_id: 34, source_code: "A1", origin_system: "curator", occurrence_count: 20 },
+      ]);
+      const table = await screen.findByRole("table", { name: "Unmapped mappings" });
+      const button = within(table).getByRole("button", { name: "Provenance" });
+      expect(button.closest("th")).toHaveAttribute("aria-sort", "ascending");
+      expect(ids(table)).toEqual(["code-mapping-34", "code-mapping-33", "code-mapping-32", "code-mapping-31"]);
+      fireEvent.click(button);
+      expect(button.closest("th")).toHaveAttribute("aria-sort", "descending");
+      expect(ids(table)).toEqual(["code-mapping-31", "code-mapping-34", "code-mapping-33", "code-mapping-32"]);
+      fireEvent.click(button);
+      expect(button.closest("th")).toHaveAttribute("aria-sort", "ascending");
+      expect(ids(table)).toEqual(["code-mapping-34", "code-mapping-33", "code-mapping-32", "code-mapping-31"]);
+    });
+
+    it.each(["Source code", "Seen", "Source description", "Destination concept", "Concept ID", "Dest count", "Status"])(
       "sorts %s ascending and descending", async (column) => {
         renderPage([high, low]);
         const table = await screen.findByRole("table", { name: "Unmapped mappings" });
@@ -462,6 +506,41 @@ describe("CodeMappingPage", () => {
     // so expand its section after the global search has located it.
     fireEvent.click(screen.getByRole("button", { name: /^Mapped/ }));
     expect(await screen.findByText("C90.00", { selector: "td" })).toBeInTheDocument();
+  });
+
+  it("labels cross-tab hits with their coding system in browse mode (#963)", async () => {
+    // The page always asks for browse=1, and the server answers a query with
+    // rows from every coding system (mapping_browse: `mappings if search`).
+    const pages = { Unmapped: { page: 1, page_size: 100, total: 1 }, Mapped: { page: 1, page_size: 100, total: 1 },
+      Rejected: { page: 1, page_size: 100, total: 0 }, "Athena Mapped": { page: 1, page_size: 100, total: 0 } };
+    const tabs = [
+      { vocabulary_id: "", label: "Uncoded", is_standard: false, proposed: 1, approved: 0, athena: 0 },
+      { vocabulary_id: "ICD10", label: "ICD-10", is_standard: false, proposed: 0, approved: 1, athena: 0 },
+    ];
+    mockGet.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
+      if (url === "/v1/code-mappings/") {
+        const search = String(config?.params?.search || "");
+        return Promise.resolve({ data: {
+          results: search ? [proposedRow, approvedRow].filter((r) => r.source_code.includes(search)) : [proposedRow],
+          duplicates: [], selected_source: "", rejected_count: 0, tabs, pages,
+        } });
+      }
+      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+    });
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+    // One tab's rows: nothing to label.
+    expect(screen.queryByRole("columnheader", { name: "System" })).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Search mappings" }), { target: { value: "C90.00" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Mapped/ }));
+    const row = (await screen.findByText("C90.00", { selector: "td" })).closest("tr")!;
+    expect(cellUnder(row, "System")).toHaveTextContent("ICD-10");
+    expect(await screen.findByText(/Searching all coding systems — 1 match from other tabs/)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Search mappings" }), { target: { value: "" } });
+    await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+    await waitFor(() => expect(screen.queryByRole("columnheader", { name: "System" })).not.toBeInTheDocument());
   });
 
   it("splits proposed and approved into Unmapped and Mapped sections", async () => {
@@ -787,7 +866,9 @@ describe("CodeMappingPage", () => {
     it("resolves a hand-typed destination concept id on blur", async () => {
       await openDialog();
       const input = screen.getByLabelText("Destination Concept ID");
-      mockGet.mockImplementationOnce(() => Promise.resolve({ data: loincHit }));
+      const previousGet = mockGet.getMockImplementation();
+      mockGet.mockImplementation((url: string, ...args: unknown[]) => url === "/v1/concepts/3046299/"
+        ? Promise.resolve({ data: loincHit }) : previousGet?.(url, ...args));
       fireEvent.change(input, { target: { value: "3046299" } });
       fireEvent.blur(input, { target: { value: "3046299" } });
 
@@ -858,7 +939,7 @@ describe("CodeMappingPage", () => {
       fireEvent.change(screen.getByLabelText("Search destination concepts"), {
         target: { value: "monoclonal" },
       });
-      expect(await screen.findByText("Quantitative · Unit: mg/dL")).toBeInTheDocument();
+      expect(await screen.findByText("Quantitative · Suggested unit: mg/dL")).toBeInTheDocument();
     });
 
     it("selects a reviewed mint candidate as the mapping destination", async () => {
@@ -887,6 +968,79 @@ describe("CodeMappingPage", () => {
         const call = mockGet.mock.calls.find((c) => c[0] === "/v1/concepts/search/");
         expect(call?.[1]?.params?.vocabulary_id).toBe("HK-Labs");
       });
+    });
+
+    it("searches active, standard concepts unless the curator widens it", async () => {
+      // #1465: retired and non-standard concepts are opt-in.
+      await openDialog();
+      const searches = () => mockGet.mock.calls.filter((c) => c[0] === "/v1/concepts/search/");
+      fireEvent.change(screen.getByLabelText("Search destination concepts"), {
+        target: { value: "monoclonal" },
+      });
+      await waitFor(() => expect(searches()).toHaveLength(1));
+      expect(searches()[0][1].params).not.toHaveProperty("include_retired");
+      expect(searches()[0][1].params).not.toHaveProperty("include_non_standard");
+
+      fireEvent.click(screen.getByLabelText("Include retired"));
+      await waitFor(() => expect(searches()).toHaveLength(2));
+      expect(searches()[1][1].params.include_retired).toBe("true");
+      expect(searches()[1][1].params).not.toHaveProperty("include_non_standard");
+
+      fireEvent.click(screen.getByLabelText("Include non-standard"));
+      await waitFor(() => expect(searches()).toHaveLength(3));
+      expect(searches()[2][1].params).toMatchObject({ include_retired: "true", include_non_standard: "true" });
+    });
+
+    it("labels each search result as standard, non-standard or retired", async () => {
+      // #1465: curators asked where a code "came from" because nothing said a
+      // result was a retired extension concept.
+      await openDialog();
+      const otherRequests = mockGet.getMockImplementation()!;
+      mockGet.mockImplementation((url: string, ...rest: unknown[]) => {
+        if (url !== "/v1/concepts/search/") return otherRequests(url, ...rest);
+        {
+          return Promise.resolve({ data: { results: [
+            loincHit,
+            { ...loincHit, concept_id: 3545451, concept_code: "833581000000104", standard_concept: null, invalid_reason: "U" },
+            { ...loincHit, concept_id: 2000000001, concept_code: "HK-1", standard_concept: null, invalid_reason: null },
+          ] } });
+        }
+      });
+      fireEvent.change(screen.getByLabelText("Search destination concepts"), {
+        target: { value: "monoclonal" },
+      });
+      const retired = await screen.findByText("833581000000104");
+      expect(retired.closest("button")).toHaveTextContent("Retired");
+      expect(screen.getByText("33358-3").closest("button")).toHaveTextContent("Standard");
+      expect(screen.getByText("HK-1").closest("button")).toHaveTextContent("Non-standard");
+    });
+
+    it("sends one search for a typed word, not one per keystroke", async () => {
+      // #1466: each keystroke used to start its own server query.
+      await openDialog();
+      const box = screen.getByLabelText("Search destination concepts");
+      for (const value of ["mon", "mono", "monoc", "monocl", "monoclonal"]) {
+        fireEvent.change(box, { target: { value } });
+      }
+      await waitFor(() => {
+        expect(mockGet.mock.calls.filter((c) => c[0] === "/v1/concepts/search/")).toHaveLength(1);
+      });
+      const [call] = mockGet.mock.calls.filter((c) => c[0] === "/v1/concepts/search/");
+      expect(call[1].params.q).toBe("monoclonal");
+    });
+
+    it("aborts the search in flight when the query changes", async () => {
+      await openDialog();
+      const box = screen.getByLabelText("Search destination concepts");
+      const searches = () => mockGet.mock.calls.filter((c) => c[0] === "/v1/concepts/search/");
+      fireEvent.change(box, { target: { value: "monoclonal" } });
+      await waitFor(() => expect(searches()).toHaveLength(1));
+      const first: AbortSignal = searches()[0][1].signal;
+      expect(first.aborted).toBe(false);
+      fireEvent.change(box, { target: { value: "monoclonal protein" } });
+      expect(first.aborted).toBe(true);
+      await waitFor(() => expect(searches()).toHaveLength(2));
+      expect(searches()[1][1].signal.aborted).toBe(false);
     });
 
     it("lets the search scope widen so a mint can be re-pointed at a standard concept", async () => {
@@ -1442,9 +1596,16 @@ describe("server mapping pages", () => {
     });
     render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
     expect(await screen.findByText("FIRST PAGE")).toBeInTheDocument();
+    expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({
+      order_0: "origin_system", order_1: "-occurrence_count", order_2: "-occurrence_count", order_3: "-occurrence_count",
+    }) });
+    expect(screen.getByTitle("Sort Unmapped by Provenance").closest("th")).toHaveAttribute("aria-sort", "ascending");
     expect(screen.getByText("Page 1 of 2 · 101 mappings")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
     expect(await screen.findByText("SECOND PAGE")).toBeInTheDocument();
+    expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({
+      page_0: 2, order_0: "origin_system",
+    }) });
     fireEvent.click(screen.getByTitle("Sort Unmapped by Seen"));
     await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ page_0: 1, order_0: "occurrence_count" }) }));
   });
