@@ -51,9 +51,13 @@ def test_pending_migration_blocks_release_even_with_usable_writer(ready, setting
     # databases may already have one, so initialize it explicitly for both.
     recorder.ensure_schema()
     original = list(recorder.migration_qs.values())
-    for app, migration in MigrationLoader(connection).disk_migrations:
+    loader = MigrationLoader(connection)
+    for app, migration in loader.disk_migrations:
         recorder.record_applied(app, migration)
-    recorder.record_unapplied('omop_core', name)
+    # Pending migrations must include dependent migrations added later, or the
+    # fixture represents inconsistent history rather than a valid pending plan.
+    for app, migration in loader.graph.backwards_plan(('omop_core', name)):
+        recorder.record_unapplied(app, migration)
     try:
         report = audit(False)
         assert 'omop_core.' + name in report['pending_migrations']
