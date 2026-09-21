@@ -129,6 +129,8 @@ def normalize_variant(payload, existing=None):
         raise ValidationError({'feature_type': 'Select the feature type.'})
     if data['feature_type'] == 'Gene' and data['genomic_feature']:
         data['genomic_feature'] = data['genomic_feature'].upper()
+        if data['genomic_feature'] == 'PALB1':
+            data['genomic_feature'] = 'PALB2'
         data['gene'] = data['genomic_feature']
     # A gene-only result is allowed (e.g. a test with no specific variant).
     raw_date = data.get('test_date')

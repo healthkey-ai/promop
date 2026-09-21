@@ -96,6 +96,14 @@ def test_priority_placeholders_and_named_patch_use_chromosome_feature(setup):
     assert result.data['genomics_del17p'][0]['status'] == 'absent'
 
 
+def test_new_feature_input_keeps_existing_palb1_alias_compatibility(setup):
+    person, _, staff = setup
+    result = call(person, staff, 'post', {'genomic_feature': 'palb1', 'feature_type': 'Gene'})
+    assert result.status_code == 201, result.data
+    assert result.data['genomic_feature'] == result.data['gene'] == 'PALB2'
+    assert result.data['marker_key'] == 'palb2'
+
+
 @pytest.mark.parametrize('change', [
     {'feature_type': 'invalid'}, {'feature_type': ''}, {'finding_category': 'invalid'},
     {'genomic_feature': 'TP53', 'feature_type': 'Gene', 'marker_key': 'del17p'},
