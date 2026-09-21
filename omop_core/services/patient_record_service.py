@@ -2366,6 +2366,7 @@ _GENETIC_MUTATION_LOINCS = {
     '21636-6': 'BRCA1',
     '21640-8': 'BRCA2',   # BRCA2 gene c.6174delT [Presence] in Blood or Tissue
     '21739-8': 'TP53',    # TP53 gene mutations found [Identifier] in Blood or Tissue
+    '96970-9': 'TP53',    # TP53 gene deletion and duplication mutation analysis [Identifier] in Blood or Tissue
     '48013-7': 'KRAS',
     '62862-8': 'EGFR',
     '60033-8': 'PIK3CA',  # PIK3CA gene mutations found [Identifier] in Blood or Tissue
