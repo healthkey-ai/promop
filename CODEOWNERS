@@ -23,10 +23,28 @@
 /patient_portal/api/break_glass.py  @larsburgess
 
 # ── Configuration and security checks ───────────────────────────────────────
-# Settings modules control auth backends, secret keys, and CORS policy.
-/promop/settings.py                 @larsburgess
-/ctomop/settings.py                 @larsburgess
+# Settings modules control auth backends, secret keys, and CORS policy. The
+# OAuth validator decides which clients may still authenticate; the Sentry
+# module decides what leaves the process.
+#
+# Patterns, not exact filenames, and deliberately the same shape the gate in
+# .github/scripts/security-review.cjs uses: an entry that covers less than the
+# gate does asks for no reviewer on a change the gate will still hold, which
+# reads as the gate being broken rather than as the owner list being stale.
+/promop/*settings*                  @larsburgess
+/promop/settings/                   @larsburgess
+/ctomop/*settings*                  @larsburgess
+/ctomop/settings/                   @larsburgess
+/promop/oauth.py                    @larsburgess
+/promop/oauth/                      @larsburgess
+/ctomop/oauth.py                    @larsburgess
+/ctomop/oauth/                      @larsburgess
+/promop/sentry.py                   @larsburgess
+/promop/sentry/                     @larsburgess
+/ctomop/sentry.py                   @larsburgess
+/ctomop/sentry/                     @larsburgess
 /patient_portal/checks.py           @larsburgess
+/frontend/package*.json             @larsburgess
 
 # ── CI and the security gates themselves ──────────────────────────────────────
 # A change that weakens a gate should be as visible as a change that trips it.

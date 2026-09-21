@@ -8,22 +8,47 @@ const REQUIRED_REVIEWER = { login: 'larsburgess', id: 23724 };
 // text the PR author controls. Cap the fan-out well below the hourly budget.
 const MAX_ISSUE_REFERENCES = 20;
 // Paths the test-file exemption must never reach: the control plane — CI, the
-// policy that gates it, the scanners it runs, the change-management evidence,
-// and the Django settings modules. A file here executes with the control
-// plane's privileges whatever it is named (`.github/workflows/*.test.yml` is a
-// workflow Actions will run; `.github/scripts/*.test.cjs` was executed by this
-// policy's own workflow).
+// policy that gates it, the scanners it runs, the change-management evidence —
+// and, in the Django project packages, the modules that decide who may
+// authenticate. A file here executes with the control plane's privileges
+// whatever it is named (`.github/workflows/*.test.yml` is a workflow Actions
+// will run; `.github/scripts/*.test.cjs` was executed by this policy's own
+// workflow), and a `test_settings.py` is still a settings module.
+//
+// These are globs, not exact filenames: the matcher has no implicit recursion,
+// so `promop/settings.py` alone stops covering the settings module the day it
+// becomes `promop/settings/base.py` — the ordinary refactor at its current
+// size — and covers neither `ctomop/settings_staging.py` nor a
+// `settings_prod.py`. The same applies to the two modules below, which is why
+// each is listed as both a file and a package. The infix form also keeps
+// `test_settings.py` in scope, which is the point of listing settings here
+// rather than below the test exemption. A file under a directory named
+// `tests/` stays exempt at any depth.
 const CONTROL_PATHS = [
   '.github/**', '**/CODEOWNERS', 'docs/soc2/**', '.bandit*', '.gitleaks*',
   'SECURITY.md', 'scripts/capture_change_management_evidence.py',
-  'promop/settings.py', 'ctomop/settings.py',
+  'promop/**/*settings*', 'promop/settings/**', 'ctomop/**/*settings*', 'ctomop/settings/**',
+  // OAUTH2_VALIDATOR_CLASS: refuses grant, response type and bearer token for
+  // retired browser clients. Its only test is under tests/, which this list
+  // exempts, so ungating it would let one change weaken the validator and
+  // relax the test that proves it.
+  'promop/oauth.py', 'promop/oauth/**', 'ctomop/oauth.py', 'ctomop/oauth/**',
+  // The Sentry scrubber: the secret denylist and include_local_variables.
+  'promop/sentry.py', 'promop/sentry/**', 'ctomop/sentry.py', 'ctomop/sentry/**',
 ];
 // Paths that require @larsburgess approval — true security policy, auth/identity
-// code, and credential handling. Operational files (Dockerfiles, deps, infra,
-// route tables, start scripts) are intentionally excluded: they are covered by
-// CI security gates and do not change access control policy.
+// code, and credential handling. Operational files (Dockerfiles, infra, route
+// tables, start scripts) are intentionally excluded: their security-relevant
+// values are pinned by tests, and bandit and gitleaks cover the secret case.
+// Python dependencies are excluded because `pip-audit -r requirements.txt`
+// runs in CI. `frontend/package*.json` is not: Dependabot alerts are enabled
+// and do reach it, but an alert fires on a known CVE in a dependency that is
+// already here, and the reviewable event for a manifest is a dependency being
+// *added* — a new direct dependency, or a name one character from a real one,
+// raises no alert at all. An npm audit step would not change that either.
 const SECURITY_PATHS = [
   ...CONTROL_PATHS,
+  'frontend/package*.json',
   'omop_core/authorization.py', 'patient_portal/services.py',
   'patient_portal/api/break_glass.py', 'patient_portal/checks.py',
   'patient_portal/api/authentication.py', 'patient_portal/api/permissions.py',
