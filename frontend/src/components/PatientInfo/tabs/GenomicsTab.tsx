@@ -10,6 +10,7 @@ type Marker = { key: string; field_name: string; gene: string; label: string; ki
 
 const fields = [
   ['gene', 'Gene'],
+  ['status', 'Finding status'],
   ['variant_name', 'Variant name'],
   ['variant', 'Original variant text'],
   ['transcript_dna_change', 'Transcript DNA change (c.HGVS)'],
@@ -39,7 +40,6 @@ const fields = [
   ['evidence_source', 'Interpretation evidence / source'],
   ['genomic_reference_sequence_id', 'Genomic reference sequence ID'],
   ['zygosity', 'Zygosity'],
-  ['status', 'Finding status'],
 ] as const;
 
 /** Fields rendered as `<select>` dropdowns with a fixed value set. */
