@@ -43,6 +43,8 @@ test('file classification covers security code and renames while excluding test-
   for (const filename of ['ctomop/settings.py', 'frontend/src/components/Auth/Login.tsx', '.github/workflows/ci.yml', 'patient_portal/api/permissions.py', '.bandit-baseline.json']) assert.equal(securityFiles([{ filename }]), true, filename);
   for (const filename of ['patient_portal/tests.py', 'tests/test_browser_oauth_retirement.py', 'frontend/src/components/Auth/Login.test.tsx', 'omop_core/services/genomics.py', 'requirements.txt', 'Dockerfile', 'render.yaml', 'start.sh', 'patient_portal/api/v1_urls.py']) assert.equal(securityFiles([{ filename }]), false, filename);
   assert.equal(securityFiles([{ filename: 'retired.py', previous_filename: 'patient_portal/api/permissions.py' }]), true);
+  // Renaming the OAuth validator out of the way is still a gated change.
+  assert.equal(securityFiles([{ filename: 'retired.py', previous_filename: 'ctomop/oauth.py' }]), true);
 });
 
 function fixture({ labels = [], files = [], issueLabels = [], reviews = [], broken = false, existingStatuses = [] } = {}) {
@@ -163,32 +165,53 @@ test('application test files stay exempt', () => {
   ]) assert.equal(securityPath(filename), false, filename);
 });
 
-test('auth/identity and settings paths are gated', () => {
+test('auth/identity, settings and credential handling are gated', () => {
   for (const filename of [
-    'promop/settings.py', 'ctomop/settings.py',
+    // Every spelling of a settings module, not one exact filename: splitting
+    // promop/settings.py into a package must not silently ungate it.
+    'promop/settings.py', 'ctomop/settings.py', 'promop/settings/base.py',
+    'promop/settings_prod.py', 'ctomop/settings_staging.py', 'promop/settings/__init__.py',
+    'ctomop/settings/base.py', 'promop/config/settings.py',
+    // OAUTH2_VALIDATOR_CLASS and the Sentry scrubber, as files and as the
+    // packages either may become.
+    'promop/oauth.py', 'ctomop/oauth.py', 'promop/sentry.py', 'ctomop/sentry.py',
+    'promop/oauth/validators.py', 'promop/sentry/scrubber.py',
     'frontend/src/api/publicAxios.ts', 'frontend/src/api/clinicalTransport.ts',
     'frontend/src/federation/assertLabsTokens.ts', 'patient_portal/service_tokens.py',
     'patient_portal/management/commands/import_service_tokens.py',
     'docs/promop-security-soc2-remediation-plan.md',
+    // Dependabot alerts reach this manifest, but they fire on a known CVE in a
+    // dependency already here — not on one being added.
+    'frontend/package.json', 'frontend/package-lock.json',
   ]) assert.equal(securityPath(filename), true, filename);
 });
 
-test('operational files are no longer gated', () => {
-  for (const filename of [
-    'promop/oauth.py', 'promop/urls.py', 'promop/celery.py',
-    'patient_portal/api/v1_urls.py', 'patient_portal/urls.py',
-    'start.sh', 'start-worker.sh', 'requirements.txt', 'ops/artemis/Dockerfile',
-    'Procfile', 'nixpacks.toml', 'ctomop/settings_staging.py',
-    'frontend/.env.production', 'requirements/base.txt', 'deploy/Dockerfile',
-    'render.yaml', 'docker-compose.yml', 'Dockerfile', 'Dockerfile.gcp',
-    'frontend/package.json', 'frontend/package-lock.json', '.env.example',
-  ]) assert.equal(securityPath(filename), false, filename);
+// Deliberately not gated. Shaped as one list of whatever the classifier does
+// gate, rather than as 24 assertions that each path MUST be false. It fails on
+// the same inputs — re-gating render.yaml still turns this red — so the gain is
+// in what the failure says, not in when it happens: the name and the message
+// read as "this list changed", and they name every newly gated path at once
+// instead of stopping at the first.
+test('the narrowed scope leaves operational paths out', () => {
+  const out = [
+    'promop/urls.py', 'promop/celery.py', 'patient_portal/api/v1_urls.py',
+    'patient_portal/urls.py', 'start.sh', 'start-worker.sh', 'requirements.txt',
+    'requirements/base.txt', 'ops/artemis/Dockerfile', 'deploy/Dockerfile',
+    'Procfile', 'nixpacks.toml', 'frontend/.env.production', 'render.yaml',
+    'docker-compose.yml', 'Dockerfile', 'Dockerfile.gcp', '.env.example',
+  ].filter(securityPath);
+  assert.deepEqual(out, [], `unexpectedly gated: ${out.join(', ')}`);
 });
 
-test('Django project package test files are no longer gated (scope narrowed to settings.py)', () => {
+test('a test-named settings module is still gated', () => {
+  // A test_settings.py is a settings module whatever it is named, and wherever
+  // it sits — ctomop/ carried one until 0ba8665d. The recursive form is what
+  // reaches the last of these: a settings module parked under tests/ would
+  // otherwise be exempted by name.
   for (const filename of [
-    'promop/test_settings.py', 'promop/tests/urls.py', 'ctomop/test_settings.py',
-  ]) assert.equal(securityPath(filename), false, filename);
+    'promop/test_settings.py', 'promop/settings/test_base.py', 'ctomop/test_settings.py',
+    'promop/tests/test_settings.py',
+  ]) assert.equal(securityPath(filename), true, filename);
 });
 
 test('a path carrying stray whitespace cannot slip past classification', () => {
