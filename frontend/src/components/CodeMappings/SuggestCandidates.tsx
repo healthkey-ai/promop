@@ -1,5 +1,6 @@
 import { useState } from "react";
 import InlineDestinationPicker from "./InlineDestinationPicker";
+import MintConceptDialog from "./MintConceptDialog";
 import { destinationError, saveMappingDestination } from "./destinationSearch";
 
 export type SuggestCandidate = {
@@ -12,6 +13,7 @@ export type SuggestCandidate = {
   lexical_score?: number;
   semantic_score?: number;
   vector_distance?: number;
+  standard_concept?: string | null;
 };
 type Alternative = {
   concept_id: number;
@@ -42,6 +44,7 @@ type Props = {
   onSaved?: () => void;
   canApprove?: boolean;
   vocabularies?: { vocabulary_id: string; vocabulary_name: string }[];
+  domains?: { domain_id: string; label: string }[];
 };
 
 const STRATEGY_LABELS: Record<string, string> = { umls: "U", lexical: "L", vectors: "V", semantic: "V" };
@@ -49,6 +52,10 @@ const STRATEGY_LABELS: Record<string, string> = { umls: "U", lexical: "L", vecto
 const RANKER_STYLE: Record<string, string> = {
   jev: "bg-indigo-100 text-indigo-700",
   anthropic: "bg-sky-100 text-sky-700",
+};
+
+const STANDARD_BADGE: Record<string, { label: string; className: string }> = {
+  C: { label: "Classification", className: "bg-slate-100 text-slate-600" },
 };
 
 type MergedCandidate = SuggestCandidate & { strategies: Set<string> };
@@ -79,12 +86,14 @@ function mergeCandidates(searches: CandidateActivity[], ranked?: CandidateActivi
   return [...byId.values()];
 }
 
-export default function SuggestCandidates({ activity, finished, onSaved, canApprove = false, vocabularies = [] }: Props) {
+export default function SuggestCandidates({ activity, finished, onSaved, canApprove = false, vocabularies = [], domains = [] }: Props) {
   const [editing, setEditing] = useState<number | null>(null);
+  const [minting, setMinting] = useState<number | null>(null);
   const [needsAttentionOnly, setNeedsAttentionOnly] = useState(false);
   const [savedNames, setSavedNames] = useState<Record<number, string>>({});
   const [saving, setSaving] = useState<number | null>(null);
   const [selected, setSelected] = useState<Record<number, number>>({});
+  const [approved, setApproved] = useState<Record<number, number>>({});
   const [error, setError] = useState("");
   const [collapsed, setCollapsed] = useState(false);
   const groups = new Map<number, CandidateActivity[]>();
@@ -103,6 +112,37 @@ export default function SuggestCandidates({ activity, finished, onSaved, canAppr
       onSaved?.();
     } catch (failure) {
       setError(`Could not save the alternative candidate. ${destinationError(failure)}`);
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const approve = async (mappingId: number, candidate: SuggestCandidate) => {
+    setSaving(mappingId);
+    setError("");
+    try {
+      await saveMappingDestination(mappingId, candidate.concept_id, true);
+      setSelected(current => ({ ...current, [mappingId]: candidate.concept_id }));
+      setApproved(current => ({ ...current, [mappingId]: candidate.concept_id }));
+      onSaved?.();
+    } catch (failure) {
+      setError(`Could not approve. ${destinationError(failure)}`);
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const mintAndSave = async (mappingId: number, concept: { concept_id: number; concept_name: string }) => {
+    setMinting(null);
+    setSaving(mappingId);
+    setError("");
+    try {
+      await saveMappingDestination(mappingId, concept.concept_id);
+      setSelected(current => ({ ...current, [mappingId]: concept.concept_id }));
+      setSavedNames(current => ({ ...current, [mappingId]: concept.concept_name }));
+      onSaved?.();
+    } catch (failure) {
+      setError(`Concept minted but could not save mapping. ${destinationError(failure)}`);
     } finally {
       setSaving(null);
     }
@@ -143,6 +183,7 @@ export default function SuggestCandidates({ activity, finished, onSaved, canAppr
   };
   const attentionCount = [...groups].filter(([id, events]) => needsAttention(id, events)).length;
   const visibleGroups = [...groups].filter(([id, events]) => !needsAttentionOnly || needsAttention(id, events));
+  const hasHkVocabularies = vocabularies.some(v => v.vocabulary_id.startsWith("HK-"));
 
   return <section aria-label="Suggestion candidates" className="mb-4 space-y-3 rounded-md border border-slate-200 bg-white p-4">
     <button type="button" className="flex w-full items-center justify-between text-left"
@@ -166,10 +207,11 @@ export default function SuggestCandidates({ activity, finished, onSaved, canAppr
         const result = events.filter(event => event.stage === "result").at(-1);
         const ranked = events.filter(event => event.stage === "ranked").at(-1);
         const winner = (result ?? ranked)?.suggested;
-        const activeId = selected[mappingId] ?? winner?.concept_id;
         const searches = events.filter(event => event.stage === "candidates");
         const candidates = mergeCandidates(searches, ranked);
         const confidences = confidenceLookup(events);
+        const allStandard = candidates.every(c => c.standard_concept === undefined || c.standard_concept === "S");
+        const canAct = finished && result?.updated && !result.dry_run;
         return <article key={mappingId} className="rounded border border-slate-200 p-3">
           <h3 className="font-medium">
             {source.source_vocabulary_id || "Uncoded"}:{source.source_code}
@@ -186,11 +228,16 @@ export default function SuggestCandidates({ activity, finished, onSaved, canAppr
             <tbody>{candidates.map(candidate => {
               const confs = confidences.get(candidate.concept_id) ?? [];
               const strategies = [...candidate.strategies].map(s => STRATEGY_LABELS[s] || s).filter(Boolean).join("");
-              return <tr key={candidate.concept_id} className={`border-b border-slate-100 ${candidate.concept_id === winner?.concept_id ? "bg-sky-50" : ""}`}>
+              const isWinner = candidate.concept_id === winner?.concept_id;
+              const isSelected = selected[mappingId] === candidate.concept_id;
+              const isApproved = approved[mappingId] === candidate.concept_id;
+              const stdBadge = !allStandard && candidate.standard_concept !== "S" && candidate.standard_concept !== undefined ? (STANDARD_BADGE[candidate.standard_concept ?? ""] ?? { label: "Non-std", className: "bg-amber-100 text-amber-700" }) : null;
+              return <tr key={candidate.concept_id} className={`border-b border-slate-100 ${isWinner ? "bg-sky-50" : ""}`}>
                 <td className="py-1.5 pr-2">
                   <span>{candidate.vocabulary_id}:{candidate.concept_code}</span>
                   <span className="ml-1 text-slate-600">— {candidate.concept_name}</span>
                   <span className="ml-1 text-xs text-slate-400">OMOP {candidate.concept_id}</span>
+                  {stdBadge && <span className={`ml-1 rounded px-1 py-0.5 text-xs ${stdBadge.className}`}>{stdBadge.label}</span>}
                 </td>
                 <td className="py-1.5 px-2">
                   <span className="rounded bg-slate-100 px-1.5 py-0.5 text-xs font-mono" title={[...candidate.strategies].join(", ")}>{strategies}</span>
@@ -201,12 +248,26 @@ export default function SuggestCandidates({ activity, finished, onSaved, canAppr
                     title={conf.ranker ? `${conf.ranker} confidence` : "confidence"}>{Math.round(conf.confidence * 100)}%{conf.ranker ? ` ${conf.ranker[0].toUpperCase()}` : ""}</span>)}
                 </td>
                 <td className="py-1.5 pl-2 whitespace-nowrap">
-                  {candidate.concept_id === winner?.concept_id && <span className="font-semibold text-sky-700">Winner</span>}
-                  {selected[mappingId] === candidate.concept_id && <span role="status" className="text-xs">Selected</span>}
-                  {finished && result?.updated && !result.dry_run && candidate.concept_id !== activeId && <button
-                    type="button" disabled={saving !== null} className="rounded border px-2 py-0.5 text-xs disabled:opacity-50"
-                    aria-label={`Use ${candidate.concept_name} for ${source.source_code}`}
-                    onClick={() => void choose(mappingId, candidate)}>{saving === mappingId ? "Saving\u2026" : "Use"}</button>}
+                  {isApproved
+                    ? <span role="status" className="text-xs font-medium text-green-700">Approved</span>
+                    : <>
+                        {isWinner && <span className="font-semibold text-sky-700">Winner</span>}
+                        {isSelected && !isWinner && <span role="status" className="text-xs">Selected</span>}
+                        {canAct && !isWinner && !isSelected && <button
+                          type="button" disabled={saving !== null} className="rounded border px-2 py-0.5 text-xs disabled:opacity-50"
+                          aria-label={`Use ${candidate.concept_name} for ${source.source_code}`}
+                          onClick={() => void choose(mappingId, candidate)}>{saving === mappingId ? "Saving\u2026" : "Use"}</button>}
+                        {canApprove && canAct && (isWinner || isSelected) && <button
+                          type="button" disabled={saving !== null}
+                          className="ml-1 rounded border border-green-300 bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700 hover:bg-green-100 disabled:opacity-50"
+                          aria-label={`Approve ${candidate.concept_name} for ${source.source_code}`}
+                          onClick={() => void approve(mappingId, candidate)}>{saving === mappingId ? "Saving\u2026" : "Approve"}</button>}
+                        {canApprove && canAct && !isWinner && !isSelected && <button
+                          type="button" disabled={saving !== null}
+                          className="ml-1 rounded border border-green-300 bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700 hover:bg-green-100 disabled:opacity-50"
+                          aria-label={`Approve ${candidate.concept_name} for ${source.source_code}`}
+                          onClick={() => void approve(mappingId, candidate)}>{saving === mappingId ? "Saving\u2026" : "Approve"}</button>}
+                      </>}
                 </td>
               </tr>;
             })}</tbody>
@@ -214,7 +275,7 @@ export default function SuggestCandidates({ activity, finished, onSaved, canAppr
           {ranked && <p className="mt-2 text-sm font-medium">{winner ? `Winner: ${winner.concept_name}` : "No destination proposed"}</p>}
           {(result ?? ranked)?.note && <p className="mt-1 text-sm text-slate-600">{(result ?? ranked)?.note}</p>}
           {savedNames[mappingId] && <p role="status" className="mt-2 text-sm font-medium text-green-800">Saved: {savedNames[mappingId]}</p>}
-          {finished && !result?.dry_run && <div className="mt-3">
+          {finished && !result?.dry_run && <div className="mt-3 flex items-center gap-2">
             {editing === mappingId ? <InlineDestinationPicker key={mappingId} mappingId={mappingId}
               sourceLabel={`${source.source_vocabulary_id || "Uncoded"}:${source.source_code}${description ? ` — ${description}` : ""}`}
               canApprove={canApprove} vocabularies={vocabularies}
@@ -223,17 +284,30 @@ export default function SuggestCandidates({ activity, finished, onSaved, canAppr
                 setSavedNames(current => ({ ...current, [mappingId]: concept.concept_name }));
                 setEditing(null);
                 onSaved?.();
-              }} /> : <button type="button" disabled={saving !== null}
-                aria-label={`Search destination for ${source.source_code}`}
-                onClick={() => setEditing(mappingId)} className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40">
-                Search for another destination
-              </button>}
+              }} /> : <>
+                <button type="button" disabled={saving !== null}
+                  aria-label={`Search destination for ${source.source_code}`}
+                  onClick={() => setEditing(mappingId)} className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40">
+                  Search for another destination
+                </button>
+                {hasHkVocabularies && domains.length > 0 && <button type="button" disabled={saving !== null}
+                  aria-label={`Mint new concept for ${source.source_code}`}
+                  onClick={() => setMinting(mappingId)} className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40">
+                  Mint new concept
+                </button>}
+              </>}
           </div>}
           {ranked?.ranking_timings && <p className="mt-1 text-xs text-slate-500">
             Ranking: {Object.entries(ranked.ranking_timings).map(([k, v]) =>
               `${k.replace(/_ms$/, "")} ${(v / 1000).toFixed(1)}s`
             ).join(" · ")}
           </p>}
+          {minting === mappingId && <MintConceptDialog
+            vocabularies={vocabularies} domains={domains}
+            initialDomain="" initialName={description || source.source_code || ""}
+            sourceCode={source.source_code || ""} sourceVocabulary={source.source_vocabulary_id || ""}
+            onClose={() => setMinting(null)}
+            onSelect={concept => void mintAndSave(mappingId, concept)} />}
         </article>;
       })}
     </>}
