@@ -22,7 +22,7 @@ from patient_portal.models import InboundWebhookEvent, WebhookDelivery, WebhookS
 from patient_portal.webhooks import (
     EVENT_TYPES, INBOUND_HANDLERS, compute_hmac_signature, validate_webhook_url,
 )
-from .permissions import ScopedTokenPermission
+from .permissions import ScopedTokenPermission, is_interactive_session
 
 
 class WebhookSubscriptionSerializer(serializers.ModelSerializer):
@@ -94,6 +94,18 @@ class WebhookManagementPermission(ScopedTokenPermission):
               secret. Extending a trust to that was not the intent of granting
               one (docs/soc2/webhook-egress-authority.md).
 
+    Writes additionally require an interactive session, for the reason
+    ServiceApplicationViewSet does: create() mints a long-lived signing secret
+    and names where an organization's patient events are sent, so it is
+    credential administration. An OAuth2 token an org admin delegated to a
+    third-party application carries `patient/*.write` and would otherwise
+    convert that scoped, expiring grant into a permanent egress channel the
+    application controls — the subscription outlives the grant, and the secret
+    authenticates the sender to the receiver. Reads stay open to every
+    authentication class: listing subscriptions discloses no secret (the
+    serializer returns it only from create) and matches data the caller can
+    already reach.
+
     CSRF enforcement on the viewset covers the session case, which is the one an
     attacker can drive from a page the admin visits.
     """
@@ -103,8 +115,13 @@ class WebhookManagementPermission(ScopedTokenPermission):
             return False
         if not get_admin_orgs(request.user).exists():
             return False
-        if request.method not in SAFE_METHODS and not get_direct_admin_orgs(request.user).exists():
-            return False
+        if request.method not in SAFE_METHODS:
+            if not get_direct_admin_orgs(request.user).exists():
+                return False
+            # Positively identified, not inferred from `auth is None`:
+            # BasicAuthentication also reports no token, and ENABLE_BASIC_AUTH
+            # is a supported deployment setting.
+            return is_interactive_session(request)
         if request.auth is None:
             return True
         from .providers.base import TokenClaims

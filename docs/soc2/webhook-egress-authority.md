@@ -2,14 +2,18 @@
 
 **Decision.** Creating, editing or deleting a webhook subscription requires
 platform staff or a direct `org_admin` grant on the organization named in the
-subscription. Organization and domain trusts do not carry that authority.
+subscription, **presented in an interactive session**. Organization and domain
+trusts do not carry that authority, and neither does a credential the holder of
+that authority handed to a machine.
 
 **Status:** implemented (#1220, acting on the review of #1318). Enforced in
 `patient_portal/api/webhook_views.py` by `WebhookManagementPermission` and by
 `WebhookSubscriptionViewSet.get_queryset`, both routing writes through
-`omop_core.services.access.get_direct_admin_orgs`. Covered by
+`omop_core.services.access.get_direct_admin_orgs`, with the session requirement
+from `patient_portal.api.permissions.is_interactive_session`. Covered by
 `tests/test_webhooks.py::test_a_trust_no_longer_reaches_subscription_creation`
-and the two tests beside it.
+and the two tests beside it, and by
+`test_a_delegated_machine_credential_cannot_configure_egress`.
 
 ## What was true before
 
@@ -38,10 +42,36 @@ organization that wants a partner to run its integrations grants that partner an
 `org_admin` role, which is an explicit, revocable, auditable act with the right
 name on it.
 
+## Which credential, not only which user
+
+`get_direct_admin_orgs` answers "does this user hold the authority". It does not
+answer "is this the user". A third-party application holding an OAuth2 access
+token that an `org_admin` delegated to it carries `patient/*.write` and passes
+every check above — the authority is real and the user is right — yet the person
+is not present. Creating a subscription mints a long-lived signing secret and
+names where the organization's patient events are sent, so it converts a scoped,
+expiring, revocable grant into a permanent egress channel the application
+chooses the destination for. Revoking the grant does not close the channel.
+
+Writes therefore additionally require `is_interactive_session`: a session or a
+partner (Firebase/PHR) token, the same rule `ServiceApplicationViewSet` applies
+to service-credential administration, and for the same reason. The authenticator
+is identified positively rather than inferred from `request.auth is None`,
+because HTTP Basic also reports no token and `ENABLE_BASIC_AUTH` is a supported
+deployment setting.
+
+This closes an asymmetry rather than adding a new policy: promop had already
+decided that administering a long-lived credential requires the person (#1372,
+shipped in #1379). The webhook endpoint was written in parallel with that change
+and did not pick it up.
+
 ## What is deliberately unchanged
 
 Reading subscriptions and their delivery history still follows the full
-`get_admin_orgs` reach, including trusts. The list a professional sees therefore
+`get_admin_orgs` reach, including trusts, and is open to every authentication
+class the endpoint accepts: a listing discloses no secret — `create()` is the
+only response that carries one — and an integration that watches the
+subscriptions it already relies on is a legitimate caller. The list a professional sees therefore
 matches the data they already work with, and narrowing reads would hide an
 organization's egress configuration from someone the organization has already
 trusted with its patients — the wrong direction for review and for incident

@@ -124,7 +124,9 @@ def test_unsigned_idempotency_key_must_match_signed_id(setup):
 def test_subscription_management_and_secret_visibility(setup):
     org, other, person, user, subscription = setup
     client = APIClient()
-    client.force_authenticate(user)
+    # A session, not force_authenticate: writes here are credential
+    # administration and the endpoint requires an interactive session.
+    client.force_login(user)
     with patch('patient_portal.api.webhook_views.validate_webhook_url'):
         response = client.post('/api/v1/webhooks/subscriptions/', {
             'organization': org.pk, 'url': subscription.url, 'event_types': ['lab.updated'],
@@ -156,7 +158,7 @@ def test_patient_and_expired_admin_cannot_manage_subscriptions(setup):
 
 def test_subscription_url_errors_never_expose_exception_details(setup):
     client = APIClient()
-    client.force_authenticate(setup[3])
+    client.force_login(setup[3])
     # Patch the shared implementation, not the view-local alias: DRF copies the
     # model-field validator onto the serializer field, so the model path is the
     # one that produces this error and the alias is never reached on a failure.
@@ -726,7 +728,7 @@ def test_inbound_quota_is_per_authenticated_source(setup, settings):
 
 def test_subscription_validation_does_not_resolve_dns(setup):
     client = APIClient()
-    client.force_authenticate(setup[3])
+    client.force_login(setup[3])
     with patch('socket.getaddrinfo', side_effect=AssertionError('DNS in request')):
         result = client.post('/api/v1/webhooks/subscriptions/', {
             'organization': setup[0].pk, 'url': 'https://unresolvable.example/events',
@@ -866,7 +868,7 @@ def test_subscription_mutations_require_csrf(setup):
 def test_disclosed_secret_is_not_cacheable(setup):
     org, other, person, user, subscription = setup
     client = APIClient()
-    client.force_authenticate(user)
+    client.force_login(user)
     with patch('patient_portal.api.webhook_views.validate_webhook_url'):
         response = client.post('/api/v1/webhooks/subscriptions/', {
             'organization': org.pk, 'url': subscription.url, 'event_types': ['lab.updated'],
@@ -1137,7 +1139,9 @@ def trusted_professional(setup):
     GroupAccess.objects.create(identity=professional, org=other, role='doctor')
     OrgTrust.objects.create(granting_org=org, trusted_org=other)
     client = APIClient()
-    client.force_authenticate(user=professional)
+    # A session, so what this fixture measures is the trust rule and not
+    # the interactive-session rule that writes also have to clear.
+    client.force_login(professional)
     return client, org, other, professional
 
 
@@ -1182,10 +1186,44 @@ def test_a_trust_still_reads_the_subscriptions_it_could_always_see(trusted_profe
     assert 'https://subscriber.example/events' in urls
 
 
+def test_a_delegated_machine_credential_cannot_configure_egress(setup):
+    """The org admin's own authority, presented without the org admin.
+
+    A subscription is a long-lived egress channel and create() discloses its
+    signing secret, so administering one is credential administration — the act
+    ServiceApplicationViewSet already requires an interactive session for. An
+    OAuth2 access token this admin delegated to a third-party application
+    carries `patient/*.write`, and without this rule the application could turn
+    that scoped, revocable, expiring grant into a permanent feed of the
+    organization's patient events pointed at a URL of its own choosing.
+    """
+    org, other, person, user, subscription = setup
+    machine = APIClient()
+    machine.force_authenticate(user, token='delegated-token')
+    with patch('patient_portal.api.webhook_views.validate_webhook_url'):
+        created = machine.post('/api/v1/webhooks/subscriptions/', {
+            'organization': org.pk, 'url': 'https://third-party.example/events',
+            'event_types': ['patient.changed'],
+        }, format='json')
+    assert created.status_code == 403, created.data
+    assert not WebhookSubscription.objects.filter(
+        url='https://third-party.example/events').exists()
+    assert machine.patch(f'/api/v1/webhooks/subscriptions/{subscription.pk}/',
+                         {'url': 'https://third-party.example/events'},
+                         format='json').status_code == 403
+    assert machine.delete(
+        f'/api/v1/webhooks/subscriptions/{subscription.pk}/').status_code == 403
+    subscription.refresh_from_db()
+    assert subscription.url == 'https://subscriber.example/events'
+    # Only writes moved. A header-authenticated caller still reads the listing
+    # on exactly the terms it always did — scope-checked, no secret disclosed —
+    # which test_csrf_protected_endpoint_still_serves_its_real_callers pins.
+
+
 def test_a_direct_org_admin_still_administers_its_own_subscriptions(setup):
     org, other, person, user, subscription = setup
     client = APIClient()
-    client.force_authenticate(user=user)  # live org_admin grant on org
+    client.force_login(user)  # live org_admin grant on org
     response = client.post('/api/v1/webhooks/subscriptions/', {
         'organization': org.pk, 'url': 'https://partner.example/events',
         'event_types': ['patient.changed'],
