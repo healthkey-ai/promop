@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 EVENT_TYPES = ('patient.changed', 'lab.updated', 'document.received', 'foundation.synced')
 # The patient tables a subscriber hears about. One list, so a bulk writer that
 # announces its own work cannot cover a different set than the signals do.
+# Which event a save carries, by table. Shared by the signal and the bulk
+# publisher: a subscriber that asked only for document.received hears about a
+# document however it was written, and not only when it arrived one at a time.
+_SAVE_EVENT_TYPES = {'measurement': 'lab.updated', 'patientdocument': 'document.received'}
 PATIENT_EVENT_MODELS = (
     'omop_core.Person', 'omop_core.PatientRecord', 'omop_core.Measurement',
     'omop_core.PatientDocument', 'omop_core.ConditionOccurrence',
@@ -206,7 +210,8 @@ def publish_patient_bulk_change(person_id, model_name, count, operation='bulk_sa
     organization_id = (PatientRecord.objects.filter(person_id=person_id)
                        .values_list('organization_id', flat=True).first())
     if organization_id is not None and count:
-        event_type = 'lab.updated' if model_name == 'measurement' and operation != 'bulk_deleted' else 'patient.changed'
+        event_type = 'patient.changed' if operation == 'bulk_deleted' else _SAVE_EVENT_TYPES.get(
+            model_name, 'patient.changed')
         publish_event(organization_id, event_type, {
             'person_id': person_id, 'resource_type': f'{app_label}.{model_name}',
             'operation': operation, 'count': count,
@@ -226,9 +231,7 @@ def patient_data_changed(sender, instance, raw=False, signal=None, **kwargs):
         return
     event_type = 'patient.changed'
     if signal is post_save:
-        event_type = {'measurement': 'lab.updated', 'patientdocument': 'document.received'}.get(
-            sender._meta.model_name, event_type,
-        )
+        event_type = _SAVE_EVENT_TYPES.get(sender._meta.model_name, event_type)
     publish_event(organization_id, event_type, {
         'person_id': person_id, 'resource_id': str(instance.pk),
         'resource_type': sender._meta.label_lower,

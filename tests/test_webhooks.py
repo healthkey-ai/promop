@@ -1205,6 +1205,7 @@ def test_a_patient_copy_announces_one_event_per_table_not_one_per_row(setup):
     with suppress_patient_record_refresh():
         for _ in range(5):
             MeasurementFactory(person=person, measurement_concept=concept)
+        PatientDocument.objects.create(person=person, doc_type='OTHER', title='Referral')
     payload = read_patient('default', person.pk)
 
     WebhookDelivery.objects.all().delete()
@@ -1213,9 +1214,12 @@ def test_a_patient_copy_announces_one_event_per_table_not_one_per_row(setup):
 
     events = [d.payload for d in WebhookDelivery.objects.all()]
     assert all(e['data']['person_id'] == 420002 for e in events), events
-    # One per table that received rows, and nothing per row.
+    # One per table that received rows, and nothing per row. Each carries the
+    # event type that table's writes always carry — a subscriber listening only
+    # for document.received still hears about a document that arrived by copy.
     assert sorted((e['type'], e['data']['resource_type'], e['data']['operation'],
                    e['data']['count']) for e in events) == [
+        ('document.received', 'omop_core.patientdocument', 'bulk_saved', 1),
         ('lab.updated', 'omop_core.measurement', 'bulk_saved', 5),
         ('patient.changed', 'omop_core.patientrecord', 'bulk_saved', 1),
         ('patient.changed', 'omop_core.person', 'bulk_saved', 1),
@@ -1228,6 +1232,41 @@ def test_a_patient_copy_announces_one_event_per_table_not_one_per_row(setup):
     replaced = [d.payload for d in WebhookDelivery.objects.all()]
     assert not [e for e in replaced if 'deleted' in e['data']['operation']], replaced
     assert Measurement.objects.filter(person_id=420002).count() == 5
+
+
+def test_a_replace_that_moves_a_patient_tells_the_organization_that_lost_them(setup):
+    """--replace may name a different organization, which moves the patient.
+
+    The aggregates go to the organization that now holds the data. Without a
+    word to the one it left, that tenant's subscriber keeps a patient it no
+    longer has — and this is the one case where rows really were deleted from
+    an organization rather than rewritten under it.
+    """
+    from omop_core.services.patient_transfer import apply_patient, read_patient
+    from omop_core.signals import suppress_patient_record_refresh
+    from tests.factories import ConceptFactory, MeasurementFactory
+
+    org, other, person, user, subscription = setup  # `subscription` belongs to org
+    gaining = WebhookSubscription.objects.create(
+        organization=other, url='https://gaining.example/events',
+        event_types=['patient.changed', 'lab.updated'],
+    )
+    with suppress_patient_record_refresh():
+        MeasurementFactory(person=person, measurement_concept=ConceptFactory())
+    payload = read_patient('default', person.pk)
+
+    WebhookDelivery.objects.all().delete()
+    apply_patient(payload, other, target_person_id=person.pk, replace=True)
+
+    departure = [d.payload for d in WebhookDelivery.objects.filter(subscription=subscription)]
+    assert [(e['type'], e['data']['resource_type'], e['data']['operation'])
+            for e in departure] == [
+        ('patient.changed', 'omop_core.person', 'bulk_deleted'),
+    ], departure
+    # The organization that now holds the patient hears the arrival instead.
+    arrival = sorted(e['data']['resource_type']
+                     for e in (d.payload for d in WebhookDelivery.objects.filter(subscription=gaining)))
+    assert arrival == ['omop_core.measurement', 'omop_core.patientrecord', 'omop_core.person']
 
 
 def test_a_dry_run_copy_announces_nothing(setup):

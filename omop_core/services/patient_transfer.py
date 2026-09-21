@@ -313,19 +313,25 @@ def apply_patient(
             # shape the bulk API and FHIR-sync writers publish. Inside the
             # transaction, so the outbox rows commit with the data and a dry run
             # takes them back.
+            previous_org_id = None
             with suppress_webhook_events():
                 if Person.objects.filter(person_id=person_id).exists():
                     if not replace:
                         raise PatientCopyError(
                             f'Person {person_id} already exists here. Use --replace or --target-person-id.'
                         )
+                    # Read before the delete: --replace may move the patient to
+                    # another organization, and the one losing them has to hear
+                    # about it while its record still says so.
+                    previous_org_id = (PatientRecord.objects.filter(person_id=person_id)
+                                       .values_list('organization_id', flat=True).first())
                     delete_patient(person_id)
                 _Copier(payload, organization, person_id, stats).run()
                 refresh_patient_record(Person.objects.get(person_id=person_id))
                 # The source record may have no org, or there may be no source record at all.
                 PatientRecord.objects.filter(person_id=person_id).update(organization=organization)
             stats.person_id = person_id
-            _publish_copy_events(person_id, stats)
+            _publish_copy_events(person_id, stats, previous_org_id, organization.pk)
             if dry_run:
                 raise _Rollback
     except _Rollback:
@@ -333,17 +339,31 @@ def apply_patient(
     return stats
 
 
-def _publish_copy_events(person_id: int, stats: PatientCopyStats) -> None:
+def _publish_copy_events(person_id: int, stats: PatientCopyStats,
+                         previous_org_id: int | None, organization_id: int) -> None:
     """One aggregate per table for a patient this instance just wrote.
 
     Driven by the webhook model list rather than by everything the copy
     touched: a subscriber's vocabulary is those tables, and announcing a
     table it never hears about from any other writer would be a new event
     shape rather than the same news by a different route.
+
+    A --replace into a different organization moves the patient. The events
+    below go to the organization that now holds them, and would leave the one
+    that lost them believing it still has data that has been deleted, so that
+    organization is told first — while `person_id` is still its own reference
+    for the patient.
     """
     from django.apps import apps
-    from patient_portal.webhooks import PATIENT_EVENT_MODELS, publish_patient_bulk_change
+    from patient_portal.webhooks import (
+        PATIENT_EVENT_MODELS, publish_event, publish_patient_bulk_change,
+    )
 
+    if previous_org_id is not None and previous_org_id != organization_id:
+        publish_event(previous_org_id, 'patient.changed', {
+            'person_id': person_id, 'resource_type': 'omop_core.person',
+            'operation': 'bulk_deleted', 'count': 1,
+        })
     for label in PATIENT_EVENT_MODELS:
         model = apps.get_model(label)
         count = stats.created.get(model._meta.object_name, 0)
