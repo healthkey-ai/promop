@@ -31,9 +31,11 @@ from omop_core.models import (
     VisitOccurrence,
 )
 from omop_core.services.patient_transfer import (
+    COPY_SOURCE,
     PatientCopyError,
     PatientCopyStats,
     apply_patient,
+    copied_person_id,
     read_patient,
     select_person_ids,
 )
@@ -254,6 +256,55 @@ def test_copying_twice_needs_replace_and_does_not_duplicate(patient: Person):
     assert not Person.objects.filter(person_id=first.person_id).exists()
     assert Person.objects.exclude(person_id=SOURCE_ID).count() == 1
     assert Measurement.objects.filter(person_id=second.person_id).count() == 1
+
+
+def test_a_copy_survives_the_patient_being_deleted_elsewhere(patient: Person):
+    """The marker holds a generic foreign key, so nothing cascades with the Person.
+
+    `delete_patient` clears it, but the other ways a Person goes — account
+    self-deletion, admin delete, either bulk delete, bulk_import_fhir_bundle —
+    do not. A marker naming a patient who is gone used to answer "already
+    copied here" with a person_id that no longer resolves, so the source
+    patient could not be copied again: plain re-copy raised that error, and
+    --replace raised Person.DoesNotExist out of delete_patient.
+    """
+    org = OrganizationFactory(slug='target-org')
+    first = apply_patient(read_patient('default', SOURCE_ID), org)
+    # Exactly what patient_portal/api/views.py does, rather than delete_patient.
+    Person.objects.filter(person_id=first.person_id).delete()
+    assert copied_person_id(SOURCE_ID) is None
+
+    second = apply_patient(read_patient('default', SOURCE_ID), org)
+    assert second.person_id not in (None, first.person_id)
+    assert Measurement.objects.filter(person_id=second.person_id).count() == 1
+    # And the marker left behind does not pile up.
+    assert ProvenanceRecord.objects.filter(
+        source=COPY_SOURCE, source_user_id=str(SOURCE_ID),
+        content_type=ContentType.objects.get_for_model(Person),
+    ).count() == 1
+
+
+def test_replace_after_the_patient_was_deleted_elsewhere(patient: Person):
+    """--replace has nothing to replace, which is not an error."""
+    org = OrganizationFactory(slug='target-org')
+    first = apply_patient(read_patient('default', SOURCE_ID), org)
+    Person.objects.filter(person_id=first.person_id).delete()
+
+    second = apply_patient(read_patient('default', SOURCE_ID), org, replace=True)
+    assert Person.objects.filter(person_id=second.person_id).exists()
+    assert copied_person_id(SOURCE_ID) == second.person_id
+
+
+def test_a_live_copy_still_shadows_an_older_dead_one(patient: Person):
+    """Only the dead marker is ignored — a patient who is still here is found."""
+    org = OrganizationFactory(slug='target-org')
+    first = apply_patient(read_patient('default', SOURCE_ID), org)
+    Person.objects.filter(person_id=first.person_id).delete()
+    second = apply_patient(read_patient('default', SOURCE_ID), org)
+
+    assert copied_person_id(SOURCE_ID) == second.person_id
+    with pytest.raises(PatientCopyError, match='already copied'):
+        apply_patient(read_patient('default', SOURCE_ID), org)
 
 
 def test_an_identical_address_is_reused(patient: Person):

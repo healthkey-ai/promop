@@ -23,7 +23,7 @@ from typing import Any, TypedDict
 
 from django.contrib.contenttypes.models import ContentType
 from django.db import connection, models, transaction
-from django.db.models import Max, Model, Q
+from django.db.models import Max, Model, Q, QuerySet
 from psycopg import sql
 
 from omop_core.models import (
@@ -563,16 +563,35 @@ def _new_ids(model: type[Model], attname: str, count: int) -> list[int]:
 COPY_SOURCE: str = 'copy_patient'
 
 
-def copied_person_id(source_person_id: int) -> int | None:
-    """person_id here of a patient already copied from that source id."""
+def _copy_markers(source_person_id: int) -> QuerySet:
+    """Every marker written for that source patient, newest first."""
     return ProvenanceRecord.objects.filter(
         source=COPY_SOURCE, source_user_id=str(source_person_id),
         content_type=ContentType.objects.get_for_model(Person),
+    ).order_by('-created_at', '-id')
+
+
+def copied_person_id(source_person_id: int) -> int | None:
+    """person_id here of a patient already copied from that source id.
+
+    Only a patient who is still here counts. The marker holds a generic
+    foreign key, so nothing cascades when the Person row goes: delete_patient()
+    clears it, but the other five ways a Person is deleted — account
+    self-deletion, admin delete, the two bulk deletes, bulk_import_fhir_bundle
+    — leave it behind. A marker pointing at a patient who is gone would
+    otherwise answer "already copied here" with a person_id that no longer
+    resolves, and a re-copy would fail on it forever.
+    """
+    return _copy_markers(source_person_id).filter(
+        object_id__in=Person.objects.values('person_id'),
     ).values_list('object_id', flat=True).first()
 
 
 def _record_copy(source_person_id: int, person_id: int, organization: Organization) -> None:
-    """Record where this patient came from."""
+    """Record where this patient came from, replacing any marker left behind."""
+    _copy_markers(source_person_id).exclude(
+        object_id__in=Person.objects.values('person_id'),
+    ).delete()
     ProvenanceRecord.objects.create(
         source=COPY_SOURCE, source_user_id=str(source_person_id), target_patient_id=str(person_id),
         content_type=ContentType.objects.get_for_model(Person), object_id=person_id,
