@@ -3,7 +3,7 @@
 Source and target are the test database: a patient is read, then written as
 another person_id, which exercises the same remapping a real copy needs.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone as datetime_timezone
 from io import StringIO
 from typing import Any
 
@@ -11,6 +11,7 @@ import pytest
 from django.contrib.contenttypes.models import ContentType
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.utils import timezone
 
 from omop_core.models import (
     CareSite,
@@ -197,7 +198,7 @@ def test_org_is_assigned_when_the_source_has_no_record(patient: Person):
 
 
 def test_source_timestamps_survive_auto_now_fields(patient: Person):
-    past = datetime(2020, 5, 1, tzinfo=timezone.utc)
+    past = datetime(2020, 5, 1, tzinfo=datetime_timezone.utc)
     RecordRevision.objects.filter(patient_record__person_id=SOURCE_ID).update(changed_at=past)
     _copy()
 
@@ -261,9 +262,9 @@ def test_copying_twice_needs_replace_and_does_not_duplicate(patient: Person):
 def test_a_copy_survives_the_patient_being_deleted_elsewhere(patient: Person):
     """The marker holds a generic foreign key, so nothing cascades with the Person.
 
-    `delete_patient` clears it, but the other ways a Person goes — account
-    self-deletion, admin delete, either bulk delete, bulk_import_fhir_bundle —
-    do not. A marker naming a patient who is gone used to answer "already
+    `delete_patient` clears it; nothing else does — not account self-deletion,
+    the admin delete, either bulk delete, bulk_import_fhir_bundle,
+    delete_org_patients, nor the Django admin. A marker naming a patient who is gone used to answer "already
     copied here" with a person_id that no longer resolves, so the source
     patient could not be copied again: plain re-copy raised that error, and
     --replace raised Person.DoesNotExist out of delete_patient.
@@ -295,16 +296,56 @@ def test_replace_after_the_patient_was_deleted_elsewhere(patient: Person):
     assert copied_person_id(SOURCE_ID) == second.person_id
 
 
-def test_a_live_copy_still_shadows_an_older_dead_one(patient: Person):
-    """Only the dead marker is ignored — a patient who is still here is found."""
-    org = OrganizationFactory(slug='target-org')
-    first = apply_patient(read_patient('default', SOURCE_ID), org)
-    Person.objects.filter(person_id=first.person_id).delete()
-    second = apply_patient(read_patient('default', SOURCE_ID), org)
+def _marker(person_id: int, org: Any) -> ProvenanceRecord:
+    """A copy marker for SOURCE_ID naming person_id here."""
+    return ProvenanceRecord.objects.create(
+        source=COPY_SOURCE, source_user_id=str(SOURCE_ID), target_patient_id=str(person_id),
+        content_type=ContentType.objects.get_for_model(Person), object_id=person_id,
+        organization=org,
+    )
 
-    assert copied_person_id(SOURCE_ID) == second.person_id
+
+def test_a_live_copy_still_shadows_a_dead_one(patient: Person):
+    """Only the dead marker is ignored — a patient who is still here is found.
+
+    Both markers are written by hand, because _record_copy clears the dead one
+    as it writes the live one: the pair this asserts on cannot be produced by
+    copying twice, and a test that tried would be asserting on one marker.
+    """
+    org = OrganizationFactory(slug='target-org')
+    live = apply_patient(read_patient('default', SOURCE_ID), org)
+    ProvenanceRecord.objects.filter(
+        source=COPY_SOURCE, source_user_id=str(SOURCE_ID),
+        content_type=ContentType.objects.get_for_model(Person),
+    ).delete()
+    _marker(live.person_id, org)
+    dead = _marker(live.person_id + 7777, org)  # a patient who is not here
+    # The dead one is the newer, so ordering alone would return it: what makes
+    # the live one win has to be that the other patient is gone.
+    ProvenanceRecord.objects.filter(pk=dead.pk).update(
+        created_at=timezone.now() + timedelta(minutes=1),
+    )
+
+    assert copied_person_id(SOURCE_ID) == live.person_id
     with pytest.raises(PatientCopyError, match='already copied'):
         apply_patient(read_patient('default', SOURCE_ID), org)
+
+
+def test_the_newest_live_marker_wins(patient: Person):
+    """A chained copy (A to B to C) brings B's own markers with it, so two can
+    name a patient who is here. The one this copy wrote is the newer."""
+    org = OrganizationFactory(slug='target-org')
+    first = apply_patient(read_patient('default', SOURCE_ID), org)
+    older = apply_patient(read_patient('default', SOURCE_ID), org, replace=True)
+    # Same source, a second patient of ours, written after the first.
+    inherited = PersonFactory(person_id=older.person_id + 4242)
+    newer = _marker(inherited.person_id, org)
+    ProvenanceRecord.objects.filter(pk=newer.pk).update(
+        created_at=timezone.now() + timedelta(minutes=1),
+    )
+
+    assert Person.objects.filter(person_id=first.person_id).exists() is False
+    assert copied_person_id(SOURCE_ID) == inherited.person_id
 
 
 def test_an_identical_address_is_reused(patient: Person):
