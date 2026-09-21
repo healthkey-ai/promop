@@ -312,6 +312,9 @@ export interface PatientInfo {
   basal_energy_per_day_30d?: string | number;
   body_mass_avg_30d?: string | number;
 
+  // Genomic aggregates (computed, read-only)
+  tp53_disruption?: boolean | null;
+
   // Myeloma diagnostic criteria (computed, read-only)
   meets_crab?: boolean | null;
   meets_slim?: boolean | null;

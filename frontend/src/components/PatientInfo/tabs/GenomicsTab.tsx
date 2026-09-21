@@ -10,6 +10,7 @@ type Marker = { genomic_feature?: string; feature_type?: string; finding_categor
 
 const fields = [
   ['genomic_feature', 'Genomic feature'],
+  ['status', 'Finding status'],
   ['feature_type', 'Feature type'],
   ['finding_category', 'Finding category'],
   ['variant_name', 'Finding / variant name'],
@@ -40,7 +41,6 @@ const fields = [
   ['evidence_source', 'Interpretation evidence / source'],
   ['genomic_reference_sequence_id', 'Genomic reference sequence ID'],
   ['zygosity', 'Zygosity'],
-  ['status', 'Finding status'],
 ] as const;
 
 /** Fields rendered as `<select>` dropdowns with a fixed value set. */
