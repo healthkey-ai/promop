@@ -12208,9 +12208,9 @@ def field_choice_detail(request, pk):
 @api_view(['POST', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def field_choice_codes(request, choice_pk):
-    """POST: add a code to a choice.  DELETE: remove all codes (use detail for single)."""
+    """POST: add a code. DELETE: remove code_id, or all codes when omitted."""
 
-    from omop_core.models import FieldChoice, FieldChoiceCode
+    from omop_core.models import FieldChoice
     from .serializers import FieldChoiceCodeSerializer
     if not _can_manage_field_mappings(request.user):
         return Response({'detail': 'Organization admin access required to manage field choices.'}, status=status.HTTP_403_FORBIDDEN)
@@ -12225,7 +12225,20 @@ def field_choice_codes(request, choice_pk):
         serializer.save(choice=choice)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
-    # DELETE — remove all codes for this choice
+    # Scope an individual removal to its choice, without replacing sibling
+    # codes (including any another curator added after the editor loaded).
+    code_id = request.query_params.get('code_id')
+    if code_id is not None:
+        try:
+            code_id = serializers.IntegerField(min_value=1).run_validation(code_id)
+        except ValidationError as exc:
+            raise ValidationError({'code_id': exc.detail})
+        deleted, _ = choice.codes.filter(pk=code_id).delete()
+        if not deleted:
+            return Response({'detail': 'Code not found for this choice.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    # Preserve the existing explicit remove-all-codes operation.
     choice.codes.all().delete()
     return Response(status=status.HTTP_204_NO_CONTENT)
 
