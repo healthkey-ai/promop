@@ -314,6 +314,7 @@ def apply_patient(
             # transaction, so the outbox rows commit with the data and a dry run
             # takes them back.
             previous_org_id = None
+            previous_counts: dict[str, int] = {}
             with suppress_webhook_events():
                 if Person.objects.filter(person_id=person_id).exists():
                     if not replace:
@@ -322,16 +323,21 @@ def apply_patient(
                         )
                     # Read before the delete: --replace may move the patient to
                     # another organization, and the one losing them has to hear
-                    # about it while its record still says so.
+                    # about it while its record still says so. The census is for
+                    # the other direction — a source that dropped this patient's
+                    # labs leaves tables empty here, and a subscriber told only
+                    # what arrived would mirror rows that are gone.
                     previous_org_id = (PatientRecord.objects.filter(person_id=person_id)
                                        .values_list('organization_id', flat=True).first())
+                    previous_counts = _patient_event_counts(person_id)
                     delete_patient(person_id)
                 _Copier(payload, organization, person_id, stats).run()
                 refresh_patient_record(Person.objects.get(person_id=person_id))
                 # The source record may have no org, or there may be no source record at all.
                 PatientRecord.objects.filter(person_id=person_id).update(organization=organization)
             stats.person_id = person_id
-            _publish_copy_events(person_id, stats, previous_org_id, organization.pk)
+            _publish_copy_events(person_id, stats, previous_org_id, previous_counts,
+                                 organization.pk)
             if dry_run:
                 raise _Rollback
     except _Rollback:
@@ -339,8 +345,18 @@ def apply_patient(
     return stats
 
 
+def _patient_event_counts(person_id: int) -> dict[str, int]:
+    """Rows this patient has here, per table a subscriber hears about."""
+    from django.apps import apps
+    from patient_portal.webhooks import PATIENT_EVENT_MODELS
+
+    return {label: apps.get_model(label).objects.filter(person_id=person_id).count()
+            for label in PATIENT_EVENT_MODELS}
+
+
 def _publish_copy_events(person_id: int, stats: PatientCopyStats,
-                         previous_org_id: int | None, organization_id: int) -> None:
+                         previous_org_id: int | None, previous_counts: dict[str, int],
+                         organization_id: int) -> None:
     """One aggregate per table for a patient this instance just wrote.
 
     Driven by the webhook model list rather than by everything the copy
@@ -359,7 +375,8 @@ def _publish_copy_events(person_id: int, stats: PatientCopyStats,
         PATIENT_EVENT_MODELS, publish_event, publish_patient_bulk_change,
     )
 
-    if previous_org_id is not None and previous_org_id != organization_id:
+    moved = previous_org_id is not None and previous_org_id != organization_id
+    if moved:
         publish_event(previous_org_id, 'patient.changed', {
             'person_id': person_id, 'resource_type': 'omop_core.person',
             'operation': 'bulk_deleted', 'count': 1,
@@ -367,8 +384,23 @@ def _publish_copy_events(person_id: int, stats: PatientCopyStats,
     for label in PATIENT_EVENT_MODELS:
         model = apps.get_model(label)
         count = stats.created.get(model._meta.object_name, 0)
-        publish_patient_bulk_change(person_id, model._meta.model_name, count,
-                                    app_label=model._meta.app_label)
+        if model is PatientRecord and not count:
+            # Derived here on every copy, even when the source had no record row
+            # to copy, so the write happened whether or not the copier made it.
+            count = PatientRecord.objects.filter(person_id=person_id).count()
+        if count:
+            publish_patient_bulk_change(person_id, model._meta.model_name, count,
+                                        app_label=model._meta.app_label,
+                                        organization_id=organization_id)
+        elif previous_counts.get(label) and not moved:
+            # The table had rows here and the copy brought none, so --replace
+            # emptied it. Announced to the organization that held them; when the
+            # patient moved, the departure event above already covers every
+            # table at once and this organization never had the rows.
+            publish_patient_bulk_change(person_id, model._meta.model_name,
+                                        previous_counts[label], operation='bulk_deleted',
+                                        app_label=model._meta.app_label,
+                                        organization_id=organization_id)
 
 
 class _Copier:

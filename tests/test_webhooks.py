@@ -1156,7 +1156,10 @@ def test_a_trust_no_longer_reaches_subscription_creation(trusted_professional):
         'organization': org.pk, 'url': 'https://attacker.example/collect',
         'event_types': ['patient.changed'],
     }, format='json')
-    assert response.status_code in (400, 403), response.data
+    # 403 exactly, so this still fails when the permission class stops checking:
+    # the serializer and the narrowed queryset refuse a trust too, with 400 and
+    # 404, and a range that accepts those cannot tell the gate from its backstops.
+    assert response.status_code == 403, response.data
     assert not WebhookSubscription.objects.filter(url='https://attacker.example/collect').exists()
 
 
@@ -1269,6 +1272,58 @@ def test_a_replace_that_moves_a_patient_tells_the_organization_that_lost_them(se
     assert arrival == ['omop_core.measurement', 'omop_core.patientrecord', 'omop_core.person']
 
 
+def test_a_replace_that_empties_a_table_says_so(setup):
+    """The other direction: the source dropped this patient's labs.
+
+    The copy correctly deletes the five rows here and brings none. Told only
+    what arrived, a subscriber would mirror five measurements that no longer
+    exist — worse than the per-row storm this replaced, which at least said
+    something.
+    """
+    from omop_core.models import Measurement
+    from omop_core.services.patient_transfer import apply_patient, read_patient
+    from omop_core.signals import suppress_patient_record_refresh
+    from tests.factories import ConceptFactory, MeasurementFactory
+
+    org, other, person, user, subscription = setup
+    with suppress_patient_record_refresh():
+        for _ in range(5):
+            MeasurementFactory(person=person, measurement_concept=ConceptFactory())
+        emptied = Person.objects.create(person_id=420004)
+        PatientRecord.objects.create(person=emptied, organization=org)
+    payload = read_patient('default', emptied.pk)  # the same patient, without labs
+
+    WebhookDelivery.objects.all().delete()
+    apply_patient(payload, org, target_person_id=person.pk, replace=True)
+    assert not Measurement.objects.filter(person_id=person.pk).exists()
+
+    events = [d.payload for d in WebhookDelivery.objects.all()]
+    assert ('patient.changed', 'omop_core.measurement', 'bulk_deleted', 5) in [
+        (e['type'], e['data']['resource_type'], e['data']['operation'], e['data']['count'])
+        for e in events
+    ], events
+
+
+def test_a_copy_from_a_source_without_a_patient_record_still_announces_one(setup):
+    """refresh_patient_record derives the record here whether or not the source
+    had one to copy, so the write happened and the read model changed."""
+    from omop_core.services.patient_transfer import apply_patient, read_patient
+    from omop_core.signals import suppress_patient_record_refresh
+
+    org, other, person, user, subscription = setup
+    with suppress_patient_record_refresh():
+        recordless = Person.objects.create(person_id=420005)
+    payload = read_patient('default', recordless.pk)
+    assert not payload['rows']['omop_core.PatientRecord']
+
+    WebhookDelivery.objects.all().delete()
+    stats = apply_patient(payload, org, target_person_id=420006)
+    assert stats.created['PatientRecord'] == 0
+    assert 'omop_core.patientrecord' in [
+        d.payload['data']['resource_type'] for d in WebhookDelivery.objects.all()
+    ]
+
+
 def test_a_dry_run_copy_announces_nothing(setup):
     """The outbox row is written inside the copy's transaction, so a rollback
     takes it back — without that, a dry run would tell subscribers about data
@@ -1299,9 +1354,22 @@ def test_a_delegated_machine_credential_cannot_configure_egress(setup):
     that scoped, revocable, expiring grant into a permanent feed of the
     organization's patient events pointed at a URL of its own choosing.
     """
+    from oauth2_provider.models import AccessToken, Application
+
     org, other, person, user, subscription = setup
+    # The real credential shape, not a bare string: an authorization-code grant
+    # this admin approved for a third-party application, carrying the write
+    # scope and their own identity.
+    app = Application.objects.create(
+        name='Third-party integration', client_type=Application.CLIENT_CONFIDENTIAL,
+        authorization_grant_type=Application.GRANT_AUTHORIZATION_CODE, user=user,
+    )
+    token = AccessToken.objects.create(
+        application=app, user=user, token='delegated-egress-token',
+        scope='patient/*.write', expires=timezone.now() + timedelta(hours=1),
+    )
     machine = APIClient()
-    machine.force_authenticate(user, token='delegated-token')
+    machine.force_authenticate(user, token=token)
     with patch('patient_portal.api.webhook_views.validate_webhook_url'):
         created = machine.post('/api/v1/webhooks/subscriptions/', {
             'organization': org.pk, 'url': 'https://third-party.example/events',

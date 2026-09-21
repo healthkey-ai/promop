@@ -98,9 +98,14 @@ work with, so the list matches the data they already see. Creating, editing or
 deleting a subscription follows `get_direct_admin_orgs`: platform staff and
 direct `org_admin` grants only. A trust is granted for data access, and naming
 where an organization's events are sent is data-egress configuration, so a trust
-does not carry it ([decision](soc2/webhook-egress-authority.md)). OAuth and service tokens must
-additionally hold the relevant read/write scope. Partner tokens (Firebase,
-SAML) carry no scopes at all, so for them the two sets above — wide for reads,
+does not carry it ([decision](soc2/webhook-egress-authority.md)). Writes also
+require an interactive session — a session or a partner (Firebase/SAML) token —
+because creating a subscription mints a long-lived signing secret and names
+where an organization's data goes, which is credential administration and must
+require the person rather than something they handed out. So an OAuth access
+token or a service credential **cannot create, edit or delete a subscription at
+any scope**; it can read, and reads still need the relevant scope. Partner
+tokens carry no scopes at all, so for them the two sets above — wide for reads,
 direct grants only for writes — are the whole gate; session callers are covered by CSRF enforcement on the endpoint. The 201 response includes
 the generated `secret` once: store it at the subscriber. List, detail, update,
 and delivery-log responses never expose the secret. Subscriptions cannot be
