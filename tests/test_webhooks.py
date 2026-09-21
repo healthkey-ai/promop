@@ -1186,6 +1186,69 @@ def test_a_trust_still_reads_the_subscriptions_it_could_always_see(trusted_profe
     assert 'https://subscriber.example/events' in urls
 
 
+def test_a_patient_copy_announces_one_event_per_table_not_one_per_row(setup):
+    """copy_patient writes a whole patient at once, and signals cannot see it.
+
+    Left to them, an import fires one event per copied row, and `--replace`
+    first fires one `deleted` per row of the data being replaced — an operator
+    re-syncing a cohort would queue a delivery per clinical row, each
+    announcing a removal that did not happen. The copy announces its own work
+    instead, the same way the bulk API and FHIR-sync writers do.
+    """
+    from omop_core.models import Measurement
+    from omop_core.services.patient_transfer import apply_patient, read_patient
+    from omop_core.signals import suppress_patient_record_refresh
+    from tests.factories import ConceptFactory, MeasurementFactory
+
+    org, other, person, user, subscription = setup
+    concept = ConceptFactory(concept_name='Haemoglobin', concept_code='718-7')
+    with suppress_patient_record_refresh():
+        for _ in range(5):
+            MeasurementFactory(person=person, measurement_concept=concept)
+    payload = read_patient('default', person.pk)
+
+    WebhookDelivery.objects.all().delete()
+    stats = apply_patient(payload, org, target_person_id=420002)
+    assert stats.created['Measurement'] == 5
+
+    events = [d.payload for d in WebhookDelivery.objects.all()]
+    assert all(e['data']['person_id'] == 420002 for e in events), events
+    # One per table that received rows, and nothing per row.
+    assert sorted((e['type'], e['data']['resource_type'], e['data']['operation'],
+                   e['data']['count']) for e in events) == [
+        ('lab.updated', 'omop_core.measurement', 'bulk_saved', 5),
+        ('patient.changed', 'omop_core.patientrecord', 'bulk_saved', 1),
+        ('patient.changed', 'omop_core.person', 'bulk_saved', 1),
+    ]
+
+    # --replace deletes the patient's rows before writing them again. That is
+    # one patient being rewritten, not five measurements being removed.
+    WebhookDelivery.objects.all().delete()
+    apply_patient(payload, org, target_person_id=420002, replace=True)
+    replaced = [d.payload for d in WebhookDelivery.objects.all()]
+    assert not [e for e in replaced if 'deleted' in e['data']['operation']], replaced
+    assert Measurement.objects.filter(person_id=420002).count() == 5
+
+
+def test_a_dry_run_copy_announces_nothing(setup):
+    """The outbox row is written inside the copy's transaction, so a rollback
+    takes it back — without that, a dry run would tell subscribers about data
+    this instance does not have."""
+    from omop_core.services.patient_transfer import apply_patient, read_patient
+    from omop_core.signals import suppress_patient_record_refresh
+    from tests.factories import ConceptFactory, MeasurementFactory
+
+    org, other, person, user, subscription = setup
+    with suppress_patient_record_refresh():
+        MeasurementFactory(person=person, measurement_concept=ConceptFactory())
+    payload = read_patient('default', person.pk)
+
+    WebhookDelivery.objects.all().delete()
+    apply_patient(payload, org, target_person_id=420003, dry_run=True)
+    assert not Person.objects.filter(person_id=420003).exists()
+    assert not WebhookDelivery.objects.exists()
+
+
 def test_a_delegated_machine_credential_cannot_configure_egress(setup):
     """The org admin's own authority, presented without the org admin.
 

@@ -300,26 +300,55 @@ def apply_patient(
     replace: bool = False, dry_run: bool = False,
 ) -> PatientCopyStats:
     """Write a read_patient payload as a patient of organization, in one transaction."""
+    from patient_portal.webhooks import suppress_webhook_events
+
     stats = PatientCopyStats()
     person_id = target_person_id or payload['person']['person_id']
     try:
         with transaction.atomic(), suppress_patient_record_refresh():
-            if Person.objects.filter(person_id=person_id).exists():
-                if not replace:
-                    raise PatientCopyError(
-                        f'Person {person_id} already exists here. Use --replace or --target-person-id.'
-                    )
-                delete_patient(person_id)
-            _Copier(payload, organization, person_id, stats).run()
-            refresh_patient_record(Person.objects.get(person_id=person_id))
-            # The source record may have no org, or there may be no source record at all.
-            PatientRecord.objects.filter(person_id=person_id).update(organization=organization)
+            # A copy writes every table this patient has, so the per-row signals
+            # would fire once per row — and on --replace, one `deleted` per row
+            # of the data being replaced, which is not what happened to the
+            # patient. Subscribers get one aggregate per table instead, the same
+            # shape the bulk API and FHIR-sync writers publish. Inside the
+            # transaction, so the outbox rows commit with the data and a dry run
+            # takes them back.
+            with suppress_webhook_events():
+                if Person.objects.filter(person_id=person_id).exists():
+                    if not replace:
+                        raise PatientCopyError(
+                            f'Person {person_id} already exists here. Use --replace or --target-person-id.'
+                        )
+                    delete_patient(person_id)
+                _Copier(payload, organization, person_id, stats).run()
+                refresh_patient_record(Person.objects.get(person_id=person_id))
+                # The source record may have no org, or there may be no source record at all.
+                PatientRecord.objects.filter(person_id=person_id).update(organization=organization)
             stats.person_id = person_id
+            _publish_copy_events(person_id, stats)
             if dry_run:
                 raise _Rollback
     except _Rollback:
         pass
     return stats
+
+
+def _publish_copy_events(person_id: int, stats: PatientCopyStats) -> None:
+    """One aggregate per table for a patient this instance just wrote.
+
+    Driven by the webhook model list rather than by everything the copy
+    touched: a subscriber's vocabulary is those tables, and announcing a
+    table it never hears about from any other writer would be a new event
+    shape rather than the same news by a different route.
+    """
+    from django.apps import apps
+    from patient_portal.webhooks import PATIENT_EVENT_MODELS, publish_patient_bulk_change
+
+    for label in PATIENT_EVENT_MODELS:
+        model = apps.get_model(label)
+        count = stats.created.get(model._meta.object_name, 0)
+        publish_patient_bulk_change(person_id, model._meta.model_name, count,
+                                    app_label=model._meta.app_label)
 
 
 class _Copier:

@@ -22,6 +22,14 @@ from patient_portal.models import WebhookDelivery, WebhookSubscription
 
 logger = logging.getLogger(__name__)
 EVENT_TYPES = ('patient.changed', 'lab.updated', 'document.received', 'foundation.synced')
+# The patient tables a subscriber hears about. One list, so a bulk writer that
+# announces its own work cannot cover a different set than the signals do.
+PATIENT_EVENT_MODELS = (
+    'omop_core.Person', 'omop_core.PatientRecord', 'omop_core.Measurement',
+    'omop_core.PatientDocument', 'omop_core.ConditionOccurrence',
+    'omop_core.DrugExposure', 'omop_core.Observation', 'omop_core.ProcedureOccurrence',
+    'omop_core.PatientTrialEnrollment', 'omop_oncology.Episode',
+)
 _suppress_events = ContextVar('suppress_webhook_events', default=False)
 
 
@@ -187,7 +195,8 @@ INBOUND_HANDLERS = {
 }
 
 
-def publish_patient_bulk_change(person_id, model_name, count, operation='bulk_saved'):
+def publish_patient_bulk_change(person_id, model_name, count, operation='bulk_saved',
+                                app_label='omop_core'):
     # Honour the suppressor too: a caller that wraps an ingest in
     # suppress_webhook_events() expecting silence would otherwise still get the
     # aggregate. Every current call site publishes outside the block, so this
@@ -199,7 +208,7 @@ def publish_patient_bulk_change(person_id, model_name, count, operation='bulk_sa
     if organization_id is not None and count:
         event_type = 'lab.updated' if model_name == 'measurement' and operation != 'bulk_deleted' else 'patient.changed'
         publish_event(organization_id, event_type, {
-            'person_id': person_id, 'resource_type': f'omop_core.{model_name}',
+            'person_id': person_id, 'resource_type': f'{app_label}.{model_name}',
             'operation': operation, 'count': count,
         })
 
@@ -230,12 +239,7 @@ def patient_data_changed(sender, instance, raw=False, signal=None, **kwargs):
 def connect_patient_signals():
     from django.apps import apps
 
-    for label in (
-        'omop_core.Person', 'omop_core.PatientRecord', 'omop_core.Measurement',
-        'omop_core.PatientDocument', 'omop_core.ConditionOccurrence',
-        'omop_core.DrugExposure', 'omop_core.Observation', 'omop_core.ProcedureOccurrence',
-        'omop_core.PatientTrialEnrollment', 'omop_oncology.Episode',
-    ):
+    for label in PATIENT_EVENT_MODELS:
         model = apps.get_model(label)
         for signal in (post_save, post_delete):
             signal.connect(patient_data_changed, sender=model, dispatch_uid=f'webhooks.{label}')
