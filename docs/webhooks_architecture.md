@@ -74,6 +74,7 @@ Different sources behind one IP have separate quotas. Invalid signatures do not
 consume a source quota. A 429 includes `Retry-After`; wait that many seconds,
 then retry with a fresh signature/timestamp and the same ID/body. A per-IP ingress bucket
 (`WEBHOOK_INGRESS_RATE`, default 1,200/minute) also applies, in front of
+`WEBHOOK_TRUSTED_PROXY_DEPTH` is what makes that meter unforgeable: the client address is taken that many entries from the right of `X-Forwarded-For`, so a value larger than the number of proxies actually in front of the deployment lets a caller choose its own bucket. It is 1 on Render; use 0 when nothing fronts the application.
 signature verification, so traffic that never verifies is still metered. It is
 deliberately set above the per-source quota so a correctly signed sender always
 meets its own limit first; the project's generic 60/minute anonymous bucket is
@@ -251,7 +252,7 @@ and timestamps. Response bodies, destination URLs, secrets, and notification
 payloads are excluded. Dead letters remain available for investigation; there
 is no automatic reset of exhausted attempts.
 
-Migrations `patient_portal.0018` and `0019` add three tables, a uniqueness constraint,
+Migrations `patient_portal.0021` and `0022` add three tables, a uniqueness constraint,
 and a partial index for active deliveries;
 it does not modify existing clinical rows. Apply migrations before web/worker
 deployment. Treat signing secrets and delivery records as protected application

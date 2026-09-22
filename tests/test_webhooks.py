@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import socket
+import urllib3
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
@@ -643,6 +644,123 @@ def test_private_destinations_rejected(address):
     with patch('socket.getaddrinfo', return_value=[(socket.AF_INET, 1, 6, '', (address, 443))]):
         with pytest.raises(ValueError):
             resolve_webhook_url('https://subscriber.example/')
+
+
+DUAL_STACK = [
+    (socket.AF_INET6, 1, 6, '', ('2606:4700:4700::1111', 443, 0, 0)),
+    (socket.AF_INET, 1, 6, '', ('8.8.8.8', 443)),
+]
+
+
+def test_only_the_first_address_of_each_family_is_a_candidate():
+    """A hostname with many records must not turn one attempt into many."""
+    many = [(socket.AF_INET, 1, 6, '', (f'8.8.8.{n}', 443)) for n in range(1, 9)]
+    many.append((socket.AF_INET6, 1, 6, '', ('2606:4700:4700::1111', 443, 0, 0)))
+    with patch('socket.getaddrinfo', return_value=many):
+        _, addresses = resolve_webhook_url('https://subscriber.example/')
+    assert addresses == ['8.8.8.1', '2606:4700:4700::1111']
+
+
+def test_a_dual_stack_subscriber_is_tried_over_ipv4_first():
+    """Sorting the strings put '2606:...' before '8.8.8.8' and pinned IPv6.
+
+    On a runtime without IPv6 egress that is a connection failure on every
+    attempt, and the stored error is a fixed token, so nothing says why.
+    """
+    with patch('socket.getaddrinfo', return_value=DUAL_STACK):
+        parsed, addresses = resolve_webhook_url('https://subscriber.example/')
+    assert addresses == ['8.8.8.8', '2606:4700:4700::1111']
+
+
+def test_every_resolved_address_is_still_validated():
+    mixed = [(socket.AF_INET, 1, 6, '', ('8.8.8.8', 443)),
+             (socket.AF_INET, 1, 6, '', ('127.0.0.1', 443))]
+    with patch('socket.getaddrinfo', return_value=mixed):
+        with pytest.raises(ValueError):
+            resolve_webhook_url('https://subscriber.example/')
+
+
+def test_a_refused_address_falls_back_to_the_next_validated_one():
+    pools, pool_kwargs = [], []
+
+    def make_pool(address, **kwargs):
+        pool = Mock()
+        if address == '8.8.8.8':
+            pool.urlopen.side_effect = urllib3.exceptions.NewConnectionError(Mock(), 'no route')
+        else:
+            pool.urlopen.return_value = Mock(status=200)
+        pools.append((address, pool))
+        pool_kwargs.append(kwargs)
+        return pool
+
+    with patch('socket.getaddrinfo', return_value=DUAL_STACK):
+        with patch('patient_portal.webhooks.urllib3.HTTPSConnectionPool', side_effect=make_pool):
+            assert send_webhook('https://subscriber.example/', {'id': 'x'}, 'secret', 'delivery') == 200
+
+    assert [address for address, _ in pools] == ['8.8.8.8', '2606:4700:4700::1111']
+    for _, pool in pools:
+        pool.close.assert_called_once()
+    # The pinning property has to hold on the second pool too, not just the first.
+    for kwargs in pool_kwargs:
+        assert kwargs['server_hostname'] == 'subscriber.example'
+        assert kwargs['assert_hostname'] == 'subscriber.example'
+        assert kwargs['cert_reqs'] == 'CERT_REQUIRED'
+        assert kwargs['retries'] is False
+        assert (kwargs['timeout'].connect_timeout, kwargs['timeout'].read_timeout) == (5, 10)
+
+
+def test_a_blackholed_address_times_out_and_still_falls_over():
+    """urllib3 2.7.0: NewConnectionError subclasses ConnectTimeoutError.
+
+    A route that is dropped rather than refused — the IPv6-without-egress case
+    — raises the parent, so catching only NewConnectionError would not fail over
+    in the very scenario the ordering change exists for.
+    """
+    attempted = []
+
+    def make_pool(address, **kwargs):
+        attempted.append(address)
+        pool = Mock()
+        if address == '8.8.8.8':
+            pool.urlopen.side_effect = urllib3.exceptions.ConnectTimeoutError('timed out')
+        else:
+            pool.urlopen.return_value = Mock(status=204)
+        return pool
+
+    with patch('socket.getaddrinfo', return_value=DUAL_STACK):
+        with patch('patient_portal.webhooks.urllib3.HTTPSConnectionPool', side_effect=make_pool):
+            assert send_webhook('https://subscriber.example/', {'id': 'x'}, 'secret', 'd') == 204
+    assert attempted == ['8.8.8.8', '2606:4700:4700::1111']
+
+
+def test_a_failure_after_the_request_is_on_the_wire_is_not_retried_elsewhere():
+    """A read timeout may mean the peer already acted; retrying is a resend."""
+    calls = []
+
+    def make_pool(address, **kwargs):
+        calls.append(address)
+        pool = Mock()
+        pool.urlopen.side_effect = urllib3.exceptions.ReadTimeoutError(Mock(), '/', 'timed out')
+        return pool
+
+    with patch('socket.getaddrinfo', return_value=DUAL_STACK):
+        with patch('patient_portal.webhooks.urllib3.HTTPSConnectionPool', side_effect=make_pool):
+            with pytest.raises(urllib3.exceptions.ReadTimeoutError):
+                send_webhook('https://subscriber.example/', {'id': 'x'}, 'secret', 'delivery')
+
+    assert calls == ['8.8.8.8'], 'only the first address may be attempted'
+
+
+def test_the_last_address_failing_propagates_rather_than_returning_none():
+    def make_pool(address, **kwargs):
+        pool = Mock()
+        pool.urlopen.side_effect = urllib3.exceptions.NewConnectionError(Mock(), 'refused')
+        return pool
+
+    with patch('socket.getaddrinfo', return_value=DUAL_STACK):
+        with patch('patient_portal.webhooks.urllib3.HTTPSConnectionPool', side_effect=make_pool):
+            with pytest.raises(urllib3.exceptions.NewConnectionError):
+                send_webhook('https://subscriber.example/', {'id': 'x'}, 'secret', 'delivery')
 
 
 def test_transport_pins_ip_verifies_tls_signs_bytes_and_disables_redirects():
