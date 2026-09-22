@@ -41,6 +41,7 @@ export default function MintConceptDialog(props: Props) {
   const update = (key: keyof typeof fields, value: string) => {
     setFields(prev => ({ ...prev, [key]: value }));
     setReview(null); setConfirmed(false); setError("");
+    if (key === "domain_id") { setParentConcept(null); setParentQuery(""); setParentResults([]); }
   };
 
   // Debounced parent concept search — the early-return branch clears results

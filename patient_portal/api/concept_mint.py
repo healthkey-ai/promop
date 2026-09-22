@@ -49,6 +49,16 @@ class MintInput(serializers.Serializer):
                 raise serializers.ValidationError('Parent concept not found or is invalid.')
         return value
 
+    def validate(self, attrs):
+        parent_id = attrs.get('parent_concept_id')
+        if parent_id is not None:
+            parent_domain = Concept.objects.filter(pk=parent_id).values_list('domain_id', flat=True).first()
+            if parent_domain and parent_domain != attrs['domain_id']:
+                raise serializers.ValidationError({
+                    'parent_concept_id': f'Parent concept domain ({parent_domain}) does not match the selected domain ({attrs["domain_id"]}).',
+                })
+        return attrs
+
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -111,24 +121,30 @@ def mint_destination(request):
                 min_levels_of_separation=0, max_levels_of_separation=0,
             )
             # Parent ancestry — transitive closure
-            parent_id = data.get('parent_concept_id')
-            if parent_id:
-                parent = Concept.objects.get(pk=parent_id)
+            parent_id = data['parent_concept_id']
+            if parent_id is not None:
+                if not Concept.objects.filter(pk=parent_id, invalid_reason__isnull=True).exists():
+                    raise serializers.ValidationError(
+                        {'parent_concept_id': 'Parent concept no longer exists or has been retired.'},
+                    )
                 # Direct parent link
-                ConceptAncestor.objects.create(
-                    ancestor_concept=parent, descendant_concept=concept,
-                    min_levels_of_separation=1, max_levels_of_separation=1,
-                )
+                ancestor_rows = [
+                    ConceptAncestor(
+                        ancestor_concept_id=parent_id, descendant_concept=concept,
+                        min_levels_of_separation=1, max_levels_of_separation=1,
+                    ),
+                ]
                 # Inherit all of parent's ancestors with separation + 1
                 for row in ConceptAncestor.objects.filter(
-                    descendant_concept=parent,
-                ).exclude(ancestor_concept=parent):
-                    ConceptAncestor.objects.create(
+                    descendant_concept_id=parent_id,
+                ).exclude(ancestor_concept_id=parent_id):
+                    ancestor_rows.append(ConceptAncestor(
                         ancestor_concept_id=row.ancestor_concept_id,
                         descendant_concept=concept,
                         min_levels_of_separation=row.min_levels_of_separation + 1,
                         max_levels_of_separation=row.max_levels_of_separation + 1,
-                    )
+                    ))
+                ConceptAncestor.objects.bulk_create(ancestor_rows)
     except IntegrityError:
         return Response({'detail': 'That code already exists in this vocabulary. Choose the existing concept or another code.'}, status=409)
     return Response(_serialize_concept(concept), status=status.HTTP_201_CREATED)

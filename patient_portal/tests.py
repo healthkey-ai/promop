@@ -21921,6 +21921,24 @@ class CodeMappingApiTest(TestCase):
         response = self.client.post(url, {**payload, 'action': 'review'}, format='json')
         self.assertEqual(response.status_code, 400)
 
+    def test_mint_rejects_cross_domain_parent(self):
+        """Minting with a parent from a different domain returns 400."""
+        from omop_core.services.pk import next_pk
+        self.client.force_authenticate(user=self.staff)
+        url = '/api/v1/code-mappings/mint-destination/'
+        # Create a Condition-domain parent
+        condition_parent = Concept.objects.create(
+            concept_id=next_pk(Concept, 'concept_id'),
+            vocabulary_id='SNOMED', concept_name='Condition parent', concept_code='CP-test',
+            domain_id='Condition', concept_class_id='Clinical Finding',
+            valid_start_date='2000-01-01', valid_end_date='2099-12-31',
+        )
+        # Mint payload is Measurement domain — parent is Condition domain
+        payload = {**self._mint_payload(), 'concept_code': 'mint-cross-domain',
+                   'parent_concept_id': condition_parent.concept_id}
+        response = self.client.post(url, {**payload, 'action': 'review'}, format='json')
+        self.assertEqual(response.status_code, 400)
+
     # ------------------------------------------------------------ reference
 
     def test_reference_returns_all_five_domains(self):
