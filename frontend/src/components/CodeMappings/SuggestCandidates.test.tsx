@@ -47,8 +47,8 @@ describe("progressive suggestion candidates", () => {
     expect(screen.getByText("Selected")).toBeInTheDocument();
   });
 
-  it("keeps choices unavailable until writes finish and for dry runs", () => {
-    const { rerender } = render(<SuggestCandidates activity={results} finished={false} />);
+  it("keeps choices unavailable until the mapping result is saved and for dry runs", () => {
+    const { rerender } = render(<SuggestCandidates activity={results.filter(event => event.stage !== "result")} finished={false} />);
     expect(screen.queryByRole("button", { name: /Use .* for/ })).not.toBeInTheDocument();
     rerender(<SuggestCandidates activity={results.map(event => ({ ...event, dry_run: true }))} finished />);
     expect(screen.queryByRole("button", { name: /Use .* for/ })).not.toBeInTheDocument();
@@ -116,8 +116,8 @@ describe("batch manual destination search", () => {
     expect(await screen.findByText("No remaining mappings need attention in this run.")).toBeInTheDocument();
   });
 
-  it("keeps manual search unavailable while a run is writing or when it was a dry run", () => {
-    const { rerender } = render(<SuggestCandidates activity={results} finished={false} />);
+  it("keeps manual search unavailable before the mapping result is saved or when it was a dry run", () => {
+    const { rerender } = render(<SuggestCandidates activity={results.filter(event => event.stage !== "result")} finished={false} />);
     expect(screen.queryByRole("button", { name: /Search destination for/ })).not.toBeInTheDocument();
     rerender(<SuggestCandidates activity={results.map(event => ({ ...event, dry_run: true }))} finished />);
     expect(screen.queryByRole("button", { name: /Search destination for/ })).not.toBeInTheDocument();
@@ -156,8 +156,8 @@ describe("approve from suggest results", () => {
     expect(screen.queryByRole("button", { name: /Approve .* for/ })).not.toBeInTheDocument();
   });
 
-  it("does not render Approve buttons for dry runs or unfinished runs", () => {
-    const { rerender } = render(<SuggestCandidates activity={results} finished={false} canApprove />);
+  it("does not render Approve buttons for dry runs or unsaved results", () => {
+    const { rerender } = render(<SuggestCandidates activity={results.filter(event => event.stage !== "result")} finished={false} canApprove />);
     expect(screen.queryByRole("button", { name: /Approve .* for/ })).not.toBeInTheDocument();
     rerender(<SuggestCandidates activity={results.map(event => ({ ...event, dry_run: true }))} finished canApprove />);
     expect(screen.queryByRole("button", { name: /Approve .* for/ })).not.toBeInTheDocument();
