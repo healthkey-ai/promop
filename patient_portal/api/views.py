@@ -10717,6 +10717,13 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     if status_value == 'approved' and (not was_approved or destination_moved):
         values['reviewer'] = user
         values['reviewed_at'] = timezone.now()
+        if (mapping is not None and mapping.source == 'Athena'
+                and mapping.origin_system in {'athena-multiple', CURATOR_PROVENANCE}
+                and concept is not None
+                and mapping.destination_candidates.filter(target_concept_id=concept.pk, origins__contains=['Athena']).exists()):
+            # Choosing one of the verified Athena destinations completes the
+            # pending choice and moves this mapping to ATHENA-MAPPED.
+            values['origin_system'] = 'athena'
     elif was_approved and status_value != 'approved':
         values['reviewer'] = None
         values['reviewed_at'] = None
