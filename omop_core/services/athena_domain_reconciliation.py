@@ -38,7 +38,7 @@ class AthenaDomainBrowser:
         try:
             from playwright.sync_api import sync_playwright
         except ImportError as exc:
-            raise LookupFailure('Install requirements-athena-scrape.txt and run playwright install chromium') from exc
+            raise LookupFailure('Install requirements.txt and run python scripts/install_athena_browser.py') from exc
         results = {}
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True, executable_path=self.executable)
