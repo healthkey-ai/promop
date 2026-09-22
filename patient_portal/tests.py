@@ -7000,6 +7000,13 @@ class _ConceptFixtureBase(_SmartBase):
         from omop_core.models import Concept, Vocabulary, Domain, ConceptClass
         import datetime
 
+        # Search/list fixtures need a controlled catalog: deployment migrations
+        # may already contain these real IDs, codes and other matching names.
+        Concept.objects.filter(vocabulary_id__in=('LOINC', 'SNOMED')).exclude(
+            pk__in=FieldConceptMapping.objects.values_list('concept_id', flat=True),
+        ).delete()
+        Vocabulary.objects.filter(pk__in=('LOINC', 'SNOMED')).update(vocabulary_version='')
+
         # Token with no read scope — must be rejected by ScopedTokenPermission
         cls.empty_scope_token = AccessToken.objects.create(
             user=cls.foundation_user,
@@ -21921,6 +21928,8 @@ class CodeMappingApiTest(TestCase):
     def test_audit_reports_a_retired_destination_with_its_replacement(self):
         from io import StringIO
         successor = self._retire_standard_with_replacement()
+        SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='ICD10', source_code='F98.8').delete()
         SourceCodeConceptMapping.objects.create(
             source_vocabulary_id='ICD10', source_code='F98.8', omop_table='measurement',
             target_concept=self.standard, destination_vocabulary_id='LOINC',
@@ -21950,6 +21959,8 @@ class CodeMappingApiTest(TestCase):
     def test_audit_status_filter(self):
         from io import StringIO
         self._retire_standard_with_replacement()
+        SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='ICD10', source_code='Z76.82').delete()
         SourceCodeConceptMapping.objects.create(
             source_vocabulary_id='ICD10', source_code='Z76.82', omop_table='measurement',
             target_concept=self.standard, destination_vocabulary_id='LOINC',
@@ -22313,7 +22324,8 @@ class CodeMappingResolutionTest(TestCase):
             source_code='33358-4', source_vocabulary_id='ICD10CM', omop_table='measurement',
         )
         self.assertIsNone(concept)
-        self.assertEqual(mapping.id, SourceCodeConceptMapping.objects.get().id)
+        self.assertEqual(mapping.id, SourceCodeConceptMapping.objects.get(
+            source_vocabulary_id='ICD10CM', source_code='33358-4').id)
         self.assertEqual(mapping.occurrence_count, 1)
 
     def test_import_does_not_bump_an_approved_mapping_back_to_proposed(self):
@@ -25302,6 +25314,10 @@ class CodeMappingSourceVocabTabsTest(TestCase):
 
     @classmethod
     def setUpTestData(cls):
+        # These tests exercise their own ICD-10 proposals, independently of
+        # the authoritative mappings installed by deployment migrations.
+        SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id__in=('ICD10', 'ICD10CM')).delete()
         cls.staff = Identity.objects.create_user(
             email='svt_staff@t.com', password='x', is_staff=True,
         )
@@ -25371,7 +25387,7 @@ class CodeMappingSourceVocabTabsTest(TestCase):
             vocabulary=cls.snomed_vocab,
             concept_class=cls.concept_class,
             standard_concept='S',
-            concept_code='44054006',
+            concept_code='TEST-SVT-DIABETES',
             valid_start_date=date(1970, 1, 1),
             valid_end_date=date(2099, 12, 31),
         )
