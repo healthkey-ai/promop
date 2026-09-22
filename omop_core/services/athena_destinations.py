@@ -215,7 +215,7 @@ class AthenaBrowser:
         try:
             from playwright.sync_api import sync_playwright
         except ImportError as exc:
-            raise LookupFailure('Web fallback needs requirements-athena-scrape.txt and playwright install chromium') from exc
+            raise LookupFailure('Install requirements.txt and run python scripts/install_athena_browser.py') from exc
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True, executable_path=self.executable)
             try:
