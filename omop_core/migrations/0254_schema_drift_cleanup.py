@@ -31,13 +31,7 @@ def drop_orphan_objects(apps, schema_editor):
     conn = schema_editor.connection
     with conn.cursor() as cur:
         cur.execute('DROP TABLE IF EXISTS release_table_change CASCADE')
-        # organization.public_data — check before ALTER to avoid error on fresh DBs
-        cur.execute("""
-            SELECT 1 FROM information_schema.columns
-            WHERE table_name = 'organization' AND column_name = 'public_data'
-        """)
-        if cur.fetchone():
-            cur.execute('ALTER TABLE organization DROP COLUMN public_data')
+        cur.execute('ALTER TABLE organization DROP COLUMN IF EXISTS public_data')
 
 
 def add_stcm_constraint(apps, schema_editor):
