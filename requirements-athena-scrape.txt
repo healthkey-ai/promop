@@ -1,0 +1,4 @@
+# Optional interactive web fallback for scrape_unmapped_destinations.
+# Install with: pip install -r requirements-athena-scrape.txt
+# Then: python -m playwright install chromium
+playwright==1.63.0
