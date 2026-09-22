@@ -362,8 +362,13 @@ def _census(person_id: int) -> _RemovedPatient:
     organization are still here.
     """
     from django.apps import apps
+    from django.conf import settings
     from patient_portal.webhooks import PATIENT_EVENT_MODELS
 
+    if not settings.WEBHOOKS_ENABLED:
+        # Ten COUNT(*) per replaced patient, for events that will not be
+        # published. A census with no organization is skipped downstream.
+        return _RemovedPatient(person_id, None, {})
     return _RemovedPatient(
         person_id,
         PatientRecord.objects.filter(person_id=person_id)

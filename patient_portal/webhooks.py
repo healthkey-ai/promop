@@ -86,16 +86,32 @@ def resolve_webhook_url(url):
     parsed = validate_webhook_url(url)
     try:
         addresses = socket.getaddrinfo(parsed.hostname, 443, type=socket.SOCK_STREAM)
-        ips = sorted({address[4][0] for address in addresses})
+        # Order by address family, then by address. Sorting the strings put
+        # '2606:4700::1111' before '8.8.8.8', so a dual-stack subscriber behind
+        # a CDN was reached over IPv6 — from a runtime without IPv6 egress that
+        # is a connection error on every attempt, and the stored error is a
+        # fixed token, so the cause never reaches the operator. Every address is
+        # validated; the order only decides which is tried first.
+        ips = sorted({address[4][0] for address in addresses},
+                     key=lambda ip: (ipaddress.ip_address(ip).version, ip))
         if not ips or any(not _public_address(ipaddress.ip_address(ip)) for ip in ips):
             raise ValueError
+        # Every address is validated, but only the first of each family is
+        # tried. The defect is which family gets chosen, not which record
+        # within one — choosing between several A records is the subscriber's
+        # load balancer's job, and each extra candidate costs another connect
+        # timeout inside the task's soft limit.
+        first_of_family = {}
+        for ip in ips:
+            first_of_family.setdefault(ipaddress.ip_address(ip).version, ip)
+        ips = list(first_of_family.values())
     except (ValueError, OSError):
         raise ValueError('Webhook URL must resolve only to public HTTPS addresses on port 443.') from None
-    return parsed, ips[0]
+    return parsed, ips
 
 
 def send_webhook(url, payload, secret, delivery_id):
-    parsed, address = resolve_webhook_url(url)
+    parsed, addresses = resolve_webhook_url(url)
     body = encode_payload(payload)
     # Bind a timestamp into the signed bytes, exactly as the inbound path does.
     # A body-only signature is replayable forever, and the documented mitigation
@@ -105,32 +121,55 @@ def send_webhook(url, payload, secret, delivery_id):
     # risk from sharing the scheme: an outbound body always starts with '{', so
     # it can never be read as the inbound 'digits.' prefix.
     timestamp = str(int(timezone.now().timestamp()))
-    # Pin the validated address while retaining the original hostname for SNI
-    # and certificate checks, so DNS rebinding cannot bypass network validation.
-    pool = urllib3.HTTPSConnectionPool(
-        address, port=443, server_hostname=parsed.hostname,
-        assert_hostname=parsed.hostname, cert_reqs='CERT_REQUIRED',
-        timeout=urllib3.Timeout(connect=5, read=10), retries=False,
-    )
-    response = None
-    try:
-        target = parsed.path or '/'
-        if parsed.query:
-            target += '?' + parsed.query
-        response = pool.urlopen(
-            'POST', target,
-            body=body, headers={
-                'Host': parsed.netloc, 'Content-Type': 'application/json',
-                'X-HealthKey-Signature': compute_hmac_signature(body, secret, timestamp),
-                'X-HealthKey-Timestamp': timestamp,
-                'X-HealthKey-Delivery': str(delivery_id),
-            }, redirect=False, retries=False, preload_content=False,
+    target = parsed.path or '/'
+    if parsed.query:
+        target += '?' + parsed.query
+    headers = {
+        'Host': parsed.netloc, 'Content-Type': 'application/json',
+        'X-HealthKey-Signature': compute_hmac_signature(body, secret, timestamp),
+        'X-HealthKey-Timestamp': timestamp,
+        'X-HealthKey-Delivery': str(delivery_id),
+    }
+    # Try each validated address in turn, but only while the failure is a
+    # connection failure: once a request is on the wire the peer may have acted
+    # on it, so a read timeout or a protocol error must not be retried against
+    # another address — that would be a second delivery of the same event.
+    last = len(addresses) - 1
+    for index, address in enumerate(addresses):
+        # Pin the validated address while retaining the original hostname for SNI
+        # and certificate checks, so DNS rebinding cannot bypass network validation.
+        pool = urllib3.HTTPSConnectionPool(
+            address, port=443, server_hostname=parsed.hostname,
+            assert_hostname=parsed.hostname, cert_reqs='CERT_REQUIRED',
+            timeout=urllib3.Timeout(connect=5, read=10), retries=False,
         )
-        return response.status
-    finally:
-        if response is not None:
-            response.close()
-        pool.close()
+        response = None
+        try:
+            response = pool.urlopen(
+                'POST', target, body=body, headers=headers,
+                redirect=False, retries=False, preload_content=False,
+            )
+            return response.status
+        except urllib3.exceptions.ConnectTimeoutError:
+            # The stored error is a fixed token, by design — exception text can
+            # carry URL credentials. The family is not sensitive and is the one
+            # fact an operator needs to tell "unreachable over IPv6" apart from
+            # "the subscriber is down".
+            logger.warning('Webhook delivery %s: no connection over IPv%s; %s',
+                           delivery_id, ipaddress.ip_address(address).version,
+                           'trying the next address' if index < last else 'no addresses left')
+            # The parent class, deliberately: NewConnectionError subclasses it,
+            # and a blackholed route — the IPv6-without-egress case this exists
+            # for — times out rather than being refused. Either way the peer was
+            # never reached, so the next address is a first attempt, not a
+            # resend. Anything raised after the request is on the wire (read
+            # timeout, protocol or TLS error) propagates instead.
+            if index == last:
+                raise
+        finally:
+            if response is not None:
+                response.close()
+            pool.close()
 
 
 def enqueue_delivery(delivery_id, countdown=0):
