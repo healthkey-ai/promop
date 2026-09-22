@@ -14,9 +14,9 @@ from omop_core.services.athena_domain_reconciliation import (
 )
 
 REPORT_FIELDS = ('source_vocabulary', 'concept_id', 'vocabulary_id', 'concept_code', 'local_domain',
-                 'athena_domain', 'outcome', 'reason', 'reference', 'checked_at')
+                 'athena_domain', 'outcome', 'reason', 'stale_mappings', 'reference', 'checked_at')
 UNRESOLVED = {'lookup_failed', 'identity_conflict', 'upstream_nonstandard', 'upstream_inactive',
-              'missing_domain', 'changed_during_lookup'}
+              'missing_domain', 'changed_during_lookup', 'unsupported_domain'}
 
 
 class Command(BaseCommand):
@@ -75,8 +75,9 @@ class Command(BaseCommand):
                     if writer:
                         writer.writerow(receipt)
                     else:
+                        stale = f' stale_mappings={receipt["stale_mappings"]}' if receipt['stale_mappings'] else ''
                         log.write(f'{receipt["concept_id"]}: {receipt["local_domain"]} → '
-                                  f'{receipt["athena_domain"] or "?"}; {receipt["outcome"]} {receipt["reason"]}')
+                                  f'{receipt["athena_domain"] or "?"}; {receipt["outcome"]} {receipt["reason"]}{stale}')
                 if writer:
                     stream.flush()
         log.write(f'{vocabulary}: checked={sum(totals.values())}; ' + ', '.join(f'{k}={v}' for k, v in sorted(totals.items())))

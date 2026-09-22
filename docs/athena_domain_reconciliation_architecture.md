@@ -70,8 +70,26 @@ changes to its identity, provenance, standard status or domain are preserved and
 reported for rechecking. A concurrent change that already set the Athena domain
 is a no-op. The SQL update names only `domain_id`.
 
+A domain Athena reports is written only if the application can route it — the
+five domains in `DOMAIN_TO_TABLE`. A destination Athena has moved to `Device`,
+`Meas Value` or `Spec Anatomic Site` is reported as `unsupported_domain` and
+left alone: writing it would drop the concept out of every per-domain Suggest
+index and make new mappings from it fail validation. This check runs before the
+local `Domain` table is consulted, so such a destination is never reported as a
+missing Domain row instead. `unsupported_domain` counts as unresolved, so a run
+that previously exited zero while writing an unroutable domain now exits
+nonzero — wrappers treating exit zero as "clean" will see the difference.
+
 A CSV receipt includes the source vocabulary, concept ID/vocabulary/code, local
-and Athena domains, outcome, reason, Athena page URL and check timestamp.
+and Athena domains, outcome, reason, `stale_mappings`, Athena page URL and check
+timestamp. `stale_mappings` lists the `SourceCodeConceptMapping` primary keys
+whose own `domain_id` contradicts the corrected concept domain: a mapping stores
+its domain and `omop_table` separately, and `clean()` compares those two to each
+other rather than to the destination, so a correction here leaves the mapping
+routing facts to the old table. The command does not rewrite them — which rows
+to re-curate, and what to do with facts already written, is a curation decision.
+A list longer than `STALE_MAPPING_LIMIT` ends with `+N more` rather than being
+silently cut. The same list appears in the default (non-`--report`) output.
 `--report -` writes CSV to stdout and progress to stderr. Without `--report`,
 results and counts are printed. Partial lookup failures produce a nonzero exit
 status after the report is written; successful corrections in an apply run stay
