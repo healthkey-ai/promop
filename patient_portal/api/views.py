@@ -131,7 +131,8 @@ from patient_portal.api.bulk_upload import (
 from .permissions import (
     EtlPatientCrudPermission, EtlWritePermission, PatientCrudPermission, GenomicsCrudPermission,
     PatientDeletePermission, PatientSelfScopePermission, ScopedTokenPermission,
-    VocabReadPermission, LabSyncPermission, get_request_org, is_service_token, is_machine_request,
+    VocabReadPermission, LabSyncPermission, EtlProvisionPermission,
+    get_request_org, is_service_token, is_machine_request,
 )
 from .providers.base import TokenClaims
 from .serializers import (
@@ -5514,7 +5515,8 @@ class PersonViewSet(viewsets.GenericViewSet):
         from patient_portal.api.permissions import is_machine_request
         if is_machine_request(request):
             return Response(
-                {'detail': 'Person identity provisioning requires end-user authentication.'},
+                {'detail': 'Person identity provisioning requires end-user authentication. '
+                           'Service callers use POST /api/persons/provision/.'},
                 status=status.HTTP_403_FORBIDDEN,
             )
         actor_iss = request.data.get('actor_iss', '').strip()
@@ -5591,6 +5593,67 @@ class PersonViewSet(viewsets.GenericViewSet):
         PatientRecord.objects.get_or_create(person=person)
         http_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
         return Response({'person_id': person.person_id, 'created': created}, status=http_status)
+
+    @action(detail=False, methods=['post'], url_path='provision',
+            permission_classes=[EtlProvisionPermission])
+    def provision(self, request):
+        """
+        POST /api/persons/provision/
+        Body: { "email": "..." }  (optional)
+        Response 200/201: { "person_id": 1234, "created": true }
+
+        Mints a person who is not anyone yet, for an importer that holds a
+        source id we cannot verify. No actor claims, so nothing here asserts
+        whose account this is: the address is what a later verified login
+        matches on, and the caller keeps its own source id to person id map.
+
+        The address is written in the same transaction as the insert. A mint
+        followed by a PATCH would leave a window where a login lands on a
+        person with no address and forks.
+        """
+        from patient_portal.api.permissions import reject_machine_actor_claims
+        from patient_portal.models import PatientUser
+        reject_machine_actor_claims(
+            request,
+            request.data.get('actor_iss', ''),
+            request.data.get('actor_sub', ''),
+        )
+
+        email = (request.data.get('email') or '').strip() or None
+        if email is not None:
+            try:
+                validate_email(email)
+            except DjangoValidationError:
+                return Response(
+                    {'detail': "'email' must be a valid email address."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        if email is not None:
+            # A re-run must not mint a second person for an address it already
+            # minted one for, because two would then fork the login instead of
+            # adopting either. An address that already names several persons,
+            # or one whose person has been claimed, is left alone.
+            existing = list(Person.objects.filter(email__iexact=email)[:2])
+            if len(existing) == 1 and not PatientUser.objects.filter(
+                person=existing[0],
+            ).exists():
+                PatientRecord.objects.get_or_create(person=existing[0])
+                return Response(
+                    {'person_id': existing[0].person_id, 'created': False},
+                    status=status.HTTP_200_OK,
+                )
+
+        from patient_portal.services import create_unidentified_person
+        with transaction.atomic():
+            person = create_unidentified_person(source='etl-provision')
+            if email is not None:
+                person.email = email
+                person.save(update_fields=['email'])
+        return Response(
+            {'person_id': person.person_id, 'created': True},
+            status=status.HTTP_201_CREATED,
+        )
 
     def partial_update(self, request, person_id=None):
         """

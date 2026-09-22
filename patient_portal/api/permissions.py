@@ -217,6 +217,24 @@ class EtlWritePermission(ScopedTokenPermission):
         )
 
 
+class EtlProvisionPermission(BasePermission):
+    """The ETL capability, or staff. Nothing else.
+
+    Narrower than EtlWritePermission on purpose: an org-linked
+    client_credentials app is also a machine caller, and provisioning is not
+    something it should reach by holding a SMART write scope.
+    """
+
+    def has_permission(self, request, view):
+        if _has_legacy_etl_write_grant(request):
+            return True
+        return bool(
+            request.user
+            and request.user.is_authenticated
+            and getattr(request.user, 'is_staff', False)
+        )
+
+
 class LabSyncPermission(ScopedTokenPermission):
     """
     Permission for the lab result sync endpoint.

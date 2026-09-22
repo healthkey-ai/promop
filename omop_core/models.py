@@ -883,6 +883,10 @@ class Person(models.Model):
 
     class Meta:
         db_table = 'person'
+        indexes = [
+            # Upper, not Lower: that is what Django compiles __iexact to.
+            models.Index(Upper('email'), name='ix_person_email_upper'),
+        ]
         constraints = [
             models.UniqueConstraint(
                 fields=['actor_iss', 'actor_sub'],
@@ -3536,6 +3540,7 @@ class PatientRecord(models.Model):
             models.Index(fields=["stage"]),
             models.Index(fields=["-updated_at"], name="ix_pr_updated_at"),
             models.Index(fields=["organization", "-updated_at"], name="ix_pr_org_updated_at"),
+            models.Index(Upper("email"), name="ix_pr_email_upper"),
         ]
         constraints = [
             models.CheckConstraint(

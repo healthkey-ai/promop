@@ -234,3 +234,121 @@ def test_ordinary_clinical_provenance_cannot_spoof_service_actor(service_id):
         content_type__model='measurement', object_id=measurement.pk,
         source_user_id=f'urn:service|{service_id}', source='EHR_SYNC',
     ).exists()
+
+
+@pytest.mark.django_db
+@override_settings(SERVICE_AUTH_TOKENS=GRANTS, SERVICE_AUTH_TOKEN='')
+def test_etl_provisions_a_person_with_an_address_it_can_be_found_by():
+    from omop_core.models import PatientRecord
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION='Bearer etl-test-secret')
+
+    response = client.post('/api/persons/provision/',
+                           {'email': 'Imported@Example.com'}, format='json')
+
+    assert response.status_code == 201, response.data
+    assert response.data['created'] is True
+    person = Person.objects.get(person_id=response.data['person_id'])
+    assert person.email == 'Imported@Example.com'
+    assert person.actor_iss is None and person.actor_sub is None
+    assert PatientRecord.objects.filter(person=person).exists()
+    assert not PatientUser.objects.filter(person=person).exists()
+
+
+@pytest.mark.django_db
+@override_settings(SERVICE_AUTH_TOKENS=GRANTS, SERVICE_AUTH_TOKEN='')
+def test_provision_is_idempotent_so_a_rerun_cannot_fork_the_login():
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION='Bearer etl-test-secret')
+    payload = {'email': 'rerun@example.com'}
+
+    first = client.post('/api/persons/provision/', payload, format='json')
+    second = client.post('/api/persons/provision/',
+                         {'email': 'ReRun@Example.com'}, format='json')
+
+    assert (first.status_code, second.status_code) == (201, 200)
+    assert first.data['person_id'] == second.data['person_id']
+    assert second.data['created'] is False
+    assert Person.objects.count() == 1
+
+
+@pytest.mark.django_db
+@override_settings(SERVICE_AUTH_TOKENS=GRANTS, SERVICE_AUTH_TOKEN='')
+def test_provisioned_person_is_adopted_by_its_owners_first_login():
+    from patient_portal.services import resolve_or_create_person
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION='Bearer etl-test-secret')
+    response = client.post('/api/persons/provision/',
+                           {'email': 'Owner@Example.com'}, format='json')
+
+    identity = Identity.objects.create(issuer='https://issuer.example', sub='owner')
+    person = resolve_or_create_person(identity, email='owner@example.com',
+                                      email_verified=True)
+
+    assert person.person_id == response.data['person_id']
+    assert Person.objects.count() == 1
+
+
+@pytest.mark.django_db
+@override_settings(SERVICE_AUTH_TOKENS=GRANTS, SERVICE_AUTH_TOKEN='')
+def test_provision_without_an_address_still_mints():
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION='Bearer etl-test-secret')
+
+    response = client.post('/api/persons/provision/', {}, format='json')
+
+    assert response.status_code == 201, response.data
+    assert Person.objects.get(person_id=response.data['person_id']).email is None
+
+
+@pytest.mark.django_db
+@override_settings(SERVICE_AUTH_TOKENS=GRANTS, SERVICE_AUTH_TOKEN='')
+def test_provision_rejects_actor_claims_and_non_etl_tokens():
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION='Bearer etl-test-secret')
+    claimed = client.post('/api/persons/provision/',
+                          {'email': 'a@example.com',
+                           'actor_iss': 'https://issuer.example',
+                           'actor_sub': 'victim'}, format='json')
+    assert claimed.status_code == 403
+    assert not Person.objects.exists()
+
+    client.credentials(HTTP_AUTHORIZATION='Bearer labs-test-secret')
+    denied = client.post('/api/persons/provision/',
+                         {'email': 'a@example.com'}, format='json')
+    assert denied.status_code == 403
+    assert not Person.objects.exists()
+
+
+@pytest.mark.django_db
+@override_settings(SERVICE_AUTH_TOKENS=GRANTS, SERVICE_AUTH_TOKEN='')
+def test_provision_leaves_a_claimed_address_alone():
+    """Re-minting beside it would fork; adopting it would hand over an account."""
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION='Bearer etl-test-secret')
+    owner = Identity.objects.create(issuer='https://issuer.example', sub='held')
+    held = Person.objects.create(person_id=990001, email='held@example.com')
+    PatientUser.objects.create(identity=owner, person=held)
+
+    response = client.post('/api/persons/provision/',
+                           {'email': 'held@example.com'}, format='json')
+
+    assert response.status_code == 201
+    assert response.data['person_id'] != held.person_id
+
+
+@pytest.mark.django_db
+@override_settings(SERVICE_AUTH_TOKENS=GRANTS, SERVICE_AUTH_TOKEN='')
+def test_etl_can_derive_the_person_it_provisioned():
+    """Provisioning is only useful if the same grant can rebuild the record."""
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION='Bearer etl-test-secret')
+    provisioned = client.post('/api/persons/provision/',
+                              {'email': 'derivable@example.com'}, format='json')
+
+    response = client.post(
+        f"/api/v1/patient-records/{provisioned.data['person_id']}/refresh/",
+    )
+
+    assert response.status_code == 202, response.data
+    assert response.data['person_id'] == provisioned.data['person_id']

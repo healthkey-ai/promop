@@ -16698,6 +16698,142 @@ class UnverifiedEmailNotStampedOnPersonTest(TestCase):
         self.assertEqual(person.email, 'owner@example.com')
 
 
+class ImportedPersonAdoptedAtLoginTest(TestCase):
+    """A Person provisioned before its owner signs in must be adopted, not forked."""
+
+    ISSUER = 'https://securetoken.google.com/promop-test'
+
+    def _identity(self, sub: str, email: str) -> Identity:
+        identity = Identity.objects.get_or_create(
+            issuer=self.ISSUER, sub=sub, defaults={'email': email},
+        )[0]
+        identity.set_unusable_password()
+        identity.save()
+        return identity
+
+    def _imported_person(self, email: str | None) -> Person:
+        """What an importer leaves behind: no Identity, no PatientUser."""
+        from omop_core.services.pk import next_pk
+        person = Person.objects.create(
+            person_id=next_pk(Person, 'person_id'), email=email,
+        )
+        PatientRecord.objects.create(person=person)
+        return person
+
+    def test_login_adopts_imported_person_when_case_differs(self):
+        from patient_portal.services import resolve_or_create_person
+
+        imported = self._imported_person('Owner.Name@Example.com')
+        identity = self._identity('case-differs', 'owner.name@example.com')
+
+        person = resolve_or_create_person(
+            identity, email='owner.name@example.com', email_verified=True,
+        )
+
+        self.assertEqual(person.person_id, imported.person_id)
+        self.assertEqual(Person.objects.count(), 1)
+        self.assertTrue(
+            PatientUser.objects.filter(identity=identity, person=imported).exists()
+        )
+
+    def test_login_adopts_imported_person_on_exact_match(self):
+        from patient_portal.services import resolve_or_create_person
+
+        imported = self._imported_person('exact@example.com')
+        identity = self._identity('exact-match', 'exact@example.com')
+
+        person = resolve_or_create_person(
+            identity, email='exact@example.com', email_verified=True,
+        )
+
+        self.assertEqual(person.person_id, imported.person_id)
+        self.assertEqual(Person.objects.count(), 1)
+
+    def test_legacy_patient_record_address_also_adopts_case_insensitively(self):
+        """The fallback for snapshots that carry an address Person does not."""
+        from omop_core.services.pk import next_pk
+        from patient_portal.services import resolve_or_create_person
+
+        person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=person, email='Legacy@Example.com')
+        identity = self._identity('legacy-case', 'legacy@example.com')
+
+        resolved = resolve_or_create_person(
+            identity, email='legacy@example.com', email_verified=True,
+        )
+
+        self.assertEqual(resolved.person_id, person.person_id)
+        self.assertEqual(Person.objects.count(), 1)
+
+    def test_unverified_login_still_forks(self):
+        """The known limit of adopting by address, pinned so it stays visible."""
+        from patient_portal.services import resolve_or_create_person
+
+        imported = self._imported_person('unverified@example.com')
+        identity = self._identity('unverified-login', 'unverified@example.com')
+
+        person = resolve_or_create_person(
+            identity, email='unverified@example.com', email_verified=False,
+        )
+
+        self.assertNotEqual(person.person_id, imported.person_id)
+        self.assertEqual(Person.objects.count(), 2)
+
+    def test_duplicate_address_forks_rather_than_guessing(self):
+        """Person.email is not unique, so a shared address has no single answer."""
+        from patient_portal.services import resolve_or_create_person
+
+        first = self._imported_person('shared@example.com')
+        second = self._imported_person('Shared@example.com')
+        identity = self._identity('shared-address', 'shared@example.com')
+
+        person = resolve_or_create_person(
+            identity, email='shared@example.com', email_verified=True,
+        )
+
+        self.assertNotIn(person.person_id, {first.person_id, second.person_id})
+        self.assertFalse(PatientUser.objects.filter(person=first).exists())
+        self.assertFalse(PatientUser.objects.filter(person=second).exists())
+
+    def test_lone_snapshot_cannot_settle_an_ambiguous_address(self):
+        """Both sources are counted together, so a stale snapshot cannot decide."""
+        from patient_portal.services import resolve_or_create_person
+
+        first = self._imported_person('ambiguous@example.com')
+        second = self._imported_person('Ambiguous@Example.com')
+        PatientRecord.objects.filter(person=second).update(
+            email='ambiguous@example.com',
+        )
+        identity = self._identity('ambiguous-snapshot', 'ambiguous@example.com')
+
+        person = resolve_or_create_person(
+            identity, email='ambiguous@example.com', email_verified=True,
+        )
+
+        self.assertNotIn(person.person_id, {first.person_id, second.person_id})
+        self.assertFalse(
+            PatientUser.objects.filter(person__in=[first, second]).exists()
+        )
+
+    def test_case_variant_does_not_rebind_a_claimed_person(self):
+        """An address already held by someone else must not be taken over."""
+        from patient_portal.services import resolve_or_create_person
+
+        owner = self._identity('real-owner', 'claimed@example.com')
+        owned = self._imported_person('Claimed@Example.com')
+        PatientUser.objects.create(identity=owner, person=owned)
+        intruder = self._identity('intruder', 'claimed@example.com')
+
+        person = resolve_or_create_person(
+            intruder, email='claimed@example.com', email_verified=True,
+        )
+
+        self.assertNotEqual(person.person_id, owned.person_id)
+        self.assertEqual(
+            PatientUser.objects.get(person=owned).identity_id, owner.pk,
+        )
+
+
 class CsvCreateForNonOrgCallerTest(TestCase):
     """A write-scoped non-org caller can still introduce new patients (#748).
 
