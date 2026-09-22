@@ -6,7 +6,7 @@ from rest_framework.permissions import BasePermission
 
 from .providers.base import TokenClaims
 from patient_portal.service_tokens import ServiceCredential
-from omop_core.services.access import has_org_admin_access
+from omop_core.services.access import has_org_admin_access, has_explicit_org_admin_access
 
 logger = logging.getLogger(__name__)
 
@@ -405,3 +405,13 @@ class IsStaffOrOrgAdmin(BasePermission):
 
         slug = view.kwargs.get('slug')
         return has_org_admin_access(request.user, slug)
+
+
+class IsStaffOrAccessAdmin(BasePermission):
+    """Only explicit organization admins or staff may delegate access."""
+
+    def has_permission(self, request, view):
+        return bool(
+            request.user and request.user.is_authenticated
+            and has_explicit_org_admin_access(request.user, view.kwargs.get('slug'))
+        )
