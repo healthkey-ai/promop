@@ -9,7 +9,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
+from omop_core.models import Concept, ConceptAncestor, ConceptClass, Domain, Vocabulary
 from omop_core.mapping.suggestions import lexical_candidates, umls_candidates
 from omop_core.services.pk import next_pk
 
@@ -31,6 +31,7 @@ class MintInput(serializers.Serializer):
     domain_id = serializers.CharField(max_length=20)
     source_code = serializers.CharField(max_length=255, allow_blank=True, default='')
     source_vocabulary_id = serializers.CharField(max_length=50, allow_blank=True, default='')
+    parent_concept_id = serializers.IntegerField(required=False, allow_null=True, default=None)
 
     def validate_vocabulary_id(self, value):
         if not value.startswith('HK-') or not Vocabulary.objects.filter(pk=value).exists():
@@ -40,6 +41,12 @@ class MintInput(serializers.Serializer):
     def validate_domain_id(self, value):
         if not Domain.objects.filter(pk=value).exists():
             raise serializers.ValidationError('Choose an existing domain.')
+        return value
+
+    def validate_parent_concept_id(self, value):
+        if value is not None:
+            if not Concept.objects.filter(pk=value, invalid_reason__isnull=True).exists():
+                raise serializers.ValidationError('Parent concept not found or is invalid.')
         return value
 
 
@@ -98,6 +105,30 @@ def mint_destination(request):
                 standard_concept=None, source='HealthKey', valid_start_date=localdate(),
                 valid_end_date=date(2099, 12, 31),
             )
+            # Self-ancestor — every OMOP concept has this
+            ConceptAncestor.objects.create(
+                ancestor_concept=concept, descendant_concept=concept,
+                min_levels_of_separation=0, max_levels_of_separation=0,
+            )
+            # Parent ancestry — transitive closure
+            parent_id = data.get('parent_concept_id')
+            if parent_id:
+                parent = Concept.objects.get(pk=parent_id)
+                # Direct parent link
+                ConceptAncestor.objects.create(
+                    ancestor_concept=parent, descendant_concept=concept,
+                    min_levels_of_separation=1, max_levels_of_separation=1,
+                )
+                # Inherit all of parent's ancestors with separation + 1
+                for row in ConceptAncestor.objects.filter(
+                    descendant_concept=parent,
+                ).exclude(ancestor_concept=parent):
+                    ConceptAncestor.objects.create(
+                        ancestor_concept_id=row.ancestor_concept_id,
+                        descendant_concept=concept,
+                        min_levels_of_separation=row.min_levels_of_separation + 1,
+                        max_levels_of_separation=row.max_levels_of_separation + 1,
+                    )
     except IntegrityError:
         return Response({'detail': 'That code already exists in this vocabulary. Choose the existing concept or another code.'}, status=409)
     return Response(_serialize_concept(concept), status=status.HTTP_201_CREATED)

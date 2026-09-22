@@ -21838,6 +21838,89 @@ class CodeMappingApiTest(TestCase):
                                          'review_token': review.data['review_token']}, format='json')
         self.assertEqual(response.status_code, 400)
 
+    def test_mint_creates_self_ancestor(self):
+        """Minting without a parent creates a self-ancestor row."""
+        self.client.force_authenticate(user=self.staff)
+        url = '/api/v1/code-mappings/mint-destination/'
+        payload = {**self._mint_payload(), 'concept_code': 'mint-anc-self'}
+        review = self.client.post(url, {**payload, 'action': 'review'}, format='json')
+        self.assertEqual(review.status_code, 200, review.data)
+        response = self.client.post(url, {**payload, 'action': 'mint', 'none_match': True,
+                                         'review_token': review.data['review_token']}, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        concept_id = response.data['concept_id']
+        self_row = ConceptAncestor.objects.filter(
+            ancestor_concept_id=concept_id, descendant_concept_id=concept_id,
+        )
+        self.assertTrue(self_row.exists())
+        self.assertEqual(self_row.first().min_levels_of_separation, 0)
+        self.assertEqual(self_row.first().max_levels_of_separation, 0)
+        # No other ancestry rows
+        self.assertEqual(ConceptAncestor.objects.filter(descendant_concept_id=concept_id).count(), 1)
+
+    def test_mint_with_parent_creates_full_ancestry(self):
+        """Minting with a parent creates self-ancestor + parent link + transitive ancestors."""
+        from omop_core.services.pk import next_pk
+        self.client.force_authenticate(user=self.staff)
+        url = '/api/v1/code-mappings/mint-destination/'
+        # Create a grandparent → parent chain in ConceptAncestor
+        grandparent = Concept.objects.create(
+            concept_id=next_pk(Concept, 'concept_id'),
+            vocabulary_id='SNOMED', concept_name='Grandparent', concept_code='GP-test',
+            domain_id='Measurement', concept_class_id='Procedure',
+            valid_start_date='2000-01-01', valid_end_date='2099-12-31',
+        )
+        parent = Concept.objects.create(
+            concept_id=next_pk(Concept, 'concept_id'),
+            vocabulary_id='SNOMED', concept_name='Parent concept', concept_code='P-test',
+            domain_id='Measurement', concept_class_id='Procedure',
+            valid_start_date='2000-01-01', valid_end_date='2099-12-31',
+        )
+        # grandparent self-ancestor
+        ConceptAncestor.objects.create(
+            ancestor_concept=grandparent, descendant_concept=grandparent,
+            min_levels_of_separation=0, max_levels_of_separation=0,
+        )
+        # parent self-ancestor
+        ConceptAncestor.objects.create(
+            ancestor_concept=parent, descendant_concept=parent,
+            min_levels_of_separation=0, max_levels_of_separation=0,
+        )
+        # grandparent → parent
+        ConceptAncestor.objects.create(
+            ancestor_concept=grandparent, descendant_concept=parent,
+            min_levels_of_separation=1, max_levels_of_separation=1,
+        )
+        # Now mint a child with parent_concept_id
+        payload = {**self._mint_payload(), 'concept_code': 'mint-anc-child',
+                   'parent_concept_id': parent.concept_id}
+        review = self.client.post(url, {**payload, 'action': 'review'}, format='json')
+        self.assertEqual(review.status_code, 200, review.data)
+        response = self.client.post(url, {**payload, 'action': 'mint', 'none_match': True,
+                                         'review_token': review.data['review_token']}, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        child_id = response.data['concept_id']
+        ancestors = ConceptAncestor.objects.filter(descendant_concept_id=child_id).order_by('min_levels_of_separation')
+        self.assertEqual(ancestors.count(), 3)  # self + parent + grandparent
+        # Self-ancestor
+        self_row = ancestors.get(ancestor_concept_id=child_id)
+        self.assertEqual(self_row.min_levels_of_separation, 0)
+        # Direct parent
+        parent_row = ancestors.get(ancestor_concept_id=parent.concept_id)
+        self.assertEqual(parent_row.min_levels_of_separation, 1)
+        # Grandparent (transitive)
+        gp_row = ancestors.get(ancestor_concept_id=grandparent.concept_id)
+        self.assertEqual(gp_row.min_levels_of_separation, 2)
+
+    def test_mint_with_invalid_parent_rejects(self):
+        """Minting with a nonexistent parent_concept_id returns 400."""
+        self.client.force_authenticate(user=self.staff)
+        url = '/api/v1/code-mappings/mint-destination/'
+        payload = {**self._mint_payload(), 'concept_code': 'mint-anc-bad',
+                   'parent_concept_id': 999999999}
+        response = self.client.post(url, {**payload, 'action': 'review'}, format='json')
+        self.assertEqual(response.status_code, 400)
+
     # ------------------------------------------------------------ reference
 
     def test_reference_returns_all_five_domains(self):
