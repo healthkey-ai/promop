@@ -36,6 +36,7 @@ export type CandidateActivity = {
   dry_run?: boolean;
   alternatives?: Alternative[];
   ranking_timings?: Record<string, number>;
+  omop_table?: string;
 };
 
 type Props = {
@@ -56,6 +57,15 @@ const RANKER_STYLE: Record<string, string> = {
 
 const STANDARD_BADGE: Record<string, { label: string; className: string }> = {
   C: { label: "Classification", className: "bg-slate-100 text-slate-600" },
+};
+
+/** Maps omop_table to the default HK-* vocabulary and domain for minting. Mirrors _QUARANTINE_TARGETS in code_resolution.py. */
+const OMOP_TABLE_DEFAULTS: Record<string, { vocabulary_id: string; domain_id: string }> = {
+  measurement: { vocabulary_id: "HK-Labs", domain_id: "Measurement" },
+  observation: { vocabulary_id: "HK-Observation", domain_id: "Observation" },
+  condition: { vocabulary_id: "HK-Condition", domain_id: "Condition" },
+  drug_exposure: { vocabulary_id: "HK-Drug", domain_id: "Drug" },
+  procedure: { vocabulary_id: "HK-Procedure", domain_id: "Procedure" },
 };
 
 type MergedCandidate = SuggestCandidate & { strategies: Set<string> };
@@ -376,12 +386,16 @@ export default function SuggestCandidates({ activity, finished, onSaved, canAppr
               `${k.replace(/_ms$/, "")} ${(v / 1000).toFixed(1)}s`
             ).join(" · ")}
           </p>}
-          {minting === mappingId && <MintConceptDialog
-            vocabularies={vocabularies} domains={domains}
-            initialDomain="" initialName={description || source.source_code || ""}
-            sourceCode={source.source_code || ""} sourceVocabulary={source.source_vocabulary_id || ""}
-            onClose={() => setMinting(null)}
-            onSelect={concept => void mintAndSave(mappingId, concept)} />}
+          {minting === mappingId && (() => {
+            const tableDefaults = OMOP_TABLE_DEFAULTS[events.find(e => e.omop_table)?.omop_table || ""];
+            return <MintConceptDialog
+              vocabularies={vocabularies} domains={domains}
+              initialDomain={tableDefaults?.domain_id || ""} initialName={description || source.source_code || ""}
+              initialVocabulary={tableDefaults?.vocabulary_id || ""} initialCode={source.source_code || ""}
+              sourceCode={source.source_code || ""} sourceVocabulary={source.source_vocabulary_id || ""}
+              onClose={() => setMinting(null)}
+              onSelect={concept => void mintAndSave(mappingId, concept)} />;
+          })()}
         </article>;
       })}
     </>}

@@ -242,6 +242,20 @@ describe("mint new concept from suggest results", () => {
     expect(screen.getByRole("dialog", { name: "Mint new concept" })).toBeInTheDocument();
   });
 
+  it("pre-fills vocabulary, domain, and concept code from omop_table and source_code", () => {
+    const activityWithTable: CandidateActivity[] = results.map(e => ({ ...e, omop_table: "measurement" }));
+    render(<SuggestCandidates activity={activityWithTable} finished vocabularies={hkVocabs} domains={domains} />);
+    fireEvent.click(screen.getByRole("button", { name: "Mint new concept for LOCAL" }));
+    const dialog = screen.getByRole("dialog", { name: "Mint new concept" });
+    expect(dialog).toBeInTheDocument();
+    // Vocabulary pre-filled to HK-Labs
+    expect(screen.getByLabelText(/Custom vocabulary group/)).toHaveValue("HK-Labs");
+    // Domain pre-filled to Measurement
+    expect(screen.getByLabelText(/Concept domain/)).toHaveValue("Measurement");
+    // Concept code pre-filled to source_code
+    expect(screen.getByLabelText(/Concept code/)).toHaveValue("LOCAL");
+  });
+
   it("saves the minted concept as the mapping destination", async () => {
     const onSaved = vi.fn();
     post.mockResolvedValue({ data: { candidates: [], review_token: "tok" } });
