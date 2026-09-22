@@ -16,7 +16,7 @@ from datetime import date
 import re
 from django.utils.timezone import localdate
 from django.utils import timezone
-from omop_core.services.access import get_admin_access_paths, has_org_admin_access
+from omop_core.services.access import get_admin_access_paths, has_org_admin_access, has_explicit_org_admin_access
 from omop_core.services.patient_record_service import PATIENT_RECORD_OMOP_MAPPED_FIELDS
 from omop_core.services.write_descriptor import get_serializer_read_only_fields
 
@@ -160,9 +160,16 @@ class UserSerializer(serializers.ModelSerializer):
 
 
 class OrganizationSerializer(serializers.ModelSerializer):
+    can_manage_access = serializers.SerializerMethodField()
+
+    def get_can_manage_access(self, obj):
+        request = self.context.get('request')
+        return bool(request and request.user.is_authenticated
+                    and has_explicit_org_admin_access(request.user, obj.slug))
+
     class Meta:
         model = Organization
-        fields = ['id', 'name', 'slug', 'is_active', 'allows_public_aggregated_data', 'allows_patient_signup', 'clinical_unit_system', 'created_at']
+        fields = ['id', 'name', 'slug', 'is_active', 'allows_public_aggregated_data', 'allows_patient_signup', 'clinical_unit_system', 'created_at', 'can_manage_access']
         read_only_fields = ['id', 'created_at']
 
 

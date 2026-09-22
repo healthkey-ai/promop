@@ -97,7 +97,7 @@ from omop_core.services.access import get_admin_orgs
 from omop_core.services.pk import next_pk
 from patient_portal.models import Identity, PatientUser
 from omop_core.models import Person, PatientRecord
-from .permissions import IsStaffPermission, IsStaffOrOrgAdmin
+from .permissions import IsStaffPermission, IsStaffOrOrgAdmin, IsStaffOrAccessAdmin
 from .serializers import (
     OrganizationSerializer, OrgTrustSerializer,
     OrgInvitationSerializer, GroupAccessSerializer,
@@ -302,13 +302,13 @@ class OrgListCreateView(APIView):
 
     def get(self, request):
         orgs = _visible_orgs(request.user)
-        return Response(OrganizationSerializer(orgs, many=True).data)
+        return Response(OrganizationSerializer(orgs, many=True, context={'request': request}).data)
 
     def post(self, request):
-        ser = OrganizationSerializer(data=request.data)
+        ser = OrganizationSerializer(data=request.data, context={'request': request})
         ser.is_valid(raise_exception=True)
         org = ser.save(created_by=request.user)
-        return Response(OrganizationSerializer(org).data, status=status.HTTP_201_CREATED)
+        return Response(OrganizationSerializer(org, context={'request': request}).data, status=status.HTTP_201_CREATED)
 
 
 # ---------------------------------------------------------------------------
@@ -323,11 +323,11 @@ class OrgDetailView(APIView):
 
     def get(self, request, slug):
         org = _get_org(slug)
-        return Response(OrganizationSerializer(org).data)
+        return Response(OrganizationSerializer(org, context={'request': request}).data)
 
     def patch(self, request, slug):
         org = _get_org(slug)
-        ser = OrganizationSerializer(org, data=request.data, partial=True)
+        ser = OrganizationSerializer(org, data=request.data, partial=True, context={'request': request})
         ser.is_valid(raise_exception=True)
         # Non-staff org_admins cannot toggle is_active
         if not getattr(request.user, 'is_staff', False):
@@ -355,7 +355,7 @@ class OrgDetailView(APIView):
 # ---------------------------------------------------------------------------
 
 class OrgInviteView(APIView):
-    permission_classes = [IsStaffOrOrgAdmin]
+    permission_classes = [IsStaffOrAccessAdmin]
 
     def post(self, request, slug):
         org = _get_org(slug)
@@ -451,7 +451,7 @@ class OrgInviteView(APIView):
 
 
 class OrgInvitationListView(APIView):
-    permission_classes = [IsStaffOrOrgAdmin]
+    permission_classes = [IsStaffOrAccessAdmin]
 
     def get(self, request, slug):
         org = _get_org(slug)
@@ -460,7 +460,7 @@ class OrgInvitationListView(APIView):
 
 
 class OrgInvitationDetailView(APIView):
-    permission_classes = [IsStaffOrOrgAdmin]
+    permission_classes = [IsStaffOrAccessAdmin]
 
     def delete(self, request, slug, invitation_id):
         org = _get_org(slug)
@@ -640,7 +640,7 @@ def org_invitation_lookup(request):
 # ---------------------------------------------------------------------------
 
 class OrgTrustListCreateView(APIView):
-    permission_classes = [IsStaffOrOrgAdmin]
+    permission_classes = [IsStaffOrAccessAdmin]
 
     def get(self, request, slug):
         org = _get_org(slug)
@@ -656,7 +656,7 @@ class OrgTrustListCreateView(APIView):
 
 
 class OrgTrustDetailView(APIView):
-    permission_classes = [IsStaffOrOrgAdmin]
+    permission_classes = [IsStaffOrAccessAdmin]
 
     def delete(self, request, slug, trust_id):
         org = _get_org(slug)
@@ -670,7 +670,7 @@ class OrgTrustDetailView(APIView):
 # ---------------------------------------------------------------------------
 
 class OrgAccessListView(APIView):
-    permission_classes = [IsStaffOrOrgAdmin]
+    permission_classes = [IsStaffOrAccessAdmin]
 
     def get(self, request, slug):
         org = _get_org(slug)
@@ -679,7 +679,7 @@ class OrgAccessListView(APIView):
 
 
 class OrgAccessDetailView(APIView):
-    permission_classes = [IsStaffOrOrgAdmin]
+    permission_classes = [IsStaffOrAccessAdmin]
 
     def patch(self, request, slug, access_id):
         """Update role and/or premium status for an access grant.
