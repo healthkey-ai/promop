@@ -231,6 +231,37 @@ test('the narrowed scope leaves operational paths out', () => {
   assert.deepEqual(out, [], `unexpectedly gated: ${out.join(', ')}`);
 });
 
+test('the root URLconf is gated while app route tables are not', () => {
+  // promop/urls.py is not DRF: AllowAny, the admin mount, the OAuth2 AS mount
+  // and a plain-Django catch-all all live there, so IsAuthenticated-by-default
+  // does not cover a path() added to it. App URLconfs do get that default.
+  for (const filename of [
+    'promop/urls.py', 'ctomop/urls.py', 'promop/urls/__init__.py', 'ctomop/urls/api.py',
+  ]) assert.equal(securityPath(filename), true, filename);
+  for (const filename of [
+    'patient_portal/urls.py', 'patient_portal/api/urls.py', 'patient_portal/api/v1_urls.py',
+    'omop_core/urls.py',
+  ]) assert.equal(securityPath(filename), false, filename);
+});
+
+test('the tests that pin the ungated operational files are themselves gated', () => {
+  // start.sh and render.yaml stay out of scope on the grounds that their
+  // security-relevant values are pinned by tests. That holds only while the
+  // pins cannot be relaxed in the same ungated change, so the pins are gated:
+  // test_web_startup asserts start.sh's exact command sequence including
+  // `check --deploy --fail-level ERROR`, and the render tests pin DEBUG,
+  // CORS_ALLOWED_ORIGINS, SERVICE_AUTH_SCOPES and the broker ipAllowList.
+  for (const filename of [
+    'tests/test_web_startup.py', 'tests/test_deployment_startup_contract.py',
+    'tests/test_render_staging_blueprint.py', 'tests/test_render_production_settings.py',
+    'tests/test_render_blueprint_invariants.py', 'tests/test_artemis_runtime.py',
+  ]) assert.equal(securityPath(filename), true, filename);
+  // The exemption still covers ordinary application tests.
+  for (const filename of ['tests/test_webhooks.py', 'tests/test_suggest_strategies.py']) {
+    assert.equal(securityPath(filename), false, filename);
+  }
+});
+
 test('a test-named settings module is still gated', () => {
   // A test_settings.py is a settings module whatever it is named, and wherever
   // it sits — ctomop/ carried one until 0ba8665d. The recursive form is what
