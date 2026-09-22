@@ -35,9 +35,9 @@
 # The project route table: mounts admin/ and the OAuth2 provider tree, and is
 # the only urls.py in the tree carrying permission_classes=[AllowAny].
 # ctomop/urls.py aliases it, so repointing that alias moves every route.
-/promop/urls.py                     @larsburgess
+/promop/*urls*.py                   @larsburgess
 /promop/urls/                       @larsburgess
-/ctomop/urls.py                     @larsburgess
+/ctomop/*urls*.py                   @larsburgess
 /ctomop/urls/                       @larsburgess
 
 # ── Configuration and security checks ───────────────────────────────────────
@@ -93,10 +93,27 @@
 # ── CI and the security gates themselves ──────────────────────────────────────
 # A change that weakens a gate should be as visible as a change that trips it.
 /.github/                           @larsburgess
-/.gitleaks.toml                     @larsburgess
+/.gitleaks*                         @larsburgess
 /.bandit*                           @larsburgess
+/SECURITY.md                        @larsburgess
+
+
+# ── Credential handling and the auth surface of the frontend ────────────────
+
+# ── Tests that pin the deliberately ungated operational files ───────────────
+# start.sh, render.yaml and ops/artemis/Dockerfile are out of the gate's scope
+# because their security-relevant values are pinned by these tests. That
+# argument only holds while the pins themselves are reviewed. The root
+# Dockerfile, .dockerignore and any buildCommand have no such pin; that is
+# accepted risk, noted here so the list is not read as covering more than it does.
+/tests/test_web_startup.py          @larsburgess
+/tests/test_deployment_startup_contract.py  @larsburgess
+/tests/test_render_*.py             @larsburgess
+/tests/test_artemis_runtime.py      @larsburgess
 
 # ── Ownership and change-management evidence ────────────────────────────────
-/CODEOWNERS                         @larsburgess
+# Unanchored, mirroring the gate's `**/CODEOWNERS`: a CODEOWNERS file in any
+# directory routes review for its subtree, so all of them are owned here.
+CODEOWNERS                          @larsburgess
 /docs/soc2/                         @larsburgess
 /scripts/capture_change_management_evidence.py  @larsburgess

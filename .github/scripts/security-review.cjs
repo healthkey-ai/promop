@@ -36,11 +36,52 @@ const CONTROL_PATHS = [
   'promop/oauth.py', 'promop/oauth/**', 'ctomop/oauth.py', 'ctomop/oauth/**',
   // The Sentry scrubber: the secret denylist and include_local_variables.
   'promop/sentry.py', 'promop/sentry/**', 'ctomop/sentry.py', 'ctomop/sentry/**',
+  // The root URLconf, which is not DRF. `DEFAULT_PERMISSION_CLASSES =
+  // ['IsAuthenticated']` is what makes an app URLconf safe to leave out: a new
+  // DRF route there defaults to deny. It says nothing about `promop/urls.py`,
+  // which carries `permission_classes=[AllowAny]`, the admin mount, the OAuth2
+  // authorization-server mount and a plain-Django catch-all — a `path()` added
+  // above that catch-all is unauthenticated by default, and no test enumerates
+  // the routes reachable without authentication.
+  'promop/*urls*.py', 'promop/urls/**', 'ctomop/*urls*.py', 'ctomop/urls/**',
+  // The tests that pin the operational files SECURITY_PATHS deliberately omits.
+  // That omission rests on those values being pinned by tests, which only holds
+  // while the pins cannot be relaxed in the same ungated change:
+  // `test_web_startup` asserts the exact command sequence of start.sh, so
+  // deleting its `check --deploy` line turns the suite red, and the render
+  // blueprint tests pin DEBUG, CORS_ALLOWED_ORIGINS, SERVICE_AUTH_SCOPES and
+  // the broker's empty ipAllowList. This list is matched before TEST_PATHS, so
+  // naming them here is what overrides the test exemption.
+  'tests/test_web_startup.py', 'tests/test_deployment_startup_contract.py',
+  'tests/test_render_*.py',
+  // The sole pin on ops/artemis/Dockerfile: USER artemis, no EXPOSE, and the
+  // pinned base image and ARTEMIS_REF. The Dockerfile itself stays ungated, so
+  // without this one PR could drop `USER artemis`, add EXPOSE, float the base
+  // image, and delete the assertions that say otherwise.
+  'tests/test_artemis_runtime.py',
 ];
 // Paths that require @larsburgess approval — true security policy, auth/identity
-// code, and credential handling. Operational files (Dockerfiles, infra, route
-// tables, start scripts) are intentionally excluded: their security-relevant
-// values are pinned by tests, and bandit and gitleaks cover the secret case.
+// code, and credential handling. Operational files (Dockerfiles, infra, app
+// route tables, start scripts) are intentionally excluded, on the grounds that
+// their security-relevant values are pinned by tests. Three things make that
+// hold rather than merely sound true. The pinning tests are named in
+// CONTROL_PATHS above, so a file and the assertion constraining it cannot both
+// move in one ungated change. The render blueprint's pins are stated over the
+// whole document (tests/test_render_blueprint_invariants.py) rather than per
+// named service, so appending a service does not arrive unpinned — the
+// per-service assertions reached only the services they named, which left the
+// production broker's ipAllowList, production DEBUG, and any new service
+// uncovered. And that file pins what invokes start.sh, not only its contents:
+// a web service whose startCommand stopped calling it would have left every
+// assertion in tests/test_web_startup.py green while none of the deploy checks
+// ran in production.
+//
+// What the argument still does not reach, and is accepted risk: the root
+// Dockerfile and Dockerfile.gcp carry no security pin of their own (only the
+// wsgi entrypoint and build command are asserted), .dockerignore has none, and
+// no test constrains a service's buildCommand. Bandit and gitleaks cover the
+// secret case. The root URLconf is the one path the pinning argument cannot
+// cover at all, and it is gated above rather than here.
 //
 // Both dependency manifests are here, because the scanners answer a different
 // question than review does. `pip-audit -r requirements.txt` and Dependabot
