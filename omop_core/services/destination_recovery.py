@@ -136,8 +136,7 @@ def apply_evidence_batch(items, today, *, dry_run=False):
             results[snapshot['id']] = (outcome, reason)
             continue
         peers = peer_map.get((row.source_vocabulary_id, row.source_code.strip().casefold()), [])
-        if any(peer['id'] != row.pk and (peer['status'] == 'approved' or peer['target_concept_id']
-                or peer['reviewer_id'] or peer['updated_by_id']) for peer in peers):
+        if len(peers) > 1:
             results[row.pk] = ('skipped_existing_mapping', '')
             continue
         try:

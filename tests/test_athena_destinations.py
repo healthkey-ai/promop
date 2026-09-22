@@ -193,9 +193,10 @@ def test_concurrent_curator_change_is_preserved_before_concept_creation(tmp_path
 
 
 @pytest.mark.django_db
-def test_case_variant_approved_mapping_blocks_duplicate_approval():
+@pytest.mark.parametrize('status', ['approved', 'rejected', 'proposed'])
+def test_case_variant_mapping_requires_review_before_recovery(status):
     row = queue()
-    queue('c91.10', status='approved', target_concept_id=333)
+    queue('c91.10', status=status)
     assert apply_evidence(snapshot(row), evidence(), 'API', {}, TODAY) == 'skipped_existing_mapping'
     assert not Concept.objects.filter(pk=201).exists()
 

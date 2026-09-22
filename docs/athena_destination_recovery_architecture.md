@@ -106,8 +106,8 @@ Only unreviewed, unlocked `proposed`/legacy `none`/empty-status queue rows with
 no destination or an imported, non-curator-owned proposal qualify. Athena
 replaces existing unreviewed HT-One/model proposals, including their destination
 choices. Approved/rejected rows, curator provenance, reviewer stamps, updater
-ownership and locks are preserved. Case-variant peers with existing destinations
-or curator decisions block replacement. Rows are locked and checked against the
+ownership and locks are preserved. Case-variant duplicates require review before
+either row can be replaced. Rows are locked and checked against the
 initial snapshot immediately before writing; all network work precedes locks.
 Writes use bounded transactions of at most 100 queue rows.
 
