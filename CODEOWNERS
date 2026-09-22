@@ -16,11 +16,29 @@
 # ── Authorization and identity ────────────────────────────────────────────────
 # Every P0 finding in the security audit lived in one of these paths.
 /omop_core/authorization.py         @larsburgess
+/omop_core/authorization/           @larsburgess
 /patient_portal/api/permissions.py  @larsburgess
+/patient_portal/api/permissions/    @larsburgess
 /patient_portal/api/authentication.py  @larsburgess
+/patient_portal/api/authentication/ @larsburgess
+/patient_portal/api/middleware.py   @larsburgess
+/patient_portal/api/middleware/     @larsburgess
 /patient_portal/api/providers/      @larsburgess
 /patient_portal/services.py         @larsburgess
+/patient_portal/services/           @larsburgess
 /patient_portal/api/break_glass.py  @larsburgess
+/patient_portal/api/break_glass/    @larsburgess
+/patient_portal/service_tokens.py   @larsburgess
+/patient_portal/service_tokens/     @larsburgess
+/patient_portal/service_applications.py @larsburgess
+/patient_portal/service_applications/   @larsburgess
+# The project route table: mounts admin/ and the OAuth2 provider tree, and is
+# the only urls.py in the tree carrying permission_classes=[AllowAny].
+# ctomop/urls.py aliases it, so repointing that alias moves every route.
+/promop/urls.py                     @larsburgess
+/promop/urls/                       @larsburgess
+/ctomop/urls.py                     @larsburgess
+/ctomop/urls/                       @larsburgess
 
 # ── Configuration and security checks ───────────────────────────────────────
 # Settings modules control auth backends, secret keys, and CORS policy. The
@@ -31,9 +49,17 @@
 # .github/scripts/security-review.cjs uses: an entry that covers less than the
 # gate does asks for no reviewer on a change the gate will still hold, which
 # reads as the gate being broken rather than as the owner list being stale.
+# `*` here does not cross a directory separator, so the recursive form is the
+# one that matches the gate's `promop/**/*settings*`. The plain form stays
+# beside it: both name the same owner, so the pair costs nothing, and it does
+# not depend on `/**/` being read as "zero or more" directories rather than one
+# or more — a reading that, if wrong, would drop the owner from settings.py
+# itself.
 /promop/*settings*                  @larsburgess
+/promop/**/*settings*               @larsburgess
 /promop/settings/                   @larsburgess
 /ctomop/*settings*                  @larsburgess
+/ctomop/**/*settings*               @larsburgess
 /ctomop/settings/                   @larsburgess
 /promop/oauth.py                    @larsburgess
 /promop/oauth/                      @larsburgess
@@ -44,13 +70,31 @@
 /ctomop/sentry.py                   @larsburgess
 /ctomop/sentry/                     @larsburgess
 /patient_portal/checks.py           @larsburgess
+/patient_portal/checks/             @larsburgess
+# Both manifests: the scanners answer "is anything here known-bad", review
+# answers "should this be here at all".
 /frontend/package*.json             @larsburgess
+/requirements*.txt                  @larsburgess
+/requirements/                      @larsburgess
+
+# ── Frontend auth and the transports that carry a credential ─────────────────
+/frontend/src/utils/oauth.ts        @larsburgess
+/frontend/src/hooks/useAuth.ts      @larsburgess
+/frontend/src/api/axios.ts          @larsburgess
+/frontend/src/api/publicAxios.ts    @larsburgess
+/frontend/src/api/clinicalTransport.ts  @larsburgess
+/frontend/src/federation/assertLabsTokens.ts  @larsburgess
+/frontend/src/components/Auth/      @larsburgess
+
+# ── Security documentation and the commands that issue credentials ───────────
+/docs/*security*.md                 @larsburgess
+/patient_portal/management/commands/*service_token*.py  @larsburgess
 
 # ── CI and the security gates themselves ──────────────────────────────────────
 # A change that weakens a gate should be as visible as a change that trips it.
 /.github/                           @larsburgess
 /.gitleaks.toml                     @larsburgess
-/.bandit-baseline.json              @larsburgess
+/.bandit*                           @larsburgess
 
 # ── Ownership and change-management evidence ────────────────────────────────
 /CODEOWNERS                         @larsburgess

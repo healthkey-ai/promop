@@ -41,7 +41,7 @@ const { securityFiles, evaluate, run } = require('./security-review.cjs');
 
 test('file classification covers security code and renames while excluding test-only edits', () => {
   for (const filename of ['ctomop/settings.py', 'frontend/src/components/Auth/Login.tsx', '.github/workflows/ci.yml', 'patient_portal/api/permissions.py', '.bandit-baseline.json']) assert.equal(securityFiles([{ filename }]), true, filename);
-  for (const filename of ['patient_portal/tests.py', 'tests/test_browser_oauth_retirement.py', 'frontend/src/components/Auth/Login.test.tsx', 'omop_core/services/genomics.py', 'requirements.txt', 'Dockerfile', 'render.yaml', 'start.sh', 'patient_portal/api/v1_urls.py']) assert.equal(securityFiles([{ filename }]), false, filename);
+  for (const filename of ['patient_portal/tests.py', 'tests/test_browser_oauth_retirement.py', 'frontend/src/components/Auth/Login.test.tsx', 'omop_core/services/genomics.py', 'Dockerfile', 'render.yaml', 'start.sh', 'patient_portal/api/v1_urls.py']) assert.equal(securityFiles([{ filename }]), false, filename);
   assert.equal(securityFiles([{ filename: 'retired.py', previous_filename: 'patient_portal/api/permissions.py' }]), true);
   // Renaming the OAuth validator out of the way is still a gated change.
   assert.equal(securityFiles([{ filename: 'retired.py', previous_filename: 'ctomop/oauth.py' }]), true);
@@ -180,9 +180,37 @@ test('auth/identity, settings and credential handling are gated', () => {
     'frontend/src/federation/assertLabsTokens.ts', 'patient_portal/service_tokens.py',
     'patient_portal/management/commands/import_service_tokens.py',
     'docs/promop-security-soc2-remediation-plan.md',
-    // Dependabot alerts reach this manifest, but they fire on a known CVE in a
-    // dependency already here — not on one being added.
+    // Both manifests: the scanners fire on an advisory against a dependency
+    // already present, not on one being added, which is the reviewable event
+    // and is the same event in both ecosystems.
     'frontend/package.json', 'frontend/package-lock.json',
+    'requirements.txt', 'requirements/base.txt',
+    // The project route table — the only urls.py carrying AllowAny, and the
+    // one that mounts admin/ and the OAuth2 provider tree.
+    'promop/urls.py', 'ctomop/urls.py',
+    // One path per pattern, for every pattern on either list: a pattern that no
+    // path here exercises can be deleted without a test noticing, and eight of
+    // them could be when this list was written. Every single-file entry has a
+    // directory form beside it, so splitting a module into a package cannot
+    // ungate its own subject.
+    'patient_portal/api/permissions/base.py', 'patient_portal/api/middleware/audit.py',
+    'omop_core/authorization/rules.py', 'patient_portal/service_tokens/mint.py',
+    'ctomop/oauth/validators.py', 'ctomop/sentry/scrubber.py',
+    'patient_portal/services/consent.py', 'patient_portal/api/break_glass/views.py',
+    'patient_portal/checks/settings_checks.py', 'patient_portal/api/authentication/jwt.py',
+    'patient_portal/service_applications/models.py',
+    'promop/urls/__init__.py', 'ctomop/urls/api.py',
+    'frontend/src/api/axios/interceptors.ts', 'frontend/src/api/publicAxios/index.ts',
+    'frontend/src/api/clinicalTransport/index.ts',
+    'frontend/src/federation/assertLabsTokens/index.ts',
+    'frontend/src/utils/oauth/pkce.ts', 'frontend/src/hooks/useAuth/context.ts',
+    'scripts/capture_change_management_evidence/api.py',
+    // Entries that predate this list and were exercised by nothing: deleting
+    // any of them left the suite green.
+    'SECURITY.md', 'patient_portal/api/authentication.py',
+    'patient_portal/api/middleware.py', 'patient_portal/api/providers/base.py',
+    'patient_portal/service_applications.py', 'frontend/src/utils/oauth.ts',
+    'frontend/src/hooks/useAuth.ts', 'frontend/src/api/axios.ts',
   ]) assert.equal(securityPath(filename), true, filename);
 });
 
@@ -194,9 +222,9 @@ test('auth/identity, settings and credential handling are gated', () => {
 // instead of stopping at the first.
 test('the narrowed scope leaves operational paths out', () => {
   const out = [
-    'promop/urls.py', 'promop/celery.py', 'patient_portal/api/v1_urls.py',
-    'patient_portal/urls.py', 'start.sh', 'start-worker.sh', 'requirements.txt',
-    'requirements/base.txt', 'ops/artemis/Dockerfile', 'deploy/Dockerfile',
+    'promop/celery.py', 'patient_portal/api/v1_urls.py',
+    'patient_portal/urls.py', 'start.sh', 'start-worker.sh',
+    'ops/artemis/Dockerfile', 'deploy/Dockerfile',
     'Procfile', 'nixpacks.toml', 'frontend/.env.production', 'render.yaml',
     'docker-compose.yml', 'Dockerfile', 'Dockerfile.gcp', '.env.example',
   ].filter(securityPath);

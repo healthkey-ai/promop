@@ -27,6 +27,7 @@ const MAX_ISSUE_REFERENCES = 20;
 const CONTROL_PATHS = [
   '.github/**', '**/CODEOWNERS', 'docs/soc2/**', '.bandit*', '.gitleaks*',
   'SECURITY.md', 'scripts/capture_change_management_evidence.py',
+  'scripts/capture_change_management_evidence/**',
   'promop/**/*settings*', 'promop/settings/**', 'ctomop/**/*settings*', 'ctomop/settings/**',
   // OAUTH2_VALIDATOR_CLASS: refuses grant, response type and bearer token for
   // retired browser clients. Its only test is under tests/, which this list
@@ -40,28 +41,65 @@ const CONTROL_PATHS = [
 // code, and credential handling. Operational files (Dockerfiles, infra, route
 // tables, start scripts) are intentionally excluded: their security-relevant
 // values are pinned by tests, and bandit and gitleaks cover the secret case.
-// Python dependencies are excluded because `pip-audit -r requirements.txt`
-// runs in CI. `frontend/package*.json` is not: Dependabot alerts are enabled
-// and do reach it, but an alert fires on a known CVE in a dependency that is
-// already here, and the reviewable event for a manifest is a dependency being
-// *added* — a new direct dependency, or a name one character from a real one,
-// raises no alert at all. An npm audit step would not change that either.
+//
+// Both dependency manifests are here, because the scanners answer a different
+// question than review does. `pip-audit -r requirements.txt` and Dependabot
+// alerts both fire on a known advisory against a dependency that is already
+// present; neither has anything to say about one being *added* — a new direct
+// dependency, or a name one character away from a real one, raises nothing
+// from either. That is the reviewable event, and it is the same event in both
+// ecosystems, so gating one and not the other would be a distinction with no
+// reason behind it.
+//
+// Every entry below that names a single file is listed as a directory too. An
+// exact filename stops covering its own subject the day the module becomes a
+// package, and the largest files here — permissions.py at 407 lines,
+// middleware.py 322, authentication.py 314 — are likelier to be split than the
+// small ones for which this was first written. It applies to the TypeScript
+// entries as much as the Python ones; `index.ts` is the same move by another
+// name.
 const SECURITY_PATHS = [
   ...CONTROL_PATHS,
-  'frontend/package*.json',
-  'omop_core/authorization.py', 'patient_portal/services.py',
-  'patient_portal/api/break_glass.py', 'patient_portal/checks.py',
-  'patient_portal/api/authentication.py', 'patient_portal/api/permissions.py',
-  'patient_portal/api/middleware.py', 'patient_portal/api/providers/**',
+  'frontend/package*.json', 'requirements*.txt', 'requirements/**',
+  'omop_core/authorization.py', 'omop_core/authorization/**',
+  'patient_portal/services.py', 'patient_portal/services/**',
+  'patient_portal/api/break_glass.py', 'patient_portal/api/break_glass/**',
+  'patient_portal/checks.py', 'patient_portal/checks/**',
+  'patient_portal/api/authentication.py', 'patient_portal/api/authentication/**',
+  'patient_portal/api/permissions.py', 'patient_portal/api/permissions/**',
+  'patient_portal/api/middleware.py', 'patient_portal/api/middleware/**',
+  'patient_portal/api/providers/**',
+  // The project route table, and only it. Of the other seven urls.py modules,
+  // the DRF ones carry no permission decisions — their views do, and DRF
+  // defaults to IsAuthenticated here, so a DRF route added to one fails closed.
+  // That is a convention rather than a guarantee: a plain Django view added to
+  // any of them would have no permission default either. What makes those
+  // seven different is reachability — patient_portal/urls.py is mounted
+  // nowhere, and the rest hang off the file below. promop/urls.py is the
+  // exception on its own terms: it mounts admin/ and the OAuth2 provider tree,
+  // carries the only permission_classes=[AllowAny] of any urls.py in the tree,
+  // and ends in a catch-all, so a plain Django view added here has no
+  // permission default at all. ctomop/urls.py is gated for a different reason
+  // than its content, which is five lines aliasing this module: repointing that
+  // alias moves every route in the project.
+  'promop/urls.py', 'promop/urls/**', 'ctomop/urls.py', 'ctomop/urls/**',
   // Service principals: the credential definitions and the two commands that
   // issue and import them.
-  'patient_portal/service_tokens.py', 'patient_portal/service_applications.py',
+  'patient_portal/service_tokens.py', 'patient_portal/service_tokens/**',
+  'patient_portal/service_applications.py', 'patient_portal/service_applications/**',
   'patient_portal/management/commands/*service_token*.py',
-  'frontend/src/utils/oauth.ts', 'frontend/src/hooks/useAuth.ts',
+  'frontend/src/utils/oauth.ts', 'frontend/src/utils/oauth/**',
+  'frontend/src/hooks/useAuth.ts', 'frontend/src/hooks/useAuth/**',
   // The transports that attach (or deliberately omit) a credential — not the
-  // data-fetching modules built on top of them.
-  'frontend/src/api/axios.ts', 'frontend/src/api/publicAxios.ts',
-  'frontend/src/api/clinicalTransport.ts', 'frontend/src/federation/assertLabsTokens.ts',
+  // data-fetching modules built on top of them. Directory forms for the same
+  // reason as the Python ones: `axios.ts` becoming `axios/index.ts` plus
+  // `axios/interceptors.ts` is an ordinary move, and it would take the
+  // credential-attaching transport out of scope on its way past.
+  'frontend/src/api/axios.ts', 'frontend/src/api/axios/**',
+  'frontend/src/api/publicAxios.ts', 'frontend/src/api/publicAxios/**',
+  'frontend/src/api/clinicalTransport.ts', 'frontend/src/api/clinicalTransport/**',
+  'frontend/src/federation/assertLabsTokens.ts',
+  'frontend/src/federation/assertLabsTokens/**',
   'frontend/src/components/Auth/**',
   'docs/*security*.md',
 ];
