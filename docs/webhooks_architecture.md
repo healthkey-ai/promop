@@ -292,11 +292,12 @@ python manage.py shell -c 'from patient_portal.tasks import dispatch_pending_web
 
 `GET /api/v1/webhooks/subscriptions/{id}/deliveries/` returns authorized delivery
 history with status, attempts, next attempt, HTTP status, a redacted error code,
-timestamps, and the `destination_host` of the attempt. Response bodies, full
-destination URLs, secrets, and notification payloads are excluded — the host,
-not the path, because for some receivers the path is the credential. A row that
-was never attempted carries no host: it contacted nothing, and a record naming a
-destination anyway over-counts. Dead letters remain available for investigation; there
+timestamps, and the `destination_host` the row is addressed to. Response bodies,
+full destination URLs, secrets, and notification payloads are excluded — the
+host, not the path, because for some receivers the path is the credential. The
+address is frozen, so every attempt on a row went to that host; `attempts` is
+what says whether anything was sent there at all. Reading the table as "where
+events went" means reading the rows with attempts, not every row. Dead letters remain available for investigation; there
 is no automatic reset of exhausted attempts.
 
 Migrations `patient_portal.0021`, `0022` and `0023` add four tables, a uniqueness

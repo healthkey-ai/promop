@@ -96,7 +96,8 @@ implementation:
   remove the delivery history along with the configuration, so the sequence
   "point the events at a host, leave it a week, delete the subscription" left
   nothing behind. It now leaves the change rows and the deliveries, each stating
-  where it went. Freezing the address also means changing a URL cannot redirect
+  the address it was written for; a row's `attempts` is what says whether
+  anything was actually sent there. Freezing the address also means changing a URL cannot redirect
   events that were already queued under the old one — a redirect applies to what
   the organization sends next, which is the only thing an admin should be able
   to decide after the fact.

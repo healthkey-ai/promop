@@ -5,6 +5,29 @@ import uuid
 from django.db import migrations, models
 
 
+def freeze_queued_destinations(apps, schema_editor):
+    """Give rows that have not been sent yet the address they would be sent to.
+
+    Only the ones still in flight. For a delivery that already reached a
+    terminal state, the subscription's URL today is a guess about the past, and
+    a guess written into an egress record is worse than an empty column.
+    An unsent row is different: the destination is not history, it is where the
+    payload is going, and without it the worker falls back to the subscription's
+    mutable URL — which is exactly the redirect of already-queued patient data
+    that freezing the address exists to prevent.
+    """
+    WebhookDelivery = apps.get_model('patient_portal', 'WebhookDelivery')
+    for delivery in WebhookDelivery.objects.filter(
+        status__in=['pending', 'retry', 'sending'], destination_url='',
+    ).select_related('subscription').iterator():
+        delivery.destination_url = delivery.subscription.url
+        delivery.save(update_fields=['destination_url'])
+
+
+def unfreeze_queued_destinations(apps, schema_editor):
+    """Nothing to undo: the column goes with the field."""
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -18,6 +41,7 @@ class Migration(migrations.Migration):
             name='destination_url',
             field=models.URLField(blank=True, max_length=2048),
         ),
+        migrations.RunPython(freeze_queued_destinations, unfreeze_queued_destinations),
         migrations.AddField(
             model_name='webhooksubscription',
             name='deleted_at',

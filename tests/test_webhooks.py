@@ -346,6 +346,37 @@ def test_a_queued_delivery_keeps_its_address_when_the_subscription_moves(setup):
         'https://moved.example/events')
 
 
+def test_the_migration_freezes_only_the_destinations_still_in_flight(setup):
+    """Rows already queued when 0023 lands need an address too.
+
+    Without one the worker falls back to the subscription's mutable URL, and a
+    PATCH would redirect patient events queued before the deploy — the thing
+    freezing the address exists to prevent. A terminal row gets nothing: the
+    subscription's URL today is a guess about where that one went, and a guess
+    written into an egress record is worse than an empty column.
+    """
+    import importlib
+
+    from django.apps import apps as django_apps
+
+    org, other, person, user, subscription = setup
+    queued = WebhookDelivery.objects.create(
+        subscription=subscription, payload={'id': 'q', 'type': 'lab.updated'})
+    done = WebhookDelivery.objects.create(
+        subscription=subscription, payload={'id': 'd', 'type': 'lab.updated'},
+        status='delivered')
+    assert queued.destination_url == '' and done.destination_url == ''
+
+    migration = importlib.import_module(
+        'patient_portal.migrations.0023_webhookdelivery_destination_url_and_more')
+    migration.freeze_queued_destinations(django_apps, None)
+
+    queued.refresh_from_db()
+    done.refresh_from_db()
+    assert queued.destination_url == 'https://subscriber.example/events'
+    assert done.destination_url == ''
+
+
 def test_a_patch_cannot_undo_a_delete_committed_while_it_was_in_flight(setup):
     """DRF holds an instance loaded before the transaction and writes it whole.
 
