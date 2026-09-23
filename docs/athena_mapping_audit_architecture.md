@@ -1,5 +1,66 @@
 # Auditing Athena mapping reconciliation
 
+## Reconcile from the original Athena export
+
+Use `reconcile_athena_mappings` to check and optionally reattribute existing
+approved, non-Athena ICD10/ICD10CM SCCM rows. It reads `CONCEPT.csv` and outgoing
+`Maps to` relationships from `CONCEPT_RELATIONSHIP.csv` in the original export.
+`SOURCE_TO_CONCEPT_MAP.csv` is not needed. The local `concept_relationship`
+table is not independent evidence because curator approvals also write there.
+
+From the directory containing `manage.py` (Render shell: `~/project/src`):
+
+```bash
+# Default source: the configured Athena Google Drive folder; database read-only.
+python manage.py reconcile_athena_mappings --report /tmp/athena-preview.csv
+
+# Use the original local export instead of downloading it.
+python manage.py reconcile_athena_mappings --path ~/Downloads/vocabulary_download_v5 --report /tmp/athena-preview.csv
+
+# After reviewing the dry-run, explicitly apply using a pinned export.
+python manage.py reconcile_athena_mappings --archive /tmp/athena.zip --apply --report /tmp/athena-applied.csv
+```
+
+The default folder is
+[the shared Athena vocabulary download](https://drive.google.com/drive/u/1/folders/1HoRWGepqcH3pMKK03KNb1oWpaVs0Avl7).
+`--gdrive URL` overrides it; `--path`, `--archive`, and `--gdrive` are mutually
+exclusive. An optional positional `ICD10` or `ICD10CM` limits the stored source
+vocabulary. Omitting it checks both. Only HT-One ICD10 rows use ICD10CM lookup
+identity; other rows require their exact vocabulary. Codes ignore case and
+surrounding whitespace.
+
+The complete evidence is read before any database update or row lock. Current
+source concepts, current outgoing relationships, and current standard targets
+are required. Multiple distinct destinations are skipped even if only one is
+loaded locally; duplicate edges to the same target do not introduce ambiguity.
+The selected destination must already exist locally with matching vocabulary,
+code and domain, be external, standard, active, and in a non-deprecated
+vocabulary. Missing or conflicting concepts are reported for vocabulary repair.
+This command does not alter concept metadata or create vocabulary records.
+
+Dry-run issues only reads. Apply locks and rechecks complete SCCM snapshots and
+the current destination concepts in batches of 250. Curator locks and concurrent
+edits are preserved. Updates set the target and destination metadata, provenance
+`athena`, source `Athena`, timestamp and an appended audit note. Approval status,
+reviewer sign-off, suggestion history and existing patient facts stay unchanged.
+Only future imports use the revised mapping definitions. Successful rows are
+excluded on reruns. Earlier batches remain committed if a later batch fails;
+the CSV is flushed after each successful batch.
+
+The CSV records every eligible mapping's prior destination/provenance, exported
+source and target IDs, proposed destination metadata, outcome, reason and export
+SHA-256 fingerprint. The fingerprint is also retained in applied audit notes.
+`--report -` sends CSV to stdout and progress to stderr. Downloaded archives are
+temporary and deleted when the command exits. No vocabulary files are committed
+to Git and no automatic migration applies the proposed changes.
+
+The ordinary startup `prepare_production_database --gdrive ...` path only
+bootstraps migration-required concepts when needed and runs migrations; it does
+not automatically refresh the entire vocabulary on an initialized database.
+Run this reconciliation explicitly when ready to review/apply its results.
+
+## Diagnose the historical STCM-based migration
+
 `audit_athena_mapping_reconciliation` explains migration `0256` by comparing
 approved, non-Athena rows in `source_code_concept_mapping` (SCCM) with the
 separate `source_to_concept_map` (STCM) vocabulary table. Its default is a

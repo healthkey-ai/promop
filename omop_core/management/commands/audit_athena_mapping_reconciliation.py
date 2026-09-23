@@ -50,6 +50,8 @@ class Command(BaseCommand):
                 writer = csv.DictWriter(stream, fieldnames=REPORT_FIELDS)
                 writer.writeheader()
             log.write('Apply (SCCM only)' if options['apply'] else 'Dry run: no database writes')
+            log.write('This diagnoses STCM-based migration 0256. For original Athena export evidence, '
+                      'use reconcile_athena_mappings (also read-only by default).')
             recorder = MigrationRecorder(connections[using])
             applied = (recorder.migration_qs.filter(app='omop_core', name=MIGRATION)
                        .values_list('applied', flat=True).first()) if recorder.has_table() else None
