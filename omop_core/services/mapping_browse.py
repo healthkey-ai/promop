@@ -71,7 +71,16 @@ def browse_mappings(mappings, params, serialize):
     ).filter(duplicate_count__gt=1).values_list('pk', flat=True)
     duplicates = list(with_destination_counts(mappings.filter(pk__in=duplicate_ids)))
 
+    # Provenance values present on this tab, for the filter control. Taken
+    # from tab_rows rather than the filtered set so choosing one does not
+    # empty the list of the others.
+    provenances = [
+        {'origin_system': group['origin_system'], 'count': group['n']}
+        for group in tab_rows.order_by().values('origin_system').annotate(n=Count('pk')).order_by('-n', 'origin_system')
+    ]
+
     search = params.get('search', '').strip()
+    provenance = params.get('provenance', '')
     filtered = mappings if search else tab_rows
     if search:
         query = Q()
@@ -81,7 +90,12 @@ def browse_mappings(mappings, params, serialize):
         if search.isdigit():
             query |= Q(target_concept_id__icontains=search)
         filtered = filtered.filter(query)
-    if search:
+    # Narrows a cross-tab search as well as a single tab. Duplicates are left
+    # unfiltered on purpose: hiding one half of a duplicated code would turn a
+    # warning into a puzzle.
+    if provenance:
+        filtered = filtered.filter(origin_system=provenance)
+    if search or provenance:
         totals = filtered.aggregate(
             unmapped=Count('pk', filter=~Q(origin_system='athena') & ~Q(status__in=['approved', 'rejected'])),
             mapped=Count('pk', filter=~Q(origin_system='athena') & Q(status='approved')),
@@ -108,8 +122,14 @@ def browse_mappings(mappings, params, serialize):
             requested_page = max(1, int(params.get(f'page_{index}', 1)))
         except (ValueError, TypeError):
             raise ValidationError({'page': 'Page must be an integer.'})
-        default_order = 'origin_system' if section == 'Unmapped' else '-occurrence_count'
-        order = params.get(f'order_{index}', default_order)
+        # Every section defaults to Seen descending. Unmapped grouped by
+        # provenance until #1575: that ordering is a no-op on a tab holding one
+        # provenance (six of nine on staging), and on a tab holding several it
+        # buries the rows a Suggest run just answered -- enqueue writes
+        # origin_system='' and a run rewrites it to 'suggest v0.4', so the
+        # answers move from the first provenance group to the last. Finding
+        # curator-edited rows is what the provenance filter is for.
+        order = params.get(f'order_{index}', '-occurrence_count')
         field = ORDER_FIELDS.get(order.lstrip('-'))
         if field is None:
             raise ValidationError({'order': 'Unknown sort column.'})
@@ -135,4 +155,5 @@ def browse_mappings(mappings, params, serialize):
         return serialize(row.target_concept, row, metadata[row.pk], destination_count=row.destination_count)
 
     return dict(results=[render(row) for row in results], duplicates=[render(row) for row in duplicates],
-                tabs=tabs, selected_source=source, pages=pages, rejected_count=rejected)
+                tabs=tabs, selected_source=source, pages=pages, rejected_count=rejected,
+                provenances=provenances, selected_provenance=provenance)

@@ -572,6 +572,8 @@ type BrowseResponse = {
   selected_source: string;
   pages: Record<MappingSection, { page: number; page_size: number; total: number }>;
   rejected_count: number;
+  provenances: { origin_system: string; count: number }[];
+  selected_provenance: string;
 };
 const sectionNames: MappingSection[] = ["Unmapped", "Mapped", "Rejected", "Athena Mapped"];
 
@@ -604,9 +606,13 @@ export default function CodeMappingPage() {
   const [mappedCollapsed, setMappedCollapsed] = useState(true);
   const [rejectedCollapsed, setRejectedCollapsed] = useState(true);
   const [athenaCollapsed, setAthenaCollapsed] = useState(true);
-  const [sectionSorts, setSectionSorts] = useState<Partial<Record<MappingSection, SectionSort>>>({
-    Unmapped: { column: "origin_system", descending: false },
-  });
+  // Every section defaults to Seen descending (#1575), stated explicitly so
+  // the header shows which column is sorted. The server applies the same
+  // default for a caller that sends no order.
+  const [sectionSorts, setSectionSorts] = useState<Partial<Record<MappingSection, SectionSort>>>(
+    Object.fromEntries(sectionNames.map((section) => [section, { column: "occurrence_count", descending: true }])),
+  );
+  const [provenanceFilter, setProvenanceFilter] = useState("");
   const [navigationTarget, setNavigationTarget] = useState<{ id: string } | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
   const [suggesting, setSuggesting] = useState(false);
@@ -684,6 +690,7 @@ export default function CodeMappingPage() {
       browse: 1, search: debouncedSearch,
     };
     if (activeVocabulary !== null) params.source = activeVocabulary;
+    if (provenanceFilter) params.provenance = provenanceFilter;
     sectionNames.forEach((section, index) => {
       params[`page_${index}`] = pages[section] || 1;
       const sort = sectionSorts[section];
@@ -713,7 +720,7 @@ export default function CodeMappingPage() {
     } finally {
       if (sequence === loadSequence.current) setLoading(false);
     }
-  }, [activeVocabulary, debouncedSearch, pages, sectionSorts]);
+  }, [activeVocabulary, debouncedSearch, pages, sectionSorts, provenanceFilter]);
 
   const refreshCurrent = useRef(fetchAll);
   useEffect(() => { refreshCurrent.current = fetchAll; }, [fetchAll]);
@@ -869,6 +876,9 @@ export default function CodeMappingPage() {
   // The debounced query is what the server has answered, so the message
   // describes the rows on screen rather than re-announcing every keystroke.
   const crossTabSearch = !overallTab && debouncedSearch.trim() !== "";
+  // Server-supplied, and taken from the whole tab rather than the filtered
+  // rows, so picking one option does not remove the rest.
+  const provenanceOptions = browse?.provenances ?? [];
 
   // Four-section layout: UNMAPPED / MAPPED / REJECTED / ATHENA MAPPED.
   const athenaRows = useMemo(
@@ -1707,16 +1717,36 @@ export default function CodeMappingPage() {
         )}
 
         <div className="mb-4">
-          <label className="relative block">
-            <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-            <input
-              aria-label="Search mappings"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search source codes, destination concepts, or OMOP IDs"
-              className="h-10 w-full rounded-md border border-slate-300 bg-white pl-9 pr-3 text-sm text-slate-950 outline-none focus:border-slate-700"
-            />
-          </label>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <label className="relative block flex-1">
+              <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+              <input
+                aria-label="Search mappings"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search source codes, destination concepts, or OMOP IDs"
+                className="h-10 w-full rounded-md border border-slate-300 bg-white pl-9 pr-3 text-sm text-slate-950 outline-none focus:border-slate-700"
+              />
+            </label>
+            {/* Provenance is a filter rather than the sort it used to be
+                (#1575): it finds curator-edited rows in one click however many
+                there are, and leaves the queue in Seen order. */}
+            {provenanceOptions.length > 1 && (
+              <select
+                aria-label="Filter by provenance"
+                value={provenanceFilter}
+                onChange={(e) => { setPages({}); setProvenanceFilter(e.target.value); }}
+                className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950 outline-none focus:border-slate-700 sm:w-64"
+              >
+                <option value="">All provenance</option>
+                {provenanceOptions.map((option) => (
+                  <option key={option.origin_system || "__blank__"} value={option.origin_system}>
+                    {(option.origin_system || "No provenance")} ({option.count})
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
           {crossTabSearch && (
             <p className="mt-1 text-xs text-slate-600" role="status">
               Searching all coding systems
@@ -1742,6 +1772,9 @@ export default function CodeMappingPage() {
                 aria-selected={selected}
                 onClick={() => {
                   setPages({});
+                  // Provenance values differ per tab; a stale filter would
+                  // show an empty tab with no visible reason.
+                  setProvenanceFilter("");
                   setActiveVocabulary(tab.vocabulary_id);
                   if (tab.vocabulary_id === OVERALL_TAB) {
                     setUnmappedCollapsed(true);

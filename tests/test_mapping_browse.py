@@ -40,18 +40,90 @@ def test_pages_sort_before_slicing_and_report_full_counts(browse):
 
 
 @pytest.mark.parametrize('params', [{}, {'source': '__overall__'}, {'search': 'SORT-'}])
-def test_unmapped_default_groups_provenance_then_seen_before_pagination(browse, params):
+def test_unmapped_defaults_to_seen_descending_before_pagination(browse, params):
+    """Unmapped defaults to Seen, like every other section (#1575).
+
+    It grouped by provenance first until then. That buried the rows a Suggest
+    run had just answered: enqueue writes ``origin_system=''`` and a run
+    rewrites it to ``suggest v0.4``, which sorts last ascending.
+    """
     curated = [row(f'SORT-C{i:03}', origin_system='curator', occurrence_count=i // 2) for i in range(101)]
     suggested = row('SORT-S', origin_system='suggest v0.4', occurrence_count=1000)
-    expected = sorted(curated, key=lambda m: (-m.occurrence_count, m.source_code, m.pk)) + [suggested]
+    expected = sorted([suggested] + curated, key=lambda m: (-m.occurrence_count, m.source_code, m.pk))
     first = browse(**params).data
     second = browse(page_0=2, **params).data
     assert first['pages']['Unmapped']['total'] == 102
+    # The highest-Seen row leads regardless of its provenance.
+    assert first['results'][0]['mapping_id'] == suggested.pk
     assert [r['mapping_id'] for r in first['results'] + second['results']] == [m.pk for m in expected]
-    assert [r['mapping_id'] for r in second['results']] == [curated[1].pk, suggested.pk]
-    # A caller can still override the default to prioritise Seen across groups.
-    explicit = browse(order_0='-occurrence_count', **params).data
-    assert explicit['results'][0]['mapping_id'] == suggested.pk
+    # Provenance remains available as an explicit sort.
+    explicit = browse(order_0='origin_system', **params).data
+    assert explicit['results'][0]['origin_system'] == 'curator'
+
+
+def test_every_section_shares_the_seen_default(browse):
+    for status in ['proposed', 'approved', 'rejected']:
+        row(f'{status}-low', status=status, origin_system='curator', occurrence_count=1)
+        row(f'{status}-high', status=status, origin_system='suggest v0.4', occurrence_count=500)
+    row('athena-low', origin_system='athena', occurrence_count=1)
+    row('athena-high', origin_system='athena', occurrence_count=500)
+    data = browse().data
+    by_section = {}
+    for r in data['results']:
+        section = ('Athena Mapped' if r['origin_system'] == 'athena'
+                   else {'approved': 'Mapped', 'rejected': 'Rejected'}.get(r['status'], 'Unmapped'))
+        by_section.setdefault(section, []).append(r['source_code'])
+    assert by_section['Unmapped'] == ['proposed-high', 'proposed-low']
+    assert by_section['Mapped'] == ['approved-high', 'approved-low']
+    assert by_section['Rejected'] == ['rejected-high', 'rejected-low']
+    assert by_section['Athena Mapped'] == ['athena-high', 'athena-low']
+
+
+def test_provenance_filter_narrows_rows_totals_and_pagination(browse):
+    for i in range(3):
+        row(f'CUR-{i}', origin_system='curator', occurrence_count=10)
+    for i in range(7):
+        row(f'SUG-{i}', origin_system='suggest v0.4', occurrence_count=99)
+    unfiltered = browse().data
+    assert unfiltered['pages']['Unmapped']['total'] == 10
+    assert unfiltered['selected_provenance'] == ''
+
+    filtered = browse(provenance='curator').data
+    assert [r['source_code'] for r in filtered['results']] == ['CUR-0', 'CUR-1', 'CUR-2']
+    # Totals follow the filter, or pagination would offer pages with no rows.
+    assert filtered['pages']['Unmapped']['total'] == 3
+    assert filtered['selected_provenance'] == 'curator'
+    # The tab strip keeps counting the whole tab -- it is how a curator sees
+    # what is there before filtering.
+    assert unfiltered['tabs'][0]['proposed'] == filtered['tabs'][0]['proposed'] == 10
+
+
+def test_provenance_filter_lists_every_value_on_the_tab_with_counts(browse):
+    row('A', origin_system='curator', occurrence_count=1)
+    row('B', origin_system='suggest v0.4', occurrence_count=1)
+    row('C', origin_system='suggest v0.4', occurrence_count=1)
+    row('D', origin_system='', occurrence_count=1)
+    data = browse().data
+    assert data['provenances'] == [
+        {'origin_system': 'suggest v0.4', 'count': 2},
+        {'origin_system': '', 'count': 1},
+        {'origin_system': 'curator', 'count': 1},
+    ]
+    # Choosing one must not drop the others from the control.
+    assert browse(provenance='curator').data['provenances'] == data['provenances']
+
+
+def test_provenance_filter_composes_with_search_and_leaves_duplicates_alone(browse):
+    # A duplicate is one code twice after Upper(Trim(...)); the unique
+    # constraint forbids two rows with the identical spelling.
+    row('DUP', origin_system='curator', occurrence_count=5)
+    row(' dup ', origin_system='suggest v0.4', occurrence_count=5)
+    row('OTHER', origin_system='curator', occurrence_count=5)
+    data = browse(search='DUP', provenance='curator').data
+    assert [r['source_code'] for r in data['results']] == ['DUP']
+    # Both halves of the duplicate still surface: hiding one would turn the
+    # duplicate warning into a puzzle.
+    assert sorted(r['origin_system'] for r in data['duplicates']) == ['curator', 'suggest v0.4']
 
 
 def test_reversing_provenance_keeps_seen_descending_and_other_defaults(browse):
