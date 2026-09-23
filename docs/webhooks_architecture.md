@@ -115,9 +115,76 @@ direct grants only for writes — are the whole gate; session callers are covere
 the generated `secret` once: store it at the subscriber. List, detail, update,
 and delivery-log responses never expose the secret. Subscriptions cannot be
 transferred between organizations. `PATCH /api/v1/webhooks/subscriptions/{id}/`
-can update URL/event types or disable with `{"active":false}`; DELETE removes
-the subscription and its delivery history. Rotation is done by creating a new
-subscription and disabling/deleting the old one.
+can update URL/event types or disable with `{"active":false}`; DELETE marks the
+subscription removed. Rotation is done by creating a new subscription and
+disabling/deleting the old one.
+
+### Every change to a destination is recorded
+
+A subscription names where an organization's patient events go, so changing one
+is the act worth recording — and the generic audit row carries method, path and
+status, which says that an egress configuration changed but not what it became.
+`POST`, `PATCH` and `DELETE` therefore each append a `webhook_subscription_change`
+row: acting identity and email, organization (id and slug), subscription id, the
+URL and event types on both sides of the change, and the timestamp. The rows are
+append-only — `save()` on an existing row and `delete()` both refuse — and
+retention never prunes them. `QuerySet.update()` and direct SQL are not stopped
+by the model; a database role that cannot write the table is what makes that
+durable, and it belongs to the deployment.
+
+A change made at a shell, by a data migration or through a fixture writes no
+record. That is the same limit the model-level URL validator has, for the same
+reason: the field this table exists for is the actor, and a signal cannot name
+one. The same facts also go onto the request's `AuditEvent` row, whose
+`detail` is covered by that table's HMAC signature and hash chain — so the
+change log is the queryable index and the audit chain is the tamper-evidence,
+and rewriting one contradicts the other. The audit row carries the destination
+**host and a SHA-256 digest of the URL**, never the URL: audit rows go to stdout
+for the SIEM and are readable through `/api/v1/audit-events/` by platform staff
+and any service token, which is a wider audience than the direct org admins who
+may configure egress, and for some receivers the path is the credential. The
+digest still binds the exact address.
+
+`DELETE` marks `deleted_at` and clears `active` rather than deleting the row.
+The cascade used to take the subscription's delivery history with it, so after
+removing a subscription nothing said where that organization's events had been
+going — which is the one question an investigation asks. A removed subscription
+accepts no write (redirect, re-enable or a second delete all 404) and receives no
+further events, and it leaves the listing — removing a subscription still means
+it stops appearing, which is the contract clients were written against.
+Retrieving it by id keeps working, and so does its delivery history;
+`?include_removed=true` brings removed subscriptions back into the listing for
+whoever is reviewing that history.
+
+Each delivery freezes the address it is for when the row is written, and the
+worker sends there rather than to wherever the subscription points at send time.
+A row can sit through minutes of retry backoff and a recovery sweep, so reading
+the destination at send meant a `PATCH` both redirected PHI that was already
+queued and left any record of where it went written after the fact. Frozen, a
+redirect governs future events only, every attempt on a row went to the same
+place, and the row can say so. The delivery API exposes the `destination_host`
+derived from it, never the address: for some receivers the path is the
+credential. Changing the URL therefore cancels what was
+already queued against the old address rather than forwarding it: nothing goes
+to an address the organization has stopped designating, and nothing already
+queued is redirected to the new one. That is what makes a URL change a working
+kill switch — without it, a subscription disabled over a bad destination would
+flush its backlog there as soon as it was re-enabled. Deliveries cancelled this
+way are not re-sent; re-publish if they matter. Cancelling at the moment of the
+change cannot reach every row — a publisher that read the subscription just
+before it still inserts one addressed to the old URL, and a row a worker is
+holding has passed the point — so every attempt also compares the address it
+was frozen for against the one the organization designates now, and stops if
+they differ. That check and the attempt's claim commit together, which fixes
+the boundary: a change stops everything that has not yet begun an attempt, and
+an attempt already under way completes and is recorded. Nothing can recall a
+request in flight, and that one was addressed to what the organization
+designated when it started. A row written before the address column existed carries none and
+follows the subscription, which is all it can do.
+
+Deliveries do not survive deleting the organization — that cascade still reaches
+them. The change rows do, which after an organization is removed makes them the
+only remaining trail.
 
 Outbound types are `patient.changed`, `lab.updated`, `document.received`, and
 `foundation.synced`. Ordinary saves/deletes of patient records, demographics,
@@ -248,12 +315,17 @@ python manage.py shell -c 'from patient_portal.tasks import dispatch_pending_web
 
 `GET /api/v1/webhooks/subscriptions/{id}/deliveries/` returns authorized delivery
 history with status, attempts, next attempt, HTTP status, a redacted error code,
-and timestamps. Response bodies, destination URLs, secrets, and notification
-payloads are excluded. Dead letters remain available for investigation; there
+timestamps, and the `destination_host` the row is addressed to. Response bodies,
+full destination URLs, secrets, and notification payloads are excluded — the
+host, not the path, because for some receivers the path is the credential. The
+address is frozen, so every attempt on a row went to that host; `attempts` is
+what says whether anything was sent there at all. Reading the table as "where
+events went" means reading the rows with attempts, not every row. Dead letters remain available for investigation; there
 is no automatic reset of exhausted attempts.
 
-Migrations `patient_portal.0021` and `0022` add three tables, a uniqueness constraint,
-and a partial index for active deliveries;
+Migrations `patient_portal.0021`, `0022` and `0023` add four tables, a uniqueness
+constraint, a partial index for active deliveries, and the change log with the
+`deleted_at`/`destination_url` columns;
 it does not modify existing clinical rows. Apply migrations before web/worker
 deployment. Treat signing secrets and delivery records as protected application
 data when configuring database access, backups, and retention.
@@ -273,7 +345,9 @@ same configured database. Default retention is 30 days (`WEBHOOK_RETENTION_DAYS`
 `--days N`, `--batch-size N` (default 1000), and `--dry-run` are supported.
 Retention must be at least one day, beyond the five-minute signature window.
 The command removes old terminal delivery history (`delivered`, `dead_letter`,
-`cancelled`) and old processed inbound deduplication rows. Active deliveries,
+`cancelled`) and old processed inbound deduplication rows. It does not touch
+`webhook_subscription_change`: that is the record of who pointed an
+organization's events where, and it is kept rather than aged out. Active deliveries,
 unprocessed inbound events, and recent completions remain. Archive history
 externally before pruning if longer retention is needed. An authorized sender
 can reuse an expired event ID with a newly signed request after retention ends;

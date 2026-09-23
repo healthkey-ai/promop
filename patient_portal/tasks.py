@@ -19,13 +19,46 @@ def deliver_webhook(delivery_id):
     if not settings.WEBHOOKS_ENABLED:
         return
     with transaction.atomic():
-        delivery = (WebhookDelivery.objects.select_for_update()
+        # `of=('self',)` locks the delivery row only. Without it, `FOR UPDATE`
+        # over the join locks the subscription and organization rows too, in
+        # that order — while a subscription write locks the subscription first
+        # and its deliveries second, which is a deadlock cycle between two
+        # ordinary requests.
+        delivery = (WebhookDelivery.objects.select_for_update(of=('self',))
                     .select_related('subscription__organization').filter(pk=delivery_id).first())
         if delivery is None or delivery.status not in ('pending', 'retry', 'sending'):
             return
         if delivery.next_attempt_at > timezone.now():
             return
-        if not delivery.subscription.active or not delivery.subscription.organization.is_active:
+        # Both terms, not just `active`. The API sets the two together, but the
+        # guarantee cannot rest on every writer remembering to: a shell fix or a
+        # data migration that marks `deleted_at` alone would otherwise keep
+        # flushing queued PHI to a destination someone removed. `publish_event`
+        # reads removal the same way.
+        if (not delivery.subscription.active or delivery.subscription.deleted_at
+                or not delivery.subscription.organization.is_active):
+            delivery.status = 'cancelled'
+            delivery.save(update_fields=['status'])
+            return
+        # The address this row was frozen for is no longer the one the
+        # organization designates. A subscription write cancels what was queued
+        # at the moment of the change, but it cannot reach a row inserted by a
+        # publisher that read the subscription just before it, nor one a worker
+        # was already holding. This is the check every attempt passes through,
+        # so those rows stop here rather than delivering PHI to an address that
+        # has been revoked.
+        #
+        # Where the guarantee ends, precisely: this check and the claim below
+        # commit together, so a change landing after them meets an attempt that
+        # is already under way. Nothing can recall a request in flight — the
+        # boundary is the start of the attempt, not the arrival of the change —
+        # and that attempt was addressed to what the organization designated
+        # when it began. It completes, is recorded, and no further attempt on
+        # the row is made.
+        #
+        # A row written before the column existed carries no address and
+        # follows the subscription, which is all it can do.
+        if delivery.destination_url and delivery.destination_url != delivery.subscription.url:
             delivery.status = 'cancelled'
             delivery.save(update_fields=['status'])
             return
@@ -42,10 +75,15 @@ def deliver_webhook(delivery_id):
 
     response_status = None
     error = ''
+    # The row's own address, not the subscription's current one: a PATCH must
+    # not redirect PHI that was already queued, and every attempt on this row
+    # must be able to say it went to the same place. Rows written before the
+    # column existed carry none; those fall back, and there is nowhere else to
+    # ask.
+    url = delivery.destination_url or delivery.subscription.url
     try:
         response_status = send_webhook(
-            delivery.subscription.url, delivery.payload,
-            delivery.subscription.secret, delivery.pk,
+            url, delivery.payload, delivery.subscription.secret, delivery.pk,
         )
         if not 200 <= response_status < 300:
             error = 'http_error'

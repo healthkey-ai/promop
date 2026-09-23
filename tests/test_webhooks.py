@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import Mock, PropertyMock, patch
 
 import pytest
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import close_old_connections, connection, transaction
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
@@ -17,7 +18,10 @@ from rest_framework.test import APIClient
 
 from omop_core.models import GroupAccess, Organization, PatientDocument, PatientRecord, Person
 from patient_portal.api.fhir.sync import AGGREGATION_EXT_URL
-from patient_portal.models import Identity, InboundWebhookEvent, WebhookDelivery, WebhookSubscription
+from patient_portal.models import (
+    Identity, InboundWebhookEvent, WebhookDelivery, WebhookSubscription,
+    WebhookSubscriptionChange,
+)
 from patient_portal.tasks import deliver_webhook, dispatch_pending_webhooks
 from patient_portal.webhooks import (
     compute_hmac_signature, encode_payload, enqueue_delivery, publish_event,
@@ -166,6 +170,427 @@ def test_subscription_management_and_secret_visibility(setup):
     assert client.patch(f'/api/v1/webhooks/subscriptions/{alien.pk}/', {'active': False}, format='json').status_code == 404
     assert client.patch(f'/api/v1/webhooks/subscriptions/{subscription.pk}/', {'organization': other.pk}, format='json').status_code == 400
     assert client.patch(f'/api/v1/webhooks/subscriptions/{subscription.pk}/', {'active': False}, format='json').status_code == 200
+
+
+def test_every_egress_change_names_an_actor_a_destination_and_an_organization(setup):
+    """The generic audit row says an egress config changed, not what it became.
+
+    Without this, an admin could point an organization's patient events at a
+    host of their choosing, leave it for a week, delete the subscription, and
+    leave nothing behind saying where they had gone.
+    """
+    org, other, person, user, subscription = setup
+    client = APIClient()
+    client.force_login(user)
+
+    with patch('patient_portal.api.webhook_views.validate_webhook_url'):
+        created = client.post('/api/v1/webhooks/subscriptions/', {
+            'organization': org.pk, 'url': 'https://first.example/events',
+            'event_types': ['lab.updated'],
+        }, format='json')
+    assert created.status_code == 201
+    pk = created.data['id']
+
+    change = WebhookSubscriptionChange.objects.get(subscription_pk=pk)
+    assert change.action == WebhookSubscriptionChange.ACTION_CREATE
+    assert (change.url_before, change.url_after) == ('', 'https://first.example/events')
+    assert change.actor_id == str(user.pk) and change.actor_email == user.email
+    assert change.organization_slug == org.slug
+    assert change.event_types_after == ['lab.updated']
+
+    with patch('patient_portal.api.webhook_views.validate_webhook_url'):
+        assert client.patch(f'/api/v1/webhooks/subscriptions/{pk}/', {
+            'url': 'https://second.example/collect', 'event_types': ['patient.changed'],
+        }, format='json').status_code == 200
+
+    updated = WebhookSubscriptionChange.objects.filter(
+        subscription_pk=pk, action=WebhookSubscriptionChange.ACTION_UPDATE).get()
+    # The destination it left is the half a PATCH used to overwrite with no trace.
+    assert updated.url_before == 'https://first.example/events'
+    assert updated.url_after == 'https://second.example/collect'
+    assert updated.event_types_before == ['lab.updated']
+    assert updated.event_types_after == ['patient.changed']
+
+    assert client.delete(f'/api/v1/webhooks/subscriptions/{pk}/').status_code == 204
+    removed = WebhookSubscriptionChange.objects.filter(
+        subscription_pk=pk, action=WebhookSubscriptionChange.ACTION_DELETE).get()
+    assert removed.url_before == 'https://second.example/collect'
+    assert removed.url_after == ''
+    assert removed.actor_id == str(user.pk)
+
+
+def test_a_removed_subscription_keeps_its_history_and_accepts_no_writes(setup):
+    org, other, person, user, subscription = setup
+    delivery = WebhookDelivery.objects.create(
+        subscription=subscription, payload={'id': 'e1', 'type': 'lab.updated'},
+        destination_url='https://subscriber.example/events',
+    )
+    client = APIClient()
+    client.force_login(user)
+
+    assert client.delete(f'/api/v1/webhooks/subscriptions/{subscription.pk}/').status_code == 204
+
+    subscription.refresh_from_db()
+    assert subscription.deleted_at is not None and subscription.active is False
+    # The cascade used to take this row with the subscription, which is exactly
+    # the record of where the organization's events had been going.
+    assert WebhookDelivery.objects.filter(pk=delivery.pk).exists()
+
+    # Reads still reach it; every write is gone.
+    assert client.get(f'/api/v1/webhooks/subscriptions/{subscription.pk}/').status_code == 200
+    history = client.get(f'/api/v1/webhooks/subscriptions/{subscription.pk}/deliveries/')
+    assert history.status_code == 200
+    rows = history.data['results'] if isinstance(history.data, dict) else history.data
+    assert rows[0]['destination_host'] == 'subscriber.example'
+    # The host, not the address: for some receivers the path is the credential.
+    assert 'destination_url' not in rows[0]
+    assert client.patch(f'/api/v1/webhooks/subscriptions/{subscription.pk}/',
+                        {'active': True}, format='json').status_code == 404
+    assert client.delete(f'/api/v1/webhooks/subscriptions/{subscription.pk}/').status_code == 404
+
+
+def test_a_removed_subscription_leaves_the_listing_but_stays_retrievable(setup):
+    """Removal still means it stops appearing, which is what a client expects.
+
+    The history has to stay reachable — that is the point of not deleting the
+    row — but a collection route that silently starts returning every
+    subscription an organization has ever removed is a different endpoint than
+    the one clients were written against.
+    """
+    org, other, person, user, subscription = setup
+    client = APIClient()
+    client.force_login(user)
+    assert client.delete(f'/api/v1/webhooks/subscriptions/{subscription.pk}/').status_code == 204
+
+    def ids(response):
+        rows = response.data['results'] if isinstance(response.data, dict) else response.data
+        return {row['id'] for row in rows}
+
+    assert subscription.pk not in ids(client.get('/api/v1/webhooks/subscriptions/'))
+    assert subscription.pk in ids(
+        client.get('/api/v1/webhooks/subscriptions/?include_removed=true'))
+    assert client.get(f'/api/v1/webhooks/subscriptions/{subscription.pk}/').status_code == 200
+    # A flag it cannot read is an error, not a silent "no": the one route to a
+    # removed subscription's history should not vanish on a spelling.
+    assert client.get('/api/v1/webhooks/subscriptions/?include_removed=maybe').status_code == 400
+    # And the flag is a read; it cannot reopen a removed subscription to a write.
+    assert client.patch(
+        f'/api/v1/webhooks/subscriptions/{subscription.pk}/?include_removed=true',
+        {'active': True}, format='json').status_code == 404
+    # And it is discoverable: a generated client, or a reviewer reading the
+    # schema, should not have to find this route in prose.
+    from drf_spectacular.generators import SchemaGenerator
+    from patient_portal.api import v1_urls
+    schema = SchemaGenerator(patterns=v1_urls.urlpatterns).get_schema(public=True)
+    listing = schema['paths']['/webhooks/subscriptions/']['get']
+    assert any(parameter['name'] == 'include_removed'
+               for parameter in listing.get('parameters', []))
+
+
+def test_a_removed_subscription_receives_no_further_events(setup):
+    """Both readers of "removed" agree, and neither leans on `active`.
+
+    The API clears `active` alongside the mark, but a shell fix or a data
+    migration that marks only `deleted_at` must not keep flushing queued PHI to
+    a destination someone removed — so the mark alone is what is tested here.
+    """
+    org, other, person, user, subscription = setup
+    queued = WebhookDelivery.objects.create(
+        subscription=subscription, payload={'id': 'e1', 'type': 'lab.updated'},
+        destination_url=subscription.url,
+    )
+    subscription.deleted_at = timezone.now()
+    subscription.save(update_fields=['deleted_at'])
+
+    with patch('patient_portal.webhooks.enqueue_delivery'):
+        publish_event(org.pk, 'lab.updated', {'person_id': person.person_id})
+    assert WebhookDelivery.objects.count() == 1  # nothing new
+
+    with patch('patient_portal.tasks.send_webhook') as send:
+        deliver_webhook(str(queued.pk))
+        send.assert_not_called()
+    queued.refresh_from_db()
+    assert queued.status == 'cancelled'
+
+
+def test_a_delivery_is_addressed_when_it_is_queued_and_sent_there(setup):
+    """The row carries its own address, and the attempt uses it.
+
+    Reading the destination at send time would let a PATCH move PHI that was
+    already queued, silently. The row is addressed once, which is both what
+    stops that and what makes the mismatch detectable when the subscription
+    later moves.
+    """
+    org, other, person, user, subscription = setup
+    with patch('patient_portal.webhooks.enqueue_delivery'):
+        publish_event(org.pk, 'lab.updated', {'person_id': person.person_id})
+    delivery = WebhookDelivery.objects.get()
+    assert delivery.destination_url == 'https://subscriber.example/events'
+
+    sent = []
+    with patch('patient_portal.tasks.send_webhook',
+               side_effect=lambda url, *args, **kwargs: sent.append(url) or 200):
+        deliver_webhook(str(delivery.pk))
+    delivery.refresh_from_db()
+    assert sent == ['https://subscriber.example/events']
+    assert delivery.status == 'delivered'
+
+    # An event published after a change is addressed to the new destination.
+    WebhookSubscription.objects.filter(pk=subscription.pk).update(
+        url='https://moved.example/events')
+    with patch('patient_portal.webhooks.enqueue_delivery'):
+        publish_event(org.pk, 'lab.updated', {'person_id': person.person_id})
+    assert WebhookDelivery.objects.exclude(pk=delivery.pk).get().destination_url == (
+        'https://moved.example/events')
+
+
+def test_changing_the_url_cancels_what_was_queued_for_the_old_one(setup):
+    """Changing the destination has to be a kill switch that works.
+
+    A frozen address means a queued delivery cannot be redirected — which, on
+    its own, would send the backlog to the address the admin was moving away
+    from as soon as the subscription came back. Those rows are cancelled
+    instead: nothing goes to the old address, nothing is redirected to the new
+    one, and each row keeps saying where it had been addressed.
+    """
+    org, other, person, user, subscription = setup
+    with patch('patient_portal.webhooks.enqueue_delivery'):
+        publish_event(org.pk, 'lab.updated', {'person_id': person.person_id})
+    queued = WebhookDelivery.objects.get()
+
+    client = APIClient()
+    client.force_login(user)
+    assert client.patch(f'/api/v1/webhooks/subscriptions/{subscription.pk}/',
+                        {'url': 'https://corrected.example/events'},
+                        format='json').status_code == 200
+
+    queued.refresh_from_db()
+    assert queued.status == 'cancelled'
+    assert queued.destination_url == 'https://subscriber.example/events'
+
+    with patch('patient_portal.tasks.send_webhook') as send:
+        deliver_webhook(str(queued.pk))
+        send.assert_not_called()
+
+    # A delivery already addressed to the new URL is untouched.
+    with patch('patient_portal.webhooks.enqueue_delivery'):
+        publish_event(org.pk, 'lab.updated', {'person_id': person.person_id})
+    fresh = WebhookDelivery.objects.exclude(pk=queued.pk).get()
+    assert fresh.status == 'pending'
+    assert fresh.destination_url == 'https://corrected.example/events'
+
+
+def test_no_attempt_goes_to_an_address_the_organization_has_left(setup):
+    """Cancelling at the moment of the change cannot reach every row.
+
+    A publisher that read the subscription just before the change still inserts
+    a delivery addressed to the old URL, and a row a worker is holding has
+    passed the cancellation already. Every attempt therefore checks the address
+    it was frozen for against the one the organization designates now.
+    """
+    org, other, person, user, subscription = setup
+    with patch('patient_portal.webhooks.enqueue_delivery'):
+        publish_event(org.pk, 'lab.updated', {'person_id': person.person_id})
+    delivery = WebhookDelivery.objects.get()
+
+    # The row is untouched by the cancellation — as if it had been inserted a
+    # moment after it, or been in a worker's hands during it.
+    WebhookSubscription.objects.filter(pk=subscription.pk).update(
+        url='https://corrected.example/events')
+    assert WebhookDelivery.objects.get(pk=delivery.pk).status == 'pending'
+
+    with patch('patient_portal.tasks.send_webhook') as send:
+        deliver_webhook(str(delivery.pk))
+        send.assert_not_called()
+
+    delivery.refresh_from_db()
+    assert delivery.status == 'cancelled'
+    assert delivery.attempts == 0  # it never became an attempt
+
+
+def test_a_rolled_back_change_writes_no_audit_row_claiming_it_happened(setup):
+    """The signed trail must not assert a change the database refused.
+
+    A Python attribute is not rolled back, so setting it while the transaction
+    is still open would leave a chained audit row pointing at a change row that
+    does not exist — a contradiction between the two trails with nobody having
+    tampered.
+    """
+    from patient_portal.models import AuditEvent
+
+    org, other, person, user, subscription = setup
+    client = APIClient()
+    client.force_login(user)
+    before = AuditEvent.objects.count()
+
+    with patch('patient_portal.api.webhook_views.record_subscription_change',
+               side_effect=RuntimeError('database said no')):
+        with pytest.raises(RuntimeError):
+            client.patch(f'/api/v1/webhooks/subscriptions/{subscription.pk}/',
+                         {'url': 'https://corrected.example/events'}, format='json')
+
+    subscription.refresh_from_db()
+    assert subscription.url == 'https://subscriber.example/events'
+    assert not WebhookSubscriptionChange.objects.exists()
+    # The request is still audited — every request is. What it must not do is
+    # carry the destination of a change that never happened.
+    audited = AuditEvent.objects.latest('timestamp')
+    assert AuditEvent.objects.count() == before + 1
+    assert audited.detail is None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_an_egress_change_is_also_written_to_the_signed_audit_row(setup):
+    """The change table is the index; the chained audit row is the evidence.
+
+    Transactional, because the detail is handed to the middleware on commit —
+    which is the point: a change the database refuses leaves no audit row
+    asserting it did happen.
+    """
+    from patient_portal.models import AuditEvent
+
+    org, other, person, user, subscription = setup
+    client = APIClient()
+    client.force_login(user)
+    assert client.patch(f'/api/v1/webhooks/subscriptions/{subscription.pk}/',
+                        {'url': 'https://corrected.example/events'},
+                        format='json').status_code == 200
+
+    audited = AuditEvent.objects.filter(path__contains='/webhooks/subscriptions/',
+                                        method='PATCH').latest('timestamp')
+    assert audited.detail['host_before'] == 'subscriber.example'
+    assert audited.detail['host_after'] == 'corrected.example'
+    assert audited.detail['organization'] == org.slug
+    assert audited.detail['action'] == 'update'
+    # The path is withheld: audit rows go to stdout and are readable by any
+    # service token, a wider audience than the admins who may configure egress,
+    # and for some receivers the path is the credential.
+    assert 'events' not in json.dumps(audited.detail)
+    # The digest still binds the exact address, so the two trails can be
+    # compared without either carrying it.
+    change = WebhookSubscriptionChange.objects.get(pk=audited.detail['webhook_subscription_change'])
+    assert audited.detail['url_after_digest'] == hashlib.sha256(change.url_after.encode()).hexdigest()
+    # Signed and chained, so rewriting either trail contradicts the other.
+    assert audited.signature and audited.signature == audited.compute_signature()
+
+
+def test_a_second_delete_is_a_404(setup):
+    """The write queryset hides it; the lock below is the second line."""
+    org, other, person, user, subscription = setup
+    client = APIClient()
+    client.force_login(user)
+    WebhookSubscription.objects.filter(pk=subscription.pk).update(
+        deleted_at=timezone.now(), active=False)
+    assert client.delete(f'/api/v1/webhooks/subscriptions/{subscription.pk}/').status_code == 404
+
+
+def test_the_lock_refuses_a_row_removed_between_load_and_write(setup):
+    """The window the write queryset cannot close.
+
+    `get_object()` reads before the transaction; by the time the view writes,
+    another request may have removed the row. Called directly because that is
+    the only way to stand between the two.
+    """
+    from rest_framework.exceptions import NotFound
+
+    from patient_portal.api.webhook_views import WebhookSubscriptionViewSet
+
+    org, other, person, user, subscription = setup
+    view = WebhookSubscriptionViewSet()
+    assert view._lock_live(subscription.pk).pk == subscription.pk
+
+    WebhookSubscription.objects.filter(pk=subscription.pk).update(
+        deleted_at=timezone.now(), active=False)
+    with pytest.raises(NotFound):
+        view._lock_live(subscription.pk)
+
+
+def test_a_delivery_written_before_the_column_existed_still_sends(setup):
+    """The fallback for rows that predate the frozen address."""
+    org, other, person, user, subscription = setup
+    legacy = WebhookDelivery.objects.create(
+        subscription=subscription, payload={'id': 'old', 'type': 'lab.updated'})
+    assert legacy.destination_url == ''
+
+    sent = []
+    with patch('patient_portal.tasks.send_webhook',
+               side_effect=lambda url, *args, **kwargs: sent.append(url) or 200):
+        deliver_webhook(str(legacy.pk))
+    assert sent == ['https://subscriber.example/events']
+
+
+def test_the_migration_freezes_only_the_destinations_still_in_flight(setup):
+    """Rows already queued when 0023 lands need an address too.
+
+    Without one the worker falls back to the subscription's mutable URL, and a
+    PATCH would redirect patient events queued before the deploy — the thing
+    freezing the address exists to prevent. A terminal row gets nothing: the
+    subscription's URL today is a guess about where that one went, and a guess
+    written into an egress record is worse than an empty column.
+    """
+    import importlib
+
+    from django.apps import apps as django_apps
+
+    org, other, person, user, subscription = setup
+    queued = WebhookDelivery.objects.create(
+        subscription=subscription, payload={'id': 'q', 'type': 'lab.updated'})
+    done = WebhookDelivery.objects.create(
+        subscription=subscription, payload={'id': 'd', 'type': 'lab.updated'},
+        status='delivered')
+    assert queued.destination_url == '' and done.destination_url == ''
+
+    migration = importlib.import_module(
+        'patient_portal.migrations.0023_webhookdelivery_destination_url_and_more')
+    migration.freeze_queued_destinations(django_apps, None)
+
+    queued.refresh_from_db()
+    done.refresh_from_db()
+    assert queued.destination_url == 'https://subscriber.example/events'
+    assert done.destination_url == ''
+
+
+def test_a_patch_cannot_undo_a_delete_committed_while_it_was_in_flight(setup):
+    """DRF holds an instance loaded before the transaction and writes it whole.
+
+    A DELETE committing in between would be rolled back by that write —
+    `deleted_at` and `active` restored from the stale copy — resurrecting a
+    subscription someone removed, and still receiving events.
+    """
+    org, other, person, user, subscription = setup
+    client = APIClient()
+    client.force_login(user)
+
+    def delete_it(value):
+        # Runs during is_valid(), which is after the view has loaded the
+        # instance and before it saves: exactly the window the lock closes.
+        WebhookSubscription.objects.filter(pk=subscription.pk).update(
+            deleted_at=timezone.now(), active=False)
+
+    with patch('patient_portal.api.webhook_views.validate_webhook_url', side_effect=delete_it):
+        response = client.patch(f'/api/v1/webhooks/subscriptions/{subscription.pk}/',
+                                {'url': 'https://elsewhere.example/collect'}, format='json')
+
+    assert response.status_code == 404, response.data
+    subscription.refresh_from_db()
+    assert subscription.deleted_at is not None and subscription.active is False
+    assert subscription.url == 'https://subscriber.example/events'
+
+
+def test_a_change_record_cannot_be_rewritten_or_removed(setup):
+    org, other, person, user, subscription = setup
+    from patient_portal.webhooks import record_subscription_change
+
+    record_subscription_change(subscription, WebhookSubscriptionChange.ACTION_CREATE, user)
+    change = WebhookSubscriptionChange.objects.get()
+
+    change.url_after = 'https://rewritten.example/'
+    with pytest.raises(DjangoValidationError):
+        change.save()
+    with pytest.raises(DjangoValidationError):
+        change.delete()
+    change.refresh_from_db()
+    assert change.url_after == subscription.url
 
 
 def test_patient_and_expired_admin_cannot_manage_subscriptions(setup):
@@ -1042,7 +1467,10 @@ def test_subscription_mutations_require_csrf(setup):
     assert created.status_code == 403, created.data
     assert not WebhookSubscription.objects.filter(url='https://attacker.example/collect').exists()
     assert client.delete(f'/api/v1/webhooks/subscriptions/{subscription.pk}/').status_code == 403
-    assert WebhookSubscription.objects.filter(pk=subscription.pk).exists()
+    # The row surviving proves nothing now that removal is a mark rather than a
+    # delete; the mark being absent is what says the DELETE was refused.
+    subscription.refresh_from_db()
+    assert subscription.deleted_at is None and subscription.active
     # Reading is still fine without a token.
     assert client.get('/api/v1/webhooks/subscriptions/').status_code == 200
 
@@ -1388,7 +1816,9 @@ def test_a_trust_cannot_redirect_or_delete_an_existing_subscription(trusted_prof
         f'/api/v1/webhooks/subscriptions/{subscription.pk}/').status_code in (403, 404)
     subscription.refresh_from_db()
     assert subscription.url == 'https://subscriber.example/events'
-    assert WebhookSubscription.objects.filter(pk=subscription.pk).exists()
+    # Same reason as above: removal is a mark, so the absence of the mark is
+    # what shows the refusal took effect.
+    assert subscription.deleted_at is None and subscription.active
 
 
 def test_a_trust_still_reads_the_subscriptions_it_could_always_see(trusted_professional):

@@ -18,7 +18,9 @@ from django.db.models.signals import post_delete, post_save
 from django.utils import timezone
 
 from omop_core.models import PatientRecord
-from patient_portal.models import WebhookDelivery, WebhookSubscription
+from patient_portal.models import (
+    WebhookDelivery, WebhookSubscription, WebhookSubscriptionChange,
+)
 
 logger = logging.getLogger(__name__)
 EVENT_TYPES = ('patient.changed', 'lab.updated', 'document.received', 'foundation.synced')
@@ -234,10 +236,53 @@ def publish_event(organization_id, event_type, data, origin=None):
         event['origin'] = origin
     for subscription in WebhookSubscription.objects.filter(
         organization_id=organization_id, organization__is_active=True,
-        active=True, event_types__contains=[event_type],
+        active=True, deleted_at__isnull=True, event_types__contains=[event_type],
     ):
-        delivery = WebhookDelivery.objects.create(subscription=subscription, payload=event)
+        delivery = WebhookDelivery.objects.create(
+            subscription=subscription, payload=event,
+            # Frozen: this row is addressed to where the subscription points
+            # now, and a later PATCH does not redirect it.
+            destination_url=subscription.url,
+        )
         transaction.on_commit(lambda pk=delivery.pk: enqueue_delivery(pk))
+
+
+def record_subscription_change(subscription, action, actor, before=None):
+    """Append one row saying who changed this organization's egress, and how.
+
+    ``before`` is the subscription as it was, which the caller must capture
+    before saving: create passes none, update passes the previous values, and
+    delete passes the values the subscription is losing.
+
+    Called from the API, which is the only path a person uses. A change made at
+    a shell or through a fixture writes no record — the same limit the model
+    validators have, and for the same reason: covering it would mean a signal
+    that cannot name an actor, which is the field this exists for.
+    """
+    before = before or {}
+    removed = action == WebhookSubscriptionChange.ACTION_DELETE
+    change = WebhookSubscriptionChange.objects.create(
+        subscription=subscription,
+        subscription_pk=subscription.pk,
+        organization=subscription.organization,
+        organization_slug=subscription.organization.slug,
+        action=action,
+        url_before=before.get('url', ''),
+        url_after='' if removed else subscription.url,
+        event_types_before=before.get('event_types'),
+        event_types_after=None if removed else subscription.event_types,
+        active_before=before.get('active'),
+        active_after=None if removed else subscription.active,
+        actor_id=str(getattr(actor, 'pk', '') or ''),
+        actor_email=getattr(actor, 'email', '') or '',
+    )
+    return change
+
+
+def subscription_snapshot(subscription):
+    """The fields a change record compares, as they are now."""
+    return {'url': subscription.url, 'event_types': subscription.event_types,
+            'active': subscription.active}
 
 
 def _relay(event, event_type, data):

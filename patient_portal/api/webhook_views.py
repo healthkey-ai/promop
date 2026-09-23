@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import time
+from urllib.parse import urlsplit
 
 from django.conf import settings
 from django.db import transaction
@@ -9,20 +10,33 @@ from django.utils import timezone
 from rest_framework import serializers, status, viewsets
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import action
+from rest_framework.exceptions import NotFound
 from rest_framework.permissions import SAFE_METHODS, AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.settings import api_settings
 from rest_framework.throttling import SimpleRateThrottle
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 
 from omop_core.models import Organization, PatientRecord
 from omop_core.services.access import get_admin_orgs, get_direct_admin_orgs
-from patient_portal.models import InboundWebhookEvent, WebhookDelivery, WebhookSubscription
+from patient_portal.models import (
+    InboundWebhookEvent, WebhookDelivery, WebhookSubscription, WebhookSubscriptionChange,
+)
 from patient_portal.webhooks import (
-    EVENT_TYPES, INBOUND_HANDLERS, compute_hmac_signature, validate_webhook_url,
+    EVENT_TYPES, INBOUND_HANDLERS, compute_hmac_signature,
+    record_subscription_change, subscription_snapshot, validate_webhook_url,
 )
 from .permissions import ScopedTokenPermission, is_interactive_session
+
+
+def _url_digest(url):
+    """A stable fingerprint of a destination, safe to write where it is read.
+
+    Empty for an empty URL, so "there was no destination" and "the destination
+    is withheld" do not look alike.
+    """
+    return hashlib.sha256(url.encode()).hexdigest() if url else ''
 
 
 class WebhookSubscriptionSerializer(serializers.ModelSerializer):
@@ -32,8 +46,9 @@ class WebhookSubscriptionSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = WebhookSubscription
-        fields = ['id', 'organization', 'url', 'event_types', 'active', 'created_at']
-        read_only_fields = ['id', 'created_at']
+        fields = ['id', 'organization', 'url', 'event_types', 'active', 'created_at',
+                  'deleted_at']
+        read_only_fields = ['id', 'created_at', 'deleted_at']
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -131,10 +146,17 @@ class WebhookManagementPermission(ScopedTokenPermission):
 
 
 class WebhookDeliverySerializer(serializers.ModelSerializer):
+    # The host, derived from the frozen address; never the address itself,
+    # because for some receivers the path is the credential.
+    destination_host = serializers.SerializerMethodField()
+
     class Meta:
         model = WebhookDelivery
         fields = ['id', 'status', 'attempts', 'next_attempt_at', 'response_status',
-                  'error', 'created_at', 'delivered_at']
+                  'error', 'created_at', 'delivered_at', 'destination_host']
+
+    def get_destination_host(self, delivery):
+        return urlsplit(delivery.destination_url).hostname or ''
 
 
 class WebhookSubscriptionViewSet(viewsets.ModelViewSet):
@@ -162,21 +184,168 @@ class WebhookSubscriptionViewSet(viewsets.ModelViewSet):
         response['Pragma'] = 'no-cache'
         return response
 
+    @extend_schema(parameters=[OpenApiParameter(
+        name='include_removed', type=bool, location=OpenApiParameter.QUERY,
+        description=('Include subscriptions that have been removed. They are hidden by '
+                     'default; their delivery history remains readable either way.'),
+    )])
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
+
     def get_queryset(self):
         # Reads follow the caller's full admin reach, so the list matches the
         # data they already work with. Writes follow only the organizations they
         # administer directly, so a trust cannot edit away or redirect another
         # organization's egress configuration either — not just not create one.
         resolve = get_admin_orgs if self.request.method in SAFE_METHODS else get_direct_admin_orgs
-        return WebhookSubscription.objects.filter(
-            organization__in=resolve(self.request.user),
-        ).order_by('pk')
+        queryset = WebhookSubscription.objects.filter(organization__in=resolve(self.request.user))
+        if self.request.method not in SAFE_METHODS or not self._include_removed():
+            # A removed subscription is gone for every write: it cannot be
+            # redirected, re-enabled or deleted again. It is also absent from
+            # the listing by default, so removing one still means it stops
+            # appearing — the contract the endpoint had before removal became a
+            # mark rather than a delete. Retrieving it by id, and with it the
+            # delivery history saying where this organization's events actually
+            # went, keeps working; `?include_removed=true` brings it back to the
+            # listing for whoever is reviewing that history.
+            queryset = queryset.filter(deleted_at__isnull=True)
+        return queryset.order_by('pk')
+
+    def _include_removed(self):
+        if self.action != 'list':
+            return True
+        raw = self.request.query_params.get('include_removed')
+        if raw is None:
+            return False
+        # A value this cannot read is a 400, not a silent "false": the one route
+        # to a removed subscription's history should not disappear because a
+        # client spelled the flag differently.
+        return serializers.BooleanField().run_validation(raw)
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        subscription = serializer.save()
-        return Response({**serializer.data, 'secret': subscription.secret}, status=status.HTTP_201_CREATED)
+        self.perform_create(serializer)
+        return Response({**serializer.data, 'secret': serializer.instance.secret},
+                        status=status.HTTP_201_CREATED)
+
+    def perform_create(self, serializer):
+        with transaction.atomic():
+            subscription = serializer.save()
+            self._audit(record_subscription_change(
+                subscription, WebhookSubscriptionChange.ACTION_CREATE, self.request.user))
+
+    def perform_update(self, serializer):
+        """Re-read the row under a lock: DRF saves every field it holds.
+
+        `get_object()` loads the subscription outside any transaction, and
+        `ModelSerializer.update()` writes the whole row from that instance. A
+        DELETE committing in between would be undone — `deleted_at` and
+        `active` restored from the stale copy — resurrecting a subscription
+        someone removed, and the change row would record a before-state that
+        was already false when it was read.
+        """
+        with transaction.atomic():
+            locked = self._lock_live(serializer.instance.pk)
+            serializer.instance = locked
+            before = subscription_snapshot(locked)
+            subscription = serializer.save()
+            self._audit(record_subscription_change(
+                subscription, WebhookSubscriptionChange.ACTION_UPDATE, self.request.user,
+                before=before))
+            if subscription.url != before['url']:
+                # Deliveries queued against the address the organization has
+                # just stopped designating are cancelled rather than sent. The
+                # row keeps its frozen address and says `cancelled`, so the
+                # trail shows what was queued and that it never left; nothing is
+                # redirected to the new address either. This is what makes
+                # changing the URL a working kill switch: without it, a
+                # subscription taken out of service and brought back would
+                # flush its backlog to the address it was taken out of service
+                # over.
+                WebhookDelivery.objects.filter(
+                    subscription=subscription, status__in=['pending', 'retry'],
+                ).exclude(
+                    # A row from before the address column existed has none, and
+                    # the delivery task reads that as "follow the subscription" —
+                    # so it goes to the new address rather than being cancelled
+                    # for having been addressed to the old one.
+                    destination_url__in=['', subscription.url],
+                ).update(status='cancelled')
+
+    def perform_destroy(self, instance):
+        """Mark, do not delete: the delivery history is the record of egress.
+
+        A cascading DELETE took every delivery row with it, so after removing a
+        subscription nothing said where that organization's events had been
+        going. The subscription stops being visible to any write and stops
+        receiving events — `publish_event` and the delivery task each check the
+        mark and the flag, so neither leans on the other being set — and the
+        trail it leaves behind stays readable.
+        """
+        with transaction.atomic():
+            locked = self._lock_live(instance.pk)
+            before = subscription_snapshot(locked)
+            locked.deleted_at = timezone.now()
+            locked.active = False
+            locked.save(update_fields=['deleted_at', 'active'])
+            self._audit(record_subscription_change(
+                locked, WebhookSubscriptionChange.ACTION_DELETE, self.request.user,
+                before=before))
+
+    def _audit(self, change):
+        """Put the destination on the request's audit row as well.
+
+        `AuditEvent` signs each row and chains it to its predecessor, so a fact
+        recorded there is tamper-evident; `webhook_subscription_change` is the
+        queryable index of the same facts and the one retention never prunes.
+        Neither is a substitute for the other, and writing both means rewriting
+        one of them contradicts the other rather than passing unnoticed.
+
+        The host and a digest, never the URL. Audit rows go to stdout for the
+        SIEM and are readable through `/api/v1/audit-events/` by platform staff
+        and any service token — a wider audience than the direct org admins who
+        may configure egress — and for some receivers the URL path is the
+        credential. The digest still binds the exact address: changing a stored
+        URL without breaking the chain is not possible, and comparing the two
+        trails needs only a hash.
+        """
+        # On the Django request, not the DRF wrapper around it: the middleware
+        # that writes the audit row holds the former, and an attribute set on
+        # the wrapper never reaches it.
+        #
+        # And on commit, not now. A Python attribute is not rolled back, so a
+        # transaction that fails after this point — a lock timeout, a database
+        # error — would still leave the middleware writing a signed, chained
+        # audit row asserting a change that did not happen, and pointing at a
+        # change row that does not exist. The middleware runs after the view
+        # returns, so the callback lands in time.
+        request = getattr(self.request, '_request', self.request)
+        detail = {
+            'webhook_subscription_change': str(change.pk),
+            'action': change.action,
+            'subscription': change.subscription_pk,
+            'organization': change.organization_slug,
+            'host_before': urlsplit(change.url_before).hostname or '',
+            'host_after': urlsplit(change.url_after).hostname or '',
+            'url_before_digest': _url_digest(change.url_before),
+            'url_after_digest': _url_digest(change.url_after),
+            'event_types_before': change.event_types_before,
+            'event_types_after': change.event_types_after,
+        }
+        transaction.on_commit(lambda: setattr(request, 'audit_detail', detail))
+
+    def _lock_live(self, pk):
+        """The row as it is right now, held for the rest of the transaction.
+
+        Not found means it was removed while this request was in flight, which
+        is the answer a request arriving a moment later would get.
+        """
+        locked = (WebhookSubscription.objects.select_for_update()
+                  .filter(pk=pk, deleted_at__isnull=True).first())
+        if locked is None:
+            raise NotFound()
+        return locked
 
     @action(detail=True, methods=['get'])
     def deliveries(self, request, pk=None):

@@ -77,6 +77,45 @@ organization's egress configuration from someone the organization has already
 trusted with its patients — the wrong direction for review and for incident
 response.
 
+## What the trail must show
+
+The authority above is auditable only if the record survives the person who
+exercised it. Two properties make that true, and both were absent in the first
+implementation:
+
+- **Every create, edit and delete appends a `webhook_subscription_change` row**
+  naming the acting identity, the organization, and the URL and event types on
+  both sides of the change. The generic audit row records that
+  `PATCH /api/v1/webhooks/subscriptions/{id}/` happened; it does not record the
+  destination, and the destination is the fact an investigation needs. The rows
+  are append-only in the model and are never pruned by retention. Enforcing that
+  at the database — a role that cannot write the table — is a deployment control
+  and is not claimed here.
+- **Removing a subscription marks it rather than deleting it**, and each
+  delivery freezes the address it was written for. A cascading delete used to
+  remove the delivery history along with the configuration, so the sequence
+  "point the events at a host, leave it a week, delete the subscription" left
+  nothing behind. It now leaves the change rows, and the deliveries for as long
+  as retention keeps them (`WEBHOOK_RETENTION_DAYS`, 30 by default), each
+  stating the address it was written for; a row's `attempts` is what says
+  whether anything was actually sent there. Past that window the change rows are
+  the durable evidence — they are never pruned. Freezing the address is also what makes a change of URL a
+  working kill switch. A queued delivery cannot be silently redirected to the
+  new destination, and it is not sent to the old one either: changing the URL
+  cancels what was queued against it, and every attempt re-checks the address
+  it was frozen for against the one the organization designates now. Events queued
+  under a destination an organization has stopped designating are not delivered
+  anywhere — with one boundary, stated rather than implied: an attempt already
+  under way when the change lands completes, because no control can recall a
+  request in flight. That attempt was addressed to the destination the
+  organization designated when it began, and no further attempt on that
+  delivery is made.
+
+A change made outside the API — a shell, a data migration, a fixture — writes no
+change row, because the actor cannot be named from there. (No webhook model is
+registered in the Django admin, so that is not among the paths.) Treat direct
+database access to `webhook_subscription` as the privileged path it is.
+
 ## Residual risk
 
 A direct `org_admin` grant is still sufficient to point an organization's event
