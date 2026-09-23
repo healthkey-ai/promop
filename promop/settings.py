@@ -773,6 +773,11 @@ RUNNER_DIST = Path(os.environ['PROLOG_RUNNER_DIST']) if os.environ.get('PROLOG_R
 # refuses to activate a version whose translations are unreviewed unless the
 # deployment names them here — a statement that respondents will read machine
 # translations, which the runner discloses to them (PROlog DEF-5).
+# Who may read a survey's results at /s/<slug>/report: the same people the
+# Django admin lets read them, checked through the ordinary login path
+# (patient_portal.services.prolog_results_viewer).
+PROLOG_RESULTS_AUTH = 'patient_portal.services.prolog_results_viewer'
+
 PROLOG_MACHINE_LANGUAGES = [
     lang.strip() for lang in os.environ.get('PROLOG_MACHINE_LANGUAGES', '').split(',') if lang.strip()
 ]
