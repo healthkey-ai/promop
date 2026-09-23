@@ -92,11 +92,14 @@ implementation:
   at the database — a role that cannot write the table — is a deployment control
   and is not claimed here.
 - **Removing a subscription marks it rather than deleting it**, and each
-  delivery carries the `destination_host` it was written for. A cascading delete
-  used to remove the delivery history along with the configuration, so the
-  sequence "point the events at a host, leave it a week, delete the
-  subscription" left nothing behind. It now leaves the change rows and the
-  deliveries, each stating where it actually went.
+  delivery freezes the address it was written for. A cascading delete used to
+  remove the delivery history along with the configuration, so the sequence
+  "point the events at a host, leave it a week, delete the subscription" left
+  nothing behind. It now leaves the change rows and the deliveries, each stating
+  where it went. Freezing the address also means changing a URL cannot redirect
+  events that were already queued under the old one — a redirect applies to what
+  the organization sends next, which is the only thing an admin should be able
+  to decide after the fact.
 
 A change made outside the API — Django admin, a shell, a data migration — writes
 no change row, because the actor cannot be named from there. Treat direct

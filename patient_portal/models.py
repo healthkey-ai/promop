@@ -90,15 +90,18 @@ class WebhookDelivery(models.Model):
     error = models.CharField(max_length=64, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     delivered_at = models.DateTimeField(null=True)
-    # The host the most recent attempt actually used. Empty until an attempt is
-    # made, because a queued or cancelled row contacted nothing and a row
-    # claiming a destination it never reached over-counts for whoever reads this
-    # table as "where events went". Recorded here rather than read back off the
-    # subscription, whose `url` is the current destination: a PATCH rewrites it,
-    # and every past delivery would then name a place it never went. The host,
-    # not the full URL — for some receivers the path is the credential (see
-    # WebhookSubscriptionChange for who may see that).
-    destination_host = models.CharField(max_length=255, blank=True)
+    # The address this delivery is for, frozen when the row is written. An
+    # outbox row addressed to "wherever the subscription points at send time"
+    # cannot be audited: the URL is mutable, the row can sit through minutes of
+    # retry backoff and a recovery sweep, and a PATCH in between both moves
+    # PHI that was already queued and leaves any record of the old destination
+    # wrong. Freezing it means a redirect governs future events only, every
+    # attempt on this row went exactly here, and the row can say so.
+    #
+    # The API exposes the host, never this: for some receivers the path is the
+    # credential. `WebhookSubscriptionChange` is where destinations over time
+    # are recorded, with the actor who changed them.
+    destination_url = models.URLField(max_length=2048, blank=True)
 
     class Meta:
         indexes = [models.Index(

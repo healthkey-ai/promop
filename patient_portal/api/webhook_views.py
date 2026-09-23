@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import time
+from urllib.parse import urlsplit
 
 from django.conf import settings
 from django.db import transaction
@@ -9,6 +10,7 @@ from django.utils import timezone
 from rest_framework import serializers, status, viewsets
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import action
+from rest_framework.exceptions import NotFound
 from rest_framework.permissions import SAFE_METHODS, AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -135,10 +137,17 @@ class WebhookManagementPermission(ScopedTokenPermission):
 
 
 class WebhookDeliverySerializer(serializers.ModelSerializer):
+    # The host, derived from the frozen address; never the address itself,
+    # because for some receivers the path is the credential.
+    destination_host = serializers.SerializerMethodField()
+
     class Meta:
         model = WebhookDelivery
         fields = ['id', 'status', 'attempts', 'next_attempt_at', 'response_status',
                   'error', 'created_at', 'delivered_at', 'destination_host']
+
+    def get_destination_host(self, delivery):
+        return urlsplit(delivery.destination_url).hostname or ''
 
 
 class WebhookSubscriptionViewSet(viewsets.ModelViewSet):
@@ -204,8 +213,19 @@ class WebhookSubscriptionViewSet(viewsets.ModelViewSet):
                 subscription, WebhookSubscriptionChange.ACTION_CREATE, self.request.user)
 
     def perform_update(self, serializer):
-        before = subscription_snapshot(serializer.instance)
+        """Re-read the row under a lock: DRF saves every field it holds.
+
+        `get_object()` loads the subscription outside any transaction, and
+        `ModelSerializer.update()` writes the whole row from that instance. A
+        DELETE committing in between would be undone — `deleted_at` and
+        `active` restored from the stale copy — resurrecting a subscription
+        someone removed, and the change row would record a before-state that
+        was already false when it was read.
+        """
         with transaction.atomic():
+            locked = self._lock_live(serializer.instance.pk)
+            serializer.instance = locked
+            before = subscription_snapshot(locked)
             subscription = serializer.save()
             record_subscription_change(
                 subscription, WebhookSubscriptionChange.ACTION_UPDATE, self.request.user,
@@ -220,14 +240,27 @@ class WebhookSubscriptionViewSet(viewsets.ModelViewSet):
         receiving events (`active` is what publish_event and the delivery task
         both check), and the trail it leaves behind stays readable.
         """
-        before = subscription_snapshot(instance)
         with transaction.atomic():
-            instance.deleted_at = timezone.now()
-            instance.active = False
-            instance.save(update_fields=['deleted_at', 'active'])
+            locked = self._lock_live(instance.pk)
+            before = subscription_snapshot(locked)
+            locked.deleted_at = timezone.now()
+            locked.active = False
+            locked.save(update_fields=['deleted_at', 'active'])
             record_subscription_change(
-                instance, WebhookSubscriptionChange.ACTION_DELETE, self.request.user,
+                locked, WebhookSubscriptionChange.ACTION_DELETE, self.request.user,
                 before=before)
+
+    def _lock_live(self, pk):
+        """The row as it is right now, held for the rest of the transaction.
+
+        Not found means it was removed while this request was in flight, which
+        is the answer a request arriving a moment later would get.
+        """
+        locked = (WebhookSubscription.objects.select_for_update()
+                  .filter(pk=pk, deleted_at__isnull=True).first())
+        if locked is None:
+            raise NotFound()
+        return locked
 
     @action(detail=True, methods=['get'])
     def deliveries(self, request, pk=None):

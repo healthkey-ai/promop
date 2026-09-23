@@ -238,10 +238,12 @@ def publish_event(organization_id, event_type, data, origin=None):
         organization_id=organization_id, organization__is_active=True,
         active=True, deleted_at__isnull=True, event_types__contains=[event_type],
     ):
-        # No destination_host here: nothing has been contacted yet, and the
-        # subscription's URL can still change before the attempt. The delivery
-        # task records the host it actually used.
-        delivery = WebhookDelivery.objects.create(subscription=subscription, payload=event)
+        delivery = WebhookDelivery.objects.create(
+            subscription=subscription, payload=event,
+            # Frozen: this row is addressed to where the subscription points
+            # now, and a later PATCH does not redirect it.
+            destination_url=subscription.url,
+        )
         transaction.on_commit(lambda pk=delivery.pk: enqueue_delivery(pk))
 
 

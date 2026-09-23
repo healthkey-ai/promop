@@ -223,7 +223,7 @@ def test_a_removed_subscription_keeps_its_history_and_accepts_no_writes(setup):
     org, other, person, user, subscription = setup
     delivery = WebhookDelivery.objects.create(
         subscription=subscription, payload={'id': 'e1', 'type': 'lab.updated'},
-        destination_host='subscriber.example',
+        destination_url='https://subscriber.example/events',
     )
     client = APIClient()
     client.force_login(user)
@@ -242,6 +242,8 @@ def test_a_removed_subscription_keeps_its_history_and_accepts_no_writes(setup):
     assert history.status_code == 200
     rows = history.data['results'] if isinstance(history.data, dict) else history.data
     assert rows[0]['destination_host'] == 'subscriber.example'
+    # The host, not the address: for some receivers the path is the credential.
+    assert 'destination_url' not in rows[0]
     assert client.patch(f'/api/v1/webhooks/subscriptions/{subscription.pk}/',
                         {'active': True}, format='json').status_code == 404
     assert client.delete(f'/api/v1/webhooks/subscriptions/{subscription.pk}/').status_code == 404
@@ -279,19 +281,19 @@ def test_a_removed_subscription_receives_no_further_events(setup):
     assert not WebhookDelivery.objects.exists()
 
 
-def test_a_delivery_records_the_host_its_attempt_used_and_claims_none_before(setup):
-    """Where it went, not where it was headed, and nothing until it went.
+def test_a_queued_delivery_keeps_its_address_when_the_subscription_moves(setup):
+    """A redirect governs future events, not PHI that is already queued.
 
-    Queueing contacts nobody, and the URL can still move before the attempt —
-    the retry backoff alone spans minutes. A row stamped at enqueue would name
-    a destination the event never reached; reading the destination back off the
-    subscription would have every past delivery follow the next PATCH.
+    The row can sit through minutes of retry backoff and a recovery sweep. If
+    the destination were read at send time, changing the URL would move events
+    queued before the change — and any record of where they went would have to
+    be written after the fact, or be wrong.
     """
     org, other, person, user, subscription = setup
     with patch('patient_portal.webhooks.enqueue_delivery'):
         publish_event(org.pk, 'lab.updated', {'person_id': person.person_id})
     delivery = WebhookDelivery.objects.get()
-    assert delivery.destination_host == ''
+    assert delivery.destination_url == 'https://subscriber.example/events'
 
     WebhookSubscription.objects.filter(pk=subscription.pk).update(
         url='https://moved.example/events')
@@ -301,15 +303,42 @@ def test_a_delivery_records_the_host_its_attempt_used_and_claims_none_before(set
         deliver_webhook(str(delivery.pk))
 
     delivery.refresh_from_db()
-    assert sent == ['https://moved.example/events']
+    assert sent == ['https://subscriber.example/events']
     assert delivery.status == 'delivered'
-    assert delivery.destination_host == 'moved.example'
+    assert delivery.destination_url == 'https://subscriber.example/events'
 
-    # And a later PATCH does not rewrite the record of an attempt already made.
-    WebhookSubscription.objects.filter(pk=subscription.pk).update(
-        url='https://moved-again.example/events')
-    delivery.refresh_from_db()
-    assert delivery.destination_host == 'moved.example'
+    # The next event does go to the new address.
+    with patch('patient_portal.webhooks.enqueue_delivery'):
+        publish_event(org.pk, 'lab.updated', {'person_id': person.person_id})
+    assert WebhookDelivery.objects.exclude(pk=delivery.pk).get().destination_url == (
+        'https://moved.example/events')
+
+
+def test_a_patch_cannot_undo_a_delete_committed_while_it_was_in_flight(setup):
+    """DRF holds an instance loaded before the transaction and writes it whole.
+
+    A DELETE committing in between would be rolled back by that write —
+    `deleted_at` and `active` restored from the stale copy — resurrecting a
+    subscription someone removed, and still receiving events.
+    """
+    org, other, person, user, subscription = setup
+    client = APIClient()
+    client.force_login(user)
+
+    def delete_it(value):
+        # Runs during is_valid(), which is after the view has loaded the
+        # instance and before it saves: exactly the window the lock closes.
+        WebhookSubscription.objects.filter(pk=subscription.pk).update(
+            deleted_at=timezone.now(), active=False)
+
+    with patch('patient_portal.api.webhook_views.validate_webhook_url', side_effect=delete_it):
+        response = client.patch(f'/api/v1/webhooks/subscriptions/{subscription.pk}/',
+                                {'url': 'https://elsewhere.example/collect'}, format='json')
+
+    assert response.status_code == 404, response.data
+    subscription.refresh_from_db()
+    assert subscription.deleted_at is not None and subscription.active is False
+    assert subscription.url == 'https://subscriber.example/events'
 
 
 def test_a_change_record_cannot_be_rewritten_or_removed(setup):

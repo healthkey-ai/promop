@@ -1,7 +1,6 @@
 """Durable, bounded webhook delivery with recovery after worker/broker outages."""
 
 from datetime import timedelta
-from urllib.parse import urlsplit
 
 from celery import shared_task
 from django.conf import settings
@@ -43,13 +42,12 @@ def deliver_webhook(delivery_id):
 
     response_status = None
     error = ''
-    # One value for the send and for the record of it. The row's
-    # destination_host was written when the event was queued; a PATCH between
-    # then and now moves the destination, and a history that still named the
-    # old host would state where the event was headed rather than where it
-    # went. Read the URL once here so the two cannot disagree.
-    url = delivery.subscription.url
-    destination_host = urlsplit(url).hostname or ''
+    # The row's own address, not the subscription's current one: a PATCH must
+    # not redirect PHI that was already queued, and every attempt on this row
+    # must be able to say it went to the same place. Rows written before the
+    # column existed carry none; those fall back, and there is nowhere else to
+    # ask.
+    url = delivery.destination_url or delivery.subscription.url
     try:
         response_status = send_webhook(
             url, delivery.payload, delivery.subscription.secret, delivery.pk,
@@ -68,7 +66,6 @@ def deliver_webhook(delivery_id):
             return
         current.response_status = response_status
         current.error = error
-        current.destination_host = destination_host
         delay = RETRY_BASE_SECONDS * 2 ** (current.attempts - 1)
         if not error:
             current.status = 'delivered'
