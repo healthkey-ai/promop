@@ -15,7 +15,7 @@ services:
       - key: PLAYWRIGHT_BROWSERS_PATH
         value: "0"
       - key: PYTHON_VERSION
-        value: 3.12.0
+        value: 3.12.13
       - key: SECRET_KEY
         generateValue: true
       # Required by patient_portal.E001/E002/E003, which start.sh enforces
@@ -117,7 +117,7 @@ services:
       - key: PLAYWRIGHT_BROWSERS_PATH
         value: "0"
       - key: PYTHON_VERSION
-        value: 3.12.0
+        value: 3.12.13
       # Exactly one scheduler per deployment. This service runs a single
       # replica; scaling it up means moving beat to its own service rather than
       # raising the replica count. Without it the recovery sweep never runs:
@@ -183,7 +183,7 @@ services:
       - key: PLAYWRIGHT_BROWSERS_PATH
         value: "0"
       - key: PYTHON_VERSION
-        value: 3.12.0
+        value: 3.12.13
       - key: SECRET_KEY
         generateValue: true
       - key: AUDIT_HMAC_KEY
@@ -288,7 +288,7 @@ services:
       - key: PLAYWRIGHT_BROWSERS_PATH
         value: "0"
       - key: PYTHON_VERSION
-        value: 3.12.0
+        value: 3.12.13
       - key: DEBUG
         value: 'False'
       - key: CELERY_BROKER_URL
