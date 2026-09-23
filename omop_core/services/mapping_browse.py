@@ -8,6 +8,10 @@ from omop_core.services.mapping_destinations import with_destination_counts
 from omop_core.services.source_retirement import mapping_source_retirement
 
 OVERALL = '__overall__'
+# A blank origin_system is a real value -- enqueue_unmapped_source_codes writes
+# it for every newly queued code -- but '' already means "no filter" on the
+# wire, so filtering to it needs a sentinel.
+BLANK_PROVENANCE = '__blank__'
 PAGE_SIZE = 100
 ORDER_FIELDS = {
     'origin_system': 'origin_system', 'source_code': 'source_code',
@@ -25,10 +29,20 @@ def canonical_source(source):
     return {**vocab.ICD10CM_MERGE, **vocab.VOCABULARY_OID_ALIASES}.get(source, source)
 
 
+def _provenance_options(counts_by_origin):
+    """Filter options, most common first, ties broken by name."""
+    return [{'origin_system': origin, 'count': n}
+            for origin, n in sorted(counts_by_origin.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+
 def browse_mappings(mappings, params, serialize):
     # Counts use the same Athena de-duplication as the visible rows.
     counts = {}
     section_counts = {}
+    # Provenance counts ride on this aggregate rather than a second GROUP BY:
+    # origin_system carries no index, so a query of its own is a sequential
+    # scan of the tab on every browse and on every refresh after an approve.
+    provenance_counts = {}
     for group in mappings.order_by().values('source_vocabulary_id', 'status', 'origin_system').annotate(n=Count('pk')):
         source = canonical_source(group['source_vocabulary_id'])
         bucket = counts.setdefault(source, dict(proposed=0, approved=0, athena=0))
@@ -41,6 +55,12 @@ def browse_mappings(mappings, params, serialize):
         key = 'athena' if group['origin_system'] == 'athena' else group['status']
         if key in bucket:
             bucket[key] += group['n']
+        # Athena rows are excluded: they are reference, they sit in a section
+        # that starts collapsed, and on the ICD-10 tab they outnumber
+        # everything else -- offering them would read as emptying the page.
+        if group['origin_system'] != 'athena':
+            per_source = provenance_counts.setdefault(source, {})
+            per_source[group['origin_system']] = per_source.get(group['origin_system'], 0) + group['n']
     ordered = sorted(counts, key=lambda key: (vocab.source_tab_sort_key(key), key))
     tabs = [{
         'vocabulary_id': key, 'label': vocab.source_tab_label(key),
@@ -71,16 +91,19 @@ def browse_mappings(mappings, params, serialize):
     ).filter(duplicate_count__gt=1).values_list('pk', flat=True)
     duplicates = list(with_destination_counts(mappings.filter(pk__in=duplicate_ids)))
 
-    # Provenance values present on this tab, for the filter control. Taken
-    # from tab_rows rather than the filtered set so choosing one does not
-    # empty the list of the others.
-    provenances = [
-        {'origin_system': group['origin_system'], 'count': group['n']}
-        for group in tab_rows.order_by().values('origin_system').annotate(n=Count('pk')).order_by('-n', 'origin_system')
-    ]
+    # Values offered by the filter control, from the counts above so choosing
+    # one does not empty the list of the others.
+    if source == OVERALL:
+        totals_by_provenance = {}
+        for per_source in provenance_counts.values():
+            for origin, n in per_source.items():
+                totals_by_provenance[origin] = totals_by_provenance.get(origin, 0) + n
+    else:
+        totals_by_provenance = provenance_counts.get(canonical_source(source), {})
+    provenances = _provenance_options(totals_by_provenance)
 
     search = params.get('search', '').strip()
-    provenance = params.get('provenance', '')
+    provenance = params.get('provenance', '').strip()
     filtered = mappings if search else tab_rows
     if search:
         query = Q()
@@ -90,11 +113,19 @@ def browse_mappings(mappings, params, serialize):
         if search.isdigit():
             query |= Q(target_concept_id__icontains=search)
         filtered = filtered.filter(query)
+        # A search reaches across every tab, so the tab's own counts would
+        # describe a different set of rows than the filter acts on -- offering
+        # values that match nothing and hiding ones that dominate the hits.
+        provenances = _provenance_options(dict(
+            filtered.exclude(origin_system='athena').order_by()
+            .values_list('origin_system').annotate(n=Count('pk'))
+        ))
     # Narrows a cross-tab search as well as a single tab. Duplicates are left
     # unfiltered on purpose: hiding one half of a duplicated code would turn a
     # warning into a puzzle.
     if provenance:
-        filtered = filtered.filter(origin_system=provenance)
+        filtered = filtered.filter(
+            origin_system='' if provenance == BLANK_PROVENANCE else provenance)
     if search or provenance:
         totals = filtered.aggregate(
             unmapped=Count('pk', filter=~Q(origin_system='athena') & ~Q(status__in=['approved', 'rejected'])),

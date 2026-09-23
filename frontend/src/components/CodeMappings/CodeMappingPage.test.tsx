@@ -1586,6 +1586,10 @@ describe("mapping dialog request isolation", () => {
 });
 
 describe("server mapping pages", () => {
+  // This block held one test and needed no reset; it holds several now, and an
+  // unreset mockGet implementation leaks into the tests that follow.
+  beforeEach(() => { mockGet.mockReset(); mockPost.mockReset(); mockPatch.mockReset(); });
+
   // #1575: Provenance became a filter instead of the default sort. A filter
   // finds curator-edited rows however many there are, and leaves the queue in
   // Seen order.
@@ -1619,7 +1623,53 @@ describe("server mapping pages", () => {
     }));
   });
 
-  it("omits the filter when a tab has nothing to filter by", async () => {
+  // Blank is not a corner case: enqueue_unmapped_source_codes writes
+  // origin_system='' for every newly queued code, so it is the largest cohort
+  // on a freshly enqueued tab. "" is already the select's "no filter" value,
+  // so it needs a sentinel of its own or the option is unselectable and filters
+  // nothing.
+  it("filters to the blank provenance through a distinct sentinel value", async () => {
+    renderBrowse();
+    const filter = await screen.findByLabelText("Filter by provenance") as HTMLSelectElement;
+    const values = Array.from(filter.querySelectorAll("option")).map((o) => o.getAttribute("value"));
+    expect(values).toEqual(["", "curator", "__blank__"]);
+    expect(new Set(values).size).toBe(values.length);
+    fireEvent.change(filter, { target: { value: "__blank__" } });
+    expect(filter.value).toBe("__blank__");
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", {
+      params: expect.objectContaining({ provenance: "__blank__" }),
+    }));
+  });
+
+  it("keeps a filter clearable after the rows carrying it are gone", async () => {
+    // The curator filters to a value, works through those rows, and the next
+    // refresh no longer offers it. Without an escape hatch the queue reads as
+    // empty with no control left to clear.
+    let payload = browseData();
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/v1/code-mappings/") return Promise.resolve({ data: payload });
+      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+    });
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    const filter = await screen.findByLabelText("Filter by provenance") as HTMLSelectElement;
+    // Those rows are worked off, so the next refresh stops offering the value.
+    payload = browseData({ provenances: [{ origin_system: "HT-One", count: 9 }] });
+    fireEvent.change(filter, { target: { value: "curator" } });
+    await waitFor(() => expect(
+      Array.from(screen.getByLabelText("Filter by provenance").querySelectorAll("option")).map((o) => o.textContent),
+    ).toContain("curator (0)"));
+    const after = screen.getByLabelText("Filter by provenance") as HTMLSelectElement;
+    expect(after.value).toBe("curator");
+    // Clearing it works, and the control then retires on its own: one
+    // provenance left and nothing filtered means nothing to offer.
+    fireEvent.change(after, { target: { value: "" } });
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", {
+      params: expect.not.objectContaining({ provenance: expect.anything() }),
+    }));
+    expect(screen.queryByLabelText("Filter by provenance")).not.toBeInTheDocument();
+  });
+
+  it("omits the filter when a tab has nothing to filter by and nothing is set", async () => {
     renderBrowse({ provenances: [{ origin_system: "HT-One", count: 9 }] });
     await screen.findByRole("table", { name: "Unmapped mappings" });
     expect(screen.queryByLabelText("Filter by provenance")).not.toBeInTheDocument();

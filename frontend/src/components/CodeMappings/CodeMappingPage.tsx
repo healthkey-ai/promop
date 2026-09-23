@@ -576,6 +576,11 @@ type BrowseResponse = {
   selected_provenance: string;
 };
 const sectionNames: MappingSection[] = ["Unmapped", "Mapped", "Rejected", "Athena Mapped"];
+const DEFAULT_SECTION_SORT: SectionSort = { column: "occurrence_count", descending: true };
+// A blank origin_system is a real value -- enqueue_unmapped_source_codes writes
+// it for every newly queued code -- but "" is already the select's "no filter"
+// value, so filtering to blank needs a sentinel the server translates back.
+const BLANK_PROVENANCE = "__blank__";
 
 export default function CodeMappingPage() {
   const navigate = useNavigate();
@@ -610,7 +615,8 @@ export default function CodeMappingPage() {
   // the header shows which column is sorted. The server applies the same
   // default for a caller that sends no order.
   const [sectionSorts, setSectionSorts] = useState<Partial<Record<MappingSection, SectionSort>>>(
-    Object.fromEntries(sectionNames.map((section) => [section, { column: "occurrence_count", descending: true }])),
+    () => sectionNames.reduce<Partial<Record<MappingSection, SectionSort>>>(
+      (sorts, section) => ({ ...sorts, [section]: DEFAULT_SECTION_SORT }), {}),
   );
   const [provenanceFilter, setProvenanceFilter] = useState("");
   const [navigationTarget, setNavigationTarget] = useState<{ id: string } | null>(null);
@@ -879,6 +885,14 @@ export default function CodeMappingPage() {
   // Server-supplied, and taken from the whole tab rather than the filtered
   // rows, so picking one option does not remove the rest.
   const provenanceOptions = browse?.provenances ?? [];
+  const provenanceValue = (origin: string) => origin || BLANK_PROVENANCE;
+  // A filter can outlive the values that produced it -- the rows carrying it
+  // get approved away, or the server's default tab moves before any tab has
+  // been clicked. Keep it listed and keep the control mounted, or there is no
+  // way left to clear it and the queue reads as empty for no visible reason.
+  const provenanceOrphaned = provenanceFilter !== ""
+    && !provenanceOptions.some((option) => provenanceValue(option.origin_system) === provenanceFilter);
+  const showProvenanceFilter = provenanceOptions.length > 1 || provenanceFilter !== "";
 
   // Four-section layout: UNMAPPED / MAPPED / REJECTED / ATHENA MAPPED.
   const athenaRows = useMemo(
@@ -1731,7 +1745,7 @@ export default function CodeMappingPage() {
             {/* Provenance is a filter rather than the sort it used to be
                 (#1575): it finds curator-edited rows in one click however many
                 there are, and leaves the queue in Seen order. */}
-            {provenanceOptions.length > 1 && (
+            {showProvenanceFilter && (
               <select
                 aria-label="Filter by provenance"
                 value={provenanceFilter}
@@ -1740,10 +1754,15 @@ export default function CodeMappingPage() {
               >
                 <option value="">All provenance</option>
                 {provenanceOptions.map((option) => (
-                  <option key={option.origin_system || "__blank__"} value={option.origin_system}>
+                  <option key={provenanceValue(option.origin_system)} value={provenanceValue(option.origin_system)}>
                     {(option.origin_system || "No provenance")} ({option.count})
                   </option>
                 ))}
+                {provenanceOrphaned && (
+                  <option value={provenanceFilter}>
+                    {(provenanceFilter === BLANK_PROVENANCE ? "No provenance" : provenanceFilter)} (0)
+                  </option>
+                )}
               </select>
             )}
           </div>

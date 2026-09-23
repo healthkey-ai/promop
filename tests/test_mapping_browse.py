@@ -113,6 +113,70 @@ def test_provenance_filter_lists_every_value_on_the_tab_with_counts(browse):
     assert browse(provenance='curator').data['provenances'] == data['provenances']
 
 
+def test_blank_provenance_is_filterable_through_a_sentinel(browse):
+    """'' is a real provenance -- enqueue_unmapped_source_codes writes it for
+    every newly queued code -- but '' on the wire already means "no filter"."""
+    row('QUEUED-1', origin_system='', occurrence_count=9)
+    row('QUEUED-2', origin_system='', occurrence_count=8)
+    row('CURATED', origin_system='curator', occurrence_count=7)
+    assert browse().data['pages']['Unmapped']['total'] == 3
+    filtered = browse(provenance='__blank__').data
+    assert [r['source_code'] for r in filtered['results']] == ['QUEUED-1', 'QUEUED-2']
+    assert filtered['pages']['Unmapped']['total'] == 2
+    assert filtered['selected_provenance'] == '__blank__'
+    # An empty value is still "no filter", not "the blank provenance".
+    assert browse(provenance='').data['pages']['Unmapped']['total'] == 3
+
+
+def test_athena_rows_are_not_offered_as_a_filter_value(browse):
+    """Athena is reference data in a section that starts collapsed, and on the
+    ICD-10 tab it outnumbers everything -- offering it reads as an empty page."""
+    for i in range(5):
+        row(f'ATH-{i}', origin_system='athena', status='approved')
+    row('WORK', origin_system='HT-One')
+    assert browse().data['provenances'] == [{'origin_system': 'HT-One', 'count': 1}]
+
+
+def test_search_rebuilds_the_options_from_the_rows_the_filter_will_act_on(browse):
+    """A search reaches across tabs, so the active tab's counts would describe
+    a different set of rows than the filter applies to."""
+    row('HIT-A', source_vocabulary_id='ICD10', origin_system='curator')
+    row('HIT-B', source_vocabulary_id='RxNorm', origin_system='fhir-sync')
+    row('MISS', source_vocabulary_id='ICD10', origin_system='hk-labs')
+    assert browse(source='ICD10').data['provenances'] == [
+        {'origin_system': 'curator', 'count': 1}, {'origin_system': 'hk-labs', 'count': 1},
+    ]
+    # Searching widens to every tab, so the off-tab provenance must be offered.
+    assert browse(source='ICD10', search='HIT-').data['provenances'] == [
+        {'origin_system': 'curator', 'count': 1}, {'origin_system': 'fhir-sync', 'count': 1},
+    ]
+
+
+def test_provenance_options_cost_no_extra_query(browse):
+    """origin_system carries no index, so a GROUP BY of its own is a sequential
+    scan of the tab on every browse and every post-approve refresh. The options
+    ride on the aggregate browse already runs."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    def query_count():
+        with CaptureQueriesContext(connection) as captured:
+            data = browse().data
+        return len(captured.captured_queries), data
+
+    for i in range(30):
+        row(f'Q{i:03}', origin_system='curator' if i % 2 else '', occurrence_count=i)
+    baseline, first = query_count()
+    for i in range(30, 90):
+        row(f'Q{i:03}', origin_system='hk-labs', occurrence_count=i)
+    grown, second = query_count()
+    assert grown == baseline, f'query count grew {baseline} -> {grown}'
+    # The options really are being produced, so the count above is not flat
+    # because the feature quietly did nothing.
+    assert {o['origin_system'] for o in first['provenances']} == {'curator', ''}
+    assert {o['origin_system'] for o in second['provenances']} == {'curator', '', 'hk-labs'}
+
+
 def test_provenance_filter_composes_with_search_and_leaves_duplicates_alone(browse):
     # A duplicate is one code twice after Upper(Trim(...)); the unique
     # constraint forbids two rows with the identical spelling.
