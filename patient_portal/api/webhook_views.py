@@ -16,7 +16,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.settings import api_settings
 from rest_framework.throttling import SimpleRateThrottle
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 
 from omop_core.models import Organization, PatientRecord
 from omop_core.services.access import get_admin_orgs, get_direct_admin_orgs
@@ -175,6 +175,14 @@ class WebhookSubscriptionViewSet(viewsets.ModelViewSet):
         response['Pragma'] = 'no-cache'
         return response
 
+    @extend_schema(parameters=[OpenApiParameter(
+        name='include_removed', type=bool, location=OpenApiParameter.QUERY,
+        description=('Include subscriptions that have been removed. They are hidden by '
+                     'default; their delivery history remains readable either way.'),
+    )])
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
+
     def get_queryset(self):
         # Reads follow the caller's full admin reach, so the list matches the
         # data they already work with. Writes follow only the organizations they
@@ -197,7 +205,13 @@ class WebhookSubscriptionViewSet(viewsets.ModelViewSet):
     def _include_removed(self):
         if self.action != 'list':
             return True
-        return self.request.query_params.get('include_removed', '').lower() in ('1', 'true', 'yes')
+        raw = self.request.query_params.get('include_removed')
+        if raw is None:
+            return False
+        # A value this cannot read is a 400, not a silent "false": the one route
+        # to a removed subscription's history should not disappear because a
+        # client spelled the flag differently.
+        return serializers.BooleanField().run_validation(raw)
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)

@@ -25,7 +25,13 @@ def deliver_webhook(delivery_id):
             return
         if delivery.next_attempt_at > timezone.now():
             return
-        if not delivery.subscription.active or not delivery.subscription.organization.is_active:
+        # Both terms, not just `active`. The API sets the two together, but the
+        # guarantee cannot rest on every writer remembering to: a shell fix or a
+        # data migration that marks `deleted_at` alone would otherwise keep
+        # flushing queued PHI to a destination someone removed. `publish_event`
+        # reads removal the same way.
+        if (not delivery.subscription.active or delivery.subscription.deleted_at
+                or not delivery.subscription.organization.is_active):
             delivery.status = 'cancelled'
             delivery.save(update_fields=['status'])
             return

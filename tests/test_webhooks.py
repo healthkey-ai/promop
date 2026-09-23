@@ -270,15 +270,47 @@ def test_a_removed_subscription_leaves_the_listing_but_stays_retrievable(setup):
     assert subscription.pk in ids(
         client.get('/api/v1/webhooks/subscriptions/?include_removed=true'))
     assert client.get(f'/api/v1/webhooks/subscriptions/{subscription.pk}/').status_code == 200
+    # A flag it cannot read is an error, not a silent "no": the one route to a
+    # removed subscription's history should not vanish on a spelling.
+    assert client.get('/api/v1/webhooks/subscriptions/?include_removed=maybe').status_code == 400
+    # And the flag is a read; it cannot reopen a removed subscription to a write.
+    assert client.patch(
+        f'/api/v1/webhooks/subscriptions/{subscription.pk}/?include_removed=true',
+        {'active': True}, format='json').status_code == 404
+    # And it is discoverable: a generated client, or a reviewer reading the
+    # schema, should not have to find this route in prose.
+    from drf_spectacular.generators import SchemaGenerator
+    from patient_portal.api import v1_urls
+    schema = SchemaGenerator(patterns=v1_urls.urlpatterns).get_schema(public=True)
+    listing = schema['paths']['/webhooks/subscriptions/']['get']
+    assert any(parameter['name'] == 'include_removed'
+               for parameter in listing.get('parameters', []))
 
 
 def test_a_removed_subscription_receives_no_further_events(setup):
+    """Both readers of "removed" agree, and neither leans on `active`.
+
+    The API clears `active` alongside the mark, but a shell fix or a data
+    migration that marks only `deleted_at` must not keep flushing queued PHI to
+    a destination someone removed — so the mark alone is what is tested here.
+    """
     org, other, person, user, subscription = setup
+    queued = WebhookDelivery.objects.create(
+        subscription=subscription, payload={'id': 'e1', 'type': 'lab.updated'},
+        destination_url=subscription.url,
+    )
     subscription.deleted_at = timezone.now()
     subscription.save(update_fields=['deleted_at'])
+
     with patch('patient_portal.webhooks.enqueue_delivery'):
         publish_event(org.pk, 'lab.updated', {'person_id': person.person_id})
-    assert not WebhookDelivery.objects.exists()
+    assert WebhookDelivery.objects.count() == 1  # nothing new
+
+    with patch('patient_portal.tasks.send_webhook') as send:
+        deliver_webhook(str(queued.pk))
+        send.assert_not_called()
+    queued.refresh_from_db()
+    assert queued.status == 'cancelled'
 
 
 def test_a_queued_delivery_keeps_its_address_when_the_subscription_moves(setup):
