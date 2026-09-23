@@ -77,6 +77,32 @@ organization's egress configuration from someone the organization has already
 trusted with its patients — the wrong direction for review and for incident
 response.
 
+## What the trail must show
+
+The authority above is auditable only if the record survives the person who
+exercised it. Two properties make that true, and both were absent in the first
+implementation:
+
+- **Every create, edit and delete appends a `webhook_subscription_change` row**
+  naming the acting identity, the organization, and the URL and event types on
+  both sides of the change. The generic audit row records that
+  `PATCH /api/v1/webhooks/subscriptions/{id}/` happened; it does not record the
+  destination, and the destination is the fact an investigation needs. The rows
+  are append-only in the model and are never pruned by retention. Enforcing that
+  at the database — a role that cannot write the table — is a deployment control
+  and is not claimed here.
+- **Removing a subscription marks it rather than deleting it**, and each
+  delivery carries the `destination_host` it was written for. A cascading delete
+  used to remove the delivery history along with the configuration, so the
+  sequence "point the events at a host, leave it a week, delete the
+  subscription" left nothing behind. It now leaves the change rows and the
+  deliveries, each stating where it actually went.
+
+A change made outside the API — Django admin, a shell, a data migration — writes
+no change row, because the actor cannot be named from there. Treat direct
+database and admin access to `webhook_subscription` as the privileged path it
+is.
+
 ## Residual risk
 
 A direct `org_admin` grant is still sufficient to point an organization's event

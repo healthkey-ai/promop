@@ -52,6 +52,13 @@ class WebhookSubscription(models.Model):
     secret = models.CharField(max_length=128, default=webhook_secret, editable=False)
     active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    # Removing a subscription marks it instead of deleting the row. A DELETE
+    # used to cascade the delivery history with it, so the one record of where
+    # an organization's events had actually been going disappeared with the
+    # configuration that sent them there. Writes exclude these rows (so the
+    # subscription is gone for every practical purpose); reads keep them, which
+    # is what makes the history reachable afterwards.
+    deleted_at = models.DateTimeField(null=True, blank=True)
 
 
 class InboundWebhookEvent(models.Model):
@@ -83,12 +90,88 @@ class WebhookDelivery(models.Model):
     error = models.CharField(max_length=64, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     delivered_at = models.DateTimeField(null=True)
+    # Where this one went, recorded when the row is written. The subscription's
+    # `url` is the current destination, not the historical one: a PATCH rewrites
+    # it, and every past delivery would then claim to have gone somewhere it
+    # never went. The host, not the full URL — for some receivers the path is
+    # the credential (see WebhookSubscriptionChange for who may see that).
+    destination_host = models.CharField(max_length=255, blank=True)
 
     class Meta:
         indexes = [models.Index(
             fields=['next_attempt_at'], name='webhook_due_active_idx',
             condition=Q(status__in=['pending', 'retry', 'sending']),
         )]
+
+
+class WebhookSubscriptionChange(models.Model):
+    """Append-only record of who pointed an organization's events where.
+
+    The generic audit row (``AuditLogMiddleware``) carries method, path and
+    status, which for ``PATCH /api/v1/webhooks/subscriptions/<id>/`` says that
+    an egress configuration changed but not what it became. The destination is
+    the fact that matters: without this, an admin could point an organization's
+    patient events at a host of their choosing, leave it for a week, delete the
+    subscription, and leave nothing behind saying where they had gone.
+
+    Append-only is enforced here for the paths people use — ``save()`` on an
+    existing row and ``delete()`` both refuse. ``QuerySet.update()`` and a
+    direct SQL statement still get through; the durable guarantee for those is
+    a database role that cannot write this table, which belongs to the
+    deployment rather than to the model.
+
+    Rows survive what they describe. The organization and subscription
+    references are nullable and their identifying values are copied in, so
+    deleting either leaves the record readable rather than taking it along.
+    """
+    ACTION_CREATE = 'create'
+    ACTION_UPDATE = 'update'
+    ACTION_DELETE = 'delete'
+    ACTIONS = [
+        (ACTION_CREATE, 'Created'),
+        (ACTION_UPDATE, 'Updated'),
+        (ACTION_DELETE, 'Deleted'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    subscription = models.ForeignKey(
+        WebhookSubscription, on_delete=models.SET_NULL, null=True, related_name='changes',
+    )
+    subscription_pk = models.PositiveIntegerField()
+    organization = models.ForeignKey('omop_core.Organization', on_delete=models.SET_NULL, null=True)
+    organization_slug = models.CharField(max_length=255)
+    action = models.CharField(max_length=16, choices=ACTIONS)
+    # Empty on the side where there is no destination: before a create, after a
+    # delete. A URL is always both recorded and attributable to an actor.
+    url_before = models.URLField(max_length=2048, blank=True)
+    url_after = models.URLField(max_length=2048, blank=True)
+    event_types_before = models.JSONField(null=True)
+    event_types_after = models.JSONField(null=True)
+    active_before = models.BooleanField(null=True)
+    active_after = models.BooleanField(null=True)
+    # The string form of the acting Identity's pk, as AuditEvent records it, so
+    # the two trails join and the value outlives the Identity row.
+    actor_id = models.CharField(max_length=64, blank=True)
+    actor_email = models.CharField(max_length=254, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'webhook_subscription_change'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['subscription_pk', '-created_at'],
+                         name='webhook_change_sub_ts_idx'),
+            models.Index(fields=['organization_slug', '-created_at'],
+                         name='webhook_change_org_ts_idx'),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValidationError('Webhook subscription changes are append-only.')
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError('Webhook subscription changes are append-only.')
 
 
 class IdentityManager(BaseUserManager):

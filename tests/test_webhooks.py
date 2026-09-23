@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import Mock, PropertyMock, patch
 
 import pytest
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import close_old_connections, connection, transaction
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
@@ -17,7 +18,10 @@ from rest_framework.test import APIClient
 
 from omop_core.models import GroupAccess, Organization, PatientDocument, PatientRecord, Person
 from patient_portal.api.fhir.sync import AGGREGATION_EXT_URL
-from patient_portal.models import Identity, InboundWebhookEvent, WebhookDelivery, WebhookSubscription
+from patient_portal.models import (
+    Identity, InboundWebhookEvent, WebhookDelivery, WebhookSubscription,
+    WebhookSubscriptionChange,
+)
 from patient_portal.tasks import deliver_webhook, dispatch_pending_webhooks
 from patient_portal.webhooks import (
     compute_hmac_signature, encode_payload, enqueue_delivery, publish_event,
@@ -166,6 +170,125 @@ def test_subscription_management_and_secret_visibility(setup):
     assert client.patch(f'/api/v1/webhooks/subscriptions/{alien.pk}/', {'active': False}, format='json').status_code == 404
     assert client.patch(f'/api/v1/webhooks/subscriptions/{subscription.pk}/', {'organization': other.pk}, format='json').status_code == 400
     assert client.patch(f'/api/v1/webhooks/subscriptions/{subscription.pk}/', {'active': False}, format='json').status_code == 200
+
+
+def test_every_egress_change_names_an_actor_a_destination_and_an_organization(setup):
+    """The generic audit row says an egress config changed, not what it became.
+
+    Without this, an admin could point an organization's patient events at a
+    host of their choosing, leave it for a week, delete the subscription, and
+    leave nothing behind saying where they had gone.
+    """
+    org, other, person, user, subscription = setup
+    client = APIClient()
+    client.force_login(user)
+
+    with patch('patient_portal.api.webhook_views.validate_webhook_url'):
+        created = client.post('/api/v1/webhooks/subscriptions/', {
+            'organization': org.pk, 'url': 'https://first.example/events',
+            'event_types': ['lab.updated'],
+        }, format='json')
+    assert created.status_code == 201
+    pk = created.data['id']
+
+    change = WebhookSubscriptionChange.objects.get(subscription_pk=pk)
+    assert change.action == WebhookSubscriptionChange.ACTION_CREATE
+    assert (change.url_before, change.url_after) == ('', 'https://first.example/events')
+    assert change.actor_id == str(user.pk) and change.actor_email == user.email
+    assert change.organization_slug == org.slug
+    assert change.event_types_after == ['lab.updated']
+
+    with patch('patient_portal.api.webhook_views.validate_webhook_url'):
+        assert client.patch(f'/api/v1/webhooks/subscriptions/{pk}/', {
+            'url': 'https://second.example/collect', 'event_types': ['patient.changed'],
+        }, format='json').status_code == 200
+
+    updated = WebhookSubscriptionChange.objects.filter(
+        subscription_pk=pk, action=WebhookSubscriptionChange.ACTION_UPDATE).get()
+    # The destination it left is the half a PATCH used to overwrite with no trace.
+    assert updated.url_before == 'https://first.example/events'
+    assert updated.url_after == 'https://second.example/collect'
+    assert updated.event_types_before == ['lab.updated']
+    assert updated.event_types_after == ['patient.changed']
+
+    assert client.delete(f'/api/v1/webhooks/subscriptions/{pk}/').status_code == 204
+    removed = WebhookSubscriptionChange.objects.filter(
+        subscription_pk=pk, action=WebhookSubscriptionChange.ACTION_DELETE).get()
+    assert removed.url_before == 'https://second.example/collect'
+    assert removed.url_after == ''
+    assert removed.actor_id == str(user.pk)
+
+
+def test_a_removed_subscription_keeps_its_history_and_accepts_no_writes(setup):
+    org, other, person, user, subscription = setup
+    delivery = WebhookDelivery.objects.create(
+        subscription=subscription, payload={'id': 'e1', 'type': 'lab.updated'},
+        destination_host='subscriber.example',
+    )
+    client = APIClient()
+    client.force_login(user)
+
+    assert client.delete(f'/api/v1/webhooks/subscriptions/{subscription.pk}/').status_code == 204
+
+    subscription.refresh_from_db()
+    assert subscription.deleted_at is not None and subscription.active is False
+    # The cascade used to take this row with the subscription, which is exactly
+    # the record of where the organization's events had been going.
+    assert WebhookDelivery.objects.filter(pk=delivery.pk).exists()
+
+    # Reads still reach it; every write is gone.
+    assert client.get(f'/api/v1/webhooks/subscriptions/{subscription.pk}/').status_code == 200
+    history = client.get(f'/api/v1/webhooks/subscriptions/{subscription.pk}/deliveries/')
+    assert history.status_code == 200
+    rows = history.data['results'] if isinstance(history.data, dict) else history.data
+    assert rows[0]['destination_host'] == 'subscriber.example'
+    assert client.patch(f'/api/v1/webhooks/subscriptions/{subscription.pk}/',
+                        {'active': True}, format='json').status_code == 404
+    assert client.delete(f'/api/v1/webhooks/subscriptions/{subscription.pk}/').status_code == 404
+
+
+def test_a_removed_subscription_receives_no_further_events(setup, django_capture_on_commit_callbacks):
+    org, other, person, user, subscription = setup
+    subscription.deleted_at = timezone.now()
+    subscription.save(update_fields=['deleted_at'])
+    with patch('patient_portal.webhooks.enqueue_delivery'):
+        publish_event(org.pk, 'lab.updated', {'person_id': person.person_id})
+    assert not WebhookDelivery.objects.exists()
+
+
+def test_a_delivery_records_where_it_went_not_where_the_subscription_points_now(setup):
+    org, other, person, user, subscription = setup
+    with patch('patient_portal.webhooks.enqueue_delivery'):
+        publish_event(org.pk, 'lab.updated', {'person_id': person.person_id})
+    delivery = WebhookDelivery.objects.get()
+    assert delivery.destination_host == 'subscriber.example'
+
+    client = APIClient()
+    client.force_login(user)
+    with patch('patient_portal.api.webhook_views.validate_webhook_url'):
+        assert client.patch(f'/api/v1/webhooks/subscriptions/{subscription.pk}/',
+                            {'url': 'https://elsewhere.example/collect'},
+                            format='json').status_code == 200
+    delivery.refresh_from_db()
+    # Reading the destination off the subscription would now claim this event
+    # went somewhere it never went.
+    assert delivery.destination_host == 'subscriber.example'
+
+
+def test_a_change_record_cannot_be_rewritten_or_removed(setup):
+    org, other, person, user, subscription = setup
+    from patient_portal.webhooks import record_subscription_change
+
+    record_subscription_change(subscription, WebhookSubscriptionChange.ACTION_CREATE, user)
+    change = WebhookSubscriptionChange.objects.get()
+
+    change.url_after = 'https://rewritten.example/'
+    with pytest.raises(DjangoValidationError):
+        change.save()
+    with pytest.raises(DjangoValidationError):
+        change.delete()
+    change.refresh_from_db()
+    assert change.url_after == subscription.url
 
 
 def test_patient_and_expired_admin_cannot_manage_subscriptions(setup):

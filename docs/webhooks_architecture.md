@@ -115,9 +115,37 @@ direct grants only for writes — are the whole gate; session callers are covere
 the generated `secret` once: store it at the subscriber. List, detail, update,
 and delivery-log responses never expose the secret. Subscriptions cannot be
 transferred between organizations. `PATCH /api/v1/webhooks/subscriptions/{id}/`
-can update URL/event types or disable with `{"active":false}`; DELETE removes
-the subscription and its delivery history. Rotation is done by creating a new
-subscription and disabling/deleting the old one.
+can update URL/event types or disable with `{"active":false}`; DELETE marks the
+subscription removed. Rotation is done by creating a new subscription and
+disabling/deleting the old one.
+
+### Every change to a destination is recorded
+
+A subscription names where an organization's patient events go, so changing one
+is the act worth recording — and the generic audit row carries method, path and
+status, which says that an egress configuration changed but not what it became.
+`POST`, `PATCH` and `DELETE` therefore each append a `webhook_subscription_change`
+row: acting identity and email, organization (id and slug), subscription id, the
+URL and event types on both sides of the change, and the timestamp. The rows are
+append-only — `save()` on an existing row and `delete()` both refuse — and
+retention never prunes them. `QuerySet.update()` and direct SQL are not stopped
+by the model; a database role that cannot write the table is what makes that
+durable, and it belongs to the deployment.
+
+A change made in the Django admin or at a shell writes no record. That is the
+same limit the model-level URL validator has, for the same reason: the field
+this table exists for is the actor, and a signal cannot name one.
+
+`DELETE` marks `deleted_at` and clears `active` rather than deleting the row.
+The cascade used to take the subscription's delivery history with it, so after
+removing a subscription nothing said where that organization's events had been
+going — which is the one question an investigation asks. A removed subscription
+accepts no write (redirect, re-enable or a second delete all 404) and receives no
+further events; reads still reach it and its history. Each delivery also records
+the `destination_host` it was written for, because the subscription's `url` is
+where events go *now*: after a `PATCH`, reading the destination off the
+subscription would have every past delivery claim it went somewhere it never
+went.
 
 Outbound types are `patient.changed`, `lab.updated`, `document.received`, and
 `foundation.synced`. Ordinary saves/deletes of patient records, demographics,
@@ -252,8 +280,9 @@ and timestamps. Response bodies, destination URLs, secrets, and notification
 payloads are excluded. Dead letters remain available for investigation; there
 is no automatic reset of exhausted attempts.
 
-Migrations `patient_portal.0021` and `0022` add three tables, a uniqueness constraint,
-and a partial index for active deliveries;
+Migrations `patient_portal.0021`, `0022` and `0023` add four tables, a uniqueness
+constraint, a partial index for active deliveries, and the change log with its
+`deleted_at`/`destination_host` columns;
 it does not modify existing clinical rows. Apply migrations before web/worker
 deployment. Treat signing secrets and delivery records as protected application
 data when configuring database access, backups, and retention.
@@ -273,7 +302,9 @@ same configured database. Default retention is 30 days (`WEBHOOK_RETENTION_DAYS`
 `--days N`, `--batch-size N` (default 1000), and `--dry-run` are supported.
 Retention must be at least one day, beyond the five-minute signature window.
 The command removes old terminal delivery history (`delivered`, `dead_letter`,
-`cancelled`) and old processed inbound deduplication rows. Active deliveries,
+`cancelled`) and old processed inbound deduplication rows. It does not touch
+`webhook_subscription_change`: that is the record of who pointed an
+organization's events where, and it is kept rather than aged out. Active deliveries,
 unprocessed inbound events, and recent completions remain. Archive history
 externally before pruning if longer retention is needed. An authorized sender
 can reuse an expired event ID with a newly signed request after retention ends;

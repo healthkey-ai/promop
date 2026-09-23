@@ -18,9 +18,12 @@ from drf_spectacular.utils import extend_schema
 
 from omop_core.models import Organization, PatientRecord
 from omop_core.services.access import get_admin_orgs, get_direct_admin_orgs
-from patient_portal.models import InboundWebhookEvent, WebhookDelivery, WebhookSubscription
+from patient_portal.models import (
+    InboundWebhookEvent, WebhookDelivery, WebhookSubscription, WebhookSubscriptionChange,
+)
 from patient_portal.webhooks import (
-    EVENT_TYPES, INBOUND_HANDLERS, compute_hmac_signature, validate_webhook_url,
+    EVENT_TYPES, INBOUND_HANDLERS, compute_hmac_signature,
+    record_subscription_change, subscription_snapshot, validate_webhook_url,
 )
 from .permissions import ScopedTokenPermission, is_interactive_session
 
@@ -32,8 +35,9 @@ class WebhookSubscriptionSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = WebhookSubscription
-        fields = ['id', 'organization', 'url', 'event_types', 'active', 'created_at']
-        read_only_fields = ['id', 'created_at']
+        fields = ['id', 'organization', 'url', 'event_types', 'active', 'created_at',
+                  'deleted_at']
+        read_only_fields = ['id', 'created_at', 'deleted_at']
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -134,7 +138,7 @@ class WebhookDeliverySerializer(serializers.ModelSerializer):
     class Meta:
         model = WebhookDelivery
         fields = ['id', 'status', 'attempts', 'next_attempt_at', 'response_status',
-                  'error', 'created_at', 'delivered_at']
+                  'error', 'created_at', 'delivered_at', 'destination_host']
 
 
 class WebhookSubscriptionViewSet(viewsets.ModelViewSet):
@@ -168,15 +172,53 @@ class WebhookSubscriptionViewSet(viewsets.ModelViewSet):
         # administer directly, so a trust cannot edit away or redirect another
         # organization's egress configuration either — not just not create one.
         resolve = get_admin_orgs if self.request.method in SAFE_METHODS else get_direct_admin_orgs
-        return WebhookSubscription.objects.filter(
-            organization__in=resolve(self.request.user),
-        ).order_by('pk')
+        queryset = WebhookSubscription.objects.filter(organization__in=resolve(self.request.user))
+        if self.request.method not in SAFE_METHODS:
+            # A removed subscription is gone for every write: it cannot be
+            # redirected, re-enabled or deleted again. Reads still reach it,
+            # which is what keeps its delivery history — where this
+            # organization's events actually went — reachable afterwards.
+            queryset = queryset.filter(deleted_at__isnull=True)
+        return queryset.order_by('pk')
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        subscription = serializer.save()
-        return Response({**serializer.data, 'secret': subscription.secret}, status=status.HTTP_201_CREATED)
+        self.perform_create(serializer)
+        return Response({**serializer.data, 'secret': serializer.instance.secret},
+                        status=status.HTTP_201_CREATED)
+
+    def perform_create(self, serializer):
+        with transaction.atomic():
+            subscription = serializer.save()
+            record_subscription_change(
+                subscription, WebhookSubscriptionChange.ACTION_CREATE, self.request.user)
+
+    def perform_update(self, serializer):
+        before = subscription_snapshot(serializer.instance)
+        with transaction.atomic():
+            subscription = serializer.save()
+            record_subscription_change(
+                subscription, WebhookSubscriptionChange.ACTION_UPDATE, self.request.user,
+                before=before)
+
+    def perform_destroy(self, instance):
+        """Mark, do not delete: the delivery history is the record of egress.
+
+        A cascading DELETE took every delivery row with it, so after removing a
+        subscription nothing said where that organization's events had been
+        going. The subscription stops being visible to any write and stops
+        receiving events (`active` is what publish_event and the delivery task
+        both check), and the trail it leaves behind stays readable.
+        """
+        before = subscription_snapshot(instance)
+        with transaction.atomic():
+            instance.deleted_at = timezone.now()
+            instance.active = False
+            instance.save(update_fields=['deleted_at', 'active'])
+            record_subscription_change(
+                instance, WebhookSubscriptionChange.ACTION_DELETE, self.request.user,
+                before=before)
 
     @action(detail=True, methods=['get'])
     def deliveries(self, request, pk=None):
