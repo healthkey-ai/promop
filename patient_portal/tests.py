@@ -7058,6 +7058,13 @@ class _ConceptFixtureBase(_SmartBase):
             concept_code='44054006', standard_concept='S', **common,
         )
 
+        # The catalog deletion above queues deferred FK checks in the class
+        # transaction. Validate them before per-test savepoints; otherwise each
+        # teardown repeats the same bulk checks after its savepoint rolls back.
+        # Django still validates every test's own writes during teardown.
+        from django.db import connection
+        connection.check_constraints()
+
     def _auth(self):
         return {'HTTP_AUTHORIZATION': f'Bearer {self.read_token.token}'}
 
@@ -17097,19 +17104,18 @@ class VocabSnapshotStreamTransactionTest(TransactionTestCase):
     the stream fails on Postgres if the fix is reverted.
     """
 
-    # TransactionTestCase truncates all tables on teardown and does NOT restore
-    # migration-seeded reference data (concept-zero, vocab rows, lookups, ...).
-    # This is currently the only non-TestCase DB test, and Django runs all
-    # TestCase subclasses first, so nothing DB-touching runs after this truncation
-    # — but serialize+restore removes the reliance on that ordering luck so a
-    # future TransactionTestCase can't inherit emptied reference tables.
-    serialized_rollback = True
+    # Recreate our small reference fixture after each TransactionTestCase flush.
+    # Restoring the entire migration-seeded database imports the large source
+    # catalogs before every test, even though these tests only stream vocabulary
+    # metadata. Explicit fixtures also make the tests independent of order.
 
     def setUp(self):
         from oauth2_provider.models import Application, AccessToken
+        from django.db import connection
         from django.utils import timezone as tz
         import datetime
         from omop_core.models import VocabularyRelease
+        self.assertFalse(connection.in_atomic_block, 'Streaming regression requires autocommit')
         _make_vocab_fixtures()
         user = Identity.objects.create_user(email='snap_svc@test.com', password='pw')
         app = Application.objects.create(
