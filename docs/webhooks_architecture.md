@@ -170,10 +170,13 @@ to an address the organization has stopped designating, and nothing already
 queued is redirected to the new one. That is what makes a URL change a working
 kill switch — without it, a subscription disabled over a bad destination would
 flush its backlog there as soon as it was re-enabled. Deliveries cancelled this
-way are not re-sent; re-publish if they matter. A delivery a worker is already
-attempting cannot be cancelled that way — it has passed the point — so if that
-attempt fails, its retry is cancelled rather than sent to the address the
-organization has left.
+way are not re-sent; re-publish if they matter. Cancelling at the moment of the
+change cannot reach every row — a publisher that read the subscription just
+before it still inserts one addressed to the old URL, and a row a worker is
+holding has passed the point — so every attempt also compares the address it
+was frozen for against the one the organization designates now, and stops if
+they differ. A row written before the address column existed carries none and
+follows the subscription, which is all it can do.
 
 Deliveries do not survive deleting the organization — that cascade still reaches
 them. The change rows do, which after an organization is removed makes them the

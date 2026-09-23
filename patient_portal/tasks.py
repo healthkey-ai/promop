@@ -7,7 +7,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from patient_portal.models import WebhookDelivery, WebhookSubscription
+from patient_portal.models import WebhookDelivery
 from patient_portal.webhooks import enqueue_delivery, send_webhook
 
 MAX_ATTEMPTS = 5
@@ -19,7 +19,12 @@ def deliver_webhook(delivery_id):
     if not settings.WEBHOOKS_ENABLED:
         return
     with transaction.atomic():
-        delivery = (WebhookDelivery.objects.select_for_update()
+        # `of=('self',)` locks the delivery row only. Without it, `FOR UPDATE`
+        # over the join locks the subscription and organization rows too, in
+        # that order — while a subscription write locks the subscription first
+        # and its deliveries second, which is a deadlock cycle between two
+        # ordinary requests.
+        delivery = (WebhookDelivery.objects.select_for_update(of=('self',))
                     .select_related('subscription__organization').filter(pk=delivery_id).first())
         if delivery is None or delivery.status not in ('pending', 'retry', 'sending'):
             return
@@ -32,6 +37,18 @@ def deliver_webhook(delivery_id):
         # reads removal the same way.
         if (not delivery.subscription.active or delivery.subscription.deleted_at
                 or not delivery.subscription.organization.is_active):
+            delivery.status = 'cancelled'
+            delivery.save(update_fields=['status'])
+            return
+        # The address this row was frozen for is no longer the one the
+        # organization designates. A subscription write cancels what was queued
+        # at the moment of the change, but it cannot reach a row inserted by a
+        # publisher that read the subscription just before it, nor one a worker
+        # was already holding. This is the check every attempt passes through,
+        # so those rows stop here rather than delivering PHI to an address that
+        # has been revoked. A row written before the column existed carries no
+        # address and follows the subscription, which is all it can do.
+        if delivery.destination_url and delivery.destination_url != delivery.subscription.url:
             delivery.status = 'cancelled'
             delivery.save(update_fields=['status'])
             return
@@ -73,19 +90,9 @@ def deliver_webhook(delivery_id):
         current.response_status = response_status
         current.error = error
         delay = RETRY_BASE_SECONDS * 2 ** (current.attempts - 1)
-        designated = (WebhookSubscription.objects
-                      .filter(pk=current.subscription_id)
-                      .values_list('url', flat=True).first())
         if not error:
             current.status = 'delivered'
             current.delivered_at = timezone.now()
-        elif current.destination_url and current.destination_url != designated:
-            # The organization moved this subscription while the attempt was in
-            # flight. Cancelling a queued delivery at the moment of the change
-            # cannot reach a row a worker already holds, and a retry would send
-            # it to an address they have stopped designating — so the retry is
-            # where that decision has to be honoured too.
-            current.status = 'cancelled'
         elif current.attempts >= MAX_ATTEMPTS:
             current.status = 'dead_letter'
         else:

@@ -99,10 +99,13 @@ implementation:
   as retention keeps them (`WEBHOOK_RETENTION_DAYS`, 30 by default), each
   stating the address it was written for; a row's `attempts` is what says
   whether anything was actually sent there. Past that window the change rows are
-  the durable evidence — they are never pruned. Freezing the address also means changing a URL cannot redirect
-  events that were already queued under the old one — a redirect applies to what
-  the organization sends next, which is the only thing an admin should be able
-  to decide after the fact.
+  the durable evidence — they are never pruned. Freezing the address is also what makes a change of URL a
+  working kill switch. A queued delivery cannot be silently redirected to the
+  new destination, and it is not sent to the old one either: changing the URL
+  cancels what was queued against it, and every attempt re-checks the address
+  it was frozen for against the one the organization designates now. Events
+  queued under a destination an organization has stopped designating are not
+  delivered anywhere.
 
 A change made outside the API — a shell, a data migration, a fixture — writes no
 change row, because the actor cannot be named from there. (No webhook model is

@@ -265,7 +265,13 @@ class WebhookSubscriptionViewSet(viewsets.ModelViewSet):
                 # over.
                 WebhookDelivery.objects.filter(
                     subscription=subscription, status__in=['pending', 'retry'],
-                ).exclude(destination_url=subscription.url).update(status='cancelled')
+                ).exclude(
+                    # A row from before the address column existed has none, and
+                    # the delivery task reads that as "follow the subscription" —
+                    # so it goes to the new address rather than being cancelled
+                    # for having been addressed to the old one.
+                    destination_url__in=['', subscription.url],
+                ).update(status='cancelled')
 
     def perform_destroy(self, instance):
         """Mark, do not delete: the delivery history is the record of egress.
@@ -307,8 +313,15 @@ class WebhookSubscriptionViewSet(viewsets.ModelViewSet):
         # On the Django request, not the DRF wrapper around it: the middleware
         # that writes the audit row holds the former, and an attribute set on
         # the wrapper never reaches it.
+        #
+        # And on commit, not now. A Python attribute is not rolled back, so a
+        # transaction that fails after this point — a lock timeout, a database
+        # error — would still leave the middleware writing a signed, chained
+        # audit row asserting a change that did not happen, and pointing at a
+        # change row that does not exist. The middleware runs after the view
+        # returns, so the callback lands in time.
         request = getattr(self.request, '_request', self.request)
-        request.audit_detail = {
+        detail = {
             'webhook_subscription_change': str(change.pk),
             'action': change.action,
             'subscription': change.subscription_pk,
@@ -320,6 +333,7 @@ class WebhookSubscriptionViewSet(viewsets.ModelViewSet):
             'event_types_before': change.event_types_before,
             'event_types_after': change.event_types_after,
         }
+        transaction.on_commit(lambda: setattr(request, 'audit_detail', detail))
 
     def _lock_live(self, pk):
         """The row as it is right now, held for the rest of the transaction.

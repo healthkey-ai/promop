@@ -313,13 +313,13 @@ def test_a_removed_subscription_receives_no_further_events(setup):
     assert queued.status == 'cancelled'
 
 
-def test_a_queued_delivery_keeps_its_address_when_the_subscription_moves(setup):
-    """A redirect governs future events, not PHI that is already queued.
+def test_a_delivery_is_addressed_when_it_is_queued_and_sent_there(setup):
+    """The row carries its own address, and the attempt uses it.
 
-    The row can sit through minutes of retry backoff and a recovery sweep. If
-    the destination were read at send time, changing the URL would move events
-    queued before the change — and any record of where they went would have to
-    be written after the fact, or be wrong.
+    Reading the destination at send time would let a PATCH move PHI that was
+    already queued, silently. The row is addressed once, which is both what
+    stops that and what makes the mismatch detectable when the subscription
+    later moves.
     """
     org, other, person, user, subscription = setup
     with patch('patient_portal.webhooks.enqueue_delivery'):
@@ -327,19 +327,17 @@ def test_a_queued_delivery_keeps_its_address_when_the_subscription_moves(setup):
     delivery = WebhookDelivery.objects.get()
     assert delivery.destination_url == 'https://subscriber.example/events'
 
-    WebhookSubscription.objects.filter(pk=subscription.pk).update(
-        url='https://moved.example/events')
     sent = []
     with patch('patient_portal.tasks.send_webhook',
                side_effect=lambda url, *args, **kwargs: sent.append(url) or 200):
         deliver_webhook(str(delivery.pk))
-
     delivery.refresh_from_db()
     assert sent == ['https://subscriber.example/events']
     assert delivery.status == 'delivered'
-    assert delivery.destination_url == 'https://subscriber.example/events'
 
-    # The next event does go to the new address.
+    # An event published after a change is addressed to the new destination.
+    WebhookSubscription.objects.filter(pk=subscription.pk).update(
+        url='https://moved.example/events')
     with patch('patient_portal.webhooks.enqueue_delivery'):
         publish_event(org.pk, 'lab.updated', {'person_id': person.person_id})
     assert WebhookDelivery.objects.exclude(pk=delivery.pk).get().destination_url == (
@@ -374,8 +372,7 @@ def test_changing_the_url_cancels_what_was_queued_for_the_old_one(setup):
         deliver_webhook(str(queued.pk))
         send.assert_not_called()
 
-    # A delivery already addressed to the new URL is untouched, and so is one
-    # that a worker has in hand.
+    # A delivery already addressed to the new URL is untouched.
     with patch('patient_portal.webhooks.enqueue_delivery'):
         publish_event(org.pk, 'lab.updated', {'person_id': person.person_id})
     fresh = WebhookDelivery.objects.exclude(pk=queued.pk).get()
@@ -383,34 +380,73 @@ def test_changing_the_url_cancels_what_was_queued_for_the_old_one(setup):
     assert fresh.destination_url == 'https://corrected.example/events'
 
 
-def test_a_retry_does_not_go_to_an_address_the_organization_has_left(setup):
-    """Cancelling at the moment of the change cannot reach a row in flight.
+def test_no_attempt_goes_to_an_address_the_organization_has_left(setup):
+    """Cancelling at the moment of the change cannot reach every row.
 
-    A worker holding a delivery has already passed the cancellation; if that
-    attempt fails, the retry is the second chance to honour the decision.
+    A publisher that read the subscription just before the change still inserts
+    a delivery addressed to the old URL, and a row a worker is holding has
+    passed the cancellation already. Every attempt therefore checks the address
+    it was frozen for against the one the organization designates now.
     """
     org, other, person, user, subscription = setup
     with patch('patient_portal.webhooks.enqueue_delivery'):
         publish_event(org.pk, 'lab.updated', {'person_id': person.person_id})
     delivery = WebhookDelivery.objects.get()
 
-    def move_the_subscription(url, *args, **kwargs):
-        # The worker is mid-attempt: the row is already `sending`, so the
-        # cancellation a PATCH performs does not select it.
-        WebhookSubscription.objects.filter(pk=subscription.pk).update(
-            url='https://corrected.example/events')
-        raise ConnectionError('refused')
+    # The row is untouched by the cancellation — as if it had been inserted a
+    # moment after it, or been in a worker's hands during it.
+    WebhookSubscription.objects.filter(pk=subscription.pk).update(
+        url='https://corrected.example/events')
+    assert WebhookDelivery.objects.get(pk=delivery.pk).status == 'pending'
 
-    with patch('patient_portal.tasks.send_webhook', side_effect=move_the_subscription):
+    with patch('patient_portal.tasks.send_webhook') as send:
         deliver_webhook(str(delivery.pk))
+        send.assert_not_called()
 
     delivery.refresh_from_db()
     assert delivery.status == 'cancelled'
-    assert delivery.attempts == 1  # the attempt that was in flight is recorded
+    assert delivery.attempts == 0  # it never became an attempt
 
 
+def test_a_rolled_back_change_writes_no_audit_row_claiming_it_happened(setup):
+    """The signed trail must not assert a change the database refused.
+
+    A Python attribute is not rolled back, so setting it while the transaction
+    is still open would leave a chained audit row pointing at a change row that
+    does not exist — a contradiction between the two trails with nobody having
+    tampered.
+    """
+    from patient_portal.models import AuditEvent
+
+    org, other, person, user, subscription = setup
+    client = APIClient()
+    client.force_login(user)
+    before = AuditEvent.objects.count()
+
+    with patch('patient_portal.api.webhook_views.record_subscription_change',
+               side_effect=RuntimeError('database said no')):
+        with pytest.raises(RuntimeError):
+            client.patch(f'/api/v1/webhooks/subscriptions/{subscription.pk}/',
+                         {'url': 'https://corrected.example/events'}, format='json')
+
+    subscription.refresh_from_db()
+    assert subscription.url == 'https://subscriber.example/events'
+    assert not WebhookSubscriptionChange.objects.exists()
+    # The request is still audited — every request is. What it must not do is
+    # carry the destination of a change that never happened.
+    audited = AuditEvent.objects.latest('timestamp')
+    assert AuditEvent.objects.count() == before + 1
+    assert audited.detail is None
+
+
+@pytest.mark.django_db(transaction=True)
 def test_an_egress_change_is_also_written_to_the_signed_audit_row(setup):
-    """The change table is the index; the chained audit row is the evidence."""
+    """The change table is the index; the chained audit row is the evidence.
+
+    Transactional, because the detail is handed to the middleware on commit —
+    which is the point: a change the database refuses leaves no audit row
+    asserting it did happen.
+    """
     from patient_portal.models import AuditEvent
 
     org, other, person, user, subscription = setup
@@ -438,13 +474,35 @@ def test_an_egress_change_is_also_written_to_the_signed_audit_row(setup):
     assert audited.signature and audited.signature == audited.compute_signature()
 
 
-def test_a_delete_answers_404_when_the_row_was_removed_under_it(setup):
+def test_a_second_delete_is_a_404(setup):
+    """The write queryset hides it; the lock below is the second line."""
     org, other, person, user, subscription = setup
     client = APIClient()
     client.force_login(user)
     WebhookSubscription.objects.filter(pk=subscription.pk).update(
         deleted_at=timezone.now(), active=False)
     assert client.delete(f'/api/v1/webhooks/subscriptions/{subscription.pk}/').status_code == 404
+
+
+def test_the_lock_refuses_a_row_removed_between_load_and_write(setup):
+    """The window the write queryset cannot close.
+
+    `get_object()` reads before the transaction; by the time the view writes,
+    another request may have removed the row. Called directly because that is
+    the only way to stand between the two.
+    """
+    from rest_framework.exceptions import NotFound
+
+    from patient_portal.api.webhook_views import WebhookSubscriptionViewSet
+
+    org, other, person, user, subscription = setup
+    view = WebhookSubscriptionViewSet()
+    assert view._lock_live(subscription.pk).pk == subscription.pk
+
+    WebhookSubscription.objects.filter(pk=subscription.pk).update(
+        deleted_at=timezone.now(), active=False)
+    with pytest.raises(NotFound):
+        view._lock_live(subscription.pk)
 
 
 def test_a_delivery_written_before_the_column_existed_still_sends(setup):
