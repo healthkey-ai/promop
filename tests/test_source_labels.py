@@ -139,6 +139,30 @@ def test_the_generated_column_matches_normalise_for_every_case():
         assert stored(mapping) == normalise(label), f'disagreed on {label!r}'
 
 
+def test_max_description_matches_the_model_field():
+    """MAX_DESCRIPTION cannot be imported from the model -- the model imports
+    this module -- so nothing but this test keeps the two in step. Widened
+    apart, genuine long labels are refused a key for no reason; narrowed apart,
+    a normalised value could outgrow the column and fail the INSERT."""
+    from omop_core.services.source_labels import MAX_DESCRIPTION
+    field = SourceCodeConceptMapping._meta.get_field('source_code_description')
+    assert field.max_length == MAX_DESCRIPTION
+    generated = SourceCodeConceptMapping._meta.get_field('source_label_norm')
+    assert generated.output_field.max_length == MAX_DESCRIPTION
+
+
+def test_widening_the_description_requires_dropping_this_column_first():
+    """Postgres refuses ALTER COLUMN ... TYPE on a column a stored generated
+    column reads, so a migration that only widens source_code_description
+    fails. The recipe is in the source_labels docstring; this pins the
+    behaviour so the docstring cannot quietly become wrong."""
+    from django.db.utils import NotSupportedError, ProgrammingError
+    with pytest.raises((NotSupportedError, ProgrammingError), match='generated column'):
+        with connection.cursor() as cursor:
+            cursor.execute('ALTER TABLE source_code_concept_mapping '
+                           'ALTER COLUMN source_code_description TYPE varchar(500)')
+
+
 def test_the_column_really_is_database_generated():
     with connection.cursor() as cursor:
         cursor.execute("""

@@ -1967,7 +1967,8 @@ class SourceCodeConceptMapping(models.Model):
             ),
             output_field=models.CharField(),
         ),
-        output_field=models.CharField(max_length=255, null=True),
+        output_field=models.CharField(
+            max_length=source_labels.MAX_DESCRIPTION, null=True),
         db_persist=True,
         help_text=(
             'Normalised source_code_description, the key a review group is '
@@ -1977,7 +1978,11 @@ class SourceCodeConceptMapping(models.Model):
             'normalises to nothing (absent, blank or punctuation only) and the '
             'row belongs to no group, as does one stored at the column limit '
             'and so possibly truncated. Grouping queries must exclude NULL, '
-            'since SQL would otherwise gather every such row into one.'
+            'since SQL would otherwise gather every such row into one. '
+            'Widening source_code_description means dropping this column, '
+            'altering that one and re-adding this one in a single migration: '
+            'Postgres refuses to alter the type of a column a stored '
+            'generated column reads.'
         ),
     )
     umls_source_name = models.TextField(

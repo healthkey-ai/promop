@@ -37,7 +37,7 @@ never displayed: a group shows its members' ``source_code_description``.
 **Empty normalises to NULL, and NULL means "not part of any group."** 1,925
 queue rows on staging carry no description at all, and a label of ``--`` or
 whitespace normalises to nothing. Grouping those together would offer a curator
-a single row standing for 1,925 unrelated codes, mappable in one click. A
+a single row standing for 1,929 unrelated codes, mappable in one click. A
 ``GROUP BY`` still groups NULLs, so the rollup must exclude them explicitly --
 ``.exclude(source_label_norm=None)`` -- and this module returning ``None``
 rather than ``''`` is what makes that exclusion expressible.
@@ -50,6 +50,24 @@ past the cut, offered as a single row a curator could map in one click. A label
 at the limit cannot be told from a truncated one, so it is not trusted as an
 identity. Real analyte labels are short; 255 characters of text is procedure
 prose, which this grouping is not for.
+
+**Widening source_code_description needs three steps.** Postgres refuses
+``ALTER COLUMN ... TYPE`` on a column a stored generated column reads --
+``cannot alter type of a column used by a generated column`` -- so a migration
+that only widens the description fails. Drop this column, alter the
+description, then re-add it, in one migration:
+
+.. code-block:: python
+
+    operations = [
+        migrations.RemoveField('sourcecodeconceptmapping', 'source_label_norm'),
+        migrations.AlterField('sourcecodeconceptmapping', 'source_code_description', ...),
+        migrations.AddField('sourcecodeconceptmapping', 'source_label_norm', ...),
+    ]
+
+Re-adding recomputes every row, so nothing is lost. Also lower
+:data:`MAX_DESCRIPTION` in step with the new length, or labels that are no
+longer truncated keep being refused a key.
 
 **This rule is frozen.** The normalised value is the identity a review group is
 built from; changing it re-keys every group. It is stored in a database
@@ -68,7 +86,8 @@ SQL_PATTERN = f'[^{_KEEP}]+'
 
 #: ``SourceCodeConceptMapping.source_code_description``'s ``max_length``. A
 #: label this long may have been cut to fit, so it is not a reliable identity.
-#: Keep in step with the model field.
+#: It cannot be imported from the model -- the model imports this module -- so
+#: ``test_max_description_matches_the_model_field`` asserts the two agree.
 MAX_DESCRIPTION = 255
 
 
