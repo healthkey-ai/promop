@@ -138,7 +138,12 @@ reason: the field this table exists for is the actor, and a signal cannot name
 one. The same facts also go onto the request's `AuditEvent` row, whose
 `detail` is covered by that table's HMAC signature and hash chain — so the
 change log is the queryable index and the audit chain is the tamper-evidence,
-and rewriting one contradicts the other.
+and rewriting one contradicts the other. The audit row carries the destination
+**host and a SHA-256 digest of the URL**, never the URL: audit rows go to stdout
+for the SIEM and are readable through `/api/v1/audit-events/` by platform staff
+and any service token, which is a wider audience than the direct org admins who
+may configure egress, and for some receivers the path is the credential. The
+digest still binds the exact address.
 
 `DELETE` marks `deleted_at` and clears `active` rather than deleting the row.
 The cascade used to take the subscription's delivery history with it, so after
@@ -165,7 +170,10 @@ to an address the organization has stopped designating, and nothing already
 queued is redirected to the new one. That is what makes a URL change a working
 kill switch — without it, a subscription disabled over a bad destination would
 flush its backlog there as soon as it was re-enabled. Deliveries cancelled this
-way are not re-sent; re-publish if they matter.
+way are not re-sent; re-publish if they matter. A delivery a worker is already
+attempting cannot be cancelled that way — it has passed the point — so if that
+attempt fails, its retry is cancelled rather than sent to the address the
+organization has left.
 
 Deliveries do not survive deleting the organization — that cascade still reaches
 them. The change rows do, which after an organization is removed makes them the

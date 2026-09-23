@@ -383,6 +383,32 @@ def test_changing_the_url_cancels_what_was_queued_for_the_old_one(setup):
     assert fresh.destination_url == 'https://corrected.example/events'
 
 
+def test_a_retry_does_not_go_to_an_address_the_organization_has_left(setup):
+    """Cancelling at the moment of the change cannot reach a row in flight.
+
+    A worker holding a delivery has already passed the cancellation; if that
+    attempt fails, the retry is the second chance to honour the decision.
+    """
+    org, other, person, user, subscription = setup
+    with patch('patient_portal.webhooks.enqueue_delivery'):
+        publish_event(org.pk, 'lab.updated', {'person_id': person.person_id})
+    delivery = WebhookDelivery.objects.get()
+
+    def move_the_subscription(url, *args, **kwargs):
+        # The worker is mid-attempt: the row is already `sending`, so the
+        # cancellation a PATCH performs does not select it.
+        WebhookSubscription.objects.filter(pk=subscription.pk).update(
+            url='https://corrected.example/events')
+        raise ConnectionError('refused')
+
+    with patch('patient_portal.tasks.send_webhook', side_effect=move_the_subscription):
+        deliver_webhook(str(delivery.pk))
+
+    delivery.refresh_from_db()
+    assert delivery.status == 'cancelled'
+    assert delivery.attempts == 1  # the attempt that was in flight is recorded
+
+
 def test_an_egress_change_is_also_written_to_the_signed_audit_row(setup):
     """The change table is the index; the chained audit row is the evidence."""
     from patient_portal.models import AuditEvent
@@ -396,10 +422,18 @@ def test_an_egress_change_is_also_written_to_the_signed_audit_row(setup):
 
     audited = AuditEvent.objects.filter(path__contains='/webhooks/subscriptions/',
                                         method='PATCH').latest('timestamp')
-    assert audited.detail['url_before'] == 'https://subscriber.example/events'
-    assert audited.detail['url_after'] == 'https://corrected.example/events'
+    assert audited.detail['host_before'] == 'subscriber.example'
+    assert audited.detail['host_after'] == 'corrected.example'
     assert audited.detail['organization'] == org.slug
     assert audited.detail['action'] == 'update'
+    # The path is withheld: audit rows go to stdout and are readable by any
+    # service token, a wider audience than the admins who may configure egress,
+    # and for some receivers the path is the credential.
+    assert 'events' not in json.dumps(audited.detail)
+    # The digest still binds the exact address, so the two trails can be
+    # compared without either carrying it.
+    change = WebhookSubscriptionChange.objects.get(pk=audited.detail['webhook_subscription_change'])
+    assert audited.detail['url_after_digest'] == hashlib.sha256(change.url_after.encode()).hexdigest()
     # Signed and chained, so rewriting either trail contradicts the other.
     assert audited.signature and audited.signature == audited.compute_signature()
 

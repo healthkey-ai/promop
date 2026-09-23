@@ -30,6 +30,15 @@ from patient_portal.webhooks import (
 from .permissions import ScopedTokenPermission, is_interactive_session
 
 
+def _url_digest(url):
+    """A stable fingerprint of a destination, safe to write where it is read.
+
+    Empty for an empty URL, so "there was no destination" and "the destination
+    is withheld" do not look alike.
+    """
+    return hashlib.sha256(url.encode()).hexdigest() if url else ''
+
+
 class WebhookSubscriptionSerializer(serializers.ModelSerializer):
     event_types = serializers.ListField(
         child=serializers.ChoiceField(choices=EVENT_TYPES), allow_empty=False, max_length=4,
@@ -286,6 +295,14 @@ class WebhookSubscriptionViewSet(viewsets.ModelViewSet):
         queryable index of the same facts and the one retention never prunes.
         Neither is a substitute for the other, and writing both means rewriting
         one of them contradicts the other rather than passing unnoticed.
+
+        The host and a digest, never the URL. Audit rows go to stdout for the
+        SIEM and are readable through `/api/v1/audit-events/` by platform staff
+        and any service token — a wider audience than the direct org admins who
+        may configure egress — and for some receivers the URL path is the
+        credential. The digest still binds the exact address: changing a stored
+        URL without breaking the chain is not possible, and comparing the two
+        trails needs only a hash.
         """
         # On the Django request, not the DRF wrapper around it: the middleware
         # that writes the audit row holds the former, and an attribute set on
@@ -296,8 +313,10 @@ class WebhookSubscriptionViewSet(viewsets.ModelViewSet):
             'action': change.action,
             'subscription': change.subscription_pk,
             'organization': change.organization_slug,
-            'url_before': change.url_before,
-            'url_after': change.url_after,
+            'host_before': urlsplit(change.url_before).hostname or '',
+            'host_after': urlsplit(change.url_after).hostname or '',
+            'url_before_digest': _url_digest(change.url_before),
+            'url_after_digest': _url_digest(change.url_after),
             'event_types_before': change.event_types_before,
             'event_types_after': change.event_types_after,
         }

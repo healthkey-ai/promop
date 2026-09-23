@@ -7,7 +7,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from patient_portal.models import WebhookDelivery
+from patient_portal.models import WebhookDelivery, WebhookSubscription
 from patient_portal.webhooks import enqueue_delivery, send_webhook
 
 MAX_ATTEMPTS = 5
@@ -73,9 +73,19 @@ def deliver_webhook(delivery_id):
         current.response_status = response_status
         current.error = error
         delay = RETRY_BASE_SECONDS * 2 ** (current.attempts - 1)
+        designated = (WebhookSubscription.objects
+                      .filter(pk=current.subscription_id)
+                      .values_list('url', flat=True).first())
         if not error:
             current.status = 'delivered'
             current.delivered_at = timezone.now()
+        elif current.destination_url and current.destination_url != designated:
+            # The organization moved this subscription while the attempt was in
+            # flight. Cancelling a queued delivery at the moment of the change
+            # cannot reach a row a worker already holds, and a retry would send
+            # it to an address they have stopped designating — so the retry is
+            # where that decision has to be honoured too.
+            current.status = 'cancelled'
         elif current.attempts >= MAX_ATTEMPTS:
             current.status = 'dead_letter'
         else:
