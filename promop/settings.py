@@ -47,6 +47,9 @@ FRONTEND_ROOT = resolve_frontend_root(BASE_DIR, os.environ.get('WHITENOISE_ROOT'
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-your-default-key-change-this')
+# Previous keys that still verify during a rotation, comma-separated; signing uses
+# SECRET_KEY only. See docs/signing-key-rotation.md.
+SECRET_KEY_FALLBACKS = _env_list('SECRET_KEY_FALLBACKS')
 
 # DEBUG controls diagnostics, not the security defaults below.
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
