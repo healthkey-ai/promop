@@ -2144,10 +2144,6 @@ class SourceCodeConceptMapping(models.Model):
             models.Index(fields=['source_vocabulary_id', 'source_code'], name='ix_sccm_source_code'),
             models.Index(fields=['target_concept', 'status'], name='ix_sccm_target_status'),
             models.Index(fields=['destination_vocabulary_id', 'status'], name='ix_sccm_dest_status'),
-            # The rollup groups on this within a tab, and orders the groups by
-            # summed occurrence_count.
-            models.Index(fields=['source_vocabulary_id', 'source_label_norm'],
-                         name='ix_sccm_label_group'),
         ]
         constraints = [
             # Blank source systems stay distinct from each other: Postgres treats
