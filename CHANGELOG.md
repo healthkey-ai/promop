@@ -6,6 +6,20 @@ All notable changes to PRomop are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **Label grouping key for code mappings** — `SourceCodeConceptMapping` gains
+  `source_label_norm`, a database-generated normalisation of
+  `source_code_description`. Vendor-local codes are opaque (Epic flowsheet ids,
+  Cerner `codeSet/72` numbers) but their display text is not, and the same text
+  arrives under thousands of codes: in a 721,620-code HealthTree extract
+  `albumin` appeared under 2,557. The row key stays
+  `(source_vocabulary_id, source_code)` and ingest resolution is unchanged;
+  this is a grouping key, so one review row and one ranker call can stand for a
+  label instead of a code. NULL means the row belongs to no group — the label
+  is absent, blank, punctuation only, or stored at the column limit and so
+  possibly truncated (#1571).
+
 ### Changed
 
 - **Code Mapping queue order** — every section now defaults to Seen descending.
