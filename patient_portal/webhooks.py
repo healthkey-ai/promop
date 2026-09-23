@@ -261,7 +261,7 @@ def record_subscription_change(subscription, action, actor, before=None):
     """
     before = before or {}
     removed = action == WebhookSubscriptionChange.ACTION_DELETE
-    WebhookSubscriptionChange.objects.create(
+    change = WebhookSubscriptionChange.objects.create(
         subscription=subscription,
         subscription_pk=subscription.pk,
         organization=subscription.organization,
@@ -276,6 +276,7 @@ def record_subscription_change(subscription, action, actor, before=None):
         actor_id=str(getattr(actor, 'pk', '') or ''),
         actor_email=getattr(actor, 'email', '') or '',
     )
+    return change
 
 
 def subscription_snapshot(subscription):

@@ -132,9 +132,13 @@ retention never prunes them. `QuerySet.update()` and direct SQL are not stopped
 by the model; a database role that cannot write the table is what makes that
 durable, and it belongs to the deployment.
 
-A change made in the Django admin or at a shell writes no record. That is the
-same limit the model-level URL validator has, for the same reason: the field
-this table exists for is the actor, and a signal cannot name one.
+A change made at a shell, by a data migration or through a fixture writes no
+record. That is the same limit the model-level URL validator has, for the same
+reason: the field this table exists for is the actor, and a signal cannot name
+one. The same facts also go onto the request's `AuditEvent` row, whose
+`detail` is covered by that table's HMAC signature and hash chain — so the
+change log is the queryable index and the audit chain is the tamper-evidence,
+and rewriting one contradicts the other.
 
 `DELETE` marks `deleted_at` and clears `active` rather than deleting the row.
 The cascade used to take the subscription's delivery history with it, so after
@@ -155,9 +159,13 @@ queued and left any record of where it went written after the fact. Frozen, a
 redirect governs future events only, every attempt on a row went to the same
 place, and the row can say so. The delivery API exposes the `destination_host`
 derived from it, never the address: for some receivers the path is the
-credential. Fixing a wrong URL therefore does not rescue deliveries queued
-against it — they fail to the old address and dead-letter after five attempts;
-re-publish if they matter.
+credential. Changing the URL therefore cancels what was
+already queued against the old address rather than forwarding it: nothing goes
+to an address the organization has stopped designating, and nothing already
+queued is redirected to the new one. That is what makes a URL change a working
+kill switch — without it, a subscription disabled over a bad destination would
+flush its backlog there as soon as it was re-enabled. Deliveries cancelled this
+way are not re-sent; re-publish if they matter.
 
 Deliveries do not survive deleting the organization — that cascade still reaches
 them. The change rows do, which after an organization is removed makes them the

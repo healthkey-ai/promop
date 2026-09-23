@@ -199,6 +199,12 @@ class AuditLogMiddleware:
                     or request.META.get('REMOTE_ADDR')
                 ),
                 'duration_ms': round((time.monotonic() - start) * 1000),
+                # What a view chose to put on the record. `AuditEvent` signs and
+                # chains this field with the rest of the row, so a fact placed
+                # here is tamper-evident in a way a separate table is not —
+                # which is why egress configuration changes name their
+                # destination through it (see WebhookSubscriptionViewSet).
+                'detail': getattr(request, 'audit_detail', None),
             }
         except Exception:
             logger.warning("AuditLogMiddleware failed to build audit entry", exc_info=True)
@@ -235,6 +241,7 @@ class AuditLogMiddleware:
             resource_id=entry['resource_id'],
             ip_address=(entry['ip_address'] or '')[:64] or None,
             duration_ms=entry['duration_ms'],
+            detail=entry.get('detail'),
         )
 
 

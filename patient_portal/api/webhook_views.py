@@ -223,8 +223,8 @@ class WebhookSubscriptionViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         with transaction.atomic():
             subscription = serializer.save()
-            record_subscription_change(
-                subscription, WebhookSubscriptionChange.ACTION_CREATE, self.request.user)
+            self._audit(record_subscription_change(
+                subscription, WebhookSubscriptionChange.ACTION_CREATE, self.request.user))
 
     def perform_update(self, serializer):
         """Re-read the row under a lock: DRF saves every field it holds.
@@ -241,9 +241,22 @@ class WebhookSubscriptionViewSet(viewsets.ModelViewSet):
             serializer.instance = locked
             before = subscription_snapshot(locked)
             subscription = serializer.save()
-            record_subscription_change(
+            self._audit(record_subscription_change(
                 subscription, WebhookSubscriptionChange.ACTION_UPDATE, self.request.user,
-                before=before)
+                before=before))
+            if subscription.url != before['url']:
+                # Deliveries queued against the address the organization has
+                # just stopped designating are cancelled rather than sent. The
+                # row keeps its frozen address and says `cancelled`, so the
+                # trail shows what was queued and that it never left; nothing is
+                # redirected to the new address either. This is what makes
+                # changing the URL a working kill switch: without it, a
+                # subscription taken out of service and brought back would
+                # flush its backlog to the address it was taken out of service
+                # over.
+                WebhookDelivery.objects.filter(
+                    subscription=subscription, status__in=['pending', 'retry'],
+                ).exclude(destination_url=subscription.url).update(status='cancelled')
 
     def perform_destroy(self, instance):
         """Mark, do not delete: the delivery history is the record of egress.
@@ -251,8 +264,9 @@ class WebhookSubscriptionViewSet(viewsets.ModelViewSet):
         A cascading DELETE took every delivery row with it, so after removing a
         subscription nothing said where that organization's events had been
         going. The subscription stops being visible to any write and stops
-        receiving events (`active` is what publish_event and the delivery task
-        both check), and the trail it leaves behind stays readable.
+        receiving events — `publish_event` and the delivery task each check the
+        mark and the flag, so neither leans on the other being set — and the
+        trail it leaves behind stays readable.
         """
         with transaction.atomic():
             locked = self._lock_live(instance.pk)
@@ -260,9 +274,33 @@ class WebhookSubscriptionViewSet(viewsets.ModelViewSet):
             locked.deleted_at = timezone.now()
             locked.active = False
             locked.save(update_fields=['deleted_at', 'active'])
-            record_subscription_change(
+            self._audit(record_subscription_change(
                 locked, WebhookSubscriptionChange.ACTION_DELETE, self.request.user,
-                before=before)
+                before=before))
+
+    def _audit(self, change):
+        """Put the destination on the request's audit row as well.
+
+        `AuditEvent` signs each row and chains it to its predecessor, so a fact
+        recorded there is tamper-evident; `webhook_subscription_change` is the
+        queryable index of the same facts and the one retention never prunes.
+        Neither is a substitute for the other, and writing both means rewriting
+        one of them contradicts the other rather than passing unnoticed.
+        """
+        # On the Django request, not the DRF wrapper around it: the middleware
+        # that writes the audit row holds the former, and an attribute set on
+        # the wrapper never reaches it.
+        request = getattr(self.request, '_request', self.request)
+        request.audit_detail = {
+            'webhook_subscription_change': str(change.pk),
+            'action': change.action,
+            'subscription': change.subscription_pk,
+            'organization': change.organization_slug,
+            'url_before': change.url_before,
+            'url_after': change.url_after,
+            'event_types_before': change.event_types_before,
+            'event_types_after': change.event_types_after,
+        }
 
     def _lock_live(self, pk):
         """The row as it is right now, held for the rest of the transaction.

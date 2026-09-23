@@ -122,9 +122,17 @@ class WebhookSubscriptionChange(models.Model):
 
     Append-only is enforced here for the paths people use — ``save()`` on an
     existing row and ``delete()`` both refuse. ``QuerySet.update()``, a direct
-    SQL statement, ``bulk_create`` and a fixture load all get through; the
-    durable guarantee for those is a database role that cannot write this
-    table, which belongs to the deployment rather than to the model.
+    SQL statement, ``bulk_create`` and a fixture load all get through, and a
+    model cannot stop them: the durable guarantee for those is a database role
+    that cannot write this table, which belongs to the deployment.
+
+    What does not depend on the deployment is that the same facts are written a
+    second time, into the ``AuditEvent`` row for the request (``detail``), which
+    is HMAC-signed and hash-chained to its predecessor. Rewriting a row here
+    without also breaking that chain leaves the two trails contradicting each
+    other. This table is the queryable index — typed columns, its own history
+    per subscription, and never pruned by retention — rather than the
+    tamper-evidence mechanism.
 
     Rows survive what they describe. The organization and subscription
     references are nullable and their identifying values are copied in, so
@@ -143,7 +151,10 @@ class WebhookSubscriptionChange(models.Model):
     subscription = models.ForeignKey(
         WebhookSubscription, on_delete=models.SET_NULL, null=True, related_name='changes',
     )
-    subscription_pk = models.PositiveIntegerField()
+    # Matches WebhookSubscription's BigAutoField: a narrower column would make
+    # the audit insert the thing that fails, and take the change it records
+    # down with it.
+    subscription_pk = models.PositiveBigIntegerField()
     organization = models.ForeignKey('omop_core.Organization', on_delete=models.SET_NULL, null=True)
     organization_slug = models.CharField(max_length=255)
     action = models.CharField(max_length=16, choices=ACTIONS)
@@ -155,8 +166,9 @@ class WebhookSubscriptionChange(models.Model):
     event_types_after = models.JSONField(null=True)
     active_before = models.BooleanField(null=True)
     active_after = models.BooleanField(null=True)
-    # The string form of the acting Identity's pk, as AuditEvent records it, so
-    # the two trails join and the value outlives the Identity row.
+    # The string form of the acting Identity's pk, in the same shape AuditEvent
+    # stores it under `user_id`, so the two trails join on that pair and the
+    # value outlives the Identity row.
     actor_id = models.CharField(max_length=64, blank=True)
     actor_email = models.CharField(max_length=254, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

@@ -95,17 +95,19 @@ implementation:
   delivery freezes the address it was written for. A cascading delete used to
   remove the delivery history along with the configuration, so the sequence
   "point the events at a host, leave it a week, delete the subscription" left
-  nothing behind. It now leaves the change rows and the deliveries, each stating
-  the address it was written for; a row's `attempts` is what says whether
-  anything was actually sent there. Freezing the address also means changing a URL cannot redirect
+  nothing behind. It now leaves the change rows, and the deliveries for as long
+  as retention keeps them (`WEBHOOK_RETENTION_DAYS`, 30 by default), each
+  stating the address it was written for; a row's `attempts` is what says
+  whether anything was actually sent there. Past that window the change rows are
+  the durable evidence — they are never pruned. Freezing the address also means changing a URL cannot redirect
   events that were already queued under the old one — a redirect applies to what
   the organization sends next, which is the only thing an admin should be able
   to decide after the fact.
 
-A change made outside the API — Django admin, a shell, a data migration — writes
-no change row, because the actor cannot be named from there. Treat direct
-database and admin access to `webhook_subscription` as the privileged path it
-is.
+A change made outside the API — a shell, a data migration, a fixture — writes no
+change row, because the actor cannot be named from there. (No webhook model is
+registered in the Django admin, so that is not among the paths.) Treat direct
+database access to `webhook_subscription` as the privileged path it is.
 
 ## Residual risk
 

@@ -346,6 +346,87 @@ def test_a_queued_delivery_keeps_its_address_when_the_subscription_moves(setup):
         'https://moved.example/events')
 
 
+def test_changing_the_url_cancels_what_was_queued_for_the_old_one(setup):
+    """Changing the destination has to be a kill switch that works.
+
+    A frozen address means a queued delivery cannot be redirected — which, on
+    its own, would send the backlog to the address the admin was moving away
+    from as soon as the subscription came back. Those rows are cancelled
+    instead: nothing goes to the old address, nothing is redirected to the new
+    one, and each row keeps saying where it had been addressed.
+    """
+    org, other, person, user, subscription = setup
+    with patch('patient_portal.webhooks.enqueue_delivery'):
+        publish_event(org.pk, 'lab.updated', {'person_id': person.person_id})
+    queued = WebhookDelivery.objects.get()
+
+    client = APIClient()
+    client.force_login(user)
+    assert client.patch(f'/api/v1/webhooks/subscriptions/{subscription.pk}/',
+                        {'url': 'https://corrected.example/events'},
+                        format='json').status_code == 200
+
+    queued.refresh_from_db()
+    assert queued.status == 'cancelled'
+    assert queued.destination_url == 'https://subscriber.example/events'
+
+    with patch('patient_portal.tasks.send_webhook') as send:
+        deliver_webhook(str(queued.pk))
+        send.assert_not_called()
+
+    # A delivery already addressed to the new URL is untouched, and so is one
+    # that a worker has in hand.
+    with patch('patient_portal.webhooks.enqueue_delivery'):
+        publish_event(org.pk, 'lab.updated', {'person_id': person.person_id})
+    fresh = WebhookDelivery.objects.exclude(pk=queued.pk).get()
+    assert fresh.status == 'pending'
+    assert fresh.destination_url == 'https://corrected.example/events'
+
+
+def test_an_egress_change_is_also_written_to_the_signed_audit_row(setup):
+    """The change table is the index; the chained audit row is the evidence."""
+    from patient_portal.models import AuditEvent
+
+    org, other, person, user, subscription = setup
+    client = APIClient()
+    client.force_login(user)
+    assert client.patch(f'/api/v1/webhooks/subscriptions/{subscription.pk}/',
+                        {'url': 'https://corrected.example/events'},
+                        format='json').status_code == 200
+
+    audited = AuditEvent.objects.filter(path__contains='/webhooks/subscriptions/',
+                                        method='PATCH').latest('timestamp')
+    assert audited.detail['url_before'] == 'https://subscriber.example/events'
+    assert audited.detail['url_after'] == 'https://corrected.example/events'
+    assert audited.detail['organization'] == org.slug
+    assert audited.detail['action'] == 'update'
+    # Signed and chained, so rewriting either trail contradicts the other.
+    assert audited.signature and audited.signature == audited.compute_signature()
+
+
+def test_a_delete_answers_404_when_the_row_was_removed_under_it(setup):
+    org, other, person, user, subscription = setup
+    client = APIClient()
+    client.force_login(user)
+    WebhookSubscription.objects.filter(pk=subscription.pk).update(
+        deleted_at=timezone.now(), active=False)
+    assert client.delete(f'/api/v1/webhooks/subscriptions/{subscription.pk}/').status_code == 404
+
+
+def test_a_delivery_written_before_the_column_existed_still_sends(setup):
+    """The fallback for rows that predate the frozen address."""
+    org, other, person, user, subscription = setup
+    legacy = WebhookDelivery.objects.create(
+        subscription=subscription, payload={'id': 'old', 'type': 'lab.updated'})
+    assert legacy.destination_url == ''
+
+    sent = []
+    with patch('patient_portal.tasks.send_webhook',
+               side_effect=lambda url, *args, **kwargs: sent.append(url) or 200):
+        deliver_webhook(str(legacy.pk))
+    assert sent == ['https://subscriber.example/events']
+
+
 def test_the_migration_freezes_only_the_destinations_still_in_flight(setup):
     """Rows already queued when 0023 lands need an address too.
 
