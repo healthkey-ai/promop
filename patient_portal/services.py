@@ -310,3 +310,32 @@ def prolog_results_viewer(email, password):
         may_read_responses=True,
         may_read_contacts=identity.has_perm('prolog_surveys.view_surveycontact'),
     )
+
+
+def prolog_results_password_change(email, current_password, new_password):
+    """PROLOG_RESULTS_PASSWORD_CHANGE: a results reader changing their own password.
+
+    The same policy as everywhere else in this project — the current password
+    must be right, the new one must satisfy Django's validators and the no-reuse
+    rules (TI.1.1#04/#05), and setting it records history and clears the
+    force-change flag and lockout counters (`set_new_password`).
+
+    Refusals are raised as `PasswordRefused` with the messages the reader
+    should see; the survey runner has no policy of its own to apply.
+    """
+    from django.contrib.auth import authenticate
+
+    from prolog_surveys.results import PasswordRefused
+
+    identity = authenticate(username=email, password=current_password)
+    if identity is None:
+        raise PasswordRefused(['Your current password is not right.'])
+    try:
+        validate_password(new_password, identity)
+    except ValidationError as exc:
+        raise PasswordRefused(list(exc.messages)) from None
+    reuse = password_reuse_error(identity, new_password)
+    if reuse:
+        raise PasswordRefused([reuse])
+    set_new_password(identity, new_password)
+    logger.info('prolog results password changed for identity %s', identity.pk)
