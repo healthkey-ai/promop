@@ -165,3 +165,27 @@ def test_exactly_one_scheduler_across_the_blueprint():
         # Configuration, not a comment: N replicas would be N schedulers, each
         # queueing the recovery sweep every minute and a daily prune.
         assert service['numInstances'] == 1
+
+
+def test_every_service_runs_a_python_that_classifies_wrapped_addresses():
+    """CPython below 3.12.4 (CVE-2024-4032) calls `2002:7f00:1::` globally
+    reachable — the 6to4 notation for 127.0.0.1. The webhook address filter
+    unwraps those itself so it does not rest on this pin, but a deployment
+    whose `ipaddress` is wrong is a hazard for every other caller of it.
+    """
+    minimum = (3, 12, 4)
+    blueprint = yaml.safe_load((ROOT / 'render.yaml').read_text())
+    pins = {
+        service['name']: env['value']
+        for service in blueprint['services']
+        for env in service.get('envVars', [])
+        if env['key'] == 'PYTHON_VERSION'
+    }
+    # Asserted before runtime.txt is added: that entry always exists, so a
+    # blueprint whose services carry no PYTHON_VERSION at all would otherwise
+    # leave this test green while pinning nothing.
+    python_services = [s['name'] for s in blueprint['services'] if s.get('runtime') == 'python']
+    assert set(pins) == set(python_services), f'Python services without a pin: {set(python_services) - set(pins)}'
+    pins['runtime.txt'] = (ROOT / 'runtime.txt').read_text().strip().removeprefix('python-')
+    for name, pin in pins.items():
+        assert tuple(int(part) for part in str(pin).split('.')) >= minimum, f'{name} pins {pin}'

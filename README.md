@@ -219,7 +219,7 @@ See **[docs/reproducing-benchmark-results.md](docs/reproducing-benchmark-results
 
 `start.sh` runs `migrate` and `setup_admin` on every deploy. Push to `main` to trigger a Render deploy.
 
-- Backend: `https://promop.onrender.com`
+- Backend: `https://promop.onrender.com` (this is just our public example which you can sign up to as demo user, but you cannot deploy to it)
 - Admin credentials: set via `ADMIN_EMAIL` / `ADMIN_PASSWORD` env vars on Render
 
 ---

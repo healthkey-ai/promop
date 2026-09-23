@@ -639,11 +639,53 @@ def test_unsafe_url_schemes_and_credentials(url):
         resolve_webhook_url(url)
 
 
-@pytest.mark.parametrize('address', ['127.0.0.1', '10.0.0.1', '169.254.169.254', '::1', 'fd00::1', '::ffff:127.0.0.1'])
+@pytest.mark.parametrize('address', [
+    '127.0.0.1', '10.0.0.1', '169.254.169.254', '::1', 'fd00::1', '::ffff:127.0.0.1',
+    # IPv6 notations carrying a private IPv4 inside. `is_global` below CPython
+    # 3.12.4 (CVE-2024-4032) calls the 6to4 pair globally reachable, and every
+    # Render service was pinned to 3.12.0; the filter now unwraps them itself,
+    # so this holds whatever interpreter the deployment rolls back to.
+    '2002:7f00:1::',                              # 6to4 wrap of 127.0.0.1
+    '2002:a00:5::',                               # 6to4 wrap of 10.0.0.5
+    '2001:0:4136:e378:8000:63bf:f5ff:fffa',       # Teredo client 10.0.0.5
+])
 def test_private_destinations_rejected(address):
     with patch('socket.getaddrinfo', return_value=[(socket.AF_INET, 1, 6, '', (address, 443))]):
         with pytest.raises(ValueError):
             resolve_webhook_url('https://subscriber.example/')
+
+
+@pytest.mark.parametrize('address', ['2002:7f00:1::', '2002:a00:5::', '::ffff:127.0.0.1'])
+def test_a_wrapped_private_address_is_refused_as_a_literal_url(address):
+    """No DNS is involved, so this is the branch a subscription create reaches."""
+    with pytest.raises(ValueError):
+        resolve_webhook_url(f'https://[{address}]/events')
+
+
+def test_a_public_ipv6_literal_is_still_accepted():
+    """The notation is not what is being refused above; the address inside is."""
+    with patch('socket.getaddrinfo', return_value=[
+        (socket.AF_INET6, 1, 6, '', ('2606:4700:4700::1111', 443, 0, 0)),
+    ]):
+        _, addresses = resolve_webhook_url('https://[2606:4700:4700::1111]/events')
+    assert addresses == ['2606:4700:4700::1111']
+
+
+def test_the_filter_does_not_depend_on_the_interpreters_special_address_table():
+    """The table has been wrong once. Judge the wrapped address on its own terms.
+
+    `is_global` is forced True for every address here, which is what CPython
+    3.12.0 answers for the 6to4 pair; what must refuse it is the unwrapping.
+    """
+    import ipaddress
+
+    from patient_portal.webhooks import _public_address
+
+    with patch('ipaddress.IPv6Address.is_global', new_callable=PropertyMock, return_value=True):
+        assert not _public_address(ipaddress.ip_address('2002:7f00:1::'))
+        assert not _public_address(ipaddress.ip_address('2002:a00:5::'))
+        assert not _public_address(ipaddress.ip_address('::ffff:169.254.169.254'))
+        assert _public_address(ipaddress.ip_address('2606:4700:4700::1111'))
 
 
 DUAL_STACK = [
@@ -1301,6 +1343,35 @@ def test_a_trust_no_longer_reaches_subscription_creation(trusted_professional):
     # 404, and a range that accepts those cannot tell the gate from its backstops.
     assert response.status_code == 403, response.data
     assert not WebhookSubscription.objects.filter(url='https://attacker.example/collect').exists()
+
+
+def test_a_deactivated_organization_has_no_direct_admin(setup):
+    """One rule, asked two ways, must answer the same.
+
+    `get_direct_admin_orgs` and `has_explicit_org_admin_access` are the same
+    policy — a direct org_admin grant, trusts excluded — written independently
+    on two branches. They had drifted: only the second excluded a deactivated
+    organization, so switching an org off left its admin able to redirect its
+    events.
+    """
+    from omop_core.services.access import get_direct_admin_orgs, has_explicit_org_admin_access
+
+    org, _, _, user, subscription = setup
+    assert org in get_direct_admin_orgs(user)
+    assert has_explicit_org_admin_access(user, org.slug)
+
+    Organization.objects.filter(pk=org.pk).update(is_active=False)
+    org.refresh_from_db()
+    assert org not in get_direct_admin_orgs(user)
+    assert not has_explicit_org_admin_access(user, org.slug)
+
+    client = APIClient()
+    client.force_login(user)
+    response = client.patch(f'/api/v1/webhooks/subscriptions/{subscription.pk}/',
+                            {'url': 'https://elsewhere.example/collect'}, format='json')
+    assert response.status_code in (403, 404), response.data
+    subscription.refresh_from_db()
+    assert subscription.url == 'https://subscriber.example/events'
 
 
 def test_a_trust_cannot_redirect_or_delete_an_existing_subscription(trusted_professional):

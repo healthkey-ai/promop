@@ -1,8 +1,9 @@
 # Code owners for healthkey-ai/promop.
 #
 # Purpose is SOC2 CC8.1 change management: declare who should review changes to
-# security-relevant code. The Security review status requires approval from
-# @larsburgess for security-related changes once rollout is complete. Paths below are ordered least- to
+# security-relevant code. The Security review status requires approval of
+# security-related changes from a writer other than the PR's author once rollout is
+# complete. Paths below are ordered least- to
 # most-specific; the LAST matching pattern wins, so the security paths at the
 # bottom override the catch-all at the top.
 #

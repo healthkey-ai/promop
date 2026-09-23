@@ -21,3 +21,13 @@ def test_empty_genomics_and_zero_lines():
     data = PatientListSerializer(PatientRecordFactory(genetic_mutations=[], therapy_lines_count=0)).data
     assert data['genomics_summary'] == ''
     assert data['therapy_lines_count'] == 0
+
+
+def test_chromosome_summary_uses_features_for_new_and_legacy_findings(django_assert_num_queries):
+    record = PatientRecordFactory(genetic_mutations=[
+        {'gene': 'TP53', 'variant': 'del17p', 'status': 'present'},
+        {'genomic_feature': 'Chromosome 12', 'feature_type': 'Chromosome(s)', 'variant_name': 'Trisomy 12', 'status': 'present'},
+    ])
+    with django_assert_num_queries(0):
+        data = PatientListSerializer(record).data
+    assert data['genomics_summary'] == '17p del17p (present); Chromosome 12 Trisomy 12 (present)'

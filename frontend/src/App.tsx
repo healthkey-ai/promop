@@ -113,7 +113,7 @@ function AppRoutes() {
     return element;
   };
 
-  const uploadRoute = (element: ReactNode) => {
+  const orgAdminRoute = (element: ReactNode) => {
     if (!currentUser) return <Navigate to="/login" replace />;
     if (!(currentUser.is_staff || currentUser.is_org_admin)) return <Navigate to="/" replace />;
     return element;
@@ -158,12 +158,12 @@ function AppRoutes() {
         }
       />
       <Route path="/patient/:personId" element={providerRoute(<PatientDetail user={currentUser} />)} />
-      <Route path="/upload" element={uploadRoute(<UploadPage />)} />
-      <Route path="/upload-fhir" element={uploadRoute(<UploadFHIR />)} />
-      <Route path="/upload-csv" element={uploadRoute(<UploadCSV />)} />
+      <Route path="/upload" element={orgAdminRoute(<UploadPage />)} />
+      <Route path="/upload-fhir" element={orgAdminRoute(<UploadFHIR />)} />
+      <Route path="/upload-csv" element={orgAdminRoute(<UploadCSV />)} />
       <Route path="/stats" element={<Navigate to="/org-admin" replace />} />
       <Route path="/service-applications" element={currentUser?.is_staff ? <ServiceApplicationsPage /> : <Navigate to={currentUser ? "/" : "/login"} replace />} />
-      <Route path="/org-admin" element={providerRoute(<OrgAdminPage />)} />
+      <Route path="/org-admin" element={orgAdminRoute(<OrgAdminPage />)} />
       <Route path="/mappings" element={mappingAdminRoute(<MappingHubPage />)} />
       <Route path="/field-mappings" element={mappingAdminRoute(<FieldMappingPage />)} />
       <Route path="/code-mappings" element={mappingAdminRoute(<CodeMappingPage />)} />

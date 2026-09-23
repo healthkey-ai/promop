@@ -78,8 +78,35 @@ def validate_webhook_url(url):
     return parsed
 
 
+def _embedded_ipv4(address):
+    """The IPv4 addresses an IPv6 address carries inside it, if any."""
+    if address.version != 6:
+        return
+    for wrapper in (address.ipv4_mapped, address.sixtofour):
+        if wrapper is not None:
+            yield wrapper
+    if address.teredo:
+        yield from address.teredo
+
+
 def _public_address(address):
-    return address.is_global and not address.is_multicast and not address.is_reserved
+    """Judge the address a packet arrives at, not the notation it was written in.
+
+    ``is_global`` judges the wrapper, and on the interpreter this deploys on it
+    judges it wrongly: CPython below 3.12.4 (CVE-2024-4032) reports
+    ``2002:7f00:1::`` — the 6to4 form of 127.0.0.1 — as globally reachable, and
+    every Render service pinned 3.12.0. The pin moves in this change, but a
+    validator whose correctness rests on a patch-level pin in another file is
+    one that regresses silently on a rollback, so unwrap the wrappers here too.
+
+    ``ipv4_mapped`` and ``teredo`` are covered by the special-address table on
+    the interpreters checked, before the fix and after it. They are unwrapped
+    anyway: the rule then holds because of what is written here rather than
+    because of a table that has already been wrong once.
+    """
+    if not (address.is_global and not address.is_multicast and not address.is_reserved):
+        return False
+    return all(_public_address(embedded) for embedded in _embedded_ipv4(address))
 
 
 def resolve_webhook_url(url):

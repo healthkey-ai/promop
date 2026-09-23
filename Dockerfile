@@ -20,9 +20,13 @@ RUN python --version && node --version && npm --version
 WORKDIR /app
 
 # Copy Python requirements and install
+ENV PLAYWRIGHT_BROWSERS_PATH=0
 COPY requirements.txt .
+COPY scripts/install_athena_browser.py ./scripts/
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt && \
+    python scripts/install_athena_browser.py --with-deps && \
+    rm -rf /var/lib/apt/lists/*
 
 # Copy frontend package files and install Node dependencies
 COPY frontend/package*.json ./frontend/

@@ -24,6 +24,8 @@ PyJWT>=2.10.1
 python-decouple==3.8
 python-dotenv==1.2.2
 python3-openid==3.2.0
+# Browser-based Athena management commands (Chromium installed by deployment builds).
+playwright==1.63.0
 requests==2.34.2
 requests-oauthlib==2.0.0
 stream-unzip==0.0.99

@@ -7000,6 +7000,13 @@ class _ConceptFixtureBase(_SmartBase):
         from omop_core.models import Concept, Vocabulary, Domain, ConceptClass
         import datetime
 
+        # Search/list fixtures need a controlled catalog: deployment migrations
+        # may already contain these real IDs, codes and other matching names.
+        Concept.objects.filter(vocabulary_id__in=('LOINC', 'SNOMED')).exclude(
+            pk__in=FieldConceptMapping.objects.values_list('concept_id', flat=True),
+        ).delete()
+        Vocabulary.objects.filter(pk__in=('LOINC', 'SNOMED')).update(vocabulary_version='')
+
         # Token with no read scope — must be rejected by ScopedTokenPermission
         cls.empty_scope_token = AccessToken.objects.create(
             user=cls.foundation_user,
@@ -16691,6 +16698,142 @@ class UnverifiedEmailNotStampedOnPersonTest(TestCase):
         self.assertEqual(person.email, 'owner@example.com')
 
 
+class ImportedPersonAdoptedAtLoginTest(TestCase):
+    """A Person provisioned before its owner signs in must be adopted, not forked."""
+
+    ISSUER = 'https://securetoken.google.com/promop-test'
+
+    def _identity(self, sub: str, email: str) -> Identity:
+        identity = Identity.objects.get_or_create(
+            issuer=self.ISSUER, sub=sub, defaults={'email': email},
+        )[0]
+        identity.set_unusable_password()
+        identity.save()
+        return identity
+
+    def _imported_person(self, email: str | None) -> Person:
+        """What an importer leaves behind: no Identity, no PatientUser."""
+        from omop_core.services.pk import next_pk
+        person = Person.objects.create(
+            person_id=next_pk(Person, 'person_id'), email=email,
+        )
+        PatientRecord.objects.create(person=person)
+        return person
+
+    def test_login_adopts_imported_person_when_case_differs(self):
+        from patient_portal.services import resolve_or_create_person
+
+        imported = self._imported_person('Owner.Name@Example.com')
+        identity = self._identity('case-differs', 'owner.name@example.com')
+
+        person = resolve_or_create_person(
+            identity, email='owner.name@example.com', email_verified=True,
+        )
+
+        self.assertEqual(person.person_id, imported.person_id)
+        self.assertEqual(Person.objects.count(), 1)
+        self.assertTrue(
+            PatientUser.objects.filter(identity=identity, person=imported).exists()
+        )
+
+    def test_login_adopts_imported_person_on_exact_match(self):
+        from patient_portal.services import resolve_or_create_person
+
+        imported = self._imported_person('exact@example.com')
+        identity = self._identity('exact-match', 'exact@example.com')
+
+        person = resolve_or_create_person(
+            identity, email='exact@example.com', email_verified=True,
+        )
+
+        self.assertEqual(person.person_id, imported.person_id)
+        self.assertEqual(Person.objects.count(), 1)
+
+    def test_legacy_patient_record_address_also_adopts_case_insensitively(self):
+        """The fallback for snapshots that carry an address Person does not."""
+        from omop_core.services.pk import next_pk
+        from patient_portal.services import resolve_or_create_person
+
+        person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=person, email='Legacy@Example.com')
+        identity = self._identity('legacy-case', 'legacy@example.com')
+
+        resolved = resolve_or_create_person(
+            identity, email='legacy@example.com', email_verified=True,
+        )
+
+        self.assertEqual(resolved.person_id, person.person_id)
+        self.assertEqual(Person.objects.count(), 1)
+
+    def test_unverified_login_still_forks(self):
+        """The known limit of adopting by address, pinned so it stays visible."""
+        from patient_portal.services import resolve_or_create_person
+
+        imported = self._imported_person('unverified@example.com')
+        identity = self._identity('unverified-login', 'unverified@example.com')
+
+        person = resolve_or_create_person(
+            identity, email='unverified@example.com', email_verified=False,
+        )
+
+        self.assertNotEqual(person.person_id, imported.person_id)
+        self.assertEqual(Person.objects.count(), 2)
+
+    def test_duplicate_address_forks_rather_than_guessing(self):
+        """Person.email is not unique, so a shared address has no single answer."""
+        from patient_portal.services import resolve_or_create_person
+
+        first = self._imported_person('shared@example.com')
+        second = self._imported_person('Shared@example.com')
+        identity = self._identity('shared-address', 'shared@example.com')
+
+        person = resolve_or_create_person(
+            identity, email='shared@example.com', email_verified=True,
+        )
+
+        self.assertNotIn(person.person_id, {first.person_id, second.person_id})
+        self.assertFalse(PatientUser.objects.filter(person=first).exists())
+        self.assertFalse(PatientUser.objects.filter(person=second).exists())
+
+    def test_lone_snapshot_cannot_settle_an_ambiguous_address(self):
+        """Both sources are counted together, so a stale snapshot cannot decide."""
+        from patient_portal.services import resolve_or_create_person
+
+        first = self._imported_person('ambiguous@example.com')
+        second = self._imported_person('Ambiguous@Example.com')
+        PatientRecord.objects.filter(person=second).update(
+            email='ambiguous@example.com',
+        )
+        identity = self._identity('ambiguous-snapshot', 'ambiguous@example.com')
+
+        person = resolve_or_create_person(
+            identity, email='ambiguous@example.com', email_verified=True,
+        )
+
+        self.assertNotIn(person.person_id, {first.person_id, second.person_id})
+        self.assertFalse(
+            PatientUser.objects.filter(person__in=[first, second]).exists()
+        )
+
+    def test_case_variant_does_not_rebind_a_claimed_person(self):
+        """An address already held by someone else must not be taken over."""
+        from patient_portal.services import resolve_or_create_person
+
+        owner = self._identity('real-owner', 'claimed@example.com')
+        owned = self._imported_person('Claimed@Example.com')
+        PatientUser.objects.create(identity=owner, person=owned)
+        intruder = self._identity('intruder', 'claimed@example.com')
+
+        person = resolve_or_create_person(
+            intruder, email='claimed@example.com', email_verified=True,
+        )
+
+        self.assertNotEqual(person.person_id, owned.person_id)
+        self.assertEqual(
+            PatientUser.objects.get(person=owned).identity_id, owner.pk,
+        )
+
+
 class CsvCreateForNonOrgCallerTest(TestCase):
     """A write-scoped non-org caller can still introduce new patients (#748).
 
@@ -21831,6 +21974,107 @@ class CodeMappingApiTest(TestCase):
                                          'review_token': review.data['review_token']}, format='json')
         self.assertEqual(response.status_code, 400)
 
+    def test_mint_creates_self_ancestor(self):
+        """Minting without a parent creates a self-ancestor row."""
+        self.client.force_authenticate(user=self.staff)
+        url = '/api/v1/code-mappings/mint-destination/'
+        payload = {**self._mint_payload(), 'concept_code': 'mint-anc-self'}
+        review = self.client.post(url, {**payload, 'action': 'review'}, format='json')
+        self.assertEqual(review.status_code, 200, review.data)
+        response = self.client.post(url, {**payload, 'action': 'mint', 'none_match': True,
+                                         'review_token': review.data['review_token']}, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        concept_id = response.data['concept_id']
+        self_row = ConceptAncestor.objects.filter(
+            ancestor_concept_id=concept_id, descendant_concept_id=concept_id,
+        )
+        self.assertTrue(self_row.exists())
+        self.assertEqual(self_row.first().min_levels_of_separation, 0)
+        self.assertEqual(self_row.first().max_levels_of_separation, 0)
+        # No other ancestry rows
+        self.assertEqual(ConceptAncestor.objects.filter(descendant_concept_id=concept_id).count(), 1)
+
+    def test_mint_with_parent_creates_full_ancestry(self):
+        """Minting with a parent creates self-ancestor + parent link + transitive ancestors."""
+        from omop_core.services.pk import next_pk
+        self.client.force_authenticate(user=self.staff)
+        url = '/api/v1/code-mappings/mint-destination/'
+        # Create a grandparent → parent chain in ConceptAncestor
+        grandparent = Concept.objects.create(
+            concept_id=next_pk(Concept, 'concept_id'),
+            vocabulary_id='SNOMED', concept_name='Grandparent', concept_code='GP-test',
+            domain_id='Measurement', concept_class_id='Procedure',
+            valid_start_date='2000-01-01', valid_end_date='2099-12-31',
+        )
+        parent = Concept.objects.create(
+            concept_id=next_pk(Concept, 'concept_id'),
+            vocabulary_id='SNOMED', concept_name='Parent concept', concept_code='P-test',
+            domain_id='Measurement', concept_class_id='Procedure',
+            valid_start_date='2000-01-01', valid_end_date='2099-12-31',
+        )
+        # grandparent self-ancestor
+        ConceptAncestor.objects.create(
+            ancestor_concept=grandparent, descendant_concept=grandparent,
+            min_levels_of_separation=0, max_levels_of_separation=0,
+        )
+        # parent self-ancestor
+        ConceptAncestor.objects.create(
+            ancestor_concept=parent, descendant_concept=parent,
+            min_levels_of_separation=0, max_levels_of_separation=0,
+        )
+        # grandparent → parent
+        ConceptAncestor.objects.create(
+            ancestor_concept=grandparent, descendant_concept=parent,
+            min_levels_of_separation=1, max_levels_of_separation=1,
+        )
+        # Now mint a child with parent_concept_id
+        payload = {**self._mint_payload(), 'concept_code': 'mint-anc-child',
+                   'parent_concept_id': parent.concept_id}
+        review = self.client.post(url, {**payload, 'action': 'review'}, format='json')
+        self.assertEqual(review.status_code, 200, review.data)
+        response = self.client.post(url, {**payload, 'action': 'mint', 'none_match': True,
+                                         'review_token': review.data['review_token']}, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        child_id = response.data['concept_id']
+        ancestors = ConceptAncestor.objects.filter(descendant_concept_id=child_id).order_by('min_levels_of_separation')
+        self.assertEqual(ancestors.count(), 3)  # self + parent + grandparent
+        # Self-ancestor
+        self_row = ancestors.get(ancestor_concept_id=child_id)
+        self.assertEqual(self_row.min_levels_of_separation, 0)
+        # Direct parent
+        parent_row = ancestors.get(ancestor_concept_id=parent.concept_id)
+        self.assertEqual(parent_row.min_levels_of_separation, 1)
+        # Grandparent (transitive)
+        gp_row = ancestors.get(ancestor_concept_id=grandparent.concept_id)
+        self.assertEqual(gp_row.min_levels_of_separation, 2)
+
+    def test_mint_with_invalid_parent_rejects(self):
+        """Minting with a nonexistent parent_concept_id returns 400."""
+        self.client.force_authenticate(user=self.staff)
+        url = '/api/v1/code-mappings/mint-destination/'
+        payload = {**self._mint_payload(), 'concept_code': 'mint-anc-bad',
+                   'parent_concept_id': 999999999}
+        response = self.client.post(url, {**payload, 'action': 'review'}, format='json')
+        self.assertEqual(response.status_code, 400)
+
+    def test_mint_rejects_cross_domain_parent(self):
+        """Minting with a parent from a different domain returns 400."""
+        from omop_core.services.pk import next_pk
+        self.client.force_authenticate(user=self.staff)
+        url = '/api/v1/code-mappings/mint-destination/'
+        # Create a Condition-domain parent
+        condition_parent = Concept.objects.create(
+            concept_id=next_pk(Concept, 'concept_id'),
+            vocabulary_id='SNOMED', concept_name='Condition parent', concept_code='CP-test',
+            domain_id='Condition', concept_class_id='Clinical Finding',
+            valid_start_date='2000-01-01', valid_end_date='2099-12-31',
+        )
+        # Mint payload is Measurement domain — parent is Condition domain
+        payload = {**self._mint_payload(), 'concept_code': 'mint-cross-domain',
+                   'parent_concept_id': condition_parent.concept_id}
+        response = self.client.post(url, {**payload, 'action': 'review'}, format='json')
+        self.assertEqual(response.status_code, 400)
+
     # ------------------------------------------------------------ reference
 
     def test_reference_returns_all_five_domains(self):
@@ -21921,6 +22165,8 @@ class CodeMappingApiTest(TestCase):
     def test_audit_reports_a_retired_destination_with_its_replacement(self):
         from io import StringIO
         successor = self._retire_standard_with_replacement()
+        SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='ICD10', source_code='F98.8').delete()
         SourceCodeConceptMapping.objects.create(
             source_vocabulary_id='ICD10', source_code='F98.8', omop_table='measurement',
             target_concept=self.standard, destination_vocabulary_id='LOINC',
@@ -21950,6 +22196,8 @@ class CodeMappingApiTest(TestCase):
     def test_audit_status_filter(self):
         from io import StringIO
         self._retire_standard_with_replacement()
+        SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='ICD10', source_code='Z76.82').delete()
         SourceCodeConceptMapping.objects.create(
             source_vocabulary_id='ICD10', source_code='Z76.82', omop_table='measurement',
             target_concept=self.standard, destination_vocabulary_id='LOINC',
@@ -22313,7 +22561,8 @@ class CodeMappingResolutionTest(TestCase):
             source_code='33358-4', source_vocabulary_id='ICD10CM', omop_table='measurement',
         )
         self.assertIsNone(concept)
-        self.assertEqual(mapping.id, SourceCodeConceptMapping.objects.get().id)
+        self.assertEqual(mapping.id, SourceCodeConceptMapping.objects.get(
+            source_vocabulary_id='ICD10CM', source_code='33358-4').id)
         self.assertEqual(mapping.occurrence_count, 1)
 
     def test_import_does_not_bump_an_approved_mapping_back_to_proposed(self):
@@ -25302,6 +25551,10 @@ class CodeMappingSourceVocabTabsTest(TestCase):
 
     @classmethod
     def setUpTestData(cls):
+        # These tests exercise their own ICD-10 proposals, independently of
+        # the authoritative mappings installed by deployment migrations.
+        SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id__in=('ICD10', 'ICD10CM')).delete()
         cls.staff = Identity.objects.create_user(
             email='svt_staff@t.com', password='x', is_staff=True,
         )
@@ -25371,7 +25624,7 @@ class CodeMappingSourceVocabTabsTest(TestCase):
             vocabulary=cls.snomed_vocab,
             concept_class=cls.concept_class,
             standard_concept='S',
-            concept_code='44054006',
+            concept_code='TEST-SVT-DIABETES',
             valid_start_date=date(1970, 1, 1),
             valid_end_date=date(2099, 12, 31),
         )

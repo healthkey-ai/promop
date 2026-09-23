@@ -1,0 +1,3 @@
+# Compatibility install for older operator instructions.
+# Playwright is also pinned in requirements.txt; keep this version aligned.
+playwright==1.63.0

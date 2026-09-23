@@ -133,7 +133,8 @@ from patient_portal.api.bulk_upload import (
 from .permissions import (
     EtlPatientCrudPermission, EtlWritePermission, PatientCrudPermission, GenomicsCrudPermission,
     PatientDeletePermission, PatientSelfScopePermission, ScopedTokenPermission,
-    VocabReadPermission, LabSyncPermission, get_request_org, is_service_token, is_machine_request,
+    VocabReadPermission, LabSyncPermission, EtlProvisionPermission,
+    get_request_org, is_service_token, is_machine_request,
 )
 from .providers.base import TokenClaims
 from .serializers import (
@@ -1099,6 +1100,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         from omop_core.models import FieldConceptMapping
         from omop_core.services.genomics import mapping_is_usable
         from omop_core.services.genomics_catalog import catalog, disease_code, markers
+        from omop_core.services.genomics_features import marker_features
         person, error = self._genomics_access(request, pk)
         if error is not None:
             return error
@@ -1110,7 +1112,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             field_name__in=[m['field_name'] for m in selected],
         ).only('field_name', 'status', 'omop_table', 'source_value')}
         return Response({'version': catalog()['version'], 'disease': code,
-            'markers': [{**m, 'writable': mapping_is_usable(mappings.get(m['field_name']), parent=True)}
+            'markers': [{**m, **marker_features(m), 'writable': mapping_is_usable(mappings.get(m['field_name']), parent=True)}
                         for m in selected]})
 
     @action(detail=True, methods=['get', 'patch', 'delete'], url_path=r'genomics/(?P<variant_id>[0-9]+)', permission_classes=[GenomicsCrudPermission, PatientSelfScopePermission])
@@ -5523,7 +5525,8 @@ class PersonViewSet(viewsets.GenericViewSet):
         from patient_portal.api.permissions import is_machine_request
         if is_machine_request(request):
             return Response(
-                {'detail': 'Person identity provisioning requires end-user authentication.'},
+                {'detail': 'Person identity provisioning requires end-user authentication. '
+                           'Service callers use POST /api/persons/provision/.'},
                 status=status.HTTP_403_FORBIDDEN,
             )
         actor_iss = request.data.get('actor_iss', '').strip()
@@ -5600,6 +5603,67 @@ class PersonViewSet(viewsets.GenericViewSet):
         PatientRecord.objects.get_or_create(person=person)
         http_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
         return Response({'person_id': person.person_id, 'created': created}, status=http_status)
+
+    @action(detail=False, methods=['post'], url_path='provision',
+            permission_classes=[EtlProvisionPermission])
+    def provision(self, request):
+        """
+        POST /api/persons/provision/
+        Body: { "email": "..." }  (optional)
+        Response 200/201: { "person_id": 1234, "created": true }
+
+        Mints a person who is not anyone yet, for an importer that holds a
+        source id we cannot verify. No actor claims, so nothing here asserts
+        whose account this is: the address is what a later verified login
+        matches on, and the caller keeps its own source id to person id map.
+
+        The address is written in the same transaction as the insert. A mint
+        followed by a PATCH would leave a window where a login lands on a
+        person with no address and forks.
+        """
+        from patient_portal.api.permissions import reject_machine_actor_claims
+        from patient_portal.models import PatientUser
+        reject_machine_actor_claims(
+            request,
+            request.data.get('actor_iss', ''),
+            request.data.get('actor_sub', ''),
+        )
+
+        email = (request.data.get('email') or '').strip() or None
+        if email is not None:
+            try:
+                validate_email(email)
+            except DjangoValidationError:
+                return Response(
+                    {'detail': "'email' must be a valid email address."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        if email is not None:
+            # A re-run must not mint a second person for an address it already
+            # minted one for, because two would then fork the login instead of
+            # adopting either. An address that already names several persons,
+            # or one whose person has been claimed, is left alone.
+            existing = list(Person.objects.filter(email__iexact=email)[:2])
+            if len(existing) == 1 and not PatientUser.objects.filter(
+                person=existing[0],
+            ).exists():
+                PatientRecord.objects.get_or_create(person=existing[0])
+                return Response(
+                    {'person_id': existing[0].person_id, 'created': False},
+                    status=status.HTTP_200_OK,
+                )
+
+        from patient_portal.services import create_unidentified_person
+        with transaction.atomic():
+            person = create_unidentified_person(source='etl-provision')
+            if email is not None:
+                person.email = email
+                person.save(update_fields=['email'])
+        return Response(
+            {'person_id': person.person_id, 'created': True},
+            status=status.HTTP_201_CREATED,
+        )
 
     def partial_update(self, request, person_id=None):
         """Thin wrapper: this view routes PATCH through its own method rather
@@ -10792,6 +10856,13 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     if status_value == 'approved' and (not was_approved or destination_moved):
         values['reviewer'] = user
         values['reviewed_at'] = timezone.now()
+        if (mapping is not None and mapping.source == 'Athena'
+                and mapping.origin_system in {'athena-multiple', CURATOR_PROVENANCE}
+                and concept is not None
+                and mapping.destination_candidates.filter(target_concept_id=concept.pk, origins__contains=['Athena']).exists()):
+            # Choosing one of the verified Athena destinations completes the
+            # pending choice and moves this mapping to ATHENA-MAPPED.
+            values['origin_system'] = 'athena'
     elif was_approved and status_value != 'approved':
         values['reviewer'] = None
         values['reviewed_at'] = None
@@ -12283,9 +12354,9 @@ def field_choice_detail(request, pk):
 @api_view(['POST', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def field_choice_codes(request, choice_pk):
-    """POST: add a code to a choice.  DELETE: remove all codes (use detail for single)."""
+    """POST: add a code. DELETE: remove code_id, or all codes when omitted."""
 
-    from omop_core.models import FieldChoice, FieldChoiceCode
+    from omop_core.models import FieldChoice
     from .serializers import FieldChoiceCodeSerializer
     if not _can_manage_field_mappings(request.user):
         return Response({'detail': 'Organization admin access required to manage field choices.'}, status=status.HTTP_403_FORBIDDEN)
@@ -12300,7 +12371,20 @@ def field_choice_codes(request, choice_pk):
         serializer.save(choice=choice)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
-    # DELETE — remove all codes for this choice
+    # Scope an individual removal to its choice, without replacing sibling
+    # codes (including any another curator added after the editor loaded).
+    code_id = request.query_params.get('code_id')
+    if code_id is not None:
+        try:
+            code_id = serializers.IntegerField(min_value=1).run_validation(code_id)
+        except ValidationError as exc:
+            raise ValidationError({'code_id': exc.detail})
+        deleted, _ = choice.codes.filter(pk=code_id).delete()
+        if not deleted:
+            return Response({'detail': 'Code not found for this choice.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    # Preserve the existing explicit remove-all-codes operation.
     choice.codes.all().delete()
     return Response(status=status.HTTP_204_NO_CONTENT)
 

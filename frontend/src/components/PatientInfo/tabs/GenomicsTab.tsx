@@ -6,11 +6,14 @@ import { useWritableFields } from '@/hooks/useWritableFields';
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from '@/components/ui-labs/dialog';
 
 type Variant = { id?: number; gene?: string; variant?: string; [key: string]: string | number | null | undefined };
-type Marker = { key: string; field_name: string; gene: string; label: string; kind: string; aliases: string[]; writable: boolean; expert_review: string };
+type Marker = { genomic_feature?: string; feature_type?: string; finding_category?: string; key: string; field_name: string; gene: string; label: string; kind: string; aliases: string[]; writable: boolean; expert_review: string };
 
 const fields = [
-  ['gene', 'Gene'],
-  ['variant_name', 'Variant name'],
+  ['genomic_feature', 'Genomic feature'],
+  ['status', 'Finding status'],
+  ['feature_type', 'Feature type'],
+  ['finding_category', 'Finding category'],
+  ['variant_name', 'Finding / variant name'],
   ['variant', 'Original variant text'],
   ['transcript_dna_change', 'Transcript DNA change (c.HGVS)'],
   ['origin', 'Origin'],
@@ -19,7 +22,6 @@ const fields = [
   ['genome_assembly', 'Genome assembly'],
   ['transcript_reference_sequence_id', 'Transcript reference sequence ID'],
   ['amino_acid_change', 'Protein / amino acid change (p.HGVS)'],
-  ['variant_category', 'Variant category'],
   ['variant_analysis_method_type', 'Variant analysis method type'],
   ['genomic_source_class', 'Genomic source class'],
   ['chromosome', 'Chromosome'],
@@ -39,7 +41,6 @@ const fields = [
   ['evidence_source', 'Interpretation evidence / source'],
   ['genomic_reference_sequence_id', 'Genomic reference sequence ID'],
   ['zygosity', 'Zygosity'],
-  ['status', 'Finding status'],
 ] as const;
 
 /** Fields rendered as `<select>` dropdowns with a fixed value set. */
@@ -47,7 +48,8 @@ const selectOptions: Record<string, string[]> = {
   origin: ['Germline', 'Somatic', 'Unknown'],
   interpretation: ['Pathogenic', 'Likely pathogenic', 'VUS', 'Likely benign', 'Benign', 'Uncertain'],
   genome_assembly: ['GRCh38', 'GRCh37'],
-  variant_category: ['Simple variant', 'Structural variant'],
+  feature_type: ['Gene', 'Chromosome(s)', 'Chromosome arm/region', 'Rearrangement partners'],
+  finding_category: ['Sequence variant', 'Deletion', 'Gain', 'Translocation', 'Aneuploidy', 'Ploidy abnormality', 'Complex structural rearrangement'],
   genomic_source_class: ['Germline', 'Somatic', 'De novo', 'Unknown'],
   variant_analysis_method_type: ['Sequencing', 'Next generation sequencing', 'Sanger sequencing', 'PCR', 'FISH', 'Microarray'],
   status: ['present', 'absent', 'indeterminate'],
@@ -99,11 +101,14 @@ export default function GenomicsTab({ formData, readOnly = false }: {
   const [status, setStatus] = useState('');
   const url = clinicalUrl(`/v1/patient-records/${personId}/genomics/`);
   const disease = String(formData.disease ?? formData.disease_slug ?? '');
-  const markerFor = (v: Variant | null) => v ? markers.find(m => v.marker_key ? m.key === v.marker_key : m.kind === 'gene' && m.gene.toUpperCase() === v.gene?.toUpperCase()) : undefined;
+  const markerFor = (v: Variant | null) => v ? markers.find(m => v.marker_key ? m.key === v.marker_key : m.kind === 'gene' && (!v.feature_type || v.feature_type === 'Gene') && m.gene.toUpperCase() === String(v.genomic_feature || v.gene || '').toUpperCase()) : undefined;
   const rows: Variant[] = markers.flatMap(m => {
     const existing = variants.filter(v => markerFor(v)?.key === m.key);
-    return existing.length ? existing : [{ gene: m.gene, marker_key: m.key }];
+    return existing.length ? existing : [{ genomic_feature: m.genomic_feature || m.gene, feature_type: m.feature_type || 'Gene', finding_category: m.finding_category || '', marker_key: m.key }];
   }).concat(variants.filter(v => !markerFor(v)));
+
+  const featureLabel = (v: Variant) => String(v.genomic_feature || v.gene?.toUpperCase() || '—');
+  const editFinding = (v: Variant): Variant => ({ ...v, genomic_feature: featureLabel(v), feature_type: v.feature_type || 'Gene' });
 
   useEffect(() => {
     let current = true;
@@ -142,7 +147,7 @@ export default function GenomicsTab({ formData, readOnly = false }: {
         : await clinicalClient().post<Variant>(url, payload);
         setVariants(old => draft.id ? old.map(v => v.id === data.id ? data : v) : [data, ...old]);
       }
-      setDraft(null); setStatus('Variant saved.');
+      setDraft(null); setStatus('Genomic finding saved.');
     } catch (err) { setError(errorMessage(err)); }
     finally { setBusy(false); }
   }
@@ -153,7 +158,7 @@ export default function GenomicsTab({ formData, readOnly = false }: {
     try {
       await clinicalClient().delete(`${url}${deleting.id}/`);
       setVariants(old => old.filter(v => v.id !== deleting.id));
-      setDeleting(null); setViewing(null); setStatus('Variant deleted.');
+      setDeleting(null); setViewing(null); setStatus('Genomic finding deleted.');
     } catch (err) { setError(errorMessage(err)); }
     finally { setBusy(false); }
   }
@@ -161,26 +166,26 @@ export default function GenomicsTab({ formData, readOnly = false }: {
   if (loading) return <p role="status">Loading genomics…</p>;
   if (loadError) return <div role="alert">Could not load genomics. <Button variant="outline" onClick={() => setReload(n => n + 1)}>Retry</Button></div>;
 
-  return <section className="space-y-5" aria-label="Patient genomic variants" data-patient-field="genetic_mutations">
+  return <section className="space-y-5" aria-label="Patient genomic findings" data-patient-field="genetic_mutations">
     <div className="flex items-center justify-between gap-3">
-      <p className="text-sm text-muted-foreground">{variants.length} gene / variant record{variants.length === 1 ? '' : 's'}</p>
+      <p className="text-sm text-muted-foreground">{variants.length} genomic finding record{variants.length === 1 ? '' : 's'}</p>
       {editable && <Button disabled={busy || !!draft} onClick={() => {
-        setDraft({ gene: '', variant: '', status: 'present', allelic_frequency_unit: '%', clone_fraction_unit: '%' });
+        setDraft({ genomic_feature: '', feature_type: '', variant: '', status: 'present', allelic_frequency_unit: '%', clone_fraction_unit: '%' });
         setViewing(null); setDeleting(null); setError(''); setStatus('');
-      }}>Add variant</Button>}
+      }}>Add genomic finding</Button>}
     </div>
     {error && !draft && <p role="alert" className="text-sm text-red-600">{error}</p>}
     {status && <p role="status" className="text-sm text-emerald-700">{status}</p>}
-    {!variants.length && <p className="text-sm text-muted-foreground">No genomic variants recorded. Priority rows below are unknown until a result is saved.</p>}
+    {!variants.length && <p className="text-sm text-muted-foreground">No genomic findings recorded. Priority rows below are unknown until a result is saved.</p>}
     {!!rows.length && <div className="overflow-x-auto">
       <table className="w-full text-left text-sm">
-        <thead><tr className="border-b">{['Gene', 'Mutation', 'Finding status', 'Origin', 'Interpretation', 'Actions'].map(label => <th key={label} className="p-2 font-medium">{label}</th>)}</tr></thead>
+        <thead><tr className="border-b">{['Genomic feature', 'Finding / variant', 'Finding status', 'Origin', 'Interpretation', 'Actions'].map(label => <th key={label} className="p-2 font-medium">{label}</th>)}</tr></thead>
         <tbody>{rows.map(v => <tr key={v.id ?? String(v.marker_key)} tabIndex={0}
-          aria-label={`${v.gene} ${v.variant || markerFor(v)?.label || ''}`}
+          aria-label={`${featureLabel(v)} ${v.variant_name || v.variant || markerFor(v)?.label || ''}`}
           onClick={() => { if (!busy && !draft) { setViewing(v); setDeleting(null); } }}
           onKeyDown={e => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); setViewing(v); } }}
           className="border-b align-top cursor-pointer hover:bg-muted/50">
-          <td className="p-2 font-medium">{v.gene?.toUpperCase() || '—'}</td>
+          <td className="p-2 font-medium">{featureLabel(v)}</td>
           <td className="p-2 break-words max-w-xs">{v.variant_name || v.variant || v.genomic_dna_change || 'Not recorded'}
             {markerFor(v)?.kind === 'abnormality' && <span className="block text-xs text-muted-foreground">{markerFor(v)?.label}</span>}
           </td>
@@ -190,7 +195,7 @@ export default function GenomicsTab({ formData, readOnly = false }: {
           <td className="p-2" onClick={e => e.stopPropagation()}><div className="flex gap-1">
             <Button size="sm" variant="ghost" disabled={busy || !!draft} onClick={() => { setViewing(v); setDeleting(null); }}>View</Button>
             {editable && markerFor(v)?.writable !== false && <>
-              <Button size="sm" variant="ghost" disabled={busy || !!draft} onClick={() => { setDraft({ ...v }); setViewing(null); setDeleting(null); setError(''); }}>Edit</Button>
+              <Button size="sm" variant="ghost" disabled={busy || !!draft} onClick={() => { setDraft(editFinding(v)); setViewing(null); setDeleting(null); setError(''); }}>Edit</Button>
               {v.id && <Button size="sm" variant="ghost" disabled={busy || !!draft} onClick={() => { setDeleting(v); setError(''); }}>Delete</Button>}
             </>}
           </div></td>
@@ -198,19 +203,19 @@ export default function GenomicsTab({ formData, readOnly = false }: {
       </table>
     </div>}
     {personId && <LegacyCytogeneticHistory key={personId} personId={personId} />}
-    {deleting && <div role="alertdialog" aria-label="Delete variant" className="rounded-md border p-4 space-y-3">
-      <p>Delete {deleting.gene} {deleting.variant_name || deleting.variant} from the active genomics list?</p>
+    {deleting && <div role="alertdialog" aria-label="Delete genomic finding" className="rounded-md border p-4 space-y-3">
+      <p>Delete {featureLabel(deleting)} {deleting.variant_name || deleting.variant} from the active genomics list?</p>
       <div className="flex gap-2"><Button disabled={busy} onClick={remove}>Confirm delete</Button><Button variant="outline" disabled={busy} onClick={() => setDeleting(null)}>Cancel</Button></div>
     </div>}
     <Dialog open={!!viewing || !!draft} onOpenChange={open => { if (!open && !busy) { setViewing(null); setDraft(null); setError(''); } }}>
     <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto" onEscapeKeyDown={e => { if (busy) e.preventDefault(); }} onInteractOutside={e => { if (busy) e.preventDefault(); }}>
-      <DialogTitle>{draft ? (draft.id ? 'Edit variant' : 'New variant') : 'Variant details'}</DialogTitle>
+      <DialogTitle>{draft ? (draft.id ? 'Edit genomic finding' : 'New genomic finding') : 'Genomic finding details'}</DialogTitle>
       <DialogDescription>Record the laboratory findings and their interpretation. An empty value is unknown, not a negative test.</DialogDescription>
       {markerFor((draft || viewing)!)?.expert_review && <p className="text-sm text-amber-700">{markerFor((draft || viewing)!)?.expert_review}</p>}
     {viewing && <div className="space-y-4">
-      {editable && markerFor(viewing)?.writable !== false && <Button onClick={() => { setDraft({ ...viewing }); setViewing(null); }}>Edit result</Button>}
-      <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4">{[...fields, ['assessment', 'Source result assessment'], ['variant_description', 'Full variant description']].map(([key, label]) => <div key={key}>
-        <dt className="text-sm text-muted-foreground">{label}</dt><dd className="text-sm whitespace-pre-wrap break-words">{key === 'status' ? findingStatus(viewing) : viewing[key] ?? '—'}{['allelic_frequency', 'clone_fraction'].includes(key) && viewing[key] != null ? ` ${viewing[`${key}_unit`] === '1' ? '(fraction)' : '%'}` : ''}</dd>
+      {editable && markerFor(viewing)?.writable !== false && <Button onClick={() => { setDraft(editFinding(viewing)); setViewing(null); }}>Edit result</Button>}
+      <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4">{[...fields, ['assessment', 'Source result assessment'], ['variant_description', 'Full finding description'], ['variant_category', 'Original variant category'], ['gene', 'Original gene field']].map(([key, label]) => <div key={key}>
+        <dt className="text-sm text-muted-foreground">{label}</dt><dd className="text-sm whitespace-pre-wrap break-words">{key === 'status' ? findingStatus(viewing) : (key === 'genomic_feature' ? featureLabel(viewing) : viewing[key]) ?? '—'}{['allelic_frequency', 'clone_fraction'].includes(key) && viewing[key] != null ? ` ${viewing[`${key}_unit`] === '1' ? '(fraction)' : '%'}` : ''}</dd>
       </div>)}</dl>
     </div>}
     {draft && <form className="rounded-md border p-4 space-y-4" onSubmit={e => { e.preventDefault(); void save(); }}>
@@ -221,20 +226,21 @@ export default function GenomicsTab({ formData, readOnly = false }: {
           const draftMarker = markerFor(draft);
           const aliasList = key === 'variant_name' && draftMarker?.kind === 'abnormality' ? [draftMarker.label, ...draftMarker.aliases] : undefined;
           return <label key={key} className="space-y-1 text-sm">
-            <span className="block font-medium">{label}{key === 'gene' ? ' *' : ''}</span>
-            {opts ? <select disabled={draft.status === 'absent' && absentVariantFields.includes(key)} className="w-full rounded-md border bg-background px-3 py-2"
+            <span className="block font-medium">{label}{key === 'genomic_feature' ? ' *' : ''}</span>
+            {opts ? <select required={key === 'feature_type'} disabled={(key === 'feature_type' && !!draft.marker_key) || draft.status === 'absent' && absentVariantFields.includes(key)} className="w-full rounded-md border bg-background px-3 py-2"
               value={draft[key] ?? (key === 'status' ? 'present' : '')} onChange={e => setDraft(key === 'status' ? changeStatus(draft, e.target.value) : { ...draft, [key]: e.target.value })}>
               {key !== 'status' && <option value="">— Select —</option>}
+              {draft[key] && !opts.includes(String(draft[key])) && <option value={draft[key]}>{draft[key]}</option>}
               {opts.map(v => <option key={v} value={v}>{v}</option>)}
             </select>
-            : <input className="w-full rounded-md border bg-background px-3 py-2" required={key === 'gene'}
+            : <input className="w-full rounded-md border bg-background px-3 py-2" required={key === 'genomic_feature'}
               type={key.endsWith('_date') ? 'date' : numericFields.has(key) ? 'number' : 'text'}
-              readOnly={key === 'gene' && !!draft.marker_key}
+              readOnly={key === 'genomic_feature' && !!draft.marker_key}
               min={numericFields.has(key) ? 0 : undefined}
               max={['allelic_frequency', 'clone_fraction'].includes(key) ? (draft[`${key}_unit`] === '1' ? 1 : 100) : undefined}
               step={key === 'coverage_depth' ? 'any' : numericFields.has(key) ? '0.00001' : undefined}
               disabled={draft.status === 'absent' && absentVariantFields.includes(key)}
-              maxLength={key === 'gene' ? 50 : 10000}
+              maxLength={key === 'genomic_feature' ? 50 : 10000}
               list={aliasList ? `genomics-aliases-${key}` : undefined}
               value={draft[key] ?? ''} onChange={e => setDraft({ ...draft, [key]: e.target.value })} />}
             {aliasList && <datalist id={`genomics-aliases-${key}`}>{aliasList.map(v => <option key={v} value={v} />)}</datalist>}
@@ -251,11 +257,11 @@ export default function GenomicsTab({ formData, readOnly = false }: {
           </select>
         </label>
         {draft.assessment && <p className="text-sm">Source result assessment: {draft.assessment}</p>}
-        <label className="space-y-1 text-sm sm:col-span-2"><span className="block font-medium">Full variant description</span>
+        <label className="space-y-1 text-sm sm:col-span-2"><span className="block font-medium">Full finding description</span>
           <textarea className="w-full rounded-md border bg-background px-3 py-2" rows={4} maxLength={10000} value={draft.variant_description ?? ''} onChange={e => setDraft({ ...draft, variant_description: e.target.value })} />
         </label>
       </fieldset>
-      <div className="flex gap-2"><Button type="submit" disabled={busy}>{busy ? 'Saving…' : 'Save variant'}</Button><Button type="button" variant="outline" disabled={busy} onClick={() => { setDraft(null); setError(''); }}>Cancel</Button></div>
+      <div className="flex gap-2"><Button type="submit" disabled={busy}>{busy ? 'Saving…' : 'Save genomic finding'}</Button><Button type="button" variant="outline" disabled={busy} onClick={() => { setDraft(null); setError(''); }}>Cancel</Button></div>
     </form>}
     </DialogContent>
     </Dialog>
