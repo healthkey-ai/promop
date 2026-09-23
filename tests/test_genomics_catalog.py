@@ -246,7 +246,7 @@ def test_effective_registry_is_complete_and_does_not_mutate_frozen_catalog(setup
     frozen = deepcopy(catalog())
     registry = components()
     fields = {'genetic_mutations.' + row['key'] for row in registry}
-    assert len(registry) == len(fields) == 31
+    assert len(registry) == len(fields) == 34
     assert fields == {'genetic_mutations.' + key for key in FIELDS}
     assert fields <= {row['field_name'] for row in get_all_field_descriptors()}
     assert fields <= set(FieldConceptMapping.objects.values_list('field_name', flat=True))

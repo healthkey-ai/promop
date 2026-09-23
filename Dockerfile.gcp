@@ -37,6 +37,11 @@ COPY --from=backend /usr/local/bin /usr/local/bin
 COPY --from=backend /app /app
 COPY --from=frontend /app/frontend/dist/remote /app/frontend/dist/remote
 
+# Install libraries in the final runtime stage, not only the discarded builder.
+ENV PLAYWRIGHT_BROWSERS_PATH=0
+RUN python scripts/install_athena_browser.py --with-deps && \
+    rm -rf /var/lib/apt/lists/*
+
 ENV WHITENOISE_ROOT=/app/frontend/dist/remote
 
 EXPOSE 8080

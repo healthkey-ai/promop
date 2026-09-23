@@ -6,7 +6,7 @@ from rest_framework.permissions import BasePermission
 
 from .providers.base import TokenClaims
 from patient_portal.service_tokens import ServiceCredential
-from omop_core.services.access import has_org_admin_access
+from omop_core.services.access import has_org_admin_access, has_explicit_org_admin_access
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +217,24 @@ class EtlWritePermission(ScopedTokenPermission):
         )
 
 
+class EtlProvisionPermission(BasePermission):
+    """The ETL capability, or staff. Nothing else.
+
+    Narrower than EtlWritePermission on purpose: an org-linked
+    client_credentials app is also a machine caller, and provisioning is not
+    something it should reach by holding a SMART write scope.
+    """
+
+    def has_permission(self, request, view):
+        if _has_legacy_etl_write_grant(request):
+            return True
+        return bool(
+            request.user
+            and request.user.is_authenticated
+            and getattr(request.user, 'is_staff', False)
+        )
+
+
 class LabSyncPermission(ScopedTokenPermission):
     """
     Permission for the lab result sync endpoint.
@@ -405,3 +423,13 @@ class IsStaffOrOrgAdmin(BasePermission):
 
         slug = view.kwargs.get('slug')
         return has_org_admin_access(request.user, slug)
+
+
+class IsStaffOrAccessAdmin(BasePermission):
+    """Only explicit organization admins or staff may delegate access."""
+
+    def has_permission(self, request, view):
+        return bool(
+            request.user and request.user.is_authenticated
+            and has_explicit_org_admin_access(request.user, view.kwargs.get('slug'))
+        )

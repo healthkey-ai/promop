@@ -1860,6 +1860,7 @@ export default function CodeMappingPage() {
           activity={suggestRun.activity ?? []}
           finished={suggestRun.state === "success" || suggestRun.state === "failure"}
           canApprove={canApprove} vocabularies={reference.destination_vocabularies}
+          domains={reference.domains}
           onSaved={() => { void refreshCurrent.current(); }} />}
 
 

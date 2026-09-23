@@ -3,7 +3,6 @@
 // than needed is the safe direction — it can only ask for another approval.
 const SECURITY_LABEL = /security/i;
 const CONTEXT = 'Security review';
-const REQUIRED_REVIEWER = { login: 'larsburgess', id: 23724 };
 // Referenced issues are fetched one API call each, on every scheduled run, from
 // text the PR author controls. Cap the fan-out well below the hourly budget.
 const MAX_ISSUE_REFERENCES = 20;
@@ -89,6 +88,10 @@ function issueReferences(pr, repository) {
   return [...refs.values()];
 }
 
+// Security changes need one approval from a writer other than the PR's author. The
+// approval covers the whole PR, so commits pushed after it (a reviewer's own fix
+// included) do not void it. Dismissing it, or an outstanding request for changes
+// from another writer, does.
 function reviewDecision(pr, reviews, allowedReviewers) {
   const latest = new Map();
   // A deleted account leaves review.user null; such a review can never satisfy
@@ -96,11 +99,10 @@ function reviewDecision(pr, reviews, allowedReviewers) {
   for (const review of [...reviews].filter(review => review.user?.login).sort((a, b) => a.id - b.id)) {
     if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(review.state)) latest.set(review.user.login, review);
   }
-  const eligible = [...latest.values()].filter(review => allowedReviewers.has(review.user.login) && review.user.login !== pr.user.login && review.user.type !== 'Bot');
+  const eligible = [...latest.values()].filter(review => allowedReviewers.has(review.user.login)
+    && review.user.id !== pr.user.id && review.user.login !== pr.user.login && review.user.type !== 'Bot');
   if (eligible.some(review => review.state === 'CHANGES_REQUESTED')) return false;
-  return eligible.some(review => review.user.id === REQUIRED_REVIEWER.id
-    && review.user.login.toLowerCase() === REQUIRED_REVIEWER.login
-    && review.state === 'APPROVED' && review.commit_id === pr.head.sha);
+  return eligible.some(review => review.state === 'APPROVED');
 }
 
 async function evaluate(github, owner, repo, pr) {
@@ -145,8 +147,8 @@ async function evaluate(github, owner, repo, pr) {
     if (['admin', 'maintain', 'write'].includes(data.permission) || data.user?.permissions?.push) allowed.add(login);
   }
   return reviewDecision(pr, reviews, allowed)
-    ? { state: 'success', description: 'Approval from @larsburgess covers the current commit' }
-    : { state: 'failure', description: 'Security change requires @larsburgess approval of the current commit' };
+    ? { state: 'success', description: 'Approved by a writer other than the author' }
+    : { state: 'failure', description: 'Security change requires approval from a writer other than the author' };
 }
 
 async function run({ github, context, core }) {
@@ -193,7 +195,7 @@ async function run({ github, context, core }) {
       // (a label, a review, the PR body), so the old verdict is marked pending
       // while it is rechecked. The five-minute reconciliation changes nothing by
       // itself, so it only needs `pending` on a commit that has no status yet.
-      await publish('pending', 'Checking security scope and @larsburgess approval',
+      await publish('pending', 'Checking security scope and required approval',
         { onlyIfMissing: context.eventName === 'schedule' });
       const results = [];
       for (const pr of group) {

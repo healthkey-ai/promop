@@ -68,6 +68,33 @@ Recipe v3 adds portable variant-name metadata without changing the frozen v1 cat
 
 Reads retain legacy gene-specific Measurements and mappings with withdrawn approval. Legacy qualifier/value concepts can supply origin and interpretation; linked components overlay them. Editing converts a legacy parent to the current parent recipe and clears the old qualifier/value concepts. Legacy hardcoded origin/interpretation IDs remain compatibility behavior, not portable examples for new integrations.
 
+## Genomic features and finding terminology
+
+The Genomics table uses **Genomic feature** and **Finding / variant**, with
+**Add genomic finding** opening an editor for the feature, its type, finding
+category and existing report details. Feature types distinguish genes,
+chromosome(s), chromosome arms/regions and rearrangement partners. Finding
+categories distinguish sequence variants, deletions, gains, translocations,
+aneuploidy, ploidy abnormalities and complex structural rearrangements.
+
+`genomic_feature`, `feature_type` and `finding_category` are additive linked
+Observation components, seeded by migration 0252. They use local source keys
+and concept 0 until curated; chromosome findings do not masquerade as a gene
+LOINC component. The original `gene`, `variant`, `variant_category`, HGVS,
+cytogenetic location, method and provenance fields remain compatible. The
+original gene and category are visible in details. No patient facts are
+rewritten by the migration or by reading the page.
+
+For legacy records and priority placeholders, exact catalog identities provide
+feature terminology: del(17p) is a **17p** region deletion, separately from
+**TP53** gene findings; trisomy 12 is a **Chromosome 12** aneuploidy finding.
+Known region/chromosome identifiers receive their corresponding feature type.
+Free report narratives are not parsed to infer abnormalities. A gene alone
+never establishes a sequence variant; the legacy `Simple variant` category
+can supply that display classification. Unclassified findings remain
+unclassified. Explicit feature fields take precedence over compatibility
+fallbacks and round-trip through OMOP and PatientRecord projections.
+
 ## Finding state and validation
 
 | State | Representation | Meaning in the finding contract |
@@ -83,7 +110,7 @@ For absent findings, explicitly supplied nonempty amino_acid_change, allelic_fre
 
 VAF and clone fraction are independent numeric components. Each accepts % (0–100) or 1 (0–1), defaults an omitted unit to %, preserves zero and rejects values requiring more than five decimal places. Coverage depth is a nonnegative finite number on the finding. Origin and genomic source class are independent; transcript and genomic DNA changes are independent; protein change and protein change type are independent.
 
-Text input is limited to 10,000 characters and the gene identifier to 50. Unknown payload fields, invalid dates and invalid numbers are rejected. A missing interactive test_date defaults to today. mutation aliases variant, and assay_method aliases variant_analysis_method_type.
+Text input is limited to 10,000 characters and the genomic feature / legacy gene identifier to 50. Unknown payload fields, invalid dates and invalid numbers are rejected. A missing interactive test_date defaults to today. mutation aliases variant, and assay_method aliases variant_analysis_method_type.
 
 Detected-marker summaries use the effective present state, and refresh clears stale summaries after absence or indeterminate transitions. `tp53_disruption` is a ternary field: `true` (disrupted — Pathogenic TP53 with present status), `false` (tested negative — TP53 findings exist with `status='absent'`), or `null` (unknown — no TP53 findings, or findings are indeterminate/no-call/not-tested/benign). Derivation version 8 implements this ternary contract ([#1360](https://github.com/healthkey-ai/promop/pull/1360)). Missing legacy status/assessment retains its existing positive interpretation. The derivation does not add Likely pathogenic findings, del(17p), assay completeness or source-conflict rules. API and eligibility consumers must preserve all three states; coercing `null` to `false` or `false` to `null` loses clinical meaning. See the [TP53 rollout and consumer contract](tp53_aggregate_plan.md); broader clinical aggregation and external consumer acceptance remain open.
 

@@ -883,6 +883,10 @@ class Person(models.Model):
 
     class Meta:
         db_table = 'person'
+        indexes = [
+            # Upper, not Lower: that is what Django compiles __iexact to.
+            models.Index(Upper('email'), name='ix_person_email_upper'),
+        ]
         constraints = [
             models.UniqueConstraint(
                 fields=['actor_iss', 'actor_sub'],
@@ -1883,6 +1887,13 @@ class SourceToConceptMap(models.Model):
     class Meta:
         db_table = 'source_to_concept_map'
         indexes = [models.Index(fields=['source_code'], name='ix_stcm_source_code')]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['source_code', 'source_vocabulary_id',
+                        'target_concept', 'valid_start_date'],
+                name='uq_stcm_natural_key',
+            ),
+        ]
 
 
 class SourceCodeConceptMapping(models.Model):
@@ -3529,6 +3540,7 @@ class PatientRecord(models.Model):
             models.Index(fields=["stage"]),
             models.Index(fields=["-updated_at"], name="ix_pr_updated_at"),
             models.Index(fields=["organization", "-updated_at"], name="ix_pr_org_updated_at"),
+            models.Index(Upper("email"), name="ix_pr_email_upper"),
         ]
         constraints = [
             models.CheckConstraint(

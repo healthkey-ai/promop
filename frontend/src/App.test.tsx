@@ -249,8 +249,8 @@ describe("unverified email banner", () => {
   });
 });
 
-describe('administrative upload routes', () => {
-  for (const [path, marker] of [['/upload-fhir', 'UPLOAD_FHIR'], ['/upload-csv', 'UPLOAD_CSV']]) {
+describe('organization administration routes', () => {
+  for (const [path, marker] of [['/org-admin', 'ORG_ADMIN'], ['/upload-fhir', 'UPLOAD_FHIR'], ['/upload-csv', 'UPLOAD_CSV']]) {
     it.each([{ is_staff: true }, { is_org_admin: true }])(`allows admins at ${path}: %j`, role => {
       mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, ...role } });
       renderAt(path);

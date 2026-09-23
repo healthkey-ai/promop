@@ -8,9 +8,12 @@ services:
     # This shared Blueprint can advance on dev while production stays on an
     # older main revision. Validate catalog payloads when that revision ships
     # the verifier; a verifier failure must still stop the build.
-    buildCommand: "if [ -f scripts/verify_source_catalog_snapshots.py ]; then python scripts/verify_source_catalog_snapshots.py; fi && pip install -r requirements.txt && cd frontend && npm install && npm run build && cd .. && python manage.py collectstatic --noinput"
+    buildCommand: "if [ -f scripts/verify_source_catalog_snapshots.py ]; then python scripts/verify_source_catalog_snapshots.py; fi && pip install -r requirements.txt && if [ -f scripts/install_athena_browser.py ]; then python scripts/install_athena_browser.py; fi && cd frontend && npm install && npm run build && cd .. && python manage.py collectstatic --noinput"
     startCommand: "chmod +x start.sh && ./start.sh"
     envVars:
+      # Keep Chromium inside the deployed Python environment, not a build-only cache.
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: "0"
       - key: PYTHON_VERSION
         value: 3.12.0
       - key: SECRET_KEY
@@ -101,7 +104,7 @@ services:
     branch: main
     autoDeploy: true
     # No frontend build: the worker serves nothing.
-    buildCommand: "if [ -f scripts/verify_source_catalog_snapshots.py ]; then python scripts/verify_source_catalog_snapshots.py; fi && pip install -r requirements.txt"
+    buildCommand: "if [ -f scripts/verify_source_catalog_snapshots.py ]; then python scripts/verify_source_catalog_snapshots.py; fi && pip install -r requirements.txt && if [ -f scripts/install_athena_browser.py ]; then python scripts/install_athena_browser.py; fi"
     # Same entrypoint as staging: it refuses to boot without a broker, database
     # and signing key that match the web service, and it is the only path that
     # can start embedded beat.
@@ -110,6 +113,9 @@ services:
     # scaling this service cannot quietly give the deployment N schedulers.
     numInstances: 1
     envVars:
+      # Keep Chromium inside the deployed Python environment, not a build-only cache.
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: "0"
       - key: PYTHON_VERSION
         value: 3.12.0
       # Exactly one scheduler per deployment. This service runs a single
@@ -169,10 +175,13 @@ services:
     repo: https://github.com/healthkey-ai/promop
     branch: dev
     autoDeploy: true
-    buildCommand: python scripts/verify_source_catalog_snapshots.py && pip install -r requirements.txt && cd frontend && npm install && npm run build && cd .. && python manage.py
+    buildCommand: python scripts/verify_source_catalog_snapshots.py && pip install -r requirements.txt && python scripts/install_athena_browser.py && cd frontend && npm install && npm run build && cd .. && python manage.py
       collectstatic --noinput
     startCommand: chmod +x start.sh && ./start.sh
     envVars:
+      # Keep Chromium inside the deployed Python environment, not a build-only cache.
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: "0"
       - key: PYTHON_VERSION
         value: 3.12.0
       - key: SECRET_KEY
@@ -237,7 +246,7 @@ services:
     region: oregon
     autoDeploy: true
     plan: 1c-2g
-    buildCommand: python scripts/verify_source_catalog_snapshots.py && pip install -r requirements.txt
+    buildCommand: python scripts/verify_source_catalog_snapshots.py && pip install -r requirements.txt && python scripts/install_athena_browser.py
     startCommand: bash start-worker.sh
     # Exactly one scheduler per deployment, as configuration rather than as a
     # comment: scaling this up means moving beat to its own service.
@@ -275,6 +284,9 @@ services:
           name: promop-staging
           type: web
           envVarKey: ANTHROPIC_API_KEY
+      # Keep Chromium inside the deployed Python environment, not a build-only cache.
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: "0"
       - key: PYTHON_VERSION
         value: 3.12.0
       - key: DEBUG

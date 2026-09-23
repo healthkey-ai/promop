@@ -16,7 +16,7 @@ from datetime import date
 import re
 from django.utils.timezone import localdate
 from django.utils import timezone
-from omop_core.services.access import get_admin_access_paths, has_org_admin_access
+from omop_core.services.access import get_admin_access_paths, has_org_admin_access, has_explicit_org_admin_access
 from omop_core.services.patient_record_service import PATIENT_RECORD_OMOP_MAPPED_FIELDS
 from omop_core.services.write_descriptor import get_serializer_read_only_fields
 
@@ -160,9 +160,16 @@ class UserSerializer(serializers.ModelSerializer):
 
 
 class OrganizationSerializer(serializers.ModelSerializer):
+    can_manage_access = serializers.SerializerMethodField()
+
+    def get_can_manage_access(self, obj):
+        request = self.context.get('request')
+        return bool(request and request.user.is_authenticated
+                    and has_explicit_org_admin_access(request.user, obj.slug))
+
     class Meta:
         model = Organization
-        fields = ['id', 'name', 'slug', 'is_active', 'allows_public_aggregated_data', 'allows_patient_signup', 'clinical_unit_system', 'created_at']
+        fields = ['id', 'name', 'slug', 'is_active', 'allows_public_aggregated_data', 'allows_patient_signup', 'clinical_unit_system', 'created_at', 'can_manage_access']
         read_only_fields = ['id', 'created_at']
 
 
@@ -361,16 +368,18 @@ class PatientListSerializer(serializers.ModelSerializer):
 
 
     def get_genomics_summary(self, obj):
+        from omop_core.services.genomics_features import describe_finding
+
         # Use the persisted projection: listing a page must not query OMOP once
         # per patient. Keep negative/unknown results distinct from findings.
         summaries = []
         for variant in obj.genetic_mutations or []:
             if not isinstance(variant, dict):
                 continue
-            gene = str(variant.get('gene') or '').strip().upper()
+            feature = str(describe_finding(variant).get('genomic_feature') or '').strip()
             change = str(variant.get('variant') or variant.get('variant_name')
                          or variant.get('genomic_dna_change') or variant.get('amino_acid_change') or '').strip()
-            label = ' '.join(dict.fromkeys(v for v in (gene, change) if v))
+            label = ' '.join(dict.fromkeys(v for v in (feature, change) if v))
             status = variant.get('status') or variant.get('interpretation')
             if label and status:
                 label += f" ({status})"

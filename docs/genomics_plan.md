@@ -103,6 +103,70 @@ Remaining decisions and implementation:
 
 Do not add clinical thresholds or activate complex-karyotype derivation before review. Retain existing assertions, source wording and superseded history through any approved transition.
 
+### 3b. Replace hardcoded `_GENETIC_MUTATION_LOINCS` with a data-driven lookup
+
+The genomics projection pipeline collects measurement rows through two paths: a hardcoded Python dict (`_GENETIC_MUTATION_LOINCS` in `patient_record_service.py`) that maps gene-specific LOINC codes to gene names, and the `FieldConceptMapping`/`marker_sources` path that matches measurements written by the clinician variant editor. Adding a new gene-specific LOINC (e.g. `96970-9` for TP53 deletion/duplication analysis, added in [PR #1522](https://github.com/healthkey-ai/promop/pull/1522)) currently requires a code change and deploy. This should be curator-configurable.
+
+**Current hardcoded entries:**
+
+| LOINC | Gene | Description |
+|---|---|---|
+| 36908-2 | *(generic)* | Gene studied [ID]; gene in `qualifier_source_value` |
+| 81252-9 | *(generic)* | Discrete genetic variant; gene in `qualifier_source_value` |
+| 21636-6 | BRCA1 | BRCA1 gene mutations found |
+| 21640-8 | BRCA2 | BRCA2 gene c.6174delT [Presence] |
+| 21739-8 | TP53 | TP53 gene mutations found |
+| 96970-9 | TP53 | TP53 gene deletion and duplication mutation analysis |
+| 48013-7 | KRAS | Genomic reference sequence |
+| 62862-8 | EGFR | Microsatellite instability |
+| 60033-8 | PIK3CA | PIK3CA gene mutations found |
+
+**Options evaluated:**
+
+#### Option A: New lookup table (recommended)
+
+A `GenomicLOINCMapping` (or similar) model with `loinc_code`, `gene`, `description`, `active` columns. The projection pipeline reads this instead of the hardcoded dict. Curators add new LOINC→gene mappings through the admin or a management command without code changes.
+
+*Pros:*
+- Clean separation: SCCM maps source codes to OMOP concepts (ingest); this maps LOINC codes to genes (projection). Each table answers one question.
+- Curator-configurable without deploys.
+- Auditable: who added what, when.
+- Naturally extensible to other gene-specific LOINCs as new assays appear.
+- Seed migration populates the table from the current hardcoded dict, so no behavior change on deploy.
+
+*Cons:*
+- New model, migration, and admin registration.
+- One more table to copy between instances (`copy_reference_data`).
+- The two generic codes (36908-2, 81252-9) don't map to a single gene — they need a `gene=NULL` sentinel meaning "read gene from `qualifier_source_value`."
+
+#### Option B: Extend `SourceCodeConceptMapping` (SCCM) with a gene column
+
+Add an optional `gene` column to `SourceCodeConceptMapping`. The projection pipeline queries SCCM for approved Measurement-domain rows where `gene IS NOT NULL` to build the lookup.
+
+*Pros:*
+- Reuses an existing, well-understood table with full curator UI, suggest pipeline, and provenance.
+- No new model; one `AddField` migration.
+
+*Cons:*
+- SCCM's purpose is "source code → OMOP concept" for ingest. Adding a gene column overloads it with a projection concern that has nothing to do with concept resolution.
+- SCCM rows are keyed by `(source_vocabulary_id, source_code, omop_table)` and can be per-domain. A LOINC→gene mapping is vocabulary-wide, not per-table. The row would need to exist for the right `omop_table='measurement'` scope, which conflates two routing decisions.
+- The suggest pipeline, occurrence counting, and review workflow are unnecessary overhead for a simple reference lookup.
+
+#### Option C: Extend the genomics catalog JSON
+
+Add LOINC codes to each marker entry in `genomics_catalog_v1.json`. The projection pipeline reads them from the catalog instead of the hardcoded dict.
+
+*Pros:*
+- No new model; data lives in a versioned JSON file that already defines marker metadata.
+- Consistent with the existing catalog-driven approach for marker definitions.
+
+*Cons:*
+- Adding a LOINC code still requires a code change (editing the JSON and deploying).
+- The catalog is a frozen v1 artifact; extending it mixes clinical marker definitions with infrastructure routing.
+- Not curator-configurable.
+
+**Decision:** Option A (new lookup table). Implement when the next gene-specific LOINC needs to be added, or as part of broader genomics infrastructure cleanup.
+
 ### 4. Agree source requirements before Phase 2 (#1243)
 
 Obtain concrete deidentified examples and decisions for:

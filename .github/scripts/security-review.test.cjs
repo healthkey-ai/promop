@@ -21,10 +21,10 @@ test('finds local, qualified, and URL issue references without duplicates', () =
   ]);
 });
 
-test('requires current independent approval by Lars', () => {
+test('requires approval by a writer other than the author', () => {
   assert.equal(reviewDecision(pr, [], allowed), false);
   assert.equal(reviewDecision(pr, [review('APPROVED')], allowed), true);
-  assert.equal(reviewDecision(pr, [review('APPROVED', 'old')], allowed), false);
+  assert.equal(reviewDecision(pr, [review('APPROVED', 'current', 'second', 2)], allowed), true);
   assert.equal(reviewDecision(pr, [review('APPROVED', 'current', 'author')], allowed), false);
   assert.equal(reviewDecision(pr, [review('APPROVED', 'current', 'reader')], allowed), false);
   assert.equal(reviewDecision(pr, [{ ...review('APPROVED'), user: { login: 'larsburgess', id: 23724, type: 'Bot' } }], allowed), false);
@@ -114,7 +114,7 @@ test('a PR changed during evaluation cannot receive a passing status', async () 
 });
 
 
-test('only Lars can approve security changes with write access and no team requirement', async () => {
+test('security changes need an approver with write access and no team requirement', async () => {
   for (const permission of ['write', 'maintain', 'admin']) {
     const { github, current } = fixture({ issueLabels: [{ name: 'security' }], reviews: [review('APPROVED', 'current', 'larsburgess')] });
     github.rest.repos.getCollaboratorPermissionLevel = async () => ({ data: { permission } });
@@ -134,17 +134,19 @@ test('security control and existing protected paths require review', () => {
 });
 
 
-test('another admin cannot substitute for the named reviewer', async () => {
+test('any writer other than the author can approve', async () => {
   const { github, current } = fixture({ labels: [{ name: 'security' }], reviews: [review('APPROVED', 'current', 'another-developer')] });
   github.rest.repos.getCollaboratorPermissionLevel = async () => ({ data: { permission: 'admin' } });
-  assert.equal((await evaluate(github, 'healthkey-ai', 'promop', current)).state, 'failure');
+  assert.deepEqual(await evaluate(github, 'healthkey-ai', 'promop', current),
+    { state: 'success', description: 'Approved by a writer other than the author' });
 });
 
-test('reviewer identity and independent authorship are required', () => {
-  const wrongIdentity = { ...review('APPROVED'), user: { login: 'larsburgess', id: 98765 } };
-  assert.equal(reviewDecision(pr, [wrongIdentity], allowed), false);
+test('the author cannot approve their own PR, under any login', () => {
   const larsAsAuthor = { ...pr, user: { login: 'larsburgess', id: 23724 } };
   assert.equal(reviewDecision(larsAsAuthor, [review('APPROVED')], allowed), false);
+  assert.equal(reviewDecision(larsAsAuthor, [review('APPROVED', 'current', 'second', 2)], allowed), true);
+  const renamed = { ...review('APPROVED', 'current', 'second', 2), user: { login: 'second', id: 23724 } };
+  assert.equal(reviewDecision(larsAsAuthor, [renamed], allowed), false);
 });
 
 test('a test-named file inside the control plane is still gated', () => {
@@ -275,4 +277,9 @@ test('an issue lookup failing for any other reason still fails closed', async ()
   github.graphql = async () => ({ repository: { pullRequest: { closingIssuesReferences: { nodes: [], pageInfo: { hasNextPage: false } } } } });
   github.rest.issues.get = async () => { const error = new Error('Server Error'); error.status = 500; throw error; };
   await assert.rejects(() => evaluate(github, 'healthkey-ai', 'promop', current), /Server Error/);
+});
+
+test('an approval covers the whole PR, including commits pushed after it', () => {
+  assert.equal(reviewDecision(pr, [review('APPROVED', 'earlier-commit')], allowed), true);
+  assert.equal(reviewDecision(pr, [review('APPROVED', 'earlier-commit', 'second', 2), review('COMMENTED', 'current', 'second', 3)], allowed), true);
 });

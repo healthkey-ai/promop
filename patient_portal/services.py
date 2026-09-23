@@ -134,6 +134,10 @@ def resolve_or_create_person(identity, email=None, allow_create=True, email_veri
     always returned) but step 3 is skipped — returns None instead of creating.
 
     Returns the linked Person, or None if not found and allow_create=False.
+
+    Step 2 is what adopts a Person an importer provisioned before its owner
+    signed in. It needs a verified address, and an ambiguous one forks, so an
+    import keyed on email loses the unverified and the duplicated.
     """
     pu = PatientUser.objects.filter(identity=identity).first()
     if pu:
@@ -147,17 +151,26 @@ def resolve_or_create_person(identity, email=None, allow_create=True, email_veri
 
     email = (email or getattr(identity, 'email', None) or "").strip()
     if email and email_verified:
-        person_qs = Person.objects.filter(email=email)
-        # Legacy fallback while older PatientRecord snapshots still exist.
-        email_qs = PatientRecord.objects.filter(email=email)
-        # Guard against cross-org collision: if multiple patients share the
-        # same email, skip the email match and auto-provision a new person
-        # rather than silently linking to the wrong patient.
-        if person_qs.count() == 1:
-            person = person_qs.first()
-        else:
-            pi = email_qs.first() if email_qs.count() == 1 else None
-            person = pi.person if pi else None
+        # Case-insensitively: an importer stores the case its source holds,
+        # the IdP presents its own.
+        candidate_ids = set(
+            Person.objects
+            .filter(email__iexact=email)
+            .values_list('person_id', flat=True)
+        )
+        # Legacy fallback while older PatientRecord snapshots still exist. It
+        # is counted with Person, not consulted after it: a lone stale snapshot
+        # must not settle an address two Persons disagree over.
+        candidate_ids |= set(
+            PatientRecord.objects
+            .filter(email__iexact=email)
+            .values_list('person_id', flat=True)
+        )
+        person = (
+            Person.objects.filter(person_id=candidate_ids.pop()).first()
+            if len(candidate_ids) == 1
+            else None
+        )
         if person:
             holder = PatientUser.objects.filter(person=person).first()
             if holder is None:
