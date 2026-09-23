@@ -261,3 +261,36 @@ def create_unidentified_person(source='prolog'):
         PatientRecord.objects.create(person=person)
     logger.info('minted unidentified person %s for %s', person.person_id, source)
     return person
+
+
+def prolog_results_viewer(email, password):
+    """PROLOG_RESULTS_AUTH: who may read a survey's results on the report page.
+
+    The same people the Django admin lets read them, checked the same way. The
+    survey runner holds no accounts and hashes no passwords: it hands the pair
+    here, and this goes through the ordinary login path — `EmailBackend`, so
+    lockout after repeated failures applies exactly as it does to the portal —
+    then asks the permission questions the admin asks of its own pages:
+
+    * staff, active, and may view responses → may read the results at all;
+    * may view contacts → may download the email addresses, which is a separate
+      permission because the answers and the addresses are separate files.
+
+    Returns None for anyone else, including a correct password without the
+    permissions: "not a reader" and "wrong password" look the same from outside.
+    """
+    from django.contrib.auth import authenticate
+
+    from prolog_surveys.results import ResultsViewer
+
+    identity = authenticate(username=email, password=password)
+    if identity is None or not (identity.is_active and identity.is_staff):
+        return None
+    if not identity.has_perm('prolog_surveys.view_surveyresponse'):
+        return None
+    logger.info('prolog results access by identity %s', identity.pk)
+    return ResultsViewer(
+        label=identity.email,
+        may_read_responses=True,
+        may_read_contacts=identity.has_perm('prolog_surveys.view_surveycontact'),
+    )
