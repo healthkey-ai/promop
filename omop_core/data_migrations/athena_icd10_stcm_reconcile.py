@@ -28,11 +28,16 @@ DOMAIN_TO_TABLE = {
 
 UPDATE_FIELDS = [
     'target_concept', 'destination_vocabulary_id', 'domain_id',
-    'omop_table', 'origin_system', 'source', 'reviewed_at',
+    'omop_table', 'origin_system', 'source',
     'notes', 'updated_at',
 ]
 
 BATCH_SIZE = 250
+
+# Compare the complete snapshot after locking: a curator can change a row while
+# we are reading the vocabulary tables and still leave it approved.
+def _snapshot(row):
+    return tuple(getattr(row, field.attname) for field in row._meta.concrete_fields)
 
 
 def reconcile(apps, connection):
@@ -85,7 +90,9 @@ def reconcile(apps, connection):
     for concept in (Concept.objects.using(alias)
                     .filter(concept_id__in=target_ids,
                             standard_concept='S',
-                            invalid_reason__isnull=True)):
+                            invalid_reason__isnull=True,
+                            valid_start_date__lte=today,
+                            valid_end_date__gte=today)):
         valid_concepts[concept.concept_id] = concept
 
     # 4. Process in batches
@@ -114,20 +121,21 @@ def _process_batch(Mapping, alias, batch, stcm_by_key, valid_concepts,
             if not row:
                 continue
             # Re-check eligibility after locking
-            if row.origin_system == 'athena' or row.status != 'approved':
+            if (row.origin_system == 'athena' or row.status != 'approved'
+                    or row.source_vocabulary_id not in ICD10_VOCABS
+                    or row.locked_by_id is not None
+                    or _snapshot(row) != _snapshot(original)):
                 receipts.append(_receipt(row, 'skipped'))
                 continue
 
             code_upper = row.source_code.strip().upper()
 
-            # Try same-vocab first, then cross-vocab fallback
+            # A code alone does not establish equivalence across vocabularies.
+            # Only the documented HT-One ICD10 label denotes ICD10CM input.
             key = (row.source_vocabulary_id, code_upper)
-            alt_vocab = 'ICD10' if row.source_vocabulary_id == 'ICD10CM' else 'ICD10CM'
-            alt_key = (alt_vocab, code_upper)
-
+            if row.source_vocabulary_id == 'ICD10' and row.origin_system == 'HT-One':
+                key = ('ICD10CM', code_upper)
             matches = stcm_by_key.get(key, [])
-            if not matches:
-                matches = stcm_by_key.get(alt_key, [])
 
             # Filter to valid standard targets
             valid_matches = [m for m in matches
@@ -162,7 +170,6 @@ def _process_batch(Mapping, alias, batch, stcm_by_key, valid_concepts,
             row.destination_vocabulary_id = target.vocabulary_id
             row.domain_id = target.domain_id
             row.omop_table = DOMAIN_TO_TABLE.get(target.domain_id, '')
-            row.reviewed_at = now
             row.updated_at = now
 
             if destination_changed:
@@ -170,13 +177,13 @@ def _process_batch(Mapping, alias, batch, stcm_by_key, valid_concepts,
                     f'STCM reconciliation {today}: destination changed from '
                     f'concept {prior_target_id} to {target.concept_id} '
                     f'({target.vocabulary_id}:{target.concept_code}). '
-                    f'Re-attributed to Athena.'
+                    f'Re-attributed to Athena using {key[0]}:{row.source_code}.'
                 )
             else:
                 note = (
                     f'STCM reconciliation {today}: destination confirmed by '
                     f'Athena ({target.vocabulary_id}:{target.concept_code}). '
-                    f'Re-attributed to Athena.'
+                    f'Re-attributed to Athena using {key[0]}:{row.source_code}.'
                 )
             row.notes = '\n'.join(filter(None, [row.notes, note]))
 

@@ -5,8 +5,11 @@ the source_to_concept_map now has a valid standard Athena mapping.  If so,
 update the destination (if different) and set origin_system='athena'.  Rows
 move from the Mapped section to the Athena Mapped section in the UI.
 
-Reads the live STCM table (no frozen snapshot).  Idempotent: a second run
-finds zero eligible rows because they are all origin_system='athena'.
+Reads the live STCM table (no frozen snapshot). Successfully reconciled rows
+are excluded on reruns; unmatched and skipped rows remain eligible.
+
+This updates mapping definitions for subsequent resolution. It does not
+rewrite existing clinical facts or rederive patient records.
 """
 from django.db import migrations
 
@@ -28,7 +31,6 @@ def load_reconciliation(apps, schema_editor):
 class Migration(migrations.Migration):
     atomic = False  # batch transactions handled internally
     dependencies = [
-        ('omop_core', '0254_schema_drift_cleanup'),
-        ('omop_core', '0254_patientrecord_ix_pr_email_upper_and_more'),
+        ('omop_core', '0255_merge_0254_patientrecord_ix_pr_email_upper_and_schema_drift_cleanup'),
     ]
     operations = [migrations.RunPython(load_reconciliation, migrations.RunPython.noop)]
