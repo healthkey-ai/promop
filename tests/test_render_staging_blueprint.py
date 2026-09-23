@@ -181,7 +181,11 @@ def test_every_service_runs_a_python_that_classifies_wrapped_addresses():
         for env in service.get('envVars', [])
         if env['key'] == 'PYTHON_VERSION'
     }
+    # Asserted before runtime.txt is added: that entry always exists, so a
+    # blueprint whose services carry no PYTHON_VERSION at all would otherwise
+    # leave this test green while pinning nothing.
+    python_services = [s['name'] for s in blueprint['services'] if s.get('runtime') == 'python']
+    assert set(pins) == set(python_services), f'Python services without a pin: {set(python_services) - set(pins)}'
     pins['runtime.txt'] = (ROOT / 'runtime.txt').read_text().strip().removeprefix('python-')
-    assert pins, 'no Python pin found to check'
     for name, pin in pins.items():
         assert tuple(int(part) for part in str(pin).split('.')) >= minimum, f'{name} pins {pin}'
