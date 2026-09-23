@@ -123,7 +123,7 @@ def capture(repository):
         'workflows': workflows,
         'scope': {
             'github_settings': 'Observed through authenticated read-only GitHub API calls.',
-            'security_review': 'Assesses required status configuration; the trusted policy must require @larsburgess (23724). Does not certify workflow correctness or individual PR approvals. Retain trusted workflow and status-run evidence.',
+            'security_review': 'Assesses required status configuration; the trusted policy must require approval from a writer other than the author. Does not certify workflow correctness or individual PR approvals. Retain trusted workflow and status-run evidence.',
             'render_settings': 'Not captured. GitHub environments do not prove Render approval gates.',
             'historical_operation': 'Not established by this configuration snapshot; retain PR and deployment records.',
         },
