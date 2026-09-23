@@ -413,7 +413,10 @@ describe("CodeMappingPage", () => {
       expect(within(screen.getByRole("dialog")).queryByRole("status")).not.toBeInTheDocument();
     });
 
-    it("defaults Unmapped to Provenance with Seen descending within each group", async () => {
+    // #1575 replaced the Provenance-then-Seen default with plain Seen. Grouping
+    // by provenance buried the rows a Suggest run had just answered, because a
+    // run rewrites origin_system from '' to 'suggest v0.4', which sorts last.
+    it("defaults Unmapped to Seen descending, with Provenance still sortable", async () => {
       renderPage([
         { ...high, origin_system: "suggest v0.4", occurrence_count: 200 },
         { ...low, origin_system: "curator", occurrence_count: 3 },
@@ -421,15 +424,18 @@ describe("CodeMappingPage", () => {
         { ...low, mapping_id: 34, source_code: "A1", origin_system: "curator", occurrence_count: 20 },
       ]);
       const table = await screen.findByRole("table", { name: "Unmapped mappings" });
-      const button = within(table).getByRole("button", { name: "Provenance" });
-      expect(button.closest("th")).toHaveAttribute("aria-sort", "ascending");
-      expect(ids(table)).toEqual(["code-mapping-34", "code-mapping-33", "code-mapping-32", "code-mapping-31"]);
-      fireEvent.click(button);
-      expect(button.closest("th")).toHaveAttribute("aria-sort", "descending");
+      const provenance = within(table).getByRole("button", { name: "Provenance" });
+      // The highest-Seen row leads whatever its provenance, and the header
+      // says which column that is rather than leaving the default implicit.
+      expect(within(table).getByRole("button", { name: "Seen" }).closest("th")).toHaveAttribute("aria-sort", "descending");
+      expect(provenance.closest("th")).toHaveAttribute("aria-sort", "none");
       expect(ids(table)).toEqual(["code-mapping-31", "code-mapping-34", "code-mapping-33", "code-mapping-32"]);
-      fireEvent.click(button);
-      expect(button.closest("th")).toHaveAttribute("aria-sort", "ascending");
+      fireEvent.click(provenance);
+      expect(provenance.closest("th")).toHaveAttribute("aria-sort", "ascending");
       expect(ids(table)).toEqual(["code-mapping-34", "code-mapping-33", "code-mapping-32", "code-mapping-31"]);
+      fireEvent.click(provenance);
+      expect(provenance.closest("th")).toHaveAttribute("aria-sort", "descending");
+      expect(ids(table)).toEqual(["code-mapping-31", "code-mapping-34", "code-mapping-33", "code-mapping-32"]);
     });
 
     it.each(["Source code", "Seen", "Source description", "Destination concept", "Concept ID", "Dest count", "Status"])(
@@ -1580,6 +1586,103 @@ describe("mapping dialog request isolation", () => {
 });
 
 describe("server mapping pages", () => {
+  // This block held one test and needed no reset; it holds several now, and an
+  // unreset mockGet implementation leaks into the tests that follow.
+  beforeEach(() => { mockGet.mockReset(); mockPost.mockReset(); mockPatch.mockReset(); });
+
+  // #1575: Provenance became a filter instead of the default sort. A filter
+  // finds curator-edited rows however many there are, and leaves the queue in
+  // Seen order.
+  const browseData = (overrides: Record<string, unknown> = {}) => ({
+    results: [proposedRow], duplicates: [], selected_source: "",
+    tabs: [{ vocabulary_id: "", label: "Uncoded", is_standard: false, proposed: 3, approved: 0, athena: 0 }],
+    pages: { Unmapped: { page: 1, page_size: 100, total: 3 }, Mapped: { page: 1, page_size: 100, total: 0 }, Rejected: { page: 1, page_size: 100, total: 0 }, "Athena Mapped": { page: 1, page_size: 100, total: 0 } },
+    rejected_count: 0,
+    provenances: [{ origin_system: "curator", count: 2 }, { origin_system: "", count: 1 }],
+    selected_provenance: "",
+    ...overrides,
+  });
+
+  const renderBrowse = (overrides: Record<string, unknown> = {}) => {
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/v1/code-mappings/") return Promise.resolve({ data: browseData(overrides) });
+      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+    });
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+  };
+
+  it("filters by provenance, labelling the blank value and showing counts", async () => {
+    renderBrowse();
+    const filter = await screen.findByLabelText("Filter by provenance");
+    expect(Array.from(filter.querySelectorAll("option")).map((o) => o.textContent)).toEqual([
+      "All provenance", "curator (2)", "No provenance (1)",
+    ]);
+    fireEvent.change(filter, { target: { value: "curator" } });
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", {
+      params: expect.objectContaining({ provenance: "curator" }),
+    }));
+  });
+
+  // Blank is not a corner case: enqueue_unmapped_source_codes writes
+  // origin_system='' for every newly queued code, so it is the largest cohort
+  // on a freshly enqueued tab. "" is already the select's "no filter" value,
+  // so it needs a sentinel of its own or the option is unselectable and filters
+  // nothing.
+  it("filters to the blank provenance through a distinct sentinel value", async () => {
+    renderBrowse();
+    const filter = await screen.findByLabelText("Filter by provenance") as HTMLSelectElement;
+    const values = Array.from(filter.querySelectorAll("option")).map((o) => o.getAttribute("value"));
+    expect(values).toEqual(["", "curator", "__blank__"]);
+    expect(new Set(values).size).toBe(values.length);
+    fireEvent.change(filter, { target: { value: "__blank__" } });
+    expect(filter.value).toBe("__blank__");
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", {
+      params: expect.objectContaining({ provenance: "__blank__" }),
+    }));
+  });
+
+  it("keeps a filter clearable after the rows carrying it are gone", async () => {
+    // The curator filters to a value, works through those rows, and the next
+    // refresh no longer offers it. Without an escape hatch the queue reads as
+    // empty with no control left to clear.
+    let payload = browseData();
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/v1/code-mappings/") return Promise.resolve({ data: payload });
+      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+    });
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    const filter = await screen.findByLabelText("Filter by provenance") as HTMLSelectElement;
+    // Those rows are worked off, so the next refresh stops offering the value.
+    payload = browseData({ provenances: [{ origin_system: "HT-One", count: 9 }] });
+    fireEvent.change(filter, { target: { value: "curator" } });
+    await waitFor(() => expect(
+      Array.from(screen.getByLabelText("Filter by provenance").querySelectorAll("option")).map((o) => o.textContent),
+    ).toContain("curator (0)"));
+    const after = screen.getByLabelText("Filter by provenance") as HTMLSelectElement;
+    expect(after.value).toBe("curator");
+    // Clearing it works, and the control then retires on its own: one
+    // provenance left and nothing filtered means nothing to offer.
+    fireEvent.change(after, { target: { value: "" } });
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", {
+      params: expect.not.objectContaining({ provenance: expect.anything() }),
+    }));
+    expect(screen.queryByLabelText("Filter by provenance")).not.toBeInTheDocument();
+  });
+
+  it("omits the filter when a tab has nothing to filter by and nothing is set", async () => {
+    renderBrowse({ provenances: [{ origin_system: "HT-One", count: 9 }] });
+    await screen.findByRole("table", { name: "Unmapped mappings" });
+    expect(screen.queryByLabelText("Filter by provenance")).not.toBeInTheDocument();
+  });
+
+  it("sends no provenance param until one is chosen", async () => {
+    renderBrowse();
+    await screen.findByLabelText("Filter by provenance");
+    expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", {
+      params: expect.not.objectContaining({ provenance: expect.anything() }),
+    });
+  });
+
   it("requests the next page and sorts the full section on the server", async () => {
     mockGet.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
       if (url === "/v1/code-mappings/") {
@@ -1597,15 +1700,16 @@ describe("server mapping pages", () => {
     render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
     expect(await screen.findByText("FIRST PAGE")).toBeInTheDocument();
     expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({
-      order_0: "origin_system", order_1: "-occurrence_count", order_2: "-occurrence_count", order_3: "-occurrence_count",
+      order_0: "-occurrence_count", order_1: "-occurrence_count", order_2: "-occurrence_count", order_3: "-occurrence_count",
     }) });
-    expect(screen.getByTitle("Sort Unmapped by Provenance").closest("th")).toHaveAttribute("aria-sort", "ascending");
+    expect(screen.getByTitle("Sort Unmapped by Seen").closest("th")).toHaveAttribute("aria-sort", "descending");
     expect(screen.getByText("Page 1 of 2 · 101 mappings")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
     expect(await screen.findByText("SECOND PAGE")).toBeInTheDocument();
     expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({
-      page_0: 2, order_0: "origin_system",
+      page_0: 2, order_0: "-occurrence_count",
     }) });
+    // Reversing the active sort returns to page 1.
     fireEvent.click(screen.getByTitle("Sort Unmapped by Seen"));
     await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ page_0: 1, order_0: "occurrence_count" }) }));
   });

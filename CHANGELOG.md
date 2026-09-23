@@ -8,6 +8,14 @@ All notable changes to PRomop are documented here.
 
 ### Changed
 
+- **Code Mapping queue order** — every section now defaults to Seen descending.
+  Unmapped grouped by Provenance first; that is a no-op on a tab holding one
+  provenance, and on a tab holding several it buried the rows a Suggest run had
+  just answered, because a run rewrites `origin_system` from `''` to
+  `suggest v0.4`, which sorts last ascending. Provenance stays sortable and
+  gains a filter control, which finds curator-edited rows in one click however
+  many there are (#1575).
+
 - **Copying between instances** — models are classified as system, reference or
   patient data (`omop_core/services/instance_data.py`). `copy_curation` is
   renamed `copy_reference_data` and now also copies lookups, therapy reference data,
