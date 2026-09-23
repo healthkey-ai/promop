@@ -22,12 +22,24 @@ from omop_core.models import Organization, PatientRecord
 from omop_core.services.access import get_admin_orgs, get_direct_admin_orgs
 from patient_portal.models import (
     InboundWebhookEvent, WebhookDelivery, WebhookSubscription, WebhookSubscriptionChange,
+    webhook_secret,
 )
 from patient_portal.webhooks import (
     EVENT_TYPES, INBOUND_HANDLERS, compute_hmac_signature,
     record_subscription_change, subscription_snapshot, validate_webhook_url,
 )
 from .permissions import ScopedTokenPermission, is_interactive_session
+
+
+def _masked_url(url):
+    """Scheme and host, with everything that follows withheld.
+
+    The host stays because it is what makes a subscription recognisable to
+    someone reviewing where an organization sends data; the path, query and
+    fragment are what a receiver may be treating as a shared secret.
+    """
+    parsed = urlsplit(url)
+    return f'{parsed.scheme}://{parsed.netloc}/***' if parsed.netloc else ''
 
 
 def _url_digest(url):
@@ -82,6 +94,47 @@ class WebhookSubscriptionSerializer(serializers.ModelSerializer):
         if self.instance and value.pk != self.instance.organization_id:
             raise serializers.ValidationError('A subscription cannot change organizations.')
         return value
+
+    def validate(self, attrs):
+        """An organization gets a bounded number of destinations.
+
+        Every clinical write inserts one outbox row per matching subscription,
+        inside the transaction of the write itself. Without a bound, an admin
+        can multiply the cost of every write their organization performs — and
+        the cost lands on the clinical path, not on the webhook that caused it.
+        Removed subscriptions do not count: they receive nothing.
+        """
+        attrs = super().validate(attrs)
+        if self.instance is None:
+            organization = attrs.get('organization')
+            live = WebhookSubscription.objects.filter(
+                organization=organization, deleted_at__isnull=True,
+            ).count()
+            if live >= settings.WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG:
+                raise serializers.ValidationError(
+                    f'An organization may have at most '
+                    f'{settings.WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG} webhook subscriptions.'
+                )
+        return attrs
+
+    def to_representation(self, instance):
+        """Show the destination only to someone who could change it.
+
+        For a Slack- or Zapier-shaped receiver the URL path *is* the credential:
+        anyone holding it can post to that endpoint. Reads follow the wider
+        `get_admin_orgs` reach, so a trust-derived professional from another
+        organization, or an OAuth token a user delegated to a third-party
+        application, can list these — an audience that may not configure egress
+        and has no reason to hold the credential either. They see the host,
+        which is what makes the subscription recognisable, and the rest masked.
+        """
+        data = super().to_representation(instance)
+        request = self.context.get('request')
+        if request is None:
+            return data
+        if not get_direct_admin_orgs(request.user).filter(pk=instance.organization_id).exists():
+            data['url'] = _masked_url(instance.url)
+        return data
 
 
 class WebhookManagementPermission(ScopedTokenPermission):
@@ -347,6 +400,31 @@ class WebhookSubscriptionViewSet(viewsets.ModelViewSet):
             raise NotFound()
         return locked
 
+    @action(detail=True, methods=['post'], url_path='rotate-secret')
+    def rotate_secret(self, request, pk=None):
+        """Replace the signing secret without changing where events go.
+
+        Rotation used to mean creating a second subscription and deleting the
+        first, which moved the destination for no reason and — before removal
+        became a mark — destroyed the delivery history of the old one. The
+        secret is write-only everywhere else and is disclosed once here, the
+        same way `create()` discloses it, under the same no-store directives.
+
+        Deliveries already queued keep the secret they will be signed with at
+        send time, which is this one: a receiver that has not yet stored the
+        new secret rejects them, and they retry into the backoff window. Roll
+        out the new secret at the receiver first.
+        """
+        with transaction.atomic():
+            subscription = self._lock_live(self.get_object().pk)
+            before = subscription_snapshot(subscription)
+            subscription.secret = webhook_secret()
+            subscription.save(update_fields=['secret'])
+            self._audit(record_subscription_change(
+                subscription, WebhookSubscriptionChange.ACTION_ROTATE, request.user,
+                before=before))
+        return Response({'secret': subscription.secret})
+
     @action(detail=True, methods=['get'])
     def deliveries(self, request, pk=None):
         deliveries = self.get_object().deliveries.order_by('-created_at')
@@ -358,7 +436,15 @@ class WebhookSubscriptionViewSet(viewsets.ModelViewSet):
 
 class InboundDataSerializer(serializers.Serializer):
     person_id = serializers.IntegerField(min_value=1)
-    resource_id = serializers.CharField(max_length=128, required=False)
+    # An identifier, and nothing else. This value is passed through to every
+    # subscriber of the organization, so whatever a partner puts here is what
+    # this deployment forwards under its own signature. Constrained to the
+    # shape of a resource identifier — no whitespace, no punctuation that
+    # carries a sentence — so a free-text field cannot become a channel for
+    # clinical detail the event shape does not claim to carry.
+    resource_id = serializers.RegexField(
+        r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$', max_length=128, required=False,
+    )
 
 
 class InboundEventSerializer(serializers.Serializer):

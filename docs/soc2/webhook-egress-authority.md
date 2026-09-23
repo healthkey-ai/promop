@@ -25,7 +25,9 @@ organization B could create a subscription streaming B's patient events to any
 public HTTPS URL, and `create()` returns the signing secret to whoever made it.
 
 The payloads carry identifiers and event shape — `person_id`, resource type,
-operation, count — not clinical values, which bounds the severity. It is still a
+operation, count — not clinical values. That bounds what a wrong destination
+learns; it does not make the stream non-clinical, and it is classified as PHI
+([payload classification](webhook-payload-classification.md)). It is a
 continuous, authenticated feed naming which of B's patients changed and when.
 
 ## Why the trust does not carry it

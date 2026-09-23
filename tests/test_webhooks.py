@@ -593,6 +593,121 @@ def test_a_change_record_cannot_be_rewritten_or_removed(setup):
     assert change.url_after == subscription.url
 
 
+def test_an_organization_cannot_hold_unbounded_destinations(setup, settings):
+    """Each subscription adds an insert to every clinical write of that org.
+
+    The cost lands inside the transaction of the write that triggered it, so an
+    unbounded list is an organization's own admin multiplying the cost of that
+    organization's writes.
+    """
+    settings.WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG = 2
+    org, other, person, user, subscription = setup
+    client = APIClient()
+    client.force_login(user)
+
+    def create(host):
+        return client.post('/api/v1/webhooks/subscriptions/', {
+            'organization': org.pk, 'url': f'https://{host}.example/events',
+            'event_types': ['lab.updated'],
+        }, format='json')
+
+    assert create('second').status_code == 201
+    refused = create('third')
+    assert refused.status_code == 400
+    assert 'at most 2' in str(refused.data)
+
+    # A removed subscription receives nothing, so it does not hold a slot.
+    assert client.delete(f'/api/v1/webhooks/subscriptions/{subscription.pk}/').status_code == 204
+    assert create('third').status_code == 201
+
+
+def test_a_reader_who_cannot_change_the_destination_does_not_see_it(trusted_professional):
+    """For a Slack- or Zapier-shaped receiver the path is the credential.
+
+    Reads follow the wider admin reach on purpose — a trust-derived
+    professional should be able to see that an organization sends events, and
+    where. Holding the credential is a different thing.
+    """
+    client, org, other, professional = trusted_professional
+    subscription = WebhookSubscription.objects.get(organization=org)
+
+    listed = client.get(f'/api/v1/webhooks/subscriptions/{subscription.pk}/')
+    assert listed.status_code == 200
+    assert listed.data['url'] == 'https://subscriber.example/***'
+    assert '/events' not in client.get('/api/v1/webhooks/subscriptions/').content.decode()
+
+
+def test_a_direct_admin_still_sees_the_whole_destination(setup):
+    org, other, person, user, subscription = setup
+    client = APIClient()
+    client.force_login(user)
+    assert client.get(f'/api/v1/webhooks/subscriptions/{subscription.pk}/').data['url'] == (
+        'https://subscriber.example/events')
+
+
+def test_rotating_the_secret_keeps_the_destination_and_records_who(setup):
+    """Rotation used to mean create a new subscription and delete the old one.
+
+    That moved the destination for no reason and, before removal became a mark,
+    destroyed the old subscription's delivery history along with it.
+    """
+    org, other, person, user, subscription = setup
+    client = APIClient()
+    client.force_login(user)
+    original = subscription.secret
+
+    response = client.post(f'/api/v1/webhooks/subscriptions/{subscription.pk}/rotate-secret/')
+    assert response.status_code == 200
+    assert len(response.data['secret']) >= 32
+    assert response.data['secret'] != original
+    assert response['Cache-Control'] == 'no-store'
+
+    subscription.refresh_from_db()
+    assert subscription.secret == response.data['secret']
+    assert subscription.url == 'https://subscriber.example/events'
+
+    recorded = WebhookSubscriptionChange.objects.get(
+        action=WebhookSubscriptionChange.ACTION_ROTATE)
+    assert recorded.actor_id == str(user.pk)
+    assert recorded.url_before == recorded.url_after == subscription.url
+    # The secret itself is never written to either trail.
+    assert original not in str(recorded.__dict__)
+
+
+def test_rotation_needs_the_same_authority_as_any_other_egress_write(trusted_professional, setup):
+    client, org, other, professional = trusted_professional
+    subscription = WebhookSubscription.objects.get(organization=org)
+    before = subscription.secret
+    assert client.post(
+        f'/api/v1/webhooks/subscriptions/{subscription.pk}/rotate-secret/',
+    ).status_code in (403, 404)
+    subscription.refresh_from_db()
+    assert subscription.secret == before
+
+
+@pytest.mark.parametrize('resource_id', [
+    'lab report: elevated CRP, see notes', 'has space', 'ключ', 'a' * 129, '',
+])
+def test_a_relayed_resource_id_must_be_an_identifier(setup, resource_id):
+    """Whatever a partner puts here, this deployment forwards under its own
+    signature — so it cannot be a free-text channel for clinical detail."""
+    response = inbound(payload={
+        'id': f'event-{abs(hash(resource_id))}', 'type': 'lab.updated',
+        'data': {'person_id': 420001, 'resource_id': resource_id},
+    })
+    assert response.status_code == 400
+    assert not WebhookDelivery.objects.exists()
+
+
+def test_a_well_formed_resource_id_is_still_relayed(setup):
+    assert inbound(payload={
+        'id': 'event-ok', 'type': 'lab.updated',
+        'data': {'person_id': 420001, 'resource_id': 'Observation/abc-123'},
+    }).status_code == 202
+    delivered = WebhookDelivery.objects.get()
+    assert delivered.payload['data']['resource_id'] == 'Observation/abc-123'
+
+
 def test_patient_and_expired_admin_cannot_manage_subscriptions(setup):
     org, other, person, user, subscription = setup
     client = APIClient()
@@ -1827,7 +1942,12 @@ def test_a_trust_still_reads_the_subscriptions_it_could_always_see(trusted_profe
     assert listing.status_code == 200
     rows = listing.data['results'] if isinstance(listing.data, dict) else listing.data
     urls = [row['url'] for row in rows]
-    assert 'https://subscriber.example/events' in urls
+    # Narrowing reads would hide an organization's egress configuration from
+    # someone it has already trusted with its patients — the wrong direction
+    # for review. What they do not get is the part a receiver may be treating
+    # as a credential; see
+    # test_a_reader_who_cannot_change_the_destination_does_not_see_it.
+    assert 'https://subscriber.example/***' in urls
 
 
 def test_a_patient_copy_announces_one_event_per_table_not_one_per_row(setup):

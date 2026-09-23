@@ -45,7 +45,13 @@ Supported inbound types are `lab.updated`, `document.received`, and
 `foundation.synced`. Each handler creates outbound delivery records for its
 matching active subscriptions and marks the inbound event processed in the same
 transaction. `data.person_id` must belong to the configured organization;
-`data.resource_id` is optional. Additional input fields are ignored and are not
+`data.resource_id` is optional, and must look like an identifier —
+`[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}`, so no whitespace and no sentence
+punctuation. It is passed through to every subscriber of the organization under
+this deployment's own signature, and the payload is classified as identifiers
+and event shape ([payload classification](soc2/webhook-payload-classification.md));
+a free-text field there would be a channel for clinical narrative the
+classification does not cover. Additional input fields are ignored and are not
 forwarded. Bodies are limited to 64 KiB. Invalid signatures return 401, invalid
 JSON/schema or a patient outside the source organization returns 400. The
 patient rule governs a first-time event id only: a replay of an event this
@@ -116,8 +122,27 @@ the generated `secret` once: store it at the subscriber. List, detail, update,
 and delivery-log responses never expose the secret. Subscriptions cannot be
 transferred between organizations. `PATCH /api/v1/webhooks/subscriptions/{id}/`
 can update URL/event types or disable with `{"active":false}`; DELETE marks the
-subscription removed. Rotation is done by creating a new subscription and
-disabling/deleting the old one.
+subscription removed. `POST
+/api/v1/webhooks/subscriptions/{id}/rotate-secret/` replaces the signing secret
+and returns it once, under the same directives as `create()`, leaving the
+destination and the delivery history alone — rotation no longer means creating
+a second subscription and deleting the first. Roll the new secret out at the
+receiver first: deliveries already queued are signed with whatever the secret
+is at send time, so a receiver that has not stored it yet rejects them into the
+retry backoff.
+
+An organization may hold at most `WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG`
+subscriptions (10 by default); removed ones do not count. Every clinical write
+inserts one outbox row per matching subscription, inside the transaction of the
+write itself, so the list is a multiplier on that organization's own writes.
+
+The `url` is returned in full only to a caller who could change it — platform
+staff and direct `org_admin` grants. Everyone else who may read the
+subscription, which includes trust-derived professionals and delegated OAuth
+tokens, sees scheme and host with the rest masked (`https://host/***`): for a
+Slack- or Zapier-shaped receiver the path is the credential, and being able to
+review where an organization sends data is a different thing from holding the
+key to post there.
 
 ### Every change to a destination is recorded
 
@@ -323,7 +348,7 @@ what says whether anything was sent there at all. Reading the table as "where
 events went" means reading the rows with attempts, not every row. Dead letters remain available for investigation; there
 is no automatic reset of exhausted attempts.
 
-Migrations `patient_portal.0021`, `0022` and `0023` add four tables, a uniqueness
+Migrations `patient_portal.0021` to `0024` add four tables, a uniqueness
 constraint, a partial index for active deliveries, and the change log with the
 `deleted_at`/`destination_url` columns;
 it does not modify existing clinical rows. Apply migrations before web/worker

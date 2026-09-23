@@ -699,6 +699,12 @@ WEBHOOK_INGRESS_RATE = os.environ.get('WEBHOOK_INGRESS_RATE', '1200/minute')
 # Render terminates with one; set 0 to key on REMOTE_ADDR instead.
 WEBHOOK_TRUSTED_PROXY_DEPTH = int(os.environ.get('WEBHOOK_TRUSTED_PROXY_DEPTH', '1'))
 WEBHOOK_RETENTION_DAYS = int(os.environ.get('WEBHOOK_RETENTION_DAYS', '30'))
+# How many destinations one organization may hold at once. Every clinical write
+# inserts one outbox row per matching subscription, inside the transaction of
+# the write itself, so this is a bound on what an organization's own admin can
+# add to the cost of that organization's writes.
+WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG = int(
+    os.environ.get('WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG', '10'))
 CELERY_BEAT_SCHEDULE = {
     'recover-webhook-deliveries': {
         'task': 'patient_portal.tasks.dispatch_pending_webhooks',

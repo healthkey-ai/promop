@@ -141,10 +141,14 @@ class WebhookSubscriptionChange(models.Model):
     ACTION_CREATE = 'create'
     ACTION_UPDATE = 'update'
     ACTION_DELETE = 'delete'
+    ACTION_ROTATE = 'rotate_secret'
     ACTIONS = [
         (ACTION_CREATE, 'Created'),
         (ACTION_UPDATE, 'Updated'),
         (ACTION_DELETE, 'Deleted'),
+        # A rotation moves no destination, so both URL sides carry the same
+        # value; what it records is who replaced the credential, and when.
+        (ACTION_ROTATE, 'Signing secret rotated'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
