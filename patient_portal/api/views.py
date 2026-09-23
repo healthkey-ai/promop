@@ -10577,6 +10577,8 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
         data.get('source_vocabulary_id',
                  '' if mapping is None else mapping.source_vocabulary_id) or ''
     ).strip()
+    if mapping is None or 'source_vocabulary_id' in data:
+        source_vocabulary_id = source_vocabularies.canonical_source_vocabulary(source_vocabulary_id)
     if source_vocabulary_id.startswith('HK-'):
         raise serializers.ValidationError({'source_vocabulary_id': (
             'HK-* vocabularies are minting destinations, not source code '

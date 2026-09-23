@@ -8,7 +8,7 @@ from django.db import transaction
 from omop_core.management.embedding_command import EmbeddingLoadCommand
 
 from omop_core.models import Concept, SourceCodeConceptMapping, MappingDestinationCandidate
-from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE
+from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE, canonical_source_vocabulary
 
 
 DEFAULT_ARTIFACT = Path(__file__).resolve().parents[3] / 'docs' / 'ht-code-concept-mapping.md'
@@ -41,7 +41,7 @@ class Command(EmbeddingLoadCommand):
         grouped = defaultdict(dict)
         metadata = {}
         for row in mappings:
-            key = (row['source_vocabulary_id'], row['source_code'])
+            key = (canonical_source_vocabulary(row['source_vocabulary_id']), row['source_code'])
             metadata.setdefault(key, row)
             for candidate in row.get('candidates') or [row]:
                 target_key = (candidate['target_vocabulary_id'], str(candidate['target_concept_code']))

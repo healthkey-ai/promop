@@ -116,6 +116,28 @@ Mapping UI. Approval makes the row effective and can re-point already stored
 clinical rows; that governed decision is why importers must never promote a
 proposal themselves.
 
+### SNOMED source identifiers
+
+The FHIR OID `urn:oid:2.16.840.1.113883.6.96` and `SNOMED` identify the same
+code system. Crossmap imports and new curator mappings store `SNOMED`; lookup
+accepts either spelling and preserves the caller's spelling in response keys.
+Source codes and destination concept IDs are not changed by this normalization.
+
+Migration `0257_normalize_snomed_oid_mappings` merges redundant imported OID
+rows into approved canonical mappings and normalizes alias-only rows. Only
+untouched HT-FHIR proposals with a matching, active standard SNOMED destination
+and consistent domain/table are automatically approved. Curator decisions,
+machine suggestions, invalid destinations and conflicting duplicates require
+review. A retained conflicting OID row continues to govern lookups using that
+OID, rather than silently falling through to the canonical row.
+
+Run `python manage.py audit_snomed_oid_mappings` for a read-only JSON preview.
+Duplicate merges retain the larger encounter count, earliest first-seen and
+latest last-seen timestamps, move candidate/review dependencies, and append the
+removed row's metadata to the survivor's notes. The migration does not rewrite
+clinical facts. It is irreversible: recovery requires a backup or manual
+reconciliation using those snapshots, accounting for subsequent curation.
+
 ### Why curation lives in SCCM
 
 SCCM can represent uncoded source text without requiring a source Concept, and

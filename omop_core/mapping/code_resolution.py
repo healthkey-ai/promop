@@ -50,6 +50,7 @@ from omop_core.mapping.therapy import (
     _slug,
 )
 from omop_core.signals import suppress_patient_record_refresh
+from omop_core.services.source_vocabularies import VOCABULARY_OID_ALIASES, canonical_source_vocabulary
 
 logger = logging.getLogger(__name__)
 
@@ -136,11 +137,23 @@ def approved_mapping_for(source_vocabulary_id, source_code):
     """
     if not source_code:
         return None
+    source_vocabulary_id = _resolution_vocabulary(source_vocabulary_id, source_code)
     return SourceCodeConceptMapping.objects.filter(
         source_vocabulary_id=source_vocabulary_id or '',
         source_code__iexact=source_code[:SOURCE_CODE_MAX],
         status='approved',
     ).select_related('target_concept').first()
+
+
+def _resolution_vocabulary(vocabulary_id, source_code):
+    """Accept OIDs while respecting legacy exceptions retained by migration."""
+    canonical = canonical_source_vocabulary(vocabulary_id)
+    if vocabulary_id in VOCABULARY_OID_ALIASES and SourceCodeConceptMapping.objects.filter(
+        source_vocabulary_id=vocabulary_id,
+        source_code__iexact=source_code[:SOURCE_CODE_MAX],
+    ).exists():
+        return vocabulary_id
+    return canonical
 
 
 def _direct_concept(source_vocabulary_id, source_code):
@@ -358,6 +371,7 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
     source_code = (source_code or '').strip()
     if not source_code:
         return None, None
+    source_vocabulary_id = _resolution_vocabulary(source_vocabulary_id, source_code)
     table = normalize_omop_table(omop_table)
 
     # Rule 1 — SCCM is the primary resolver for every source vocabulary,

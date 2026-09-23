@@ -22,7 +22,7 @@ from django.core.management.base import CommandError
 from omop_core.management.embedding_command import EmbeddingLoadCommand
 
 from omop_core.models import Concept, SourceCodeConceptMapping
-from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE
+from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE, canonical_source_vocabulary
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +60,8 @@ class Command(EmbeddingLoadCommand):
 
         data = json.loads(artifact_path.read_text())
         all_mappings = data.get('mappings', [])
+        for row in all_mappings:
+            row['source_vocabulary_id'] = canonical_source_vocabulary(row['source_vocabulary_id'])
 
         # Filter to approved only unless --include-proposed.
         if options['include_proposed']:
