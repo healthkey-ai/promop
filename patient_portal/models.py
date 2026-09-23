@@ -90,11 +90,14 @@ class WebhookDelivery(models.Model):
     error = models.CharField(max_length=64, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     delivered_at = models.DateTimeField(null=True)
-    # Where this one went, recorded when the row is written. The subscription's
-    # `url` is the current destination, not the historical one: a PATCH rewrites
-    # it, and every past delivery would then claim to have gone somewhere it
-    # never went. The host, not the full URL — for some receivers the path is
-    # the credential (see WebhookSubscriptionChange for who may see that).
+    # The host the most recent attempt actually used. Empty until an attempt is
+    # made, because a queued or cancelled row contacted nothing and a row
+    # claiming a destination it never reached over-counts for whoever reads this
+    # table as "where events went". Recorded here rather than read back off the
+    # subscription, whose `url` is the current destination: a PATCH rewrites it,
+    # and every past delivery would then name a place it never went. The host,
+    # not the full URL — for some receivers the path is the credential (see
+    # WebhookSubscriptionChange for who may see that).
     destination_host = models.CharField(max_length=255, blank=True)
 
     class Meta:
@@ -115,10 +118,10 @@ class WebhookSubscriptionChange(models.Model):
     subscription, and leave nothing behind saying where they had gone.
 
     Append-only is enforced here for the paths people use — ``save()`` on an
-    existing row and ``delete()`` both refuse. ``QuerySet.update()`` and a
-    direct SQL statement still get through; the durable guarantee for those is
-    a database role that cannot write this table, which belongs to the
-    deployment rather than to the model.
+    existing row and ``delete()`` both refuse. ``QuerySet.update()``, a direct
+    SQL statement, ``bulk_create`` and a fixture load all get through; the
+    durable guarantee for those is a database role that cannot write this
+    table, which belongs to the deployment rather than to the model.
 
     Rows survive what they describe. The organization and subscription
     references are nullable and their identifying values are copied in, so

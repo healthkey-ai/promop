@@ -238,12 +238,10 @@ def publish_event(organization_id, event_type, data, origin=None):
         organization_id=organization_id, organization__is_active=True,
         active=True, deleted_at__isnull=True, event_types__contains=[event_type],
     ):
-        delivery = WebhookDelivery.objects.create(
-            subscription=subscription, payload=event,
-            # Recorded now, because the subscription's url is the destination
-            # today and this row is the record of where the event actually went.
-            destination_host=urlsplit(subscription.url).hostname or '',
-        )
+        # No destination_host here: nothing has been contacted yet, and the
+        # subscription's URL can still change before the attempt. The delivery
+        # task records the host it actually used.
+        delivery = WebhookDelivery.objects.create(subscription=subscription, payload=event)
         transaction.on_commit(lambda pk=delivery.pk: enqueue_delivery(pk))
 
 
@@ -254,8 +252,8 @@ def record_subscription_change(subscription, action, actor, before=None):
     before saving: create passes none, update passes the previous values, and
     delete passes the values the subscription is losing.
 
-    Called from the API, which is the only path a person uses. A change made in
-    the Django admin or at a shell writes no record — the same limit the model
+    Called from the API, which is the only path a person uses. A change made at
+    a shell or through a fixture writes no record — the same limit the model
     validators have, and for the same reason: covering it would mean a signal
     that cannot name an actor, which is the field this exists for.
     """

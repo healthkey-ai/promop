@@ -247,7 +247,30 @@ def test_a_removed_subscription_keeps_its_history_and_accepts_no_writes(setup):
     assert client.delete(f'/api/v1/webhooks/subscriptions/{subscription.pk}/').status_code == 404
 
 
-def test_a_removed_subscription_receives_no_further_events(setup, django_capture_on_commit_callbacks):
+def test_a_removed_subscription_leaves_the_listing_but_stays_retrievable(setup):
+    """Removal still means it stops appearing, which is what a client expects.
+
+    The history has to stay reachable — that is the point of not deleting the
+    row — but a collection route that silently starts returning every
+    subscription an organization has ever removed is a different endpoint than
+    the one clients were written against.
+    """
+    org, other, person, user, subscription = setup
+    client = APIClient()
+    client.force_login(user)
+    assert client.delete(f'/api/v1/webhooks/subscriptions/{subscription.pk}/').status_code == 204
+
+    def ids(response):
+        rows = response.data['results'] if isinstance(response.data, dict) else response.data
+        return {row['id'] for row in rows}
+
+    assert subscription.pk not in ids(client.get('/api/v1/webhooks/subscriptions/'))
+    assert subscription.pk in ids(
+        client.get('/api/v1/webhooks/subscriptions/?include_removed=true'))
+    assert client.get(f'/api/v1/webhooks/subscriptions/{subscription.pk}/').status_code == 200
+
+
+def test_a_removed_subscription_receives_no_further_events(setup):
     org, other, person, user, subscription = setup
     subscription.deleted_at = timezone.now()
     subscription.save(update_fields=['deleted_at'])
@@ -256,23 +279,37 @@ def test_a_removed_subscription_receives_no_further_events(setup, django_capture
     assert not WebhookDelivery.objects.exists()
 
 
-def test_a_delivery_records_where_it_went_not_where_the_subscription_points_now(setup):
+def test_a_delivery_records_the_host_its_attempt_used_and_claims_none_before(setup):
+    """Where it went, not where it was headed, and nothing until it went.
+
+    Queueing contacts nobody, and the URL can still move before the attempt —
+    the retry backoff alone spans minutes. A row stamped at enqueue would name
+    a destination the event never reached; reading the destination back off the
+    subscription would have every past delivery follow the next PATCH.
+    """
     org, other, person, user, subscription = setup
     with patch('patient_portal.webhooks.enqueue_delivery'):
         publish_event(org.pk, 'lab.updated', {'person_id': person.person_id})
     delivery = WebhookDelivery.objects.get()
-    assert delivery.destination_host == 'subscriber.example'
+    assert delivery.destination_host == ''
 
-    client = APIClient()
-    client.force_login(user)
-    with patch('patient_portal.api.webhook_views.validate_webhook_url'):
-        assert client.patch(f'/api/v1/webhooks/subscriptions/{subscription.pk}/',
-                            {'url': 'https://elsewhere.example/collect'},
-                            format='json').status_code == 200
+    WebhookSubscription.objects.filter(pk=subscription.pk).update(
+        url='https://moved.example/events')
+    sent = []
+    with patch('patient_portal.tasks.send_webhook',
+               side_effect=lambda url, *args, **kwargs: sent.append(url) or 200):
+        deliver_webhook(str(delivery.pk))
+
     delivery.refresh_from_db()
-    # Reading the destination off the subscription would now claim this event
-    # went somewhere it never went.
-    assert delivery.destination_host == 'subscriber.example'
+    assert sent == ['https://moved.example/events']
+    assert delivery.status == 'delivered'
+    assert delivery.destination_host == 'moved.example'
+
+    # And a later PATCH does not rewrite the record of an attempt already made.
+    WebhookSubscription.objects.filter(pk=subscription.pk).update(
+        url='https://moved-again.example/events')
+    delivery.refresh_from_db()
+    assert delivery.destination_host == 'moved.example'
 
 
 def test_a_change_record_cannot_be_rewritten_or_removed(setup):
@@ -1165,7 +1202,10 @@ def test_subscription_mutations_require_csrf(setup):
     assert created.status_code == 403, created.data
     assert not WebhookSubscription.objects.filter(url='https://attacker.example/collect').exists()
     assert client.delete(f'/api/v1/webhooks/subscriptions/{subscription.pk}/').status_code == 403
-    assert WebhookSubscription.objects.filter(pk=subscription.pk).exists()
+    # The row surviving proves nothing now that removal is a mark rather than a
+    # delete; the mark being absent is what says the DELETE was refused.
+    subscription.refresh_from_db()
+    assert subscription.deleted_at is None and subscription.active
     # Reading is still fine without a token.
     assert client.get('/api/v1/webhooks/subscriptions/').status_code == 200
 
@@ -1511,7 +1551,9 @@ def test_a_trust_cannot_redirect_or_delete_an_existing_subscription(trusted_prof
         f'/api/v1/webhooks/subscriptions/{subscription.pk}/').status_code in (403, 404)
     subscription.refresh_from_db()
     assert subscription.url == 'https://subscriber.example/events'
-    assert WebhookSubscription.objects.filter(pk=subscription.pk).exists()
+    # Same reason as above: removal is a mark, so the absence of the mark is
+    # what shows the refusal took effect.
+    assert subscription.deleted_at is None and subscription.active
 
 
 def test_a_trust_still_reads_the_subscriptions_it_could_always_see(trusted_professional):

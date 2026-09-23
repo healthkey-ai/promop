@@ -173,13 +173,22 @@ class WebhookSubscriptionViewSet(viewsets.ModelViewSet):
         # organization's egress configuration either — not just not create one.
         resolve = get_admin_orgs if self.request.method in SAFE_METHODS else get_direct_admin_orgs
         queryset = WebhookSubscription.objects.filter(organization__in=resolve(self.request.user))
-        if self.request.method not in SAFE_METHODS:
+        if self.request.method not in SAFE_METHODS or not self._include_removed():
             # A removed subscription is gone for every write: it cannot be
-            # redirected, re-enabled or deleted again. Reads still reach it,
-            # which is what keeps its delivery history — where this
-            # organization's events actually went — reachable afterwards.
+            # redirected, re-enabled or deleted again. It is also absent from
+            # the listing by default, so removing one still means it stops
+            # appearing — the contract the endpoint had before removal became a
+            # mark rather than a delete. Retrieving it by id, and with it the
+            # delivery history saying where this organization's events actually
+            # went, keeps working; `?include_removed=true` brings it back to the
+            # listing for whoever is reviewing that history.
             queryset = queryset.filter(deleted_at__isnull=True)
         return queryset.order_by('pk')
+
+    def _include_removed(self):
+        if self.action != 'list':
+            return True
+        return self.request.query_params.get('include_removed', '').lower() in ('1', 'true', 'yes')
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)

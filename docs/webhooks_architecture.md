@@ -141,11 +141,22 @@ The cascade used to take the subscription's delivery history with it, so after
 removing a subscription nothing said where that organization's events had been
 going — which is the one question an investigation asks. A removed subscription
 accepts no write (redirect, re-enable or a second delete all 404) and receives no
-further events; reads still reach it and its history. Each delivery also records
-the `destination_host` it was written for, because the subscription's `url` is
-where events go *now*: after a `PATCH`, reading the destination off the
-subscription would have every past delivery claim it went somewhere it never
-went.
+further events, and it leaves the listing — removing a subscription still means
+it stops appearing, which is the contract clients were written against.
+Retrieving it by id keeps working, and so does its delivery history;
+`?include_removed=true` brings removed subscriptions back into the listing for
+whoever is reviewing that history.
+
+Each delivery records the `destination_host` its attempt used — written when the
+attempt is made, not when the event is queued. The subscription's `url` is where
+events go *now*, so reading the destination off the subscription would have every
+past delivery follow the next `PATCH`; and a `PATCH` landing between queueing and
+sending moves the destination, so a host stamped at enqueue would name a place
+the event never reached. A queued or cancelled row carries no host.
+
+Deliveries do not survive deleting the organization — that cascade still reaches
+them. The change rows do, which after an organization is removed makes them the
+only remaining trail.
 
 Outbound types are `patient.changed`, `lab.updated`, `document.received`, and
 `foundation.synced`. Ordinary saves/deletes of patient records, demographics,
@@ -276,8 +287,11 @@ python manage.py shell -c 'from patient_portal.tasks import dispatch_pending_web
 
 `GET /api/v1/webhooks/subscriptions/{id}/deliveries/` returns authorized delivery
 history with status, attempts, next attempt, HTTP status, a redacted error code,
-and timestamps. Response bodies, destination URLs, secrets, and notification
-payloads are excluded. Dead letters remain available for investigation; there
+timestamps, and the `destination_host` of the attempt. Response bodies, full
+destination URLs, secrets, and notification payloads are excluded — the host,
+not the path, because for some receivers the path is the credential. A row that
+was never attempted carries no host: it contacted nothing, and a record naming a
+destination anyway over-counts. Dead letters remain available for investigation; there
 is no automatic reset of exhausted attempts.
 
 Migrations `patient_portal.0021`, `0022` and `0023` add four tables, a uniqueness
