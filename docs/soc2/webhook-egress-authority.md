@@ -103,9 +103,13 @@ implementation:
   working kill switch. A queued delivery cannot be silently redirected to the
   new destination, and it is not sent to the old one either: changing the URL
   cancels what was queued against it, and every attempt re-checks the address
-  it was frozen for against the one the organization designates now. Events
-  queued under a destination an organization has stopped designating are not
-  delivered anywhere.
+  it was frozen for against the one the organization designates now. Events queued
+  under a destination an organization has stopped designating are not delivered
+  anywhere — with one boundary, stated rather than implied: an attempt already
+  under way when the change lands completes, because no control can recall a
+  request in flight. That attempt was addressed to the destination the
+  organization designated when it began, and no further attempt on that
+  delivery is made.
 
 A change made outside the API — a shell, a data migration, a fixture — writes no
 change row, because the actor cannot be named from there. (No webhook model is

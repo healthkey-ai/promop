@@ -175,7 +175,11 @@ change cannot reach every row — a publisher that read the subscription just
 before it still inserts one addressed to the old URL, and a row a worker is
 holding has passed the point — so every attempt also compares the address it
 was frozen for against the one the organization designates now, and stops if
-they differ. A row written before the address column existed carries none and
+they differ. That check and the attempt's claim commit together, which fixes
+the boundary: a change stops everything that has not yet begun an attempt, and
+an attempt already under way completes and is recorded. Nothing can recall a
+request in flight, and that one was addressed to what the organization
+designated when it started. A row written before the address column existed carries none and
 follows the subscription, which is all it can do.
 
 Deliveries do not survive deleting the organization — that cascade still reaches

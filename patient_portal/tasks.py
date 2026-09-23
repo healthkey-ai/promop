@@ -46,8 +46,18 @@ def deliver_webhook(delivery_id):
         # publisher that read the subscription just before it, nor one a worker
         # was already holding. This is the check every attempt passes through,
         # so those rows stop here rather than delivering PHI to an address that
-        # has been revoked. A row written before the column existed carries no
-        # address and follows the subscription, which is all it can do.
+        # has been revoked.
+        #
+        # Where the guarantee ends, precisely: this check and the claim below
+        # commit together, so a change landing after them meets an attempt that
+        # is already under way. Nothing can recall a request in flight — the
+        # boundary is the start of the attempt, not the arrival of the change —
+        # and that attempt was addressed to what the organization designated
+        # when it began. It completes, is recorded, and no further attempt on
+        # the row is made.
+        #
+        # A row written before the column existed carries no address and
+        # follows the subscription, which is all it can do.
         if delivery.destination_url and delivery.destination_url != delivery.subscription.url:
             delivery.status = 'cancelled'
             delivery.save(update_fields=['status'])
