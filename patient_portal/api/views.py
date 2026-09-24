@@ -11948,6 +11948,14 @@ def code_mapping_lookup(request):
                 # resolved flag, never a provisional target, to write OMOP.
                 'proposed_target_concept_id': mapping.target_concept_id if mapping else None,
             }
+            if mapping and mapping.status == 'approved':
+                # The identity is standard, but the requested fact table may
+                # be incompatible (e.g. a Device imported as a drug).
+                result[key].update(
+                    domain_id=mapping.domain_id,
+                    omop_table=mapping.omop_table,
+                    unresolved_reason='destination_domain_or_validity_mismatch',
+                )
             unresolved += 1
     response = Response({
         'mappings': result,

@@ -27,6 +27,7 @@ the rows already stored, or the decision only ever reaches data that happens to
 arrive again.
 """
 import logging
+from datetime import date
 
 from django.contrib.contenttypes.models import ContentType
 from django.db import IntegrityError, transaction
@@ -51,6 +52,8 @@ from omop_core.mapping.therapy import (
 )
 from omop_core.signals import suppress_patient_record_refresh
 from omop_core.services.source_vocabularies import VOCABULARY_OID_ALIASES, canonical_source_vocabulary
+from omop_core.services.snomed_identity import IDENTITY_ORIGIN, is_standard_snomed, promote_crossmap_identity
+from omop_core.services.source_vocabularies import table_for_domain
 
 logger = logging.getLogger(__name__)
 
@@ -277,6 +280,7 @@ def _effective_direct_mapping(*, source_vocabulary_id, source_code, concept, omo
     ).select_related('target_concept').first()
     if existing is not None:
         return existing
+    standard_identity = source_vocabulary_id == 'SNOMED' and is_standard_snomed(concept)
     try:
         with transaction.atomic():
             return SourceCodeConceptMapping.objects.create(
@@ -287,9 +291,9 @@ def _effective_direct_mapping(*, source_vocabulary_id, source_code, concept, omo
                 target_concept=concept,
                 destination_vocabulary_id=concept.vocabulary_id or '',
                 domain_id=concept.domain_id or _DOMAIN_FOR_TABLE.get(omop_table, ''),
-                omop_table=omop_table,
+                omop_table=table_for_domain(concept.domain_id) if standard_identity else omop_table,
                 source='Athena', status='approved', origin='import',
-                origin_system='athena-direct', occurrence_count=0,
+                origin_system=IDENTITY_ORIGIN if standard_identity else 'athena-direct', occurrence_count=0,
             )
     except IntegrityError:
         return SourceCodeConceptMapping.objects.filter(
@@ -360,6 +364,15 @@ def _usable_destination(concept: Concept | None, omop_table: str) -> bool:
     )
 
 
+def _identity_for_table(mapping, table):
+    """An automatic identity is only usable in its real clinical domain."""
+    target = mapping.target_concept
+    if (mapping.status != 'approved' or not _usable_destination(target, table)
+            or not target.valid_start_date <= date.today() <= target.valid_end_date):
+        return None, mapping
+    return target, mapping
+
+
 def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
                         source_text='', source_system='fhir-upload'):
     """Resolve an inbound source code to a destination concept.
@@ -379,6 +392,8 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
     # lose to an automatic natural-key lookup.
     approved = approved_mapping_for(source_vocabulary_id, source_code)
     if approved is not None:
+        if approved.origin_system == IDENTITY_ORIGIN:
+            return _identity_for_table(approved, table)
         return approved.target_concept, approved
 
     # A proposed target is a review aid, never an effective mapping.  Once a
@@ -389,6 +404,9 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
         source_code__iexact=source_code[:SOURCE_CODE_MAX], status='proposed',
     ).select_related('target_concept').first()
     if pending is not None:
+        identity = promote_crossmap_identity(pending)
+        if identity is not None:
+            return _identity_for_table(identity, table)
         promoted = _promote_if_loaded(pending, source_vocabulary_id, source_code)
         if promoted is not None:
             return promoted.target_concept, promoted
@@ -404,11 +422,16 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
     # Rule 2 — LOINC/SNOMED retain direct Athena lookup only as a fallback.
     if source_vocabulary_id in SELF_RESOLVING_VOCABULARIES:
         concept = _direct_concept(source_vocabulary_id, source_code)
+        if source_vocabulary_id == 'SNOMED' and not is_standard_snomed(concept):
+            concept = None
         if concept is not None:
-            return concept, _effective_direct_mapping(
+            mapping = _effective_direct_mapping(
                 source_vocabulary_id=source_vocabulary_id,
                 source_code=source_code, concept=concept, omop_table=table,
             )
+            if source_vocabulary_id == 'SNOMED':
+                return _identity_for_table(mapping, table)
+            return concept, mapping
         # ...unless that concept is not loaded on this deploy. Returning None
         # here would drop the code to concept 0 with nothing in the review
         # queue, and LOINC is the dominant source system for the labs this

@@ -23,6 +23,7 @@ from omop_core.management.embedding_command import EmbeddingLoadCommand
 
 from omop_core.models import Concept, SourceCodeConceptMapping
 from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE, canonical_source_vocabulary
+from omop_core.services.snomed_identity import apply_import_identity, snomed_identities
 
 logger = logging.getLogger(__name__)
 
@@ -105,12 +106,16 @@ class Command(EmbeddingLoadCommand):
         )
 
         # --- Build new rows ---
+        identities = snomed_identities({m['source_code'] for m in mappings if m['source_vocabulary_id'] == 'SNOMED'})
         pending = []
         stats = {'created': 0, 'existing': 0, 'missing_concept': 0}
 
         for m in mappings:
             target_key = (m['target_vocabulary_id'], m['target_concept_code'])
             concept = concepts.get(target_key)
+            identity = identities.get(m['source_code']) if m['source_vocabulary_id'] == 'SNOMED' and target_key[0] == 'RxNorm' else None
+            if identity:
+                concept = identity
             if not concept:
                 stats['missing_concept'] += 1
                 if options['verbosity'] >= 2:
@@ -131,7 +136,7 @@ class Command(EmbeddingLoadCommand):
             origin_system = origins[0] if origins else 'artifact'
 
             stats['created'] += 1
-            pending.append(SourceCodeConceptMapping(
+            new_mapping = SourceCodeConceptMapping(
                 source_vocabulary_id=m['source_vocabulary_id'],
                 source_code=m['source_code'],
                 source_code_description=m.get('source_code_description', '')[:255],
@@ -144,7 +149,10 @@ class Command(EmbeddingLoadCommand):
                 origin_system=origin_system,
                 source=origin_system,
                 occurrence_count=0,
-            ))
+            )
+            if identity:
+                apply_import_identity(new_mapping, identity, f'{target_key[0]}:{target_key[1]}')
+            pending.append(new_mapping)
 
         if not options['dry_run'] and pending:
             SourceCodeConceptMapping.objects.bulk_create(

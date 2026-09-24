@@ -151,7 +151,7 @@ class TestSnomedRxnormImport:
         )
         snomed_concept = ConceptFactory(
             concept_id=7001, concept_code='102002',
-            concept_name='Aspirin substance',
+            concept_name='Aspirin substance', standard_concept=None,
             vocabulary=VocabularyFactory(vocabulary_id='SNOMED'),
             domain=DomainFactory(domain_id='Drug'),
         )

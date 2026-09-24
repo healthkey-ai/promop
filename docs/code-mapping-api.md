@@ -138,6 +138,31 @@ removed row's metadata to the survivor's notes. The migration does not rewrite
 clinical facts. It is irreversible: recovery requires a backup or manual
 reconciliation using those snapshots, accounting for subsequent curation.
 
+### Standard SNOMED identities and imported drug crossmaps
+
+A SNOMED code that is already an active OMOP standard concept does not need
+an automatic SNOMED-to-RxNorm translation. Crossmap imports prefer its exact
+SNOMED identity and its actual domain over the external crossmap destination.
+Existing mappings are not overwritten by re-imports.
+
+Migration `0259_prefer_standard_snomed_identities` corrects untouched imported
+proposals whose selected RxNorm destination is missing, nonstandard or invalid.
+It approves the matching active standard SNOMED concept, corrects domain/table
+metadata, retains imported candidates and encounter counts, and snapshots the
+old mapping in notes. Approved/rejected mappings, human edits, machine-suggestion
+decisions, locks and conflicting non-RxNorm candidates are protected. The
+resolver applies the same eligibility rules when it encounters a remaining
+crossmap proposal. Preview with `python manage.py audit_snomed_crossmap_identities`.
+
+Standard status belongs to a concept, not to the SNOMED vocabulary as a whole.
+Nonstandard or inactive SNOMED sources are not automatically self-mapped.
+An automatic Observation identity is usable for an Observation request, not a
+Drug request. Device identities remain approved reference mappings, but have
+no supported clinical table in this application and cannot resolve as drug
+exposures. Incompatible requests return `resolved: false`, the actual mapping
+domain/table, and `unresolved_reason: "destination_domain_or_validity_mismatch"`.
+Clinical facts are not moved between tables by either migration.
+
 ### Why curation lives in SCCM
 
 SCCM can represent uncoded source text without requiring a source Concept, and
