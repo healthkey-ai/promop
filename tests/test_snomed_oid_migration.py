@@ -22,7 +22,7 @@ def historical_apps():
     # Restore migration discovery solely to get the real historical model state.
     with override_settings(MIGRATION_MODULES={}):
         return MigrationLoader(connection).project_state([
-            ('omop_core', '0256_reconcile_icd10_mapped_against_stcm'),
+            ('omop_core', '0257_sourcecodeconceptmapping_source_label_norm'),
         ]).apps
 
 
@@ -46,7 +46,7 @@ def mapping(target, vocabulary=OID, **kwargs):
 def test_migration_normalizes_and_approves_without_faking_review(historical_apps, target):
     row = mapping(target, notes='Original evidence')
     before = Mapping.objects.values().get(pk=row.pk)
-    migration = import_module('omop_core.migrations.0257_normalize_snomed_oid_mappings')
+    migration = import_module('omop_core.migrations.0258_normalize_snomed_oid_mappings')
     with connection.schema_editor(atomic=False) as editor:
         migration.normalize_snomed_oid_mappings(historical_apps, editor)
     row.refresh_from_db()
