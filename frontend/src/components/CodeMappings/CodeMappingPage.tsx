@@ -597,6 +597,10 @@ type GroupEntry = {
 
 /** The key the members endpoint takes: a label, or ':<pk>' for an unlabelled row. */
 const groupKey = (entry: GroupEntry) => entry.label ?? `:${entry.mapping_id}`;
+/** Cache key. A label whose codes span Unmapped and Mapped is two entries, and
+ *  the server scopes members by section -- keying on the label alone would let
+ *  one entry show the other's rows. */
+const expansionKey = (entry: GroupEntry, section: MappingSection) => `${section}|${groupKey(entry)}`;
 const sectionNames: MappingSection[] = ["Unmapped", "Mapped", "Rejected", "Athena Mapped"];
 const DEFAULT_SECTION_SORT: SectionSort = { column: "occurrence_count", descending: true };
 // A blank origin_system is a real value -- enqueue_unmapped_source_codes writes
@@ -913,25 +917,42 @@ export default function CodeMappingPage() {
   const provenanceOptions = browse?.provenances ?? [];
   const provenanceValue = (origin: string) => origin || BLANK_PROVENANCE;
 
-  const toggleGroup = useCallback(async (entry: GroupEntry, section: MappingSection) => {
-    const key = groupKey(entry);
-    if (key in expandedGroups) {
-      setExpandedGroups(({ [key]: _removed, ...rest }) => rest);
-      return;
-    }
-    setExpandedGroups((current) => ({ ...current, [key]: null }));
+  const loadGroup = useCallback(async (entry: GroupEntry, section: MappingSection) => {
+    const cacheKey = expansionKey(entry, section);
+    setExpandedGroups((current) => ({ ...current, [cacheKey]: null }));
+    // A tab switch clears the cache; without this, a fetch already in flight
+    // resolves afterwards and re-inserts the previous tab's rows.
+    const sequence = loadSequence.current;
     try {
       const { data } = await api.get<{ results: CodeMappingRow[] }>("/v1/code-mappings/group/", {
-        params: { label: key, section, ...(activeVocabulary !== null ? { source: activeVocabulary } : {}) },
+        params: {
+          label: groupKey(entry), section,
+          // The server picks the default tab until one is clicked, so sending
+          // activeVocabulary would fetch across every vocabulary on first load.
+          ...(selectedVocabulary !== null ? { source: selectedVocabulary } : {}),
+          ...(debouncedSearch ? { search: debouncedSearch } : {}),
+          ...(provenanceFilter ? { provenance: provenanceFilter } : {}),
+        },
       });
-      setExpandedGroups((current) => ({ ...current, [key]: data.results || [] }));
+      if (sequence !== loadSequence.current) return;
+      setExpandedGroups((current) => ({ ...current, [cacheKey]: data.results || [] }));
     } catch {
+      if (sequence !== loadSequence.current) return;
       // Leave it collapsed rather than showing an empty group, which would
       // read as "this label has no codes".
-      setExpandedGroups(({ [key]: _failed, ...rest }) => rest);
+      setExpandedGroups(({ [cacheKey]: _failed, ...rest }) => rest);
       setError("Could not load the codes in that group.");
     }
-  }, [expandedGroups, activeVocabulary]);
+  }, [selectedVocabulary, debouncedSearch, provenanceFilter]);
+
+  const toggleGroup = useCallback((entry: GroupEntry, section: MappingSection) => {
+    const cacheKey = expansionKey(entry, section);
+    if (cacheKey in expandedGroups) {
+      setExpandedGroups(({ [cacheKey]: _removed, ...rest }) => rest);
+      return;
+    }
+    void loadGroup(entry, section);
+  }, [expandedGroups, loadGroup]);
   // A filter can outlive the values that produced it -- the rows carrying it
   // get approved away, or the server's default tab moves before any tab has
   // been clicked. Keep it listed and keep the control mounted, or there is no
@@ -1298,6 +1319,19 @@ export default function CodeMappingPage() {
     // Reflect a successful server write immediately, never a speculative
     // approval. Background reload reconciles ordering, totals and other users.
     setRows((current) => current.map((row) => row.mapping_id === saved.mapping_id ? saved : row));
+    // Under rollup the queue rows live in the expanded groups, not in `rows`
+    // or `browse.results` -- both of which the server leaves empty. Without
+    // this, approving an expanded member leaves it showing its old status and
+    // the curator's own write looks like it did nothing.
+    setExpandedGroups((current) => {
+      let touched = false;
+      const next = Object.fromEntries(Object.entries(current).map(([key, members]) => {
+        if (!members?.some((row) => row.mapping_id === saved.mapping_id)) return [key, members];
+        touched = true;
+        return [key, members.map((row) => row.mapping_id === saved.mapping_id ? saved : row)];
+      }));
+      return touched ? next : current;
+    });
     setBrowse((current) => {
       const previous = current?.results.find((row) => row.mapping_id === saved.mapping_id);
       if (!current || !previous || previous.status === saved.status
@@ -1574,14 +1608,22 @@ export default function CodeMappingPage() {
     // queue renders exactly as before.
     const groupEntries = browse?.rollup ? browse.groups[section] ?? [] : null;
     const pagination = browse?.pages[section];
+    // Grouped entries are always ordered by summed Seen: browse validates
+    // order_<index> and then ignores it. A header that still toggled would
+    // announce an ordering the table never applies, and refetch for nothing.
     const header = (label: string, column: SortColumn) => (
-      <th className="px-4 py-3 font-semibold" aria-sort={sort?.column === column ? (sort.descending ? "descending" : "ascending") : "none"}>
-        <button type="button" title={`Sort ${section} by ${label}`} className="inline-flex items-center gap-1 hover:underline focus:outline-2"
-          onClick={() => { setPages((previous) => ({ ...previous, [section]: 1 })); setSectionSorts((previous) => ({ ...previous, [section]: {
-            column, descending: previous[section]?.column === column ? !previous[section]?.descending : false,
-          } })); }}>
-          {label}<span aria-hidden="true">{sort?.column === column ? (sort.descending ? "↓" : "↑") : "↕"}</span>
-        </button>
+      <th className="px-4 py-3 font-semibold"
+        aria-sort={groupEntries || sort?.column !== column ? "none" : sort.descending ? "descending" : "ascending"}>
+        {groupEntries ? (
+          <span title={`${section} is grouped by label and ordered by Seen`}>{label}</span>
+        ) : (
+          <button type="button" title={`Sort ${section} by ${label}`} className="inline-flex items-center gap-1 hover:underline focus:outline-2"
+            onClick={() => { setPages((previous) => ({ ...previous, [section]: 1 })); setSectionSorts((previous) => ({ ...previous, [section]: {
+              column, descending: previous[section]?.column === column ? !previous[section]?.descending : false,
+            } })); }}>
+            {label}<span aria-hidden="true">{sort?.column === column ? (sort.descending ? "↓" : "↑") : "↕"}</span>
+          </button>
+        )}
       </th>
     );
     // Extracted so the rollup can render the same row under a group entry.
@@ -1712,11 +1754,11 @@ export default function CodeMappingPage() {
         <tbody className="divide-y divide-slate-100">
           {groupEntries
             ? groupEntries.map((entry) => {
-              const key = groupKey(entry);
-              const open = key in expandedGroups;
-              const members = expandedGroups[key];
+              const cacheKey = expansionKey(entry, section);
+              const open = cacheKey in expandedGroups;
+              const members = expandedGroups[cacheKey];
               return (
-                <Fragment key={key}>
+                <Fragment key={cacheKey}>
                   <tr className="bg-slate-50/60">
                     <td className="px-4 py-3">
                       <button type="button"
@@ -2189,7 +2231,7 @@ export default function CodeMappingPage() {
           </section>
         )}
 
-        {athenaRows.length > 0 && (
+        {(athenaRows.length > 0 || (browse?.pages["Athena Mapped"]?.total ?? 0) > 0) && (
           <section>
             <button
               type="button"

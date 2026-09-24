@@ -5,7 +5,7 @@ from rest_framework.exceptions import ValidationError
 
 from omop_core.services import source_vocabularies as vocab
 from omop_core.services.mapping_destinations import with_destination_counts
-from omop_core.services.mapping_rollup import group_entries
+from omop_core.services.mapping_rollup import count_groups, group_entries
 from omop_core.services.source_retirement import mapping_source_retirement
 
 OVERALL = '__overall__'
@@ -40,6 +40,48 @@ SECTION_FILTERS = {
     'Rejected': lambda qs: qs.exclude(origin_system='athena').filter(status='rejected'),
     'Athena Mapped': lambda qs: qs.filter(origin_system='athena'),
 }
+
+
+def tab_queryset(mappings, source):
+    """The rows on one source tab, or every row on the Overall tab."""
+    from omop_core.services.athena_mapping_guard import source_tab_vocabularies
+    if source is None or source == OVERALL:
+        return mappings
+    return mappings.filter(source_vocabulary_id__in=source_tab_vocabularies(source))
+
+
+def apply_search(mappings, tab_rows, search):
+    """A search deliberately reaches across every tab, not just the active one."""
+    if not search:
+        return tab_rows
+    query = Q()
+    for field in ('source_code', 'source_vocabulary_id', 'source_code_description',
+                  'target_concept__concept_name', 'target_concept__concept_code'):
+        query |= Q(**{f'{field}__icontains': search})
+    if search.isdigit():
+        query |= Q(target_concept_id__icontains=search)
+    return mappings.filter(query)
+
+
+def apply_provenance(queryset, provenance):
+    if not provenance:
+        return queryset
+    return queryset.filter(
+        origin_system='' if provenance == BLANK_PROVENANCE else provenance)
+
+
+def visible_rows(mappings, params):
+    """Everything a browse request narrows by, in the order browse applies it.
+
+    The group-members endpoint has to reproduce this exactly: a rollup entry's
+    members/seen/proposed counts describe the *filtered* set, so expanding an
+    entry that says "3 codes" under a provenance filter must not open into all
+    2,557 -- including the rows the filter existed to hide.
+    """
+    source = params.get('source')
+    search = (params.get('search') or '').strip()
+    rows = apply_search(mappings, tab_queryset(mappings, source), search)
+    return apply_provenance(rows, (params.get('provenance') or '').strip())
 
 
 def _provenance_options(counts_by_origin):
@@ -86,8 +128,7 @@ def browse_mappings(mappings, params, serialize):
     tabs.append(dict(vocabulary_id=OVERALL, label='Overall', is_standard=False,
                      **{key: sum(c[key] for c in counts.values()) for key in ('proposed', 'approved', 'athena')}))
 
-    from omop_core.services.athena_mapping_guard import source_tab_vocabularies
-    tab_rows = mappings if source == OVERALL else mappings.filter(source_vocabulary_id__in=source_tab_vocabularies(source))
+    tab_rows = tab_queryset(mappings, source)
     # Only duplicate groups need full rows. Window filtering preserves every
     # member, including rejected rows outside the current page/search.
     # A duplicate is one code twice in one *vocabulary*, not twice on one tab:
@@ -117,15 +158,8 @@ def browse_mappings(mappings, params, serialize):
 
     search = params.get('search', '').strip()
     provenance = params.get('provenance', '').strip()
-    filtered = mappings if search else tab_rows
+    filtered = apply_search(mappings, tab_rows, search)
     if search:
-        query = Q()
-        for field in ('source_code', 'source_vocabulary_id', 'source_code_description',
-                      'target_concept__concept_name', 'target_concept__concept_code'):
-            query |= Q(**{f'{field}__icontains': search})
-        if search.isdigit():
-            query |= Q(target_concept_id__icontains=search)
-        filtered = filtered.filter(query)
         # A search reaches across every tab, so the tab's own counts would
         # describe a different set of rows than the filter acts on -- offering
         # values that match nothing and hiding ones that dominate the hits.
@@ -136,9 +170,7 @@ def browse_mappings(mappings, params, serialize):
     # Narrows a cross-tab search as well as a single tab. Duplicates are left
     # unfiltered on purpose: hiding one half of a duplicated code would turn a
     # warning into a puzzle.
-    if provenance:
-        filtered = filtered.filter(
-            origin_system='' if provenance == BLANK_PROVENANCE else provenance)
+    filtered = apply_provenance(filtered, provenance)
     if search or provenance:
         totals = filtered.aggregate(
             unmapped=Count('pk', filter=~Q(origin_system='athena') & ~Q(status__in=['approved', 'rejected'])),
@@ -180,13 +212,13 @@ def browse_mappings(mappings, params, serialize):
         if rollup:
             # Pagination counts groups, not rows -- a page of 100 rows ordered
             # by a group's summed Seen would cut groups in half, and the whole
-            # point is that one entry is one decision.
-            entries, total = group_entries(query, requested_page, PAGE_SIZE)
-            page = min(requested_page, max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE))
-            if page != requested_page:
-                entries, _ = group_entries(query, page, PAGE_SIZE)
-            groups[section] = entries
-            pages[section] = dict(page=page, page_size=PAGE_SIZE, total=total)
+            # point is that one entry is one decision. Count first so an
+            # out-of-range page clamps before the slice rather than paying for
+            # a second aggregate.
+            group_total = count_groups(query)
+            page = min(requested_page, max(1, (group_total + PAGE_SIZE - 1) // PAGE_SIZE))
+            groups[section] = group_entries(query, page, PAGE_SIZE)
+            pages[section] = dict(page=page, page_size=PAGE_SIZE, total=group_total)
             continue
         page = min(requested_page, max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE))
         # Correlated destination counts and retirement lookups run only on the

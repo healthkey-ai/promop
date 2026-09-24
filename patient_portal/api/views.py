@@ -10902,9 +10902,8 @@ def code_mapping_group(request):
     if not _can_manage_field_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
-    from omop_core.services.athena_mapping_guard import (
-        source_tab_vocabularies, without_icd10_athena_duplicates)
-    from omop_core.services.mapping_browse import OVERALL, SECTION_FILTERS
+    from omop_core.services.athena_mapping_guard import without_icd10_athena_duplicates
+    from omop_core.services.mapping_browse import SECTION_FILTERS, visible_rows
     from omop_core.services.mapping_destinations import with_destination_counts
     from omop_core.services.mapping_rollup import group_members
     from omop_core.services.source_retirement import mapping_source_retirement
@@ -10918,11 +10917,12 @@ def code_mapping_group(request):
 
     mappings = without_icd10_athena_duplicates(SourceCodeConceptMapping.objects.select_related(
         'target_concept', 'created_by', 'reviewer', 'locked_by'))
-    source = request.query_params.get('source')
-    if source is not None and source != OVERALL:
-        mappings = mappings.filter(source_vocabulary_id__in=source_tab_vocabularies(source))
+    # Same tab, search and provenance narrowing browse applied before it
+    # counted the entry. Without this, an entry reading "3 codes" under a
+    # provenance filter expands into all 2,557 -- including the rows the filter
+    # existed to hide -- and a cross-tab search expands into one tab only.
     rows = list(with_destination_counts(
-        SECTION_FILTERS[section](group_members(mappings, label))
+        SECTION_FILTERS[section](group_members(visible_rows(mappings, request.query_params), label))
     ).order_by('-occurrence_count', 'source_code', 'id')[:MAX_GROUP_MEMBERS + 1])
     truncated = len(rows) > MAX_GROUP_MEMBERS
     rows = rows[:MAX_GROUP_MEMBERS]

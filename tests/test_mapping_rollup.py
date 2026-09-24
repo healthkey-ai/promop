@@ -2,7 +2,7 @@
 import pytest
 
 from omop_core.models import SourceCodeConceptMapping
-from omop_core.services.mapping_rollup import group_entries, group_members
+from omop_core.services.mapping_rollup import count_groups, group_entries, group_members
 
 pytestmark = pytest.mark.django_db
 
@@ -14,7 +14,8 @@ def row(code, description='', seen=0, **kwargs):
 
 
 def entries(page=1, page_size=100):
-    return group_entries(SourceCodeConceptMapping.objects.all(), page, page_size)
+    qs = SourceCodeConceptMapping.objects.all()
+    return group_entries(qs, page, page_size), count_groups(qs)
 
 
 def test_codes_sharing_a_label_become_one_entry_carrying_their_summed_seen():
@@ -137,8 +138,11 @@ def test_members_of_a_synthetic_key_is_the_one_row():
     assert list(members.values_list('pk', flat=True)) == [blank.pk]
 
 
-@pytest.mark.parametrize('bad', [':notanumber', ':', ':999999999'])
+@pytest.mark.parametrize('bad', [':notanumber', ':', ':999999999', ':0', ':-4',
+                                 ':99999999999999999999'])
 def test_a_malformed_or_unknown_key_returns_nothing_rather_than_raising(bad):
+    """An id past bigint reaches Postgres as an out-of-range comparison and
+    raises DataError -- a 500 for what is only an unknown group."""
     row('A', 'Albumin')
     assert not group_members(SourceCodeConceptMapping.objects.all(), bad).exists()
 
@@ -237,3 +241,27 @@ def test_the_members_endpoint_validates_its_inputs(api):
     _, members = api
     assert members().status_code == 400
     assert members(label='albumin', section='Nonsense').status_code == 400
+
+
+def test_expanding_honours_the_filters_the_entry_was_counted_under(api):
+    """An entry's members/seen describe the filtered set. Expanding one that
+    says "1 code" under a provenance filter must not open into all of them."""
+    _, members = api
+    row('KEEP', 'Albumin', seen=1, origin_system='curator')
+    row('HIDDEN', 'ALBUMIN', seen=1, origin_system='hk-labs')
+    assert len(members(label='albumin').data['results']) == 2
+    filtered = members(label='albumin', provenance='curator').data['results']
+    assert [r['source_code'] for r in filtered] == ['KEEP']
+
+
+def test_expanding_follows_a_search_across_tabs_the_way_browse_does(api):
+    """browse searches every tab; the members endpoint must not quietly
+    restrict to the active one, or an entry expands into fewer rows than it
+    counted."""
+    _, members = api
+    row('HIT-ICD', 'Albumin', seen=1, source_vocabulary_id='ICD10')
+    row('HIT-RX', 'ALBUMIN', seen=1, source_vocabulary_id='RxNorm')
+    both = members(label='albumin', source='ICD10', search='HIT-').data['results']
+    assert sorted(r['source_code'] for r in both) == ['HIT-ICD', 'HIT-RX']
+    # Without a search it stays on the tab.
+    assert [r['source_code'] for r in members(label='albumin', source='ICD10').data['results']] == ['HIT-ICD']

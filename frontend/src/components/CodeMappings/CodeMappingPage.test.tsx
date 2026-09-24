@@ -1780,6 +1780,101 @@ describe("server mapping pages", () => {
       { params: expect.objectContaining({ label: ":77" }) }));
   });
 
+  it("keeps a label's two sections apart when expanding", async () => {
+    // albumin with some codes proposed and some approved is an entry in both
+    // sections. Keyed on the label alone, expanding one would show the other's
+    // rows, and its chevron would collapse the wrong group.
+    mockGet.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
+      if (url === "/v1/code-mappings/") {
+        return Promise.resolve({ data: browseData({
+          rollup: true,
+          groups: { Unmapped: [entry({ members: 2 })], Mapped: [entry({ members: 1, status: "approved" })] },
+          pages: { Unmapped: { page: 1, page_size: 100, total: 1 }, Mapped: { page: 1, page_size: 100, total: 1 },
+                   Rejected: { page: 1, page_size: 100, total: 0 }, "Athena Mapped": { page: 1, page_size: 100, total: 0 } },
+        }) });
+      }
+      if (url === "/v1/code-mappings/group/") {
+        const section = config?.params?.section;
+        return Promise.resolve({ data: { results: [
+          { ...proposedRow, mapping_id: section === "Mapped" ? 82 : 81,
+            source_code: section === "Mapped" ? "MAPPED-CODE" : "UNMAPPED-CODE" }] } });
+      }
+      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+    });
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    const unmapped = await screen.findByRole("table", { name: "Unmapped mappings" });
+    fireEvent.click(within(unmapped).getByRole("button", { name: /Expand Albumin/ }));
+    expect(await screen.findByText("UNMAPPED-CODE")).toBeInTheDocument();
+    // The Mapped section starts collapsed.
+    fireEvent.click(screen.getByRole("button", { name: /^Mapped/ }));
+    // Its entry is still collapsed too, not showing the Unmapped rows.
+    const mapped = screen.getByRole("table", { name: "Mapped mappings" });
+    expect(within(mapped).getByRole("button", { name: /Expand Albumin/ })).toBeInTheDocument();
+    fireEvent.click(within(mapped).getByRole("button", { name: /Expand Albumin/ }));
+    expect(await screen.findByText("MAPPED-CODE")).toBeInTheDocument();
+    expect(screen.getByText("UNMAPPED-CODE")).toBeInTheDocument();
+  });
+
+  it("scopes the members request to the tab the server chose, before any tab is clicked", async () => {
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/v1/code-mappings/") {
+        return Promise.resolve({ data: browseData({
+          rollup: true, selected_source: "ICD10", groups: { Unmapped: [entry()] },
+          tabs: [{ vocabulary_id: "ICD10", label: "ICD-10", is_standard: false, proposed: 3, approved: 0, athena: 0 }],
+        }) });
+      }
+      if (url === "/v1/code-mappings/group/") return Promise.resolve({ data: { results: [] } });
+      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+    });
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: /Expand Albumin/ }));
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/group/",
+      { params: expect.objectContaining({ source: "ICD10" }) }));
+  });
+
+  it("carries the active search and provenance filter into the members request", async () => {
+    // The entry's counts describe the filtered set, so expanding it must not
+    // open into the rows the filter existed to hide.
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/v1/code-mappings/") {
+        return Promise.resolve({ data: browseData({ rollup: true, groups: { Unmapped: [entry()] } }) });
+      }
+      if (url === "/v1/code-mappings/group/") return Promise.resolve({ data: { results: [] } });
+      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+    });
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    await screen.findByRole("table", { name: "Unmapped mappings" });
+    fireEvent.change(screen.getByLabelText("Filter by provenance"), { target: { value: "curator" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Expand Albumin/ }));
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/group/",
+      { params: expect.objectContaining({ provenance: "curator" }) }));
+  });
+
+  it("still shows the Athena section when grouped", async () => {
+    // It is gated on rows the server no longer sends under rollup, so it
+    // vanished entirely along with its export menu.
+    renderBrowse({
+      rollup: true,
+      groups: { "Athena Mapped": [entry({ label: "ferritin", description: "Ferritin" })] },
+      pages: { Unmapped: { page: 1, page_size: 100, total: 0 }, Mapped: { page: 1, page_size: 100, total: 0 },
+               Rejected: { page: 1, page_size: 100, total: 0 }, "Athena Mapped": { page: 1, page_size: 100, total: 1 } },
+    });
+    // The section renders at all -- it was gated on rows the server no longer
+    // sends under rollup, so it disappeared along with its export menu.
+    const heading = await screen.findByRole("button", { name: /^Athena Mapped/ });
+    fireEvent.click(heading);
+    expect(await screen.findByRole("table", { name: "Athena Mapped mappings" })).toBeInTheDocument();
+  });
+
+  it("does not offer a sort it cannot apply while grouped", async () => {
+    renderBrowse({ rollup: true, groups: { Unmapped: [entry()] } });
+    const table = await screen.findByRole("table", { name: "Unmapped mappings" });
+    // Grouped entries are always ordered by summed Seen; browse validates
+    // order_<index> and then ignores it.
+    expect(within(table).queryByRole("button", { name: "Seen" })).not.toBeInTheDocument();
+    expect(within(table).getByText("Seen").closest("th")).toHaveAttribute("aria-sort", "none");
+  });
+
   it("requests the next page and sorts the full section on the server", async () => {
     mockGet.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
       if (url === "/v1/code-mappings/") {

@@ -40,14 +40,8 @@ def _group_key():
     )
 
 
-def group_entries(queryset, page, page_size):
-    """Return ``(entries, total_groups)`` for one section, ordered by Seen.
-
-    ``entries`` are dicts, not model instances: a group has no single row
-    behind it. A one-member group carries ``mapping_id`` so the client can
-    render it exactly as it renders a row today.
-    """
-    grouped = (
+def _grouped(queryset):
+    return (
         queryset.order_by()
         .annotate(group_key=_group_key())
         .values('group_key')
@@ -84,9 +78,23 @@ def group_entries(queryset, page, page_size):
         )
         .order_by('-seen', 'group_key')
     )
-    total = grouped.count()
+
+
+def count_groups(queryset):
+    """How many entries a section holds, for pagination."""
+    return _grouped(queryset).count()
+
+
+def group_entries(queryset, page, page_size):
+    """One page of entries for a section, ordered by summed Seen.
+
+    Entries are dicts, not model instances: a group has no single row behind
+    it. A one-member group carries ``mapping_id`` so the client can act on it
+    the way it acts on a row.
+    """
+    grouped = _grouped(queryset)
     start = (page - 1) * page_size
-    entries = [
+    return [
         {
             'label': entry['label'],
             'description': entry['description'],
@@ -105,14 +113,18 @@ def group_entries(queryset, page, page_size):
         }
         for entry in grouped[start:start + page_size]
     ]
-    return entries, total
 
 
 def group_members(queryset, label):
     """The rows behind one entry: a real label, or ``:<pk>`` for a single row."""
     if label.startswith(SYNTHETIC_PREFIX):
         try:
-            return queryset.filter(pk=int(label[len(SYNTHETIC_PREFIX):]))
+            pk = int(label[len(SYNTHETIC_PREFIX):])
         except ValueError:
             return queryset.none()
+        # A pk past bigint reaches Postgres as an out-of-range comparison and
+        # raises DataError -- a 500 for what is only an unknown group.
+        if not 0 < pk <= 9223372036854775807:
+            return queryset.none()
+        return queryset.filter(pk=pk)
     return queryset.filter(source_label_norm=label)
