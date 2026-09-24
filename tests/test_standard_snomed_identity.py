@@ -22,7 +22,7 @@ pytestmark = pytest.mark.django_db
 def historical_apps():
     with override_settings(MIGRATION_MODULES={}):
         return MigrationLoader(connection).project_state([
-            ('omop_core', '0259_normalize_snomed_oid_mappings'),
+            ('omop_core', '0260_normalize_snomed_oid_mappings'),
         ]).apps
 
 
@@ -52,7 +52,7 @@ def test_migration_prefers_valid_standard_source_and_preserves_evidence(historic
         invalid_reason='D' if rx_kind == 'retired' else None)
     row = proposal(source,target)
     candidate_before = Candidate.objects.values().get(mapping=row)
-    migration = import_module('omop_core.migrations.0260_prefer_standard_snomed_identities')
+    migration = import_module('omop_core.migrations.0261_prefer_standard_snomed_identities')
     with connection.schema_editor(atomic=False) as editor:
         migration.prefer_standard_snomed_identities(historical_apps, editor)
     row.refresh_from_db()

@@ -123,7 +123,7 @@ code system. Crossmap imports and new curator mappings store `SNOMED`; lookup
 accepts either spelling and preserves the caller's spelling in response keys.
 Source codes and destination concept IDs are not changed by this normalization.
 
-Migration `0259_normalize_snomed_oid_mappings` merges redundant imported OID
+Migration `0260_normalize_snomed_oid_mappings` merges redundant imported OID
 rows into approved canonical mappings and normalizes alias-only rows. Only
 untouched HT-FHIR proposals with a matching, active standard SNOMED destination
 and consistent domain/table are automatically approved. Curator decisions,
@@ -145,7 +145,7 @@ an automatic SNOMED-to-RxNorm translation. Crossmap imports prefer its exact
 SNOMED identity and its actual domain over the external crossmap destination.
 Existing mappings are not overwritten by re-imports.
 
-Migration `0260_prefer_standard_snomed_identities` corrects untouched imported
+Migration `0261_prefer_standard_snomed_identities` corrects untouched imported
 proposals whose selected RxNorm destination is missing, nonstandard or invalid.
 It approves the matching active standard SNOMED concept, corrects domain/table
 metadata, retains imported candidates and encounter counts, and snapshots the
@@ -212,3 +212,42 @@ excluded from the latest batch-run link. Requests without `async: true` retain
 the synchronous response, which now also includes the complete candidate pool.
 As with batch runs, live polling requires the queued dispatcher; inline execution
 returns all completed stages in the initial response.
+
+### Repair nonstandard SNOMED crossmap destinations from local relationships
+
+Migration `0262_reconcile_snomed_local_relationships` follows the identity repair.
+It starts with untouched imported SNOMED proposals whose RxNorm destination is
+missing or nonstandard, locates the source in `concept`, and reads its current
+outgoing `Maps to` rows from `concept_relationship`. It uses each environment's
+installed tables: there is no bundled mapping data, network lookup, export, or
+instance-specific ID list. Counts therefore depend on local vocabulary coverage.
+
+A single active standard destination becomes approved. Multiple active standard
+destinations replace the old candidates and remain proposed with no selected
+target, for curator review. No valid destination leaves the row unchanged. Only
+direct SNOMED relationships are used; indirect RxNorm recovery is deferred.
+Retired source codes can be resolved through their still-current relationships.
+Missing relationship targets are reported as incomplete evidence rather than
+approving from an incomplete target set. Destinations in deprecated vocabularies,
+locally authored concepts, and invalid/nonstandard destinations are excluded.
+
+Approval uses the destination's actual domain. Domains without clinical storage
+support (including Device) retain a blank table and cannot resolve as Drug.
+The resolver also leaves the multiple-destination queue for curator selection.
+Reimporting the HealthTree artifact preserves the repaired candidate set.
+
+Approved/rejected mappings, human attribution, locks, suggestion decisions and
+archived suggestion reviews are protected. The migration rechecks row eligibility
+under locks in bounded transactions. It preserves encounter counts, descriptions,
+source provenance and review history; original mapping/candidate definitions and
+relationship evidence are recorded in notes before replacement. Only SCCM and
+its destination candidates are written; concepts, relationships and clinical
+facts are unchanged. Repeated execution does not modify repaired rows. This is
+irreversible automatically: use the audit snapshots or a backup for manual
+recovery rather than overwriting later curation.
+
+Preview without writes or locks:
+
+```sh
+python manage.py audit_snomed_relationship_mappings
+```

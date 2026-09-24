@@ -9,6 +9,7 @@ from omop_core.management.embedding_command import EmbeddingLoadCommand
 
 from omop_core.models import Concept, SourceCodeConceptMapping, MappingDestinationCandidate
 from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE, canonical_source_vocabulary
+from omop_core.data_migrations.snomed_relationships_v1 import REPAIRED_ORIGINS
 from omop_core.services.snomed_identity import apply_import_identity, snomed_identities
 
 
@@ -113,6 +114,8 @@ class Command(EmbeddingLoadCommand):
                 additions, updates = [], []
                 for key, candidates in grouped.items():
                     mapping = stored[key]
+                    if mapping.origin_system in REPAIRED_ORIGINS:
+                        continue
                     for (vocab, code), candidate in candidates.items():
                         target = targets.get((vocab, code))
                         target_id = target.pk if target else None

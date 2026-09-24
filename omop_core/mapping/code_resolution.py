@@ -52,6 +52,7 @@ from omop_core.mapping.therapy import (
 )
 from omop_core.signals import suppress_patient_record_refresh
 from omop_core.services.source_vocabularies import VOCABULARY_OID_ALIASES, canonical_source_vocabulary
+from omop_core.data_migrations.snomed_relationships_v1 import SINGLE_ORIGIN, MULTIPLE_ORIGIN
 from omop_core.services.snomed_identity import IDENTITY_ORIGIN, is_standard_snomed, promote_crossmap_identity
 from omop_core.services.source_vocabularies import table_for_domain
 
@@ -340,7 +341,7 @@ def _promote_if_loaded(
 
 def _waiting_for_vocabulary(mapping: SourceCodeConceptMapping) -> bool:
     """True for an untouched import proposal holding only a placeholder or a gap."""
-    if mapping.status != 'proposed' or mapping.origin != 'import':
+    if mapping.origin_system == MULTIPLE_ORIGIN or mapping.status != 'proposed' or mapping.origin != 'import':
         return False
     if mapping.reviewer_id is not None or mapping.suggested_target_concept_id is not None:
         return False
@@ -392,7 +393,7 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
     # lose to an automatic natural-key lookup.
     approved = approved_mapping_for(source_vocabulary_id, source_code)
     if approved is not None:
-        if approved.origin_system == IDENTITY_ORIGIN:
+        if approved.origin_system in (IDENTITY_ORIGIN, SINGLE_ORIGIN):
             return _identity_for_table(approved, table)
         return approved.target_concept, approved
 
