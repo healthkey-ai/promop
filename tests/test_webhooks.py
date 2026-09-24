@@ -23,6 +23,7 @@ from patient_portal.models import (
     WebhookSubscriptionChange,
 )
 from patient_portal.tasks import deliver_webhook, dispatch_pending_webhooks
+from patient_portal import webhooks as webhooks_module
 from patient_portal.webhooks import (
     compute_hmac_signature, encode_payload, enqueue_delivery, publish_event,
     resolve_webhook_url, send_webhook,
@@ -591,6 +592,232 @@ def test_a_change_record_cannot_be_rewritten_or_removed(setup):
         change.delete()
     change.refresh_from_db()
     assert change.url_after == subscription.url
+
+
+def test_an_organization_cannot_hold_unbounded_destinations(setup, settings):
+    """Each subscription adds an insert to every clinical write of that org.
+
+    The cost lands inside the transaction of the write that triggered it, so an
+    unbounded list is an organization's own admin multiplying the cost of that
+    organization's writes.
+    """
+    settings.WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG = 2
+    org, other, person, user, subscription = setup
+    client = APIClient()
+    client.force_login(user)
+
+    def create(host):
+        return client.post('/api/v1/webhooks/subscriptions/', {
+            'organization': org.pk, 'url': f'https://{host}.example/events',
+            'event_types': ['lab.updated'],
+        }, format='json')
+
+    assert create('second').status_code == 201
+    refused = create('third')
+    assert refused.status_code == 400
+    assert 'at most 2' in str(refused.data)
+
+    # A removed subscription receives nothing, so it does not hold a slot.
+    assert client.delete(f'/api/v1/webhooks/subscriptions/{subscription.pk}/').status_code == 204
+    assert create('third').status_code == 201
+
+
+@pytest.mark.django_db(transaction=True)
+def test_two_creates_cannot_both_take_the_last_slot(setup, settings):
+    """A count taken before the write commits is not a bound.
+
+    Both requests read one slot left, both insert, and the organization ends up
+    over the cap. The window is normally a millisecond, so the transaction here
+    is held open after the insert until the other request has had its turn:
+    without the lock the second count runs inside that window and sees room.
+    """
+    import threading
+
+    settings.WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG = 2
+    org, other, person, user, subscription = setup
+    inserted = threading.Event()
+    real_record = webhooks_module.record_subscription_change
+
+    def hold_the_transaction_open(*args, **kwargs):
+        change = real_record(*args, **kwargs)
+        # Still inside perform_create's transaction: the row is written and
+        # uncommitted, which is exactly the state the lock has to cover.
+        if not inserted.is_set():
+            inserted.set()
+            # Long enough for the second request to reach the count — two
+            # orders of magnitude over what that takes. The failure mode of a
+            # loaded machine is a false pass, never a false failure: the second
+            # request would then be refused on the merits instead of by the
+            # lock.
+            time.sleep(1.5)
+        return change
+
+    def create(host):
+        client = APIClient()
+        client.force_login(user)
+        try:
+            return client.post('/api/v1/webhooks/subscriptions/', {
+                'organization': org.pk, 'url': f'https://{host}.example/events',
+                'event_types': ['lab.updated'],
+            }, format='json').status_code
+        finally:
+            close_old_connections()
+
+    # One patch around both requests. Entering it per thread nests two contexts
+    # whose exits interleave, and the second restores the first thread's mock
+    # rather than the original.
+    with patch('patient_portal.api.webhook_views.record_subscription_change',
+               side_effect=hold_the_transaction_open):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(create, 'second')
+            inserted.wait(timeout=5)
+            second = pool.submit(create, 'third')
+            codes = sorted([first.result(), second.result()])
+
+    assert codes == [201, 400], codes
+    assert WebhookSubscription.objects.filter(
+        organization=org, deleted_at__isnull=True).count() == 2
+
+
+def test_a_reader_who_cannot_change_the_destination_does_not_see_it(trusted_professional):
+    """For a Slack- or Zapier-shaped receiver the path is the credential.
+
+    Reads follow the wider admin reach on purpose — a trust-derived
+    professional should be able to see that an organization sends events, and
+    where. Holding the credential is a different thing.
+    """
+    client, org, other, professional = trusted_professional
+    subscription = WebhookSubscription.objects.get(organization=org)
+
+    listed = client.get(f'/api/v1/webhooks/subscriptions/{subscription.pk}/')
+    assert listed.status_code == 200
+    assert listed.data['url'] == 'https://subscriber.example/***'
+    assert '/events' not in client.get('/api/v1/webhooks/subscriptions/').content.decode()
+
+
+def test_a_direct_admin_still_sees_the_whole_destination(setup):
+    org, other, person, user, subscription = setup
+    client = APIClient()
+    client.force_login(user)
+    assert client.get(f'/api/v1/webhooks/subscriptions/{subscription.pk}/').data['url'] == (
+        'https://subscriber.example/events')
+
+
+def test_a_token_the_admin_delegated_does_not_carry_the_destination(setup):
+    """The grant is the admin's; the credential would be the application's.
+
+    An OAuth token a direct admin delegated to a third-party application
+    resolves to that admin, so an admin-grant check alone would hand the
+    application a destination it cannot obtain by any other route here — the
+    same reasoning that makes writes require an interactive session.
+    """
+    from oauth2_provider.models import AccessToken, Application
+
+    org, other, person, user, subscription = setup
+    app = Application.objects.create(
+        name='Reader integration', client_type=Application.CLIENT_CONFIDENTIAL,
+        authorization_grant_type=Application.GRANT_AUTHORIZATION_CODE, user=user,
+    )
+    token = AccessToken.objects.create(
+        application=app, user=user, token='delegated-reader-token',
+        scope='patient/*.read', expires=timezone.now() + timedelta(hours=1),
+    )
+    machine = APIClient()
+    machine.force_authenticate(user, token=token)
+
+    response = machine.get(f'/api/v1/webhooks/subscriptions/{subscription.pk}/')
+    assert response.status_code == 200, response.data
+    # It can see that the organization sends events, and to which host. The
+    # part a receiver may treat as a shared secret it does not get.
+    assert response.data['url'] == 'https://subscriber.example/***'
+
+
+def test_rotating_the_secret_keeps_the_destination_and_records_who(setup):
+    """Rotation used to mean create a new subscription and delete the old one.
+
+    That moved the destination for no reason and, before removal became a mark,
+    destroyed the old subscription's delivery history along with it.
+    """
+    org, other, person, user, subscription = setup
+    client = APIClient()
+    client.force_login(user)
+    original = subscription.secret
+
+    response = client.post(f'/api/v1/webhooks/subscriptions/{subscription.pk}/rotate-secret/')
+    assert response.status_code == 200
+    assert len(response.data['secret']) >= 32
+    assert response.data['secret'] != original
+    assert response['Cache-Control'] == 'no-store'
+
+    subscription.refresh_from_db()
+    assert subscription.secret == response.data['secret']
+    assert subscription.url == 'https://subscriber.example/events'
+
+    recorded = WebhookSubscriptionChange.objects.get(
+        action=WebhookSubscriptionChange.ACTION_ROTATE)
+    assert recorded.actor_id == str(user.pk)
+    assert recorded.url_before == recorded.url_after == subscription.url
+    # Neither trail carries a secret — the one replaced or the one issued.
+    from patient_portal.models import AuditEvent
+    trails = str(recorded.__dict__) + json.dumps(
+        [event.detail for event in AuditEvent.objects.all()], default=str)
+    assert original not in trails and subscription.secret not in trails
+
+
+def test_rotation_needs_the_same_authority_as_any_other_egress_write(trusted_professional, setup):
+    client, org, other, professional = trusted_professional
+    subscription = WebhookSubscription.objects.get(organization=org)
+    before = subscription.secret
+    # 403 exactly: the caller administers no organization directly, so the
+    # permission class refuses before the narrowed queryset is consulted.
+    assert client.post(
+        f'/api/v1/webhooks/subscriptions/{subscription.pk}/rotate-secret/',
+    ).status_code == 403
+    subscription.refresh_from_db()
+    assert subscription.secret == before
+
+
+@pytest.mark.parametrize('resource_id', [
+    'lab report: elevated CRP, see notes', 'has space', 'tab\tseparated',
+    'line\nbreak', 'a' * 129,
+    # A NUL reaches a jsonb column, which refuses it — the insert would raise
+    # inside the transaction that also writes the idempotency row, so the
+    # sender would retry into the same 500 forever.
+    'lab-\x00-456', 'bell-\x07', 'del-\x7f',
+    # Unicode whitespace Python's \s knows about. In the middle, not leading:
+    # DRF trims the ends before validating, so a leading one is simply removed.
+    'nb\u00a0sp',
+    '',  # refused by allow_blank rather than by the pattern, but refused
+])
+def test_a_relayed_resource_id_must_be_an_identifier(setup, resource_id):
+    """Whatever a partner puts here, this deployment forwards under its own
+    signature — so it cannot be a free-text channel for clinical detail.
+
+    The rule is "no whitespace": narrative needs spaces, identifiers do not.
+    """
+    response = inbound(payload={
+        'id': f'event-{abs(hash(resource_id))}', 'type': 'lab.updated',
+        'data': {'person_id': 420001, 'resource_id': resource_id},
+    })
+    assert response.status_code == 400
+    assert not WebhookDelivery.objects.exists()
+
+
+@pytest.mark.parametrize('resource_id', [
+    'Observation/abc-123',
+    'urn:uuid:5e3f2b1a-0c4d-4e6f-8a9b-1c2d3e4f5a6b',
+    # The FHIR token form and padded base64: an allowlist of characters
+    # rejected both, and this field accepted any string until today.
+    'http://hospital.example/mrn|12345',
+    'YWJjZGVmZw==',
+])
+def test_an_identifier_a_partner_may_already_send_is_still_relayed(setup, resource_id):
+    assert inbound(payload={
+        'id': f'event-{abs(hash(resource_id))}', 'type': 'lab.updated',
+        'data': {'person_id': 420001, 'resource_id': resource_id},
+    }).status_code == 202
+    delivered = WebhookDelivery.objects.get()
+    assert delivered.payload['data']['resource_id'] == resource_id
 
 
 def test_patient_and_expired_admin_cannot_manage_subscriptions(setup):
@@ -1821,13 +2048,18 @@ def test_a_trust_cannot_redirect_or_delete_an_existing_subscription(trusted_prof
     assert subscription.deleted_at is None and subscription.active
 
 
-def test_a_trust_still_reads_the_subscriptions_it_could_always_see(trusted_professional):
+def test_a_trust_still_sees_the_subscription_and_its_host(trusted_professional):
     client, org, other, professional = trusted_professional
     listing = client.get('/api/v1/webhooks/subscriptions/')
     assert listing.status_code == 200
     rows = listing.data['results'] if isinstance(listing.data, dict) else listing.data
     urls = [row['url'] for row in rows]
-    assert 'https://subscriber.example/events' in urls
+    # Narrowing reads would hide an organization's egress configuration from
+    # someone it has already trusted with its patients — the wrong direction
+    # for review. What they do not get is the part a receiver may be treating
+    # as a credential; see
+    # test_a_reader_who_cannot_change_the_destination_does_not_see_it.
+    assert 'https://subscriber.example/***' in urls
 
 
 def test_a_patient_copy_announces_one_event_per_table_not_one_per_row(setup):
