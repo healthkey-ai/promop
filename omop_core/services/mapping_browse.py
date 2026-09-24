@@ -5,6 +5,7 @@ from rest_framework.exceptions import ValidationError
 
 from omop_core.services import source_vocabularies as vocab
 from omop_core.services.mapping_destinations import with_destination_counts
+from omop_core.services.mapping_rollup import group_entries
 from omop_core.services.source_retirement import mapping_source_retirement
 
 OVERALL = '__overall__'
@@ -27,6 +28,18 @@ def canonical_source(source):
     if source in vocab.WEARABLE_SOURCE_VOCABULARIES:
         return 'OpenWearables'
     return {**vocab.ICD10CM_MERGE, **vocab.VOCABULARY_OID_ALIASES}.get(source, source)
+
+
+#: How each section carves the tab. Shared with the group-members endpoint so
+#: expanding an entry shows the rows the entry was actually counted from -- a
+#: label whose codes are split across Unmapped and Mapped is two entries, and
+#: expanding either must not show the other's rows.
+SECTION_FILTERS = {
+    'Unmapped': lambda qs: qs.exclude(origin_system='athena').exclude(status__in=['approved', 'rejected']),
+    'Mapped': lambda qs: qs.exclude(origin_system='athena').filter(status='approved'),
+    'Rejected': lambda qs: qs.exclude(origin_system='athena').filter(status='rejected'),
+    'Athena Mapped': lambda qs: qs.filter(origin_system='athena'),
+}
 
 
 def _provenance_options(counts_by_origin):
@@ -139,13 +152,12 @@ def browse_mappings(mappings, params, serialize):
         totals = {key: sum(bucket.get(key, 0) for bucket in selected_counts)
                   for key in ('unmapped', 'mapped', 'athena', 'rejected', 'athena_rejected')}
     rejected = totals['rejected']
-    section_queries = {
-        'Unmapped': filtered.exclude(origin_system='athena').exclude(status__in=['approved', 'rejected']),
-        'Mapped': filtered.exclude(origin_system='athena').filter(status='approved'),
-        'Rejected': filtered.exclude(origin_system='athena').filter(status='rejected'),
-        'Athena Mapped': filtered.filter(origin_system='athena'),
-    }
-    pages, selected_ids = {}, []
+    section_queries = {name: carve(filtered) for name, carve in SECTION_FILTERS.items()}
+    # Rollup is opt-in. The flat queue stays the default so a caller that has
+    # not been taught about groups keeps the behaviour it has, and so the two
+    # shapes can be compared on the same data.
+    rollup = params.get('rollup') == '1'
+    pages, selected_ids, groups = {}, [], {}
     section_totals = [totals['unmapped'], totals['mapped'], rejected,
                       totals['athena'] + totals['athena_rejected']]
     for index, (section, query) in enumerate(section_queries.items()):
@@ -165,6 +177,17 @@ def browse_mappings(mappings, params, serialize):
         if field is None:
             raise ValidationError({'order': 'Unknown sort column.'})
         total = section_totals[index]
+        if rollup:
+            # Pagination counts groups, not rows -- a page of 100 rows ordered
+            # by a group's summed Seen would cut groups in half, and the whole
+            # point is that one entry is one decision.
+            entries, total = group_entries(query, requested_page, PAGE_SIZE)
+            page = min(requested_page, max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE))
+            if page != requested_page:
+                entries, _ = group_entries(query, page, PAGE_SIZE)
+            groups[section] = entries
+            pages[section] = dict(page=page, page_size=PAGE_SIZE, total=total)
+            continue
         page = min(requested_page, max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE))
         # Correlated destination counts and retirement lookups run only on the
         # bounded page unless the curator explicitly sorts by destination count.
@@ -187,4 +210,5 @@ def browse_mappings(mappings, params, serialize):
 
     return dict(results=[render(row) for row in results], duplicates=[render(row) for row in duplicates],
                 tabs=tabs, selected_source=source, pages=pages, rejected_count=rejected,
-                provenances=provenances, selected_provenance=provenance)
+                provenances=provenances, selected_provenance=provenance,
+                groups=groups, rollup=rollup)

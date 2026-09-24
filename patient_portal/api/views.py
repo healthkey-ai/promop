@@ -10879,6 +10879,67 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     return mapping, repoint
 
 
+#: A rollup entry can stand for thousands of codes; nobody reads past a few
+#: hundred, and the members come back ordered by Seen so the cut falls on
+#: the ones that matter least.
+MAX_GROUP_MEMBERS = 500
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def code_mapping_group(request):
+    """The vendor codes behind one rollup entry.
+
+    The grouped queue shows one row per label; this is what expanding it
+    fetches. Kept out of the browse payload because a label can stand for
+    thousands of codes -- ``albumin`` for 2,557 -- and a page of 100 entries
+    would otherwise carry every member of every one of them.
+
+    Scoped by section for the same reason the entry was: a label whose codes
+    are split across Unmapped and Mapped is two entries, and expanding either
+    must not show the other's rows.
+    """
+    if not _can_manage_field_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    from omop_core.services.athena_mapping_guard import (
+        source_tab_vocabularies, without_icd10_athena_duplicates)
+    from omop_core.services.mapping_browse import OVERALL, SECTION_FILTERS
+    from omop_core.services.mapping_destinations import with_destination_counts
+    from omop_core.services.mapping_rollup import group_members
+    from omop_core.services.source_retirement import mapping_source_retirement
+
+    label = request.query_params.get('label')
+    if not label:
+        return Response({'detail': 'label is required.'}, status=status.HTTP_400_BAD_REQUEST)
+    section = request.query_params.get('section', 'Unmapped')
+    if section not in SECTION_FILTERS:
+        return Response({'detail': 'Unknown section.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    mappings = without_icd10_athena_duplicates(SourceCodeConceptMapping.objects.select_related(
+        'target_concept', 'created_by', 'reviewer', 'locked_by'))
+    source = request.query_params.get('source')
+    if source is not None and source != OVERALL:
+        mappings = mappings.filter(source_vocabulary_id__in=source_tab_vocabularies(source))
+    rows = list(with_destination_counts(
+        SECTION_FILTERS[section](group_members(mappings, label))
+    ).order_by('-occurrence_count', 'source_code', 'id')[:MAX_GROUP_MEMBERS + 1])
+    truncated = len(rows) > MAX_GROUP_MEMBERS
+    rows = rows[:MAX_GROUP_MEMBERS]
+    metadata = mapping_source_retirement(rows)
+    return Response({
+        'label': label,
+        'section': section,
+        'results': [_serialize_code_mapping_row(
+            row.target_concept, row, metadata[row.pk], destination_count=row.destination_count)
+            for row in rows],
+        # A group can be larger than anyone will read. Saying so beats a silent
+        # cut, and the members are ordered by Seen so the ones shown are the
+        # ones that matter.
+        'truncated': truncated,
+    })
+
+
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def code_mapping_list(request):

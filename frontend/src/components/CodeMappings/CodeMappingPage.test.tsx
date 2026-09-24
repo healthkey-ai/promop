@@ -1600,7 +1600,16 @@ describe("server mapping pages", () => {
     rejected_count: 0,
     provenances: [{ origin_system: "curator", count: 2 }, { origin_system: "", count: 1 }],
     selected_provenance: "",
+    groups: {},
+    rollup: false,
     ...overrides,
+  });
+
+  const entry = (over: Record<string, unknown> = {}) => ({
+    label: "albumin", description: "Albumin", members: 2557, seen: 141875, proposed: 2557,
+    destination_concept_id: null, destination_concept_name: null, destination_concept_code: null,
+    destination_vocabulary_id: null, mixed_destinations: false, status: "proposed",
+    mixed_statuses: false, mapping_id: null, ...over,
   });
 
   const renderBrowse = (overrides: Record<string, unknown> = {}) => {
@@ -1681,6 +1690,94 @@ describe("server mapping pages", () => {
     expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", {
       params: expect.not.objectContaining({ provenance: expect.anything() }),
     });
+  });
+
+  // #1571: one review row per label. albumin arrives under 2,557 vendor codes,
+  // so a per-code queue asks the same question 2,557 times and scatters the
+  // volume so the queue cannot be ordered usefully.
+  it("does not group until asked", async () => {
+    renderBrowse();
+    await screen.findByRole("table", { name: "Unmapped mappings" });
+    expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", {
+      params: expect.not.objectContaining({ rollup: expect.anything() }),
+    });
+  });
+
+  it("asks the server to group and shows one row for the label", async () => {
+    let payload = browseData();
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/v1/code-mappings/") return Promise.resolve({ data: payload });
+      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+    });
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    await screen.findByRole("table", { name: "Unmapped mappings" });
+    payload = browseData({ rollup: true, groups: { Unmapped: [entry()] } });
+    fireEvent.click(screen.getByLabelText("Group by label"));
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", {
+      params: expect.objectContaining({ rollup: 1 }),
+    }));
+    const table = await screen.findByRole("table", { name: "Unmapped mappings" });
+    expect(within(table).getByText("2,557 codes")).toBeInTheDocument();
+    expect(within(table).getByText("141,875")).toBeInTheDocument();
+    expect(within(table).getByText("Albumin")).toBeInTheDocument();
+  });
+
+  it("names no concept for a group whose members disagree", async () => {
+    renderBrowse({ rollup: true, groups: { Unmapped: [entry({
+      mixed_destinations: true, destination_concept_id: null, destination_concept_name: null,
+    })] } });
+    const table = await screen.findByRole("table", { name: "Unmapped mappings" });
+    expect(within(table).getByText("Mixed destinations")).toBeInTheDocument();
+  });
+
+  it("names the concept when every member agrees", async () => {
+    renderBrowse({ rollup: true, groups: { Unmapped: [entry({
+      destination_concept_id: 3024561, destination_concept_name: "Albumin [Mass/volume] in Serum or Plasma",
+      destination_concept_code: "1751-7", destination_vocabulary_id: "LOINC",
+    })] } });
+    const table = await screen.findByRole("table", { name: "Unmapped mappings" });
+    expect(within(table).getByText("Albumin [Mass/volume] in Serum or Plasma")).toBeInTheDocument();
+    expect(within(table).getByText("LOINC:1751-7")).toBeInTheDocument();
+  });
+
+  it("expands a group into its vendor codes, and collapses again", async () => {
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/v1/code-mappings/") {
+        return Promise.resolve({ data: browseData({ rollup: true, groups: { Unmapped: [entry()] } }) });
+      }
+      if (url === "/v1/code-mappings/group/") {
+        return Promise.resolve({ data: { results: [
+          { ...proposedRow, mapping_id: 91, source_code: "EPIC#aaa" },
+          { ...proposedRow, mapping_id: 92, source_code: "674310" },
+        ] } });
+      }
+      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+    });
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    const toggle = await screen.findByRole("button", { name: /Expand Albumin/ });
+    fireEvent.click(toggle);
+    expect(await screen.findByText("EPIC#aaa")).toBeInTheDocument();
+    expect(screen.getByText("674310")).toBeInTheDocument();
+    // The members endpoint is asked for this label, in this section.
+    expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/group/",
+      { params: expect.objectContaining({ label: "albumin", section: "Unmapped" }) });
+    fireEvent.click(screen.getByRole("button", { name: /Collapse Albumin/ }));
+    expect(screen.queryByText("EPIC#aaa")).not.toBeInTheDocument();
+  });
+
+  it("asks for an unlabelled row by its synthetic key", async () => {
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/v1/code-mappings/") {
+        return Promise.resolve({ data: browseData({ rollup: true, groups: { Unmapped: [
+          entry({ label: null, description: "", members: 1, mapping_id: 77 })] } }) });
+      }
+      if (url === "/v1/code-mappings/group/") return Promise.resolve({ data: { results: [] } });
+      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+    });
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: /Expand unlabelled/ }));
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/group/",
+      { params: expect.objectContaining({ label: ":77" }) }));
   });
 
   it("requests the next page and sorts the full section on the server", async () => {
