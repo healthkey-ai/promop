@@ -4258,6 +4258,20 @@ class TrialSearchPreferences(models.Model):
             "schema here — see the class docstring."
         ),
     )
+    # A column rather than a key in `preferences`: `reset` empties that
+    # payload wholesale, so a flag inside it would be cleared by the Reset
+    # filters button and the patient asked again for having pressed it; and
+    # `non_default_filter_count` counts keys there, so a truthy one would tick
+    # the UI's "Filters (N)" badge up for everyone who has been asked.
+    #
+    # The rationale above is a comment rather than more `help_text` — the
+    # field has one, and it is the API contract, not this. Re-wording
+    # `help_text` costs an `AlterField` migration, which is why the long
+    # reasoning lives out here where it can be edited freely.
+    weights_wizard_offered = models.BooleanField(
+        default=False,
+        help_text="Whether this patient has been offered the weights wizard.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
