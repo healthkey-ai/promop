@@ -13,9 +13,15 @@ sides passed. `docs/webhooks_architecture.md` asks bulk writers to call
 
 `QuerySet.delete()` is deliberately not in that list. `Collector.can_fast_delete`
 returns False when a model has `post_delete` listeners, so a queryset delete
-fetches the rows and fires the signal for each one. Deletions are announced —
-one event per row, which is noisy for a large delete but not silent, and
-demanding an aggregate here would duplicate them.
+fetches the rows and fires the signal for each one — an aggregate demanded here
+would duplicate them.
+
+That makes a delete *signalled*, which is not the same as *announced*. For
+anything but a `PatientRecord` the receiver resolves the organization through
+`PatientRecord`, so a cascade that removed the record first leaves the rest of
+the rows with nowhere to send their event: a patient-wide delete can go quiet
+while a single-table delete is noisy. That is a defect in the publisher, not
+something this guard can see — issue #1592.
 
 **Granularity.** The check is per function, not per file. A file-level escape
 would have exempted `patient_portal/api/views.py`, `api/fhir/sync.py` and
@@ -56,34 +62,50 @@ ALLOWED = {
         'clinical rows. Subscribers hear the write that triggered the '
         'derivation; this would repeat it under a second name.',
     'omop_core/services/patient_record_service.py::recompute_formula_field':
-        'same read model, one field at a time.',
+        'the same read model, recomputed across every record of every tenant. '
+        'No clinical write triggered it, so there is nothing for an event to '
+        'correspond to; what it writes is derived state.',
     'omop_core/services/sample_patient_disease_status.py::ensure_sample_patient_disease_status':
         'seeds sample data for a demo tenant.',
     'omop_core/services/genomics.py::delete_variant':
-        'NOT REVIEWED — marks one measurement erroneous through a queryset, so '
-        'the signal a .save() on the same row would have fired does not. See '
-        'issue #1592.',
+        'NOT REVIEWED — marks measurements erroneous through querysets, so the '
+        'post_save a .save() would have fired does not. It ends with '
+        'refresh_patient_record, so a patient.changed still goes out; what is '
+        'lost is the lab.updated typing a Measurement save would have carried. '
+        'A second update in the same function (a queryset held in a local) is '
+        'invisible to this guard. See issue #1592.',
 }
 
 
-def _scopes(node, prefix=''):
+def _scopes(tree):
     """(qualified name, node) for every scope in a module, module included.
 
     Qualified, because a file holds several `patch` methods: keyed on the bare
     name, one scope's entry overwrites another's and a real writer disappears
     behind a namesake that has nothing to report.
+
+    Each scope is yielded once. Recursing into ordinary statements with the
+    module's own empty prefix yielded `<module>` again for every statement in
+    the file — paired with the statement rather than the module, so a write
+    inside a module-level `if` was reported as silent even when the module
+    published, and counted once per enclosing statement.
     """
-    if not prefix:
-        yield '<module>', node
+    yield '<module>', tree
+    yield from _nested_scopes(tree, '')
+
+
+def _nested_scopes(node, prefix):
     for child in ast.iter_child_nodes(node):
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
             name = f'{prefix}{child.name}'
             yield name, child
-            yield from _scopes(child, prefix=f'{name}.')
+            yield from _nested_scopes(child, f'{name}.')
         elif isinstance(child, ast.ClassDef):
-            yield from _scopes(child, prefix=f'{prefix}{child.name}.')
-        elif not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            yield from _scopes(child, prefix=prefix)
+            yield from _nested_scopes(child, f'{prefix}{child.name}.')
+        else:
+            # A statement, not a scope: keep looking inside it for defs, and
+            # do not yield anything of its own.
+            yield from _nested_scopes(child, prefix)
 
 
 def _in_scope(node):

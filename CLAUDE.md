@@ -1231,7 +1231,10 @@ celery -A promop worker --loglevel=info --queues=celery,webhooks
 Name the queues, or use `start-worker.sh`, which does. Webhook delivery is
 routed to `webhooks` (`CELERY_TASK_ROUTES`), and a bare `celery -A promop
 worker` consumes only the default queue — every delivery would sit unclaimed
-while the recovery sweep re-queued it every five minutes.
+while the recovery sweep re-queued it every five minutes. One worker draining
+both is right for development and does not isolate them: before webhooks are
+enabled in production, run a second worker with `CELERY_WORKER_QUEUES=webhooks`
+and set `CELERY_WORKER_QUEUES=celery` on this one.
 
 The task is idempotent — derivation clears and rebuilds every field — so a
 duplicate call is extra load, not a correctness problem. That is why nothing
