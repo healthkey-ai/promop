@@ -370,16 +370,22 @@ switching it off is a redeploy of the web service and the worker, not a config
 flip: plan on minutes, not seconds. What it stops is the publisher and the
 delivery task — `publish_event` writes no outbox rows and `deliver_webhook`
 returns immediately — so clinical writes stop carrying the outbox insert that
-shares their transaction. Rows already written stay; they are delivered when
-the flag comes back, subject to retention.
+shares their transaction. Rows already written stay, and retention does not
+remove them — `prune_webhooks` deletes only terminal rows — so a long
+disablement accumulates a backlog that all goes out at once when the flag
+returns.
 
 Faster levers that do not need a deploy, in order of reach:
 
 1. `PATCH {"active": false}` on one subscription — stops that destination.
    Queued deliveries for it are cancelled when the worker reaches them.
 2. `DELETE` on it — the same, and it leaves the listing; the history stays.
-3. Scale the webhook worker to zero, or stop draining the `webhooks` queue.
-   Deliveries accumulate in the outbox and go out when it returns.
+3. Scale the webhook worker to zero, or stop draining the `webhooks` queue —
+   but only together with the flag. The sweep does not know the queue is
+   unattended: it keeps handing rows over, up to 1000 a minute, into a list
+   nobody reads. The staging broker is 256 MB with `maxmemoryPolicy:
+   noeviction`, so that fills it and then rejects writes, taking clinical task
+   queuing down with it.
 
 None of those stops the outbox *insert*, which is the part that shares a
 transaction with clinical writes. If lock contention on that insert is the

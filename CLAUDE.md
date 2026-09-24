@@ -1225,8 +1225,13 @@ patch Celery or run it eager.
 Run a worker with:
 
 ```bash
-celery -A promop worker --loglevel=info
+celery -A promop worker --loglevel=info --queues=celery,webhooks
 ```
+
+Name the queues, or use `start-worker.sh`, which does. Webhook delivery is
+routed to `webhooks` (`CELERY_TASK_ROUTES`), and a bare `celery -A promop
+worker` consumes only the default queue — every delivery would sit unclaimed
+while the recovery sweep re-queued it every five minutes.
 
 The task is idempotent — derivation clears and rebuilds every field — so a
 duplicate call is extra load, not a correctness problem. That is why nothing

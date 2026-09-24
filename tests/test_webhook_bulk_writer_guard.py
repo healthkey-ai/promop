@@ -1,10 +1,9 @@
 """Every bulk writer of patient data has to say so, or say why it does not.
 
-Django's `post_save`/`post_delete` do not fire for `bulk_create`,
-`bulk_update`, `QuerySet.update()` or `QuerySet.delete()`. The webhook
-publisher is connected to those signals, so a writer that uses any of them
-changes patient data silently — no subscriber hears it, and nothing in the code
-says that was intended.
+Django's `post_save` does not fire for `bulk_create`, `bulk_update` or
+`QuerySet.update()`. The webhook publisher is connected to that signal, so a
+writer that uses one of them changes patient data silently — no subscriber
+hears it, and nothing in the code says that was intended.
 
 That is not hypothetical: five such paths were found by hand while building
 this feature (FHIR sync's `bulk_create`, the TP53 cache reconciler's
@@ -12,99 +11,157 @@ this feature (FHIR sync's `bulk_create`, the TP53 cache reconciler's
 sides passed. `docs/webhooks_architecture.md` asks bulk writers to call
 `publish_patient_bulk_change`; nothing enforced it.
 
-This scans the request-path packages — the API and the services a request
-reaches — and requires each file that bulk-writes a patient-event model either
-to publish, to suppress deliberately, or to appear below with a reason.
-Management commands are out of scope: an operator running maintenance is not a
-tenant's data changing under them.
+`QuerySet.delete()` is deliberately not in that list. `Collector.can_fast_delete`
+returns False when a model has `post_delete` listeners, so a queryset delete
+fetches the rows and fires the signal for each one. Deletions are announced —
+one event per row, which is noisy for a large delete but not silent, and
+demanding an aggregate here would duplicate them.
+
+**Granularity.** The check is per function, not per file. A file-level escape
+would have exempted `patient_portal/api/views.py`, `api/fhir/sync.py` and
+`services/patient_transfer.py` in their entirety — the files three of those
+five bugs lived in — because an unrelated call site elsewhere in the same file
+publishes.
+
+**What it does not see.** The receiver has to be spelled `Model.objects...`:
+a queryset held in a local (`qs = Measurement.objects.filter(...)`, then
+`qs.update(...)`), a related manager (`person.measurement_set.update(...)`),
+`self.get_queryset().update(...)`, an aliased import, `_raw_delete` and raw SQL
+all pass unnoticed. It catches the idiom this codebase actually writes, and is
+a ratchet against new ones, not a proof.
 """
 import ast
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCANNED = ('patient_portal/api', 'omop_core/services')
-BULK_CALLS = {'bulk_create', 'bulk_update', 'update', 'delete'}
-
-# Reasons, not exemptions. A file here still bulk-writes patient data; the
-# entry says why no event follows. "Not reviewed" is an honest value and is
-# tracked in the issue named beside it.
-ALLOWED = {
-    'patient_portal/api/org_views.py':
-        'marks derivation_version stale for a tenant. A derived-field marker, '
-        'not patient data: announcing it would fan one event per patient out '
-        'of an admin PATCH.',
-    'omop_core/services/patient_cleanup.py':
-        'deletes a patient\'s clinical rows immediately before the Person, '
-        'whose post_delete announces the removal once. Per-table events here '
-        'would repeat it for every table.',
-    'omop_core/services/patient_record_service.py':
-        'writes derivation bookkeeping onto the record it just derived; the '
-        'clinical write that triggered the derivation is what subscribers hear.',
-    'omop_core/services/sample_patient_disease_status.py':
-        'seeds sample data for a demo tenant.',
-    'patient_portal/api/lab_results/views.py':
-        'NOT REVIEWED — deletes measurements orphaned by deleting a visit, '
-        'and a subscriber plausibly wants that. See issue #1592.',
-    'omop_core/services/episode_service.py':
-        'NOT REVIEWED — deletes derived episode observations. See issue #1592.',
-    'omop_core/services/genomics.py':
-        'NOT REVIEWED — updates one measurement through a queryset, so the '
-        'signal does not fire for it. See issue #1592.',
-}
+BULK_CALLS = {'bulk_create', 'bulk_update', 'update'}
+ANNOUNCERS = {'publish_patient_bulk_change', 'suppress_webhook_events'}
 PATIENT_EVENT_CLASSES = {
     'Person', 'PatientRecord', 'Measurement', 'PatientDocument',
     'ConditionOccurrence', 'DrugExposure', 'Observation',
     'ProcedureOccurrence', 'PatientTrialEnrollment', 'Episode',
 }
 
+# Reasons, not exemptions. Each entry still bulk-writes patient data; it says
+# why no event follows. "NOT REVIEWED" is an honest value, and is tracked in
+# the issue named beside it.
+ALLOWED = {
+    'patient_portal/api/org_views.py::OrgDetailView.patch':
+        'marks derivation_version stale for a tenant when its unit policy '
+        'changes. A derived-field marker, not patient data: announcing it '
+        'would fan one event per patient out of an admin PATCH.',
+    'omop_core/services/patient_record_service.py::recompute_patient_record_fields':
+        'writes the record it has just derived — the read model, not the '
+        'clinical rows. Subscribers hear the write that triggered the '
+        'derivation; this would repeat it under a second name.',
+    'omop_core/services/patient_record_service.py::recompute_formula_field':
+        'same read model, one field at a time.',
+    'omop_core/services/sample_patient_disease_status.py::ensure_sample_patient_disease_status':
+        'seeds sample data for a demo tenant.',
+    'omop_core/services/genomics.py::delete_variant':
+        'NOT REVIEWED — marks one measurement erroneous through a queryset, so '
+        'the signal a .save() on the same row would have fired does not. See '
+        'issue #1592.',
+}
 
-def _bulk_writes(path):
-    """Calls like `Measurement.objects.bulk_create(...)` in one file."""
+
+def _scopes(node, prefix=''):
+    """(qualified name, node) for every scope in a module, module included.
+
+    Qualified, because a file holds several `patch` methods: keyed on the bare
+    name, one scope's entry overwrites another's and a real writer disappears
+    behind a namesake that has nothing to report.
+    """
+    if not prefix:
+        yield '<module>', node
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            name = f'{prefix}{child.name}'
+            yield name, child
+            yield from _scopes(child, prefix=f'{name}.')
+        elif isinstance(child, ast.ClassDef):
+            yield from _scopes(child, prefix=f'{prefix}{child.name}.')
+        elif not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield from _scopes(child, prefix=prefix)
+
+
+def _in_scope(node):
+    """Every node of this scope, not descending into nested functions.
+
+    They are scopes of their own: a publisher in the enclosing function says
+    nothing about what a closure inside it does, and vice versa.
+    """
+    stack = list(ast.iter_child_nodes(node))
+    while stack:
+        child = stack.pop()
+        yield child
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        stack.extend(ast.iter_child_nodes(child))
+
+
+def _bulk_writes(node):
+    """Calls like `Measurement.objects.bulk_create(...)` in this scope."""
     found = []
-    for node in ast.walk(ast.parse(path.read_text())):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+    for child in _in_scope(node):
+        if not (isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)):
             continue
-        if node.func.attr not in BULK_CALLS:
+        if child.func.attr not in BULK_CALLS:
             continue
-        receiver = ast.unparse(node.func.value)
-        if '.objects' not in receiver:
-            continue
+        receiver = ast.unparse(child.func.value)
         if any(f'{name}.objects' in receiver for name in PATIENT_EVENT_CLASSES):
-            found.append(f'{path.relative_to(ROOT)}:{node.lineno} {node.func.attr}')
-    return found
+            found.append((child.lineno, child.func.attr))
+    return sorted(found)
+
+
+def _announces(node):
+    return any(
+        (isinstance(child, ast.Name) and child.id in ANNOUNCERS)
+        or (isinstance(child, ast.Attribute) and child.attr in ANNOUNCERS)
+        for child in _in_scope(node)
+    )
+
+
+def _python_files():
+    for package in SCANNED:
+        for path in sorted((ROOT / package).rglob('*.py')):
+            if path.name.startswith('test_') or path.name == 'tests.py':
+                continue
+            if 'tests' in path.parts:
+                continue
+            yield path
+
+
+def _unannounced():
+    """{'path::function': [(line, call)]} for every scope that writes silently."""
+    silent = {}
+    for path in _python_files():
+        tree = ast.parse(path.read_text())
+        for name, node in _scopes(tree):
+            writes = _bulk_writes(node)
+            if writes and not _announces(node):
+                silent.setdefault(f'{path.relative_to(ROOT)}::{name}', []).extend(writes)
+    return silent
 
 
 def test_every_bulk_writer_of_patient_data_announces_it_or_says_why_not():
-    unannounced = {}
-    for package in SCANNED:
-        for path in sorted((ROOT / package).rglob('*.py')):
-            if path.name.startswith('test_') or path.name == 'tests.py' or 'tests' in path.parts:
-                continue
-            writes = _bulk_writes(path)
-            if not writes:
-                continue
-            source = path.read_text()
-            if 'publish_patient_bulk_change' in source or 'suppress_webhook_events' in source:
-                continue
-            relative = str(path.relative_to(ROOT))
-            if relative in ALLOWED:
-                continue
-            unannounced[relative] = writes
-
+    unannounced = {key: sites for key, sites in _unannounced().items() if key not in ALLOWED}
     assert not unannounced, (
         'These bulk-write a patient-event model without publishing an event. '
-        'Signals do not fire for bulk_create/bulk_update/QuerySet.update/delete, '
-        'so no subscriber hears the change. Call publish_patient_bulk_change, '
-        'or add the file to ALLOWED above with the reason:\n'
-        + '\n'.join(f'  {name}: {sites}' for name, sites in sorted(unannounced.items()))
+        'post_save does not fire for bulk_create/bulk_update/QuerySet.update, '
+        'so no subscriber hears the change. Call publish_patient_bulk_change '
+        'in that function, or add it to ALLOWED above with the reason:\n'
+        + '\n'.join(f'  {key}: {sites}' for key, sites in sorted(unannounced.items()))
     )
 
 
 def test_the_allowlist_has_no_stale_entries():
-    """An entry that no longer bulk-writes anything is a reason nobody needs."""
-    stale = [
-        name for name in ALLOWED
-        if not _bulk_writes(ROOT / name)
-        or 'publish_patient_bulk_change' in (ROOT / name).read_text()
-    ]
+    """An entry that no longer writes silently is a reason nobody needs.
+
+    Covers the ways one goes stale: the function grew a publisher, the writes
+    moved out of it, or the file was renamed or deleted.
+    """
+    silent = _unannounced()
+    stale = sorted(key for key in ALLOWED if key not in silent)
     assert not stale, f'ALLOWED entries that no longer need one: {stale}'
