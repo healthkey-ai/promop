@@ -115,6 +115,10 @@ class WebhookSubscriptionSerializer(serializers.ModelSerializer):
         data = super().to_representation(instance)
         request = self.context.get('request')
         if request is None:
+            # No caller to judge, so no disclosure. The viewset always supplies
+            # one; a future caller that does not should not be the exception
+            # that hands out a credential.
+            data['url'] = _masked_url(instance.url)
             return data
         may_change = (
             is_interactive_session(request)
@@ -300,8 +304,12 @@ class WebhookSubscriptionViewSet(viewsets.ModelViewSet):
         """
         if connection.vendor == 'postgresql':
             with connection.cursor() as cursor:
+                # Both arguments are int4 while the pk is a bigint. Folding it
+                # keeps the call in range; two organizations far enough apart
+                # can then share a key, which costs them a little serialisation
+                # of their own creates and nothing else.
                 cursor.execute('SELECT pg_advisory_xact_lock(%s, %s)',
-                               [self._CAP_LOCK_KEY, organization.pk])
+                               [self._CAP_LOCK_KEY, organization.pk % 2147483647])
         live = WebhookSubscription.objects.filter(
             organization=organization, deleted_at__isnull=True,
         ).count()
@@ -467,12 +475,18 @@ class InboundDataSerializer(serializers.Serializer):
     person_id = serializers.IntegerField(min_value=1)
     # An identifier, and nothing else. This value is passed through to every
     # subscriber of the organization, so whatever a partner puts here is what
-    # this deployment forwards under its own signature. Constrained to the
-    # shape of a resource identifier — no whitespace, no punctuation that
-    # carries a sentence — so a free-text field cannot become a channel for
-    # clinical detail the event shape does not claim to carry.
+    # this deployment forwards under its own signature, inside a payload
+    # classified as identifiers and event shape.
+    #
+    # The rule is "no whitespace", not a guess at identifier syntax. Narrative
+    # needs spaces; identifiers do not. An allowlist of characters looked
+    # tighter and was wrong — it rejected the FHIR token form
+    # `http://hospital.example/mrn|12345` and padded base64, both of which a
+    # partner may legitimately already be sending, and this field accepted any
+    # string before today. `\Z` rather than `$`, which in Python also matches
+    # before a trailing newline.
     resource_id = serializers.RegexField(
-        r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$', max_length=128, required=False,
+        r'\A\S{1,128}\Z', max_length=128, required=False,
     )
 
 

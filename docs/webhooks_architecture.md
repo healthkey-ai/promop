@@ -45,13 +45,15 @@ Supported inbound types are `lab.updated`, `document.received`, and
 `foundation.synced`. Each handler creates outbound delivery records for its
 matching active subscriptions and marks the inbound event processed in the same
 transaction. `data.person_id` must belong to the configured organization;
-`data.resource_id` is optional, and must look like an identifier —
-`[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}`, so no whitespace and no sentence
-punctuation. It is passed through to every subscriber of the organization under
-this deployment's own signature, and the payload is classified as identifiers
-and event shape ([payload classification](soc2/webhook-payload-classification.md));
-a free-text field there would be a channel for clinical narrative the
-classification does not cover. Additional input fields are ignored and are not
+`data.resource_id` is optional and must contain no whitespace (`\A\S{1,128}\Z`).
+It is passed through to every subscriber of the organization under this
+deployment's own signature, and the payload is classified as identifiers and
+event shape ([payload classification](soc2/webhook-payload-classification.md));
+free text there would be a channel for clinical narrative the classification
+does not cover, and narrative needs spaces. The rule is deliberately not an
+allowlist of identifier characters: this field accepted any string before, and
+an allowlist rejected the FHIR token form `http://hospital.example/mrn|12345`
+and padded base64, which a partner may already be sending. Additional input fields are ignored and are not
 forwarded. Bodies are limited to 64 KiB. Invalid signatures return 401, invalid
 JSON/schema or a patient outside the source organization returns 400. The
 patient rule governs a first-time event id only: a replay of an event this
@@ -351,9 +353,10 @@ what says whether anything was sent there at all. Reading the table as "where
 events went" means reading the rows with attempts, not every row. Dead letters remain available for investigation; there
 is no automatic reset of exhausted attempts.
 
-Migrations `patient_portal.0021` to `0024` add four tables, a uniqueness
+Migrations `patient_portal.0021` to `0023` add four tables, a uniqueness
 constraint, a partial index for active deliveries, and the change log with the
-`deleted_at`/`destination_url` columns;
+`deleted_at`/`destination_url` columns; `0024` only widens the change log's
+`action` choices and has no schema effect;
 it does not modify existing clinical rows. Apply migrations before web/worker
 deployment. Treat signing secrets and delivery records as protected application
 data when configuring database access, backups, and retention.

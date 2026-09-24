@@ -23,6 +23,7 @@ from patient_portal.models import (
     WebhookSubscriptionChange,
 )
 from patient_portal.tasks import deliver_webhook, dispatch_pending_webhooks
+from patient_portal import webhooks as webhooks_module
 from patient_portal.webhooks import (
     compute_hmac_signature, encode_payload, enqueue_delivery, publish_event,
     resolve_webhook_url, send_webhook,
@@ -626,25 +627,44 @@ def test_two_creates_cannot_both_take_the_last_slot(setup, settings):
     """A count taken before the write commits is not a bound.
 
     Both requests read one slot left, both insert, and the organization ends up
-    over the cap — which is why the count runs under a lock inside the writing
-    transaction rather than in validation.
+    over the cap. The window is normally a millisecond, so the transaction here
+    is held open after the insert until the other request has had its turn:
+    without the lock the second count runs inside that window and sees room.
     """
+    import threading
+
     settings.WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG = 2
     org, other, person, user, subscription = setup
+    inserted = threading.Event()
+    real_record = webhooks_module.record_subscription_change
+
+    def hold_the_transaction_open(*args, **kwargs):
+        change = real_record(*args, **kwargs)
+        # Still inside perform_create's transaction: the row is written and
+        # uncommitted, which is exactly the state the lock has to cover.
+        if not inserted.is_set():
+            inserted.set()
+            time.sleep(1.5)
+        return change
 
     def create(host):
         client = APIClient()
         client.force_login(user)
         try:
-            return client.post('/api/v1/webhooks/subscriptions/', {
-                'organization': org.pk, 'url': f'https://{host}.example/events',
-                'event_types': ['lab.updated'],
-            }, format='json').status_code
+            with patch('patient_portal.api.webhook_views.record_subscription_change',
+                       side_effect=hold_the_transaction_open):
+                return client.post('/api/v1/webhooks/subscriptions/', {
+                    'organization': org.pk, 'url': f'https://{host}.example/events',
+                    'event_types': ['lab.updated'],
+                }, format='json').status_code
         finally:
             close_old_connections()
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        codes = sorted(pool.map(create, ['second', 'third']))
+        first = pool.submit(create, 'second')
+        inserted.wait(timeout=5)
+        second = pool.submit(create, 'third')
+        codes = sorted([first.result(), second.result()])
 
     assert codes == [201, 400], codes
     assert WebhookSubscription.objects.filter(
@@ -729,27 +749,37 @@ def test_rotating_the_secret_keeps_the_destination_and_records_who(setup):
         action=WebhookSubscriptionChange.ACTION_ROTATE)
     assert recorded.actor_id == str(user.pk)
     assert recorded.url_before == recorded.url_after == subscription.url
-    # The secret itself is never written to either trail.
-    assert original not in str(recorded.__dict__)
+    # Neither trail carries a secret — the one replaced or the one issued.
+    from patient_portal.models import AuditEvent
+    trails = str(recorded.__dict__) + json.dumps(
+        [event.detail for event in AuditEvent.objects.all()], default=str)
+    assert original not in trails and subscription.secret not in trails
 
 
 def test_rotation_needs_the_same_authority_as_any_other_egress_write(trusted_professional, setup):
     client, org, other, professional = trusted_professional
     subscription = WebhookSubscription.objects.get(organization=org)
     before = subscription.secret
+    # 403 exactly: the caller administers no organization directly, so the
+    # permission class refuses before the narrowed queryset is consulted.
     assert client.post(
         f'/api/v1/webhooks/subscriptions/{subscription.pk}/rotate-secret/',
-    ).status_code in (403, 404)
+    ).status_code == 403
     subscription.refresh_from_db()
     assert subscription.secret == before
 
 
 @pytest.mark.parametrize('resource_id', [
-    'lab report: elevated CRP, see notes', 'has space', 'ключ', 'a' * 129, '',
+    'lab report: elevated CRP, see notes', 'has space', 'tab\tseparated',
+    'line\nbreak', 'a' * 129,
+    '',  # refused by allow_blank rather than by the pattern, but refused
 ])
 def test_a_relayed_resource_id_must_be_an_identifier(setup, resource_id):
     """Whatever a partner puts here, this deployment forwards under its own
-    signature — so it cannot be a free-text channel for clinical detail."""
+    signature — so it cannot be a free-text channel for clinical detail.
+
+    The rule is "no whitespace": narrative needs spaces, identifiers do not.
+    """
     response = inbound(payload={
         'id': f'event-{abs(hash(resource_id))}', 'type': 'lab.updated',
         'data': {'person_id': 420001, 'resource_id': resource_id},
@@ -758,13 +788,21 @@ def test_a_relayed_resource_id_must_be_an_identifier(setup, resource_id):
     assert not WebhookDelivery.objects.exists()
 
 
-def test_a_well_formed_resource_id_is_still_relayed(setup):
+@pytest.mark.parametrize('resource_id', [
+    'Observation/abc-123',
+    'urn:uuid:5e3f2b1a-0c4d-4e6f-8a9b-1c2d3e4f5a6b',
+    # The FHIR token form and padded base64: an allowlist of characters
+    # rejected both, and this field accepted any string until today.
+    'http://hospital.example/mrn|12345',
+    'YWJjZGVmZw==',
+])
+def test_an_identifier_a_partner_may_already_send_is_still_relayed(setup, resource_id):
     assert inbound(payload={
-        'id': 'event-ok', 'type': 'lab.updated',
-        'data': {'person_id': 420001, 'resource_id': 'Observation/abc-123'},
+        'id': f'event-{abs(hash(resource_id))}', 'type': 'lab.updated',
+        'data': {'person_id': 420001, 'resource_id': resource_id},
     }).status_code == 202
     delivered = WebhookDelivery.objects.get()
-    assert delivered.payload['data']['resource_id'] == 'Observation/abc-123'
+    assert delivered.payload['data']['resource_id'] == resource_id
 
 
 def test_patient_and_expired_admin_cannot_manage_subscriptions(setup):
@@ -1995,7 +2033,7 @@ def test_a_trust_cannot_redirect_or_delete_an_existing_subscription(trusted_prof
     assert subscription.deleted_at is None and subscription.active
 
 
-def test_a_trust_still_reads_the_subscriptions_it_could_always_see(trusted_professional):
+def test_a_trust_still_sees_the_subscription_and_its_host(trusted_professional):
     client, org, other, professional = trusted_professional
     listing = client.get('/api/v1/webhooks/subscriptions/')
     assert listing.status_code == 200

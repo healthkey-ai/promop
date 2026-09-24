@@ -36,9 +36,13 @@ the stream as PHI.
   technical detail. This is a contractual control: the code cannot check it,
   and the code does not pretend to.
 - **The list of destinations is reviewable, and the trail of who set them is
-  durable.** `webhook_subscription_change` records every change with its actor
-  and both destinations, and the matching `AuditEvent` row is signed and
-  chained ([egress authority](webhook-egress-authority.md)).
+  durable.** `webhook_subscription_change` records every change made through
+  the API with its actor and the destination on each side of it — a create has
+  no "before" and a delete no "after" — and the matching `AuditEvent` row is
+  signed and chained ([egress authority](webhook-egress-authority.md)). A
+  change made at a shell or by a data migration writes no row, because the
+  actor cannot be named from there; direct database access to
+  `webhook_subscription` is a privileged path and is controlled as one.
 - **Delivery is minimised in what it carries and where it goes.** Public HTTPS
   on 443 only, TLS verified against a pinned address, signed with a
   per-subscription secret, and the body holds no clinical value — so a
@@ -46,10 +50,9 @@ the stream as PHI.
   content.
 - **Relayed inbound events are constrained.** An event arriving from a partner
   is republished to that organization's subscribers under this deployment's
-  own signature. `resource_id` is passed through, so it is restricted to the
-  shape of an identifier rather than accepted as free text: a partner cannot
-  use it to push clinical narrative into a payload this document classifies as
-  identifiers only.
+  own signature. `resource_id` is passed through, so it must contain no
+  whitespace: a partner cannot use it to push clinical narrative into a payload
+  this document classifies as identifiers only.
 
 ## What this does not decide
 
