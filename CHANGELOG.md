@@ -8,6 +8,13 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Label rollup for the Code Mapping queue** — a "Group by label" toggle shows
+  one review row per label instead of one per vendor code, ordered by the
+  group's summed Seen and paginated by group. Expanding a row fetches its codes
+  from `GET /v1/code-mappings/group/`, which renders them exactly as queue rows.
+  A group names a destination only when every member agrees. Off by default;
+  the flat queue is unchanged (#1571).
+
 - **Label grouping key for code mappings** — `SourceCodeConceptMapping` gains
   `source_label_norm`, a database-generated normalisation of
   `source_code_description`. Vendor-local codes are opaque (Epic flowsheet ids,

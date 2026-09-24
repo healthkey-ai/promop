@@ -574,7 +574,33 @@ type BrowseResponse = {
   rejected_count: number;
   provenances: { origin_system: string; count: number }[];
   selected_provenance: string;
+  groups: Partial<Record<MappingSection, GroupEntry[]>>;
+  rollup: boolean;
 };
+
+/** One review row standing for every vendor code sharing a label. */
+type GroupEntry = {
+  label: string | null;
+  description: string;
+  members: number;
+  seen: number;
+  proposed: number;
+  destination_concept_id: number | null;
+  destination_concept_name: string | null;
+  destination_concept_code: string | null;
+  destination_vocabulary_id: string | null;
+  mixed_destinations: boolean;
+  status: string | null;
+  mixed_statuses: boolean;
+  mapping_id: number | null;
+};
+
+/** The key the members endpoint takes: a label, or ':<pk>' for an unlabelled row. */
+const groupKey = (entry: GroupEntry) => entry.label ?? `:${entry.mapping_id}`;
+/** Cache key. A label whose codes span Unmapped and Mapped is two entries, and
+ *  the server scopes members by section -- keying on the label alone would let
+ *  one entry show the other's rows. */
+const expansionKey = (entry: GroupEntry, section: MappingSection) => `${section}|${groupKey(entry)}`;
 const sectionNames: MappingSection[] = ["Unmapped", "Mapped", "Rejected", "Athena Mapped"];
 const DEFAULT_SECTION_SORT: SectionSort = { column: "occurrence_count", descending: true };
 // A blank origin_system is a real value -- enqueue_unmapped_source_codes writes
@@ -619,6 +645,9 @@ export default function CodeMappingPage() {
       (sorts, section) => ({ ...sorts, [section]: DEFAULT_SECTION_SORT }), {}),
   );
   const [provenanceFilter, setProvenanceFilter] = useState("");
+  const [rollup, setRollup] = useState(false);
+  // key -> members, or null while the fetch is in flight.
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, CodeMappingRow[] | null>>({});
   const [navigationTarget, setNavigationTarget] = useState<{ id: string } | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
   const [suggesting, setSuggesting] = useState(false);
@@ -697,6 +726,7 @@ export default function CodeMappingPage() {
     };
     if (activeVocabulary !== null) params.source = activeVocabulary;
     if (provenanceFilter) params.provenance = provenanceFilter;
+    if (rollup) params.rollup = 1;
     sectionNames.forEach((section, index) => {
       params[`page_${index}`] = pages[section] || 1;
       const sort = sectionSorts[section];
@@ -726,7 +756,7 @@ export default function CodeMappingPage() {
     } finally {
       if (sequence === loadSequence.current) setLoading(false);
     }
-  }, [activeVocabulary, debouncedSearch, pages, sectionSorts, provenanceFilter]);
+  }, [activeVocabulary, debouncedSearch, pages, sectionSorts, provenanceFilter, rollup]);
 
   const refreshCurrent = useRef(fetchAll);
   useEffect(() => { refreshCurrent.current = fetchAll; }, [fetchAll]);
@@ -886,6 +916,43 @@ export default function CodeMappingPage() {
   // rows, so picking one option does not remove the rest.
   const provenanceOptions = browse?.provenances ?? [];
   const provenanceValue = (origin: string) => origin || BLANK_PROVENANCE;
+
+  const loadGroup = useCallback(async (entry: GroupEntry, section: MappingSection) => {
+    const cacheKey = expansionKey(entry, section);
+    setExpandedGroups((current) => ({ ...current, [cacheKey]: null }));
+    // A tab switch clears the cache; without this, a fetch already in flight
+    // resolves afterwards and re-inserts the previous tab's rows.
+    const sequence = loadSequence.current;
+    try {
+      const { data } = await api.get<{ results: CodeMappingRow[] }>("/v1/code-mappings/group/", {
+        params: {
+          label: groupKey(entry), section,
+          // The server picks the default tab until one is clicked, so sending
+          // activeVocabulary would fetch across every vocabulary on first load.
+          ...(selectedVocabulary !== null ? { source: selectedVocabulary } : {}),
+          ...(debouncedSearch ? { search: debouncedSearch } : {}),
+          ...(provenanceFilter ? { provenance: provenanceFilter } : {}),
+        },
+      });
+      if (sequence !== loadSequence.current) return;
+      setExpandedGroups((current) => ({ ...current, [cacheKey]: data.results || [] }));
+    } catch {
+      if (sequence !== loadSequence.current) return;
+      // Leave it collapsed rather than showing an empty group, which would
+      // read as "this label has no codes".
+      setExpandedGroups(({ [cacheKey]: _failed, ...rest }) => rest);
+      setError("Could not load the codes in that group.");
+    }
+  }, [selectedVocabulary, debouncedSearch, provenanceFilter]);
+
+  const toggleGroup = useCallback((entry: GroupEntry, section: MappingSection) => {
+    const cacheKey = expansionKey(entry, section);
+    if (cacheKey in expandedGroups) {
+      setExpandedGroups(({ [cacheKey]: _removed, ...rest }) => rest);
+      return;
+    }
+    void loadGroup(entry, section);
+  }, [expandedGroups, loadGroup]);
   // A filter can outlive the values that produced it -- the rows carrying it
   // get approved away, or the server's default tab moves before any tab has
   // been clicked. Keep it listed and keep the control mounted, or there is no
@@ -1252,6 +1319,19 @@ export default function CodeMappingPage() {
     // Reflect a successful server write immediately, never a speculative
     // approval. Background reload reconciles ordering, totals and other users.
     setRows((current) => current.map((row) => row.mapping_id === saved.mapping_id ? saved : row));
+    // Under rollup the queue rows live in the expanded groups, not in `rows`
+    // or `browse.results` -- both of which the server leaves empty. Without
+    // this, approving an expanded member leaves it showing its old status and
+    // the curator's own write looks like it did nothing.
+    setExpandedGroups((current) => {
+      let touched = false;
+      const next = Object.fromEntries(Object.entries(current).map(([key, members]) => {
+        if (!members?.some((row) => row.mapping_id === saved.mapping_id)) return [key, members];
+        touched = true;
+        return [key, members.map((row) => row.mapping_id === saved.mapping_id ? saved : row)];
+      }));
+      return touched ? next : current;
+    });
     setBrowse((current) => {
       const previous = current?.results.find((row) => row.mapping_id === saved.mapping_id);
       if (!current || !previous || previous.status === saved.status
@@ -1524,16 +1604,135 @@ export default function CodeMappingPage() {
   const renderTable = (sectionRows: CodeMappingRow[], emptyText: string, section: MappingSection, { hideStatus = false }: { hideStatus?: boolean } = {}) => {
     const colCount = 7 + (showSystemColumn ? 1 : 0) + (hideStatus ? 0 : 2);
     const sort = sectionSorts[section];
+    // Present only when the server grouped this response; otherwise the flat
+    // queue renders exactly as before.
+    const groupEntries = browse?.rollup ? browse.groups[section] ?? [] : null;
     const pagination = browse?.pages[section];
+    // Grouped entries are always ordered by summed Seen: browse validates
+    // order_<index> and then ignores it. A header that still toggled would
+    // announce an ordering the table never applies, and refetch for nothing.
     const header = (label: string, column: SortColumn) => (
-      <th className="px-4 py-3 font-semibold" aria-sort={sort?.column === column ? (sort.descending ? "descending" : "ascending") : "none"}>
-        <button type="button" title={`Sort ${section} by ${label}`} className="inline-flex items-center gap-1 hover:underline focus:outline-2"
-          onClick={() => { setPages((previous) => ({ ...previous, [section]: 1 })); setSectionSorts((previous) => ({ ...previous, [section]: {
-            column, descending: previous[section]?.column === column ? !previous[section]?.descending : false,
-          } })); }}>
-          {label}<span aria-hidden="true">{sort?.column === column ? (sort.descending ? "↓" : "↑") : "↕"}</span>
-        </button>
+      <th className="px-4 py-3 font-semibold"
+        aria-sort={groupEntries || sort?.column !== column ? "none" : sort.descending ? "descending" : "ascending"}>
+        {groupEntries ? (
+          <span title={`${section} is grouped by label and ordered by Seen`}>{label}</span>
+        ) : (
+          <button type="button" title={`Sort ${section} by ${label}`} className="inline-flex items-center gap-1 hover:underline focus:outline-2"
+            onClick={() => { setPages((previous) => ({ ...previous, [section]: 1 })); setSectionSorts((previous) => ({ ...previous, [section]: {
+              column, descending: previous[section]?.column === column ? !previous[section]?.descending : false,
+            } })); }}>
+            {label}<span aria-hidden="true">{sort?.column === column ? (sort.descending ? "↓" : "↑") : "↕"}</span>
+          </button>
+        )}
       </th>
+    );
+    // Extracted so the rollup can render the same row under a group entry.
+    // A member row must behave exactly like a queue row -- same click to
+    // edit, same lock badge, same inline destination picker -- or expanding
+    // a group would quietly become a read-only view.
+    const renderRow = (row: CodeMappingRow) => (
+      <Fragment key={mappingRowId(row)}>
+          <tr
+            id={mappingRowId(row)}
+            role="button"
+            tabIndex={0}
+            onClick={() => openEditDialog(row)}
+            onKeyDown={(e) => {
+              if (e.target !== e.currentTarget) return;
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                openEditDialog(row);
+              }
+            }}
+            className={`scroll-mt-24 cursor-pointer hover:bg-slate-50 focus:outline-2 focus:outline-red-600 ${
+              navigationTarget?.id === mappingRowId(row) ? "bg-red-50" : ""
+            }`}
+          >
+            <td className="px-4 py-3 font-mono text-xs text-slate-900">
+              {row.locked_by_username && <span title={`Locked by ${row.locked_by_username}`} className="mr-1 text-amber-500">&#128274;</span>}
+              {row.source_code}
+            </td>
+            {showSystemColumn && (
+              <td className="px-4 py-3 text-xs text-slate-700">{systemLabel(row)}</td>
+            )}
+            <td className="px-4 py-3 text-right font-mono text-xs text-slate-700">{row.occurrence_count || 0}</td>
+            <td className="px-4 py-3 text-xs text-slate-700">{row.source_code_description || "—"}</td>
+            <td className="px-4 py-3 text-xs text-slate-700">{row.origin_system || "—"}</td>
+            <td className="px-4 py-3">
+              <div className="font-medium text-slate-950">{row.destination_concept_name}</div>
+              <div className="font-mono text-xs text-slate-500">
+                {row.destination_vocabulary_id}:{row.destination_concept_code}
+              </div>
+              {(row.measurement_type || row.suggested_unit) && (
+                <ConceptInputDetails domain_id={row.destination_domain_id || ""} measurement_type={row.measurement_type} suggested_unit={row.suggested_unit} example_units={row.example_units} />
+              )}
+              {section === "Unmapped" && row.mapping_id && <button type="button"
+                aria-label={`Choose destination for ${row.source_code}`}
+                aria-expanded={inlineMappingId === row.mapping_id}
+                onClick={event => { event.stopPropagation(); setInlineMappingId(current => current === row.mapping_id ? null : row.mapping_id); }}
+                className="mt-2 inline-flex items-center gap-1 rounded border border-slate-300 px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100">
+                <Search size={12} />{row.destination_concept_id ? "Change destination" : "Choose destination"}
+              </button>}
+            </td>
+            <td className="px-4 py-3 font-mono text-xs text-slate-900">{row.destination_concept_id}</td>
+            <td className={`px-4 py-3 text-center font-mono text-xs font-medium ${row.destination_count !== 1 ? "text-red-600" : "text-slate-700"}`}>{row.destination_count ?? 0}</td>
+            {!hideStatus && (
+            <td className="px-4 py-3">
+              <div className="inline-flex items-center gap-2">
+                <button
+                  type="button"
+                  // Stops a one-click approve from also opening the dialog.
+                  onClick={(e) => { e.stopPropagation(); void toggleApproval(row); }}
+                  className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
+                    row.status === "approved"
+                      ? "border-green-500 bg-green-500 text-white"
+                      : "border-slate-300 hover:border-slate-600"
+                  }`}
+                  title={row.status === "approved" ? "Mark mapping as proposed" : "Approve mapping"}
+                  aria-label={row.status === "approved" ? `Unapprove ${row.source_code}` : `Approve ${row.source_code}`}
+                >
+                  {row.status === "approved" && <Check size={10} />}
+                </button>
+                <span className={`inline-flex rounded px-2 py-1 text-xs font-medium ${statusClass[row.status]}`}>
+                  {row.status}
+                </span>
+                {row.suggest_strategy && (
+                  <span className="inline-flex rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700" title={`Suggested via ${strategyLabel[row.suggest_strategy] || row.suggest_strategy}`}>
+                    {strategyLabel[row.suggest_strategy] || row.suggest_strategy}
+                  </span>
+                )}
+              </div>
+            </td>
+            )}
+            {!hideStatus && (
+            <td className="px-4 py-3">
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); openEditDialog(row); }}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-300 text-slate-700 hover:bg-slate-100"
+                aria-label={`Edit ${row.source_code}`}
+              >
+                <Pencil size={14} />
+              </button>
+            </td>
+            )}
+          </tr>
+          {inlineMappingId === row.mapping_id && row.mapping_id && <tr>
+            <td colSpan={colCount} className="bg-slate-50 p-3">
+              <InlineDestinationPicker key={row.mapping_id} mappingId={row.mapping_id}
+                sourceLabel={`${row.source_vocabulary_id || "Uncoded"}:${row.source_code} — ${row.source_code_description}`}
+                vocabularies={reference.destination_vocabularies}
+                initialVocabulary={reference.destination_vocabularies.some(item => item.vocabulary_id === row.destination_vocabulary_id) ? row.destination_vocabulary_id : ""}
+                canApprove={canApprove} onCancel={() => setInlineMappingId(null)}
+                onSaved={(saved, concept) => {
+                  applySavedMapping(saved as CodeMappingRow);
+                  setInlineMappingId(null);
+                  setBanner(`${row.source_code}: saved ${concept.concept_name}${saved.status === "approved" ? " and approved the mapping" : " for review"}.`);
+                  void refreshCurrent.current();
+                }} />
+            </td>
+          </tr>}
+      </Fragment>
     );
     return (
     <div className="overflow-hidden rounded-md border border-slate-200 bg-white">
@@ -1553,111 +1752,62 @@ export default function CodeMappingPage() {
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
-          {(browse ? sectionRows : sortMappingRows(sectionRows, sort)).map((row) => (
-            <Fragment key={mappingRowId(row)}>
-            <tr
-              id={mappingRowId(row)}
-              role="button"
-              tabIndex={0}
-              onClick={() => openEditDialog(row)}
-              onKeyDown={(e) => {
-                if (e.target !== e.currentTarget) return;
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  openEditDialog(row);
-                }
-              }}
-              className={`scroll-mt-24 cursor-pointer hover:bg-slate-50 focus:outline-2 focus:outline-red-600 ${
-                navigationTarget?.id === mappingRowId(row) ? "bg-red-50" : ""
-              }`}
-            >
-              <td className="px-4 py-3 font-mono text-xs text-slate-900">
-                {row.locked_by_username && <span title={`Locked by ${row.locked_by_username}`} className="mr-1 text-amber-500">&#128274;</span>}
-                {row.source_code}
-              </td>
-              {showSystemColumn && (
-                <td className="px-4 py-3 text-xs text-slate-700">{systemLabel(row)}</td>
-              )}
-              <td className="px-4 py-3 text-right font-mono text-xs text-slate-700">{row.occurrence_count || 0}</td>
-              <td className="px-4 py-3 text-xs text-slate-700">{row.source_code_description || "—"}</td>
-              <td className="px-4 py-3 text-xs text-slate-700">{row.origin_system || "—"}</td>
-              <td className="px-4 py-3">
-                <div className="font-medium text-slate-950">{row.destination_concept_name}</div>
-                <div className="font-mono text-xs text-slate-500">
-                  {row.destination_vocabulary_id}:{row.destination_concept_code}
-                </div>
-                {(row.measurement_type || row.suggested_unit) && (
-                  <ConceptInputDetails domain_id={row.destination_domain_id || ""} measurement_type={row.measurement_type} suggested_unit={row.suggested_unit} example_units={row.example_units} />
-                )}
-                {section === "Unmapped" && row.mapping_id && <button type="button"
-                  aria-label={`Choose destination for ${row.source_code}`}
-                  aria-expanded={inlineMappingId === row.mapping_id}
-                  onClick={event => { event.stopPropagation(); setInlineMappingId(current => current === row.mapping_id ? null : row.mapping_id); }}
-                  className="mt-2 inline-flex items-center gap-1 rounded border border-slate-300 px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100">
-                  <Search size={12} />{row.destination_concept_id ? "Change destination" : "Choose destination"}
-                </button>}
-              </td>
-              <td className="px-4 py-3 font-mono text-xs text-slate-900">{row.destination_concept_id}</td>
-              <td className={`px-4 py-3 text-center font-mono text-xs font-medium ${row.destination_count !== 1 ? "text-red-600" : "text-slate-700"}`}>{row.destination_count ?? 0}</td>
-              {!hideStatus && (
-              <td className="px-4 py-3">
-                <div className="inline-flex items-center gap-2">
-                  <button
-                    type="button"
-                    // Stops a one-click approve from also opening the dialog.
-                    onClick={(e) => { e.stopPropagation(); void toggleApproval(row); }}
-                    className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
-                      row.status === "approved"
-                        ? "border-green-500 bg-green-500 text-white"
-                        : "border-slate-300 hover:border-slate-600"
-                    }`}
-                    title={row.status === "approved" ? "Mark mapping as proposed" : "Approve mapping"}
-                    aria-label={row.status === "approved" ? `Unapprove ${row.source_code}` : `Approve ${row.source_code}`}
-                  >
-                    {row.status === "approved" && <Check size={10} />}
-                  </button>
-                  <span className={`inline-flex rounded px-2 py-1 text-xs font-medium ${statusClass[row.status]}`}>
-                    {row.status}
-                  </span>
-                  {row.suggest_strategy && (
-                    <span className="inline-flex rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700" title={`Suggested via ${strategyLabel[row.suggest_strategy] || row.suggest_strategy}`}>
-                      {strategyLabel[row.suggest_strategy] || row.suggest_strategy}
-                    </span>
+          {groupEntries
+            ? groupEntries.map((entry) => {
+              const cacheKey = expansionKey(entry, section);
+              const open = cacheKey in expandedGroups;
+              const members = expandedGroups[cacheKey];
+              return (
+                <Fragment key={cacheKey}>
+                  <tr className="bg-slate-50/60">
+                    <td className="px-4 py-3">
+                      <button type="button"
+                        aria-expanded={open}
+                        aria-label={`${open ? "Collapse" : "Expand"} ${entry.description || "unlabelled"}`}
+                        onClick={() => toggleGroup(entry, section)}
+                        className="inline-flex items-center gap-2 text-left font-medium text-slate-900 hover:underline">
+                        <span aria-hidden="true" className="inline-block w-3">{open ? "▾" : "▸"}</span>
+                        <span className="font-mono text-xs">
+                          {entry.members === 1 ? "1 code" : `${entry.members.toLocaleString()} codes`}
+                        </span>
+                      </button>
+                    </td>
+                    {showSystemColumn && <td className="px-4 py-3" />}
+                    <td className="px-4 py-3 text-right font-mono text-xs text-slate-700">{entry.seen.toLocaleString()}</td>
+                    <td className="px-4 py-3 text-xs font-medium text-slate-900">{entry.description || "—"}</td>
+                    <td className="px-4 py-3" />
+                    <td className="px-4 py-3">
+                      {/* Naming one side of a disagreement is worse than
+                          naming neither, so a mixed group names no concept. */}
+                      {entry.mixed_destinations ? (
+                        <span className="text-xs font-medium text-amber-700">Mixed destinations</span>
+                      ) : entry.destination_concept_name ? (
+                        <>
+                          <div className="font-medium text-slate-950">{entry.destination_concept_name}</div>
+                          <div className="font-mono text-xs text-slate-500">
+                            {entry.destination_vocabulary_id}:{entry.destination_concept_code}
+                          </div>
+                        </>
+                      ) : <span className="text-xs text-slate-500">—</span>}
+                    </td>
+                    <td className="px-4 py-3 font-mono text-xs text-slate-900">
+                      {entry.mixed_destinations ? "" : entry.destination_concept_id ?? ""}
+                    </td>
+                    <td className="px-4 py-3" />
+                    {!hideStatus && <td className="px-4 py-3 text-xs text-slate-700">
+                      {entry.mixed_statuses ? "Mixed" : entry.status || "—"}
+                    </td>}
+                    {!hideStatus && <td className="px-4 py-3" />}
+                  </tr>
+                  {open && members === null && (
+                    <tr><td colSpan={colCount} className="px-4 py-3 text-center text-xs text-slate-500" role="status">Loading codes…</td></tr>
                   )}
-                </div>
-              </td>
-              )}
-              {!hideStatus && (
-              <td className="px-4 py-3">
-                <button
-                  type="button"
-                  onClick={(e) => { e.stopPropagation(); openEditDialog(row); }}
-                  className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-300 text-slate-700 hover:bg-slate-100"
-                  aria-label={`Edit ${row.source_code}`}
-                >
-                  <Pencil size={14} />
-                </button>
-              </td>
-              )}
-            </tr>
-            {inlineMappingId === row.mapping_id && row.mapping_id && <tr>
-              <td colSpan={colCount} className="bg-slate-50 p-3">
-                <InlineDestinationPicker key={row.mapping_id} mappingId={row.mapping_id}
-                  sourceLabel={`${row.source_vocabulary_id || "Uncoded"}:${row.source_code} — ${row.source_code_description}`}
-                  vocabularies={reference.destination_vocabularies}
-                  initialVocabulary={reference.destination_vocabularies.some(item => item.vocabulary_id === row.destination_vocabulary_id) ? row.destination_vocabulary_id : ""}
-                  canApprove={canApprove} onCancel={() => setInlineMappingId(null)}
-                  onSaved={(saved, concept) => {
-                    applySavedMapping(saved as CodeMappingRow);
-                    setInlineMappingId(null);
-                    setBanner(`${row.source_code}: saved ${concept.concept_name}${saved.status === "approved" ? " and approved the mapping" : " for review"}.`);
-                    void refreshCurrent.current();
-                  }} />
-              </td>
-            </tr>}
-            </Fragment>
-          ))}
-          {sectionRows.length === 0 && (
+                  {open && members && members.map(renderRow)}
+                </Fragment>
+              );
+            })
+            : (browse ? sectionRows : sortMappingRows(sectionRows, sort)).map(renderRow)}
+          {(groupEntries ? groupEntries.length === 0 : sectionRows.length === 0) && (
             <tr>
               <td colSpan={colCount} className="px-4 py-8 text-center text-sm text-slate-500">{emptyText}</td>
             </tr>
@@ -1745,6 +1895,13 @@ export default function CodeMappingPage() {
             {/* Provenance is a filter rather than the sort it used to be
                 (#1575): it finds curator-edited rows in one click however many
                 there are, and leaves the queue in Seen order. */}
+            <label className="inline-flex h-10 shrink-0 items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-700">
+              <input type="checkbox" checked={rollup}
+                onChange={(e) => { setPages({}); setExpandedGroups({}); setRollup(e.target.checked); }} />
+              {/* One decision per label rather than per vendor code: albumin
+                  arrives under 2,557 of them. */}
+              Group by label
+            </label>
             {showProvenanceFilter && (
               <select
                 aria-label="Filter by provenance"
@@ -1794,6 +1951,7 @@ export default function CodeMappingPage() {
                   // Provenance values differ per tab; a stale filter would
                   // show an empty tab with no visible reason.
                   setProvenanceFilter("");
+                  setExpandedGroups({});
                   setActiveVocabulary(tab.vocabulary_id);
                   if (tab.vocabulary_id === OVERALL_TAB) {
                     setUnmappedCollapsed(true);
@@ -2073,7 +2231,7 @@ export default function CodeMappingPage() {
           </section>
         )}
 
-        {athenaRows.length > 0 && (
+        {(athenaRows.length > 0 || (browse?.pages["Athena Mapped"]?.total ?? 0) > 0) && (
           <section>
             <button
               type="button"

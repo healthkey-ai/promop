@@ -1600,7 +1600,16 @@ describe("server mapping pages", () => {
     rejected_count: 0,
     provenances: [{ origin_system: "curator", count: 2 }, { origin_system: "", count: 1 }],
     selected_provenance: "",
+    groups: {},
+    rollup: false,
     ...overrides,
+  });
+
+  const entry = (over: Record<string, unknown> = {}) => ({
+    label: "albumin", description: "Albumin", members: 2557, seen: 141875, proposed: 2557,
+    destination_concept_id: null, destination_concept_name: null, destination_concept_code: null,
+    destination_vocabulary_id: null, mixed_destinations: false, status: "proposed",
+    mixed_statuses: false, mapping_id: null, ...over,
   });
 
   const renderBrowse = (overrides: Record<string, unknown> = {}) => {
@@ -1681,6 +1690,189 @@ describe("server mapping pages", () => {
     expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", {
       params: expect.not.objectContaining({ provenance: expect.anything() }),
     });
+  });
+
+  // #1571: one review row per label. albumin arrives under 2,557 vendor codes,
+  // so a per-code queue asks the same question 2,557 times and scatters the
+  // volume so the queue cannot be ordered usefully.
+  it("does not group until asked", async () => {
+    renderBrowse();
+    await screen.findByRole("table", { name: "Unmapped mappings" });
+    expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", {
+      params: expect.not.objectContaining({ rollup: expect.anything() }),
+    });
+  });
+
+  it("asks the server to group and shows one row for the label", async () => {
+    let payload = browseData();
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/v1/code-mappings/") return Promise.resolve({ data: payload });
+      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+    });
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    await screen.findByRole("table", { name: "Unmapped mappings" });
+    payload = browseData({ rollup: true, groups: { Unmapped: [entry()] } });
+    fireEvent.click(screen.getByLabelText("Group by label"));
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", {
+      params: expect.objectContaining({ rollup: 1 }),
+    }));
+    const table = await screen.findByRole("table", { name: "Unmapped mappings" });
+    expect(within(table).getByText("2,557 codes")).toBeInTheDocument();
+    expect(within(table).getByText("141,875")).toBeInTheDocument();
+    expect(within(table).getByText("Albumin")).toBeInTheDocument();
+  });
+
+  it("names no concept for a group whose members disagree", async () => {
+    renderBrowse({ rollup: true, groups: { Unmapped: [entry({
+      mixed_destinations: true, destination_concept_id: null, destination_concept_name: null,
+    })] } });
+    const table = await screen.findByRole("table", { name: "Unmapped mappings" });
+    expect(within(table).getByText("Mixed destinations")).toBeInTheDocument();
+  });
+
+  it("names the concept when every member agrees", async () => {
+    renderBrowse({ rollup: true, groups: { Unmapped: [entry({
+      destination_concept_id: 3024561, destination_concept_name: "Albumin [Mass/volume] in Serum or Plasma",
+      destination_concept_code: "1751-7", destination_vocabulary_id: "LOINC",
+    })] } });
+    const table = await screen.findByRole("table", { name: "Unmapped mappings" });
+    expect(within(table).getByText("Albumin [Mass/volume] in Serum or Plasma")).toBeInTheDocument();
+    expect(within(table).getByText("LOINC:1751-7")).toBeInTheDocument();
+  });
+
+  it("expands a group into its vendor codes, and collapses again", async () => {
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/v1/code-mappings/") {
+        return Promise.resolve({ data: browseData({ rollup: true, groups: { Unmapped: [entry()] } }) });
+      }
+      if (url === "/v1/code-mappings/group/") {
+        return Promise.resolve({ data: { results: [
+          { ...proposedRow, mapping_id: 91, source_code: "EPIC#aaa" },
+          { ...proposedRow, mapping_id: 92, source_code: "674310" },
+        ] } });
+      }
+      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+    });
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    const toggle = await screen.findByRole("button", { name: /Expand Albumin/ });
+    fireEvent.click(toggle);
+    expect(await screen.findByText("EPIC#aaa")).toBeInTheDocument();
+    expect(screen.getByText("674310")).toBeInTheDocument();
+    // The members endpoint is asked for this label, in this section.
+    expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/group/",
+      { params: expect.objectContaining({ label: "albumin", section: "Unmapped" }) });
+    fireEvent.click(screen.getByRole("button", { name: /Collapse Albumin/ }));
+    expect(screen.queryByText("EPIC#aaa")).not.toBeInTheDocument();
+  });
+
+  it("asks for an unlabelled row by its synthetic key", async () => {
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/v1/code-mappings/") {
+        return Promise.resolve({ data: browseData({ rollup: true, groups: { Unmapped: [
+          entry({ label: null, description: "", members: 1, mapping_id: 77 })] } }) });
+      }
+      if (url === "/v1/code-mappings/group/") return Promise.resolve({ data: { results: [] } });
+      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+    });
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: /Expand unlabelled/ }));
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/group/",
+      { params: expect.objectContaining({ label: ":77" }) }));
+  });
+
+  it("keeps a label's two sections apart when expanding", async () => {
+    // albumin with some codes proposed and some approved is an entry in both
+    // sections. Keyed on the label alone, expanding one would show the other's
+    // rows, and its chevron would collapse the wrong group.
+    mockGet.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
+      if (url === "/v1/code-mappings/") {
+        return Promise.resolve({ data: browseData({
+          rollup: true,
+          groups: { Unmapped: [entry({ members: 2 })], Mapped: [entry({ members: 1, status: "approved" })] },
+          pages: { Unmapped: { page: 1, page_size: 100, total: 1 }, Mapped: { page: 1, page_size: 100, total: 1 },
+                   Rejected: { page: 1, page_size: 100, total: 0 }, "Athena Mapped": { page: 1, page_size: 100, total: 0 } },
+        }) });
+      }
+      if (url === "/v1/code-mappings/group/") {
+        const section = config?.params?.section;
+        return Promise.resolve({ data: { results: [
+          { ...proposedRow, mapping_id: section === "Mapped" ? 82 : 81,
+            source_code: section === "Mapped" ? "MAPPED-CODE" : "UNMAPPED-CODE" }] } });
+      }
+      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+    });
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    const unmapped = await screen.findByRole("table", { name: "Unmapped mappings" });
+    fireEvent.click(within(unmapped).getByRole("button", { name: /Expand Albumin/ }));
+    expect(await screen.findByText("UNMAPPED-CODE")).toBeInTheDocument();
+    // The Mapped section starts collapsed.
+    fireEvent.click(screen.getByRole("button", { name: /^Mapped/ }));
+    // Its entry is still collapsed too, not showing the Unmapped rows.
+    const mapped = screen.getByRole("table", { name: "Mapped mappings" });
+    expect(within(mapped).getByRole("button", { name: /Expand Albumin/ })).toBeInTheDocument();
+    fireEvent.click(within(mapped).getByRole("button", { name: /Expand Albumin/ }));
+    expect(await screen.findByText("MAPPED-CODE")).toBeInTheDocument();
+    expect(screen.getByText("UNMAPPED-CODE")).toBeInTheDocument();
+  });
+
+  it("scopes the members request to the tab the server chose, before any tab is clicked", async () => {
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/v1/code-mappings/") {
+        return Promise.resolve({ data: browseData({
+          rollup: true, selected_source: "ICD10", groups: { Unmapped: [entry()] },
+          tabs: [{ vocabulary_id: "ICD10", label: "ICD-10", is_standard: false, proposed: 3, approved: 0, athena: 0 }],
+        }) });
+      }
+      if (url === "/v1/code-mappings/group/") return Promise.resolve({ data: { results: [] } });
+      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+    });
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: /Expand Albumin/ }));
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/group/",
+      { params: expect.objectContaining({ source: "ICD10" }) }));
+  });
+
+  it("carries the active search and provenance filter into the members request", async () => {
+    // The entry's counts describe the filtered set, so expanding it must not
+    // open into the rows the filter existed to hide.
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/v1/code-mappings/") {
+        return Promise.resolve({ data: browseData({ rollup: true, groups: { Unmapped: [entry()] } }) });
+      }
+      if (url === "/v1/code-mappings/group/") return Promise.resolve({ data: { results: [] } });
+      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+    });
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    await screen.findByRole("table", { name: "Unmapped mappings" });
+    fireEvent.change(screen.getByLabelText("Filter by provenance"), { target: { value: "curator" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Expand Albumin/ }));
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/group/",
+      { params: expect.objectContaining({ provenance: "curator" }) }));
+  });
+
+  it("still shows the Athena section when grouped", async () => {
+    // It is gated on rows the server no longer sends under rollup, so it
+    // vanished entirely along with its export menu.
+    renderBrowse({
+      rollup: true,
+      groups: { "Athena Mapped": [entry({ label: "ferritin", description: "Ferritin" })] },
+      pages: { Unmapped: { page: 1, page_size: 100, total: 0 }, Mapped: { page: 1, page_size: 100, total: 0 },
+               Rejected: { page: 1, page_size: 100, total: 0 }, "Athena Mapped": { page: 1, page_size: 100, total: 1 } },
+    });
+    // The section renders at all -- it was gated on rows the server no longer
+    // sends under rollup, so it disappeared along with its export menu.
+    const heading = await screen.findByRole("button", { name: /^Athena Mapped/ });
+    fireEvent.click(heading);
+    expect(await screen.findByRole("table", { name: "Athena Mapped mappings" })).toBeInTheDocument();
+  });
+
+  it("does not offer a sort it cannot apply while grouped", async () => {
+    renderBrowse({ rollup: true, groups: { Unmapped: [entry()] } });
+    const table = await screen.findByRole("table", { name: "Unmapped mappings" });
+    // Grouped entries are always ordered by summed Seen; browse validates
+    // order_<index> and then ignores it.
+    expect(within(table).queryByRole("button", { name: "Seen" })).not.toBeInTheDocument();
+    expect(within(table).getByText("Seen").closest("th")).toHaveAttribute("aria-sort", "none");
   });
 
   it("requests the next page and sorts the full section on the server", async () => {
