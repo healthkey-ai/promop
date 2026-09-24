@@ -202,6 +202,12 @@ VOCABULARY_OID_ALIASES = {
     'urn:oid:2.16.840.1.113883.6.96': 'SNOMED',
 }
 
+
+def canonical_source_vocabulary(vocabulary_id):
+    """Normalize equivalent identifiers, without merging distinct vocabularies."""
+    vocabulary_id = (vocabulary_id or '').strip()
+    return VOCABULARY_OID_ALIASES.get(vocabulary_id, vocabulary_id)
+
 # OMOP vocabulary_id → UMLS root_source (SAB), for the UMLS bridge in Suggest
 # and for naming source codes from UMLS atoms. ICD10CM must precede ICD10:
 # Suggest's reverse map (SAB → vocabulary) keeps the first vocabulary it sees

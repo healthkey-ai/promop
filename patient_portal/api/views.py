@@ -10577,6 +10577,8 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
         data.get('source_vocabulary_id',
                  '' if mapping is None else mapping.source_vocabulary_id) or ''
     ).strip()
+    if mapping is None or 'source_vocabulary_id' in data:
+        source_vocabulary_id = source_vocabularies.canonical_source_vocabulary(source_vocabulary_id)
     if source_vocabulary_id.startswith('HK-'):
         raise serializers.ValidationError({'source_vocabulary_id': (
             'HK-* vocabularies are minting destinations, not source code '
@@ -11946,6 +11948,14 @@ def code_mapping_lookup(request):
                 # resolved flag, never a provisional target, to write OMOP.
                 'proposed_target_concept_id': mapping.target_concept_id if mapping else None,
             }
+            if mapping and mapping.status == 'approved':
+                # The identity is standard, but the requested fact table may
+                # be incompatible (e.g. a Device imported as a drug).
+                result[key].update(
+                    domain_id=mapping.domain_id,
+                    omop_table=mapping.omop_table,
+                    unresolved_reason='destination_domain_or_validity_mismatch',
+                )
             unresolved += 1
     response = Response({
         'mappings': result,

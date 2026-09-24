@@ -27,6 +27,7 @@ from django.core.management.base import CommandError
 from omop_core.management.embedding_command import EmbeddingLoadCommand
 
 from omop_core.models import Concept, SourceCodeConceptMapping
+from omop_core.services.snomed_identity import is_standard_snomed, identity_values
 from omop_core.services.source_vocabularies import (
     DOMAIN_TO_TABLE,
     patient_scoped_concept_ids,
@@ -241,7 +242,8 @@ class Command(EmbeddingLoadCommand):
             qs = Concept.objects.filter(
                 vocabulary_id='SNOMED',
                 concept_code__in=snomed_codes,
-            ).only('concept_id', 'concept_code', 'concept_name', 'domain_id')
+            ).only('concept_id', 'concept_code', 'concept_name', 'domain_id', 'vocabulary_id',
+                   'standard_concept', 'invalid_reason', 'valid_start_date', 'valid_end_date')
             for c in qs.iterator(chunk_size=5000):
                 snomed_concepts[c.concept_code] = c
 
@@ -275,7 +277,8 @@ class Command(EmbeddingLoadCommand):
                 no_source += 1
                 continue
 
-            target = rxnorm_concepts.get(rxnorm_code)
+            identity = source if is_standard_snomed(source) else None
+            target = identity or rxnorm_concepts.get(rxnorm_code)
             if not target:
                 no_target += 1
                 continue
@@ -296,6 +299,9 @@ class Command(EmbeddingLoadCommand):
                 created += 1
                 continue
 
+            identity_defaults = identity_values(identity) if identity else {}
+            if identity:
+                identity_defaults.update(notes=f'Active standard SNOMED identity preferred to HK-ETL RxNorm:{rxnorm_code}.')
             obj, was_created = SourceCodeConceptMapping.objects.get_or_create(
                 source_vocabulary_id='SNOMED',
                 source_code=snomed_code[:100],
@@ -311,6 +317,7 @@ class Command(EmbeddingLoadCommand):
                     'origin_system': 'HK-ETL',
                     'source': 'ETL',
                     'occurrence_count': 0,
+                    **identity_defaults,
                 },
             )
             if was_created:
