@@ -485,6 +485,14 @@ class InboundDataSerializer(serializers.Serializer):
     # partner may legitimately already be sending, and this field accepted any
     # string before today. `\Z` rather than `$`, which in Python also matches
     # before a trailing newline.
+    #
+    # What this does not do, so nobody reads more into it: a partner determined
+    # to put clinical content here can, as `dx-metastatic-breast-cancer` or a
+    # percent-encoded sentence, and no syntactic rule distinguishes that from
+    # an identifier. A tighter pattern would buy the appearance of a control
+    # and break real identifiers. The partner is an authenticated source that
+    # already sends this deployment its clinical data; what governs its content
+    # is the agreement with it, not this field.
     resource_id = serializers.RegexField(
         r'\A\S{1,128}\Z', max_length=128, required=False,
     )

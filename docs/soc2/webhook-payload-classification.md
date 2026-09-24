@@ -51,8 +51,14 @@ the stream as PHI.
 - **Relayed inbound events are constrained.** An event arriving from a partner
   is republished to that organization's subscribers under this deployment's
   own signature. `resource_id` is passed through, so it must contain no
-  whitespace: a partner cannot use it to push clinical narrative into a payload
-  this document classifies as identifiers only.
+  whitespace — which stops free text arriving there by accident.
+
+  It is not a control against a partner that means to do it. `dx-metastatic-
+  breast-cancer` satisfies any syntactic rule that still accepts real
+  identifiers, so a tighter pattern would buy the appearance of a control and
+  reject legitimate values. The partner is an authenticated source that already
+  sends this deployment clinical data under an agreement; that agreement is
+  what governs what it puts in this field, and it is the right place for it.
 
 ## What this does not decide
 

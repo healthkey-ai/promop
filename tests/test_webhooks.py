@@ -651,20 +651,23 @@ def test_two_creates_cannot_both_take_the_last_slot(setup, settings):
         client = APIClient()
         client.force_login(user)
         try:
-            with patch('patient_portal.api.webhook_views.record_subscription_change',
-                       side_effect=hold_the_transaction_open):
-                return client.post('/api/v1/webhooks/subscriptions/', {
-                    'organization': org.pk, 'url': f'https://{host}.example/events',
-                    'event_types': ['lab.updated'],
-                }, format='json').status_code
+            return client.post('/api/v1/webhooks/subscriptions/', {
+                'organization': org.pk, 'url': f'https://{host}.example/events',
+                'event_types': ['lab.updated'],
+            }, format='json').status_code
         finally:
             close_old_connections()
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(create, 'second')
-        inserted.wait(timeout=5)
-        second = pool.submit(create, 'third')
-        codes = sorted([first.result(), second.result()])
+    # One patch around both requests. Entering it per thread nests two contexts
+    # whose exits interleave, and the second restores the first thread's mock
+    # rather than the original.
+    with patch('patient_portal.api.webhook_views.record_subscription_change',
+               side_effect=hold_the_transaction_open):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(create, 'second')
+            inserted.wait(timeout=5)
+            second = pool.submit(create, 'third')
+            codes = sorted([first.result(), second.result()])
 
     assert codes == [201, 400], codes
     assert WebhookSubscription.objects.filter(
