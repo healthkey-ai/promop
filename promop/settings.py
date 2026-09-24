@@ -777,7 +777,8 @@ RUNNER_DIST = Path(os.environ['PROLOG_RUNNER_DIST']) if os.environ.get('PROLOG_R
 # Django admin lets read them, checked through the ordinary login path
 # (patient_portal.services.prolog_results_viewer).
 PROLOG_RESULTS_AUTH = 'patient_portal.services.prolog_results_viewer'
-PROLOG_RESULTS_PASSWORD_CHANGE = 'patient_portal.services.prolog_results_password_change'
+# Callback import path, not a hardcoded credential.
+PROLOG_RESULTS_PASSWORD_CHANGE = 'patient_portal.services.prolog_results_password_change'  # nosec B105
 
 PROLOG_MACHINE_LANGUAGES = [
     lang.strip() for lang in os.environ.get('PROLOG_MACHINE_LANGUAGES', '').split(',') if lang.strip()
