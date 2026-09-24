@@ -102,21 +102,39 @@ def test_worker_refuses_missing_required_configuration(missing):
     assert missing in result.stderr
 
 
-@pytest.mark.parametrize('embedded_beat', ['true', 'false'])
-def test_worker_start_defaults_to_one_child(tmp_path, embedded_beat):
+def _run_worker_script(tmp_path, **extra_env):
+    """Run the entrypoint with a stub celery that records how it was invoked."""
     celery = tmp_path / 'celery'
-    celery.write_text('#!/bin/bash\nprintf "%s %s %s" "$CELERY_WORKER_CONCURRENCY" "$CELERY_WORKER_PREFETCH_MULTIPLIER" "$*"\n')
+    celery.write_text(
+        '#!/bin/bash\nprintf "%s %s %s" "$CELERY_WORKER_CONCURRENCY"'
+        ' "$CELERY_WORKER_PREFETCH_MULTIPLIER" "$*"\n')
     celery.chmod(0o755)
     env = {'PATH': f'{tmp_path}:{os.environ["PATH"]}',
            'CELERY_BROKER_URL': 'redis://example.invalid',
            'DATABASE_URL': 'postgresql://example.invalid', 'SECRET_KEY': 'test-only',
-           'CELERY_EMBEDDED_BEAT': embedded_beat}
-    result = subprocess.run(['bash', str(ROOT / 'start-worker.sh')], env=env, capture_output=True, text=True)
+           **extra_env}
+    result = subprocess.run(['bash', str(ROOT / 'start-worker.sh')], env=env,
+                            capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-    expected = '1 1 -A promop worker --loglevel=info'
+    return result.stdout
+
+
+@pytest.mark.parametrize('embedded_beat', ['true', 'false'])
+def test_worker_start_defaults_to_one_child(tmp_path, embedded_beat):
+    invocation = _run_worker_script(tmp_path, CELERY_EMBEDDED_BEAT=embedded_beat)
+    expected = '1 1 -A promop worker --loglevel=info --queues=celery,webhooks'
     if embedded_beat == 'true':
         expected += ' --beat --schedule=/tmp/promop-celerybeat-schedule'
-    assert result.stdout == expected
+    assert invocation == expected
+
+
+def test_a_worker_can_be_restricted_to_one_queue(tmp_path):
+    """Webhook delivery is routed to its own queue so it can be drained by its
+    own process; which process is a deployment decision, made here."""
+    assert _run_worker_script(
+        tmp_path, CELERY_WORKER_QUEUES='webhooks').endswith('--queues=webhooks')
+    assert _run_worker_script(
+        tmp_path, CELERY_WORKER_QUEUES='celery').endswith('--queues=celery')
 
 
 def test_production_worker_runs_the_entrypoint_that_can_schedule_recovery():

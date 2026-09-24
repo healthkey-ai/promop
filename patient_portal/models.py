@@ -90,6 +90,12 @@ class WebhookDelivery(models.Model):
     error = models.CharField(max_length=64, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     delivered_at = models.DateTimeField(null=True)
+    # When this row was last handed to the broker. The recovery sweep is for
+    # rows the broker lost, and it cannot tell those from rows that are simply
+    # waiting their turn: without this it re-queues every due row every minute,
+    # so a backlog it cannot drain turns into duplicate messages faster than
+    # the workers remove them.
+    queued_at = models.DateTimeField(null=True, blank=True)
     # The address this delivery is for, frozen when the row is written. An
     # outbox row addressed to "wherever the subscription points at send time"
     # cannot be audited: the URL is mutable, the row can sit through minutes of

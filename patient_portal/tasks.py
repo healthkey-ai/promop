@@ -5,6 +5,7 @@ from datetime import timedelta
 from celery import shared_task
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from patient_portal.models import WebhookDelivery
@@ -108,6 +109,10 @@ def deliver_webhook(delivery_id):
         else:
             current.status = 'retry'
             current.next_attempt_at = timezone.now() + timedelta(seconds=delay)
+            # Handed to the broker by the callback below, and marked as handed
+            # over here so the sweep leaves it alone while it waits out the
+            # backoff.
+            current.queued_at = timezone.now()
             transaction.on_commit(lambda: enqueue_delivery(current.pk, countdown=delay))
         current.save()
 
@@ -126,10 +131,33 @@ def prune_webhook_history():
 
 @shared_task
 def dispatch_pending_webhooks():
+    """Re-queue deliveries the broker lost, and only those.
+
+    The sweep cannot see the broker, so it used to re-queue every due row every
+    minute — including the ones already waiting in it. A backlog the workers
+    cannot drain (a bulk write, a slow subscriber) then grew a thousand
+    duplicate messages a minute on a broker shared with clinical tasks, each
+    duplicate taking `SELECT ... FOR UPDATE` on the same hot row. The DB lease
+    stopped duplicate *sends*; nothing bounded the queue depth.
+
+    A row is left alone for `WEBHOOK_REQUEUE_AFTER_SECONDS` after it was handed
+    over. That is longer than the two-minute in-flight lease, so a delivery
+    stranded by a dead worker is still recovered — within that interval rather
+    than on the next minute.
+    """
     if not settings.WEBHOOKS_ENABLED:
         return
-    due = WebhookDelivery.objects.filter(
-        status__in=['pending', 'retry', 'sending'], next_attempt_at__lte=timezone.now(),
-    ).order_by('next_attempt_at', 'pk').values_list('pk', flat=True)[:1000]
+    now = timezone.now()
+    stale = now - timedelta(seconds=settings.WEBHOOK_REQUEUE_AFTER_SECONDS)
+    due = list(WebhookDelivery.objects.filter(
+        status__in=['pending', 'retry', 'sending'], next_attempt_at__lte=now,
+    ).filter(
+        Q(queued_at__isnull=True) | Q(queued_at__lte=stale),
+    ).order_by('next_attempt_at', 'pk').values_list('pk', flat=True)[:1000])
+    if not due:
+        return
+    # Marked before the messages go out: a sweep that dies half way through has
+    # still recorded what it handed over, and the next one starts after it.
+    WebhookDelivery.objects.filter(pk__in=due).update(queued_at=now)
     for delivery_id in due:
         enqueue_delivery(delivery_id)

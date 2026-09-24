@@ -363,6 +363,43 @@ it does not modify existing clinical rows. Apply migrations before web/worker
 deployment. Treat signing secrets and delivery records as protected application
 data when configuring database access, backups, and retention.
 
+## Operating it
+
+**Turning it off.** `WEBHOOKS_ENABLED` is read from Django settings, so
+switching it off is a redeploy of the web service and the worker, not a config
+flip: plan on minutes, not seconds. What it stops is the publisher and the
+delivery task — `publish_event` writes no outbox rows and `deliver_webhook`
+returns immediately — so clinical writes stop carrying the outbox insert that
+shares their transaction. Rows already written stay, and retention does not
+remove them — `prune_webhooks` deletes only terminal rows — so a long
+disablement accumulates a backlog that all goes out at once when the flag
+returns.
+
+Faster levers that do not need a deploy, in order of reach:
+
+1. `PATCH {"active": false}` on one subscription — stops that destination.
+   Queued deliveries for it are cancelled when the worker reaches them.
+2. `DELETE` on it — the same, and it leaves the listing; the history stays.
+3. Scale the webhook worker to zero, or stop draining the `webhooks` queue —
+   but only together with the flag. The sweep does not know the queue is
+   unattended: it keeps handing rows over, up to 1000 a minute, into a list
+   nobody reads. The staging broker is 256 MB with `maxmemoryPolicy:
+   noeviction`, so that fills it and then rejects writes, taking clinical task
+   queuing down with it.
+
+None of those stops the outbox *insert*, which is the part that shares a
+transaction with clinical writes. If lock contention on that insert is the
+incident, the flag and a deploy are the answer.
+
+**Queues.** `deliver_webhook` is routed to the `webhooks` queue
+(`CELERY_TASK_ROUTES`), and `start-worker.sh` drains `celery,webhooks` by
+default so a single-worker deployment keeps working. That default does not
+isolate them: one process spends the same slots on either queue, and a
+subscriber that accepts a connection and then stalls holds one for the request
+timeout. Before enabling webhooks in production, run a second worker with
+`CELERY_WORKER_QUEUES=webhooks` and set `CELERY_WORKER_QUEUES=celery` on the
+existing one; until then, delivery and clinical tasks share the pool.
+
 ## Retention
 
 `CELERY_BEAT_SCHEDULE` runs `patient_portal.tasks.prune_webhook_history` daily at
@@ -385,4 +422,10 @@ unprocessed inbound events, and recent completions remain. Archive history
 externally before pruning if longer retention is needed. An authorized sender
 can reuse an expired event ID with a newly signed request after retention ends;
 use unique event IDs. The recovery sweep uses an index limited to active statuses
-and queues the oldest due rows first.
+and queues the oldest due rows first. It skips rows handed to the broker within
+`WEBHOOK_REQUEUE_AFTER_SECONDS` (300): the sweep exists for rows the broker
+lost and cannot tell those from rows waiting their turn, so without the mark a
+backlog it cannot drain became a thousand duplicate messages a minute on a
+broker shared with clinical tasks. The interval is longer than the two-minute
+in-flight lease, so a delivery stranded by a dead worker is still recovered —
+within that interval rather than on the next minute.
