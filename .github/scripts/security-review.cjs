@@ -150,6 +150,72 @@ const SECURITY_PATHS = [
   'patient_portal/service_tokens.py', 'patient_portal/service_tokens/**',
   'patient_portal/service_applications.py', 'patient_portal/service_applications/**',
   'patient_portal/management/commands/*service_token*.py',
+  // The other two credential-minting commands, which that glob misses on the
+  // filename alone — the same accident as the two service_applications modules.
+  // create_service_client mints an OAuth2 client secret (secrets.token_urlsafe);
+  // create_smart_app is, by its own comment, the only place redirect-URI
+  // validation happens on the supported provisioning path.
+  'patient_portal/management/commands/create_service_client.py',
+  'patient_portal/management/commands/create_smart_app.py',
+  // ...and the viewset that actually issues them. The line above covers
+  // patient_portal/service_applications.py, which holds ALLOWED_SCOPES,
+  // MAX_TOKEN_LIFETIME and issue_token; this one covers the staff API that
+  // calls issue_token, performs the one-time secret disclosure and applies
+  // is_interactive_session. Gating the definitions and not the endpoint that
+  // hands out the credential was an accident of the two files having the same
+  // name in different packages, not a decision.
+  'patient_portal/api/service_applications.py', 'patient_portal/api/service_applications/**',
+  // The password backend: authenticate() itself, plus the lockout threshold and
+  // the deliberate timing equalisation that resists account enumeration. A
+  // change here is an authentication-policy change by definition.
+  'patient_portal/backends.py', 'patient_portal/backends/**',
+  // Who may act as an administrator of an organization: get_admin_access_paths,
+  // get_admin_orgs, has_org_admin_access. Every authorization decision scoped to
+  // an org reads these.
+  'omop_core/services/access.py', 'omop_core/services/access/**',
+  // ...and the only module that WRITES the rows those functions read.
+  // org_views.py creates and upgrades GroupAccess, including role 'org_admin'
+  // (ROLE_RANK), from an invitation token; it carries five AllowAny endpoints,
+  // one of which sets a password and marks the address verified. Gating the
+  // reader of an authorization table while leaving its sole writer out is the
+  // same mistake as gating the token definitions and not the endpoint that
+  // issues them. It is the busiest file on this list (29 commits in the last 12
+  // months, against 0-6 for the others), and that is the cost of it being the
+  // place org roles are granted.
+  'patient_portal/api/org_views.py', 'patient_portal/api/org_views/**',
+  // Proxy authorization — who may act for a patient. Structurally the same as
+  // audit_views.py below: a ReadOnlyModelViewSet whose _is_privileged() widens
+  // the queryset for staff and service tokens.
+  'patient_portal/api/representatives.py', 'patient_portal/api/representatives/**',
+  // The credential lifecycle of a patient account. Each of these mints or
+  // consumes something that stands in for a password:
+  //   password_reset       — signed single-use reset links
+  //   email_verification   — the signed proof that binds an address to an
+  //                          account, which domain trust then relies on to hand
+  //                          out another organization's patients
+  //   patient_signup       — account creation for a trusted server-to-server
+  //                          caller, org taken from the caller's token
+  //   patient_invitations  — carries two PUBLIC endpoints, lookup-by-token and
+  //                          accept, and accept sets a password
+  'patient_portal/api/password_reset.py', 'patient_portal/api/password_reset/**',
+  'patient_portal/api/email_verification.py', 'patient_portal/api/email_verification/**',
+  'patient_portal/api/patient_signup.py', 'patient_portal/api/patient_signup/**',
+  'patient_portal/api/patient_invitations.py', 'patient_portal/api/patient_invitations/**',
+  // The audit trail's read API. It is the evidence the other controls are
+  // audited by, and it branches on privilege: staff and service tokens see
+  // every event, everyone else sees only their own.
+  'patient_portal/api/audit_views.py', 'patient_portal/api/audit_views/**',
+  // The two commands that create accounts with standing privilege.
+  // setup_admin runs from start.sh on every deploy and resets the password of
+  // whatever local identity matches ADMIN_EMAIL. No directory form: Django's
+  // find_commands skips packages (`if not is_pkg`), so a command cannot become
+  // one. Residual risk, since that same filter also skips leading-underscore
+  // modules and this tree already uses the pattern (commands/_mm_generator.py):
+  // reducing setup_admin.py to `from ._setup_admin_impl import Command` moves
+  // the ADMIN_PASSWORD read and the set_password call to a filename these two
+  // exact patterns do not match.
+  'omop_core/management/commands/create_staff_user.py',
+  'omop_core/management/commands/setup_admin.py',
   'frontend/src/utils/oauth.ts', 'frontend/src/utils/oauth/**',
   'frontend/src/hooks/useAuth.ts', 'frontend/src/hooks/useAuth/**',
   // The transports that attach (or deliberately omit) a credential — not the
