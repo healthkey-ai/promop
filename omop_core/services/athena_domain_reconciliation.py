@@ -8,6 +8,9 @@ from omop_core.models import Concept, Domain, MappingDestinationCandidate, Sourc
 from omop_core.services.athena_destinations import (
     ATHENA_URL, BrowserTransport, LookupFailure, active, concept_from_api,
 )
+from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE
+
+STALE_MAPPING_LIMIT = 50
 
 
 def destination_snapshots(vocabulary, using='default'):
@@ -64,9 +67,13 @@ def reconcile_domain(snapshot, result, *, using='default', apply=False):
     cid = snapshot['concept_id']
     receipt = dict(concept_id=cid, vocabulary_id=snapshot['vocabulary_id'], concept_code=snapshot['concept_code'],
                    local_domain=snapshot['domain_id'], athena_domain='', outcome='', reason='',
-                   reference=f'{ATHENA_URL}/search-terms/terms/{cid}')
+                   stale_mappings='', reference=f'{ATHENA_URL}/search-terms/terms/{cid}')
     def finish(outcome, reason=''):
         receipt.update(outcome=outcome, reason=reason)
+        if outcome not in ('updated', 'would_update'):
+            # Nothing was written, so nothing was left out of step. Naming rows
+            # here would read as a correction having destabilised them.
+            receipt['stale_mappings'] = ''
         return receipt
     if not external(snapshot):
         return finish('protected_local', 'Locally authored concept or non-external concept ID')
@@ -88,8 +95,30 @@ def reconcile_domain(snapshot, result, *, using='default', apply=False):
     receipt['athena_domain'] = domain
     if domain == snapshot['domain_id']:
         return finish('unchanged')
+    if domain not in DOMAIN_TO_TABLE:
+        # A destination in Device, Meas Value or Spec Anatomic Site is a real
+        # Athena 'Maps to' target, but nothing downstream can route it: the
+        # concept drops out of every per-domain partial index, so Suggest stops
+        # returning it, and creating a mapping from it is rejected because the
+        # form prefills domain_id from concept.domain_id. Report it instead.
+        return finish('unsupported_domain',
+                      f'Athena domain {domain!r} is outside the domains this application routes '
+                      f'({", ".join(sorted(DOMAIN_TO_TABLE))}); domain left unchanged')
     if not Domain.objects.using(using).filter(pk=domain).exists():
         return finish('missing_domain', 'Official domain is absent from the local Domain reference table')
+    # A mapping carries its own domain_id and omop_table, and clean() only checks
+    # those two against each other — never against target_concept.domain_id. So a
+    # domain correction here silently leaves the mapping routing facts to the old
+    # table. Naming the rows is the least this can do; deciding whether to rewrite
+    # them (and what to do with facts already written) is a curation question.
+    # A blank domain_id is unset, not divergent, so it is not reported.
+    diverging = (SourceCodeConceptMapping.objects.using(using)
+                 .filter(target_concept_id=cid).exclude(domain_id__in=('', domain)).order_by('pk'))
+    stale = list(diverging.values_list('pk', flat=True)[:STALE_MAPPING_LIMIT])
+    # Truncation has to be visible: a receipt that silently drops rows reads as
+    # a complete remediation list and leaves the rest inconsistent.
+    hidden = (diverging.count() - len(stale)) if len(stale) == STALE_MAPPING_LIMIT else 0
+    receipt['stale_mappings'] = ' '.join(str(pk) for pk in stale) + (f' +{hidden} more' if hidden else '')
     if not apply:
         return finish('would_update')
     with transaction.atomic(using=using):
