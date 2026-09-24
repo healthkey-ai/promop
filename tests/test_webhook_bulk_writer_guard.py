@@ -69,11 +69,11 @@ ALLOWED = {
         'seeds sample data for a demo tenant.',
     'omop_core/services/genomics.py::delete_variant':
         'NOT REVIEWED — marks measurements erroneous through querysets, so the '
-        'post_save a .save() would have fired does not. It ends with '
-        'refresh_patient_record, so a patient.changed still goes out; what is '
-        'lost is the lab.updated typing a Measurement save would have carried. '
-        'A second update in the same function (a queryset held in a local) is '
-        'invisible to this guard. See issue #1592.',
+        'post_save a .save() would have fired does not. When it refreshes, a '
+        'patient.changed goes out and only the lab.updated typing is lost; a '
+        'caller passing skip_refresh=True gets nothing at all. A second update '
+        'in the same function (a queryset held in a local) is invisible to '
+        'this guard. See issue #1592.',
 }
 
 
