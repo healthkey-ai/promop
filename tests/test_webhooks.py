@@ -621,6 +621,36 @@ def test_an_organization_cannot_hold_unbounded_destinations(setup, settings):
     assert create('third').status_code == 201
 
 
+@pytest.mark.django_db(transaction=True)
+def test_two_creates_cannot_both_take_the_last_slot(setup, settings):
+    """A count taken before the write commits is not a bound.
+
+    Both requests read one slot left, both insert, and the organization ends up
+    over the cap — which is why the count runs under a lock inside the writing
+    transaction rather than in validation.
+    """
+    settings.WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG = 2
+    org, other, person, user, subscription = setup
+
+    def create(host):
+        client = APIClient()
+        client.force_login(user)
+        try:
+            return client.post('/api/v1/webhooks/subscriptions/', {
+                'organization': org.pk, 'url': f'https://{host}.example/events',
+                'event_types': ['lab.updated'],
+            }, format='json').status_code
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        codes = sorted(pool.map(create, ['second', 'third']))
+
+    assert codes == [201, 400], codes
+    assert WebhookSubscription.objects.filter(
+        organization=org, deleted_at__isnull=True).count() == 2
+
+
 def test_a_reader_who_cannot_change_the_destination_does_not_see_it(trusted_professional):
     """For a Slack- or Zapier-shaped receiver the path is the credential.
 
@@ -643,6 +673,35 @@ def test_a_direct_admin_still_sees_the_whole_destination(setup):
     client.force_login(user)
     assert client.get(f'/api/v1/webhooks/subscriptions/{subscription.pk}/').data['url'] == (
         'https://subscriber.example/events')
+
+
+def test_a_token_the_admin_delegated_does_not_carry_the_destination(setup):
+    """The grant is the admin's; the credential would be the application's.
+
+    An OAuth token a direct admin delegated to a third-party application
+    resolves to that admin, so an admin-grant check alone would hand the
+    application a destination it cannot obtain by any other route here — the
+    same reasoning that makes writes require an interactive session.
+    """
+    from oauth2_provider.models import AccessToken, Application
+
+    org, other, person, user, subscription = setup
+    app = Application.objects.create(
+        name='Reader integration', client_type=Application.CLIENT_CONFIDENTIAL,
+        authorization_grant_type=Application.GRANT_AUTHORIZATION_CODE, user=user,
+    )
+    token = AccessToken.objects.create(
+        application=app, user=user, token='delegated-reader-token',
+        scope='patient/*.read', expires=timezone.now() + timedelta(hours=1),
+    )
+    machine = APIClient()
+    machine.force_authenticate(user, token=token)
+
+    response = machine.get(f'/api/v1/webhooks/subscriptions/{subscription.pk}/')
+    assert response.status_code == 200, response.data
+    # It can see that the organization sends events, and to which host. The
+    # part a receiver may treat as a shared secret it does not get.
+    assert response.data['url'] == 'https://subscriber.example/***'
 
 
 def test_rotating_the_secret_keeps_the_destination_and_records_who(setup):

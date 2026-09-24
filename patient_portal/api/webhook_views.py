@@ -5,7 +5,7 @@ import time
 from urllib.parse import urlsplit
 
 from django.conf import settings
-from django.db import transaction
+from django.db import connection, transaction
 from django.utils import timezone
 from rest_framework import serializers, status, viewsets
 from rest_framework.authentication import SessionAuthentication
@@ -95,44 +95,32 @@ class WebhookSubscriptionSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('A subscription cannot change organizations.')
         return value
 
-    def validate(self, attrs):
-        """An organization gets a bounded number of destinations.
-
-        Every clinical write inserts one outbox row per matching subscription,
-        inside the transaction of the write itself. Without a bound, an admin
-        can multiply the cost of every write their organization performs — and
-        the cost lands on the clinical path, not on the webhook that caused it.
-        Removed subscriptions do not count: they receive nothing.
-        """
-        attrs = super().validate(attrs)
-        if self.instance is None:
-            organization = attrs.get('organization')
-            live = WebhookSubscription.objects.filter(
-                organization=organization, deleted_at__isnull=True,
-            ).count()
-            if live >= settings.WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG:
-                raise serializers.ValidationError(
-                    f'An organization may have at most '
-                    f'{settings.WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG} webhook subscriptions.'
-                )
-        return attrs
-
     def to_representation(self, instance):
         """Show the destination only to someone who could change it.
 
         For a Slack- or Zapier-shaped receiver the URL path *is* the credential:
         anyone holding it can post to that endpoint. Reads follow the wider
         `get_admin_orgs` reach, so a trust-derived professional from another
-        organization, or an OAuth token a user delegated to a third-party
-        application, can list these — an audience that may not configure egress
-        and has no reason to hold the credential either. They see the host,
-        which is what makes the subscription recognisable, and the rest masked.
+        organization can list these — an audience that may not configure egress
+        and has no reason to hold the credential either.
+
+        The test is the authority to *change* the destination, which is the
+        same pair writes require: a direct admin grant **and** an interactive
+        session. An OAuth token a direct admin delegated to a third-party
+        application resolves to that admin, so the grant alone would hand the
+        application a credential it cannot be given by any other route on this
+        endpoint. Everyone else sees the host, which is what makes the
+        subscription recognisable, and the rest masked.
         """
         data = super().to_representation(instance)
         request = self.context.get('request')
         if request is None:
             return data
-        if not get_direct_admin_orgs(request.user).filter(pk=instance.organization_id).exists():
+        may_change = (
+            is_interactive_session(request)
+            and get_direct_admin_orgs(request.user).filter(pk=instance.organization_id).exists()
+        )
+        if not may_change:
             data['url'] = _masked_url(instance.url)
         return data
 
@@ -282,11 +270,46 @@ class WebhookSubscriptionViewSet(viewsets.ModelViewSet):
         return Response({**serializer.data, 'secret': serializer.instance.secret},
                         status=status.HTTP_201_CREATED)
 
+    # One organization's subscription creates are serialised on this key, so
+    # two of them cannot both read "one slot left" and both take it.
+    _CAP_LOCK_KEY = 728144
+
     def perform_create(self, serializer):
         with transaction.atomic():
+            organization = serializer.validated_data['organization']
+            self._assert_capacity(organization)
             subscription = serializer.save()
             self._audit(record_subscription_change(
                 subscription, WebhookSubscriptionChange.ACTION_CREATE, self.request.user))
+
+    def _assert_capacity(self, organization):
+        """An organization gets a bounded number of destinations.
+
+        Every clinical write inserts one outbox row per matching subscription,
+        inside the transaction of the write itself. Without a bound, an admin
+        multiplies the cost of every write their organization performs, and the
+        cost lands on the clinical path rather than on the webhook that caused
+        it. Removed subscriptions do not count: they receive nothing.
+
+        Counted under an advisory lock rather than in the serializer. A count
+        taken before the write commits is not a bound — two requests both read
+        one slot left and both take it — and no index expresses "at most N
+        rows". The lock is keyed by organization, so it serialises only creates
+        for the same tenant, and it is not a row lock: taking `FOR UPDATE` on
+        the organization would block the clinical writes that reference it.
+        """
+        if connection.vendor == 'postgresql':
+            with connection.cursor() as cursor:
+                cursor.execute('SELECT pg_advisory_xact_lock(%s, %s)',
+                               [self._CAP_LOCK_KEY, organization.pk])
+        live = WebhookSubscription.objects.filter(
+            organization=organization, deleted_at__isnull=True,
+        ).count()
+        if live >= settings.WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG:
+            raise serializers.ValidationError(
+                f'An organization may have at most '
+                f'{settings.WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG} webhook subscriptions.'
+            )
 
     def perform_update(self, serializer):
         """Re-read the row under a lock: DRF saves every field it holds.
@@ -410,10 +433,16 @@ class WebhookSubscriptionViewSet(viewsets.ModelViewSet):
         secret is write-only everywhere else and is disclosed once here, the
         same way `create()` discloses it, under the same no-store directives.
 
-        Deliveries already queued keep the secret they will be signed with at
-        send time, which is this one: a receiver that has not yet stored the
-        new secret rejects them, and they retry into the backoff window. Roll
-        out the new secret at the receiver first.
+        The receiver cannot install the new secret before it takes effect: it
+        is generated here and disclosed in this response, and every delivery
+        signed from this moment uses it. That is the right order for the reason
+        rotation exists — a secret believed to be compromised stops working at
+        once — and the cost is a window in which a receiver that has not yet
+        stored it rejects deliveries. They retry over roughly eight minutes and
+        then dead-letter, so install the new secret promptly rather than
+        beforehand. Overlapping old and new (signing twice, or honouring a
+        previous secret for a period) is a larger change and deliberately not
+        attempted here.
         """
         with transaction.atomic():
             subscription = self._lock_live(self.get_object().pk)

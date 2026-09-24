@@ -126,20 +126,23 @@ subscription removed. `POST
 /api/v1/webhooks/subscriptions/{id}/rotate-secret/` replaces the signing secret
 and returns it once, under the same directives as `create()`, leaving the
 destination and the delivery history alone — rotation no longer means creating
-a second subscription and deleting the first. Roll the new secret out at the
-receiver first: deliveries already queued are signed with whatever the secret
-is at send time, so a receiver that has not stored it yet rejects them into the
-retry backoff.
+a second subscription and deleting the first. The new secret takes effect immediately — that is what
+rotation is for — so the receiver cannot install it beforehand: take it from
+this response and install it promptly. Deliveries signed in the meantime are
+rejected by a receiver that does not have it yet; they retry over roughly eight
+minutes and then dead-letter. There is no overlap period in which both secrets
+are honoured.
 
 An organization may hold at most `WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG`
 subscriptions (10 by default); removed ones do not count. Every clinical write
 inserts one outbox row per matching subscription, inside the transaction of the
 write itself, so the list is a multiplier on that organization's own writes.
 
-The `url` is returned in full only to a caller who could change it — platform
-staff and direct `org_admin` grants. Everyone else who may read the
-subscription, which includes trust-derived professionals and delegated OAuth
-tokens, sees scheme and host with the rest masked (`https://host/***`): for a
+The `url` is returned in full only to a caller who could change it, which is
+the same pair writes require: a direct `org_admin` grant (or staff) **and** an
+interactive session. Everyone else who may read the subscription — trust-derived
+professionals, and OAuth tokens a direct admin delegated to a third-party
+application — sees scheme and host with the rest masked (`https://host/***`): for a
 Slack- or Zapier-shaped receiver the path is the credential, and being able to
 review where an organization sends data is a different thing from holding the
 key to post there.
