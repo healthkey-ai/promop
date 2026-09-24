@@ -705,6 +705,20 @@ WEBHOOK_RETENTION_DAYS = int(os.environ.get('WEBHOOK_RETENTION_DAYS', '30'))
 # add to the cost of that organization's writes.
 WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG = int(
     os.environ.get('WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG', '10'))
+# How long a delivery that has been handed to the broker is left alone by the
+# recovery sweep. The sweep exists for rows the broker lost; without a mark it
+# re-queues every due row every minute, so a backlog it cannot drain becomes a
+# growing pile of duplicate messages on the shared broker. Longer than the
+# two-minute in-flight lease, so a worker that died is still recovered — within
+# this interval rather than the next minute.
+WEBHOOK_REQUEUE_AFTER_SECONDS = int(
+    os.environ.get('WEBHOOK_REQUEUE_AFTER_SECONDS', '300'))
+# Webhook delivery runs on its own queue, drained by its own worker process. A
+# slow subscriber holds a worker slot for the length of its timeout, and on the
+# shared queue those slots are the ones clinical tasks need.
+CELERY_TASK_ROUTES = {
+    'patient_portal.tasks.deliver_webhook': {'queue': 'webhooks'},
+}
 CELERY_BEAT_SCHEDULE = {
     'recover-webhook-deliveries': {
         'task': 'patient_portal.tasks.dispatch_pending_webhooks',

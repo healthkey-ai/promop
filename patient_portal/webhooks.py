@@ -243,6 +243,10 @@ def publish_event(organization_id, event_type, data, origin=None):
             # Frozen: this row is addressed to where the subscription points
             # now, and a later PATCH does not redirect it.
             destination_url=subscription.url,
+            # Written with the row rather than by the enqueue that follows it:
+            # the message is handed over on commit, and one INSERT is cheaper
+            # than an INSERT and an UPDATE per event.
+            queued_at=timezone.now(),
         )
         transaction.on_commit(lambda pk=delivery.pk: enqueue_delivery(pk))
 

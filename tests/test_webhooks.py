@@ -4,6 +4,7 @@ import json
 import socket
 import urllib3
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
@@ -1401,6 +1402,179 @@ def test_a_refused_address_falls_back_to_the_next_validated_one():
         assert kwargs['cert_reqs'] == 'CERT_REQUIRED'
         assert kwargs['retries'] is False
         assert (kwargs['timeout'].connect_timeout, kwargs['timeout'].read_timeout) == (5, 10)
+
+
+def _self_signed(hostname, directory):
+    """A certificate for one name, its own CA, valid for an hour."""
+    import datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, hostname)])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    certificate = (
+        x509.CertificateBuilder().subject_name(name).issuer_name(name)
+        .public_key(key.public_key()).serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=5))
+        .not_valid_after(now + timedelta(hours=1))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(hostname)]), critical=False)
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    certificate_path = Path(directory) / f'{hostname}.pem'
+    key_path = Path(directory) / f'{hostname}.key'
+    certificate_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.NoEncryption()))
+    return certificate_path, key_path
+
+
+@pytest.fixture
+def local_tls_server(tmp_path, monkeypatch):
+    """An HTTPS server on the loopback presenting a cert for subscriber.example."""
+    import http.server
+    import ssl
+
+    certificate_path, key_path = _self_signed('subscriber.example', tmp_path)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certificate_path, key_path)
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    class Server(http.server.HTTPServer):
+        def handle_error(self, *args):
+            pass  # a refused handshake is the point of one of these tests
+
+    server = Server(('127.0.0.1', 0), Handler)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    # The pinning under test verifies against the system store; point it at the
+    # CA this server presents rather than weakening the check.
+    monkeypatch.setenv('SSL_CERT_FILE', str(certificate_path))
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def _production_pool_kwargs():
+    """The kwargs send_webhook actually passes, captured from a real call."""
+    captured = {}
+
+    def capture(address, **kwargs):
+        captured.update(kwargs)
+        captured['address'] = address
+        pool = Mock()
+        pool.urlopen.return_value = Mock(status=200)
+        return pool
+
+    with patch('socket.getaddrinfo', return_value=[(socket.AF_INET, 1, 6, '', ('8.8.8.8', 443))]):
+        with patch('patient_portal.webhooks.urllib3.HTTPSConnectionPool', side_effect=capture):
+            send_webhook('https://subscriber.example/events', {'id': 'e'}, 'secret', 'delivery')
+    return captured
+
+
+@pytest.mark.parametrize('assert_hostname,expected', [
+    ('subscriber.example', 'delivered'),
+    ('other.example', 'refused'),
+])
+def test_the_pinned_connection_verifies_the_certificate_for_real(
+    local_tls_server, assert_hostname, expected,
+):
+    """Against a real TLS server, with the kwargs send_webhook actually passes.
+
+    The pinning rests on urllib3 honouring `server_hostname` and
+    `assert_hostname`: neither is a named `HTTPSConnectionPool` parameter, both
+    ride in `**conn_kw`. A test that asserts the kwargs and mocks the pool stays
+    green if a dependency bump stops forwarding them — the worker would then
+    connect to a pinned IP with the hostname check silently wrong.
+
+    What this does not cover: the port. `send_webhook` connects on 443 by
+    policy, and a test server cannot bind it unprivileged, so the connection
+    here is made from the captured kwargs rather than by calling send_webhook.
+    """
+    kwargs = _production_pool_kwargs()
+    assert kwargs['server_hostname'] == 'subscriber.example'
+    assert kwargs['cert_reqs'] == 'CERT_REQUIRED'
+
+    pool = urllib3.HTTPSConnectionPool(
+        '127.0.0.1', port=local_tls_server,
+        server_hostname=kwargs['server_hostname'],
+        assert_hostname=assert_hostname,
+        cert_reqs=kwargs['cert_reqs'], timeout=kwargs['timeout'], retries=False,
+    )
+    try:
+        if expected == 'delivered':
+            response = pool.urlopen('POST', '/', body=b'{}', retries=False,
+                                    preload_content=False)
+            assert response.status == 200
+            response.close()
+        else:
+            with pytest.raises(urllib3.exceptions.SSLError) as refused:
+                pool.urlopen('POST', '/', body=b'{}', retries=False,
+                             preload_content=False)
+            assert 'doesn\'t match' in str(refused.value)
+    finally:
+        pool.close()
+
+
+def test_the_sweep_leaves_alone_what_it_has_already_handed_over(setup, settings):
+    """The sweep is for rows the broker lost, and it cannot see the broker.
+
+    Re-queuing every due row every minute turns a backlog the workers cannot
+    drain — a bulk write, a slow subscriber — into a thousand duplicate
+    messages a minute on a broker shared with clinical tasks. The lease stopped
+    duplicate sends; nothing bounded the queue.
+    """
+    settings.WEBHOOK_REQUEUE_AFTER_SECONDS = 300
+    org, other, person, user, subscription = setup
+    with patch('patient_portal.webhooks.enqueue_delivery'):
+        publish_event(org.pk, 'lab.updated', {'person_id': person.person_id})
+    delivery = WebhookDelivery.objects.get()
+    assert delivery.queued_at is not None  # written with the row
+
+    with patch('patient_portal.tasks.enqueue_delivery') as enqueue:
+        dispatch_pending_webhooks()
+        enqueue.assert_not_called()
+
+    # Past the window: handed over once, and marked again so the next sweep a
+    # minute later does not repeat it.
+    WebhookDelivery.objects.filter(pk=delivery.pk).update(
+        queued_at=timezone.now() - timedelta(seconds=301))
+    with patch('patient_portal.tasks.enqueue_delivery') as enqueue:
+        dispatch_pending_webhooks()
+        dispatch_pending_webhooks()
+        assert enqueue.call_count == 1
+    delivery.refresh_from_db()
+    assert delivery.queued_at > timezone.now() - timedelta(seconds=60)
+
+
+def test_the_sweep_still_recovers_a_row_that_was_never_handed_over(setup):
+    """A row written before the column existed, or by a path that did not mark
+    it, is exactly what the sweep is for."""
+    org, other, person, user, subscription = setup
+    stranded = WebhookDelivery.objects.create(
+        subscription=subscription, payload={'id': 'x', 'type': 'lab.updated'},
+        destination_url=subscription.url)
+    WebhookDelivery.objects.filter(pk=stranded.pk).update(queued_at=None)
+
+    with patch('patient_portal.tasks.enqueue_delivery') as enqueue:
+        dispatch_pending_webhooks()
+        assert [call.args[0] for call in enqueue.call_args_list] == [stranded.pk]
 
 
 def test_a_blackholed_address_times_out_and_still_falls_over():
