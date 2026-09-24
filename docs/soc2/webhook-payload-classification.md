@@ -53,10 +53,10 @@ the stream as PHI.
   own signature. `resource_id` is passed through, so it must contain no
   whitespace — which stops free text arriving there by accident.
 
-  It is not a control against a partner that means to do it. `dx-metastatic-
-  breast-cancer` satisfies any syntactic rule that still accepts real
-  identifiers, so a tighter pattern would buy the appearance of a control and
-  reject legitimate values. The partner is an authenticated source that already
+  It is not a control against a partner that means to do it: a value like
+  `dx-metastatic-breast-cancer` satisfies any syntactic rule that still accepts
+  real identifiers, so a tighter pattern would buy the appearance of a control
+  and reject legitimate values. The partner is an authenticated source that already
   sends this deployment clinical data under an agreement; that agreement is
   what governs what it puts in this field, and it is the right place for it.
 

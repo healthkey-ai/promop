@@ -493,8 +493,15 @@ class InboundDataSerializer(serializers.Serializer):
     # and break real identifiers. The partner is an authenticated source that
     # already sends this deployment its clinical data; what governs its content
     # is the agreement with it, not this field.
+    # Control characters are excluded as well, and not for tidiness: a NUL
+    # reaches a jsonb column, which refuses it, so the insert raises inside the
+    # transaction that also writes the idempotency row. The sender would get a
+    # 500, retry, and never settle the event.
+    #
+    # DRF trims surrounding whitespace before validating, so `' abc '` is
+    # accepted and relayed as `abc`. The rule is about the value that goes out.
     resource_id = serializers.RegexField(
-        r'\A\S{1,128}\Z', max_length=128, required=False,
+        r'\A[^\s\x00-\x1f\x7f]{1,128}\Z', max_length=128, required=False,
     )
 
 

@@ -644,6 +644,11 @@ def test_two_creates_cannot_both_take_the_last_slot(setup, settings):
         # uncommitted, which is exactly the state the lock has to cover.
         if not inserted.is_set():
             inserted.set()
+            # Long enough for the second request to reach the count — two
+            # orders of magnitude over what that takes. The failure mode of a
+            # loaded machine is a false pass, never a false failure: the second
+            # request would then be refused on the merits instead of by the
+            # lock.
             time.sleep(1.5)
         return change
 
@@ -775,6 +780,13 @@ def test_rotation_needs_the_same_authority_as_any_other_egress_write(trusted_pro
 @pytest.mark.parametrize('resource_id', [
     'lab report: elevated CRP, see notes', 'has space', 'tab\tseparated',
     'line\nbreak', 'a' * 129,
+    # A NUL reaches a jsonb column, which refuses it — the insert would raise
+    # inside the transaction that also writes the idempotency row, so the
+    # sender would retry into the same 500 forever.
+    'lab-\x00-456', 'bell-\x07', 'del-\x7f',
+    # Unicode whitespace Python's \s knows about. In the middle, not leading:
+    # DRF trims the ends before validating, so a leading one is simply removed.
+    'nb\u00a0sp',
     '',  # refused by allow_blank rather than by the pattern, but refused
 ])
 def test_a_relayed_resource_id_must_be_an_identifier(setup, resource_id):

@@ -45,7 +45,9 @@ Supported inbound types are `lab.updated`, `document.received`, and
 `foundation.synced`. Each handler creates outbound delivery records for its
 matching active subscriptions and marks the inbound event processed in the same
 transaction. `data.person_id` must belong to the configured organization;
-`data.resource_id` is optional and must contain no whitespace (`\A\S{1,128}\Z`).
+`data.resource_id` is optional and must contain no whitespace and no control
+characters (`\A[^\s\x00-\x1f\x7f]{1,128}\Z`); surrounding whitespace is trimmed
+before the rule is applied, so the constraint is on the value that is relayed.
 It is passed through to every subscriber of the organization under this
 deployment's own signature, and the payload is classified as identifiers and
 event shape ([payload classification](soc2/webhook-payload-classification.md));
