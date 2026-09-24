@@ -1,46 +1,67 @@
 # Auditing Athena mapping reconciliation
 
-## Automatic downstream reconciliation
+## Automatic downstream reconciliation from SCCM
 
-Migration `0258_reconcile_approved_icd10_from_athena_export` automatically performs
-the approved-mapping reconciliation when deployments run `manage.py migrate`.
-This includes HealthTree: no separate shell command, Drive credentials, local
-download directory, STCM content, or network access is required. Migration 0256
-is retained unchanged because it is already part of deployed migration history.
+Migration `0259_reconcile_approved_icd10_from_athena_sccm` reconciles approved,
+non-Athena ICD10/ICD10CM mappings using **approved Athena-provenance SCCM rows in
+that instance's database**. It runs during normal deployment migrations,
+including HealthTree. No bundled vocabulary data, staging snapshot, export
+files, STCM content, downloads or credentials are required.
 
-The migration uses a frozen historical-model implementation and a checksum-verified
-snapshot of the original September 21, 2026 Athena export. The 1,532,768-byte gzip
-contains 116,911 ICD10/ICD10CM source concepts, 148,546 outgoing Maps-to records,
-and 15,974 referenced target concepts. It covers the full source vocabularies,
-not a list of HealthKey mapping IDs. It retains all exported validity intervals
-and evaluates them on the deployment date. This is ordinary Git content, not a
-multi-gigabyte vocabulary download or Git LFS dependency.
+Source codes match across ICD10 and ICD10CM, ignoring case and surrounding
+whitespace, consistent with the merged ICD-10 curation tab. Punctuation and code
+suffixes are preserved. All matching Athena rows must agree on one destination.
+Conflicting destinations, missing evidence, incomplete mappings and curator
+locks are reported and skipped. The destination must be a current external
+standard concept in a non-deprecated vocabulary and supported clinical domain.
+Concept metadata is not overwritten.
 
-Each instance's approved non-Athena SCCM mappings with one valid standard export
-destination are reattributed to `athena`, updating the destination when needed.
-The exact-vocabulary and HT-One label rules, conflict checks, locks, sign-off
-preservation and future-import-only behavior described below also apply to the
-migration. Missing destinations are reported and skipped; the migration does not
-reload vocabularies or overwrite conflicting concept metadata. Its deployment
-log reports changes and skipped outcomes. Already-Athena rows are excluded, so
-the 1,674 manually corrected HealthKey rows are unchanged. Unresolved rows stay
-unchanged unless their blocking conditions have been resolved by deployment.
+Eligible mappings receive that destination, its domain/vocabulary/table metadata,
+`origin_system=athena`, `source=Athena`, and an audit note naming the evidence
+SCCM rows. Approval status, reviewer sign-off, suggestion history and existing
+patient records are preserved. The correction affects future imports only.
+Already-Athena rows are unchanged, including the previously corrected HealthKey
+rows. No HealthKey mapping IDs are embedded in the implementation.
 
-The migration commits in batches of 250 and can safely resume after interruption.
-Reversal retains completed corrections to avoid overwriting later curator edits.
-Rebuild the artifact only for a new versioned migration using:
+The migration snapshots Athena evidence before updating, then locks and rechecks
+both evidence and candidate rows in batches of 250. Concurrent edits are skipped;
+newly converted rows do not become evidence for later batches. Successful rows
+are excluded on reruns, so interrupted runs can resume. Rollback retains completed
+corrections to avoid overwriting subsequent curator edits.
+
+Migration 0256 remains historical and unchanged. Migration 0258 is retained as an
+empty node, and its bundled export, builder and loader have been removed. The new
+0259 operation performs the SCCM-based correction. Previous manual mapping
+corrections are retained.
+
+## Audit or rerun the SCCM reconciliation
+
+From the directory containing `manage.py` (Render shell: `~/project/src`):
 
 ```bash
-python scripts/build_athena_reconciliation_snapshot.py --path /path/to/original/athena-export --as-of 2026-09-21 --output /tmp/evidence.json.gz
+# Read-only preview using existing Athena SCCM mappings, both ICD-10 vocabularies.
+python manage.py reconcile_athena_sccm_mappings --report /tmp/athena-sccm-preview.csv
+
+# Limit the mappings being checked; evidence still uses both ICD-10 vocabularies.
+python manage.py reconcile_athena_sccm_mappings ICD10 --report /tmp/icd10-preview.csv
+
+# Explicitly apply, for example after resolving a skipped mapping's blocker.
+python manage.py reconcile_athena_sccm_mappings --apply --report /tmp/athena-sccm-applied.csv
 ```
 
-The builder has no database dependency and records input-file fingerprints. Do
-not replace this migration's frozen snapshot for a later vocabulary release.
+The command uses the same frozen implementation as migration 0259. Dry run is the
+default and performs only reads. The CSV identifies each candidate, prior target
+and provenance, Athena evidence row IDs, candidate targets, and outcome. Each
+committed batch is flushed to the report. `--report -` writes CSV to stdout and
+summaries to stderr; `--database` selects the database alias.
 
-## Reconcile from the original Athena export
+## Separate original-export comparison command
 
-Use `reconcile_athena_mappings` to check and optionally reattribute existing
-approved, non-Athena ICD10/ICD10CM SCCM rows. It reads `CONCEPT.csv` and outgoing
+The earlier `reconcile_athena_mappings` command remains available for explicit
+comparison with an original export. It is separate from the SCCM migration
+and is not required for downstream deployment. Use it to check and optionally
+reattribute existing approved, non-Athena ICD10/ICD10CM SCCM rows. It reads
+`CONCEPT.csv` and outgoing
 `Maps to` relationships from `CONCEPT_RELATIONSHIP.csv` in the original export.
 `SOURCE_TO_CONCEPT_MAP.csv` is not needed. The local `concept_relationship`
 table is not independent evidence because curator approvals also write there.
@@ -88,8 +109,8 @@ The CSV records every eligible mapping's prior destination/provenance, exported
 source and target IDs, proposed destination metadata, outcome, reason and export
 SHA-256 fingerprint. The fingerprint is also retained in applied audit notes.
 `--report -` sends CSV to stdout and progress to stderr. Downloaded archives are
-temporary and deleted when the command exits. No vocabulary files are committed
-to Git and no automatic migration applies the proposed changes.
+temporary and deleted when the command exits. This command does not bundle files
+or supply evidence to migration 0259.
 
 The ordinary startup `prepare_production_database --gdrive ...` path only
 bootstraps migration-required concepts when needed and runs migrations; it does
@@ -143,9 +164,9 @@ applied and the flushed CSV records them.
 
 This command deliberately checks the evidence used by migration 0256. It does
 not treat the local `concept_relationship` table as independent proof of
-Athena provenance: curator approvals also mirror mappings there. When STCM
-evidence is absent, consult an original Athena export before designing a
-different reattribution rule. There is no new automatic data migration.
+Athena provenance: curator approvals also mirror mappings there. For the
+SCCM-based replacement, use migration 0259 and
+`reconcile_athena_sccm_mappings` described above.
 
 For local access to Render staging, first verify the database identity as
 required by [the staging configuration guide](render-staging-celery.md). Run
