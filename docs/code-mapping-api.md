@@ -123,7 +123,7 @@ code system. Crossmap imports and new curator mappings store `SNOMED`; lookup
 accepts either spelling and preserves the caller's spelling in response keys.
 Source codes and destination concept IDs are not changed by this normalization.
 
-Migration `0258_normalize_snomed_oid_mappings` merges redundant imported OID
+Migration `0259_normalize_snomed_oid_mappings` merges redundant imported OID
 rows into approved canonical mappings and normalizes alias-only rows. Only
 untouched HT-FHIR proposals with a matching, active standard SNOMED destination
 and consistent domain/table are automatically approved. Curator decisions,
@@ -145,7 +145,7 @@ an automatic SNOMED-to-RxNorm translation. Crossmap imports prefer its exact
 SNOMED identity and its actual domain over the external crossmap destination.
 Existing mappings are not overwritten by re-imports.
 
-Migration `0259_prefer_standard_snomed_identities` corrects untouched imported
+Migration `0260_prefer_standard_snomed_identities` corrects untouched imported
 proposals whose selected RxNorm destination is missing, nonstandard or invalid.
 It approves the matching active standard SNOMED concept, corrects domain/table
 metadata, retains imported candidates and encounter counts, and snapshots the
