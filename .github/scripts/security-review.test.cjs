@@ -167,13 +167,12 @@ test('application test files stay exempt', () => {
 
 test('auth/identity, settings and credential handling are gated', () => {
   for (const filename of [
-    // Every spelling of a settings module, not one exact filename: splitting
-    // promop/settings.py into a package must not silently ungate it.
+    // Both project packages whole, in every spelling: the settings module as a
+    // file and as a package, the OAuth validator, the Sentry scrubber, and any
+    // module that does not exist yet.
     'promop/settings.py', 'ctomop/settings.py', 'promop/settings/base.py',
     'promop/settings_prod.py', 'ctomop/settings_staging.py', 'promop/settings/__init__.py',
     'ctomop/settings/base.py', 'promop/config/settings.py',
-    // OAUTH2_VALIDATOR_CLASS and the Sentry scrubber, as files and as the
-    // packages either may become.
     'promop/oauth.py', 'ctomop/oauth.py', 'promop/sentry.py', 'ctomop/sentry.py',
     'promop/oauth/validators.py', 'promop/sentry/scrubber.py',
     'frontend/src/api/publicAxios.ts', 'frontend/src/api/clinicalTransport.ts',
@@ -200,6 +199,7 @@ test('auth/identity, settings and credential handling are gated', () => {
     'patient_portal/checks/settings_checks.py', 'patient_portal/api/authentication/jwt.py',
     'patient_portal/service_applications/models.py',
     'promop/urls/__init__.py', 'ctomop/urls/api.py',
+    'manage.py',
     'frontend/src/api/axios/interceptors.ts', 'frontend/src/api/publicAxios/index.ts',
     'frontend/src/api/clinicalTransport/index.ts',
     'frontend/src/federation/assertLabsTokens/index.ts',
@@ -222,7 +222,7 @@ test('auth/identity, settings and credential handling are gated', () => {
 // instead of stopping at the first.
 test('the narrowed scope leaves operational paths out', () => {
   const out = [
-    'promop/celery.py', 'patient_portal/api/v1_urls.py',
+    'patient_portal/api/v1_urls.py',
     'patient_portal/urls.py', 'start.sh', 'start-worker.sh',
     'ops/artemis/Dockerfile', 'deploy/Dockerfile',
     'Procfile', 'nixpacks.toml', 'frontend/.env.production', 'render.yaml',
@@ -237,6 +237,22 @@ test('the root URLconf is gated while app route tables are not', () => {
   // does not cover a path() added to it. App URLconfs do get that default.
   for (const filename of [
     'promop/urls.py', 'ctomop/urls.py', 'promop/urls/__init__.py', 'ctomop/urls/api.py',
+  ]) assert.equal(securityPath(filename), true, filename);
+  // And the module that decides which settings define that default, in each of
+  // the three places it is spelled. Nothing pins these: the tests that name
+  // DJANGO_SETTINGS_MODULE set it in the environment before asserting anything,
+  // so a change to the setdefault would leave every one of them green while
+  // production loaded a different settings module.
+  for (const filename of [
+    'promop/wsgi.py', 'promop/asgi.py', 'promop/celery.py',
+    'ctomop/wsgi.py', 'ctomop/asgi.py', 'ctomop/celery.py', 'manage.py',
+  ]) assert.equal(securityPath(filename), true, filename);
+  // A module that does not exist yet is the case a per-filename list cannot
+  // reach: repointing wsgi.py at `promop.conf` needs promop/conf.py to be
+  // gated on the strength of its directory alone.
+  for (const filename of [
+    'promop/conf.py', 'promop/whitenoise.py', 'promop/frontend_paths.py',
+    'ctomop/conf.py',
   ]) assert.equal(securityPath(filename), true, filename);
   for (const filename of [
     'patient_portal/urls.py', 'patient_portal/api/urls.py', 'patient_portal/api/v1_urls.py',
@@ -262,15 +278,26 @@ test('the tests that pin the ungated operational files are themselves gated', ()
   }
 });
 
-test('a test-named settings module is still gated', () => {
+test('the test exemption does not reach inside the project packages', () => {
   // A test_settings.py is a settings module whatever it is named, and wherever
-  // it sits — ctomop/ carried one until 0ba8665d. The recursive form is what
-  // reaches the last of these: a settings module parked under tests/ would
-  // otherwise be exempted by name.
+  // it sits — ctomop/ carried one until 0ba8665d. CONTROL_PATHS is matched
+  // before TEST_PATHS, so inside these two packages the exemption is off
+  // entirely: that is what reaches a settings module parked under tests/.
   for (const filename of [
     'promop/test_settings.py', 'promop/settings/test_base.py', 'ctomop/test_settings.py',
     'promop/tests/test_settings.py',
   ]) assert.equal(securityPath(filename), true, filename);
+  // It reaches an ordinary-looking test in there too, which is the cost of the
+  // rule and is deliberate rather than an oversight: neither directory exists,
+  // and a 20-file configuration package holds nothing a test-shaped name makes
+  // safe. Asserted so that ungating it has to be a decision someone writes down.
+  for (const filename of [
+    'promop/tests/test_views.py', 'promop/tests/urls.py', 'ctomop/tests/test_urls.py',
+  ]) assert.equal(securityPath(filename), true, filename);
+  // Outside them, the exemption is untouched at any depth.
+  for (const filename of [
+    'patient_portal/api/tests/test_permissions.py', 'omop_core/tests/test_access.py',
+  ]) assert.equal(securityPath(filename), false, filename);
 });
 
 test('a path carrying stray whitespace cannot slip past classification', () => {

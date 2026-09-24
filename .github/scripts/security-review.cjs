@@ -7,43 +7,53 @@ const REQUIRED_REVIEWER = { login: 'larsburgess', id: 23724 };
 // Referenced issues are fetched one API call each, on every scheduled run, from
 // text the PR author controls. Cap the fan-out well below the hourly budget.
 const MAX_ISSUE_REFERENCES = 20;
-// Paths the test-file exemption must never reach: the control plane — CI, the
-// policy that gates it, the scanners it runs, the change-management evidence —
-// and, in the Django project packages, the modules that decide who may
-// authenticate. A file here executes with the control plane's privileges
-// whatever it is named (`.github/workflows/*.test.yml` is a workflow Actions
-// will run; `.github/scripts/*.test.cjs` was executed by this policy's own
-// workflow), and a `test_settings.py` is still a settings module.
+// Paths the test-file exemption must never reach. Two groups:
+//   the control plane — CI, the policy that gates it, the scanners it runs, the
+//   change-management evidence: a file here executes with the control plane's
+//   privileges whatever it is named (`.github/workflows/*.test.yml` is a
+//   workflow Actions will run; `.github/scripts/*.test.cjs` was executed by this
+//   policy's own workflow), and
+//   the two Django project packages, whole.
 //
-// These are globs, not exact filenames: the matcher has no implicit recursion,
-// so `promop/settings.py` alone stops covering the settings module the day it
-// becomes `promop/settings/base.py` — the ordinary refactor at its current
-// size — and covers neither `ctomop/settings_staging.py` nor a
-// `settings_prod.py`. The same applies to the two modules below, which is why
-// each is listed as both a file and a package. The infix form also keeps
-// `test_settings.py` in scope, which is the point of listing settings here
-// rather than below the test exemption. A file under a directory named
-// `tests/` stays exempt at any depth.
+// The packages are taken whole rather than as a list of the interesting modules
+// inside them, because the interesting set is not knowable from the filenames.
+// `settings.py`, `oauth.py` (OAUTH2_VALIDATOR_CLASS), `sentry.py` (the secret
+// denylist) and `urls.py` (the only AllowAny in the tree, the admin mount and a
+// plain-Django catch-all) are the ones that read as security today. But
+// `wsgi.py`, `asgi.py` and `celery.py` each carry
+// `os.environ.setdefault('DJANGO_SETTINGS_MODULE', ...)`, and start.sh runs
+// `gunicorn promop.wsgi:application` with nothing setting that variable — so
+// the line in wsgi.py is what chooses the settings module in production, and
+// no test pins it. tests/test_project_package_compatibility.py and
+// tests/test_render_production_settings.py both set the variable themselves
+// before asserting anything, and pytest.ini sets it for the suite; none of
+// them constrains the setdefault. Repointing it at a module named anything
+// else would swap production's settings, and a per-module list would have to
+// have anticipated that name to catch it.
+//
+// Taking them whole costs nothing measurable. The two packages are 20 files
+// and 1228 lines. Replaying all 1970 commits of the last 12 months through
+// both spellings of this list: four of them touch a module a per-module list
+// would have missed (a0ff2d2c, the rename that made promop canonical, plus
+// fbdf8d46, 01d80b6a and 148c9d59), and all four also touch settings.py, so
+// zero commits are sent for approval by the directory form that were not
+// already sent by the per-module one. The precise rule buys no review time and
+// fails open on the twenty-first file.
+//
+// This list is matched before the test exemption, so inside these two packages
+// the exemption does not apply at all: a `test_settings.py` is still a settings
+// module, and a `promop/tests/urls.py` is still a route table. That reaches
+// further than the two examples — `promop/tests/test_views.py` is gated too,
+// and neither directory exists today. It is the deliberate trade: a 20-file
+// configuration package has nothing in it that a test-shaped name makes safe,
+// and the alternative is a rule that turns on whether a settings module was
+// parked under `tests/`. Everywhere else in the tree, a file under a directory
+// named `tests/` stays exempt at any depth.
 const CONTROL_PATHS = [
   '.github/**', '**/CODEOWNERS', 'docs/soc2/**', '.bandit*', '.gitleaks*',
   'SECURITY.md', 'scripts/capture_change_management_evidence.py',
   'scripts/capture_change_management_evidence/**',
-  'promop/**/*settings*', 'promop/settings/**', 'ctomop/**/*settings*', 'ctomop/settings/**',
-  // OAUTH2_VALIDATOR_CLASS: refuses grant, response type and bearer token for
-  // retired browser clients. Its only test is under tests/, which this list
-  // exempts, so ungating it would let one change weaken the validator and
-  // relax the test that proves it.
-  'promop/oauth.py', 'promop/oauth/**', 'ctomop/oauth.py', 'ctomop/oauth/**',
-  // The Sentry scrubber: the secret denylist and include_local_variables.
-  'promop/sentry.py', 'promop/sentry/**', 'ctomop/sentry.py', 'ctomop/sentry/**',
-  // The root URLconf, which is not DRF. `DEFAULT_PERMISSION_CLASSES =
-  // ['IsAuthenticated']` is what makes an app URLconf safe to leave out: a new
-  // DRF route there defaults to deny. It says nothing about `promop/urls.py`,
-  // which carries `permission_classes=[AllowAny]`, the admin mount, the OAuth2
-  // authorization-server mount and a plain-Django catch-all — a `path()` added
-  // above that catch-all is unauthenticated by default, and no test enumerates
-  // the routes reachable without authentication.
-  'promop/*urls*.py', 'promop/urls/**', 'ctomop/*urls*.py', 'ctomop/urls/**',
+  'promop/**', 'ctomop/**',
   // The tests that pin the operational files SECURITY_PATHS deliberately omits.
   // That omission rests on those values being pinned by tests, which only holds
   // while the pins cannot be relaxed in the same ungated change:
@@ -81,7 +91,7 @@ const CONTROL_PATHS = [
 // wsgi entrypoint and build command are asserted), .dockerignore has none, and
 // no test constrains a service's buildCommand. Bandit and gitleaks cover the
 // secret case. The root URLconf is the one path the pinning argument cannot
-// cover at all, and it is gated above rather than here.
+// cover at all; it is gated above with the rest of its package.
 //
 // Both dependency manifests are here, because the scanners answer a different
 // question than review does. `pip-audit -r requirements.txt` and Dependabot
@@ -110,20 +120,31 @@ const SECURITY_PATHS = [
   'patient_portal/api/permissions.py', 'patient_portal/api/permissions/**',
   'patient_portal/api/middleware.py', 'patient_portal/api/middleware/**',
   'patient_portal/api/providers/**',
-  // The project route table, and only it. Of the other seven urls.py modules,
-  // the DRF ones carry no permission decisions — their views do, and DRF
-  // defaults to IsAuthenticated here, so a DRF route added to one fails closed.
-  // That is a convention rather than a guarantee: a plain Django view added to
-  // any of them would have no permission default either. What makes those
-  // seven different is reachability — patient_portal/urls.py is mounted
-  // nowhere, and the rest hang off the file below. promop/urls.py is the
-  // exception on its own terms: it mounts admin/ and the OAuth2 provider tree,
-  // carries the only permission_classes=[AllowAny] of any urls.py in the tree,
-  // and ends in a catch-all, so a plain Django view added here has no
-  // permission default at all. ctomop/urls.py is gated for a different reason
-  // than its content, which is five lines aliasing this module: repointing that
-  // alias moves every route in the project.
-  'promop/urls.py', 'promop/urls/**', 'ctomop/urls.py', 'ctomop/urls/**',
+  // The seven app URLconfs are deliberately out of scope, and promop/urls.py
+  // is not one of them: it is covered by `promop/**` above. The app ones carry
+  // no permission decisions — their views do, and DEFAULT_PERMISSION_CLASSES
+  // is ['IsAuthenticated'] here, so a DRF route added to one fails closed.
+  // That is a convention rather than a guarantee, since a plain Django view
+  // added to any of them would have no permission default either; what makes
+  // them different is reachability — patient_portal/urls.py is mounted
+  // nowhere, and the rest hang off promop/urls.py, which is gated.
+  // The settings-module selector that makes DEFAULT_PERMISSION_CLASSES true at
+  // all lives in promop/wsgi.py, and is gated there for the same reason.
+  //
+  // manage.py is the third copy of that selector and the only one outside both
+  // packages. start.sh runs `manage.py check --deploy --fail-level ERROR` with
+  // no DJANGO_SETTINGS_MODULE in the environment, so this file decides which
+  // settings the deploy check reads — and a check that passes against the
+  // wrong settings module is the failure the check exists to prevent.
+  //
+  // start.sh itself stays ungated, and one `export DJANGO_SETTINGS_MODULE=`
+  // line in it would override all four selectors from outside this list. Like
+  // the other operational files it is left out on the strength of a pin, and
+  // that pin had to be written: tests/test_web_startup.py already fails on a
+  // `--settings=` appended to any manage.py line, because it asserts the exact
+  // argv sequence, and now also asserts the variable is unset in the
+  // environment start.sh hands its commands. That test is in CONTROL_PATHS.
+  'manage.py',
   // Service principals: the credential definitions and the two commands that
   // issue and import them.
   'patient_portal/service_tokens.py', 'patient_portal/service_tokens/**',

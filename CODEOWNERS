@@ -32,43 +32,30 @@
 /patient_portal/service_tokens/     @larsburgess
 /patient_portal/service_applications.py @larsburgess
 /patient_portal/service_applications/   @larsburgess
-# The project route table: mounts admin/ and the OAuth2 provider tree, and is
-# the only urls.py in the tree carrying permission_classes=[AllowAny].
-# ctomop/urls.py aliases it, so repointing that alias moves every route.
-/promop/*urls*.py                   @larsburgess
-/promop/urls/                       @larsburgess
-/ctomop/*urls*.py                   @larsburgess
-/ctomop/urls/                       @larsburgess
+
+# ── The two Django project packages, whole ──────────────────────────────────
+# Mirrors the gate's `promop/**` / `ctomop/**` in .github/scripts/security-review.cjs.
+# An owner entry covering less than the gate asks for no reviewer on a change
+# the gate will still hold, which reads as the gate being broken rather than as
+# the owner list being stale — so the two lists have the same shape.
+#
+# Twenty files, 1228 lines. settings.py (auth backends, SECRET_KEY, CORS),
+# oauth.py (which clients may still authenticate), sentry.py (what leaves the
+# process) and urls.py (the only permission_classes=[AllowAny] in the tree,
+# plus the admin and OAuth2 mounts) are the obvious ones. wsgi.py, asgi.py and
+# celery.py are not obvious and matter as much: each carries the
+# `os.environ.setdefault('DJANGO_SETTINGS_MODULE', ...)` that picks which
+# settings module production loads. Naming the obvious four would drop the
+# owner from the other twelve, and from the twenty-first file when it lands,
+# and would save nothing: over the last 12 months no commit needed this owner
+# for the directory form that did not already need it for the named one.
+/promop/                            @larsburgess
+/ctomop/                            @larsburgess
+# The third copy of that setdefault, and the only one outside both packages:
+# start.sh runs `manage.py check --deploy` with no DJANGO_SETTINGS_MODULE set.
+/manage.py                          @larsburgess
 
 # ── Configuration and security checks ───────────────────────────────────────
-# Settings modules control auth backends, secret keys, and CORS policy. The
-# OAuth validator decides which clients may still authenticate; the Sentry
-# module decides what leaves the process.
-#
-# Patterns, not exact filenames, and deliberately the same shape the gate in
-# .github/scripts/security-review.cjs uses: an entry that covers less than the
-# gate does asks for no reviewer on a change the gate will still hold, which
-# reads as the gate being broken rather than as the owner list being stale.
-# `*` here does not cross a directory separator, so the recursive form is the
-# one that matches the gate's `promop/**/*settings*`. The plain form stays
-# beside it: both name the same owner, so the pair costs nothing, and it does
-# not depend on `/**/` being read as "zero or more" directories rather than one
-# or more — a reading that, if wrong, would drop the owner from settings.py
-# itself.
-/promop/*settings*                  @larsburgess
-/promop/**/*settings*               @larsburgess
-/promop/settings/                   @larsburgess
-/ctomop/*settings*                  @larsburgess
-/ctomop/**/*settings*               @larsburgess
-/ctomop/settings/                   @larsburgess
-/promop/oauth.py                    @larsburgess
-/promop/oauth/                      @larsburgess
-/ctomop/oauth.py                    @larsburgess
-/ctomop/oauth/                      @larsburgess
-/promop/sentry.py                   @larsburgess
-/promop/sentry/                     @larsburgess
-/ctomop/sentry.py                   @larsburgess
-/ctomop/sentry/                     @larsburgess
 /patient_portal/checks.py           @larsburgess
 /patient_portal/checks/             @larsburgess
 # Both manifests: the scanners answer "is anything here known-bad", review
@@ -78,12 +65,21 @@
 /requirements/                      @larsburgess
 
 # ── Frontend auth and the transports that carry a credential ─────────────────
+# Directory form beside each file, for the reason the gate gives: `axios.ts`
+# becoming `axios/index.ts` plus `axios/interceptors.ts` is an ordinary move,
+# and it would take the credential-attaching transport out of scope on the way.
 /frontend/src/utils/oauth.ts        @larsburgess
+/frontend/src/utils/oauth/          @larsburgess
 /frontend/src/hooks/useAuth.ts      @larsburgess
+/frontend/src/hooks/useAuth/        @larsburgess
 /frontend/src/api/axios.ts          @larsburgess
+/frontend/src/api/axios/            @larsburgess
 /frontend/src/api/publicAxios.ts    @larsburgess
+/frontend/src/api/publicAxios/      @larsburgess
 /frontend/src/api/clinicalTransport.ts  @larsburgess
+/frontend/src/api/clinicalTransport/    @larsburgess
 /frontend/src/federation/assertLabsTokens.ts  @larsburgess
+/frontend/src/federation/assertLabsTokens/    @larsburgess
 /frontend/src/components/Auth/      @larsburgess
 
 # ── Security documentation and the commands that issue credentials ───────────
@@ -96,9 +92,6 @@
 /.gitleaks*                         @larsburgess
 /.bandit*                           @larsburgess
 /SECURITY.md                        @larsburgess
-
-
-# ── Credential handling and the auth surface of the frontend ────────────────
 
 # ── Tests that pin the deliberately ungated operational files ───────────────
 # start.sh, render.yaml and ops/artemis/Dockerfile are out of the gate's scope
@@ -117,3 +110,4 @@
 CODEOWNERS                          @larsburgess
 /docs/soc2/                         @larsburgess
 /scripts/capture_change_management_evidence.py  @larsburgess
+/scripts/capture_change_management_evidence/    @larsburgess
