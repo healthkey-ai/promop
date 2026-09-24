@@ -1,5 +1,42 @@
 # Auditing Athena mapping reconciliation
 
+## Automatic downstream reconciliation
+
+Migration `0258_reconcile_approved_icd10_from_athena_export` automatically performs
+the approved-mapping reconciliation when deployments run `manage.py migrate`.
+This includes HealthTree: no separate shell command, Drive credentials, local
+download directory, STCM content, or network access is required. Migration 0256
+is retained unchanged because it is already part of deployed migration history.
+
+The migration uses a frozen historical-model implementation and a checksum-verified
+snapshot of the original September 21, 2026 Athena export. The 1,532,768-byte gzip
+contains 116,911 ICD10/ICD10CM source concepts, 148,546 outgoing Maps-to records,
+and 15,974 referenced target concepts. It covers the full source vocabularies,
+not a list of HealthKey mapping IDs. It retains all exported validity intervals
+and evaluates them on the deployment date. This is ordinary Git content, not a
+multi-gigabyte vocabulary download or Git LFS dependency.
+
+Each instance's approved non-Athena SCCM mappings with one valid standard export
+destination are reattributed to `athena`, updating the destination when needed.
+The exact-vocabulary and HT-One label rules, conflict checks, locks, sign-off
+preservation and future-import-only behavior described below also apply to the
+migration. Missing destinations are reported and skipped; the migration does not
+reload vocabularies or overwrite conflicting concept metadata. Its deployment
+log reports changes and skipped outcomes. Already-Athena rows are excluded, so
+the 1,674 manually corrected HealthKey rows are unchanged. Unresolved rows stay
+unchanged unless their blocking conditions have been resolved by deployment.
+
+The migration commits in batches of 250 and can safely resume after interruption.
+Reversal retains completed corrections to avoid overwriting later curator edits.
+Rebuild the artifact only for a new versioned migration using:
+
+```bash
+python scripts/build_athena_reconciliation_snapshot.py --path /path/to/original/athena-export --as-of 2026-09-21 --output /tmp/evidence.json.gz
+```
+
+The builder has no database dependency and records input-file fingerprints. Do
+not replace this migration's frozen snapshot for a later vocabulary release.
+
 ## Reconcile from the original Athena export
 
 Use `reconcile_athena_mappings` to check and optionally reattribute existing
