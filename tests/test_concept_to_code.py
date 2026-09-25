@@ -164,6 +164,36 @@ def test_ranker_cannot_fallback_to_first_candidate_without_model_selection(conce
     assert rank.call_args.kwargs['require_model_selection'] is True
 
 
+def test_worker_redelivery_marks_interrupted_preview_failed_and_keeps_results(concept):
+    from omop_core.tasks import suggest_mappings_task
+    preview = [{'concept': {'concept_id': concept.pk}, 'candidates': []}]
+    run = SuggestRun.objects.create(direction='reverse', state=SuggestRun.RUNNING, activity=preview)
+    suggest_mappings_task.push_request(delivery_info={'redelivered': True})
+    try:
+        result = suggest_mappings_task.run(str(run.pk), {'direction': 'reverse'})
+    finally:
+        suggest_mappings_task.pop_request()
+    run.refresh_from_db()
+    assert result['state'] == 'failure'
+    assert run.activity == preview and run.finished_at is not None
+    assert 'interrupted' in run.error and 'retry' in run.error
+
+
+def test_worker_redelivery_before_start_still_executes_the_preview(client, concept):
+    from omop_core.tasks import suggest_mappings_task
+    dispatcher = FakeDispatcher()
+    with use_dispatcher(dispatcher):
+        client.post(f'{BASE}suggest/', {'concept_ids': [concept.pk], 'strategies': ['lexical']}, format='json')
+    run_id, params = dispatcher.calls[0]
+    suggest_mappings_task.push_request(delivery_info={'redelivered': True})
+    try:
+        assert suggest_mappings_task.run(run_id, params)['state'] == 'success'
+        # A completed preview stays successful on another redelivery.
+        assert suggest_mappings_task.run(run_id, params)['state'] == 'success'
+    finally:
+        suggest_mappings_task.pop_request()
+
+
 @pytest.mark.parametrize('payload', [
     {'concept_ids': []}, {'concept_ids': [True]}, {'concept_ids': ['1']},
     {'strategies': []}, {'strategies': ['invalid']}, {'limit': 0}, {'limit': True},

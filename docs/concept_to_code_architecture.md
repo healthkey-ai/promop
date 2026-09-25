@@ -53,6 +53,9 @@ three ranked candidates. Each concept's retrieval has a shared SQL time budget
 of 30 seconds queued or 8 seconds inline. Failed runs retain partial previews
 and report failure. A completed/running reverse run is not restarted by task
 redelivery.
+If a worker was lost after starting a reverse run, redelivery marks that run
+failed with an interrupted-search message and preserves its partial preview so
+the curator can retry. A redelivery before the run started still executes it.
 
 ## Saving and approving
 
