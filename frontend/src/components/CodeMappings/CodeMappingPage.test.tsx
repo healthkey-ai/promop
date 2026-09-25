@@ -254,6 +254,19 @@ describe("CodeMappingPage", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
+  it("switches between source-first and concept-first curation", async () => {
+    renderPage([proposedRow]);
+    await screen.findByRole("button", { name: "Concept → Source Code" });
+    const previousGet = mockGet.getMockImplementation()!;
+    mockGet.mockImplementation((url: string, ...rest: unknown[]) => url === "/v1/concept-to-code/"
+      ? Promise.resolve({ data: { results: [], total: 0, page: 1, page_size: 50 } }) : previousGet(url, ...rest));
+    fireEvent.click(screen.getByRole("button", { name: "Concept → Source Code" }));
+    expect(await screen.findByRole("region", { name: "Concept to source code" })).toBeInTheDocument();
+    await screen.findByText(/No matching standard concepts/);
+    fireEvent.click(screen.getByRole("button", { name: "Source Code → Concept" }));
+    expect(await screen.findByText("M-PROTEIN, SERUM", { selector: "td" })).toBeInTheDocument();
+  });
+
   describe("duplicate source-code errors", () => {
     const proposed = { ...proposedRow, mapping_id: 101, source_vocabulary_id: "ICD10", source_code: "A02.0" };
     // Same vocabulary as `proposed`: a duplicate is one code twice in one vocabulary.

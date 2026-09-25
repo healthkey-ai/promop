@@ -56,6 +56,7 @@ def selection_summary(params):
 
     return {
         'order': (
+            'Codes with Seen greater than zero before zero-Seen codes. Within each group: '
             'Codes without destinations first, regardless of provenance, ordered '
             'by Seen count highest first. Then eligible replacements not yet tried '
             'by this model version, followed by previously tried replacements, '
@@ -197,6 +198,10 @@ def execute_run(run_id: str, params: dict) -> None:
     Never raises: a failure belongs on the row, where the page is already
     looking, rather than in a worker log the curator cannot see.
     """
+    if params.get('direction') == 'reverse':
+        from omop_core.services.reverse_suggest_jobs import execute_reverse_run
+        execute_reverse_run(run_id, params)
+        return
     if 'preview' in params:
         execute_preview(run_id, params)
         return

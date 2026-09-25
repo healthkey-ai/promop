@@ -1,4 +1,5 @@
 import CanonicalUnitEditor from "./CanonicalUnitEditor";
+import ConceptToCodeTab from "./ConceptToCodeTab";
 import PageTitle from '@/components/Branding/PageTitle';
 import IndividualSuggestCandidates from "./IndividualSuggestCandidates";
 import InlineDestinationPicker from "./InlineDestinationPicker";
@@ -614,6 +615,8 @@ export default function CodeMappingPage() {
   const navigate = useNavigate();
   const { currentUser } = useAuth();
   const canApprove = !!(currentUser?.is_staff || currentUser?.is_org_admin);
+  const [direction, setDirection] = useState<'forward' | 'reverse'>('forward');
+  const [reverseWriting, setReverseWriting] = useState(false);
   const [browse, setBrowse] = useState<BrowseResponse | null>(null);
   const [pages, setPages] = useState<Partial<Record<MappingSection, number>>>({});
   const loadSequence = useRef(0);
@@ -721,6 +724,7 @@ export default function CodeMappingPage() {
   }, [searchQuery]);
 
   const fetchAll = useCallback(async () => {
+    if (direction === 'reverse') return;
     const sequence = ++loadSequence.current;
     setLoading(true);
     setError("");
@@ -759,7 +763,7 @@ export default function CodeMappingPage() {
     } finally {
       if (sequence === loadSequence.current) setLoading(false);
     }
-  }, [activeVocabulary, debouncedSearch, pages, sectionSorts, provenanceFilter, rollup, seenOnly]);
+  }, [activeVocabulary, debouncedSearch, pages, sectionSorts, provenanceFilter, rollup, seenOnly, direction]);
 
   const refreshCurrent = useRef(fetchAll);
   useEffect(() => { refreshCurrent.current = fetchAll; }, [fetchAll]);
@@ -1845,6 +1849,19 @@ export default function CodeMappingPage() {
     );
   };
 
+  const directionControls = <div role="group" aria-label="Mapping direction" className="mb-5 flex gap-2 border-b border-slate-200 pb-3">
+    {([['forward', 'Source Code → Concept'], ['reverse', 'Concept → Source Code']] as const).map(([value, label]) =>
+      <button key={value} type="button" disabled={reverseWriting} aria-pressed={direction === value}
+        onClick={() => setDirection(value)}
+        className={`rounded px-3 py-2 text-sm font-medium disabled:opacity-50 ${direction === value ? 'bg-slate-950 text-white' : 'text-slate-600 hover:bg-slate-100'}`}>{label}</button>)}
+  </div>;
+
+  if (direction === 'reverse') return <div className="min-h-screen bg-slate-50 p-6"><div className="mx-auto max-w-7xl">
+    <PageTitle className="mb-5 text-2xl font-semibold text-slate-950">Code Mapping</PageTitle>
+    {directionControls}
+    <ConceptToCodeTab canApprove={canApprove} onWritingChange={setReverseWriting} />
+  </div></div>;
+
   if (loading && rows.length === 0 && !browse) {
     return (
       <div className="flex min-h-[400px] items-center justify-center">
@@ -1881,6 +1898,7 @@ export default function CodeMappingPage() {
           </button>
         </div>
 
+        {directionControls}
         {loading && <p role="status" className="mb-2 text-sm text-slate-500">Loading mappings…</p>}
 
         {error && !dialogMode && (
