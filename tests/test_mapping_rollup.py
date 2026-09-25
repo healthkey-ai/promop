@@ -204,6 +204,23 @@ def test_expanding_an_entry_returns_its_codes_newest_volume_first(api):
     assert data['truncated'] is False
 
 
+def test_seen_filter_applies_to_group_members_and_all_counts_sources(api):
+    browse, members = api
+    row('A', 'Albumin', seen=2)
+    row('B', 'Albumin', seen=3)
+    row('ZERO', 'Albumin')
+    row('OTHER-ZERO', 'Ferritin')
+    data = browse(rollup='1', seen_only='1').data
+    assert data['total'] == 2  # sources, not the single group
+    assert data['pages']['Unmapped']['total'] == 1
+    assert data['groups']['Unmapped'][0]['members'] == 2
+    assert [r['source_code'] for r in members(label='albumin', seen_only='1').data['results']] == ['B', 'A']
+    all_codes = browse(rollup='1', seen_only='0').data
+    assert all_codes['total'] == 4
+    assert all_codes['pages']['Unmapped']['total'] == 2
+    assert len(members(label='albumin', seen_only='0').data['results']) == 3
+
+
 def test_expanding_is_scoped_to_the_section_the_entry_came_from(api):
     """A label split across sections is two entries; expanding one must not
     show the other's rows."""

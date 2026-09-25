@@ -70,6 +70,14 @@ def apply_provenance(queryset, provenance):
         origin_system='' if provenance == BLANK_PROVENANCE else provenance)
 
 
+def apply_seen(queryset, params):
+    """The page opts into Seen > 0; other API clients retain their full catalog."""
+    value = params.get('seen_only', '0')
+    if value not in ('0', '1'):
+        raise ValidationError({'seen_only': 'Use 1 for Seen > 0 or 0 for all codes.'})
+    return queryset.filter(occurrence_count__gt=0) if value == '1' else queryset
+
+
 def visible_rows(mappings, params):
     """Everything a browse request narrows by, in the order browse applies it.
 
@@ -81,7 +89,7 @@ def visible_rows(mappings, params):
     source = params.get('source')
     search = (params.get('search') or '').strip()
     rows = apply_search(mappings, tab_queryset(mappings, source), search)
-    return apply_provenance(rows, (params.get('provenance') or '').strip())
+    return apply_seen(apply_provenance(rows, (params.get('provenance') or '').strip()), params)
 
 
 def _provenance_options(counts_by_origin):
@@ -91,6 +99,8 @@ def _provenance_options(counts_by_origin):
 
 
 def browse_mappings(mappings, params, serialize):
+    catalog = mappings
+    mappings = apply_seen(mappings, params)
     # Counts use the same Athena de-duplication as the visible rows.
     counts = {}
     section_counts = {}
@@ -137,13 +147,13 @@ def browse_mappings(mappings, params, serialize):
     # legitimate mappings. Only an OID spelling is the same vocabulary.
     alias_cases = [When(source_vocabulary_id=key, then=Value(canonical))
                    for key, canonical in vocab.VOCABULARY_OID_ALIASES.items()]
-    duplicate_ids = tab_rows.order_by().annotate(
+    duplicate_ids = tab_queryset(catalog, source).order_by().annotate(
         canonical=Case(*alias_cases, default=F('source_vocabulary_id'), output_field=CharField()),
         code=Upper(Trim('source_code')),
     ).exclude(code='').annotate(
         duplicate_count=Window(Count('pk'), partition_by=[F('canonical'), F('code')]),
     ).filter(duplicate_count__gt=1).values_list('pk', flat=True)
-    duplicates = list(with_destination_counts(mappings.filter(pk__in=duplicate_ids)))
+    duplicates = list(with_destination_counts(catalog.filter(pk__in=duplicate_ids)))
 
     # Values offered by the filter control, from the counts above so choosing
     # one does not empty the list of the others.
@@ -241,6 +251,7 @@ def browse_mappings(mappings, params, serialize):
         return serialize(row.target_concept, row, metadata[row.pk], destination_count=row.destination_count)
 
     return dict(results=[render(row) for row in results], duplicates=[render(row) for row in duplicates],
+                total=sum(section_totals), seen_only=params.get('seen_only') == '1',
                 tabs=tabs, selected_source=source, pages=pages, rejected_count=rejected,
                 provenances=provenances, selected_provenance=provenance,
                 groups=groups, rollup=rollup)

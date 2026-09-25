@@ -39,6 +39,53 @@ def test_pages_sort_before_slicing_and_report_full_counts(browse):
     assert browse(order_0='source_code').data['results'][0]['source_code'] == 'C000'
 
 
+def test_seen_filter_precedes_sort_pagination_and_counts_all_sections(browse):
+    for i in range(105):
+        row(f'Z-SEEN-{i:03}', occurrence_count=i + 1)
+    row('A-ZERO')  # would displace a seen row under the explicit code sort
+    row('APPROVED-SEEN', status='approved', occurrence_count=1)
+    row('APPROVED-ZERO', status='approved')
+    row('REJECTED-SEEN', status='rejected', occurrence_count=1)
+    row('REJECTED-ZERO', status='rejected')
+    row('ATHENA-SEEN', origin_system='athena', status='approved', occurrence_count=1)
+    row('ATHENA-ZERO', origin_system='athena', status='approved')
+    first = browse(seen_only='1', order_0='source_code').data
+    second = browse(seen_only='1', order_0='source_code', page_0=2).data
+    assert first['total'] == second['total'] == 108
+    assert first['seen_only'] is True
+    assert first['pages']['Unmapped']['total'] == 105
+    assert all(row['occurrence_count'] > 0 for row in first['results'] + second['results'])
+    assert first['results'][0]['source_code'] == 'Z-SEEN-000'
+    assert second['results'][0]['source_code'] == 'Z-SEEN-100'
+    tab = next(tab for tab in first['tabs'] if tab['vocabulary_id'] == 'ICD10')
+    assert (tab['proposed'], tab['approved'], tab['athena']) == (105, 1, 1)
+    unfiltered = browse(seen_only='0', order_0='source_code').data
+    assert unfiltered['total'] == 112
+    assert unfiltered['results'][0]['source_code'] == 'A-ZERO'
+    assert SourceCodeConceptMapping.objects.count() == 112
+
+
+def test_seen_filter_combines_with_cross_tab_search_and_provenance(browse):
+    row('MATCH-1', occurrence_count=2, origin_system='curator')
+    row('MATCH-2', source_vocabulary_id='SNOMED', occurrence_count=1, origin_system='curator')
+    row('MATCH-ZERO', source_vocabulary_id='SNOMED', origin_system='curator')
+    row('MATCH-OTHER', occurrence_count=2, origin_system='HT-One')
+    data = browse(source='ICD10', search='MATCH', provenance='curator', seen_only='1').data
+    assert data['total'] == 2
+    assert {r['source_code'] for r in data['results']} == {'MATCH-1', 'MATCH-2'}
+    assert browse(source='__overall__', seen_only='1').data['total'] == 3
+    assert browse(seen_only='true').status_code == 400
+
+
+def test_all_total_is_not_the_number_of_loaded_rows(browse):
+    for i in range(110):
+        row(f'P{i:03}', occurrence_count=1)
+        row(f'A{i:03}', status='approved', occurrence_count=1)
+    data = browse(seen_only='1').data
+    assert len(data['results']) == 200
+    assert data['total'] == 220
+
+
 @pytest.mark.parametrize('params', [{}, {'source': '__overall__'}, {'search': 'SORT-'}])
 def test_unmapped_defaults_to_seen_descending_before_pagination(browse, params):
     """Unmapped defaults to Seen, like every other section (#1575).
