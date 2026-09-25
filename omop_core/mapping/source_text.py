@@ -27,6 +27,10 @@ _FORMS: frozenset[str] = frozenset({
     'EXTENDED', 'DELAYED', 'RELEASE', 'PROLONGED', 'SUSTAINED', 'CHEWABLE',
     'COATED', 'FILM', 'PREFILLED', 'SYRINGE', 'VIAL', 'AMPULE', 'AMPOULE',
     'DISINTEGRATING', 'DOSE', 'DOSAGE',
+    'CUTANEOUS', 'TRANSDERMAL', 'BUCCAL', 'SUBLINGUAL', 'IMPLANT', 'PESSARY',
+    'ENEMA', 'DROPS', 'MOUTHWASH', 'GARGLE', 'PASTE', 'FOAM', 'SHAMPOO',
+    'LOZENGE', 'PELLET', 'EMULSION', 'INFUSION', 'CONCENTRATE', 'EFFERVESCENT',
+    'GASTRO', 'RESISTANT', 'MODIFIED', 'IMMEDIATE',
 })
 
 # SNOMED names a drug "X-containing product", so these mark a drug as reliably

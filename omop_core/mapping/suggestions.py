@@ -678,6 +678,22 @@ def _narrowing_filter(query: str, domain_id: str | None) -> dict[str, str]:
     return {'name_upper__trigram_similar': query}
 
 
+def _name_matches(query: str, domain_id: str | None, limit: int,
+                  narrowing: dict[str, str]):
+    """Concepts whose name matches, narrowed however the caller asked."""
+    return (
+        Concept.objects
+        .filter(standard_concept='S', invalid_reason__isnull=True,
+                **({'domain_id': domain_id} if domain_id else {}))
+        .annotate(name_upper=Upper('concept_name'))
+        .filter(**narrowing)
+        .annotate(score=TrigramSimilarity(Upper('concept_name'), query))
+        .filter(score__gt=MIN_TRIGRAM_SCORE)
+        # Equal scores are common, so every slice and the final sort tiebreak on id.
+        .order_by('-score', 'concept_id')[:limit]
+    )
+
+
 def lexical_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
     """Concepts whose name or synonyms look like this source value.
 
@@ -706,17 +722,15 @@ def lexical_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
     # `%` uses pg_trgm.similarity_threshold (0.3 by default), the same cut
     # MIN_TRIGRAM_SCORE applies -- the explicit filter stays so the constant
     # governs regardless of the session setting.
-    by_name = (
-        Concept.objects
-        .filter(standard_concept='S', invalid_reason__isnull=True,
-                **({'domain_id': domain_id} if domain_id else {}))
-        .annotate(name_upper=Upper('concept_name'))
-        .filter(**_narrowing_filter(query, domain_id))
-        .annotate(score=TrigramSimilarity(Upper('concept_name'), query))
-        .filter(score__gt=MIN_TRIGRAM_SCORE)
-        # Equal scores are common, so every slice and the final sort tiebreak on id.
-        .order_by('-score', 'concept_id')[:limit]
-    )
+    narrowing = _narrowing_filter(query, domain_id)
+    by_name = list(_name_matches(query, domain_id, limit, narrowing))
+    wide = {'name_upper__trigram_similar': query}
+    if not by_name and narrowing != wide:
+        # A key word the names spell differently, "cutaneous" against "topical",
+        # excludes everything. Nothing found means the key was wrong, not that
+        # the vocabulary is empty, so pay for the wide search rather than return
+        # less than the old code did.
+        by_name = list(_name_matches(query, domain_id, limit, wide))
 
     # Synonyms are a separate index and a separate signal; merged by concept,
     # keeping whichever route scored higher.

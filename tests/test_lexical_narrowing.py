@@ -142,6 +142,12 @@ class TestLexicalRecall:
 
         assert target.pk in _ids('Injection of joint', 'Procedure')
 
+    def test_falls_back_wide_when_the_key_matches_nothing(self):
+        """A key word the names spell differently must not empty the result."""
+        target = _drug('Salicylic Acid 0.5 MG/MG Topical Ointment')
+        # "cutaneous" never appears in the name, so the narrowed key finds nothing.
+        assert target.pk in _ids('Salicylic acid 500 mg/g cutaneous unguent')
+
     def test_non_drug_domain_is_unaffected(self):
         condition = ConceptFactory(
             concept_name='Type 2 diabetes mellitus', standard_concept='S',
