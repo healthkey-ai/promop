@@ -1283,19 +1283,30 @@ class TrialSearchPreferencesSerializer(serializers.ModelSerializer):
     # Filters button, and a count computed client-side drifts from the one
     # the server would compute.
     non_default_filter_count = serializers.IntegerField(read_only=True)
-    # Spelled out here rather than on the model: a `help_text` change on the
-    # field would be an AlterField migration, and this is a statement about
-    # the API contract, not about the column. It also reaches the detail
-    # route's schema, where the only other description is this class's
-    # docstring and that says nothing about replacing.
+    # Both fields below are spelled out here rather than on the model: a
+    # `help_text` change on a model field would be an AlterField migration,
+    # and these are statements about the API contract, not about the columns.
+    # The prose also reaches the detail route's schema, where the only other
+    # description is this class's docstring and that says nothing about
+    # replacing.
     #
     # Declaring the field decouples it from the model's `null`, `blank`,
     # `default` and `validators`, which a model-derived field would inherit.
     # Every one of those is a no-op today — `validators` is empty and the
     # column is NOT NULL — but a future model-level validator or `null=True`
-    # would stop reaching the API silently. `allow_null` is therefore stated
-    # rather than left to the default, so the 400 on a null has a reason a
-    # reader can see.
+    # would stop reaching the API silently. `preferences` therefore states
+    # `allow_null` rather than leaving it to the default, so the 400 on a null
+    # has a reason a reader can see.
+    weights_wizard_offered = serializers.BooleanField(
+        required=False,
+        help_text=(
+            "Whether this patient has been offered the suitability-weights "
+            "wizard. Write-once: `true` sets it, `false` is accepted and "
+            "ignored. Sending the value you last read back unchanged is "
+            "therefore safe, which is what this endpoint's read-modify-write "
+            "flow requires."
+        ),
+    )
     preferences = serializers.JSONField(
         required=False,
         allow_null=False,
@@ -1326,9 +1337,129 @@ class TrialSearchPreferencesSerializer(serializers.ModelSerializer):
         # it is additive — no migration, no existing key changes meaning.
         fields = [
             'id', 'person', 'preferences', 'non_default_filter_count',
-            'updated_at',
+            'weights_wizard_offered', 'updated_at',
         ]
         read_only_fields = ['person', 'updated_at']
+
+    def update(self, instance, validated_data):
+        """Write only the columns this request asked about.
+
+        `ModelSerializer.update` calls a bare `instance.save()`, which writes
+        every column from the copy this request read — so a filter PATCH that
+        never mentioned `weights_wizard_offered` still writes whatever value
+        it saw. On the unconditional path there is no lock and no transaction
+        (`If-Match` is opt-in), so a filter save that overlapped the offer
+        wrote the stale `False` back and the patient was asked again. The
+        validator above cannot catch that: the stale row it compares against
+        is the same stale row.
+
+        So the column is written only when the body carries it, and only ever
+        to `True`. There is no request that can clear it.
+
+        A body carrying `false` is therefore ignored rather than refused. A
+        400 was tried and withdrawn: this endpoint's documented flow is
+        read-modify-write ("GET, merge your edits over what came back, PATCH
+        the result"), so a client holding a representation read before the
+        offer sends `false` back on its NEXT FILTER SAVE without meaning
+        anything by it. Refusing that lost the filter edit, and kept losing it
+        until the client happened to re-read — a 400 for a field the request
+        was not about. Ignoring it costs almost nothing, because the value it
+        asks for is the one value this column will not take.
+
+        Almost: a PATCH carrying only `weights_wizard_offered: false` leaves
+        `validated_data` empty and still saves `update_fields=['updated_at']`,
+        so it bumps the row's version and can 412 a concurrent conditional
+        writer. Measured. Not a regression — an empty `{}` body does the same,
+        and `upsert` already documents that `updated_at` moves either way —
+        but "costs nothing" was too strong and a reviewer will find it.
+
+        `updated_at` is named explicitly because `update_fields` narrows what
+        `auto_now` refreshes; leaving it out would freeze the ETag and let a
+        client hold a representation of a row that has moved.
+
+        Write-once, and nothing undoes it: no request clears the column,
+        `reset` does not touch it, the viewset exposes no DELETE, and the
+        model is registered in no `admin.py`. A flag set in error — and
+        `can_write_patient` admits staff, service tokens, representatives,
+        doctors and org admins, so it need not be the patient who sets it —
+        is correctable only by a shell against the database. The cost is
+        small (someone silently never sees an optional wizard) and the
+        alternative is a clear path that re-opens the revert race this whole
+        method exists to close, but it is a real one-way door and this is
+        where a reader will land.
+
+        One behaviour change to know about: against a row deleted
+        concurrently, a narrow save raises rather than silently re-inserting
+        it. A delete landing later instead, after the save, makes the re-read
+        raise `DoesNotExist`. Two windows, not one sequence; both surface as a
+        500 — inherited from `update_fields` rather than chosen, and the
+        alternative, resurrecting a row somebody asked to delete, is worse.
+        """
+        offered = validated_data.pop('weights_wizard_offered', None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+
+        fields = [*validated_data, 'updated_at']
+        if offered:
+            instance.weights_wizard_offered = True
+            fields.append('weights_wizard_offered')
+
+        instance.save(update_fields=fields)
+
+        # THE INVARIANT, because three review rounds each found a different
+        # violation of it in this method and each fix broke the next case:
+        #
+        #     the body and the ETag must describe ONE row version.
+        #
+        # They are rendered from the same instance, so that reduces to: every
+        # field the response shows must come from the same moment. Three ways
+        # to get there, and only one of them holds:
+        #
+        #  - render what this request wrote, re-reading nothing. Wrong once
+        #    the save is NARROW: a flag-only PATCH leaves `preferences`
+        #    unwritten, so the body pairs a post-write flag with a pre-read
+        #    payload, and a client doing the documented read-modify-write
+        #    spends a valid `If-Match` and overwrites content it never read.
+        #  - re-read only the skipped columns. Also wrong: a writer landing
+        #    between the save and the re-read puts THEIR value in the body
+        #    beside OUR `updated_at`, and the client's next conditional write
+        #    412s having changed nothing.
+        #  - re-read the whole row in one SELECT. The body and the tag then
+        #    come from one snapshot whichever way the race went, which is the
+        #    invariant.
+        #
+        # So: one refresh, no `fields=`, and only when the save was narrow
+        # enough to leave something behind. The cost is that the response may
+        # describe a version this request did not produce — which is exactly
+        # what a GET a millisecond later would have said, and honest.
+        #
+        # A narrow save is what stops one request reverting another's column;
+        # it is also what makes the RESPONSE a lie, because the serializer
+        # renders from the instance this request READ. A body carrying only
+        # the flag leaves `preferences` unwritten and therefore unrefreshed,
+        # so the 200 mixes a post-write flag with a pre-read payload and
+        # stamps the pair with this request's own, currently valid, ETag. A
+        # client doing the read-modify-write this endpoint documents then
+        # spends that tag as `If-Match`, is told the precondition holds, and
+        # overwrites content it never read — verbatim the failure
+        # `partial_update` refuses to create by not re-reading at all.
+        #
+        # Measured, both failures. Two requests, EXACT's own shape (weights
+        # through the filter writer, flag as a separate PATCH): B reads
+        # `{'a': 1}`, A writes `{'a': 1, 'b': 2}`, B saves the flag — B's body
+        # came back `{'a': 1}` against a database holding `{'a': 1, 'b': 2}`,
+        # ETag current, and B's next conditional write silently dropped `b`.
+        # Before this method existed the bare `save()` wrote the whole row, so
+        # the body was true by force; the narrow save is what introduced the
+        # gap.
+        #
+        if any(
+            field not in fields
+            for field in ('preferences', 'weights_wizard_offered')
+        ):
+            instance.refresh_from_db()
+
+        return instance
 
     def validate_preferences(self, value):
         """A JSONField accepts any JSON, including a list or a bare string.

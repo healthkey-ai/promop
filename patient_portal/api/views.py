@@ -9430,11 +9430,21 @@ class TrialSearchPreferencesViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
             return self._unsupported_if_none_match(none_match, instance)
         if tokens is None:
             # Serialize from the instance this request wrote rather than
-            # re-reading the row. A `refresh_from_db` here is a SECOND read,
-            # and a writer landing between the two would have the returned
-            # `ETag` describe THEIR version while the body is ours — a
-            # client spending that tag as `If-Match` would then be told the
-            # precondition held while overwriting content it never read.
+            # re-reading the row. A `refresh_from_db` of the WHOLE row here
+            # is a second read, and a writer landing between the two would
+            # have the returned `ETag` describe THEIR version while the body
+            # is ours — a client spending that tag as `If-Match` would then
+            # be told the precondition held while overwriting content it
+            # never read.
+            #
+            # The serializer does re-read the columns this request did NOT
+            # write, and that is compatible rather than an exception — it is
+            # the complement of the hazard above, which is about re-reading
+            # what we just wrote. A column the save skipped is one whose
+            # in-memory value is this request's stale copy, so reporting it
+            # would describe a version that never existed; `updated_at` and
+            # the ETag still come from this request's own write, which is
+            # what keeps the tag honest.
             serializer = self.get_serializer(instance, data=request.data, partial=True)
             serializer.is_valid(raise_exception=True)
             serializer.save()
@@ -9693,9 +9703,33 @@ class TrialSearchPreferencesViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
             )
             prefs.preferences = {}
             prefs.save(update_fields=['preferences', 'updated_at'])
+            # This path takes no lock, so an offer landing between the read
+            # and the save leaves `prefs` holding the flag as it was. The
+            # narrow save keeps the database right and the response would
+            # still describe it wrongly — same staleness the serializer's
+            # `update` guards, and this write does not go through it.
+            #
+            # Whole row, one SELECT, for the reason written out at length in
+            # that serializer: the body and the ETag must describe ONE
+            # version. Re-reading just the flag puts a concurrent writer's
+            # value beside this request's `updated_at`, and the client's next
+            # conditional write then 412s having changed nothing. This branch
+            # had exactly that until review caught the invariant stated in one
+            # place and applied in one of the two that needed it.
+            #
+            # Same window the serializer's re-read carries: a row deleted
+            # between the save and this line raises `DoesNotExist`. Only a
+            # `Person` cascade can do that — there is no DELETE route — and
+            # the alternative, resurrecting a row somebody asked to delete, is
+            # worse.
+            prefs.refresh_from_db()
             return self._with_etag(Response(self.get_serializer(prefs).data), prefs)
 
-        # Same lock, same reason as `upsert`. A clear is a write.
+        # Same lock, same reason as `upsert`. A clear is a write. Nothing to
+        # re-read below: the row was read under the lock, so no other writer
+        # can have moved the flag while this one holds it — on PostgreSQL. On
+        # the SQLite dev fallback `select_for_update` is a no-op and this
+        # degrades to best-effort, like every other precondition in this file.
         with transaction.atomic():
             prefs = (
                 TrialSearchPreferences.objects
