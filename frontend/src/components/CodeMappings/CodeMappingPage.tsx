@@ -566,6 +566,8 @@ function buildEditForm(row: CodeMappingRow, reference: Reference): MappingForm {
 }
 
 type BrowseResponse = {
+  // Source rows matching all active filters, before pagination or label grouping.
+  total?: number;
   results: CodeMappingRow[];
   duplicates: CodeMappingRow[];
   tabs: { vocabulary_id: string; label: string; is_standard: boolean; proposed: number; approved: number; athena: number }[];
@@ -646,6 +648,7 @@ export default function CodeMappingPage() {
   );
   const [provenanceFilter, setProvenanceFilter] = useState("");
   const [rollup, setRollup] = useState(false);
+  const [seenOnly, setSeenOnly] = useState(true);
   // key -> members, or null while the fetch is in flight.
   const [expandedGroups, setExpandedGroups] = useState<Record<string, CodeMappingRow[] | null>>({});
   const [navigationTarget, setNavigationTarget] = useState<{ id: string } | null>(null);
@@ -722,7 +725,7 @@ export default function CodeMappingPage() {
     setLoading(true);
     setError("");
     const params: Record<string, string | number> = {
-      browse: 1, search: debouncedSearch,
+      browse: 1, search: debouncedSearch, seen_only: seenOnly ? "1" : "0",
     };
     if (activeVocabulary !== null) params.source = activeVocabulary;
     if (provenanceFilter) params.provenance = provenanceFilter;
@@ -756,7 +759,7 @@ export default function CodeMappingPage() {
     } finally {
       if (sequence === loadSequence.current) setLoading(false);
     }
-  }, [activeVocabulary, debouncedSearch, pages, sectionSorts, provenanceFilter, rollup]);
+  }, [activeVocabulary, debouncedSearch, pages, sectionSorts, provenanceFilter, rollup, seenOnly]);
 
   const refreshCurrent = useRef(fetchAll);
   useEffect(() => { refreshCurrent.current = fetchAll; }, [fetchAll]);
@@ -773,7 +776,8 @@ export default function CodeMappingPage() {
     sourceVocabTabs.forEach((v) => {
       counts[v.vocabulary_id] = { proposed: 0, approved: 0, athena: 0 };
     });
-    rows.forEach((row) => {
+    const countedRows = seenOnly ? rows.filter((row) => row.occurrence_count > 0) : rows;
+    countedRows.forEach((row) => {
       const key = tabForRow(row);
       if (!counts[key]) counts[key] = { proposed: 0, approved: 0, athena: 0 };
       if (row.mapping_origin === "athena") counts[key].athena += 1;
@@ -803,12 +807,12 @@ export default function CodeMappingPage() {
       vocabulary_id: OVERALL_TAB,
       label: "Overall",
       is_standard: false,
-      proposed: counts ? rows.filter((r) => r.status === "proposed").length : 0,
-      approved: rows.filter((r) => r.status === "approved").length,
-      athena: rows.filter((r) => r.mapping_origin === "athena").length,
+      proposed: countedRows.filter((r) => r.status === "proposed").length,
+      approved: countedRows.filter((r) => r.status === "approved").length,
+      athena: countedRows.filter((r) => r.mapping_origin === "athena").length,
     });
     return result;
-  }, [rows, reference, browse]);
+  }, [rows, reference, browse, seenOnly]);
 
   // Land on work, not on the alphabetically-first tab.
   const defaultVocabulary = useMemo(() => {
@@ -857,6 +861,7 @@ export default function CodeMappingPage() {
   const revealDuplicate = (row: CodeMappingRow) => {
     if (browse) { openEditDialog(row); return; }
     setSearchQuery("");
+    if (!row.occurrence_count) setSeenOnly(false);
     if (row.mapping_origin === "athena") setAthenaCollapsed(false);
     else if (row.status === "approved") setMappedCollapsed(false);
     else if (row.status === "rejected") setRejectedCollapsed(false);
@@ -876,6 +881,7 @@ export default function CodeMappingPage() {
     if (browse) return rows;
     const q = searchQuery.trim().toLowerCase();
     return rows.filter((row) => {
+      if (seenOnly && !(row.occurrence_count > 0)) return false;
       // A query is an intentional escape hatch from the current tab: a
       // curator should not have to try every code system to find an incoming
       // code. With no query, retain the focused, one-vocabulary-at-a-time
@@ -891,7 +897,11 @@ export default function CodeMappingPage() {
         String(row.destination_concept_id),
       ].some((value) => (value || "").toLowerCase().includes(q));
     });
-  }, [rows, searchQuery, selectedVocabulary, browse]);
+  }, [rows, searchQuery, selectedVocabulary, browse, seenOnly]);
+
+  const allCount = browse?.total ?? (browse
+    ? sectionNames.reduce((total, section) => total + (browse.pages[section]?.total ?? 0), 0)
+    : visibleRows.length);
 
   // Rows can arrive from other tabs: in browse mode the server searches every
   // coding system whenever a query is set, and the client filter above does
@@ -927,6 +937,7 @@ export default function CodeMappingPage() {
       const { data } = await api.get<{ results: CodeMappingRow[] }>("/v1/code-mappings/group/", {
         params: {
           label: groupKey(entry), section,
+          seen_only: seenOnly ? "1" : "0",
           // The server picks the default tab until one is clicked, so sending
           // activeVocabulary would fetch across every vocabulary on first load.
           ...(selectedVocabulary !== null ? { source: selectedVocabulary } : {}),
@@ -943,7 +954,7 @@ export default function CodeMappingPage() {
       setExpandedGroups(({ [cacheKey]: _failed, ...rest }) => rest);
       setError("Could not load the codes in that group.");
     }
-  }, [selectedVocabulary, debouncedSearch, provenanceFilter]);
+  }, [selectedVocabulary, debouncedSearch, provenanceFilter, seenOnly]);
 
   const toggleGroup = useCallback((entry: GroupEntry, section: MappingSection) => {
     const cacheKey = expansionKey(entry, section);
@@ -1612,8 +1623,15 @@ export default function CodeMappingPage() {
     // order_<index> and then ignores it. A header that still toggled would
     // announce an ordering the table never applies, and refetch for nothing.
     const header = (label: string, column: SortColumn) => (
-      <th className="px-4 py-3 font-semibold"
+      <th className="px-4 py-3 font-semibold" aria-label={column === "occurrence_count" ? label : undefined}
         aria-sort={groupEntries || sort?.column !== column ? "none" : sort.descending ? "descending" : "ascending"}>
+        {column === "occurrence_count" && <label className="mb-1 flex items-center gap-1 whitespace-nowrap text-xs font-normal normal-case tracking-normal">
+          <input type="checkbox" checked={seenOnly}
+            aria-label={`${section}: only codes with Seen greater than zero`}
+            title="Filter all source tabs and sections to codes with Seen > 0"
+            onChange={(event) => { setPages({}); setExpandedGroups({}); setSeenOnly(event.target.checked); }} />
+          &gt; 0 only
+        </label>}
         {groupEntries ? (
           <span title={`${section} is grouped by label and ordered by Seen`}>{label}</span>
         ) : (
@@ -2177,8 +2195,9 @@ export default function CodeMappingPage() {
 
         <div className="mb-4 flex items-center">
           <span className="text-sm font-semibold uppercase tracking-wide text-slate-700">All</span>
-          <span className="ml-1 text-sm font-normal text-slate-500">({visibleRows.length})</span>
+          <span className="ml-1 text-sm font-normal text-slate-500" data-testid="all-mappings-count">({allCount})</span>
           <DownloadMenu rows={visibleRows} section={`All-${selectedVocabulary}`} />
+          {browse && <span className="ml-3 text-xs text-slate-500">Downloads include loaded rows only.</span>}
         </div>
 
         <section className="mb-6">
