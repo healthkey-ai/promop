@@ -378,11 +378,30 @@ CORS_EXPOSE_HEADERS = (
     'X-Total-Count',
     'X-Page',
     'X-Page-Size',
+    # The conditional-write tag. A cross-origin client cannot read a response
+    # header that is not exposed, and the clients that write preferences are
+    # cross-origin — this service does serve its own SPA same-origin through
+    # WhiteNoise, but that SPA never touches these endpoints. EXACT prefers
+    # the body's `updated_at` and treats this as the fallback, so its absence
+    # degraded rather than broke — but the fallback documented in `state.ts`
+    # was simply never reachable from a browser.
+    'ETag',
 )
 CORS_ALLOW_HEADERS = (
     *default_headers,
     'x-provenance-source',
     'x-provenance-user-id',
+    # Conditional writes (#1312) are opt-in on the API and unavoidable for
+    # EXACT's filter saves: `default_headers` carries neither of these, so the
+    # preflight was refused with "Request header field if-match is not allowed
+    # by Access-Control-Allow-Headers" and the request never left the browser.
+    # Not env-specific — both tuples are literals, so it is every deployment —
+    # and not new-client-specific: no cross-origin browser has ever completed
+    # a conditional write against this service. Measured in a browser against
+    # the local stack: the trial-search preferences save failed silently,
+    # which is how the saved-filters feature was failing.
+    'if-match',
+    'if-none-match',
 )
 
 # ── Pluggable partner auth providers ──────────────────────────────────────
