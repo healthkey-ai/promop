@@ -27,22 +27,42 @@ def _ids(source_value: str, domain_id: str | None = 'Drug') -> list[int]:
 
 class TestNarrowingText:
     @pytest.mark.parametrize('source_value, expected', [
-        ('ASPIRIN 81 MG ORAL TABLET', 'ASPIRIN 81'),
-        ('aspirin 81 mg oral tablet', 'ASPIRIN 81'),
+        ('ASPIRIN 81 MG ORAL TABLET', 'ASPIRIN'),
+        ('aspirin 81 mg oral tablet', 'ASPIRIN'),
         ('Metformin Hydrochloride 500 MG Extended Release Tablet',
-         'METFORMIN HYDROCHLORIDE 500'),
-        ('Insulin Glargine 100 UNT/ML Injectable Solution', 'INSULIN GLARGINE 100'),
+         'METFORMIN HYDROCHLORIDE'),
+        ('Insulin Glargine 100 UNT/ML Injectable Solution', 'INSULIN GLARGINE'),
     ])
     def test_drops_dose_and_form_words(self, source_value, expected):
         assert narrowing_text(source_value) == expected
+
+    @pytest.mark.parametrize('source_value, expected', [
+        # SNOMED phrasing. The hyphen has to split or the exact match is lost.
+        ('Norfloxacin-containing product', 'NORFLOXACIN'),
+        ('Famciclovir-containing product', 'FAMCICLOVIR'),
+        ('Dezocine only product', 'DEZOCINE'),
+        ('Plazomicin-containing product in parenteral dose form', 'PLAZOMICIN'),
+        ('Edetate trisodium 200 mg/mL solution for injection', 'EDETATE TRISODIUM'),
+    ])
+    def test_keeps_only_ingredient_words_from_snomed_phrasing(self, source_value, expected):
+        assert narrowing_text(source_value) == expected
+
+    def test_repeated_ingredient_appears_once(self):
+        # The key matches one extent of the name, so a repeat can only lose matches.
+        assert narrowing_text('Granisetron (as granisetron hydrochloride) 200 micrograms') == (
+            'GRANISETRON HYDROCHLORIDE'
+        )
 
     @pytest.mark.parametrize('source_value', [
         'Type 2 diabetes mellitus',
         'Total knee replacement',
         'Hemoglobin A1c',
+        'Isoeugenol',
+        'Bis-gamma-glutamylcystine reductase (NADPH)',
+        # Function words must not look like a drug, or conditions get narrowed too.
+        'Disorder of the liver',
     ])
-    def test_leaves_text_without_dose_words_alone(self, source_value):
-        # None means "search the original", so non-drug text keeps today's path.
+    def test_leaves_text_without_drug_words_alone(self, source_value):
         assert narrowing_text(source_value) is None
 
     @pytest.mark.parametrize('source_value', [
@@ -52,18 +72,27 @@ class TestNarrowingText:
         '500 MG TABLET',
         '10 ML',
     ])
-    def test_refuses_when_nothing_selective_is_left(self, source_value):
+    def test_refuses_when_no_ingredient_is_left(self, source_value):
         assert narrowing_text(source_value) is None
 
-    def test_keeps_hyphenated_ingredients_whole(self):
-        assert narrowing_text('L-Thyroxine 50 MCG Oral Tablet') == 'L-THYROXINE 50'
-
     def test_picks_the_word_similarity_operator_only_when_narrowed(self):
-        assert _narrowing_filter('ASPIRIN 81 MG ORAL TABLET') == {
-            'name_upper__trigram_word_similar': 'ASPIRIN 81',
+        assert _narrowing_filter('ASPIRIN 81 MG ORAL TABLET', 'Drug') == {
+            'name_upper__trigram_word_similar': 'ASPIRIN',
         }
-        assert _narrowing_filter('Type 2 diabetes mellitus') == {
+        assert _narrowing_filter('Type 2 diabetes mellitus', 'Drug') == {
             'name_upper__trigram_similar': 'Type 2 diabetes mellitus',
+        }
+
+    @pytest.mark.parametrize('domain_id, source_value', [
+        # Form words mean something outside a drug name, so these stay wide.
+        ('Condition', 'Oral candidiasis'),
+        ('Procedure', 'Injection of joint'),
+        ('Measurement', 'Unit of blood transfused'),
+        (None, 'Oral candidiasis'),
+    ])
+    def test_only_drug_searches_are_narrowed(self, domain_id, source_value):
+        assert _narrowing_filter(source_value, domain_id) == {
+            'name_upper__trigram_similar': source_value,
         }
 
 
@@ -103,6 +132,15 @@ class TestLexicalRecall:
 
         assert warfarin.pk in _ids_with_narrowing_off(suggestions, 'ASPIRIN 81 MG ORAL TABLET')
         assert warfarin.pk not in _ids('ASPIRIN 81 MG ORAL TABLET')
+
+    def test_procedure_keeps_its_form_word(self):
+        """'Injection of joint' is the procedure, so narrowing must not touch it."""
+        target = ConceptFactory(
+            concept_name='Injection of joint', standard_concept='S', invalid_reason=None,
+            domain=DomainFactory(domain_id='Procedure'),
+        )
+
+        assert target.pk in _ids('Injection of joint', 'Procedure')
 
     def test_non_drug_domain_is_unaffected(self):
         condition = ConceptFactory(

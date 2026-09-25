@@ -653,7 +653,7 @@ def unmapped_source_values(omop_table, min_occurrences=DEFAULT_MIN_OCCURRENCES,
     return out
 
 
-def _narrowing_filter(query: str) -> dict[str, str]:
+def _narrowing_filter(query: str, domain_id: str | None) -> dict[str, str]:
     """How to ask the GIN index for candidate names.
 
     A drug description is mostly dose and form words, which almost every RxNorm
@@ -662,10 +662,16 @@ def _narrowing_filter(query: str) -> dict[str, str]:
     asks whether it appears somewhere in the name, which the same index answers
     and which a long name cannot dilute the way `%` is diluted.
 
-    `%>` uses pg_trgm.word_similarity_threshold (0.6 by default). It only
-    prefilters, so a different setting changes how many rows are scored, never
-    which of them pass MIN_TRIGRAM_SCORE.
+    Drug only. The same words carry meaning elsewhere: "Injection of joint" is a
+    procedure and "Oral candidiasis" is a condition, and dropping their form word
+    loses the concept. A domain-less search spans every domain, so it stays wide.
+
+    Narrowing drops candidates rather than reordering them, because `%>` cuts on
+    pg_trgm.word_similarity_threshold (0.6) before anything is scored. A name the
+    full query would have scored above MIN_TRIGRAM_SCORE can be gone already.
     """
+    if domain_id != 'Drug':
+        return {'name_upper__trigram_similar': query}
     narrowed = narrowing_text(query)
     if narrowed:
         return {'name_upper__trigram_word_similar': narrowed}
@@ -705,10 +711,10 @@ def lexical_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
         .filter(standard_concept='S', invalid_reason__isnull=True,
                 **({'domain_id': domain_id} if domain_id else {}))
         .annotate(name_upper=Upper('concept_name'))
-        .filter(**_narrowing_filter(query))
+        .filter(**_narrowing_filter(query, domain_id))
         .annotate(score=TrigramSimilarity(Upper('concept_name'), query))
         .filter(score__gt=MIN_TRIGRAM_SCORE)
-        # Equal scores are common, so pick a tiebreak and get a repeatable shortlist.
+        # Equal scores are common, so every slice and the final sort tiebreak on id.
         .order_by('-score', 'concept_id')[:limit]
     )
 
@@ -730,7 +736,7 @@ def lexical_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
             .filter(score__gt=MIN_TRIGRAM_SCORE)
             .values('concept_id')
             .annotate(score=Max('score'))
-            .order_by('-score')[:limit]
+            .order_by('-score', 'concept_id')[:limit]
         )
     else:
         # No domain (ICD-10 searches all of them), or a table nobody has built:
@@ -745,7 +751,7 @@ def lexical_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
             .filter(score__gt=MIN_TRIGRAM_SCORE)
             .values('concept_id')
             .annotate(score=Max('score'))
-            .order_by('-score')[:limit]
+            .order_by('-score', 'concept_id')[:limit]
         )
     synonym_scores = {h['concept_id']: h['score'] + SYNONYM_BONUS for h in synonym_hits}
 
@@ -762,7 +768,8 @@ def lexical_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
             if concept.concept_id not in merged or score > merged[concept.concept_id][1]:
                 merged[concept.concept_id] = (concept, score)
 
-    ranked = sorted(merged.values(), key=lambda pair: -pair[1])[:limit]
+    ranked = sorted(merged.values(),
+                    key=lambda pair: (-pair[1], pair[0].concept_id))[:limit]
     return [
         {
             'concept_id': c.concept_id,
