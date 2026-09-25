@@ -94,6 +94,7 @@ from omop_core.models import (
 )
 
 from omop_core.mapping.search_expansion import generate_search_query
+from omop_core.mapping.source_text import narrowing_text
 from omop_core.mapping.suggestion_context import (
     build_source_context, candidate_context, enrich_candidates,
 )
@@ -652,6 +653,25 @@ def unmapped_source_values(omop_table, min_occurrences=DEFAULT_MIN_OCCURRENCES,
     return out
 
 
+def _narrowing_filter(query: str) -> dict[str, str]:
+    """How to ask the GIN index for candidate names.
+
+    A drug description is mostly dose and form words, which almost every RxNorm
+    name shares, so `%` on the whole string matches over a million rows and the
+    recheck discards nearly all of them. Narrowing on the ingredient with `%>`
+    asks whether it appears somewhere in the name, which the same index answers
+    and which a long name cannot dilute the way `%` is diluted.
+
+    `%>` uses pg_trgm.word_similarity_threshold (0.6 by default). It only
+    prefilters, so a different setting changes how many rows are scored, never
+    which of them pass MIN_TRIGRAM_SCORE.
+    """
+    narrowed = narrowing_text(query)
+    if narrowed:
+        return {'name_upper__trigram_word_similar': narrowed}
+    return {'name_upper__trigram_similar': query}
+
+
 def lexical_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
     """Concepts whose name or synonyms look like this source value.
 
@@ -670,6 +690,7 @@ def lexical_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
     # 4.49s for a single source value. `__trigram_similar` emits the `%`
     # operator, which is what gin_trgm_ops answers, so the GIN index does the
     # narrowing and similarity() only scores the handful that survive.
+    # See _narrowing_filter for when `%>` replaces `%` here.
     #
     # The `%` must be applied to UPPER(col), not the raw column: both indexes
     # are on the uppercased expression, and querying the raw column silently
@@ -684,10 +705,11 @@ def lexical_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
         .filter(standard_concept='S', invalid_reason__isnull=True,
                 **({'domain_id': domain_id} if domain_id else {}))
         .annotate(name_upper=Upper('concept_name'))
-        .filter(name_upper__trigram_similar=query)
+        .filter(**_narrowing_filter(query))
         .annotate(score=TrigramSimilarity(Upper('concept_name'), query))
         .filter(score__gt=MIN_TRIGRAM_SCORE)
-        .order_by('-score')[:limit]
+        # Equal scores are common, so pick a tiebreak and get a repeatable shortlist.
+        .order_by('-score', 'concept_id')[:limit]
     )
 
     # Synonyms are a separate index and a separate signal; merged by concept,
