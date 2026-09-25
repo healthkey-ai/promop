@@ -2021,6 +2021,9 @@ class SourceCodeConceptMapping(models.Model):
             'an INNER JOIN).'
         ),
     )
+    # A proposal can move several times before approval. Keep the destinations
+    # whose stored clinical rows must move when a curator finally signs off.
+    pending_repoint_concept_ids = models.JSONField(default=list, db_default=[], blank=True)
     # Immutable evidence for suggestion-quality measurement.  target_concept
     # changes when a curator corrects a proposal; this field preserves what the
     # model actually suggested so Recall can measure those overrides.
@@ -2144,6 +2147,8 @@ class SourceCodeConceptMapping(models.Model):
             models.Index(fields=['source_vocabulary_id', 'source_code'], name='ix_sccm_source_code'),
             models.Index(fields=['target_concept', 'status'], name='ix_sccm_target_status'),
             models.Index(fields=['destination_vocabulary_id', 'status'], name='ix_sccm_dest_status'),
+            GinIndex(OpClass(Upper('source_code_description'), name='gin_trgm_ops'),
+                     name='ix_sccm_desc_upper_trgm'),
         ]
         constraints = [
             # Blank source systems stay distinct from each other: Postgres treats
@@ -4618,6 +4623,8 @@ class SuggestRun(models.Model):
     # NULL means every vocabulary; '' is the Uncoded tab, which is a real tab
     # and the one Suggest actually works on.
     source_vocabulary_id = models.CharField(max_length=50, null=True, blank=True)
+    direction = models.CharField(max_length=10, default='forward', db_default='forward',
+                                 choices=[('forward', 'Forward'), ('reverse', 'Reverse')])
     state = models.CharField(max_length=10, choices=STATES, default=QUEUED)
 
     total = models.IntegerField(default=0)

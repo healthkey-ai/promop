@@ -50,8 +50,8 @@ def project_field_to_omop_task(mapping_pk: int) -> dict[str, Any]:
     return {'mapping_pk': mapping_pk}
 
 
-@shared_task(name='omop_core.suggest_mappings')
-def suggest_mappings_task(run_id: str, params: dict[str, Any]) -> dict[str, Any]:
+@shared_task(bind=True, name='omop_core.suggest_mappings')
+def suggest_mappings_task(self, run_id: str, params: dict[str, Any]) -> dict[str, Any]:
     """Run one queued Code Mapping Suggest job.
 
     Failures are recorded on the SuggestRun row rather than raised: the page
@@ -60,6 +60,16 @@ def suggest_mappings_task(run_id: str, params: dict[str, Any]) -> dict[str, Any]
     """
     from omop_core.services.suggest_jobs import execute_run
     from omop_core.models import SuggestRun
+
+    if params.get('direction') == 'reverse' and (self.request.delivery_info or {}).get('redelivered'):
+        # A worker lost after claiming the run cannot clear RUNNING itself.
+        # Preserve its preview and offer a fresh search instead of acknowledging
+        # the redelivery while leaving the curator polling forever.
+        from django.utils import timezone
+        SuggestRun.objects.filter(pk=run_id, direction='reverse', state=SuggestRun.RUNNING).update(
+            state=SuggestRun.FAILURE, finished_at=timezone.now(),
+            error='Source-code search was interrupted. Partial candidates remain available; retry the search.',
+        )
 
     execute_run(run_id, params)
     run = SuggestRun.objects.filter(pk=run_id).first()

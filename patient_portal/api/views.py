@@ -10719,11 +10719,28 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     was_approved = mapping is not None and mapping.status == 'approved'
     was_proposed = mapping is not None and mapping.status == 'proposed'
     previous_concept_id = mapping.target_concept_id if mapping else None
+    pending_repoints = list(mapping.pending_repoint_concept_ids) if mapping else []
+    if pending_repoints and (
+        source_vocabulary_id != mapping.source_vocabulary_id
+        or source_code != mapping.source_code
+        or domain_id != mapping.domain_id
+        or (omop_table and omop_table != mapping.omop_table)
+    ):
+        raise serializers.ValidationError({'detail': (
+            'This source has a destination change awaiting approval. Resolve '
+            'that review before changing its source identity or clinical table.'
+        )})
+    if (mapping is not None and status_value != 'approved'
+            and previous_concept_id is not None
+            and previous_concept_id != (concept.pk if concept else None)
+            and previous_concept_id not in pending_repoints):
+        pending_repoints.append(previous_concept_id)
 
     # Only fields the caller actually sent. A PATCH that approves by sending
     # status alone must not blank omop_table -- the re-point would then find no
     # table, move nothing, and still report success.
-    values = {'updated_by': user}
+    values = {'updated_by': user,
+              'pending_repoint_concept_ids': [] if status_value == 'approved' else pending_repoints}
     if mapping is None or 'domain_id' in data:
         values['domain_id'] = domain_id
     if mapping is None or 'source_vocabulary_id' in data:
@@ -10879,7 +10896,7 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
 
     repoint = None
     if status_value == 'approved' and concept is not None:
-        sources = set()
+        sources = set(pending_repoints)
         if not was_approved:
             sources.add(NO_MATCHING_CONCEPT_ID)
         if previous_concept_id is not None and previous_concept_id != concept.concept_id:
@@ -11445,7 +11462,7 @@ def code_mapping_latest_suggest_run(request):
     if not _can_manage_field_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'},
                         status=status.HTTP_403_FORBIDDEN)
-    run = SuggestRun.objects.exclude(selection__contains={'mode': 'individual'}).only('id').order_by('-created_at', '-id').first()
+    run = SuggestRun.objects.filter(direction='forward').exclude(selection__contains={'mode': 'individual'}).only('id').order_by('-created_at', '-id').first()
     return Response({'run_id': str(run.id) if run else None})
 
 

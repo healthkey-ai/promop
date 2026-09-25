@@ -520,7 +520,8 @@ def suggestable_queryset(omop_table=None, *, source_vocabulary_id=None,
     Rejected rows whose destination was cleared are back in the queue and eligible
     for new suggestions — the rejection was of a specific proposal, not the code.
 
-    Codes without destinations come first regardless of provenance, ordered
+    Codes with nonzero Seen come before zero-Seen codes. Within each group,
+    codes without destinations come first regardless of provenance, ordered
     by Seen count descending. Among eligible replacements, codes not tried by
     the current model come first, then Seen count descending. Source code and
     row ID make ties deterministic. A high-Seen gap remains ahead of replacements
@@ -562,6 +563,8 @@ def _suggestable_queryset_ordered(rows, *, ranking_model=DEFAULT_RANKING_MODEL):
     """Apply the run order. Split out so a caller can count without fetching."""
     version_stamp = f'{SUGGESTION_MODEL_VERSION}-{ranking_model}'
     return rows.annotate(
+        unseen=Case(When(occurrence_count__gt=0, then=Value(0)),
+                    default=Value(1), output_field=IntegerField()),
         has_destination=Case(
             When(target_concept__isnull=True, then=Value(0)),
             default=Value(1),
@@ -577,7 +580,7 @@ def _suggestable_queryset_ordered(rows, *, ranking_model=DEFAULT_RANKING_MODEL):
             default=Value(0),
             output_field=IntegerField(),
         ),
-    ).order_by('has_destination', '-gap_seen', 'already_tried', '-occurrence_count',
+    ).order_by('unseen', 'has_destination', '-gap_seen', 'already_tried', '-occurrence_count',
                'source_code', 'id')
 
 

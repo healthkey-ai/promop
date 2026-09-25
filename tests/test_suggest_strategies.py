@@ -536,7 +536,7 @@ class TestSuggestableMappings:
             'measurement', resuggest=True, min_occurrences=1, limit=4,
         )
         assert [m.source_code for m in rows] == [
-            'GAP BUSY', 'GAP QUIET', 'GAP UNCOUNTED', 'ANSWER BUSY',
+            'GAP BUSY', 'GAP QUIET', 'ANSWER BUSY', 'ANSWER QUIET',
         ]
 
 
