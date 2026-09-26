@@ -17,30 +17,98 @@
 # ── Authorization and identity ────────────────────────────────────────────────
 # Every P0 finding in the security audit lived in one of these paths.
 /omop_core/authorization.py         @larsburgess
+/omop_core/authorization/           @larsburgess
 /patient_portal/api/permissions.py  @larsburgess
+/patient_portal/api/permissions/    @larsburgess
 /patient_portal/api/authentication.py  @larsburgess
+/patient_portal/api/authentication/ @larsburgess
+/patient_portal/api/middleware.py   @larsburgess
+/patient_portal/api/middleware/     @larsburgess
 /patient_portal/api/providers/      @larsburgess
 /patient_portal/services.py         @larsburgess
+/patient_portal/services/           @larsburgess
 /patient_portal/api/break_glass.py  @larsburgess
+/patient_portal/api/break_glass/    @larsburgess
+/patient_portal/service_tokens.py   @larsburgess
+/patient_portal/service_tokens/     @larsburgess
+/patient_portal/service_applications.py @larsburgess
+/patient_portal/service_applications/   @larsburgess
 
-# ── Deployment, configuration and secrets ─────────────────────────────────────
-# Changes here alter what runs in production or what guards it.
-/promop/settings.py                 @larsburgess
-/ctomop/settings.py                 @larsburgess
+# ── The two Django project packages, whole ──────────────────────────────────
+# Mirrors the gate's `promop/**` / `ctomop/**` in .github/scripts/security-review.cjs.
+# An owner entry covering less than the gate asks for no reviewer on a change
+# the gate will still hold, which reads as the gate being broken rather than as
+# the owner list being stale — so the two lists have the same shape.
+#
+# Twenty files, 1228 lines. settings.py (auth backends, SECRET_KEY, CORS),
+# oauth.py (which clients may still authenticate), sentry.py (what leaves the
+# process) and urls.py (the only permission_classes=[AllowAny] in the tree,
+# plus the admin and OAuth2 mounts) are the obvious ones. wsgi.py, asgi.py and
+# celery.py are not obvious and matter as much: each carries the
+# `os.environ.setdefault('DJANGO_SETTINGS_MODULE', ...)` that picks which
+# settings module production loads. Naming the obvious four would drop the
+# owner from the other twelve, and from the twenty-first file when it lands,
+# and would save nothing: over the last 12 months no commit needed this owner
+# for the directory form that did not already need it for the named one.
+/promop/                            @larsburgess
+/ctomop/                            @larsburgess
+# The third copy of that setdefault, and the only one outside both packages:
+# start.sh runs `manage.py check --deploy` with no DJANGO_SETTINGS_MODULE set.
+/manage.py                          @larsburgess
+
+# ── Configuration and security checks ───────────────────────────────────────
 /patient_portal/checks.py           @larsburgess
-/start.sh                           @larsburgess
-/Dockerfile                         @larsburgess
-/Dockerfile.gcp                     @larsburgess
-/requirements.txt                   @larsburgess
+/patient_portal/checks/             @larsburgess
+# Both manifests: the scanners answer "is anything here known-bad", review
+# answers "should this be here at all".
+/frontend/package*.json             @larsburgess
+/requirements*.txt                  @larsburgess
+/requirements/                      @larsburgess
+
+# ── Frontend auth and the transports that carry a credential ─────────────────
+# Directory form beside each file, for the reason the gate gives: `axios.ts`
+# becoming `axios/index.ts` plus `axios/interceptors.ts` is an ordinary move,
+# and it would take the credential-attaching transport out of scope on the way.
+/frontend/src/utils/oauth.ts        @larsburgess
+/frontend/src/utils/oauth/          @larsburgess
+/frontend/src/hooks/useAuth.ts      @larsburgess
+/frontend/src/hooks/useAuth/        @larsburgess
+/frontend/src/api/axios.ts          @larsburgess
+/frontend/src/api/axios/            @larsburgess
+/frontend/src/api/publicAxios.ts    @larsburgess
+/frontend/src/api/publicAxios/      @larsburgess
+/frontend/src/api/clinicalTransport.ts  @larsburgess
+/frontend/src/api/clinicalTransport/    @larsburgess
+/frontend/src/federation/assertLabsTokens.ts  @larsburgess
+/frontend/src/federation/assertLabsTokens/    @larsburgess
+/frontend/src/components/Auth/      @larsburgess
+
+# ── Security documentation and the commands that issue credentials ───────────
+/docs/*security*.md                 @larsburgess
+/patient_portal/management/commands/*service_token*.py  @larsburgess
 
 # ── CI and the security gates themselves ──────────────────────────────────────
 # A change that weakens a gate should be as visible as a change that trips it.
 /.github/                           @larsburgess
-/.gitleaks.toml                     @larsburgess
-/.bandit-baseline.json              @larsburgess
+/.gitleaks*                         @larsburgess
+/.bandit*                           @larsburgess
+/SECURITY.md                        @larsburgess
 
-# ── Ownership, Render infrastructure, and change-management evidence ──────────
-/CODEOWNERS                         @larsburgess
-/render.yaml                        @larsburgess
+# ── Tests that pin the deliberately ungated operational files ───────────────
+# start.sh, render.yaml and ops/artemis/Dockerfile are out of the gate's scope
+# because their security-relevant values are pinned by these tests. That
+# argument only holds while the pins themselves are reviewed. The root
+# Dockerfile, .dockerignore and any buildCommand have no such pin; that is
+# accepted risk, noted here so the list is not read as covering more than it does.
+/tests/test_web_startup.py          @larsburgess
+/tests/test_deployment_startup_contract.py  @larsburgess
+/tests/test_render_*.py             @larsburgess
+/tests/test_artemis_runtime.py      @larsburgess
+
+# ── Ownership and change-management evidence ────────────────────────────────
+# Unanchored, mirroring the gate's `**/CODEOWNERS`: a CODEOWNERS file in any
+# directory routes review for its subtree, so all of them are owned here.
+CODEOWNERS                          @larsburgess
 /docs/soc2/                         @larsburgess
 /scripts/capture_change_management_evidence.py  @larsburgess
+/scripts/capture_change_management_evidence/    @larsburgess
