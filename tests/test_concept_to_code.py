@@ -137,6 +137,53 @@ def test_umls_matches_vocabulary_and_code_including_aliases(concept):
     assert [row['source_vocabulary_id'] for row in candidates] == ['urn:oid:2.16.840.1.113883.6.96', 'SNOMED']
 
 
+def test_loinc_retrieval_reaches_short_analyte_labels_without_synonyms():
+    albumin = ConceptFactory(
+        concept_id=3024561, concept_code='1751-7',
+        concept_name='Albumin [Mass/volume] in Serum or Plasma',
+    )
+    short = source('albumin', source_vocabulary_id='', source_code_description='Albumin (g/dL)', occurrence_count=0)
+    seen = source('serum albumin', source_vocabulary_id='', source_code_description='Serum albumin', occurrence_count=5)
+    source('UNRELATED', source_code_description='Bone marrow sampling', occurrence_count=100)
+    source('APPROVED', source_code_description='Albumin', status='approved')
+    source('REJECTED', source_code_description='Albumin', status='rejected')
+    source('REFERENCE', source_code_description='Albumin', origin_system='athena')
+    source('WRONG-DOMAIN', source_code_description='Albumin', domain_id='Drug')
+    source('ALREADY-LINKED', source_code_description='Albumin', target_concept=albumin)
+
+    assert [row['mapping_id'] for row in reverse_retrieval_pool(
+        albumin, strategies=['lexical'], limit=25,
+    )] == [seen.pk]
+    candidates = reverse_retrieval_pool(albumin, strategies=['lexical'], limit=25, include_zero_seen=True)
+    assert [row['mapping_id'] for row in candidates] == [seen.pk, short.pk]
+    assert candidates[1]['evidence'] == ['lexical']
+    short.refresh_from_db()
+    assert short.target_concept_id is None and short.status == 'proposed'
+
+
+def test_suggest_passes_short_loinc_candidates_to_the_ranker(client):
+    albumin = ConceptFactory(
+        concept_id=3024561, concept_code='1751-7',
+        concept_name='Albumin [Mass/volume] in Serum or Plasma',
+    )
+    row = source('albumin', source_vocabulary_id='', source_code_description='Albumin (g/dL)', occurrence_count=0)
+    with patch('omop_core.mapping.suggestions.rank_candidates_dispatch', return_value=(None, 'Needs review', [], {})) as rank:
+        with use_dispatcher(InlineDispatcher()):
+            response = client.post(f'{BASE}suggest/', {
+                'concept_ids': [albumin.pk], 'strategies': ['umls', 'lexical'],
+                'include_zero_seen': True, 'ranking_model': 'anthropic',
+            }, format='json')
+    assert response.status_code == 202
+    assert response.data['state'] == 'success'
+    assert response.data['activity'][0]['candidates'][0]['mapping_id'] == row.pk
+    rank.assert_called_once()
+    assert rank.call_args.args[0] == 'albumin'
+    assert rank.call_args.args[1][0]['concept_name'] == albumin.concept_name
+    assert rank.call_args.kwargs['require_model_selection'] is True
+    row.refresh_from_db()
+    assert row.target_concept_id is None and row.status == 'proposed'
+
+
 def test_suggest_dispatch_persisted_poll_and_no_mapping_mutations(client, concept):
     row = source('A')
     dispatcher = FakeDispatcher()

@@ -1,4 +1,6 @@
 """Concept-first review using the existing SCCM approval semantics."""
+from uuid import UUID
+
 from django.db import transaction
 from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404
@@ -11,7 +13,7 @@ from omop_core.models import FieldConceptMapping, SourceCodeConceptMapping, Sugg
 from omop_core.services.concept_to_code import (
     browse_concepts, concept_payload, eligible_sources, source_payload, standard_destinations,
 )
-from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE
+from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE, VOCABULARY_OID_ALIASES
 from omop_core.services.suggest_jobs import get_dispatcher, InlineDispatcher
 
 PAGE_SIZE = 50
@@ -148,6 +150,52 @@ def _run_payload(run):
 def concept_to_code_run(request, run_id):
     _authorize(request.user)
     return Response(_run_payload(get_object_or_404(SuggestRun, pk=run_id, direction='reverse')))
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@transaction.atomic
+def concept_to_code_propose(request, concept_id):
+    """Create a proposal only for a reviewed source in a saved preview."""
+    from omop_core.mapping.reverse_catalog import refresh_catalog_candidate
+    from patient_portal.api.views import _upsert_source_code_mapping
+    _authorize(request.user)
+    if not isinstance(request.data, dict):
+        raise ValidationError({'detail': 'Supply a JSON object.'})
+    if request.data.get('status', 'proposed') != 'proposed':
+        raise ValidationError({'status': 'Propose a new source before approving its mapping.'})
+    try:
+        run_id = UUID(str(request.data.get('run_id', '')))
+    except (TypeError, ValueError):
+        raise ValidationError({'run_id': 'Supply the source preview run ID.'})
+    concept = get_object_or_404(standard_destinations(), pk=concept_id)
+    run = get_object_or_404(SuggestRun, pk=run_id, direction='reverse', state__in=[SuggestRun.SUCCESS, SuggestRun.FAILURE])
+    candidate = next((candidate for event in (run.activity or [])
+                      if event['concept']['concept_id'] == concept.pk
+                      for candidate in event['candidates']
+                      if candidate.get('mapping_id') is None
+                      and candidate['source_code'] == request.data.get('source_code')
+                      and candidate['source_vocabulary_id'] == request.data.get('source_vocabulary_id')), None)
+    if candidate is None:
+        raise ValidationError({'detail': 'Choose a source code from this concept’s saved preview.'})
+    fresh = refresh_catalog_candidate(candidate, concept)
+    if fresh is None:
+        return Response({'detail': 'The source vocabulary changed after the preview. Run the search again.'}, status=409)
+    aliases = [fresh['source_vocabulary_id'], *[alias for alias, canonical in VOCABULARY_OID_ALIASES.items()
+                                             if canonical == fresh['source_vocabulary_id']]]
+    if SourceCodeConceptMapping.objects.select_for_update().filter(
+        source_vocabulary_id__in=aliases, source_code=fresh['source_code'],
+    ).exists():
+        return Response({'detail': 'This source already has a mapping. Refresh before reviewing it.'}, status=409)
+    row, _ = _upsert_source_code_mapping(concept, {
+        'source_vocabulary_id': fresh['source_vocabulary_id'], 'source_code': fresh['source_code'],
+        'source_code_description': fresh['source_code_description'][:255],
+        **({'notes': f"Source vocabulary label: {fresh['source_code_description']}"}
+           if len(fresh['source_code_description']) > 255 else {}),
+        'domain_id': concept.domain_id, 'omop_table': DOMAIN_TO_TABLE[concept.domain_id],
+        'status': 'proposed',
+    }, request.user)
+    return Response(source_payload(row), status=201)
 
 
 @api_view(['POST'])

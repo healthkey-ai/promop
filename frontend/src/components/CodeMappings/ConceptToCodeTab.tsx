@@ -10,7 +10,7 @@ type Concept = {
   sccm_counts: { approved: number; proposed: number; rejected: number };
 };
 type Source = {
-  mapping_id: number; source_code: string; source_code_description: string;
+  mapping_id: number | null; source_code: string; source_code_description: string;
   source_vocabulary_id: string; occurrence_count: number; status: string;
   origin_system: string; updated_at: string; destination_concept_id: number | null;
   destination_concept_name: string; destination_standard_concept: string | null;
@@ -28,6 +28,7 @@ const domains = [
 ];
 const button = 'rounded border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-100 disabled:opacity-40';
 const input = 'rounded border border-slate-300 bg-white px-3 py-2 text-sm';
+const sourceKey = (source: Source) => JSON.stringify([source.source_vocabulary_id, source.source_code]);
 
 function Pagination({ data, change, disabled = false }: {
   data: Page<unknown>; change: (page: number) => void; disabled?: boolean;
@@ -143,7 +144,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting }: {
   const [loading, setLoading] = useState(false);
   const [revision, setRevision] = useState(0);
   const [error, setError] = useState('');
-  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [run, setRun] = useState<Run | null>(null);
   const [starting, setStarting] = useState(false);
   const [ranker, setRanker] = useState('none');
@@ -202,12 +203,14 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting }: {
   };
   const candidates = run?.activity.find(event => event.concept.concept_id === concept.concept_id)?.candidates ?? [];
   const rows = mode === 'candidates' ? candidates.filter(row => !seenOnly || row.occurrence_count > 0) : data?.results ?? [];
-  const editable = rows.filter(row => row.status === 'proposed' && row.origin_system !== 'athena');
-  const pending = editable.filter(row => selected.has(row.mapping_id));
+  const editable = rows.filter(row => (row.status === 'proposed' || (row.status === 'unmapped' && row.mapping_id === null)) && row.origin_system !== 'athena');
+  const pending = editable.filter(row => selected.has(sourceKey(row)));
+  const approvable = pending.filter(row => row.mapping_id !== null);
 
   const save = async (approve: boolean) => {
     if (writingRef.current || !pending.length || (approve && !canApprove)) return;
-    const batch = [...pending];
+    const batch = approve ? approvable : [...pending];
+    if (!batch.length) return;
     writingRef.current = true; setWriting(true); onWriting(true); setError('');
     const failures: string[] = [];
     let saved = 0;
@@ -216,14 +219,18 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting }: {
         if (!active.current) break;
         setProgress(`Reviewing ${index + 1} of ${batch.length}…`);
         try {
-          const { data: updated } = await api.post<Source>(`/v1/concept-to-code/${concept.concept_id}/mappings/${row.mapping_id}/`, {
-            status: approve ? 'approved' : 'proposed', expected_updated_at: row.updated_at,
-          });
+          const { data: updated } = row.mapping_id === null
+            ? await api.post<Source>(`/v1/concept-to-code/${concept.concept_id}/mappings/`, {
+              run_id: run?.run_id, source_vocabulary_id: row.source_vocabulary_id, source_code: row.source_code, status: 'proposed',
+            })
+            : await api.post<Source>(`/v1/concept-to-code/${concept.concept_id}/mappings/${row.mapping_id}/`, {
+              status: approve ? 'approved' : 'proposed', expected_updated_at: row.updated_at,
+            });
           saved += 1;
           if (active.current) {
-            setData(previous => previous ? { ...previous, results: previous.results.map(item => item.mapping_id === row.mapping_id ? updated : item) } : null);
+            setData(previous => previous ? { ...previous, results: previous.results.map(item => sourceKey(item) === sourceKey(row) ? updated : item) } : null);
             setRun(previous => previous ? { ...previous, activity: previous.activity.map(event => ({ ...event,
-              candidates: event.candidates.map(item => item.mapping_id === row.mapping_id ? { ...item, ...updated } : item),
+              candidates: event.candidates.map(item => sourceKey(item) === sourceKey(row) ? { ...item, ...updated } : item),
             })) } : null);
           }
         } catch (failure) { failures.push(`${row.source_code}: ${destinationError(failure)}`); }
@@ -260,7 +267,8 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting }: {
         onClick={() => void start()}>{running ? 'Searching…' : 'Suggest source codes'}</button>
       {mode !== 'candidates' && <button className={button} disabled={busy} onClick={refresh}>Refresh</button>}
     </div>
-    <p className="text-xs text-slate-500">Review clinical meaning before selecting codes. Suggestions do not change mappings; approval updates the mapping and matching stored clinical rows.</p>
+    <p className="text-xs text-slate-500">Review clinical meaning before selecting codes. Suggestions do not change mappings; approval updates the mapping and matching stored clinical rows.
+      {' '}New vocabulary codes have Seen = 0 and must be proposed before approval.</p>
     {run && mode === 'candidates' && <p role="status" className="text-sm text-slate-600">
       {running ? 'Searching local vocabulary evidence…' : `${candidates.length} candidates retrieved (limit ${run.selection.limit}).`}
       {run.error && ` ${run.error}`}
@@ -271,30 +279,30 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting }: {
     {loading && <p role="status" className="text-sm text-slate-500">Loading source codes…</p>}
     <div className="flex flex-wrap items-center gap-3">
       <button className={button} disabled={busy || !pending.length} onClick={() => void save(false)}>Propose selected ({pending.length})</button>
-      {canApprove && <button className="rounded bg-slate-950 px-3 py-1.5 text-sm text-white disabled:opacity-40" disabled={busy || !pending.length}
-        onClick={() => void save(true)}>Approve selected ({pending.length})</button>}
+      {canApprove && <button className="rounded bg-slate-950 px-3 py-1.5 text-sm text-white disabled:opacity-40" disabled={busy || !approvable.length}
+        onClick={() => void save(true)}>Approve selected ({approvable.length})</button>}
       {mode !== 'candidates' && data && <span className="text-xs text-slate-500">{data.total} matching sources{seenOnly ? ` · ${data.zero_seen} zero-Seen codes excluded` : ''}</span>}
     </div>
     <div className="overflow-x-auto"><table aria-label="Source codes for selected concept" className="w-full text-left text-sm">
       <thead className="border-y bg-slate-50 text-xs text-slate-600"><tr>
         <th className="p-2"><input type="checkbox" aria-label="Select displayed proposed sources" disabled={busy || !editable.length}
-          checked={editable.length > 0 && editable.every(row => selected.has(row.mapping_id))}
-          onChange={event => setSelected(new Set(event.target.checked ? editable.map(row => row.mapping_id) : []))} /></th>
+          checked={editable.length > 0 && editable.every(row => selected.has(sourceKey(row)))}
+          onChange={event => setSelected(new Set(event.target.checked ? editable.map(sourceKey) : []))} /></th>
         <th className="p-2">Source code</th><th className="p-2">Description</th>
         <th className="p-2" aria-sort="descending"><label className="mb-1 flex whitespace-nowrap items-center gap-1 font-normal">
           <input type="checkbox" aria-label="Only source codes with Seen greater than zero" checked={seenOnly} disabled={busy}
             onChange={event => { setSeenOnly(event.target.checked); setPage(1); setData(null); setSelected(new Set()); }} />&gt; 0 only</label>Seen ↓</th>
         <th className="p-2">Current destination</th><th className="p-2">Status / evidence</th>
       </tr></thead>
-      <tbody>{rows.map(row => <tr key={row.mapping_id} className="border-b border-slate-100 align-top">
+      <tbody>{rows.map(row => <tr key={sourceKey(row)} className="border-b border-slate-100 align-top">
         <td className="p-2"><input type="checkbox" aria-label={`Select ${row.source_vocabulary_id || 'Uncoded'} ${row.source_code}`}
-          disabled={busy || row.status !== 'proposed' || row.origin_system === 'athena'} checked={selected.has(row.mapping_id)}
-          onChange={event => setSelected(previous => { const next = new Set(previous); if (event.target.checked) next.add(row.mapping_id); else next.delete(row.mapping_id); return next; })} /></td>
+          disabled={busy || !editable.includes(row)} checked={selected.has(sourceKey(row))}
+          onChange={event => setSelected(previous => { const next = new Set(previous); if (event.target.checked) next.add(sourceKey(row)); else next.delete(sourceKey(row)); return next; })} /></td>
         <td className="p-2 font-mono text-xs">{row.source_vocabulary_id || 'Uncoded'}:{row.source_code}</td>
         <td className="p-2">{row.source_code_description || '—'}</td><td className="p-2 text-right tabular-nums">{row.occurrence_count}</td>
         <td className="p-2 text-xs">{row.destination_concept_name || 'None'}{row.destination_concept_id && <div className="mt-1 text-slate-500">
           OMOP {row.destination_concept_id} · {row.destination_standard_concept === 'S' ? 'Standard' : 'Nonstandard'}</div>}</td>
-        <td className="p-2 text-xs"><span className={row.status === 'approved' ? 'font-medium text-green-800' : 'text-slate-700'}>{row.status}</span>
+        <td className="p-2 text-xs"><span className={row.status === 'approved' ? 'font-medium text-green-800' : 'text-slate-700'}>{row.status === 'unmapped' ? 'Not yet mapped' : row.status}</span>
           {!!row.evidence?.length && <div className="mt-1 text-slate-500">{row.evidence.join(' + ')}</div>}
           {row.verdict === 'supported' && <div className="mt-1 text-sky-800">Model-supported; curator review required</div>}
           {row.note && <p className="mt-1 max-w-xs text-slate-500">{row.note}</p>}</td>
