@@ -67,8 +67,11 @@ RENDER_API_KEY=... python manage.py capture_encryption_evidence --render --requi
 ```
 
 `--require-covered` exits 1 if any store holds PHI outside an attested location, if no
-Render Postgres resource can be tied to the database, if point-in-time recovery is
-unavailable, or if the resources span more than one workspace. Until
+Render Postgres resource can be tied to the database, if a Celery broker or result
+backend is not a Render Key Value, if point-in-time recovery is unavailable, or if the
+resources span more than one workspace. Resource ids are read only from the running
+deployment (`RENDER_SERVICE_ID` and the live connection URLs), so a capture describes
+the resources it runs against and nothing else. Until
 [#1563](https://github.com/healthkey-ai/promop/issues/1563) is fixed it fails on the
 `files` gap. That failure is correct.
 

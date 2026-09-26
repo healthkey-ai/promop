@@ -108,7 +108,7 @@ def _assess(api, settings):
         {'store': 'database', 'gaps': []},
         {'store': 'files', 'local_path': str(settings.MEDIA_ROOT),
          'gaps': ['service filesystem']},
-        {'store': 'key_value', 'configured': True, 'gaps': []},
+        {'store': 'key_value', 'configured': True, 'unidentified_backends': 0, 'gaps': []},
     ]
     render = cmd.render_capture(api, 'srv-1', 'dpg-abc123', ['red-abc123'])
     return cmd.assess({'stores': stores, 'render': render}), render
@@ -161,3 +161,30 @@ def test_render_api_treats_any_non_200_as_a_failed_capture():
 
     with pytest.raises(CommandError, match='HTTP 403'):
         cmd.RenderAPI('key', session=Session()).get('/postgres/dpg-abc123')
+
+
+def test_a_backend_outside_render_is_a_gap_even_beside_a_render_broker(settings):
+    settings.CELERY_BROKER_URL = BROKER
+    settings.CELERY_RESULT_BACKEND = 'rediss://user:pw@results.example.test:6380/0'
+    store = cmd.broker_store()
+    assert store['render_key_value_ids'] == ['red-abc123']
+    assert store['unidentified_backends'] == 1
+    assert 'results.example.test' not in json.dumps(store)
+    render = cmd.render_capture(FakeRender(render_responses()), None, 'dpg-abc123', ['red-abc123'])
+    gaps = cmd.assess({'stores': [{'store': 'files', 'gaps': []}, store], 'render': render})
+    assert any(g.startswith('key_value: ') for g in gaps)
+
+
+def test_render_ids_come_from_the_running_deployment_only(settings, monkeypatch):
+    api = FakeRender(render_responses())
+    monkeypatch.setattr(cmd, 'RenderAPI', lambda key: api)
+    monkeypatch.setenv('RENDER_API_KEY', 'key')
+    monkeypatch.setenv('RENDER_SERVICE_ID', 'srv-1')
+    evidence, _ = capture('--render')
+    assert '/services/srv-1' in api.paths
+    # The test database is not a Render database, so nothing is attested for it.
+    assert not any(path.startswith('/postgres/') for path in api.paths)
+    assert any(g.startswith('database: no Render Postgres') for g in evidence['gaps'])
+    for flag in ('--render-postgres-id=dpg-abc123', '--render-service-id=srv-2'):
+        with pytest.raises(CommandError):
+            capture('--render', flag)

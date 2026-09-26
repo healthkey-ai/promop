@@ -139,6 +139,8 @@ def broker_store():
         'schemes': sorted({urlsplit(u).scheme for u in urls}),
         'render_key_value_ids': sorted(
             {i for i in (render_resource_id(u, 'key_value') for u in urls) if i}),
+        # Counted, never listed: the URLs carry credentials.
+        'unidentified_backends': sum(1 for u in urls if not render_resource_id(u, 'key_value')),
         'gaps': [],
     }
     return store
@@ -221,9 +223,9 @@ def assess(evidence):
                     'attestation cannot be tied to this database.')
     elif render['postgres']['recovery'].get('recoveryStatus') != 'AVAILABLE':
         gaps.append('database: point-in-time recovery is not available.')
-    if stores['key_value']['configured'] and not render['key_value']:
-        gaps.append('key_value: broker is not a Render Key Value resource; no '
-                    'attestation covers it.')
+    if stores['key_value']['unidentified_backends']:
+        gaps.append('key_value: a Celery broker or result backend is not a Render Key '
+                    'Value resource; no attestation covers it.')
     if len(render['owners']) > 1:
         gaps.append('owners: resources span more than one Render workspace.')
     return gaps
@@ -237,10 +239,6 @@ class Command(BaseCommand):
                             help='Write JSON here instead of stdout.')
         parser.add_argument('--render', action='store_true',
                             help='Read the backing Render resources (needs RENDER_API_KEY).')
-        parser.add_argument('--render-service-id', default=os.environ.get('RENDER_SERVICE_ID'),
-                            help='Defaults to RENDER_SERVICE_ID, which Render sets in every service.')
-        parser.add_argument('--render-postgres-id',
-                            help='Override the id derived from the database host.')
         parser.add_argument('--require-covered', action='store_true',
                             help='Exit 1 if any gap is found.')
 
@@ -263,10 +261,13 @@ class Command(BaseCommand):
             if not api_key:
                 raise CommandError('--render needs RENDER_API_KEY in the environment.')
             by_name = {s['store']: s for s in stores}
+            # Every id comes from the running deployment (Render's own RENDER_SERVICE_ID
+            # and the live connection URLs), never from a flag, so a capture can only
+            # describe the resources it actually runs against.
             evidence['render'] = render_capture(
                 RenderAPI(api_key),
-                options['render_service_id'],
-                options['render_postgres_id'] or by_name['database']['render_postgres_id'],
+                os.environ.get('RENDER_SERVICE_ID'),
+                by_name['database']['render_postgres_id'],
                 by_name['key_value']['render_key_value_ids'],
             )
         evidence['gaps'] = assess(evidence)
