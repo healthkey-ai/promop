@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import * as Dialog from '@radix-ui/react-dialog';
 import api from '@/api/axios';
 import { destinationError } from './destinationSearch';
 
@@ -46,6 +47,7 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange }: { canA
   const [page, setPage] = useState(1);
   const [data, setData] = useState<Page<Concept> | null>(null);
   const [selected, setSelected] = useState<Concept | null>(null);
+  const selectedTrigger = useRef<HTMLButtonElement | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [revision, setRevision] = useState(0);
@@ -68,7 +70,8 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange }: { canA
     return () => { active = false; controller.abort(); window.clearTimeout(timer); };
   }, [domain, scope, search, page, revision]);
 
-  return <section aria-label="Concept to source code" className="space-y-5">
+  return <Dialog.Root open={selected !== null} onOpenChange={open => { if (!open && !writing) setSelected(null); }}>
+    <section aria-label="Concept to source code" className="space-y-5">
     <div>
       <h2 className="text-lg font-semibold text-slate-950">Source-code coverage</h2>
       <p className="mt-1 text-sm text-slate-600">Choose a standard concept, then review the source codes that should map to it.</p>
@@ -96,7 +99,8 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange }: { canA
         <tbody>{data?.results.map(concept => <tr key={concept.concept_id}
           className={`border-t border-slate-100 ${selected?.concept_id === concept.concept_id ? 'bg-sky-50' : ''}`}>
           <td className="p-3"><button className="text-left font-medium text-slate-950 underline underline-offset-2" disabled={writing}
-            aria-pressed={selected?.concept_id === concept.concept_id} onClick={() => setSelected(concept)}>{concept.concept_name}</button>
+            aria-haspopup="dialog" aria-expanded={selected?.concept_id === concept.concept_id}
+            onClick={event => { selectedTrigger.current = event.currentTarget; setSelected(concept); }}>{concept.concept_name}</button>
             <div className="mt-1 text-xs text-slate-500">{concept.vocabulary_id}:{concept.concept_code} · OMOP {concept.concept_id} · {concept.domain_id}</div></td>
           <td className="p-3 text-xs text-slate-600">{concept.fields.length
             ? concept.fields.map(field => <div key={field.field_name}>{field.field_name} <span className="text-slate-400">({field.status})</span></div>) : '—'}</td>
@@ -107,9 +111,25 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange }: { canA
     </div>
     <p className="text-xs text-slate-500">Coverage counts include all linked source codes, including Seen = 0.</p>
     {data && <Pagination data={data} disabled={loading || writing} change={setPage} />}
-    {selected && <SourceCoverage key={selected.concept_id} concept={selected} canApprove={canApprove}
-      onWriting={value => { setWriting(value); onWritingChange?.(value); }} onSaved={() => setRevision(value => value + 1)} />}
-  </section>;
+    </section>
+    {selected && <Dialog.Portal>
+      <Dialog.Overlay className="fixed inset-0 z-50 bg-slate-950/50" />
+      <Dialog.Content aria-modal="true" className="fixed left-1/2 top-1/2 z-50 max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-7xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-lg bg-white p-5 shadow-xl"
+        onEscapeKeyDown={event => { if (writing) event.preventDefault(); }}
+        onInteractOutside={event => { if (writing) event.preventDefault(); }}
+        onCloseAutoFocus={event => { event.preventDefault(); selectedTrigger.current?.focus(); }}>
+        <div className="mb-4 flex items-start justify-between gap-4 border-b border-slate-200 pb-3">
+          <div>
+            <Dialog.Title className="text-lg font-semibold">Source codes for {selected.concept_name}</Dialog.Title>
+            <Dialog.Description className="text-sm text-slate-600">Standard {selected.vocabulary_id}:{selected.concept_code} · OMOP {selected.concept_id} · {selected.domain_id}</Dialog.Description>
+          </div>
+          <Dialog.Close className={button} disabled={writing}>Close</Dialog.Close>
+        </div>
+        <SourceCoverage key={selected.concept_id} concept={selected} canApprove={canApprove}
+          onWriting={value => { setWriting(value); onWritingChange?.(value); }} onSaved={() => setRevision(value => value + 1)} />
+      </Dialog.Content>
+    </Dialog.Portal>}
+  </Dialog.Root>;
 }
 
 function SourceCoverage({ concept, canApprove, onSaved, onWriting }: {
@@ -219,11 +239,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting }: {
 
   const busy = writing || running;
   const refresh = useCallback(() => { setData(null); setSelected(new Set()); setError(''); setRevision(value => value + 1); }, []);
-  return <section aria-label={`Source codes for ${concept.concept_name}`} className="space-y-4 rounded border border-slate-300 bg-white p-4">
-    <div className="border-b border-slate-200 pb-3">
-      <h3 className="text-lg font-semibold">{concept.concept_name}</h3>
-      <p className="text-sm text-slate-600">Standard {concept.vocabulary_id}:{concept.concept_code} · OMOP {concept.concept_id} · {concept.domain_id}</p>
-    </div>
+  return <section aria-label={`Source codes for ${concept.concept_name}`} className="space-y-4">
     <div role="group" aria-label="Source code views" className="flex flex-wrap gap-2">
       {([['linked', 'Existing mappings'], ['available', 'Find source codes'], ['candidates', 'Suggested source codes']] as const).map(([key, label]) =>
         <button key={key} className={`${button} ${mode === key ? 'bg-slate-100 font-semibold' : ''}`} disabled={busy} aria-pressed={mode === key}
