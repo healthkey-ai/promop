@@ -196,6 +196,32 @@ def get_admin_orgs(user) -> QuerySet:
     )
 
 
+def get_direct_admin_orgs(user) -> QuerySet:
+    """Organizations a user administers in their own right, trusts excluded.
+
+    ``get_admin_orgs`` answers "whose data may this user reach", and organization
+    and domain trusts widen it deliberately. Administering an organization is a
+    different question: a trust is granted so a professional can work with
+    another organization's patients, not so they can delegate that authority on
+    or point that organization's event stream at a URL of their choosing.
+    Callers that create or change such a configuration use this; callers that
+    read use ``get_admin_orgs``.
+
+    This is the single expression of that rule — ``has_explicit_org_admin_access``
+    asks it of one slug. The two were written independently on two branches and
+    had already drifted: this one admitted a deactivated organization, which is
+    how an org_admin of an org that was switched off kept the authority to
+    redirect its events.
+    """
+    if getattr(user, 'is_staff', False):
+        return Organization.objects.all()
+    return Organization.objects.filter(id__in=GroupAccess.objects.filter(
+        identity=user, role='org_admin', org__is_active=True,
+    ).filter(
+        Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()),
+    ).values('org_id'))
+
+
 def has_org_admin_access(user, slug: str | None = None) -> bool:
     """Return True when the user may administer any org or a specific org slug."""
     admin_orgs = get_admin_orgs(user)
@@ -212,11 +238,7 @@ def has_explicit_org_admin_access(user, slug: str) -> bool:
     """
     if getattr(user, 'is_staff', False):
         return True
-    return GroupAccess.objects.filter(
-        identity=user, org__slug=slug, org__is_active=True, role='org_admin',
-    ).filter(
-        Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()),
-    ).exists()
+    return get_direct_admin_orgs(user).filter(slug=slug).exists()
 
 
 def has_professional_access(user) -> bool:

@@ -28,6 +28,11 @@ _EXTRA_SECRET_KEYS: tuple[str, ...] = (
     # the plaintext pairs live in a local named `credentials`, which no key
     # denylist would match. Cite that one as evidence, not this line.
     'SERVICE_AUTH_TOKENS',
+    # Consistency with the entries around it rather than a live control: the
+    # scrubber reaches request data, extra, breadcrumbs and frame vars, and
+    # nothing writes a key by this name into any of them while
+    # include_local_variables stays False below.
+    'WEBHOOK_INBOUND_SOURCES',
     'ANTHROPIC_API_KEY',
     'MAILGUN_API_KEY',
     'ADMIN_PASSWORD',

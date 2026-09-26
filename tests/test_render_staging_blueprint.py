@@ -102,13 +102,108 @@ def test_worker_refuses_missing_required_configuration(missing):
     assert missing in result.stderr
 
 
-def test_worker_start_defaults_to_one_child(tmp_path):
+def _run_worker_script(tmp_path, **extra_env):
+    """Run the entrypoint with a stub celery that records how it was invoked."""
     celery = tmp_path / 'celery'
-    celery.write_text('#!/bin/bash\nprintf "%s %s %s" "$CELERY_WORKER_CONCURRENCY" "$CELERY_WORKER_PREFETCH_MULTIPLIER" "$*"\n')
+    celery.write_text(
+        '#!/bin/bash\nprintf "%s %s %s" "$CELERY_WORKER_CONCURRENCY"'
+        ' "$CELERY_WORKER_PREFETCH_MULTIPLIER" "$*"\n')
     celery.chmod(0o755)
     env = {'PATH': f'{tmp_path}:{os.environ["PATH"]}',
            'CELERY_BROKER_URL': 'redis://example.invalid',
-           'DATABASE_URL': 'postgresql://example.invalid', 'SECRET_KEY': 'test-only'}
-    result = subprocess.run(['bash', str(ROOT / 'start-worker.sh')], env=env, capture_output=True, text=True)
+           'DATABASE_URL': 'postgresql://example.invalid', 'SECRET_KEY': 'test-only',
+           **extra_env}
+    result = subprocess.run(['bash', str(ROOT / 'start-worker.sh')], env=env,
+                            capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-    assert result.stdout == '1 1 -A promop worker --loglevel=info'
+    return result.stdout
+
+
+@pytest.mark.parametrize('embedded_beat', ['true', 'false'])
+def test_worker_start_defaults_to_one_child(tmp_path, embedded_beat):
+    invocation = _run_worker_script(tmp_path, CELERY_EMBEDDED_BEAT=embedded_beat)
+    expected = '1 1 -A promop worker --loglevel=info --queues=celery,webhooks'
+    if embedded_beat == 'true':
+        expected += ' --beat --schedule=/tmp/promop-celerybeat-schedule'
+    assert invocation == expected
+
+
+def test_a_worker_can_be_restricted_to_one_queue(tmp_path):
+    """Webhook delivery is routed to its own queue so it can be drained by its
+    own process; which process is a deployment decision, made here."""
+    assert _run_worker_script(
+        tmp_path, CELERY_WORKER_QUEUES='webhooks').endswith('--queues=webhooks')
+    assert _run_worker_script(
+        tmp_path, CELERY_WORKER_QUEUES='celery').endswith('--queues=celery')
+
+
+def test_production_worker_runs_the_entrypoint_that_can_schedule_recovery():
+    """Without beat the recovery sweep and retention never run in production."""
+    config = yaml.safe_load((ROOT / 'render.yaml').read_text())
+    worker = next(s for s in config['services']
+                  if s['type'] == 'worker' and s['name'] == 'promop-worker')
+    assert worker['branch'] == 'main'
+    assert worker['startCommand'] == 'bash start-worker.sh'
+    env = {e['key']: e.get('value') for e in worker['envVars']}
+    assert env['CELERY_EMBEDDED_BEAT'] == 'true'
+    # Pinned so moving to start-worker.sh does not cut concurrency to its default.
+    assert env['CELERY_WORKER_CONCURRENCY'] == '4'
+
+
+def test_the_webhook_flag_is_declared_once_and_pulled_by_the_worker():
+    """Both beat tasks no-op unless WEBHOOKS_ENABLED is true, so a worker whose
+    flag differs from its web service is a silent stranded-delivery machine."""
+    config = yaml.safe_load((ROOT / 'render.yaml').read_text())
+    for web_name, worker_name in (('promop', 'promop-worker'),
+                                  ('promop-staging', 'promop-staging-worker')):
+        web = next(s for s in config['services'] if s['name'] == web_name)
+        worker = next(s for s in config['services'] if s['name'] == worker_name)
+        web_env = {e['key']: e for e in web['envVars']}
+        worker_env = {e['key']: e for e in worker['envVars']}
+        # Operator-controlled on the web service, so there is one place to flip.
+        assert web_env['WEBHOOKS_ENABLED'] == {'key': 'WEBHOOKS_ENABLED', 'sync': False}
+        assert worker_env['WEBHOOKS_ENABLED']['fromService'] == {
+            'name': web_name, 'type': 'web', 'envVarKey': 'WEBHOOKS_ENABLED',
+        }
+
+
+def test_exactly_one_scheduler_across_the_blueprint():
+    config = yaml.safe_load((ROOT / 'render.yaml').read_text())
+    with_beat = [
+        s['name'] for s in config['services'] if s['type'] == 'worker'
+        and any(e['key'] == 'CELERY_EMBEDDED_BEAT' and e.get('value') == 'true'
+                for e in s['envVars'])
+    ]
+    # One per deployment, not one per blueprint: production and staging are
+    # separate brokers and databases.
+    assert sorted(with_beat) == ['promop-staging-worker', 'promop-worker']
+    for name in with_beat:
+        service = next(s for s in config['services'] if s['name'] == name)
+        assert service['startCommand'] == 'bash start-worker.sh'
+        # Configuration, not a comment: N replicas would be N schedulers, each
+        # queueing the recovery sweep every minute and a daily prune.
+        assert service['numInstances'] == 1
+
+
+def test_every_service_runs_a_python_that_classifies_wrapped_addresses():
+    """CPython below 3.12.4 (CVE-2024-4032) calls `2002:7f00:1::` globally
+    reachable — the 6to4 notation for 127.0.0.1. The webhook address filter
+    unwraps those itself so it does not rest on this pin, but a deployment
+    whose `ipaddress` is wrong is a hazard for every other caller of it.
+    """
+    minimum = (3, 12, 4)
+    blueprint = yaml.safe_load((ROOT / 'render.yaml').read_text())
+    pins = {
+        service['name']: env['value']
+        for service in blueprint['services']
+        for env in service.get('envVars', [])
+        if env['key'] == 'PYTHON_VERSION'
+    }
+    # Asserted before runtime.txt is added: that entry always exists, so a
+    # blueprint whose services carry no PYTHON_VERSION at all would otherwise
+    # leave this test green while pinning nothing.
+    python_services = [s['name'] for s in blueprint['services'] if s.get('runtime') == 'python']
+    assert set(pins) == set(python_services), f'Python services without a pin: {set(python_services) - set(pins)}'
+    pins['runtime.txt'] = (ROOT / 'runtime.txt').read_text().strip().removeprefix('python-')
+    for name, pin in pins.items():
+        assert tuple(int(part) for part in str(pin).split('.')) >= minimum, f'{name} pins {pin}'

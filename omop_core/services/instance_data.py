@@ -48,6 +48,17 @@ SYSTEM: frozenset[str] = frozenset({
     # Outreach state, not answers.
     'prolog_surveys.ParticipantMergeCandidate', 'prolog_surveys.SurveyAdministration',
     'prolog_surveys.SurveyContact', 'prolog_surveys.SurveyInvitation',
+    # Webhooks are this deployment's integrations, not knowledge about a person.
+    # A subscription names where *this* instance sends events and carries its own
+    # signing secret; a delivery is an outbox row for one such subscription, and
+    # an inbound event is a replay key. Copying any of them to another instance
+    # would either duplicate deliveries or hand over a credential.
+    'patient_portal.InboundWebhookEvent', 'patient_portal.WebhookDelivery',
+    'patient_portal.WebhookSubscription',
+    # And the record of who changed one belongs to the instance where the change
+    # was made: copying it would attribute this deployment's egress decisions to
+    # another one's administrators.
+    'patient_portal.WebhookSubscriptionChange',
 })
 
 # Reference data that comes from a versioned external release through its own loader.

@@ -24,6 +24,8 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
 from django.utils.dateparse import parse_date
+from contextlib import nullcontext
+
 from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -3460,6 +3462,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _t_bulk_insert = _time.monotonic()
                         try:
                             Measurement.objects.bulk_create(_pending_measurements)
+                            from patient_portal.webhooks import publish_patient_bulk_change
+                            publish_patient_bulk_change(person.pk, 'measurement', len(_pending_measurements))
                             for _bm in _pending_measurements:
                                 _pt_measurement_ids.append(_bm.measurement_id)
                             for (_bm, _psrc, _puid, _preason) in _pending_provenances:
@@ -3573,6 +3577,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             _po.observation_id = _oid
                         try:
                             Observation.objects.bulk_create(_pending_observations)
+                            from patient_portal.webhooks import publish_patient_bulk_change
+                            publish_patient_bulk_change(person.pk, 'observation', len(_pending_observations))
                             logger.info(
                                 '{"event": "observations_written", "person_id": %d, "count": %d}',
                                 person.person_id, len(_pending_observations),
@@ -4812,6 +4818,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 for m, mid in zip(pending_measurements, m_ids):
                     m.measurement_id = mid
                 Measurement.objects.bulk_create(pending_measurements)
+                from patient_portal.webhooks import publish_patient_bulk_change
+                publish_patient_bulk_change(person.pk, 'measurement', len(pending_measurements))
                 created_count += len(pending_measurements)
 
             if pending_observations:
@@ -4819,6 +4827,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 for obs, oid in zip(pending_observations, obs_ids):
                     obs.observation_id = oid
                 Observation.objects.bulk_create(pending_observations)
+                from patient_portal.webhooks import publish_patient_bulk_change
+                publish_patient_bulk_change(person.pk, 'observation', len(pending_observations))
                 created_count += len(pending_observations)
 
         # Refresh the PatientRecord to recompute 30-day summaries
@@ -5656,6 +5666,15 @@ class PersonViewSet(viewsets.GenericViewSet):
         )
 
     def partial_update(self, request, person_id=None):
+        """Thin wrapper: this view routes PATCH through its own method rather
+        than DRF's perform_update, so it takes the same conditional boundary as
+        `_AtomicWriteMixin`. Note the guarantee is narrower than it looks — an
+        early `return Response(4xx)` is not an exception, so a write already
+        made before it still commits."""
+        with _webhook_write_atomic():
+            return self._partial_update(request, person_id)
+
+    def _partial_update(self, request, person_id=None):
         """
         PATCH /api/persons/{person_id}/
         Fill-if-empty Person fields + profile field writes.
@@ -6381,7 +6400,9 @@ def _apply_upsert_plan(plan, model_cls, pk_field, model_name):
             content_type=ContentType.objects.get_for_model(model_cls),
             object_id__in=plan.collapse_ids,
         ).delete()
-        model_cls.objects.filter(**{f'{pk_field}__in': plan.collapse_ids}).delete()
+        from patient_portal.webhooks import suppress_webhook_events
+        with suppress_webhook_events():
+            model_cls.objects.filter(**{f'{pk_field}__in': plan.collapse_ids}).delete()
 
     if plan.to_update:
         model_cls.objects.bulk_update(
@@ -6781,6 +6802,9 @@ class _OmopBulkCreateMixin:
                     model_cls.objects.bulk_create(instances)
                     ids, updated = list(new_ids), 0
 
+            from patient_portal.webhooks import publish_patient_bulk_change
+            publish_patient_bulk_change(person.pk, model_cls._meta.model_name, len(new_ids) + updated)
+
             # No source supplied means no ProvenanceRecord, matching the single-row
             # path — inventing a source would make provenance unfalsifiable.
             # Only inserted rows get one: an upsert that left a row untouched
@@ -6971,6 +6995,9 @@ class _OmopBulkUpdateMixin:
             self._record_bulk_provenance(
                 request, person, model_cls, pk_field, instances)
 
+        from patient_portal.webhooks import publish_patient_bulk_change
+        publish_patient_bulk_change(person.pk, model_cls._meta.model_name, len(instances))
+
         # Unguarded and inside the transaction, so a failed derivation rolls the
         # batch back instead of leaving a stale read model.
         if not _skip_refresh_requested(request):
@@ -7148,9 +7175,11 @@ class _OmopBulkDeleteMixin:
 
         # Unlike bulk_create, queryset.delete() does fire post_delete, so without
         # the suppression the batch costs one derivation per row.
-        with suppress_patient_record_refresh():
+        from patient_portal.webhooks import publish_patient_bulk_change, suppress_webhook_events
+        with suppress_patient_record_refresh(), suppress_webhook_events():
             self._delete_dangling_links(model_cls, found_ids)
             model_cls.objects.filter(**{f'{pk_field}__in': found_ids}).delete()
+        publish_patient_bulk_change(person.pk, model_cls._meta.model_name, len(found_ids), operation='bulk_deleted')
 
         # Unguarded and inside the transaction, so a failed derivation rolls the
         # batch back instead of leaving a stale read model.
@@ -7211,6 +7240,53 @@ class _OmopBulkDeleteMixin:
                 status=status.HTTP_400_BAD_REQUEST,
             )
         return ids
+
+
+def _webhook_write_atomic():
+    """A transaction for the single-row write paths, only when it buys something.
+
+    `patient_data_changed` runs inside `Model.save()`, and `publish_event`
+    inserts the outbox row from there. Without a surrounding transaction the
+    clinical row is already committed by the time that insert runs: a failure
+    (or a worker killed between the two) leaves a persisted row that no
+    subscriber will ever hear about, and `transaction.on_commit` degrades to
+    "run it now" rather than "run it after the commit that made it true".
+
+    The bulk paths already reason this way — see `_OmopBulkCreateMixin`, where
+    the derivation is deliberately left unguarded inside the transaction so a
+    failure rolls the batch back instead of leaving a stale read model.
+
+    It is conditional because the cost is not free and lands on every
+    deployment while the benefit only exists when webhooks are on.
+    `_OmopDeferRefreshMixin` suppresses the derivation for update and destroy
+    but not for create, so a single-row POST runs `refresh_patient_record` —
+    12-32s on a bulk-loaded patient — inside this block, holding its
+    `select_for_update` on `patient_record` until the outer commit instead of
+    releasing it at the derivation's own commit. WEBHOOKS_ENABLED defaults to
+    False, so by default this is exactly the behaviour that shipped before.
+    """
+    return transaction.atomic() if settings.WEBHOOKS_ENABLED else nullcontext()
+
+
+class _AtomicWriteMixin:
+    """Commit the row write, its provenance and the outbox row together.
+
+    See `_webhook_write_atomic` for why the boundary exists and why it is
+    conditional. `atomic` nests as a savepoint, so mixing it with the bulk
+    blocks that already open one is safe.
+    """
+
+    def perform_create(self, serializer):
+        with _webhook_write_atomic():
+            return super().perform_create(serializer)
+
+    def perform_update(self, serializer):
+        with _webhook_write_atomic():
+            return super().perform_update(serializer)
+
+    def perform_destroy(self, instance):
+        with _webhook_write_atomic():
+            return super().perform_destroy(instance)
 
 
 class _ProvenanceMixin:
@@ -7292,7 +7368,7 @@ class _ProvenanceMixin:
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class ConditionOccurrenceViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class ConditionOccurrenceViewSet(_AtomicWriteMixin, _OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ConditionOccurrenceSerializer
     permission_classes = [EtlPatientCrudPermission, PatientSelfScopePermission]
     queryset = ConditionOccurrence.objects.select_related('condition_concept').all()
@@ -7309,7 +7385,7 @@ class ConditionOccurrenceViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class DrugExposureViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class DrugExposureViewSet(_AtomicWriteMixin, _OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = DrugExposureSerializer
     permission_classes = [EtlPatientCrudPermission, PatientSelfScopePermission]
     queryset = DrugExposure.objects.select_related('drug_concept').all()
@@ -7326,7 +7402,7 @@ class DrugExposureViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _Provena
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class MeasurementViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class MeasurementViewSet(_AtomicWriteMixin, _OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = MeasurementSerializer
     permission_classes = [EtlPatientCrudPermission, PatientSelfScopePermission]
     queryset = Measurement.objects.select_related('measurement_concept', 'unit_concept').all()
@@ -7345,7 +7421,7 @@ class MeasurementViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _Provenan
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class ObservationViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class ObservationViewSet(_AtomicWriteMixin, _OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ObservationSerializer
     permission_classes = [EtlPatientCrudPermission, PatientSelfScopePermission]
     queryset = Observation.objects.select_related('observation_concept').all()
@@ -7362,7 +7438,7 @@ class ObservationViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _Provenan
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class ProcedureOccurrenceViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class ProcedureOccurrenceViewSet(_AtomicWriteMixin, _OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ProcedureOccurrenceSerializer
     permission_classes = [EtlPatientCrudPermission, PatientSelfScopePermission]
     queryset = ProcedureOccurrence.objects.select_related('procedure_concept').all()
@@ -7405,7 +7481,7 @@ class V1ProcedureOccurrenceViewSet(
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class EpisodeViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class EpisodeViewSet(_AtomicWriteMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = EpisodeSerializer
     permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = Episode.objects.all()
@@ -8820,7 +8896,7 @@ def disease_therapy_regimen_detail(request, pk):
 # =============================================================================
 
 @method_decorator(csrf_exempt, name='dispatch')
-class PatientDocumentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
+class PatientDocumentViewSet(_AtomicWriteMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = PatientDocumentSerializer
     permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = PatientDocument.objects.all()
@@ -8917,7 +8993,7 @@ def _deny_unless_may_write_person(request, person_id):
     return None
 
 
-class PatientTrialEnrollmentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
+class PatientTrialEnrollmentViewSet(_AtomicWriteMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     """CRUD for a patient's clinical trial enrollment status.
 
     Trial metadata (title, phase, eligibility, etc.) is NOT stored here.
