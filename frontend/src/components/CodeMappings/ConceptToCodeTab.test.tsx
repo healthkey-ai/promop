@@ -1,4 +1,5 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import ConceptToCodeTab from './ConceptToCodeTab';
 
@@ -35,6 +36,90 @@ async function selectConcept(canApprove = true) {
 }
 
 describe('concept-first curation', () => {
+  it('opens a dialog immediately from a long concept list and shows source loading errors inside it', async () => {
+    const concepts = Array.from({ length: 50 }, (_, index) => ({
+      ...concept, concept_id: 123 + index, concept_name: index ? `Concept ${index}` : concept.concept_name,
+    }));
+    get.mockImplementation((url: string) => url === '/v1/concept-to-code/'
+      ? Promise.resolve({ data: page(concepts) }) : Promise.reject(new Error('Unavailable')));
+    render(<ConceptToCodeTab canApprove />);
+    const trigger = await screen.findByRole('button', { name: 'Serum albumin' });
+    expect(trigger).toHaveAttribute('aria-haspopup', 'dialog');
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole('dialog', { name: 'Source codes for Serum albumin' });
+    expect(dialog).toHaveAttribute('aria-modal', 'true');
+    expect(within(dialog).getByText('Standard LOINC:A1 · OMOP 123 · Measurement')).toBeInTheDocument();
+    expect(screen.queryByRole('table', { name: 'Standard concept coverage' })).not.toBeInTheDocument();
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Could not load source codes.');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(trigger).toHaveFocus();
+    expect(screen.getByRole('table', { name: 'Standard concept coverage' })).toBeInTheDocument();
+  });
+
+  it('supports keyboard opening, traps focus, and returns focus on Escape', async () => {
+    const user = userEvent.setup();
+    render(<ConceptToCodeTab canApprove />);
+    const trigger = await screen.findByRole('button', { name: 'Serum albumin' });
+    trigger.focus();
+    await user.keyboard('{Enter}');
+    const dialog = screen.getByRole('dialog', { name: 'Source codes for Serum albumin' });
+    const close = within(dialog).getByRole('button', { name: 'Close' });
+    expect(close).toHaveFocus();
+    await within(dialog).findByText('SNOMED:S1');
+    await user.tab({ shift: true });
+    expect(dialog).toContainElement(document.activeElement as HTMLElement);
+    await user.tab();
+    expect(close).toHaveFocus();
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(trigger).toHaveFocus();
+  });
+
+  it('opens a different concept with fresh source selection and filters after closing', async () => {
+    const second = { ...concept, concept_id: 456, concept_name: 'Total protein' };
+    get.mockImplementation((url: string) => Promise.resolve({ data: url === '/v1/concept-to-code/'
+      ? page([concept, second]) : page([{ ...source, source_code: url.includes('/456/') ? 'S2' : 'S1' }]) }));
+    await selectConcept();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select SNOMED S1' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Only source codes with Seen greater than zero' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Total protein' }));
+    const dialog = screen.getByRole('dialog', { name: 'Source codes for Total protein' });
+    await within(dialog).findByText('SNOMED:S2');
+    expect(within(dialog).queryByText('SNOMED:S1')).not.toBeInTheDocument();
+    expect(within(dialog).getByRole('checkbox', { name: 'Only source codes with Seen greater than zero' })).toBeChecked();
+    expect(within(dialog).getByRole('button', { name: 'Approve selected (0)' })).toBeDisabled();
+    expect(get).toHaveBeenCalledWith('/v1/concept-to-code/456/', expect.objectContaining({ params: expect.objectContaining({ mode: 'linked', seen_only: '1', page: 1 }) }));
+  });
+
+  it('prevents dismissal during a batch save and allows closing when the whole batch completes', async () => {
+    const onWritingChange = vi.fn();
+    let finishFirst!: (value: unknown) => void;
+    post.mockImplementationOnce(() => new Promise(resolve => { finishFirst = resolve; }));
+    get.mockImplementation((url: string) => Promise.resolve({ data: url === '/v1/concept-to-code/'
+      ? page([concept]) : page([source, { ...source, mapping_id: 8, source_code: 'S2' }]) }));
+    render(<ConceptToCodeTab canApprove onWritingChange={onWritingChange} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Serum albumin' }));
+    await screen.findByText('SNOMED:S1');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select displayed proposed sources' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Approve selected (2)' }));
+    const close = screen.getByRole('button', { name: 'Close' });
+    expect(close).toBeDisabled();
+    expect(onWritingChange).toHaveBeenLastCalledWith(true);
+    fireEvent.click(close);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    fireEvent.pointerDown(document.body, { button: 0, pointerType: 'mouse' });
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    await act(async () => { finishFirst({ data: { ...source, status: 'approved' } }); });
+    await screen.findByText('Approved 2 of 2 selected mappings.');
+    expect(post).toHaveBeenCalledTimes(2);
+    expect(onWritingChange).toHaveBeenLastCalledWith(false);
+    expect(close).toBeEnabled();
+    fireEvent.click(close);
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
   it('shows distinct concept coverage and searches by scope and domain', async () => {
     render(<ConceptToCodeTab canApprove />);
     const table = await screen.findByRole('table', { name: 'Standard concept coverage' });
