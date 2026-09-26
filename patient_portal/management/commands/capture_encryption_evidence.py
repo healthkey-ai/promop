@@ -124,17 +124,32 @@ def file_store():
                 'attestations do not cover them. Unless a persistent disk is mounted '
                 'at this path, they are also lost on every deploy (see '
                 'render_service.disk).')
+    elif settings.IS_DEPLOYED:
+        # A remote backend (S3 and the like) is a store this command cannot inspect,
+        # so it is reported rather than assumed covered.
+        store['gaps'].append(
+            f'Uploaded documents are stored through {backend}, which this command '
+            'cannot inspect. Attest its encryption at rest and backups separately.')
     return store
 
 
+def _cache_locations():
+    cache = settings.CACHES.get('default', {})
+    if 'redis' not in cache.get('BACKEND', '').lower():
+        return []
+    location = cache.get('LOCATION') or []
+    return [location] if isinstance(location, str) else list(location)
+
+
 def broker_store():
-    broker = settings.CELERY_BROKER_URL
-    result = settings.CELERY_RESULT_BACKEND
-    urls = {u for u in (broker, result) if u}
+    # The Django cache can be its own Redis (CACHE_URL) or share the broker's, so
+    # it joins the same deduplicated set of key-value backends.
+    urls = {u for u in (settings.CELERY_BROKER_URL, settings.CELERY_RESULT_BACKEND,
+                        *_cache_locations()) if u}
     store = {
         'store': 'key_value',
         'holds': 'Celery task messages and results (person ids, derivation errors), '
-                 'throttle counters',
+                 'the Django cache (throttle counters, cached token lookups)',
         'configured': bool(urls),
         'schemes': sorted({urlsplit(u).scheme for u in urls}),
         'render_key_value_ids': sorted(

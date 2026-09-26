@@ -4,11 +4,16 @@ import json
 
 import pytest
 from django.core.management import call_command
+from django.core.files.storage import Storage
 from django.core.management.base import CommandError
 
 from patient_portal.management.commands import capture_encryption_evidence as cmd
 
 pytestmark = pytest.mark.django_db
+
+
+class RemoteStorage(Storage):
+    """Stands in for S3-style storage: no local filesystem location."""
 
 BROKER = 'redis://red-abc123:s3cret-password@red-abc123:6379'
 
@@ -188,3 +193,30 @@ def test_render_ids_come_from_the_running_deployment_only(settings, monkeypatch)
     for flag in ('--render-postgres-id=dpg-abc123', '--render-service-id=srv-2'):
         with pytest.raises(CommandError):
             capture('--render', flag)
+
+
+def test_a_remote_file_storage_backend_is_a_gap_on_a_deployment(settings):
+    settings.STORAGES = {**settings.STORAGES, 'default': {
+        'BACKEND': 'tests.test_encryption_evidence.RemoteStorage'}}
+    settings.IS_DEPLOYED = False
+    assert cmd.file_store()['gaps'] == []
+    settings.IS_DEPLOYED = True
+    store = cmd.file_store()
+    assert store['backend'] == 'tests.test_encryption_evidence.RemoteStorage'
+    assert 'local_path' not in store
+    assert len(store['gaps']) == 1 and 'cannot inspect' in store['gaps'][0]
+
+
+def test_a_separate_redis_cache_joins_the_key_value_inventory(settings):
+    settings.CELERY_BROKER_URL = BROKER
+    settings.CELERY_RESULT_BACKEND = BROKER
+    settings.CACHES = {'default': {
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'LOCATION': 'rediss://user:cache-secret@red-cache999:6379'}}
+    store = cmd.broker_store()
+    assert store['render_key_value_ids'] == ['red-abc123', 'red-cache999']
+    assert 'cache-secret' not in json.dumps(store)
+    settings.CACHES = {'default': {
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'LOCATION': 'redis://cache.example.test:6379'}}
+    assert cmd.broker_store()['unidentified_backends'] == 1

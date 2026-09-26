@@ -33,8 +33,8 @@ The field-level candidates listed in #60 do not change this:
 | Store | Holds | Covered by |
 |---|---|---|
 | PostgreSQL | All clinical tables, PatientRecord, identities, audit trail | Render: "Render Postgres databases are encrypted at rest using AES-256 data encryption. This applies to both primary and replica instances, along with all backups." ([source](https://render.com/docs/postgresql-creating-connecting)) |
-| Redis / Key Value | Celery messages and results (person ids, errors), throttle counters | Render HIPAA-enabled workspace: "All disks and daily snapshots are encrypted at rest." ([source](https://render.com/blog/introducing-hipaa-enabled-workspaces)) |
-| File storage (`MEDIA_ROOT`) | PatientDocument uploads, including advance directives | **Not covered.** Ephemeral service filesystem, outside the database and its backups. [#1563](https://github.com/healthkey-ai/promop/issues/1563) |
+| Redis / Key Value | Celery messages and results (person ids, errors), and the Django cache (throttle counters, cached token lookups), whether it shares the broker or has its own `CACHE_URL` | Render HIPAA-enabled workspace: "All disks and daily snapshots are encrypted at rest." ([source](https://render.com/blog/introducing-hipaa-enabled-workspaces)) |
+| File storage (`MEDIA_ROOT`) | PatientDocument uploads, including advance directives | **Not covered.** Ephemeral service filesystem, outside the database and its backups. [#1563](https://github.com/healthkey-ai/promop/issues/1563). A remote storage backend is reported as a gap too, because the collector cannot inspect it. |
 
 Sentry, email and LLM calls send data out of the deployment rather than storing it here.
 They belong in the sub-processor inventory ([#753](https://github.com/healthkey-ai/promop/issues/753)).
