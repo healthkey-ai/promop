@@ -59,8 +59,10 @@ reads the backing Render resources: service disk, Postgres plan, HA and point-in
 recovery status, Key Value instances, and the owning workspace. It never outputs
 hostnames, credentials or connection strings. A failed API read fails the capture.
 
-Run it from the Render shell of each web service (production is not reachable locally),
-with a Render API key exported for that session only:
+Run it from the Render shell of both the web service and its worker, and keep both
+outputs (production is not reachable locally). The two processes are configured
+separately: uploaded files live on the web service, while in production the Celery
+broker may be set only on the worker. Export a Render API key for that session only:
 
 ```bash
 RENDER_API_KEY=... python manage.py capture_encryption_evidence --render --require-covered
@@ -90,4 +92,4 @@ is tracked in [#1562](https://github.com/healthkey-ai/promop/issues/1562).
 | Integrate field encryption if needed | Not needed (see Decision). |
 | `SECRET_KEY` rotation procedure | [signing key rotation](../signing-key-rotation.md#secret_key), with `SECRET_KEY_FALLBACKS` support. |
 | Backup encryption confirmed | Render's attestation covers "all backups". The capture records PITR availability. |
-| HKI-SEC-08 on the pre-production-PHI checklist | This control, gated on a clean `--require-covered` capture and a signed BAA. |
+| HKI-SEC-08 on the pre-production-PHI checklist | **Open.** The repo has no pre-production PHI checklist yet. The gate to record there is a clean `--require-covered` capture from the web service and worker, plus a signed BAA. |

@@ -87,7 +87,7 @@ short-lived values only:
 | Django sessions and password-reset tokens | session age / reset timeout |
 | Email-verification links (`patient_portal/api/email_verification.py`) | `MAX_AGE_SECONDS` |
 | Concept-mint review tokens (`patient_portal/api/concept_mint.py`) | 15 minutes |
-| Inline derivation task ids (`omop_core/services/derivation_jobs.py`) | until polled |
+| Inline derivation task ids (`omop_core/services/derivation_jobs.py`) | no expiry; once the old key stops verifying, a poll reads `PENDING`, like an id that was never issued |
 
 Rotate without logging everyone out by keeping the old value as a fallback:
 
@@ -98,7 +98,7 @@ Rotate without logging everyone out by keeping the old value as a fallback:
    set the web service's `SECRET_KEY` to the new value and deploy both. Signing uses
    the new key, and both keys verify.
 3. Record the rotation (date, operator, reason) in the SOC2 evidence store.
-4. After the longest lifetime above has passed, clear `SECRET_KEY_FALLBACKS` and deploy.
+4. After the longest expiring lifetime above has passed, clear `SECRET_KEY_FALLBACKS` and deploy.
    Anything still signed with the old key now fails verification.
 
 On suspected exposure, skip the fallback: replace `SECRET_KEY` outright and accept that

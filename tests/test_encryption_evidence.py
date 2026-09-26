@@ -60,6 +60,8 @@ def render_responses(recovery='AVAILABLE', disk=None, kv_owner='tea-1'):
     ('redis://red-abc123:6379', 'key_value', 'red-abc123'),
     ('rediss://red-abc123:pw@oregon-keyvalue.render.com:6379', 'key_value', 'red-abc123'),
     ('redis://cache.internal:6379', 'key_value', None),
+    ('//dpg-abc123-a.other.example', 'postgres', None),
+    ('rediss://red-abc123:pw@redis.other.example:6379', 'key_value', None),
     ('', 'key_value', None),
 ])
 def test_render_resource_id_is_derived_from_the_url(url, kind, expected):
