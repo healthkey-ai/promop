@@ -14,6 +14,7 @@ from django.db.models.functions import Upper
 from omop_core.models import ConceptSynonym, UmlsSourceCode
 from omop_core.services.concept_to_code import concept_payload, eligible_sources, source_payload
 from omop_core.services.source_vocabularies import VOCAB_TO_UMLS_ROOT, VOCABULARY_OID_ALIASES
+from omop_core.mapping.reverse_catalog import catalog_candidates
 
 
 def reverse_retrieval_pool(concept, *, strategies, limit, include_zero_seen=False, timeout_ms=30000):
@@ -47,6 +48,7 @@ def _retrieve(concept, *, strategies, limit, include_zero_seen, evaluate):
     if not include_zero_seen:
         rows = rows.filter(occurrence_count__gt=0)
     pool = {}
+    terms = []
 
     def collect(matches, strategy):
         for row in evaluate(matches):
@@ -77,20 +79,41 @@ def _retrieve(concept, *, strategies, limit, include_zero_seen, evaluate):
         # similarity() alone would scan the entire source catalog.
         terms = [concept.concept_name, *evaluate(ConceptSynonym.objects.filter(concept=concept).order_by(
             'concept_synonym_name').values_list('concept_synonym_name', flat=True)[:5])]
+        if concept.vocabulary_id == 'LOINC':
+            # Long LOINC names dilute whole-string similarity: "Albumin
+            # (g/dL)" does not match "Albumin [Mass/volume] in Serum or Plasma"
+            # at the 0.3 cutoff. Also search the complete component before the
+            # bracketed property. This is retrieval only; ranking and approval
+            # still use the full destination, including specimen and method.
+            component, separator, property_and_specimen = concept.concept_name.partition(' [')
+            if separator and ']' in property_and_specimen and len(component.strip()) >= 3:
+                terms.append(component.strip())
         with transaction.atomic():
             with connection.cursor() as cursor:
                 cursor.execute("SET LOCAL pg_trgm.similarity_threshold = 0.3")
-            for term in dict.fromkeys(term.upper() for term in terms if term):
+            terms = list(dict.fromkeys(term.upper() for term in terms if term))
+            for term in terms:
                 matches = rows.annotate(label=Upper('source_code_description')).filter(
                     label__trigram_similar=term,
                 ).annotate(score=TrigramSimilarity(Upper('source_code_description'), term)).order_by(
                     '-occurrence_count', '-score', 'source_code', 'pk')[:limit]
                 collect(matches, 'lexical')
 
+    # Unregistered vocabulary codes have never been encountered. Search them
+    # only when zero-Seen sources are included; keep the preview read-only.
+    if include_zero_seen:
+        for candidate in catalog_candidates(concept, strategies=strategies, terms=terms, limit=limit, evaluate=evaluate):
+            key = candidate['mapping_id'] if candidate['mapping_id'] is not None else (
+                candidate['source_vocabulary_id'], candidate['source_code'],
+            )
+            current = pool.setdefault(key, candidate)
+            current['evidence'] = list(dict.fromkeys([*current['evidence'], *candidate['evidence']]))
+            current['lexical_score'] = max(current.get('lexical_score', 0), candidate.get('lexical_score', 0))
+
     return sorted(pool.values(), key=lambda candidate: (
         candidate['occurrence_count'] <= 0, -candidate['occurrence_count'],
         -len(candidate['evidence']), -candidate.get('lexical_score', 0),
-        candidate['source_code'], candidate['mapping_id'],
+        candidate['source_code'], candidate['source_vocabulary_id'], candidate['mapping_id'] or 0,
     ))[:limit]
 
 

@@ -41,6 +41,19 @@ source vocabulary, and indexed trigram searches over SCCM descriptions using
 the destination's name and up to five synonyms. Shared CUIs and similar names
 are retrieval evidence, not automatic equivalence decisions. The candidate
 pool is capped and places encountered sources before zero-Seen sources.
+When zero-Seen sources are included, retrieval also searches current installed
+OMOP source concepts, publisher vocabulary terms (including their indexed
+synonyms), and UMLS siblings that do not yet have an SCCM row. OMOP sources must
+share the destination's clinical domain; publisher/UMLS records cannot bypass
+known OMOP retirement or domain mismatches. Existing approved, rejected,
+reference and already-linked mappings are excluded. An editable existing SCCM
+row retains its description and Seen count. Vocabulary-only candidates have
+Seen = 0 and display as **Not yet mapped**; retrieving them creates no mapping.
+For LOINC names with a bracketed property, lexical retrieval also searches the
+complete component before that property. This lets short source labels such as
+`Albumin (g/dL)` reach review for `Albumin [Mass/volume] in Serum or Plasma`
+without requiring an installed short synonym. The full destination, including
+specimen and method, remains the target for ranking and explicit approval.
 Optional Anthropic/Jev ranking evaluates each source against the chosen
 standard destination, with no first-candidate fallback when ranking is
 unavailable. All candidates still require curator review.
@@ -66,12 +79,20 @@ SCCM row in a transaction and requires its exact `updated_at` revision from the
 preview. Concurrent edits, approved/rejected rows, Athena reference rows,
 active locks held by another user and domain mismatches prevent the write.
 
+A vocabulary-only candidate must first be proposed using its saved reverse
+preview run and source identity. The server reloads the installed source and
+checks its revision, current validity and domain compatibility. Changed sources
+or a mapping created since the preview require a refreshed search. A successful
+proposal creates one SCCM row, with the full label retained in notes if it
+exceeds the description field. It does not repoint clinical rows. Approval is a
+separate explicit action using the new mapping's exact revision.
+
 The API reuses `_upsert_source_code_mapping`: proposals retain source evidence;
 approvals record reviewer information, preserve suggestion-review semantics,
 repoint applicable clinical rows and mirror approved concept relationships
 where supported. Approval therefore has the same effects as the existing
-source-first editor. Source rows are not created from downloaded catalogs or
-bundled mapping files. Retrieval reads each deployment's installed tables.
+source-first editor. Retrieval reads each deployment's installed tables;
+only an explicit proposal creates a source row from a vocabulary candidate.
 
 When a curator changes a proposal's destination, SCCM retains its prior
 destination IDs in `pending_repoint_concept_ids`. Approval from either editor
@@ -91,6 +112,7 @@ All endpoints require an authenticated professional role:
 | `GET concept-to-code/<concept_id>/` | Paginated linked or available sources |
 | `POST concept-to-code/suggest/` | Queue a reverse preview; returns 202 |
 | `GET concept-to-code/suggest-runs/<run_id>/` | Preview progress and candidates |
+| `POST concept-to-code/<concept_id>/mappings/` | Propose one vocabulary source from a saved preview |
 | `POST concept-to-code/<concept_id>/mappings/<mapping_id>/` | Propose or approve one reviewed source with a revision precondition |
 
 Migration 0264 adds the run direction and pending destination IDs with database

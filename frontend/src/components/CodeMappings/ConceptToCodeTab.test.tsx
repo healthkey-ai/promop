@@ -212,4 +212,56 @@ describe('concept-first curation', () => {
     expect(get).toHaveBeenCalledWith('/v1/concept-to-code/suggest-runs/run-1/');
     expect(screen.getByRole('button', { name: 'Suggest source codes' })).toBeEnabled();
   });
+
+  it('keeps new vocabulary candidates distinct and requires proposal before approval', async () => {
+    const fresh = { ...source, mapping_id: null, status: 'unmapped', occurrence_count: 0,
+      source_code: 'NEW1', origin_system: 'vocabulary', destination_concept_id: null, destination_concept_name: '' };
+    const second = { ...fresh, source_code: 'NEW2' };
+    const preview = { ...run(), selection: { limit: 25, include_zero_seen: true },
+      activity: [{ concept: { concept_id: 123 }, candidates: [fresh, second] }] };
+    post.mockResolvedValueOnce({ data: preview });
+    await selectConcept();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Only source codes with Seen greater than zero' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
+    await screen.findByText('2 candidates retrieved (limit 25).');
+    expect(post).toHaveBeenCalledWith('/v1/concept-to-code/suggest/', expect.objectContaining({ include_zero_seen: true }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select SNOMED NEW1' }));
+    expect(screen.getByRole('checkbox', { name: 'Select SNOMED NEW2' })).not.toBeChecked();
+    expect(screen.getByRole('button', { name: 'Approve selected (0)' })).toBeDisabled();
+    const proposed = { ...fresh, mapping_id: 17, status: 'proposed', updated_at: 'new-revision', destination_concept_id: 123 };
+    post.mockResolvedValueOnce({ data: proposed });
+    fireEvent.click(screen.getByRole('button', { name: 'Propose selected (1)' }));
+    await screen.findByText('Proposed 1 of 1 selected mappings.');
+    expect(post).toHaveBeenLastCalledWith('/v1/concept-to-code/123/mappings/', {
+      run_id: 'run-1', source_vocabulary_id: 'SNOMED', source_code: 'NEW1', status: 'proposed',
+    });
+    expect(screen.getAllByText('Not yet mapped')).toHaveLength(1);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select displayed proposed sources' }));
+    expect(screen.getByRole('button', { name: 'Propose selected (2)' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Approve selected (1)' })).toBeEnabled();
+    post.mockResolvedValueOnce({ data: { ...proposed, status: 'approved' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Approve selected (1)' }));
+    await screen.findByText('Approved 1 of 1 selected mappings.');
+    expect(post).toHaveBeenLastCalledWith('/v1/concept-to-code/123/mappings/17/', {
+      status: 'approved', expected_updated_at: 'new-revision',
+    });
+    expect(post).toHaveBeenCalledTimes(3);
+    expect(screen.getByText('Not yet mapped')).toBeInTheDocument();
+  });
+
+  it('retains a new vocabulary candidate when its preview is stale', async () => {
+    post.mockResolvedValueOnce({ data: { ...run(), selection: { limit: 25, include_zero_seen: true },
+      activity: [{ concept: { concept_id: 123 }, candidates: [{ ...source, mapping_id: null, status: 'unmapped', occurrence_count: 0 }] }] } });
+    await selectConcept(false);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Only source codes with Seen greater than zero' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
+    await screen.findByText('Not yet mapped');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select SNOMED S1' }));
+    post.mockRejectedValueOnce({ response: { status: 409, data: { detail: 'The source vocabulary changed after the preview.' } } });
+    fireEvent.click(screen.getByRole('button', { name: 'Propose selected (1)' }));
+    await screen.findByText('Proposed 0 of 1 selected mappings.');
+    expect(screen.getByRole('alert')).toHaveTextContent('The source vocabulary changed after the preview.');
+    expect(screen.getByText('Not yet mapped')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Approve selected/ })).not.toBeInTheDocument();
+  });
 });
