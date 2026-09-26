@@ -75,3 +75,31 @@ records, an unnecessary rotation costs evidence continuity.
 `DEBUG=True` skips the checks entirely and both keys fall back to `SECRET_KEY`, which keeps
 local development ergonomic. Staging runs with `DEBUG=False` and therefore needs both keys
 set, distinct, like production.
+
+## `SECRET_KEY`
+
+`SECRET_KEY` encrypts nothing at rest. No stored PHI depends on it, so rotating it never
+touches the database (see [encryption at rest](soc2/encryption-at-rest.md)). It signs
+short-lived values only:
+
+| Signed with `SECRET_KEY` | Lifetime |
+|---|---|
+| Django sessions and password-reset tokens | session age / reset timeout |
+| Email-verification links (`patient_portal/api/email_verification.py`) | `MAX_AGE_SECONDS` |
+| Concept-mint review tokens (`patient_portal/api/concept_mint.py`) | 15 minutes |
+| Inline derivation task ids (`omop_core/services/derivation_jobs.py`) | until polled |
+
+Rotate without logging everyone out by keeping the old value as a fallback:
+
+1. Generate a new value as above.
+2. Set `SECRET_KEY_FALLBACKS` to the current value on the web service **and** its
+   worker. The worker's `SECRET_KEY` follows the web service's through `render.yaml`,
+   but the fallback is a plain dashboard variable, so it has to be set on both. Then
+   set the web service's `SECRET_KEY` to the new value and deploy both. Signing uses
+   the new key, and both keys verify.
+3. Record the rotation (date, operator, reason) in the SOC2 evidence store.
+4. After the longest lifetime above has passed, clear `SECRET_KEY_FALLBACKS` and deploy.
+   Anything still signed with the old key now fails verification.
+
+On suspected exposure, skip the fallback: replace `SECRET_KEY` outright and accept that
+sessions and outstanding links are invalidated.

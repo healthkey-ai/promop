@@ -207,3 +207,24 @@ def test_settings_import_skips_load_dotenv_when_the_flag_is_set():
     # the regression test for deleting that line — but not for the padded
     # values it alone catches, since the flag here is a bare '1'.
     assert _loaded_dotenv(PYTHON_DOTENV_DISABLED='1') is False
+
+
+def test_secret_key_fallbacks_keep_old_signatures_valid_during_rotation():
+    # docs/signing-key-rotation.md: the old key goes in SECRET_KEY_FALLBACKS so
+    # sessions and links signed before the rotation still verify.
+    code = '''
+import django
+django.setup()
+from django.core import signing
+from django.test.utils import override_settings
+with override_settings(SECRET_KEY='old-key-that-is-being-rotated-out', SECRET_KEY_FALLBACKS=[]):
+    token = signing.dumps('payload')
+print(signing.loads(token))
+'''
+    env = {key: os.environ[key] for key in ('PATH', 'SYSTEMROOT') if key in os.environ}
+    env.update(BASE_ENV, DEBUG='True',
+               SECRET_KEY_FALLBACKS='unrelated-key, old-key-that-is-being-rotated-out')
+    result = subprocess.run(
+        [sys.executable, '-c', code], cwd=ROOT, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == 'payload'
