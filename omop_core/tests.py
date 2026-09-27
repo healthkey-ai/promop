@@ -520,6 +520,17 @@ class LegacyLaboratoryProjectionTest(_OmopBase):
 
         self.assertAlmostEqual(float(pi.hemoglobin_level), 11.2, places=1)
         self.assertEqual(pi.hemoglobin_level_units, 'mmol/L')
+        self.assertIsNone(pi.hemoglobin_g_dl)
+
+    def test_latest_legacy_hemoglobin_in_another_unit_wins(self):
+        self._measurement(92330, 'Hemoglobin measurement', 10.0, code='older-hgb', unit='mmol/L')
+        self._measurement(92331, 'Hemoglobin measurement', 11.2, code='newer-hgb', unit='mmol/L')
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertAlmostEqual(float(pi.hemoglobin_level), 11.2, places=1)
+        self.assertEqual(pi.hemoglobin_level_units, 'mmol/L')
+        self.assertIsNone(pi.hemoglobin_g_dl)
 
     def test_direct_bilirubin_does_not_populate_total_bilirubin(self):
         self._measurement(92332, 'Direct bilirubin', 0.3, code='1968-7', unit='mg/dL')
