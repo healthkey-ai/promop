@@ -70,6 +70,11 @@ def blood_count_to_canonical(value, source_unit):
     return number * Decimal(factors[unit])
 
 
+def count_in_cells_per_ul(value):
+    """Convert a canonical count in thousands/µL to legacy cells/µL."""
+    return Decimal(str(value)) * 1000 if value is not None else None
+
+
 def measurement_count_unit(row):
     """Prefer explicit source units; use a UCUM concept only when text is absent."""
     if row.unit_source_value and row.unit_source_value.strip():
@@ -89,8 +94,8 @@ def blood_count_projection(field, row):
     if field == 'anc_thousand_per_ul':
         return {
             field: value,
-            'absolute_neutrophile_count': value,
-            'absolute_neutrophile_count_units': '10*3/uL' if value is not None else None,
+            'absolute_neutrophile_count': count_in_cells_per_ul(value),
+            'absolute_neutrophile_count_units': 'CELLS/UL' if value is not None else None,
         }
     # The legacy platelet column is integer-valued. Reporting cells/uL retains
     # fractional thousands and matches the downstream compatibility contract.

@@ -90,9 +90,14 @@ supported source-display and historic concept-name paths. A newer empty result
 or one with an unknown unit suppresses older results. Approved scalar mapping
 readback also converts source units. Pending user edits remain preserved.
 
-`absolute_neutrophile_count` retains the canonical numeric value and now carries
-`absolute_neutrophile_count_units=10*3/uL`. `platelet_count` is an integer column,
-so it carries cells/µL with `platelet_count_units=CELLS/UL`; for example,
+For compatibility with readers of the legacy column, `absolute_neutrophile_count`
+now carries cells/µL with `absolute_neutrophile_count_units=CELLS/UL` (#1567).
+This supersedes the version 7 choice to copy the thousands/µL number into
+that field. Legacy `absolute_lymphocyte_count` likewise carries cells/µL from
+`alc_thousand_per_ul`; `hemoglobin_level` mirrors `hemoglobin_g_dl` in g/dL.
+The two legacy fields are read-only aliases in the editor. `platelet_count`
+is an integer column that also carries cells/µL
+with `platelet_count_units=CELLS/UL`; for example,
 150.5 thousands/µL becomes 150,500 cells/µL. Nonintegral cells/µL or integer
 overflow leaves that legacy pair unset while the canonical decimal field remains
 subject to its existing range and precision checks. Unit-choice labels now show
@@ -102,6 +107,14 @@ FHIR upload and the import command share this projection path. They preserve
 the source numeric value; UCUM `valueQuantity.code` is retained when a unit
 display is absent. Re-imports persist unit-only corrections as well as numeric
 changes. The read model performs conversion; source Measurements are not scaled.
+
+Migration 0265 converts existing legacy ANC values from authoritative
+`anc_thousand_per_ul` values and aligns legacy ALC and hemoglobin values where
+their canonical fields exist. Rows with no canonical value or a pending user
+edit to the legacy alias are left untouched for source review. A later explicit
+canonical edit supersedes the pending alias edit. The migration updates
+PatientRecord compatibility columns;
+it does not rewrite raw OMOP Measurements.
 
 ### ANC and platelet rollout (#640)
 

@@ -34,8 +34,8 @@ def test_unknown_scale_or_invalid_count_is_not_zero(value, unit):
 
 @pytest.mark.django_db
 @pytest.mark.parametrize('code,field,alias,alias_unit,source,value,expected', [
-    ('751-8', 'anc_thousand_per_ul', 'absolute_neutrophile_count', '10*3/uL', 'cells/uL', 1500, 1.5),
-    ('751-8', 'anc_thousand_per_ul', 'absolute_neutrophile_count', '10*3/uL', '10*9/L', 1.5, 1.5),
+    ('751-8', 'anc_thousand_per_ul', 'absolute_neutrophile_count', 'CELLS/UL', 'cells/uL', 1500, 1.5),
+    ('751-8', 'anc_thousand_per_ul', 'absolute_neutrophile_count', 'CELLS/UL', '10*9/L', 1.5, 1.5),
     ('777-3', 'platelet_count_thousand_per_ul', 'platelet_count', 'CELLS/UL', 'cells/uL', 150500, 150.5),
     ('777-3', 'platelet_count_thousand_per_ul', 'platelet_count', 'CELLS/UL', '10*3/uL', 150.5, 150.5),
 ])
@@ -64,7 +64,7 @@ def test_projection_paths_preserve_scale_and_source(code, field, alias, alias_un
         record = refresh_patient_record(person)
         record.refresh_from_db()
         assert float(getattr(record, field)) == expected
-        assert float(getattr(record, alias)) == (expected * 1000 if code == '777-3' else expected)
+        assert float(getattr(record, alias)) == expected * 1000
         assert getattr(record, alias + '_units') == alias_unit
     measurement.refresh_from_db()
     assert float(measurement.value_as_number) == value
@@ -124,6 +124,8 @@ def test_zero_and_pending_edit_survive_refresh():
     )
     record = refresh_patient_record(person)
     assert record.anc_thousand_per_ul == Decimal('2.5')
+    assert record.absolute_neutrophile_count == Decimal('2500')
+    assert record.absolute_neutrophile_count_units == 'CELLS/UL'
     measurement.refresh_from_db()
     assert measurement.value_as_number == 0
 

@@ -31,6 +31,7 @@ from omop_core.services.mappings import (
 )
 from omop_core.services.clinical_units import (
     canonical_wbc_unit, flc_to_canonical, wbc_to_canonical, blood_count_projection,
+    count_in_cells_per_ul,
 )
 from omop_core.services.lot_regimens import (
     get_regimen_concept_id,
@@ -64,7 +65,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 9
+DERIVATION_VERSION = 10
 
 # Fields that are entirely derived from OMOP tables and must be reset before
 # each refresh so deletions are reflected (not just additions).
@@ -134,8 +135,8 @@ _OMOP_DERIVED_FIELDS = [
     'liver_enzyme_levels_alp', 'liver_enzyme_levels',
     # Legacy aliases for deduplicated LOINC fields (issue #471).
     # These model columns still exist for backward compatibility; they are
-    # populated with the same value as their canonical counterpart during
-    # derivation. See _LAB_FIELD_ALIASES below.
+    # populated from their canonical counterpart during derivation, converting
+    # counts to the legacy cells/µL scale where needed. See below.
     'calcium_mg_dl', 'creatinine_mg_dl', 'egfr', 'blood_urea_nitrogen',
     'serum_sodium', 'serum_potassium', 'magnesium', 'alkaline_phosphatase',
     'ldh_level', 'ldh',
@@ -393,13 +394,29 @@ _LAB_FIELD_ALIASES = {
     'magnesium_mg_dl':        ['magnesium'],
     'alkaline_phosphatase_u_l': ['alkaline_phosphatase', 'liver_enzyme_levels_alp'],
     'ldh_u_l':                ['ldh_level', 'ldh', 'lactate_dehydrogenase_level'],
+    'hemoglobin_g_dl':       ['hemoglobin_level'],
     'anc_thousand_per_ul':    ['absolute_neutrophile_count'],
+    'alc_thousand_per_ul':    ['absolute_lymphocyte_count'],
     'rbc_million_per_ul':     ['red_blood_cell_count'],
     'creatinine_clearance_ml_min': ['creatinine_clearance_rate'],
     'serum_bilirubin_level_direct': ['serum_bilirubin_level'],
     'ast_u_l': ['liver_enzyme_levels_ast'],
     'alt_u_l': ['liver_enzyme_levels_alt'],
 }
+
+
+def _lab_alias_value(canonical, value):
+    if canonical in ('anc_thousand_per_ul', 'alc_thousand_per_ul'):
+        return count_in_cells_per_ul(value)
+    return value
+
+
+def _lab_alias_units(canonical, value):
+    if canonical == 'anc_thousand_per_ul':
+        return {'absolute_neutrophile_count_units': 'CELLS/UL' if value is not None else None}
+    if canonical == 'hemoglobin_g_dl':
+        return {'hemoglobin_level_units': 'G/DL' if value is not None else None}
+    return {}
 
 # A FHIR Condition.stage summary is an asserted clinical fact, but the FHIR
 # element does not require a LOINC coding. Keep its source identity explicit
@@ -488,8 +505,10 @@ _SLIM_MATCH_VALUES = frozenset(
 # (for example direct bilirubin, creatinine clearance, and HbA1c) into a
 # different clinical value. New fields use _LOINC_LAB_FIELDS instead.
 _LEGACY_LAB_CONCEPT_FIELDS = {
-    'hemoglobin': 'hemoglobin_level',
-    'hemoglobin measurement': 'hemoglobin_level',
+    # Old uncoded Hemoglobin facts still feed the canonical field, so its
+    # compatibility alias cannot become blank on refresh.
+    'hemoglobin': 'hemoglobin_g_dl',
+    'hemoglobin measurement': 'hemoglobin_g_dl',
     'platelet count': 'platelet_count',
     'creatinine': 'serum_creatinine_level',
     'creatinine in serum': 'serum_creatinine_level',
@@ -1023,9 +1042,21 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
         # were removed.
         patient_info.patient_age = None
 
+    pending_aliases = set(patient_info.user_edited_fields or [])
     for canonical, aliases in _LAB_FIELD_ALIASES.items():
+        value = getattr(patient_info, canonical)
+        if canonical in changed_fields:
+            # A new canonical edit supersedes an older pending edit to a field
+            # that is now an alias. A refresh without such an edit must not
+            # erase the old user's value before its conflict is reviewed.
+            pending_aliases.difference_update(aliases)
         for alias in aliases:
-            setattr(patient_info, alias, getattr(patient_info, canonical))
+            if alias not in pending_aliases:
+                setattr(patient_info, alias, _lab_alias_value(canonical, value))
+        if not any(alias in pending_aliases for alias in aliases):
+            for unit_field, unit in _lab_alias_units(canonical, value).items():
+                setattr(patient_info, unit_field, unit)
+    patient_info.user_edited_fields = sorted(pending_aliases)
     # Full refresh clears these before extraction. Direct edits need to clear
     # dependent results when an input is removed, without clearing other data.
     for result, inputs in {
@@ -3495,7 +3526,8 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         value = data.get(canonical)
         if value is not None:
             for alias in aliases:
-                data[alias] = value
+                data[alias] = _lab_alias_value(canonical, value)
+            data.update(_lab_alias_units(canonical, value))
 
     return data
 

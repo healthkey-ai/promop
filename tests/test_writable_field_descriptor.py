@@ -155,9 +155,12 @@ class TestKinds:
     def test_no_alias_is_offered_as_editable(self):
         """Writing an alias and its canonical collides on one LOINC row (#471)."""
         descriptor = build_writable_field_descriptor()
-        for alias in ('calcium_mg_dl', 'creatinine_mg_dl', 'blood_urea_nitrogen'):
+        for alias in ('calcium_mg_dl', 'creatinine_mg_dl', 'blood_urea_nitrogen',
+                      'hemoglobin_level', 'absolute_lymphocyte_count'):
             assert descriptor[alias]['kind'] == 'alias'
             assert descriptor[alias]['writable'] is False
+        assert descriptor['hemoglobin_level']['canonical'] == 'hemoglobin_g_dl'
+        assert descriptor['absolute_lymphocyte_count']['canonical'] == 'alc_thousand_per_ul'
 
     def test_a_computed_field_names_its_inputs(self):
         entry = build_writable_field_descriptor()['bmi']
