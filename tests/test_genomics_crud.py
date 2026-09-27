@@ -449,6 +449,65 @@ def test_clone_fraction_not_interchangeable_with_allelic_frequency(setup):
     assert float(cf_row.value_as_number) == 80.0
 
 
+def test_absent_edit_clears_inherited_positive_clone_fraction(setup):
+    """G4 (#1417): Present -> Absent -> Indeterminate -> Present leaves no stale clone fraction."""
+    person, _, _ = setup
+    variant = save_variant(person, {
+        'gene': 'TP53', 'status': 'present', 'variant': 'c.743G>A',
+        'allelic_frequency': 37, 'clone_fraction': 62, 'clone_fraction_unit': '%',
+    })
+    variant = save_variant(person, {'status': 'absent'}, variant_id=variant['id'])
+    assert variant['status'] == 'absent'
+    assert variant.get('allelic_frequency') is None
+    assert variant.get('clone_fraction') is None
+    assert not Measurement.objects.filter(
+        person=person, measurement_source_value='genomics:clone_fraction', is_erroneous=False).exists()
+    variant = save_variant(person, {'status': 'indeterminate'}, variant_id=variant['id'])
+    assert variant.get('clone_fraction') is None
+    variant = save_variant(person, {'status': 'present'}, variant_id=variant['id'])
+    assert variant['status'] == 'present'
+    assert variant.get('clone_fraction') is None
+
+
+def test_absent_finding_rejects_supplied_positive_clone_fraction(setup):
+    """A positive clone fraction asserts the finding, so Absent cannot carry one."""
+    person, _, _ = setup
+    from rest_framework.exceptions import ValidationError
+    with pytest.raises(ValidationError, match='clone_fraction'):
+        save_variant(person, {'gene': 'TP53', 'status': 'absent', 'clone_fraction': 62, 'clone_fraction_unit': '%'})
+    assert not Measurement.objects.filter(person=person).exists()
+
+
+def test_stale_absent_finding_stays_editable_when_clone_fraction_is_echoed(setup, monkeypatch):
+    """A record saved before #1417 (Absent, 62%) accepts an edit that echoes the stored value."""
+    person, _, _ = setup
+    variant = save_variant(person, {'gene': 'TP53', 'status': 'present', 'clone_fraction': 62, 'clone_fraction_unit': '%'})
+    monkeypatch.setattr('omop_core.services.genomics._is_positive', lambda value: False)
+    stale = save_variant(person, {'status': 'absent'}, variant_id=variant['id'])
+    assert stale['clone_fraction'] == 62.0
+    monkeypatch.undo()
+    edited = save_variant(person, {**stale, 'laboratory': 'MGH'}, variant_id=stale['id'])
+    assert edited['laboratory'] == 'MGH'
+    assert edited.get('clone_fraction') is None
+    from rest_framework.exceptions import ValidationError
+    with pytest.raises(ValidationError, match='clone_fraction'):
+        save_variant(person, {'clone_fraction': 40}, variant_id=edited['id'])
+
+
+@pytest.mark.parametrize('inherited', [False, True])
+def test_absent_finding_keeps_zero_clone_fraction(setup, inherited):
+    """A negative FISH report records 0%, supplied or inherited; it is not cleared."""
+    person, _, _ = setup
+    base = {'gene': 'TP53', 'variant_analysis_method_type': 'FISH', 'clone_fraction': 0, 'clone_fraction_unit': '%'}
+    if inherited:
+        variant = save_variant(person, {**base, 'status': 'indeterminate'})
+        variant = save_variant(person, {'status': 'absent'}, variant_id=variant['id'])
+    else:
+        variant = save_variant(person, {**base, 'status': 'absent'})
+    assert variant['status'] == 'absent'
+    assert variant['clone_fraction'] == 0.0
+
+
 # --- BIDMC component alignment (§7) ---
 
 
