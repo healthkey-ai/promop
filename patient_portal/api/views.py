@@ -8152,6 +8152,9 @@ def concept_search(request):
     response = _paginated_concept_response(
         queryset, request, ordering=_concept_match_ordering(query, concept_id),
     )
+    if response.status_code == status.HTTP_304_NOT_MODIFIED:
+        # A revalidation hit carries no body to annotate (#1457).
+        return response
     for item in response.data.get('results', []):
         # The display-name conventions and curated unit map are LOINC-specific;
         # do not infer an input type for another vocabulary from them.

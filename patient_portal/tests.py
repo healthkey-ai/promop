@@ -16155,6 +16155,15 @@ class VocabReleaseAPITest(_SmartBase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn('ETag', resp)
 
+    def test_concept_search_304_on_matching_etag(self):
+        # #1457: the 304 has no .data, and the LOINC annotation read it anyway.
+        self._make_release()
+        resp1 = self.read_client.get('/api/v1/concepts/search/?q=test')
+        resp2 = self.read_client.get(
+            '/api/v1/concepts/search/?q=test', HTTP_IF_NONE_MATCH=resp1['ETag'],
+        )
+        self.assertEqual(resp2.status_code, 304)
+
 
 class UserlessOAuthTokenDetailTest(TestCase):
     """An OAuth2 client_credentials token has no resource owner
