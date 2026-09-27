@@ -98,6 +98,20 @@ def test_pending_legacy_edit_survives_refresh_until_a_new_canonical_edit(editor)
     assert 'hemoglobin_level' not in record.user_edited_fields
 
 
+def test_canonical_edit_supersedes_legacy_hemoglobin_in_another_unit(editor):
+    record, client = editor
+    PatientRecord.objects.filter(pk=record.pk).update(
+        hemoglobin_level=Decimal('11.2'), hemoglobin_level_units='mmol/L',
+    )
+    response = client.patch(
+        f'/api/patient-info/{record.person_id}/', {'hemoglobin_g_dl': '13.0'}, format='json',
+    )
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.hemoglobin_level == Decimal('13.0')
+    assert record.hemoglobin_level_units == 'G/DL'
+
+
 def test_migration_repairs_canonical_rows_and_preserves_legacy_only_rows():
     wrong = PatientRecordFactory()
     legacy_only = PatientRecordFactory()

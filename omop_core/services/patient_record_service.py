@@ -1050,6 +1050,12 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
             # that is now an alias. A refresh without such an edit must not
             # erase the old user's value before its conflict is reviewed.
             pending_aliases.difference_update(aliases)
+        if (canonical == 'hemoglobin_g_dl' and canonical not in changed_fields
+                and value is None and patient_info.hemoglobin_level_units
+                and patient_info.hemoglobin_level_units.strip().casefold() != 'g/dl'):
+            # An uncoded hemoglobin result in another unit is a legacy fact,
+            # not a g/dL canonical value. Keep its number and recorded unit.
+            continue
         for alias in aliases:
             if alias not in pending_aliases:
                 setattr(patient_info, alias, _lab_alias_value(canonical, value))
@@ -3445,6 +3451,12 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         concept_name = measurement.measurement_concept.concept_name.casefold().strip()
         field_name = _LEGACY_LAB_CONCEPT_FIELDS.get(concept_name)
         if not field_name or field_name in data:
+            continue
+        if (field_name == 'hemoglobin_g_dl' and measurement.unit_source_value
+                and measurement.unit_source_value.strip().casefold() != 'g/dl'):
+            # We have no supported conversion for arbitrary legacy units.
+            field_name = 'hemoglobin_level'
+        if field_name in data:
             continue
         data[field_name] = measurement.value_as_number
         if measurement.unit_source_value:

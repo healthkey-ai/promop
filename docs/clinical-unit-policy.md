@@ -115,6 +115,8 @@ edit to the legacy alias are left untouched for source review. A later explicit
 canonical edit supersedes the pending alias edit. The migration updates
 PatientRecord compatibility columns;
 it does not rewrite raw OMOP Measurements.
+An uncoded hemoglobin result in another recorded unit remains in the legacy
+column with that unit; it is not treated as a g/dL canonical result.
 
 ### ANC and platelet rollout (#640)
 
