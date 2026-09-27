@@ -478,6 +478,22 @@ def test_absent_finding_rejects_supplied_positive_clone_fraction(setup):
     assert not Measurement.objects.filter(person=person).exists()
 
 
+def test_stale_absent_finding_stays_editable_when_clone_fraction_is_echoed(setup, monkeypatch):
+    """A record saved before #1417 (Absent, 62%) accepts an edit that echoes the stored value."""
+    person, _, _ = setup
+    variant = save_variant(person, {'gene': 'TP53', 'status': 'present', 'clone_fraction': 62, 'clone_fraction_unit': '%'})
+    monkeypatch.setattr('omop_core.services.genomics._is_positive', lambda value: False)
+    stale = save_variant(person, {'status': 'absent'}, variant_id=variant['id'])
+    assert stale['clone_fraction'] == 62.0
+    monkeypatch.undo()
+    edited = save_variant(person, {**stale, 'laboratory': 'MGH'}, variant_id=stale['id'])
+    assert edited['laboratory'] == 'MGH'
+    assert edited.get('clone_fraction') is None
+    from rest_framework.exceptions import ValidationError
+    with pytest.raises(ValidationError, match='clone_fraction'):
+        save_variant(person, {'clone_fraction': 40}, variant_id=edited['id'])
+
+
 @pytest.mark.parametrize('inherited', [False, True])
 def test_absent_finding_keeps_zero_clone_fraction(setup, inherited):
     """A negative FISH report records 0%, supplied or inherited; it is not cleared."""
