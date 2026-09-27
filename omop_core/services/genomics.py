@@ -36,6 +36,14 @@ _VARIANT_LEVEL_FIELDS = frozenset({
 })
 
 
+def _is_positive(value):
+    """True for a number above zero; blanks and malformed values are left to validation."""
+    try:
+        return Decimal(str(value)) > 0
+    except (InvalidOperation, ValueError):
+        return False
+
+
 def mapping_is_usable(mapping, *, parent=False):
     """Shared storage gate for the writer, catalog and readiness audit.
 
@@ -178,6 +186,12 @@ def normalize_variant(payload, existing=None):
                 data[k] = None
             else:
                 data[k] = ''
+        # A positive clone fraction asserts the finding (#1417). Zero stays
+        # accepted: a negative FISH report records it explicitly.
+        if _is_positive(data.get('clone_fraction')):
+            if 'clone_fraction' in (payload or {}):
+                raise ValidationError({'clone_fraction': 'A positive clone fraction is not accepted on an absent finding.'})
+            data['clone_fraction'] = None
     frequency = data.get('allelic_frequency')
     unit = data.get('allelic_frequency_unit') or '%'
     if unit not in ('%', '1'):

@@ -256,6 +256,22 @@ it('uses one state control and clears incompatible inherited values on an absent
   expect(screen.getByText('Absent')).toBeInTheDocument();
 });
 
+it.each([
+  [62, ''],
+  [0, 0],
+])('clears a positive clone fraction on an absent edit and keeps a zero one (%s)', async (clone, expected) => {
+  mocks.get.mockImplementation(async path => ({ data: path.includes('genomics-catalog') ? { markers: [] }
+    : [{ ...saved, gene: 'TP53', status: 'present', allelic_frequency: 37, clone_fraction: clone, clone_fraction_unit: '%' }] }));
+  render(<GenomicsTab formData={{ person_id: 42 }} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+  fireEvent.change(screen.getByLabelText('Finding status'), { target: { value: 'absent' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save genomic finding' }));
+  await screen.findByText('Genomic finding saved.');
+  const payload = mocks.patch.mock.calls[0][1];
+  expect(payload.allelic_frequency).toBeNull();
+  expect(payload.clone_fraction).toBe(expected);
+});
+
 it('separates TP53 sequence findings from 17p deletions and preserves source details', async () => {
   const deletion = { ...saved, id: 125, gene: 'TP53', genomic_feature: '17p', feature_type: 'Chromosome arm/region',
     variant: 'Original FISH narrative', variant_name: 'del17p', finding_category: 'Deletion', variant_category: 'Structural variant', marker_key: 'del17p' };

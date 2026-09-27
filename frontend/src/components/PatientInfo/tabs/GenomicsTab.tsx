@@ -71,7 +71,11 @@ function findingStatus(finding: Variant): string {
 function changeStatus(draft: Variant, status: string): Variant {
   const changed: Variant = { ...draft, status };
   if (status !== draft.status) delete changed.assessment;
-  if (status === 'absent') for (const key of absentVariantFields) changed[key] = '';
+  if (status === 'absent') {
+    for (const key of absentVariantFields) changed[key] = '';
+    // A positive clone fraction contradicts Absent; an explicit 0 (negative FISH) stays.
+    if (Number(changed.clone_fraction) > 0) changed.clone_fraction = '';
+  }
   return changed;
 }
 
