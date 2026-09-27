@@ -10,7 +10,7 @@ import json
 import time
 from typing import Any
 
-from django.core.management.base import BaseCommand, CommandParser
+from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.db import connection
 
 from omop_core.mapping import suggestions
@@ -37,6 +37,10 @@ class Command(BaseCommand):
                             help='Also report which index each variant used.')
 
     def handle(self, **options: Any) -> None:
+        if options['domain'] != 'Drug':
+            # Only drug searches narrow, so any other domain compares a query
+            # against itself and reports a meaningless 1.0x.
+            raise CommandError('Narrowing applies to --domain Drug only.')
         texts = options['text'] or self._queue_texts(options['domain'], options['count'])
         if not texts:
             self.stdout.write(self.style.WARNING('No source text to benchmark.'))
