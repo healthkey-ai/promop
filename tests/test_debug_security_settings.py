@@ -113,6 +113,25 @@ def test_deployed_debug_requires_hosts_without_render_hostname():
     assert 'ALLOWED_HOSTS must be set' in result.stderr
 
 
+@pytest.mark.parametrize('argv', [['gunicorn'], ['manage.py', 'check', '--deploy']])
+@pytest.mark.parametrize('credentials', [None, 'true'])
+def test_deployed_http_rejects_credentialed_all_origin_cors(argv, credentials):
+    overrides = {} if credentials is None else {'CORS_ALLOW_CREDENTIALS': credentials}
+    result = boot(True, argv, RENDER='true', CORS_ALLOW_ALL_ORIGINS='true', **overrides)
+    assert result.returncode != 0
+    assert 'CORS_ALLOW_ALL_ORIGINS and CORS_ALLOW_CREDENTIALS cannot both be true' in result.stderr
+
+
+@pytest.mark.parametrize('argv', [['gunicorn'], ['manage.py', 'check', '--deploy']])
+def test_deployed_http_all_origin_cors_requires_credentials_off(argv):
+    result = boot(True, argv, RENDER='true', CORS_ALLOW_ALL_ORIGINS='true',
+                  CORS_ALLOW_CREDENTIALS='false')
+    assert result.returncode == 0, result.stderr
+    posture = json.loads(result.stdout)
+    assert posture['CORS_ALLOW_ALL_ORIGINS'] is True
+    assert posture['CORS_ALLOW_CREDENTIALS'] is False
+
+
 @pytest.mark.parametrize('command', ['collectstatic', 'makemigrations'])
 def test_build_commands_skip_all_validation(command):
     """Build-time commands run before DATABASE_URL is available."""
