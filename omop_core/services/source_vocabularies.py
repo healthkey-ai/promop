@@ -201,13 +201,17 @@ ICD10CM_MERGE = {}
 
 # Cross-vocabulary lookup for ICD-10. HT-One sends ICD-10-CM format codes
 # labeled as 'ICD10'; Athena loads them under 'ICD10CM'. This factual
-# relationship is independent of the tab layout and is used by:
-#   - source_descriptions (Athena concept name lookup)
-#   - suggestions (source concept resolution)
-#   - source_retirement (retirement evidence lookup)
-#   - field_curation_transfer (copy_reference_data dedup)
-#   - import_healthtree_seen_counts (occurrence count matching)
+# relationship is independent of the tab layout.
+# Bidirectional: given one ICD-10 vocabulary, find its sibling.
+# Used by source_descriptions, suggestions, mapping_browse cross-vocab hints.
 ICD10_CROSS_VOCAB = {'ICD10CM': 'ICD10', 'ICD10': 'ICD10CM'}
+
+# Unidirectional canonical form: both ICD-10 vocabularies → one identity.
+# Consumers that deduplicate or group by vocabulary need both to resolve to the
+# same key; the bidirectional ICD10_CROSS_VOCAB creates a cycle that breaks
+# canonical(canonical(x)) == canonical(x).
+# Used by source_retirement, field_curation_transfer, accuracy merging.
+ICD10_CANONICAL = {'ICD10CM': 'ICD10', 'ICD10': 'ICD10'}
 
 # FHIR OID URIs that are aliases for OMOP vocabulary_ids.  Rows arriving
 # via crossmap imports sometimes carry the OID instead of the OMOP spelling.

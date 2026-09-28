@@ -56,7 +56,7 @@ from omop_core.models import (
     FieldSynonym,
     SourceCodeConceptMapping,
 )
-from omop_core.services.source_vocabularies import ICD10_CROSS_VOCAB, VOCABULARY_OID_ALIASES
+from omop_core.services.source_vocabularies import ICD10_CANONICAL, VOCABULARY_OID_ALIASES
 
 # Table keys, in dependency order: a CustomPatientField requires its mapping, so
 # mappings are written first and pruned last.
@@ -93,7 +93,7 @@ _CODE_MAPPING_CONCEPT_FKS = (
 
 # Spellings the code mapping tabs show as one vocabulary. Matching on the raw
 # spelling copied ICD10:A41.9 next to an existing ICD10CM:A41.9.
-_VOCABULARY_ALIASES: dict[str, str] = {**ICD10_CROSS_VOCAB, **VOCABULARY_OID_ALIASES}
+_VOCABULARY_ALIASES: dict[str, str] = {**ICD10_CANONICAL, **VOCABULARY_OID_ALIASES}
 
 # A real source table is ~117k rows. Held as one list it does not fit in a
 # 512Mi job, and neither does a dict of every local row to match against.
