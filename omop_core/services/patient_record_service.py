@@ -238,14 +238,15 @@ PATIENT_RECORD_OMOP_MAPPED_FIELDS = frozenset(_OMOP_DERIVED_FIELDS) | frozenset(
     'date_of_birth', 'gender', 'race', 'ethnicity', 'languages_skills',
     'country', 'region', 'city', 'postal_code', 'latitude', 'longitude',
     # Flattened language capabilities (#827). Derived from PersonLanguageSkill
-    # by _flatten_language_capabilities, so they are read-only over the API:
-    # a PATCH would be silently overwritten by the next refresh.
+    # by _flatten_language_capabilities. They are NOT yet protected from PATCH:
+    # the serializer accepts them and a refresh keeps the edit as a user edit
+    # (#1634).
     'english_speak', 'english_read', 'english_write', 'english_understand',
     'spanish_speak', 'spanish_read', 'spanish_write', 'spanish_understand',
     # Their concept_id form, derived by _language_skill_concept_pairs. Unlike
-    # the eight booleans it is also read-only on the serializer and computed in
-    # the write descriptor (write_descriptor._LANGUAGE_PAIR_FIELD), so a PATCH
-    # cannot set it at all.
+    # the eight booleans it is read-only on the serializer and computed in the
+    # write descriptor (write_descriptor._LANGUAGE_PAIR_FIELD), so a PATCH
+    # cannot set it.
     'language_skill_concept_ids',
     # These are populated by section extractors but are not cleared before a
     # refresh (mostly because they carry structured / negative findings). They

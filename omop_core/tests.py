@@ -5938,7 +5938,7 @@ class LanguageSkillConceptAndFlatColumnTest(TestCase):
         ]))
 
     def test_two_rows_yielding_the_same_pair_appear_once(self):
-        """An unset skill_concept resolves to the id another row already holds."""
+        """Two rows carrying the same (language, skill) concept pair yield it once."""
         self._skill(self.english, 'speak')
         other = PersonLanguageSkill.objects.create(
             person=self.person, language_concept=self.english, skill_level='read',
@@ -5965,7 +5965,7 @@ class LanguageSkillConceptAndFlatColumnTest(TestCase):
         response = client.patch(
             f'/api/v1/patient-records/{self.person.person_id}/',
             {'language_skill_concept_ids': ['1:2']}, format='json')
-        self.assertIn(response.status_code, (200, 400), response.data)
+        self.assertEqual(response.status_code, 200, response.data)
         self.record.refresh_from_db()
         self.assertEqual(self.record.language_skill_concept_ids, derived)
         self.assertNotIn('language_skill_concept_ids',
