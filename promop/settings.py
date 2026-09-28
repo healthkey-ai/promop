@@ -125,6 +125,13 @@ if IS_DEPLOYED or not DEBUG:
             'CORS_ALLOWED_ORIGINS must be set to your frontend origin(s), '
             'e.g. "https://app.example.com"'
         )
+    if (not _no_http and not _running_worker
+            and _env_bool('CORS_ALLOW_ALL_ORIGINS')
+            and _env_bool('CORS_ALLOW_CREDENTIALS', True)):
+        _config_errors.append(
+            'CORS_ALLOW_ALL_ORIGINS and CORS_ALLOW_CREDENTIALS cannot both be true: '
+            'credentialed cross-origin requests require an origin allowlist'
+        )
     if _config_errors:
         raise ImproperlyConfigured(
             'Missing required production settings:\n'
