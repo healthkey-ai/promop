@@ -214,24 +214,14 @@ def _find_source_concept(source_vocabulary_id, source_code):
     ).first()
     if concept is not None:
         return concept
-    # Fallback: try the canonical vocabulary this one merges into (or from).
-    from omop_core.services.source_vocabularies import ICD10CM_MERGE
-    # ICD10 → try ICD10CM
-    canonical = ICD10CM_MERGE.get(source_vocabulary_id)
-    if canonical:
+    # Fallback: try the cross-vocabulary sibling (ICD10 ↔ ICD10CM).
+    from omop_core.services.source_vocabularies import ICD10_CROSS_VOCAB
+    sibling = ICD10_CROSS_VOCAB.get(source_vocabulary_id)
+    if sibling:
         return Concept.objects.filter(
-            vocabulary_id=canonical,
+            vocabulary_id=sibling,
             concept_code__iexact=source_code,
         ).first()
-    # ICD10CM → try ICD10 (reverse direction, less likely but symmetric)
-    for alias, canon in ICD10CM_MERGE.items():
-        if canon == source_vocabulary_id:
-            hit = Concept.objects.filter(
-                vocabulary_id=alias,
-                concept_code__iexact=source_code,
-            ).first()
-            if hit:
-                return hit
     return None
 
 
@@ -467,18 +457,17 @@ def _get_embedding_model():
 
 
 def vocabulary_aliases(source_vocabulary_id):
-    """Every source vocabulary a tab covers, including merged aliases.
+    """Every source vocabulary sharing the same code space.
 
-    The ICD10 tab shows rows stored under both ``ICD10`` and ``ICD10CM``: HT-One
-    sends ICD-10 codes in ICD-10-CM format (#1028) and Athena loads the concepts
-    under the canonical name.  Filtering on the tab's own id alone hides half
-    the tab's rows from whatever is doing the filtering.
+    ICD-10 and ICD-10-CM have separate tabs but share a code space: HT-One
+    sends ICD-10-CM format codes labeled as ``ICD10``, and Athena loads them
+    under ``ICD10CM``.  Suggest must look across both.
     """
-    from omop_core.services.source_vocabularies import ICD10CM_MERGE
+    from omop_core.services.source_vocabularies import ICD10_CROSS_VOCAB
     vocab_ids = {source_vocabulary_id}
-    for alias, canonical in ICD10CM_MERGE.items():
-        if canonical == source_vocabulary_id:
-            vocab_ids.add(alias)
+    sibling = ICD10_CROSS_VOCAB.get(source_vocabulary_id)
+    if sibling:
+        vocab_ids.add(sibling)
     return vocab_ids
 
 

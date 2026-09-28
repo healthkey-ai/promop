@@ -119,12 +119,11 @@ const reference = {
     Observation: "observation",
     Procedure: "procedure",
   },
-  // The API supplies the full tab catalog, including source vocabularies whose
-  // current queue contains only approved mappings. ICD10CM rows are merged
-  // into the ICD-10 tab (#1028) via VOCABULARY_ALIASES.
+  // The API supplies the full tab catalog. ICD10CM and ICD10 are separate tabs.
   source_vocabulary_tabs: [
     { vocabulary_id: "", label: "Uncoded", is_standard: false },
-    { vocabulary_id: "ICD10", label: "ICD-10", is_standard: false },
+    { vocabulary_id: "ICD10CM", label: "ICD-10-CM", is_standard: false },
+    { vocabulary_id: "ICD10", label: "ICD-10 (WHO)", is_standard: false },
   ],
 };
 
@@ -548,7 +547,7 @@ describe("CodeMappingPage", () => {
       Rejected: { page: 1, page_size: 100, total: 0 }, "Athena Mapped": { page: 1, page_size: 100, total: 0 } };
     const tabs = [
       { vocabulary_id: "", label: "Uncoded", is_standard: false, proposed: 1, approved: 0, athena: 0 },
-      { vocabulary_id: "ICD10", label: "ICD-10", is_standard: false, proposed: 0, approved: 1, athena: 0 },
+      { vocabulary_id: "ICD10CM", label: "ICD-10-CM", is_standard: false, proposed: 0, approved: 1, athena: 0 },
     ];
     mockGet.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
       if (url === "/v1/code-mappings/") {
@@ -568,7 +567,7 @@ describe("CodeMappingPage", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "Search mappings" }), { target: { value: "C90.00" } });
     fireEvent.click(screen.getByRole("button", { name: /^Mapped/ }));
     const row = (await screen.findByText("C90.00", { selector: "td" })).closest("tr")!;
-    expect(cellUnder(row, "System")).toHaveTextContent("ICD-10");
+    expect(cellUnder(row, "System")).toHaveTextContent("ICD-10-CM");
     expect(await screen.findByText(/Searching all coding systems — 1 match from other tabs/)).toBeInTheDocument();
 
     fireEvent.change(screen.getByRole("textbox", { name: "Search mappings" }), { target: { value: "" } });
@@ -584,7 +583,7 @@ describe("CodeMappingPage", () => {
     expect(screen.queryByText("C90.00")).not.toBeInTheDocument();
 
     fireEvent.click(within(screen.getByRole("tablist", { name: "Source vocabularies" }))
-      .getByRole("tab", { name: /ICD-10/ }));
+      .getByRole("tab", { name: /ICD-10-CM/ }));
     fireEvent.click(screen.getByText(/^Mapped/));
     expect(await screen.findByText("C90.00")).toBeInTheDocument();
   });
@@ -606,7 +605,7 @@ describe("CodeMappingPage", () => {
     await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
     const tabs = within(screen.getByRole("tablist", { name: "Source vocabularies" }));
     expect(tabs.getByRole("tab", { name: /Uncoded/ })).toBeInTheDocument();
-    expect(tabs.getByRole("tab", { name: /ICD-10/ })).toBeInTheDocument();
+    expect(tabs.getByRole("tab", { name: /ICD-10-CM/ })).toBeInTheDocument();
   });
 
   it("selects Uncoded instead of falling back to the default vocabulary", async () => {
@@ -614,7 +613,7 @@ describe("CodeMappingPage", () => {
     renderPage([proposedRow, proposedIcd10Row]);
     const tabs = within(await screen.findByRole("tablist", { name: "Source vocabularies" }));
     const uncoded = tabs.getByRole("tab", { name: /Uncoded/ });
-    const icd10 = tabs.getByRole("tab", { name: /ICD-10/ });
+    const icd10 = tabs.getByRole("tab", { name: /ICD-10-CM/ });
 
     fireEvent.click(icd10);
     expect(icd10).toHaveAttribute("aria-selected", "true");
@@ -1251,7 +1250,7 @@ describe("CodeMappingPage", () => {
     /** Open the dialog for a row that lives under the collapsed Mapped section. */
     const openApproved = async (code: string) => {
       const tabs = within(await screen.findByRole("tablist", { name: "Source vocabularies" }));
-      fireEvent.click(tabs.getByRole("tab", { name: /ICD-10/ }));
+      fireEvent.click(tabs.getByRole("tab", { name: /ICD-10-CM/ }));
       fireEvent.click(await screen.findByText(/^Mapped/));
       const cell = await screen.findByText(code, { selector: "td" });
       fireEvent.click(cell.closest("tr")!);
@@ -1333,7 +1332,7 @@ describe("CodeMappingPage", () => {
       expect(screen.getByRole("button", { name: /Suggest/ })).toBeEnabled();
 
       const tabs = within(screen.getByRole("tablist", { name: "Source vocabularies" }));
-      fireEvent.click(tabs.getByRole("tab", { name: /ICD-10/ }));
+      fireEvent.click(tabs.getByRole("tab", { name: /ICD-10-CM/ }));
       const button = screen.getByRole("button", { name: /Suggest/ });
       expect(button).toBeEnabled();
       expect(button).toHaveAttribute("title", expect.stringContaining("source codes"));

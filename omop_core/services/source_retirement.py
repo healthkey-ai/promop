@@ -6,19 +6,24 @@ from django.db.models.functions import Trim, Upper
 from django.utils import timezone
 
 from omop_core.models import Concept
-from omop_core.services.source_vocabularies import ICD10CM_MERGE, VOCABULARY_OID_ALIASES
+from omop_core.services.source_vocabularies import (
+    ICD10_CANONICAL, ICD10_CROSS_VOCAB, VOCABULARY_OID_ALIASES,
+)
 
 
 def mapping_source_retirement(mappings):
     mappings = list(mappings)
-    aliases = {**ICD10CM_MERGE, **VOCABULARY_OID_ALIASES}
+    # Cross-vocab expands the concept lookup (ICD10 ↔ ICD10CM); canonical
+    # groups both under one key so a mapping finds its sibling's concepts.
+    cross = {**ICD10_CROSS_VOCAB, **VOCABULARY_OID_ALIASES}
+    aliases = {**ICD10_CANONICAL, **VOCABULARY_OID_ALIASES}
 
     def canonical(vocabulary):
         return aliases.get(vocabulary, vocabulary)
 
     vocabularies = {m.source_vocabulary_id for m in mappings if m.source_vocabulary_id}
     canonical_vocabularies = {canonical(v) for v in vocabularies}
-    vocabularies |= canonical_vocabularies | {v for v, c in aliases.items() if c in canonical_vocabularies}
+    vocabularies |= canonical_vocabularies | {v for v, c in cross.items() if c in canonical_vocabularies}
     codes = {m.source_code.strip().upper() for m in mappings if m.source_code.strip()}
     linked_ids = {m.source_concept_id for m in mappings if m.source_concept_id}
     candidates = Concept.objects.annotate(normalized_code=Upper(Trim('concept_code'))).filter(

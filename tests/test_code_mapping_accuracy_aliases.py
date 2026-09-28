@@ -56,7 +56,8 @@ def test_legacy_approved_suggestions_are_backfilled_as_model_acceptances():
         assert mapping.suggestion_outcome == ''
 
 
-def test_icd10_accuracy_combines_aliases_for_latest_model():
+def test_icd10_accuracy_has_separate_tabs():
+    """ICD10 and ICD10CM have their own accuracy metrics since the tab split."""
     SourceCodeConceptMapping.objects.bulk_create([
         SourceCodeConceptMapping(
             source_vocabulary_id=vocab, source_code=code,
@@ -76,16 +77,18 @@ def test_icd10_accuracy_combines_aliases_for_latest_model():
     response = code_mapping_accuracy(request)
 
     assert response.status_code == 200
-    assert set(response.data['by_source_vocabulary']) == {'ICD10'}
-    metrics = response.data['by_source_vocabulary']['ICD10']
-    assert metrics['model_version'] == '0.2'
-    assert metrics['suggestions'] == 3
-    assert metrics['approved'] == 1
-    assert metrics['rejected'] == 1
-    assert metrics['overridden'] == 1
-    assert metrics['precision'] == pytest.approx(1 / 3)
-    assert metrics['recall'] == pytest.approx(1 / 2)
-    assert metrics['f1'] == pytest.approx(0.4)
+    assert set(response.data['by_source_vocabulary']) == {'ICD10', 'ICD10CM'}
+    icd10 = response.data['by_source_vocabulary']['ICD10']
+    assert icd10['model_version'] == '0.2'
+    assert icd10['suggestions'] == 1
+    assert icd10['approved'] == 1
+    assert icd10['precision'] == pytest.approx(1.0)
+    icd10cm = response.data['by_source_vocabulary']['ICD10CM']
+    assert icd10cm['model_version'] == '0.2'
+    assert icd10cm['suggestions'] == 2
+    assert icd10cm['rejected'] == 1
+    assert icd10cm['overridden'] == 1
+    assert icd10cm['precision'] == pytest.approx(0.0)
 
 
 @pytest.mark.parametrize(('status', 'change_destination', 'outcome', 'counter'), [
@@ -153,7 +156,8 @@ def test_accuracy_uses_one_query_for_all_vocabularies():
     assert len(queries) == 1
     assert response.data['overall']['review_totals']['rejected'] == 7
     assert response.data['by_source_vocabulary']['']['review_totals']['rejected'] == 1
-    assert response.data['by_source_vocabulary']['ICD10']['review_totals']['rejected'] == 2
+    assert response.data['by_source_vocabulary']['ICD10']['review_totals']['rejected'] == 1
+    assert response.data['by_source_vocabulary']['ICD10CM']['review_totals']['rejected'] == 1
     assert response.data['by_source_vocabulary']['OpenWearables']['review_totals']['rejected'] == 2
 
 

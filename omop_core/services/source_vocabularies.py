@@ -121,7 +121,7 @@ _OBSERVATION_SYSTEMS = (
     ('Apple', 'Apple — Apple HealthKit wearable metrics'),
     ('Garmin', 'Garmin — Garmin FIT wearable metrics'),
     ('ICD10CM', 'ICD-10-CM — Z-codes and social history'),
-    ('ICD10', 'ICD-10 — Z-code equivalents (merged with ICD-10-CM)'),
+    ('ICD10', 'ICD-10 — WHO Z-code equivalents'),
     ('HCPCS', 'HCPCS — assessments and screenings'),
     ('NCIt', 'NCIt — NCI thesaurus'),
     ('MeSH', 'MeSH — biomedical terminology'),
@@ -168,7 +168,8 @@ def domain_for_table(omop_table):
 # Non-standard vocabularies (the ones curators actually need to map) come first,
 # then uncoded, then standard vocabularies last (they self-resolve).
 SOURCE_TAB_ORDER = [
-    'ICD10', 'ICD9CM', 'CPT4', 'HCPCS',
+    'ICD10CM', 'ICD10',  # Separate tabs — CM is US billing, WHO is international
+    'ICD9CM', 'CPT4', 'HCPCS',
     'RxNorm', 'NDC',
     'Read', 'MeSH', 'OPCS4', 'Nebraska Lexicon',
     'MedDRA', 'ICDO3', 'dm+d',
@@ -178,7 +179,8 @@ SOURCE_TAB_ORDER = [
 ]
 
 SOURCE_TAB_LABELS = {
-    'ICD10': 'ICD-10',
+    'ICD10CM': 'ICD-10-CM',
+    'ICD10': 'ICD-10 (WHO)',
     'ICD9CM': 'ICD-9-CM',
     'ICD10PCS': 'ICD-10-PCS',
     'ICD9Proc': 'ICD-9-Proc',
@@ -191,9 +193,25 @@ SOURCE_TAB_LABELS = {
 # "Wearables" tab (OpenWearables) on the Code Mapping page.
 WEARABLE_SOURCE_VOCABULARIES = {'OpenWearables', 'Apple', 'Garmin'}
 
-# ICD-10-CM codes are merged into the ICD-10 tab — curators think of them as
-# one vocabulary.  Same pattern as wearable consolidation above.
-ICD10CM_MERGE = {'ICD10CM': 'ICD10'}
+# ICD-10-CM and ICD-10 (WHO) are separate tabs. The merge dict is empty;
+# it formerly mapped ICD10CM → ICD10 for tab merging. Downstream code that
+# reads it (canonical_source, source_tab_vocabularies) treats each vocabulary
+# as its own tab, which is the desired behavior.
+ICD10CM_MERGE = {}
+
+# Cross-vocabulary lookup for ICD-10. HT-One sends ICD-10-CM format codes
+# labeled as 'ICD10'; Athena loads them under 'ICD10CM'. This factual
+# relationship is independent of the tab layout.
+# Bidirectional: given one ICD-10 vocabulary, find its sibling.
+# Used by source_descriptions, suggestions, mapping_browse cross-vocab hints.
+ICD10_CROSS_VOCAB = {'ICD10CM': 'ICD10', 'ICD10': 'ICD10CM'}
+
+# Unidirectional canonical form: both ICD-10 vocabularies → one identity.
+# Consumers that deduplicate or group by vocabulary need both to resolve to the
+# same key; the bidirectional ICD10_CROSS_VOCAB creates a cycle that breaks
+# canonical(canonical(x)) == canonical(x).
+# Used by source_retirement, field_curation_transfer, accuracy merging.
+ICD10_CANONICAL = {'ICD10CM': 'ICD10', 'ICD10': 'ICD10'}
 
 # FHIR OID URIs that are aliases for OMOP vocabulary_ids.  Rows arriving
 # via crossmap imports sometimes carry the OID instead of the OMOP spelling.
