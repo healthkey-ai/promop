@@ -61,6 +61,8 @@ def reconcile(apps, connection):
     logger.info('Found %d eligible ICD-10 mapped rows.', len(eligible))
 
     # 2. Build STCM lookup: (vocab, code_casefolded) → [stcm_row, ...]
+    #    Warn if STCM has no ICD-10 rows — the table must be populated by
+    #    load_athena_vocabularies before this migration has any effect.
     stcm_rows = (
         STCM.objects.using(alias)
         .filter(
@@ -74,6 +76,14 @@ def reconcile(apps, connection):
     for stcm in stcm_rows.iterator():
         key = (stcm.source_vocabulary_id, stcm.source_code.strip().upper())
         stcm_by_key.setdefault(key, []).append(stcm)
+
+    if not stcm_by_key:
+        logger.warning(
+            'source_to_concept_map has no valid ICD-10 rows. '
+            'Run load_athena_vocabularies before this migration to populate STCM. '
+            'All %d eligible rows will get no_stcm_match.',
+            len(eligible),
+        )
 
     # 3. Pre-fetch valid standard target concepts
     target_ids = set()

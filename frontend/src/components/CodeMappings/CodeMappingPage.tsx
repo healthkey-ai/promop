@@ -373,13 +373,12 @@ const STRATEGY_LABELS = {
  * Which tab a row belongs to — keyed by source vocabulary.
  * Blank source_vocabulary_id ("") means uncoded/free text.
  * Apple and Garmin rows are consolidated under the Wearables tab.
- * ICD10CM rows are merged into the ICD-10 tab (#1028).
+ * ICD10CM and ICD10 are now separate tabs.
  * FHIR OID URIs are merged into their canonical OMOP vocabulary.
  */
 const VOCABULARY_ALIASES: Record<string, string> = {
   Apple: "OpenWearables",
   Garmin: "OpenWearables",
-  ICD10CM: "ICD10",
   "urn:oid:2.16.840.1.113883.6.96": "SNOMED",
 };
 function tabForRow(row: CodeMappingRow): string {
