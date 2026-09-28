@@ -5918,6 +5918,25 @@ class LanguageSkillConceptAndFlatColumnTest(TestCase):
         self._refresh()
         self.assertEqual(self.record.language_skill_concept_ids, [])
 
+    def test_the_migration_backfills_records_that_already_have_languages(self):
+        """AddField starts every record at []; the data step must fill them."""
+        import importlib
+        from django.apps import apps as global_apps
+
+        migration = importlib.import_module(
+            'omop_core.migrations.0266_patientrecord_language_skill_concept_ids')
+        speak = self._skill(self.english, 'speak')
+        PersonLanguageSkill.objects.filter(pk=speak.pk).update(skill_concept=None)
+        self._skill(self.spanish, 'write')
+        PatientRecord.objects.filter(pk=self.record.pk).update(language_skill_concept_ids=[])
+
+        migration.backfill_language_skill_concept_ids(global_apps, None)
+        self.record.refresh_from_db()
+        self.assertEqual(self.record.language_skill_concept_ids, sorted([
+            f'4180186:{self._hkl("speak")}',
+            f'4182511:{self._hkl("write")}',
+        ]))
+
     def test_the_pairs_are_derived_and_not_editable(self):
         from omop_core.services.field_descriptor import _classify_field
         from omop_core.services.patient_record_service import (
