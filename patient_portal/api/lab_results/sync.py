@@ -35,6 +35,8 @@ from patient_portal.api.permissions import (
     reject_machine_actor_claims,
 )
 
+from patient_portal.webhooks import publish_patient_bulk_change
+
 logger = logging.getLogger(__name__)
 
 HK_LABS_VOCAB_ID = 'HK-Labs'
@@ -295,6 +297,7 @@ class SyncView(APIView):
             ))
         if new_objects:
             Measurement.objects.bulk_create(new_objects)
+            publish_patient_bulk_change(person_id, 'measurement', len(new_objects))
 
         # Ownership: link all measurements (created + deduped) to this visit
         MeasurementOwnership.objects.bulk_create(

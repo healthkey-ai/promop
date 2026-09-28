@@ -19,7 +19,7 @@ from __future__ import annotations
 import uuid
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field as dataclass_field
-from typing import Any, TypedDict
+from typing import Any, NamedTuple, TypedDict
 
 from django.contrib.contenttypes.models import ContentType
 from django.db import connection, models, transaction
@@ -304,33 +304,118 @@ def apply_patient(
     The patient gets a person_id from this database. Source ids belong to the
     source instance, where the same number is somebody else.
     """
+    from patient_portal.webhooks import suppress_webhook_events
+
     stats = PatientCopyStats()
     source_id = payload['person']['person_id']
     try:
         with transaction.atomic(), suppress_patient_record_refresh():
-            already_here = copied_person_id(source_id)
-            if already_here is not None:
-                if not replace:
-                    raise PatientCopyError(
-                        f'Person {source_id} was already copied here as {already_here}. Use --replace.'
-                    )
-                delete_patient(already_here)
-            person_id = target_person_id or _new_ids(Person, 'person_id', 1)[0]
-            if target_person_id and Person.objects.filter(person_id=target_person_id).exists():
-                if not replace:
-                    raise PatientCopyError(f'Person {target_person_id} already exists here. Use --replace.')
-                delete_patient(target_person_id)
-            _Copier(payload, organization, person_id, stats).run()
-            refresh_patient_record(Person.objects.get(person_id=person_id))
-            # The source record may have no org, or there may be no source record at all.
-            PatientRecord.objects.filter(person_id=person_id).update(organization=organization)
-            _record_copy(source_id, person_id, organization)
+            # A copy writes every table this patient has, so the per-row
+            # signals would fire once per row — and a --replace would fire one
+            # `deleted` per row of the data being replaced. Subscribers get one
+            # aggregate per table instead, the same shape the bulk API and
+            # FHIR-sync writers publish. Inside the transaction, so the outbox
+            # rows commit with the data and a dry run takes them back.
+            removed: list[_RemovedPatient] = []
+            with suppress_webhook_events():
+                already_here = copied_person_id(source_id)
+                if already_here is not None:
+                    if not replace:
+                        raise PatientCopyError(
+                            f'Person {source_id} was already copied here as {already_here}. Use --replace.'
+                        )
+                    # Census before the delete, while the rows and the record
+                    # naming their organization are still here.
+                    removed.append(_census(already_here))
+                    delete_patient(already_here)
+                person_id = target_person_id or _new_ids(Person, 'person_id', 1)[0]
+                if target_person_id and Person.objects.filter(person_id=target_person_id).exists():
+                    if not replace:
+                        raise PatientCopyError(f'Person {target_person_id} already exists here. Use --replace.')
+                    removed.append(_census(target_person_id))
+                    delete_patient(target_person_id)
+                _Copier(payload, organization, person_id, stats).run()
+                refresh_patient_record(Person.objects.get(person_id=person_id))
+                # The source record may have no org, or there may be no source record at all.
+                PatientRecord.objects.filter(person_id=person_id).update(organization=organization)
+                _record_copy(source_id, person_id, organization)
             stats.person_id = person_id
+            _publish_copy_events(person_id, stats, removed, organization.pk)
             if dry_run:
                 raise _Rollback
     except _Rollback:
         pass
     return stats
+
+
+class _RemovedPatient(NamedTuple):
+    """A patient this copy deleted from here, and what they had."""
+    person_id: int
+    organization_id: int | None
+    counts: dict[str, int]
+
+
+def _census(person_id: int) -> _RemovedPatient:
+    """Rows this patient has here, per table a subscriber hears about.
+
+    Taken before the delete, while the rows and the record naming their
+    organization are still here.
+    """
+    from django.apps import apps
+    from django.conf import settings
+    from patient_portal.webhooks import PATIENT_EVENT_MODELS
+
+    if not settings.WEBHOOKS_ENABLED:
+        # Ten COUNT(*) per replaced patient, for events that will not be
+        # published. A census with no organization is skipped downstream.
+        return _RemovedPatient(person_id, None, {})
+    return _RemovedPatient(
+        person_id,
+        PatientRecord.objects.filter(person_id=person_id)
+        .values_list('organization_id', flat=True).first(),
+        {label: apps.get_model(label).objects.filter(person_id=person_id).count()
+         for label in PATIENT_EVENT_MODELS},
+    )
+
+
+def _publish_copy_events(person_id: int, stats: PatientCopyStats,
+                         removed: list[_RemovedPatient], organization_id: int) -> None:
+    """One aggregate per table for a patient this instance just wrote.
+
+    Driven by the webhook model list rather than by everything the copy
+    touched: a subscriber's vocabulary is those tables, and announcing a
+    table it never hears about from any other writer would be a new event
+    shape rather than the same news by a different route.
+
+    A copy lands under a person_id of this database, and a --replace deletes
+    the rows that person_id had — possibly under a different person_id, and
+    possibly for a different organization than the one receiving the copy. So
+    each deletion is announced to the organization that actually held those
+    rows, under the person_id it knew them by, and an unassigned patient
+    produces no tenant notification at all.
+    """
+    from django.apps import apps
+    from patient_portal.webhooks import PATIENT_EVENT_MODELS, publish_patient_bulk_change
+
+    models = [(label, apps.get_model(label)) for label in PATIENT_EVENT_MODELS]
+    for gone in removed:
+        if gone.organization_id is None:
+            continue
+        for label, model in models:
+            publish_patient_bulk_change(
+                gone.person_id, model._meta.model_name, gone.counts.get(label, 0),
+                operation='bulk_deleted', app_label=model._meta.app_label,
+                organization_id=gone.organization_id,
+            )
+    for label, model in models:
+        count = stats.created.get(model._meta.object_name, 0)
+        if model is PatientRecord and not count:
+            # Derived here on every copy, even when the source had no record row
+            # to copy, so the write happened whether or not the copier made it.
+            count = PatientRecord.objects.filter(person_id=person_id).count()
+        publish_patient_bulk_change(person_id, model._meta.model_name, count,
+                                    app_label=model._meta.app_label,
+                                    organization_id=organization_id)
 
 
 class _Copier:

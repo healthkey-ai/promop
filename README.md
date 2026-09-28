@@ -250,8 +250,12 @@ If you use PRomop in research, please cite it using [CITATION.cff](CITATION.cff)
 ## Project package and deployment compatibility
 
 `promop` is the canonical Django project package. Use `promop.settings`,
-`gunicorn promop.wsgi:application`, and `celery -A promop worker` for new
-configuration. The `ctomop` modules remain compatibility aliases to the same
+`gunicorn promop.wsgi:application`, and
+`celery -A promop worker --queues=celery,webhooks` for new configuration —
+webhook delivery has its own queue, and a worker that does not name it leaves
+those messages unclaimed. Draining both from one worker is a development
+convenience; see `docs/webhooks_architecture.md` for the split a production
+deployment wants. The `ctomop` modules remain compatibility aliases to the same
 settings, URL configuration, WSGI/ASGI applications and Celery app, so existing
 deployment commands and imports continue to work without duplicate applications.
 Database tables, Django app labels and migration history are unchanged.
