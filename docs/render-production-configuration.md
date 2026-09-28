@@ -10,7 +10,8 @@ prompt again during updates. Set missing values on the service's Environment
 page. In particular, `CORS_ALLOWED_ORIGINS` must contain the frontend origins;
 Render's backend hostname does not determine which external frontends to trust.
 
-`start.sh` runs `check --deploy --fail-level ERROR` before migrations. This check
+`scripts/prepare-deployment.sh`, which `start.sh` invokes, runs `check --deploy --fail-level ERROR`
+before migrations. This check
 now applies the same production settings guard as the web process and the
 Athena loader, so missing runtime configuration stops deployment before database
 work. Build-time `collectstatic`, ordinary `check`, and standalone `migrate`

@@ -9,7 +9,11 @@ set -e
 # Render production and staging both use this entrypoint. Staging is the
 # promop-staging service on dev; its database comes from Render DATABASE_URL.
 # Local staging access uses STAGING_DATABASE_URL in .env, not GCP.
-./scripts/prepare-deployment.sh
+# Invoked through bash, not as ./scripts/..., so a lost exec bit cannot stop the
+# web service booting. render.yaml chmods start.sh and only start.sh -- that
+# chmod exists because the mode is not trusted to survive, and a second file
+# would get none of that protection.
+bash scripts/prepare-deployment.sh
 
 # No --bind: gunicorn defaults to 0.0.0.0:$PORT when PORT is set, which Render
 # sets, and --workers likewise follows WEB_CONCURRENCY. Passing them here would

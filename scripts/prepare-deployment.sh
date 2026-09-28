@@ -18,6 +18,14 @@
 # — Render on every instance boot, Cloud Run on every deploy.
 set -euo pipefail
 
+# Run from the repository root whatever the caller's working directory is. The
+# steps below are bare `python manage.py`, and this script exists to be pointed
+# at by another platform's job command -- a Cloud Run job spec of
+# command: ["/app/scripts/prepare-deployment.sh"] with no workingDir would
+# otherwise fail with "can't open file 'manage.py'", after announcing that it
+# was running the deploy checks.
+cd "$(dirname "$0")/.."
+
 # Fail the deploy on a misconfigured production environment rather than starting
 # with a silent fallback. This is what makes patient_portal.E001/E002/E003 a real
 # control: CI runs the same check, but only against CI's own placeholder values,

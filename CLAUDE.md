@@ -114,7 +114,7 @@ worked. If your `.env` has no `SECRET_KEY`, export the deployment's before runni
 Against a throwaway local database, `DEBUG=True` skips the guard and overrides
 nothing — that is the form the test commands above use.
 
-`start.sh` runs `migrate` on every Render deploy, so migrations pushed to `main` are auto-applied in production.
+`start.sh` runs `scripts/prepare-deployment.sh`, which migrates, on every Render deploy, so migrations pushed to `main` are auto-applied in production.
 
 ### 3. DRF Serializer (`patient_portal/api/serializers.py`)
 
@@ -716,7 +716,7 @@ operations = [
 - **Use `makemigrations`** — let Django generate migration files; don't write them by hand.
 - **Apply to staging DB before pushing**: run `migrate` against `promop_dev` to verify before committing.
 - **Never apply schema changes manually** to the DB — always go through migrations so Django's state stays in sync.
-- **Production migrations run automatically** — `start.sh` calls `migrate` on every Render deploy.
+- **Production migrations run automatically** — `start.sh` calls `scripts/prepare-deployment.sh`, which migrates, on every Render deploy.
 - **Rebase on `dev` before creating any migration.** Two feature branches that both
   create a migration off the same base will produce conflicting sequence numbers when
   both merge. Before running `makemigrations`, always:
@@ -1119,7 +1119,7 @@ retrieval needs all standard concepts embedded, not just the queue's candidates.
 
 ## Deployment
 
-- **`start.sh`** runs `python manage.py migrate` on every deploy — so migrations pushed to `main` are auto-applied on next Render deploy.
+- **`start.sh`** runs `scripts/prepare-deployment.sh` on every deploy, which migrates — so migrations pushed to `main` are auto-applied on next Render deploy. Cloud Run runs the same script as a release-phase job (#1628).
 - **Push to `main`** triggers deploy (once Render GitHub App access is granted in dashboard).
 - **Admin credentials**: set via `ADMIN_EMAIL` / `ADMIN_PASSWORD` env vars on Render (no hardcoded default)
 - **Hostnames and connection strings**: do not commit them — this is a public repo. Service URLs and database hostnames live in `.env` and the Render/GCP dashboards.

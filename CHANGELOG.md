@@ -6,14 +6,6 @@ All notable changes to PRomop are documented here.
 
 ## [Unreleased]
 
-### Changed
-
-- **Deployment preparation is stated once** — the checks, migration and
-  vocabulary bootstrap a deployment must complete before serving now live in
-  `scripts/prepare-deployment.sh`, which `start.sh` invokes. Render's sequence is
-  unchanged; the point is that Cloud Run's `<service>-migrate` job can run the
-  same steps instead of its own copy defined outside this repository (#1625).
-
 ### Added
 
 - **Label rollup for the Code Mapping queue** — a "Group by label" toggle shows
@@ -36,6 +28,12 @@ All notable changes to PRomop are documented here.
   possibly truncated (#1571).
 
 ### Changed
+
+- **Deployment preparation is stated once** — the checks, migration and
+  vocabulary bootstrap a deployment must complete before serving now live in
+  `scripts/prepare-deployment.sh`, which `start.sh` invokes. Render's sequence is
+  unchanged; the point is that Cloud Run's `<service>-migrate` job can run the
+  same steps instead of its own copy defined outside this repository (#1625).
 
 - **Code Mapping queue order** — every section now defaults to Seen descending.
   Unmapped grouped by Provenance first; that is a no-op on a tab holding one

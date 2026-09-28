@@ -66,22 +66,45 @@ def test_preparation_does_not_start_a_server():
     assert 'celery' not in script
 
 
-def test_preparation_is_executable():
-    # Cloud Run's job runs it as a command, with no shell to be invoked through.
+def test_preparation_is_directly_executable_by_another_platform():
+    # Cloud Run's job runs it as a command, with no shell to be invoked through,
+    # so it needs both the bit and an interpreter line. commands() strips the
+    # shebang out of every other assertion here, so nothing else would notice
+    # its loss -- the job would die with "Exec format error" on green tests.
     assert stat.S_IMODE(PREPARE.stat().st_mode) & stat.S_IXUSR
+    assert PREPARE.read_text().startswith('#!')
+
+
+def test_preparation_runs_from_the_repository_root_whatever_the_caller_did():
+    script = commands(PREPARE)
+
+    # The steps are bare `python manage.py`, and the point of this script is to
+    # be pointed at by another platform's job command. Without this, a job spec
+    # with no working directory fails on "can't open file 'manage.py'".
+    assert 'cd "$(dirname "$0")/.."' in script
+    assert script.index('cd "$(dirname "$0")/.."') < script.index('python manage.py')
 
 
 def test_render_prepares_before_serving_and_keeps_no_second_copy():
     script = commands(START)
 
-    prepare = './scripts/prepare-deployment.sh'
+    # Through bash, not ./scripts/... -- render.yaml chmods start.sh and only
+    # start.sh, so a lost exec bit on a second file would stop the web service
+    # booting with nothing in the log but "Permission denied".
+    prepare = 'bash scripts/prepare-deployment.sh'
     gunicorn = 'exec gunicorn promop.wsgi:application'
+    assert './scripts/prepare-deployment.sh' not in script
     assert prepare in script
     assert script.index(prepare) < script.index(gunicorn)
     # Duplicating a step here is how the two targets drift apart again.
     assert 'prepare_production_database' not in script
     assert 'check --deploy' not in script
     assert 'setup_admin' not in script
+    # And the guard the pre-extraction test placed on this file has to stay on
+    # it: a whole-vocabulary load added here would run on every instance boot,
+    # and asserting it only against the prepare script would not notice.
+    assert 'python manage.py seed_omop_concepts' not in script
+    assert 'python manage.py load_athena_vocabularies' not in script
 
 
 def test_render_lets_the_platform_choose_bind_and_workers():
