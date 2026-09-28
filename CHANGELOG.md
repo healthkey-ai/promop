@@ -29,6 +29,14 @@ All notable changes to PRomop are documented here.
 
 ### Changed
 
+- **Render prepares once per deploy** — both web services gain a
+  `preDeployCommand` running `scripts/prepare-deployment.sh`, the release phase
+  Cloud Run already has via its gated `<service>-migrate` job. A failure now
+  stops the deploy and leaves the running version serving, instead of producing
+  a crash-looping instance. `start.sh` still prepares on boot as well until a
+  Blueprint sync is confirmed to have applied the hook — the script is
+  idempotent, so the second run is a no-op (#1625).
+
 - **Deployment preparation is stated once** — the checks, migration and
   vocabulary bootstrap a deployment must complete before serving now live in
   `scripts/prepare-deployment.sh`, which `start.sh` invokes. Render's sequence is

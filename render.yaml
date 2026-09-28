@@ -9,6 +9,12 @@ services:
     # older main revision. Validate catalog payloads when that revision ships
     # the verifier; a verifier failure must still stop the build.
     buildCommand: "if [ -f scripts/verify_source_catalog_snapshots.py ]; then python scripts/verify_source_catalog_snapshots.py; fi && pip install -r requirements.txt && if [ -f scripts/install_athena_browser.py ]; then python scripts/install_athena_browser.py; fi && cd frontend && npm install && npm run build && cd .. && python manage.py collectstatic --noinput"
+    # Prepare once per deploy, not once per instance boot. A failure here
+    # stops the deploy and leaves the running version serving, where the
+    # same failure during boot gives a crash-looping service. This is the
+    # shape Cloud Run already has, via its <service>-migrate job gated
+    # ahead of the traffic shift (#1625).
+    preDeployCommand: "bash scripts/prepare-deployment.sh"
     startCommand: "chmod +x start.sh && ./start.sh"
     envVars:
       # Keep Chromium inside the deployed Python environment, not a build-only cache.
@@ -148,6 +154,12 @@ services:
     autoDeploy: true
     buildCommand: python scripts/verify_source_catalog_snapshots.py && pip install -r requirements.txt && python scripts/install_athena_browser.py && cd frontend && npm install && npm run build && cd .. && python manage.py
       collectstatic --noinput
+    # Prepare once per deploy, not once per instance boot. A failure here
+    # stops the deploy and leaves the running version serving, where the
+    # same failure during boot gives a crash-looping service. This is the
+    # shape Cloud Run already has, via its <service>-migrate job gated
+    # ahead of the traffic shift (#1625).
+    preDeployCommand: bash scripts/prepare-deployment.sh
     startCommand: chmod +x start.sh && ./start.sh
     envVars:
       # Keep Chromium inside the deployed Python environment, not a build-only cache.

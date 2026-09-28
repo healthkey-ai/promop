@@ -9,6 +9,8 @@ sequence itself rather than the file that happened to hold it.
 import stat
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 PREPARE = ROOT / 'scripts' / 'prepare-deployment.sh'
@@ -114,6 +116,35 @@ def test_render_lets_the_platform_choose_bind_and_workers():
     # workers; hardcoding either overrides what Render or Cloud Run chose.
     assert '--bind' not in script
     assert '--workers' not in script
+
+
+def test_render_prepares_once_per_deploy():
+    """Render gains the release phase Cloud Run already has.
+
+    A failure in a pre-deploy stops the deploy and leaves the running version
+    serving; the same failure during web boot gives a crash-looping service.
+    """
+    blueprint = yaml.safe_load((ROOT / 'render.yaml').read_text())
+    web = [s for s in blueprint['services'] if s.get('type') == 'web']
+
+    assert web, 'no web services in the blueprint'
+    for service in web:
+        assert service.get('preDeployCommand') == 'bash scripts/prepare-deployment.sh', (
+            f"{service['name']} does not prepare in its release phase"
+        )
+
+
+def test_the_boot_path_still_prepares_until_the_blueprint_sync_is_verified():
+    """Phase 1 of two, and the ordering is what makes it safe.
+
+    A Blueprint sync applies preDeployCommand; a code-only redeploy does not.
+    Removing the boot-time call in the same change would mean the next deploy
+    runs a start.sh that no longer prepares while the pre-deploy hook is not yet
+    active -- migrations silently stopping on production. The script is
+    idempotent, so running in both places is a no-op the second time, and the
+    boot call comes out only once a synced deploy has been seen to run it.
+    """
+    assert 'bash scripts/prepare-deployment.sh' in commands(START)
 
 
 def test_render_requires_the_athena_source_for_the_web_service():
