@@ -5937,6 +5937,64 @@ class LanguageSkillConceptAndFlatColumnTest(TestCase):
             f'4182511:{self._hkl("write")}',
         ]))
 
+    def test_two_rows_yielding_the_same_pair_appear_once(self):
+        """An unset skill_concept resolves to the id another row already holds."""
+        self._skill(self.english, 'speak')
+        other = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english, skill_level='read',
+            skill_concept=Concept.objects.get(concept_code='hkl:speak'))
+        self.assertEqual(other.skill_concept.concept_code, 'hkl:speak')
+        self._refresh()
+        self.assertEqual(self.record.language_skill_concept_ids,
+                         [f'4180186:{self._hkl("speak")}'])
+
+    def test_a_patch_cannot_set_the_pairs_and_refresh_keeps_the_derived_value(self):
+        """Read-only over the API, and no pending edit survives the refresh."""
+        from patient_portal.models import Identity
+        from rest_framework.test import APIClient
+
+        self._skill(self.english, 'speak')
+        self._refresh()
+        derived = [f'4180186:{self._hkl("speak")}']
+        self.assertEqual(self.record.language_skill_concept_ids, derived)
+
+        admin = Identity.objects.create_superuser(
+            email='lang-pairs-admin@test.com', password='testpass')
+        client = APIClient()
+        client.force_authenticate(user=admin)
+        response = client.patch(
+            f'/api/v1/patient-records/{self.person.person_id}/',
+            {'language_skill_concept_ids': ['1:2']}, format='json')
+        self.assertIn(response.status_code, (200, 400), response.data)
+        self.record.refresh_from_db()
+        self.assertEqual(self.record.language_skill_concept_ids, derived)
+        self.assertNotIn('language_skill_concept_ids',
+                         self.record.user_edited_fields or [])
+
+        self._refresh()
+        self.assertEqual(self.record.language_skill_concept_ids, derived)
+
+    def test_the_pairs_are_read_only_on_the_serializer_and_computed(self):
+        from omop_core.services.write_descriptor import (
+            build_writable_field_descriptor, get_serializer_read_only_fields)
+        from patient_portal.api.serializers import PatientRecordSerializer
+
+        self.assertIn('language_skill_concept_ids', get_serializer_read_only_fields())
+        self.assertTrue(
+            PatientRecordSerializer().fields['language_skill_concept_ids'].read_only)
+        entry = build_writable_field_descriptor()['language_skill_concept_ids']
+        self.assertEqual(entry['kind'], 'computed')
+        self.assertFalse(entry['writable'])
+
+    def test_the_eight_booleans_keep_their_serializer_behaviour(self):
+        """This change is scoped to the pair field; the booleans are untouched."""
+        from omop_core.services.write_descriptor import get_serializer_read_only_fields
+
+        read_only = get_serializer_read_only_fields()
+        for language in ('english', 'spanish'):
+            for capability in ('speak', 'read', 'write', 'understand'):
+                self.assertNotIn(f'{language}_{capability}', read_only)
+
     def test_the_pairs_are_derived_and_not_editable(self):
         from omop_core.services.field_descriptor import _classify_field
         from omop_core.services.patient_record_service import (

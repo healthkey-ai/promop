@@ -242,7 +242,10 @@ PATIENT_RECORD_OMOP_MAPPED_FIELDS = frozenset(_OMOP_DERIVED_FIELDS) | frozenset(
     # a PATCH would be silently overwritten by the next refresh.
     'english_speak', 'english_read', 'english_write', 'english_understand',
     'spanish_speak', 'spanish_read', 'spanish_write', 'spanish_understand',
-    # Their concept_id form, derived by _language_skill_concept_pairs.
+    # Their concept_id form, derived by _language_skill_concept_pairs. Unlike
+    # the eight booleans it is also read-only on the serializer and computed in
+    # the write descriptor (write_descriptor._LANGUAGE_PAIR_FIELD), so a PATCH
+    # cannot set it at all.
     'language_skill_concept_ids',
     # These are populated by section extractors but are not cleared before a
     # refresh (mostly because they carry structured / negative findings). They
@@ -1192,8 +1195,9 @@ def _flatten_language_capabilities(capabilities_by_code):
             )
     return flattened
 
+
 def _language_skill_concept_pairs(language_rows):
-    """``PersonLanguageSkill`` rows as sorted ``"<language_id>:<skill_id>"`` strings.
+    """``PersonLanguageSkill`` rows as ``"<language_id>:<skill_id>"`` strings, sorted as strings.
 
     The concept_id form of the flattened columns above, for consumers that match
     by plain overlap rather than by column name. Every language counts, not only

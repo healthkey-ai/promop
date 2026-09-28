@@ -258,6 +258,11 @@ _COMPUTED_INPUTS = {
     ],
 }
 
+# Derived from PersonLanguageSkill on every refresh. Read-only on the serializer
+# and described as computed, so a PATCH neither writes it nor records it as a
+# pending user edit that the refresh would then restore over the derived value.
+_LANGUAGE_PAIR_FIELD = 'language_skill_concept_ids'
+
 # Lifecycle columns are not clinical data and are never writable regardless of
 # mapping state; they are excluded rather than reported as unwritable fields.
 _LIFECYCLE_FIELDS = frozenset({
@@ -508,6 +513,8 @@ def get_serializer_read_only_fields():
             read_only.add(field.name)
     # KIND_COMPUTED: derived from other fields (BMI, tnbc_status, etc.)
     read_only |= set(_COMPUTED_INPUTS)
+    # KIND_COMPUTED: concept_id pairs derived from PersonLanguageSkill
+    read_only.add(_LANGUAGE_PAIR_FIELD)
     # KIND_ALIAS: mirrors of canonical fields
     read_only |= set(_ALIAS_TO_CANONICAL)
     # Profile fields now write through PatientRecord PATCH (KIND_DIRECT),
@@ -641,6 +648,18 @@ def build_writable_field_descriptor():
                 'person_field': _PROFILE_REPLACEABLE[field],
                 'payload_field': field,
                 'value_kind': _value_kind(field),
+            }
+            continue
+
+        if field == _LANGUAGE_PAIR_FIELD:
+            descriptor[field] = {
+                'kind': KIND_COMPUTED,
+                'writable': False,
+                'inputs': ['PersonLanguageSkill'],
+                'reason': (
+                    'Derived from the person\'s language skills as concept_id '
+                    'pairs. Edit the languages instead.'
+                ),
             }
             continue
 

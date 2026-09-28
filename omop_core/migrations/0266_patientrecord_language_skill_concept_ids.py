@@ -46,7 +46,7 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='patientrecord',
             name='language_skill_concept_ids',
-            field=models.JSONField(blank=True, default=list, help_text="Derived: sorted '<language_concept_id>:<skill_concept_id>' pairs from PersonLanguageSkill. [] = nothing recorded."),
+            field=models.JSONField(blank=True, default=list, help_text="Derived: '<language_concept_id>:<skill_concept_id>' pairs, sorted as strings, from PersonLanguageSkill. [] = nothing recorded."),
         ),
         migrations.RunPython(backfill_language_skill_concept_ids, migrations.RunPython.noop),
     ]
