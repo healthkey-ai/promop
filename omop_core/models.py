@@ -3469,6 +3469,16 @@ class PatientRecord(models.Model):
     spanish_understand = models.BooleanField(
         blank=True, null=True, default=None,
         help_text="Derived: person understands Spanish. NULL = not asked.")
+    # The same facts as concept_id pairs, for consumers that match by plain
+    # overlap (EXACT reads it under its OMOP language profile, CB #5350). One
+    # "<language_concept_id>:<skill_concept_id>" string per PersonLanguageSkill
+    # row, sorted and de-duplicated, every language rather than only the two
+    # flattened above. Derived, never written directly; [] when nothing is
+    # recorded, so "not asked" is an empty list and never a negative.
+    language_skill_concept_ids = models.JSONField(
+        blank=True, default=list,
+        help_text="Derived: sorted '<language_concept_id>:<skill_concept_id>' "
+                  "pairs from PersonLanguageSkill. [] = nothing recorded.")
 
     # Lymphoma (Follicular Lymphoma)
     gelf_criteria_status = models.TextField(blank=True, null=True)

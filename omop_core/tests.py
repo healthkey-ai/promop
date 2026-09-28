@@ -5862,6 +5862,70 @@ class LanguageSkillConceptAndFlatColumnTest(TestCase):
                 self.assertEqual(
                     _classify_field(f'{language}_{capability}'), 'computed')
 
+    # -- concept_id pairs --------------------------------------------------
+
+    def _hkl(self, level):
+        return Concept.objects.get(vocabulary_id='HK-Language',
+                                   concept_code=f'hkl:{level}').concept_id
+
+    def test_pairs_carry_every_recorded_capability(self):
+        self._skill(self.english, 'speak')
+        self._skill(self.english, 'read')
+        self._skill(self.spanish, 'write')
+        self._refresh()
+        self.assertEqual(self.record.language_skill_concept_ids, sorted([
+            f'4180186:{self._hkl("speak")}',
+            f'4180186:{self._hkl("read")}',
+            f'4182511:{self._hkl("write")}',
+        ]))
+
+    def test_pairs_count_languages_outside_the_flattened_two(self):
+        """The pair names the concept, so it needs no alias table."""
+        french = Concept.objects.create(
+            concept_id=4180190, concept_name='French language',
+            domain=self.english.domain, vocabulary=self.english.vocabulary,
+            concept_class=self.english.concept_class, standard_concept='S',
+            concept_code='297479006', valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31))
+        self._skill(french, 'speak')
+        self._refresh()
+        self.assertEqual(self.record.language_skill_concept_ids,
+                         [f'4180190:{self._hkl("speak")}'])
+
+    def test_an_unset_skill_concept_is_resolved(self):
+        skill = self._skill(self.english, 'understand')
+        PersonLanguageSkill.objects.filter(pk=skill.pk).update(skill_concept=None)
+        self._refresh()
+        self.assertEqual(self.record.language_skill_concept_ids,
+                         [f'4180186:{self._hkl("understand")}'])
+
+    def test_a_row_the_mint_cannot_resolve_is_skipped_not_invented(self):
+        Concept.objects.filter(vocabulary_id='HK-Language').delete()
+        self._skill(self.english, 'speak')
+        self._refresh()
+        self.assertEqual(self.record.language_skill_concept_ids, [])
+
+    def test_no_languages_is_an_empty_list_not_null(self):
+        self._refresh()
+        self.assertEqual(self.record.language_skill_concept_ids, [])
+
+    def test_removing_the_last_language_resets_the_pairs(self):
+        skill = self._skill(self.spanish, 'speak')
+        self._refresh()
+        self.assertEqual(self.record.language_skill_concept_ids,
+                         [f'4182511:{self._hkl("speak")}'])
+        skill.delete()
+        self._refresh()
+        self.assertEqual(self.record.language_skill_concept_ids, [])
+
+    def test_the_pairs_are_derived_and_not_editable(self):
+        from omop_core.services.field_descriptor import _classify_field
+        from omop_core.services.patient_record_service import (
+            PATIENT_RECORD_OMOP_MAPPED_FIELDS)
+
+        self.assertEqual(_classify_field('language_skill_concept_ids'), 'computed')
+        self.assertIn('language_skill_concept_ids', PATIENT_RECORD_OMOP_MAPPED_FIELDS)
+
 
 class LanguageSkillReviewFindingsTest(TestCase):
     """Defects found reviewing the merged language work (#827).

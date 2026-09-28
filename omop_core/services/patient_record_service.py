@@ -242,6 +242,8 @@ PATIENT_RECORD_OMOP_MAPPED_FIELDS = frozenset(_OMOP_DERIVED_FIELDS) | frozenset(
     # a PATCH would be silently overwritten by the next refresh.
     'english_speak', 'english_read', 'english_write', 'english_understand',
     'spanish_speak', 'spanish_read', 'spanish_write', 'spanish_understand',
+    # Their concept_id form, derived by _language_skill_concept_pairs.
+    'language_skill_concept_ids',
     # These are populated by section extractors but are not cleared before a
     # refresh (mostly because they carry structured / negative findings). They
     # nevertheless originate from OMOP facts and must not become writable
@@ -1190,6 +1192,34 @@ def _flatten_language_capabilities(capabilities_by_code):
             )
     return flattened
 
+def _language_skill_concept_pairs(language_rows):
+    """``PersonLanguageSkill`` rows as sorted ``"<language_id>:<skill_id>"`` strings.
+
+    The concept_id form of the flattened columns above, for consumers that match
+    by plain overlap rather than by column name. Every language counts, not only
+    the two ``LANGUAGE_ALIASES`` flattens, because the pair carries the concept
+    and needs no alias. A row whose ``skill_concept`` is unset (written before
+    the HK-Language mint was seeded) is resolved the way ``save()`` would; if the
+    mint is still absent the row is skipped rather than given an invented id.
+    Always a list, empty when nothing is recorded, so a refresh after the last
+    row is deleted resets it.
+    """
+    from omop_core.models import _language_capability_concept_id
+
+    resolved = {}
+    pairs = set()
+    for row in language_rows:
+        skill_id = row.skill_concept_id
+        if skill_id is None:
+            if row.skill_level not in resolved:
+                resolved[row.skill_level] = _language_capability_concept_id(row.skill_level)
+            skill_id = resolved[row.skill_level]
+        if skill_id is None:
+            continue
+        pairs.add(f'{row.language_concept_id}:{skill_id}')
+    return sorted(pairs)
+
+
 def _get_demographics(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
     snapshot = snapshot or _build_snapshot(person)
@@ -1257,6 +1287,7 @@ def _get_demographics(person: Person, snapshot: OmopSnapshot = None) -> dict:
         data['languages_skills'] = format_language_skills(language_summary)
     data.update(_flatten_language_capabilities(
         person.get_language_capabilities_by_code(language_rows)))
+    data['language_skill_concept_ids'] = _language_skill_concept_pairs(language_rows)
 
     data.update({
         'email': person.email,

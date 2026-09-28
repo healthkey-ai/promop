@@ -109,6 +109,7 @@ _COMPUTED_FIELDS = frozenset({
     # the next refresh.
     'english_speak', 'english_read', 'english_write', 'english_understand',
     'spanish_speak', 'spanish_read', 'spanish_write', 'spanish_understand',
+    'language_skill_concept_ids',
     'bmi', 'disease_slug',
     'meets_crab', 'meets_slim', 'involved_uninvolved_ratio',
     'active_infection_status', 'active_malignancies',
@@ -144,6 +145,7 @@ _COMPUTED_THERAPY_EXPLANATIONS = {
     'spanish_read': 'Derived from PersonLanguageSkill rows for this language',
     'spanish_write': 'Derived from PersonLanguageSkill rows for this language',
     'spanish_understand': 'Derived from PersonLanguageSkill rows for this language',
+    'language_skill_concept_ids': 'Derived from PersonLanguageSkill rows as concept_id pairs',
     'later_therapies': 'Derived from Episode and DrugExposure records',
     'later_date': 'Derived from Episode and DrugExposure records',
 }
@@ -227,6 +229,7 @@ _TAB_GENERAL = frozenset({
     'heartrate', 'languages_skills', 'facility_name',
     'english_speak', 'english_read', 'english_write', 'english_understand',
     'spanish_speak', 'spanish_read', 'spanish_write', 'spanish_understand',
+    'language_skill_concept_ids',
     'validated', 'validated_by', 'validation_date', 'patient_age',
     'suppress_demographics_for_others',
     # Reclassified from "other"
