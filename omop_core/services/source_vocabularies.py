@@ -193,10 +193,21 @@ SOURCE_TAB_LABELS = {
 # "Wearables" tab (OpenWearables) on the Code Mapping page.
 WEARABLE_SOURCE_VOCABULARIES = {'OpenWearables', 'Apple', 'Garmin'}
 
-# ICD-10-CM and ICD-10 (WHO) are separate tabs. The merge dict is empty but
-# kept so downstream code (canonical_source, source_tab_vocabularies) that
-# reads it keeps working without changes.
+# ICD-10-CM and ICD-10 (WHO) are separate tabs. The merge dict is empty;
+# it formerly mapped ICD10CM → ICD10 for tab merging. Downstream code that
+# reads it (canonical_source, source_tab_vocabularies) treats each vocabulary
+# as its own tab, which is the desired behavior.
 ICD10CM_MERGE = {}
+
+# Cross-vocabulary lookup for ICD-10. HT-One sends ICD-10-CM format codes
+# labeled as 'ICD10'; Athena loads them under 'ICD10CM'. This factual
+# relationship is independent of the tab layout and is used by:
+#   - source_descriptions (Athena concept name lookup)
+#   - suggestions (source concept resolution)
+#   - source_retirement (retirement evidence lookup)
+#   - field_curation_transfer (copy_reference_data dedup)
+#   - import_healthtree_seen_counts (occurrence count matching)
+ICD10_CROSS_VOCAB = {'ICD10CM': 'ICD10', 'ICD10': 'ICD10CM'}
 
 # FHIR OID URIs that are aliases for OMOP vocabulary_ids.  Rows arriving
 # via crossmap imports sometimes carry the OID instead of the OMOP spelling.

@@ -8,7 +8,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from omop_core.models import SourceCodeConceptMapping
-from omop_core.services.source_vocabularies import ICD10CM_MERGE, VOCABULARY_OID_ALIASES
+from omop_core.services.source_vocabularies import VOCABULARY_OID_ALIASES
 
 
 # Exact HealthTree/FHIR identifiers only. Do not apply One's broad substring
@@ -39,9 +39,14 @@ for oid, vocabulary in {
 ALIASES = {**FHIR_ALIASES, **VOCABULARY_OID_ALIASES, '(no system)': ''}
 
 
+# ICD-10 and ICD-10-CM share a code space; canonicalize to one identity
+# so CSV counts from either vocabulary match DB rows stored under either.
+_ICD10_CANONICAL = {'ICD10CM': 'ICD10', 'ICD10': 'ICD10'}
+
+
 def canonical(vocabulary):
     vocabulary = ALIASES.get(vocabulary, vocabulary)
-    return ICD10CM_MERGE.get(vocabulary, vocabulary)
+    return _ICD10_CANONICAL.get(vocabulary, vocabulary)
 
 
 def read_counts(path):

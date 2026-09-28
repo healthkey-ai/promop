@@ -1,11 +1,7 @@
 """Bounded curation pages with 100 codes per section."""
-import logging
-
 from django.db.models import Case, CharField, Count, F, Q, Value, When, Window
 from django.db.models.functions import Upper, Trim
 from rest_framework.exceptions import ValidationError
-
-logger = logging.getLogger(__name__)
 
 from omop_core.services import source_vocabularies as vocab
 from omop_core.services.mapping_destinations import with_destination_counts
