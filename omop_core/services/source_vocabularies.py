@@ -121,7 +121,7 @@ _OBSERVATION_SYSTEMS = (
     ('Apple', 'Apple — Apple HealthKit wearable metrics'),
     ('Garmin', 'Garmin — Garmin FIT wearable metrics'),
     ('ICD10CM', 'ICD-10-CM — Z-codes and social history'),
-    ('ICD10', 'ICD-10 — Z-code equivalents (merged with ICD-10-CM)'),
+    ('ICD10', 'ICD-10 — WHO Z-code equivalents'),
     ('HCPCS', 'HCPCS — assessments and screenings'),
     ('NCIt', 'NCIt — NCI thesaurus'),
     ('MeSH', 'MeSH — biomedical terminology'),
@@ -168,7 +168,8 @@ def domain_for_table(omop_table):
 # Non-standard vocabularies (the ones curators actually need to map) come first,
 # then uncoded, then standard vocabularies last (they self-resolve).
 SOURCE_TAB_ORDER = [
-    'ICD10', 'ICD9CM', 'CPT4', 'HCPCS',
+    'ICD10CM', 'ICD10',  # Separate tabs — CM is US billing, WHO is international
+    'ICD9CM', 'CPT4', 'HCPCS',
     'RxNorm', 'NDC',
     'Read', 'MeSH', 'OPCS4', 'Nebraska Lexicon',
     'MedDRA', 'ICDO3', 'dm+d',
@@ -178,7 +179,8 @@ SOURCE_TAB_ORDER = [
 ]
 
 SOURCE_TAB_LABELS = {
-    'ICD10': 'ICD-10',
+    'ICD10CM': 'ICD-10-CM',
+    'ICD10': 'ICD-10 (WHO)',
     'ICD9CM': 'ICD-9-CM',
     'ICD10PCS': 'ICD-10-PCS',
     'ICD9Proc': 'ICD-9-Proc',
@@ -191,9 +193,10 @@ SOURCE_TAB_LABELS = {
 # "Wearables" tab (OpenWearables) on the Code Mapping page.
 WEARABLE_SOURCE_VOCABULARIES = {'OpenWearables', 'Apple', 'Garmin'}
 
-# ICD-10-CM codes are merged into the ICD-10 tab — curators think of them as
-# one vocabulary.  Same pattern as wearable consolidation above.
-ICD10CM_MERGE = {'ICD10CM': 'ICD10'}
+# ICD-10-CM and ICD-10 (WHO) are separate tabs. The merge dict is empty but
+# kept so downstream code (canonical_source, source_tab_vocabularies) that
+# reads it keeps working without changes.
+ICD10CM_MERGE = {}
 
 # FHIR OID URIs that are aliases for OMOP vocabulary_ids.  Rows arriving
 # via crossmap imports sometimes carry the OID instead of the OMOP spelling.

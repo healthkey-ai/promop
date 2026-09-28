@@ -1,7 +1,11 @@
 """Bounded curation pages with 100 codes per section."""
+import logging
+
 from django.db.models import Case, CharField, Count, F, Q, Value, When, Window
 from django.db.models.functions import Upper, Trim
 from rest_framework.exceptions import ValidationError
+
+logger = logging.getLogger(__name__)
 
 from omop_core.services import source_vocabularies as vocab
 from omop_core.services.mapping_destinations import with_destination_counts
@@ -250,8 +254,59 @@ def browse_mappings(mappings, params, serialize):
     def render(row):
         return serialize(row.target_concept, row, metadata[row.pk], destination_count=row.destination_count)
 
+    cross_hints = _icd10_cross_vocab_hints(catalog, results, source)
+
     return dict(results=[render(row) for row in results], duplicates=[render(row) for row in duplicates],
                 total=sum(section_totals), seen_only=params.get('seen_only') == '1',
                 tabs=tabs, selected_source=source, pages=pages, rejected_count=rejected,
                 provenances=provenances, selected_provenance=provenance,
-                groups=groups, rollup=rollup)
+                groups=groups, rollup=rollup, cross_vocab_hints=cross_hints)
+
+
+# ── Cross-vocabulary hints (ICD-10-CM ↔ ICD-10 WHO) ───────────────
+_ICD10_PAIR = {'ICD10': 'ICD10CM', 'ICD10CM': 'ICD10'}
+
+
+def _icd10_cross_vocab_hints(all_mappings, visible_rows, selected_source):
+    """For each visible ICD-10 row, note whether the sibling vocabulary has it.
+
+    Returns ``{mapping_id: {vocabulary, target_concept_id, target_concept_name,
+    same_target}}`` for rows whose code also appears in the sibling vocab.
+    """
+    if selected_source not in _ICD10_PAIR:
+        return {}
+    sibling_vocab = _ICD10_PAIR[selected_source]
+    icd_rows = [r for r in visible_rows if r.source_vocabulary_id == selected_source]
+    if not icd_rows:
+        return {}
+    codes = {r.source_code.strip().upper() for r in icd_rows}
+    sibling_rows = (
+        all_mappings
+        .filter(source_vocabulary_id=sibling_vocab)
+        .alias(code_upper=Upper(Trim('source_code')))
+        .filter(code_upper__in=codes)
+        .values_list('source_code', 'target_concept_id',
+                     'target_concept__concept_name')
+    )
+    sibling_by_code = {}
+    for code, target_id, target_name in sibling_rows:
+        sibling_by_code.setdefault(code.strip().upper(), []).append(
+            (target_id, target_name or ''))
+    hints = {}
+    for row in icd_rows:
+        code_upper = row.source_code.strip().upper()
+        siblings = sibling_by_code.get(code_upper)
+        if not siblings:
+            continue
+        sib_target_id, sib_target_name = siblings[0]
+        same_target = (
+            (sib_target_id == row.target_concept_id)
+            if (sib_target_id and row.target_concept_id) else None
+        )
+        hints[row.pk] = {
+            'vocabulary': sibling_vocab,
+            'target_concept_id': sib_target_id,
+            'target_concept_name': sib_target_name,
+            'same_target': same_target,
+        }
+    return hints

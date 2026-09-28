@@ -24,8 +24,11 @@ def athena_supplies_mapping(vocabulary_id, source_code, destination_id, *, exclu
     icd10 = vocabulary_id in {'ICD10', 'ICD10CM'}
     if (not icd10 and not destination_id) or not source_code.strip():
         return False
+    # ICD-10-CM and ICD-10 (WHO) are separate tabs but share the same code
+    # space, so duplicate detection must still look across both vocabularies.
+    vocab_set = {'ICD10', 'ICD10CM'} if icd10 else source_tab_vocabularies(vocabulary_id)
     mappings = SourceCodeConceptMapping.objects.filter(
-        source_vocabulary_id__in=source_tab_vocabularies(vocabulary_id),
+        source_vocabulary_id__in=vocab_set,
         origin_system='athena', target_concept_id__isnull=False,
     ).alias(trimmed_source_code=Trim('source_code')).filter(
         trimmed_source_code__iexact=source_code.strip(),

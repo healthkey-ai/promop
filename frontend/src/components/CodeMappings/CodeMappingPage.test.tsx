@@ -119,12 +119,11 @@ const reference = {
     Observation: "observation",
     Procedure: "procedure",
   },
-  // The API supplies the full tab catalog, including source vocabularies whose
-  // current queue contains only approved mappings. ICD10CM rows are merged
-  // into the ICD-10 tab (#1028) via VOCABULARY_ALIASES.
+  // The API supplies the full tab catalog. ICD10CM and ICD10 are separate tabs.
   source_vocabulary_tabs: [
     { vocabulary_id: "", label: "Uncoded", is_standard: false },
-    { vocabulary_id: "ICD10", label: "ICD-10", is_standard: false },
+    { vocabulary_id: "ICD10CM", label: "ICD-10-CM", is_standard: false },
+    { vocabulary_id: "ICD10", label: "ICD-10 (WHO)", is_standard: false },
   ],
 };
 

@@ -380,7 +380,7 @@ const STRATEGY_LABELS = {
 const VOCABULARY_ALIASES: Record<string, string> = {
   Apple: "OpenWearables",
   Garmin: "OpenWearables",
-  ICD10CM: "ICD10",
+  // ICD10CM and ICD10 are now separate tabs — no alias needed.
   "urn:oid:2.16.840.1.113883.6.96": "SNOMED",
 };
 function tabForRow(row: CodeMappingRow): string {

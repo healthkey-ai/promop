@@ -253,7 +253,8 @@ def test_reversing_provenance_keeps_seen_descending_and_other_defaults(browse):
 
 
 def test_aliases_global_search_rejected_and_sections(browse):
-    row('A', source_vocabulary_id='ICD10CM', occurrence_count=50)
+    # ICD10CM is now a separate tab, so use ICD10 for row A.
+    row('A', occurrence_count=50)
     row('B', status='approved')
     row('C', status='rejected')
     row('D', source_vocabulary_id='LOINC', source_code_description='distinctive phrase')
@@ -310,12 +311,13 @@ def test_bad_paging_or_sort_is_a_validation_error(browse):
 
 @pytest.mark.parametrize('search', ['', 'CODE'])
 def test_combined_counts_preserve_all_sections_and_rejections(browse, search):
+    # All rows use ICD10CM — ICD10CM is now a separate tab from ICD10.
     row('CODE-A', source_vocabulary_id='ICD10CM')
-    row('CODE-B', status='approved')
-    row('CODE-C', status='rejected')
+    row('CODE-B', source_vocabulary_id='ICD10CM', status='approved')
+    row('CODE-C', source_vocabulary_id='ICD10CM', status='rejected')
     row('CODE-D', source_vocabulary_id='LOINC', status='approved')
-    row('CODE-E', origin_system='athena', status='approved')
-    row('CODE-F', origin_system='athena', status='rejected')
+    row('CODE-E', source_vocabulary_id='ICD10CM', origin_system='athena', status='approved')
+    row('CODE-F', source_vocabulary_id='ICD10CM', origin_system='athena', status='rejected')
     data = browse(source='ICD10CM', search=search).data
     # Rejected rows always appear in their own section now.
     assert data['pages']['Unmapped']['total'] == 1
