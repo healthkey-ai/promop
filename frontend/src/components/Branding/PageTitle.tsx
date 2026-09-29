@@ -7,6 +7,15 @@ export default function PageTitle({ children, className = '', meta }: {
   className?: string;
   meta?: ReactNode;
 }) {
+  if (!meta) {
+    return (
+      <div className="flex min-w-0 items-center gap-3 sm:gap-4">
+        <BrandLogo />
+        <h1 className={`min-w-0 ${className}`}>{children}</h1>
+      </div>
+    );
+  }
+
   return (
     <div className="flex min-w-0 items-center gap-3 sm:gap-4">
       <BrandLogo />
