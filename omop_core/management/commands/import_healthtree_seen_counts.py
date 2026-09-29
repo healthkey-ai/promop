@@ -39,14 +39,8 @@ for oid, vocabulary in {
 ALIASES = {**FHIR_ALIASES, **VOCABULARY_OID_ALIASES, '(no system)': ''}
 
 
-# ICD-10 and ICD-10-CM share a code space; canonicalize to one identity
-# so CSV counts from either vocabulary match DB rows stored under either.
-_ICD10_CANONICAL = {'ICD10CM': 'ICD10', 'ICD10': 'ICD10'}
-
-
 def canonical(vocabulary):
-    vocabulary = ALIASES.get(vocabulary, vocabulary)
-    return _ICD10_CANONICAL.get(vocabulary, vocabulary)
+    return ALIASES.get(vocabulary, vocabulary)
 
 
 def read_counts(path):

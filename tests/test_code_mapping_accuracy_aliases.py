@@ -56,15 +56,15 @@ def test_legacy_approved_suggestions_are_backfilled_as_model_acceptances():
         assert mapping.suggestion_outcome == ''
 
 
-def test_icd10_accuracy_has_separate_tabs():
-    """ICD10 and ICD10CM have their own accuracy metrics since the tab split."""
+def test_icd10cm_accuracy_metrics():
+    """ICD10CM accuracy metrics after ICD10 relabeling."""
     SourceCodeConceptMapping.objects.bulk_create([
         SourceCodeConceptMapping(
             source_vocabulary_id=vocab, source_code=code,
             suggestion_model_version=version, suggestion_outcome=outcome,
         )
         for vocab, code, version, outcome in [
-            ('ICD10', 'A01', '0.2', 'accepted'),
+            ('ICD10CM', 'A01', '0.2', 'accepted'),
             ('ICD10CM', 'A02', '0.2', 'rejected'),
             ('ICD10CM', 'A03', '0.2', 'overridden'),
             ('ICD10CM', 'A04', '0.1', 'accepted'),
@@ -77,18 +77,15 @@ def test_icd10_accuracy_has_separate_tabs():
     response = code_mapping_accuracy(request)
 
     assert response.status_code == 200
-    assert set(response.data['by_source_vocabulary']) == {'ICD10', 'ICD10CM'}
-    icd10 = response.data['by_source_vocabulary']['ICD10']
-    assert icd10['model_version'] == '0.2'
-    assert icd10['suggestions'] == 1
-    assert icd10['approved'] == 1
-    assert icd10['precision'] == pytest.approx(1.0)
+    assert 'ICD10CM' in response.data['by_source_vocabulary']
+    assert 'ICD10' not in response.data['by_source_vocabulary']
     icd10cm = response.data['by_source_vocabulary']['ICD10CM']
     assert icd10cm['model_version'] == '0.2'
-    assert icd10cm['suggestions'] == 2
+    assert icd10cm['suggestions'] == 3
+    assert icd10cm['approved'] == 1
     assert icd10cm['rejected'] == 1
     assert icd10cm['overridden'] == 1
-    assert icd10cm['precision'] == pytest.approx(0.0)
+    assert icd10cm['precision'] == pytest.approx(1 / 3)
 
 
 @pytest.mark.parametrize(('status', 'change_destination', 'outcome', 'counter'), [
@@ -144,7 +141,7 @@ def test_uncoded_reviews_of_older_models_are_counted(status, change_destination,
 def test_accuracy_uses_one_query_for_all_vocabularies():
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
-    for source in ['', 'ICD10', 'ICD10CM', 'LOINC', 'SNOMED', 'Apple', 'Garmin']:
+    for source in ['', 'ICD10CM', 'LOINC', 'SNOMED', 'Apple', 'Garmin']:
         SourceCodeConceptMapping.objects.create(
             source_vocabulary_id=source, source_code='one',
             suggestion_model_version='v0.2', suggestion_outcome='rejected',
@@ -154,9 +151,8 @@ def test_accuracy_uses_one_query_for_all_vocabularies():
     with CaptureQueriesContext(connection) as queries:
         response = code_mapping_accuracy(request)
     assert len(queries) == 1
-    assert response.data['overall']['review_totals']['rejected'] == 7
+    assert response.data['overall']['review_totals']['rejected'] == 6
     assert response.data['by_source_vocabulary']['']['review_totals']['rejected'] == 1
-    assert response.data['by_source_vocabulary']['ICD10']['review_totals']['rejected'] == 1
     assert response.data['by_source_vocabulary']['ICD10CM']['review_totals']['rejected'] == 1
     assert response.data['by_source_vocabulary']['OpenWearables']['review_totals']['rejected'] == 2
 
@@ -199,7 +195,7 @@ def test_two_approved_suggestions_remain_perfect_when_new_model_has_no_reviews()
 
     SourceCodeConceptMapping.objects.bulk_create([
         SourceCodeConceptMapping(
-            source_vocabulary_id='ICD10', source_code=f'staging-{index}',
+            source_vocabulary_id='ICD10CM', source_code=f'staging-{index}',
             suggestion_model_version=version, suggestion_outcome=outcome,
             status='approved' if outcome else 'proposed',
         )
@@ -211,7 +207,7 @@ def test_two_approved_suggestions_remain_perfect_when_new_model_has_no_reviews()
     client = APIClient()
     client.force_authenticate(Identity.objects.create_user(email='staging-metrics@example.test', is_staff=True))
     main = client.get('/api/v1/code-mappings/accuracy/').data
-    for snapshot in (main['overall'], main['by_source_vocabulary']['ICD10']):
+    for snapshot in (main['overall'], main['by_source_vocabulary']['ICD10CM']):
         assert snapshot['model_version'] == 'v0.3'
         latest_reviewed = snapshot['latest_reviewed']
         assert latest_reviewed['model_version'] == 'v0.2'
@@ -236,7 +232,7 @@ def test_all_models_snapshot_scores_every_version_together():
 
     SourceCodeConceptMapping.objects.bulk_create([
         SourceCodeConceptMapping(
-            source_vocabulary_id='ICD10', source_code=f'all-models-{index}',
+            source_vocabulary_id='ICD10CM', source_code=f'all-models-{index}',
             suggestion_model_version=version, suggestion_outcome=outcome,
         )
         for index, (version, outcome) in enumerate([
@@ -248,7 +244,7 @@ def test_all_models_snapshot_scores_every_version_together():
     client.force_authenticate(Identity.objects.create_user(email='all-models@example.test', is_staff=True))
     main = client.get('/api/v1/code-mappings/accuracy/').data
 
-    for snapshot in (main['overall'], main['by_source_vocabulary']['ICD10']):
+    for snapshot in (main['overall'], main['by_source_vocabulary']['ICD10CM']):
         all_models = snapshot['all_models']
         assert all_models['model_versions'] == 2
         assert all_models['suggestions'] == 5

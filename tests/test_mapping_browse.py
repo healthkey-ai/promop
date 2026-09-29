@@ -21,7 +21,7 @@ def browse():
 
 
 def row(code, **kwargs):
-    return SourceCodeConceptMapping.objects.create(source_code=code, **{'source_vocabulary_id': 'ICD10', 'status': 'proposed', **kwargs})
+    return SourceCodeConceptMapping.objects.create(source_code=code, **{'source_vocabulary_id': 'ICD10CM', 'status': 'proposed', **kwargs})
 
 
 def test_pages_sort_before_slicing_and_report_full_counts(browse):
@@ -57,7 +57,7 @@ def test_seen_filter_precedes_sort_pagination_and_counts_all_sections(browse):
     assert all(row['occurrence_count'] > 0 for row in first['results'] + second['results'])
     assert first['results'][0]['source_code'] == 'Z-SEEN-000'
     assert second['results'][0]['source_code'] == 'Z-SEEN-100'
-    tab = next(tab for tab in first['tabs'] if tab['vocabulary_id'] == 'ICD10')
+    tab = next(tab for tab in first['tabs'] if tab['vocabulary_id'] == 'ICD10CM')
     assert (tab['proposed'], tab['approved'], tab['athena']) == (105, 1, 1)
     unfiltered = browse(seen_only='0', order_0='source_code').data
     assert unfiltered['total'] == 112
@@ -70,7 +70,7 @@ def test_seen_filter_combines_with_cross_tab_search_and_provenance(browse):
     row('MATCH-2', source_vocabulary_id='SNOMED', occurrence_count=1, origin_system='curator')
     row('MATCH-ZERO', source_vocabulary_id='SNOMED', origin_system='curator')
     row('MATCH-OTHER', occurrence_count=2, origin_system='HT-One')
-    data = browse(source='ICD10', search='MATCH', provenance='curator', seen_only='1').data
+    data = browse(source='ICD10CM', search='MATCH', provenance='curator', seen_only='1').data
     assert data['total'] == 2
     assert {r['source_code'] for r in data['results']} == {'MATCH-1', 'MATCH-2'}
     assert browse(source='__overall__', seen_only='1').data['total'] == 3
@@ -187,14 +187,14 @@ def test_athena_rows_are_not_offered_as_a_filter_value(browse):
 def test_search_rebuilds_the_options_from_the_rows_the_filter_will_act_on(browse):
     """A search reaches across tabs, so the active tab's counts would describe
     a different set of rows than the filter applies to."""
-    row('HIT-A', source_vocabulary_id='ICD10', origin_system='curator')
+    row('HIT-A', source_vocabulary_id='ICD10CM', origin_system='curator')
     row('HIT-B', source_vocabulary_id='RxNorm', origin_system='fhir-sync')
-    row('MISS', source_vocabulary_id='ICD10', origin_system='hk-labs')
-    assert browse(source='ICD10').data['provenances'] == [
+    row('MISS', source_vocabulary_id='ICD10CM', origin_system='hk-labs')
+    assert browse(source='ICD10CM').data['provenances'] == [
         {'origin_system': 'curator', 'count': 1}, {'origin_system': 'hk-labs', 'count': 1},
     ]
     # Searching widens to every tab, so the off-tab provenance must be offered.
-    assert browse(source='ICD10', search='HIT-').data['provenances'] == [
+    assert browse(source='ICD10CM', search='HIT-').data['provenances'] == [
         {'origin_system': 'curator', 'count': 1}, {'origin_system': 'fhir-sync', 'count': 1},
     ]
 
@@ -259,12 +259,12 @@ def test_aliases_global_search_rejected_and_sections(browse):
     row('C', status='rejected')
     row('D', source_vocabulary_id='LOINC', source_code_description='distinctive phrase')
     row('E', origin_system='athena', status='approved')
-    data = browse(source='ICD10').data
+    data = browse(source='ICD10CM').data
     # Rejected rows now appear in their own section, always visible.
     assert {r['source_code'] for r in data['results']} == {'A', 'B', 'C', 'E'}
     assert data['rejected_count'] == 1
     assert data['pages']['Rejected']['total'] == 1
-    assert [r['source_code'] for r in browse(source='ICD10', search='distinctive').data['results']] == ['D']
+    assert [r['source_code'] for r in browse(source='ICD10CM', search='distinctive').data['results']] == ['D']
     assert browse(source='').data['results'] == []
 
 
@@ -284,9 +284,9 @@ def test_same_code_in_different_vocabularies_on_one_tab_is_not_a_duplicate(brows
     for vocabulary in ('Apple', 'Garmin', 'OpenWearables'):
         row('heart_rate', source_vocabulary_id=vocabulary)
     row('A02.0')
-    row('A02.0', source_vocabulary_id='ICD10CM')
+    row('A02.0', source_vocabulary_id='SNOMED')
     assert browse(source=source).data['duplicates'] == []
-    assert browse(source='ICD10').data['duplicates'] == []
+    assert browse(source='ICD10CM').data['duplicates'] == []
 
 
 def test_duplicate_within_one_vocabulary_on_a_shared_tab_is_still_reported(browse):
@@ -335,7 +335,7 @@ def test_default_browse_reuses_counts_and_loads_sections_together(browse):
     row('B', status='approved')
     row('C', origin_system='athena', status='approved')
     with CaptureQueriesContext(connection) as queries:
-        response = browse(source='ICD10')
+        response = browse(source='ICD10CM')
     assert response.status_code == 200
     assert len(response.data['results']) == 3
     sql = [q['sql'] for q in queries]
@@ -356,9 +356,9 @@ def test_plain_list_pages_before_serialization_and_filters_in_database(status_fi
     from patient_portal.api import views
 
     SourceCodeConceptMapping.objects.bulk_create([
-        SourceCodeConceptMapping(source_vocabulary_id='ICD10', source_code=f'P{i:03}', status='approved')
+        SourceCodeConceptMapping(source_vocabulary_id='ICD10CM', source_code=f'P{i:03}', status='approved')
         for i in range(105)
-    ] + [SourceCodeConceptMapping(source_vocabulary_id='ICD10', source_code='A-proposed')])
+    ] + [SourceCodeConceptMapping(source_vocabulary_id='ICD10CM', source_code='A-proposed')])
     user = Identity.objects.create_user(email='list-pages@example.test', is_staff=True)
 
     def get(**params):
@@ -392,13 +392,13 @@ def test_plain_list_exposes_pagination_headers_only_to_allowed_origins(settings,
     settings.CORS_ALLOW_ALL_ORIGINS = False
     settings.CORS_ALLOWED_ORIGINS = ['https://curation.example']
     SourceCodeConceptMapping.objects.bulk_create([
-        SourceCodeConceptMapping(source_vocabulary_id='ICD10', source_code=f'C{i:03}')
+        SourceCodeConceptMapping(source_vocabulary_id='ICD10CM', source_code=f'C{i:03}')
         for i in range(105)
     ])
     client = APIClient()
     client.force_authenticate(user=Identity.objects.create_user(email='cors-pages@example.test', is_staff=True))
 
-    response = client.get('/api/v1/code-mappings/', {'source': 'ICD10'}, HTTP_ORIGIN=origin, secure=True)
+    response = client.get('/api/v1/code-mappings/', {'source': 'ICD10CM'}, HTTP_ORIGIN=origin, secure=True)
 
     assert response.status_code == 200
     assert len(response.data) == 100

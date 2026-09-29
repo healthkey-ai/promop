@@ -11768,10 +11768,6 @@ def _merge_vocab_counts(counts):
     for sub in source_vocabularies.WEARABLE_SOURCE_VOCABULARIES - {'OpenWearables'}:
         if sub in counts:
             counts['OpenWearables'] = counts.get('OpenWearables', 0) + counts.pop(sub)
-    # ICD-10-CM and ICD-10 are now separate tabs; ICD10CM_MERGE is empty.
-    for sub, canonical in source_vocabularies.ICD10CM_MERGE.items():
-        if sub in counts:
-            counts[canonical] = counts.get(canonical, 0) + counts.pop(sub)
     # FHIR OID aliases → canonical OMOP vocabulary.
     for oid, canonical in source_vocabularies.VOCABULARY_OID_ALIASES.items():
         if oid in counts:
