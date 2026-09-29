@@ -6,16 +6,14 @@ proposal, each member of a concept set, the value concept of a
 measurement/value pair -- is kept as a MappingDestinationCandidate, so the
 reviewer sees all of them whichever one is chosen.
 
-Re-running is safe:
-
-* a row a curator has approved or rejected is not touched, nor are its
-  candidates;
-* a row still in review that a person has edited (``updated_by`` set) keeps its
-  destination and description; only its trial count and candidates refresh;
-* a row nobody has edited is brought up to date: its description follows the
-  CB title, and a destination that could not be resolved before is filled in
-  once the concept is on this instance;
-* candidates are re-resolved, so a vocabulary loaded since the last run shows.
+Re-running is safe. After the first import a row belongs to the reviewer:
+a re-run never sets a destination, a description or a status. It refreshes
+the trial count and the candidates -- adding new ones and re-resolving old
+ones, so a vocabulary loaded since the last run shows -- and only on rows
+still in review that still carry this importer's provenance. A row a curator
+has approved, rejected, cleared or re-pointed is left exactly as it is. A row
+without a destination whose proposal has since become usable is listed, for
+a person to pick.
 
 Terms that are in the queue but missing from the file are reported, never
 deleted: whether a term was retired is CB's call, and the export tells CB what
@@ -73,9 +71,9 @@ class Command(BaseCommand):
 
         concepts = resolve_concepts(k for row in rows for k in row.candidate_keys())
         stats = dict.fromkeys(
-            ('created', 'refreshed', 'destination_filled', 'decided_kept', 'rejected_proposals',
+            ('created', 'refreshed', 'destination_available', 'kept', 'rejected_proposals',
              'candidates_added', 'candidates_updated', 'candidates_unavailable'), 0)
-        problems = []
+        problems, available = [], []
 
         with transaction.atomic():
             existing = {
@@ -97,8 +95,11 @@ class Command(BaseCommand):
                 stats['candidates_unavailable'] += sum(k not in concepts for k in row.candidate_keys())
 
                 mapping = existing.get(row.source_code.lower())
-                if mapping is not None and mapping.status != 'proposed':
-                    stats['decided_kept'] += 1
+                # A clear through the UI blanks origin_system and a curator's
+                # re-point replaces it: either way the row is no longer ours.
+                if mapping is not None and (mapping.status != 'proposed'
+                                            or mapping.origin_system != ORIGIN_SYSTEM):
+                    stats['kept'] += 1
                     continue
 
                 if mapping is None:
@@ -121,15 +122,12 @@ class Command(BaseCommand):
                     stats['refreshed'] += 1
                     prior = {(c.target_vocabulary_id, c.target_concept_code): c
                              for c in mapping.destination_candidates.all()}
-                    updates = {'occurrence_count': row.trial_count}
-                    if mapping.updated_by_id is None:
-                        updates['source_code_description'] = row.description
-                        if mapping.target_concept_id is None and target is not None:
-                            stats['destination_filled'] += 1
-                            updates.update(_destination_fields(target, row))
-                            updates['notes'] = _notes(row, problem)
+                    if mapping.target_concept_id is None and target is not None:
+                        stats['destination_available'] += 1
+                        available.append(f'{row.source_code}: {row.proposal}')
                     if apply:
-                        SourceCodeConceptMapping.objects.filter(pk=mapping.pk).update(**updates)
+                        SourceCodeConceptMapping.objects.filter(pk=mapping.pk).update(
+                            occurrence_count=row.trial_count)
 
                 for key, origins in row.candidate_keys().items():
                     concept = concepts.get(key)
@@ -156,6 +154,8 @@ class Command(BaseCommand):
             f'{verb} {len(rows):,} CB terms: ' + ', '.join(f'{k}={v:,}' for k, v in stats.items())))
         for line in problems:
             self.stdout.write(f'  proposal not used: {line}')
+        for line in available:
+            self.stdout.write(f'  destination now available, pick it in the UI: {line}')
         if absent:
             self.stdout.write(self.style.WARNING(
                 f'{len(absent):,} CB terms are in the queue but not in the file (left untouched):'))

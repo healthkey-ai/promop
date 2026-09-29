@@ -3,6 +3,7 @@ from django.db.models import Case, Count, Exists, IntegerField, OuterRef, Q, Sub
 from django.db.models.functions import Coalesce
 
 from omop_core.models import MappingDestinationCandidate
+from omop_core.services.cb_vocabulary import destination_problem
 from omop_core.services.concept_unit_info import concept_unit_fields
 from omop_core.services.source_vocabularies import is_catalog_source
 
@@ -13,7 +14,6 @@ def _selectable(mapping, concept):
     if is_catalog_source(mapping.source_vocabulary_id):
         # A catalog term may point at any live concept, standard or not (#1649);
         # the rule is shared with the importer so the UI offers what it accepts.
-        from omop_core.services.cb_vocabulary import destination_problem
         return not destination_problem(concept)
     return concept.standard_concept == 'S'
 

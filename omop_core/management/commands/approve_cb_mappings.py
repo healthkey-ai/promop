@@ -77,7 +77,9 @@ class Command(BaseCommand):
         concepts = resolve_concepts(r.proposal for r in rows if r.proposal)
         now = timezone.now()
         lock_cutoff = now - timedelta(minutes=settings.MAPPING_LOCK_TIMEOUT_MINUTES)
-        unlocked = Q(locked_by__isnull=True) | Q(locked_at__lt=lock_cutoff) | Q(locked_by=reviewer)
+        # The UI's _is_lock_active: a lock holds only with a holder and a fresh timestamp.
+        unlocked = (Q(locked_by__isnull=True) | Q(locked_at__isnull=True)
+                    | Q(locked_at__lt=lock_cutoff) | Q(locked_by=reviewer))
         mappings = {
             m.source_code.lower(): m
             for m in SourceCodeConceptMapping.objects.filter(source_vocabulary_id=SOURCE_VOCABULARY_ID)
@@ -98,6 +100,8 @@ class Command(BaseCommand):
                     reason = 'not in the queue (import first)'
                 elif mapping.status != 'proposed':
                     reason = f'already {mapping.status}'
+                elif mapping.target_concept_id is None:
+                    reason = 'no destination'
                 elif mapping.target_concept_id != concept.concept_id:
                     reason = 're-pointed since import'
                 else:

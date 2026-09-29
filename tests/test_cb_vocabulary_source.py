@@ -297,32 +297,47 @@ def test_a_missing_column_stops_the_import(tmp_path):
         call_command('import_cb_vocabularies', '--file', str(path), '--apply')
 
 
-def test_reimport_fills_a_destination_once_its_concept_arrives(tmp_path, concepts):
+def test_reimport_never_sets_a_destination_but_lists_one_that_became_available(tmp_path, concepts):
+    from io import StringIO
     path = write_csv(tmp_path / 'late.csv', [
         {'table': 'disease', 'code': 'FL', 'title': 'Follicular lymphoma', 'omop_vocabulary_id': 'SNOMED',
          'omop_concept_code': '308121000', 'match': 'auto_exact', 'verified': 'ok'},
     ])
     call_command('import_cb_vocabularies', '--file', path, '--apply')
-    assert cb('disease:FL').target_concept_id is None
-    assert cb('disease:FL').destination_candidates.get().target_concept_id is None
-
     arrived = concept('SNOMED', '308121000')
-    call_command('import_cb_vocabularies', '--file', path)  # dry run: still nothing
-    assert cb('disease:FL').target_concept_id is None
-    call_command('import_cb_vocabularies', '--file', path, '--apply')
+    out = StringIO()
+
+    call_command('import_cb_vocabularies', '--file', path, '--apply', stdout=out)
 
     fl = cb('disease:FL')
-    assert fl.target_concept_id == arrived.concept_id
+    assert fl.target_concept_id is None  # a person picks it
+    assert 'destination now available' in out.getvalue()
+    # The candidate is re-resolved, so the UI offers the concept.
     assert fl.destination_candidates.get().target_concept_id == arrived.concept_id
 
 
-def test_reimport_keeps_the_description_of_a_row_a_person_edited(tmp_path, proposals, reviewer):
+def test_reimport_leaves_a_row_the_curator_cleared(tmp_path, proposals, concepts):
+    call_command('import_cb_vocabularies', '--file', proposals, '--apply')
+    # What the UI's DELETE on a mapping does: no destination, no candidates,
+    # provenance blanked, back to proposed -- and updated_by left unset.
+    bc = cb('disease:BC')
+    bc.destination_candidates.all().delete()
+    SourceCodeConceptMapping.objects.filter(pk=bc.pk).update(
+        target_concept=None, destination_vocabulary_id='', origin_system='', status='proposed')
+
+    call_command('import_cb_vocabularies', '--file', proposals, '--apply')
+
+    bc = cb('disease:BC')
+    assert bc.target_concept_id is None
+    assert not bc.destination_candidates.exists()
+
+
+def test_reimport_does_not_rewrite_the_description(proposals):
     call_command('import_cb_vocabularies', '--file', proposals, '--apply')
     SourceCodeConceptMapping.objects.filter(source_code='disease:BC').update(
-        source_code_description='Breast carcinoma (edited)', updated_by=reviewer)
+        source_code_description='Breast carcinoma (edited)')
     call_command('import_cb_vocabularies', '--file', proposals, '--apply')
     assert cb('disease:BC').source_code_description == 'Breast carcinoma (edited)'
-    assert cb('cytogenicmarker:chromothripsis').source_code_description == 'Chromothripsis (cytogenicmarker)'
 
 
 def test_cb_candidates_are_selectable_by_the_import_rule(proposals, concepts):
