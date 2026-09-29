@@ -11930,6 +11930,10 @@ def _source_vocabulary_tabs():
 
 
 def _code_mapping_reference_payload():
+    deployed_commit = (os.environ.get('RENDER_GIT_COMMIT') or '').strip()
+    if not re.fullmatch(r'[0-9a-fA-F]{7,64}', deployed_commit):
+        deployed_commit = ''
+
     known = {
         v.vocabulary_id: v.vocabulary_name
         for v in Vocabulary.objects.filter(
@@ -11946,6 +11950,9 @@ def _code_mapping_reference_payload():
     ]
 
     return {
+        # Render injects the deployed Git commit. Keep it out of local UI when
+        # absent, and expose the full value for the marker tooltip/label.
+        'release_commit': deployed_commit,
         'domains': [
             {'domain_id': domain_id, 'label': label}
             for domain_id, label in source_vocabularies.DOMAIN_CHOICES

@@ -203,6 +203,7 @@ interface SourceVocabularyTab {
 
 interface Reference {
   suggest_max_per_run?: number;
+  release_commit?: string;
   domains: DomainRef[];
   source_code_systems_by_domain: Record<string, SourceCodeSystemRef[]>;
   destination_vocabularies: VocabularyRef[];
@@ -1856,8 +1857,20 @@ export default function CodeMappingPage() {
         className={`rounded px-3 py-2 text-sm font-medium disabled:opacity-50 ${direction === value ? 'bg-slate-950 text-white' : 'text-slate-600 hover:bg-slate-100'}`}>{label}</button>)}
   </div>;
 
+  const releaseMarker = reference.release_commit ? (
+    <span
+      className="text-[10px] font-normal tracking-wide text-slate-400"
+      title={`Deployed commit ${reference.release_commit}`}
+      aria-label={`Deployed release ${reference.release_commit}`}
+    >
+      release {reference.release_commit.slice(0, 8)}
+    </span>
+  ) : null;
+
   if (direction === 'reverse') return <div className="min-h-screen bg-slate-50 p-6"><div className="mx-auto max-w-7xl">
-    <PageTitle className="mb-5 text-2xl font-semibold text-slate-950">Code Mapping</PageTitle>
+    <div className="mb-5">
+      <PageTitle className="text-2xl font-semibold text-slate-950" meta={releaseMarker}>Code Mapping</PageTitle>
+    </div>
     {directionControls}
     <ConceptToCodeTab canApprove={canApprove} onWritingChange={setReverseWriting} />
   </div></div>;
@@ -1883,7 +1896,7 @@ export default function CodeMappingPage() {
               <ArrowLeft size={16} />
             </button>
             <div>
-              <PageTitle className="text-2xl font-semibold text-slate-950">Code Mapping</PageTitle>
+              <PageTitle className="text-2xl font-semibold text-slate-950" meta={releaseMarker}>Code Mapping</PageTitle>
               <p className="text-sm text-slate-600">
                 Source codes from FHIR, paper labs and notes, mapped to destination OMOP concepts
               </p>

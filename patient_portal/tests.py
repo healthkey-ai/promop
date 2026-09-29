@@ -25647,6 +25647,25 @@ class CodeMappingSourceVocabTabsTest(TestCase):
     def setUp(self):
         self.client = APIClient()
 
+    def test_reference_includes_valid_render_release_commit(self):
+        """The mapping header can identify the exact deployed Render build."""
+        commit = '8798ec24f4cc16e47f8c0ceec69d38d7e5858b17'
+        self.client.force_authenticate(user=self.staff)
+        with patch.dict(os.environ, {'RENDER_GIT_COMMIT': commit}):
+            resp = self.client.get('/api/v1/code-mappings/reference/')
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['release_commit'], commit)
+
+    def test_reference_omits_invalid_render_release_commit(self):
+        """Unexpected environment values are never reflected into the UI."""
+        self.client.force_authenticate(user=self.staff)
+        with patch.dict(os.environ, {'RENDER_GIT_COMMIT': 'not-a-commit'}):
+            resp = self.client.get('/api/v1/code-mappings/reference/')
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['release_commit'], '')
+
     def test_reference_includes_source_vocabulary_tabs(self):
         """The reference endpoint returns a tab for every mapped source system."""
         mappings = [

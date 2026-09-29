@@ -71,6 +71,7 @@ const approvedRow = {
 
 /** Shape of GET /v1/code-mappings/reference/. */
 const reference = {
+  release_commit: "8798ec24f4cc16e47f8c0ceec69d38d7e5858b17",
   domains: [
     { domain_id: "Condition", label: "Condition — diagnoses, problems, findings" },
     { domain_id: "Drug", label: "Drug — medications and substances" },
@@ -227,6 +228,18 @@ describe("CodeMappingPage", () => {
     mockPost.mockResolvedValue({ data: {} });
     mockPatch.mockResolvedValue({ data: {} });
     mockDelete.mockResolvedValue({ data: {} });
+  });
+
+  it("shows the deployed commit beside the Code Mapping title", async () => {
+    renderPage([proposedRow]);
+    const marker = await screen.findByLabelText(
+      `Deployed release ${reference.release_commit}`,
+    );
+    expect(marker).toHaveTextContent("release 8798ec24");
+    expect(marker).toHaveAttribute(
+      "title",
+      `Deployed commit ${reference.release_commit}`,
+    );
   });
 
   it("lets a curator choose a destination inline without opening the edit dialog", async () => {
