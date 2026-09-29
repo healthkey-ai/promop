@@ -6688,22 +6688,25 @@ class OpenWearablesVocabularyTest(TestCase):
 
 
 class HospitalSourceVocabularyTest(TestCase):
-    """Epic and Cerner local namespaces stay vendor-scoped, not tenant-scoped."""
+    """Hospital resolver keys stay tenant-scoped while their tabs roll up."""
 
     def test_epic_systems_are_recognised(self):
-        from omop_core.services.source_vocabularies import fhir_source_vocabulary
+        from omop_core.services.source_vocabularies import fhir_source_vocabulary, hospital_vendor
 
-        self.assertEqual(fhir_source_vocabulary(
-            'urn:oid:1.2.840.114350.1.13.211.2.7.5.737384.45'), 'EPIC')
-        self.assertEqual(fhir_source_vocabulary(
-            'http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id'), 'EPIC')
+        systems = [
+            'urn:oid:1.2.840.114350.1.13.211.2.7.5.737384.45',
+            'http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id',
+        ]
+        for system in systems:
+            self.assertEqual(fhir_source_vocabulary(system), system)
+            self.assertEqual(hospital_vendor(system), 'EPIC')
 
-    def test_cerner_codeset_is_recognised_without_retaining_the_tenant(self):
-        from omop_core.services.source_vocabularies import fhir_source_vocabulary
+    def test_cerner_codeset_retains_the_tenant_resolver_key(self):
+        from omop_core.services.source_vocabularies import fhir_source_vocabulary, hospital_vendor
 
-        self.assertEqual(fhir_source_vocabulary(
-            'https://fhir.cerner.com/993df7f9-6163-4b2c-9388-9d472c4ef3f9/codeSet/72'),
-            'CERNER')
+        system = 'https://fhir.cerner.com/993df7f9-6163-4b2c-9388-9d472c4ef3f9/codeSet/72'
+        self.assertEqual(fhir_source_vocabulary(system), system)
+        self.assertEqual(hospital_vendor(system), 'CERNER')
 
     def test_generic_and_unknown_systems_are_not_misclassified(self):
         from omop_core.services.source_vocabularies import fhir_source_vocabulary
@@ -6726,6 +6729,35 @@ class HospitalSourceVocabularyTest(TestCase):
             with self.subTest(domain=domain):
                 vocabularies = {entry['vocabulary_id'] for entry in source_systems_for(domain)}
                 self.assertTrue({'EPIC', 'CERNER'} <= vocabularies)
+
+    def test_tabs_and_suggest_include_every_tenant_without_merging_resolver_keys(self):
+        from omop_core.mapping.suggestions import suggestable_queryset
+        from omop_core.services.mapping_browse import tab_queryset
+
+        epic_a = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='urn:oid:1.2.840.114350.1.13.211.2.7.5.737384.45',
+            source_code='10627', omop_table='measurement', status='proposed')
+        epic_b = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='urn:oid:1.2.840.114350.1.13.670.2.7.5.737384.45',
+            source_code='10627', omop_table='measurement', status='proposed')
+        cerner = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id=(
+                'https://fhir.cerner.com/993df7f9-6163-4b2c-9388-9d472c4ef3f9/codeSet/72'),
+            source_code='10627', omop_table='measurement', status='proposed')
+
+        self.assertEqual(
+            set(tab_queryset(SourceCodeConceptMapping.objects.all(), 'EPIC')
+                .values_list('pk', flat=True)),
+            {epic_a.pk, epic_b.pk},
+        )
+        self.assertEqual(
+            set(suggestable_queryset(
+                'measurement', source_vocabulary_id='EPIC', min_occurrences=1)
+                .values_list('pk', flat=True)),
+            {epic_a.pk, epic_b.pk},
+        )
+        self.assertNotEqual(epic_a.source_vocabulary_id, epic_b.source_vocabulary_id)
+        self.assertNotIn(cerner.pk, {epic_a.pk, epic_b.pk})
 
 
 class SeedOpenWearablesMappingsTest(TestCase):

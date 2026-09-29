@@ -39,6 +39,9 @@ ORDER_FIELDS = {
 
 
 def canonical_source(source):
+    vendor = vocab.hospital_vendor(source)
+    if vendor:
+        return vendor
     if source in vocab.WEARABLE_SOURCE_VOCABULARIES:
         return 'OpenWearables'
     return vocab.VOCABULARY_OID_ALIASES.get(source, source)
@@ -61,7 +64,8 @@ def tab_queryset(mappings, source):
     from omop_core.services.athena_mapping_guard import source_tab_vocabularies
     if source is None or source == OVERALL:
         return mappings
-    return mappings.filter(source_vocabulary_id__in=source_tab_vocabularies(source))
+    from omop_core.services.athena_mapping_guard import source_tab_filter
+    return mappings.filter(source_tab_filter(source))
 
 
 def apply_search(mappings, tab_rows, search):

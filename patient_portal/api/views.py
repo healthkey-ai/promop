@@ -11858,6 +11858,13 @@ def _merge_vocab_counts(counts):
     for oid, canonical in source_vocabularies.VOCABULARY_OID_ALIASES.items():
         if oid in counts:
             counts[canonical] = counts.get(canonical, 0) + counts.pop(oid)
+    # Tenant-specific Epic/Cerner resolver keys → vendor tabs. Iterate over a
+    # snapshot because several hundred hospital systems can be present.
+    for source, count in list(counts.items()):
+        vendor = source_vocabularies.hospital_vendor(source)
+        if vendor and source != vendor:
+            counts[vendor] = counts.get(vendor, 0) + count
+            counts.pop(source)
 
 
 def _source_vocabulary_tabs():

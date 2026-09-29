@@ -227,29 +227,37 @@ FHIR_SYSTEM_VOCABULARIES = {
 }
 
 
+def hospital_vendor(system):
+    """Return EPIC/CERNER for a vendor-local system or vendor tab id."""
+    normalized = (system or '').strip().casefold().rstrip('/')
+    if normalized == 'epic' or normalized.startswith('urn:oid:1.2.840.114350.') \
+            or normalized.startswith(('http://open.epic.com/', 'https://open.epic.com/')):
+        return 'EPIC'
+    if normalized == 'cerner' or (
+        normalized.startswith(('http://fhir.cerner.com/', 'https://fhir.cerner.com/'))
+        and '/codeset/' in normalized
+    ):
+        return 'CERNER'
+    return ''
+
+
 def fhir_source_vocabulary(system):
-    """Return the stable source vocabulary for a FHIR ``Coding.system`` URI.
+    """Return the resolver identity for a FHIR ``Coding.system`` URI.
 
     Epic embeds a hospital id in ``urn:oid:1.2.840.114350.*`` and Cerner embeds
-    an instance id before ``codeSet``. Keeping either full URI as the
-    vocabulary would create a tab per hospital; dropping it to blank would mix
-    opaque vendor codes with genuinely uncoded text. Collapse only these
-    vendor-owned namespaces to their vendor while leaving unknown systems
-    unresolved.
+    an instance id before ``codeSet``. Their opaque codes are only stable
+    inside that exact system, so retain the URI as the resolver key. The tab
+    layer separately rolls those keys up by :func:`hospital_vendor`.
     """
-    normalized = (system or '').strip().casefold().rstrip('/')
+    identity = (system or '').strip().rstrip('/')
+    normalized = identity.casefold()
     if not normalized:
         return ''
     standard = FHIR_SYSTEM_VOCABULARIES.get(normalized)
     if standard:
         return standard
-    if normalized.startswith('urn:oid:1.2.840.114350.'):
-        return 'EPIC'
-    if normalized.startswith(('http://open.epic.com/', 'https://open.epic.com/')):
-        return 'EPIC'
-    if normalized.startswith(('http://fhir.cerner.com/', 'https://fhir.cerner.com/')) \
-            and '/codeset/' in normalized:
-        return 'CERNER'
+    if hospital_vendor(identity):
+        return identity
     return ''
 
 

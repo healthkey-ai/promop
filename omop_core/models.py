@@ -1934,7 +1934,7 @@ class SourceCodeConceptMapping(models.Model):
         ),
     )
     source_vocabulary_id = models.CharField(
-        max_length=50, blank=True, default='', db_index=True,
+        max_length=255, blank=True, default='', db_index=True,
         help_text=(
             'External code system the code arrived in (ICD10CM, LOINC, SNOMED, '
             'NDC, ...). Blank means uncoded — a paper lab test name or free '
@@ -2204,7 +2204,7 @@ class MappingSuggestionReview(models.Model):
         SourceCodeConceptMapping, on_delete=models.SET_NULL, null=True,
         related_name='suggestion_reviews',
     )
-    source_vocabulary_id = models.CharField(max_length=50, blank=True)
+    source_vocabulary_id = models.CharField(max_length=255, blank=True)
     source_code = models.CharField(max_length=100)
     suggested_target_concept_id = models.BigIntegerField(null=True)
     suggestion_model_version = models.CharField(max_length=20)
@@ -4659,7 +4659,7 @@ class SuggestRun(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     # NULL means every vocabulary; '' is the Uncoded tab, which is a real tab
     # and the one Suggest actually works on.
-    source_vocabulary_id = models.CharField(max_length=50, null=True, blank=True)
+    source_vocabulary_id = models.CharField(max_length=255, null=True, blank=True)
     direction = models.CharField(max_length=10, default='forward', db_default='forward',
                                  choices=[('forward', 'Forward'), ('reverse', 'Reverse')])
     state = models.CharField(max_length=10, choices=STATES, default=QUEUED)

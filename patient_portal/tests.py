@@ -25683,12 +25683,15 @@ class CodeMappingSourceVocabTabsTest(TestCase):
                 origin='import',
             ),
             SourceCodeConceptMapping(
-                source_vocabulary_id='EPIC', source_code='EPIC#31000013118',
+                source_vocabulary_id='urn:oid:1.2.840.114350.1.13.211.2.7.5.737384.45',
+                source_code='EPIC#31000013118',
                 source_code_description='Albumin', domain_id='Measurement',
                 omop_table='measurement', status='proposed', origin='import',
             ),
             SourceCodeConceptMapping(
-                source_vocabulary_id='CERNER', source_code='674310',
+                source_vocabulary_id=(
+                    'https://fhir.cerner.com/993df7f9-6163-4b2c-9388-9d472c4ef3f9/codeSet/72'),
+                source_code='674310',
                 source_code_description='Albumin', domain_id='Measurement',
                 omop_table='measurement', status='proposed', origin='import',
             ),
