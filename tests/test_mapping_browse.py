@@ -39,7 +39,8 @@ def test_pages_sort_before_slicing_and_report_full_counts(browse):
     assert browse(order_0='source_code').data['results'][0]['source_code'] == 'C000'
 
 
-def test_seen_filter_precedes_sort_pagination_and_counts_all_sections(browse):
+def test_seen_filter_narrows_only_unmapped(browse):
+    """seen_only filters Unmapped to occurrence_count > 0 but leaves other sections unfiltered."""
     for i in range(105):
         row(f'Z-SEEN-{i:03}', occurrence_count=i + 1)
     row('A-ZERO')  # would displace a seen row under the explicit code sort
@@ -51,14 +52,20 @@ def test_seen_filter_precedes_sort_pagination_and_counts_all_sections(browse):
     row('ATHENA-ZERO', origin_system='athena', status='approved')
     first = browse(seen_only='1', order_0='source_code').data
     second = browse(seen_only='1', order_0='source_code', page_0=2).data
-    assert first['total'] == second['total'] == 108
     assert first['seen_only'] is True
+    # Unmapped narrows to the 105 rows with seen > 0.
     assert first['pages']['Unmapped']['total'] == 105
-    assert all(row['occurrence_count'] > 0 for row in first['results'] + second['results'])
+    # Mapped, Rejected, Athena include ALL rows regardless of seen_only.
+    assert first['pages']['Mapped']['total'] == 2
+    assert first['pages']['Rejected']['total'] == 2
+    assert first['pages']['Athena Mapped']['total'] == 2
+    # Total reflects narrowed Unmapped + full other sections.
+    assert first['total'] == second['total'] == 111
     assert first['results'][0]['source_code'] == 'Z-SEEN-000'
     assert second['results'][0]['source_code'] == 'Z-SEEN-100'
+    # Tab counts use the full set (including unseen proposed).
     tab = next(tab for tab in first['tabs'] if tab['vocabulary_id'] == 'ICD10CM')
-    assert (tab['proposed'], tab['approved'], tab['athena']) == (105, 1, 1)
+    assert (tab['proposed'], tab['approved'], tab['athena']) == (106, 2, 2)
     unfiltered = browse(seen_only='0', order_0='source_code').data
     assert unfiltered['total'] == 112
     assert unfiltered['results'][0]['source_code'] == 'A-ZERO'

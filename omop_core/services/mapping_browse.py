@@ -78,26 +78,45 @@ def apply_provenance(queryset, provenance):
         origin_system='' if provenance == BLANK_PROVENANCE else provenance)
 
 
-def apply_seen(queryset, params):
-    """The page opts into Seen > 0; other API clients retain their full catalog."""
+def _seen_only(params):
+    """Parse and validate the seen_only parameter."""
     value = params.get('seen_only', '0')
     if value not in ('0', '1'):
         raise ValidationError({'seen_only': 'Use 1 for Seen > 0 or 0 for all codes.'})
-    return queryset.filter(occurrence_count__gt=0) if value == '1' else queryset
+    return value == '1'
 
 
-def visible_rows(mappings, params):
+def apply_seen(queryset, params):
+    """The page opts into Seen > 0; other API clients retain their full catalog."""
+    return queryset.filter(occurrence_count__gt=0) if _seen_only(params) else queryset
+
+
+def _apply_seen_for_section(queryset, params, section):
+    """Seen > 0 applies only to Unmapped; other sections show all codes."""
+    if section == 'Unmapped' and _seen_only(params):
+        return queryset.filter(occurrence_count__gt=0)
+    return queryset
+
+
+def visible_rows(mappings, params, section=None):
     """Everything a browse request narrows by, in the order browse applies it.
 
     The group-members endpoint has to reproduce this exactly: a rollup entry's
     members/seen/proposed counts describe the *filtered* set, so expanding an
     entry that says "3 codes" under a provenance filter must not open into all
     2,557 -- including the rows the filter existed to hide.
+
+    *section* narrows the seen filter: when set, Seen > 0 applies only to
+    Unmapped.  When None the filter applies to everything, preserving the
+    contract for callers that have no section context.
     """
     source = params.get('source')
     search = (params.get('search') or '').strip()
     rows = apply_search(mappings, tab_queryset(mappings, source), search)
-    return apply_seen(apply_provenance(rows, (params.get('provenance') or '').strip()), params)
+    rows = apply_provenance(rows, (params.get('provenance') or '').strip())
+    if section is not None:
+        return _apply_seen_for_section(rows, params, section)
+    return apply_seen(rows, params)
 
 
 def _provenance_options(counts_by_origin):
@@ -108,8 +127,9 @@ def _provenance_options(counts_by_origin):
 
 def browse_mappings(mappings, params, serialize):
     catalog = mappings
-    mappings = apply_seen(mappings, params)
-    # Counts use the same Athena de-duplication as the visible rows.
+    seen_only = _seen_only(params)
+    # seen_only narrows only the Unmapped section; other sections show all codes.
+    # Tab counts use the full queryset so the tab strip reflects total work.
     counts = {}
     section_counts = {}
     # Provenance counts ride on this aggregate rather than a second GROUP BY:
@@ -191,8 +211,11 @@ def browse_mappings(mappings, params, serialize):
     # warning into a puzzle.
     filtered = apply_provenance(filtered, provenance)
     if search or provenance:
+        _unmapped_filter = ~_Q_ATHENA & ~Q(status__in=['approved', 'rejected'])
+        if seen_only:
+            _unmapped_filter = _unmapped_filter & Q(occurrence_count__gt=0)
         totals = filtered.aggregate(
-            unmapped=Count('pk', filter=~_Q_ATHENA & ~Q(status__in=['approved', 'rejected'])),
+            unmapped=Count('pk', filter=_unmapped_filter),
             mapped=Count('pk', filter=~_Q_ATHENA & Q(status='approved')),
             athena=Count('pk', filter=_Q_ATHENA & ~Q(status='rejected')),
             rejected=Count('pk', filter=~_Q_ATHENA & Q(status='rejected')),
@@ -204,6 +227,12 @@ def browse_mappings(mappings, params, serialize):
                   for key in ('unmapped', 'mapped', 'athena', 'rejected', 'athena_rejected')}
     rejected = totals['rejected']
     section_queries = {name: carve(filtered) for name, carve in SECTION_FILTERS.items()}
+    # Seen > 0 narrows only the Unmapped section: a curator triaging the queue
+    # wants to focus on codes patients actually have, but Mapped and Athena
+    # Mapped are reference that should be visible regardless of occurrence.
+    if seen_only:
+        section_queries['Unmapped'] = section_queries['Unmapped'].filter(occurrence_count__gt=0)
+        totals['unmapped'] = section_queries['Unmapped'].count()
     # Rollup is opt-in. The flat queue stays the default so a caller that has
     # not been taught about groups keeps the behaviour it has, and so the two
     # shapes can be compared on the same data.

@@ -651,7 +651,7 @@ export default function CodeMappingPage() {
   );
   const [provenanceFilter, setProvenanceFilter] = useState("");
   const [rollup, setRollup] = useState(false);
-  const [seenOnly, setSeenOnly] = useState(false);
+  const [seenOnly, setSeenOnly] = useState(true);
   // key -> members, or null while the fetch is in flight.
   const [expandedGroups, setExpandedGroups] = useState<Record<string, CodeMappingRow[] | null>>({});
   const [navigationTarget, setNavigationTarget] = useState<{ id: string } | null>(null);
