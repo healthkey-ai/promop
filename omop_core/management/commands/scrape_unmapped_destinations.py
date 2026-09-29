@@ -42,7 +42,7 @@ class Command(EmbeddingLoadCommand):
     help = 'Approve unambiguous Athena destinations for unmapped queue codes, preserving curated mappings.'
 
     def add_arguments(self, parser):
-        parser.add_argument('--vocabulary', action='append', help='Exact source vocabulary; repeatable. Default: ICD10 and ICD10CM.')
+        parser.add_argument('--vocabulary', action='append', help='Exact source vocabulary; repeatable. Default: ICD10CM.')
         parser.add_argument('--lookup-vocabulary', action='append', default=[], metavar='SOURCE=ATHENA',
                             help='Explicit source-label correction, e.g. ICD10=ICD10CM for HT-One; repeatable')
         sources = parser.add_mutually_exclusive_group()
@@ -76,7 +76,7 @@ class Command(EmbeddingLoadCommand):
             if source in lookup_vocabularies and lookup_vocabularies[source] != destination:
                 raise CommandError(f'Conflicting lookup vocabularies for {source}')
             lookup_vocabularies[source] = destination
-        vocabularies = options['vocabulary'] or ['ICD10', 'ICD10CM']
+        vocabularies = options['vocabulary'] or ['ICD10CM']
         # Audit every unapproved queue code, including existing proposals, but
         # keep the stricter write eligibility separate from coverage counts.
         query = SourceCodeConceptMapping.objects.filter(

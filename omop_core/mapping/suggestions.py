@@ -199,13 +199,7 @@ RANKING_MODEL = RANKING_MODEL_ANTHROPIC
 
 
 def _find_source_concept(source_vocabulary_id, source_code):
-    """Look up the OMOP Concept for a source code, with ICD10CM_MERGE fallback.
-
-    ICD-10 (HT-One) codes are ICD-10-CM format (#1028), but Athena loads
-    concepts under vocabulary_id='ICD10CM'.  When the literal vocabulary has
-    no concept, try the merged-vocabulary alias so the source_concept and its
-    concept_name are still available for ranking and display.
-    """
+    """Look up the OMOP Concept for a source code."""
     if not source_vocabulary_id:
         return None
     concept = Concept.objects.filter(
@@ -214,14 +208,6 @@ def _find_source_concept(source_vocabulary_id, source_code):
     ).first()
     if concept is not None:
         return concept
-    # Fallback: try the cross-vocabulary sibling (ICD10 ↔ ICD10CM).
-    from omop_core.services.source_vocabularies import ICD10_CROSS_VOCAB
-    sibling = ICD10_CROSS_VOCAB.get(source_vocabulary_id)
-    if sibling:
-        return Concept.objects.filter(
-            vocabulary_id=sibling,
-            concept_code__iexact=source_code,
-        ).first()
     return None
 
 
@@ -457,18 +443,8 @@ def _get_embedding_model():
 
 
 def vocabulary_aliases(source_vocabulary_id):
-    """Every source vocabulary sharing the same code space.
-
-    ICD-10 and ICD-10-CM have separate tabs but share a code space: HT-One
-    sends ICD-10-CM format codes labeled as ``ICD10``, and Athena loads them
-    under ``ICD10CM``.  Suggest must look across both.
-    """
-    from omop_core.services.source_vocabularies import ICD10_CROSS_VOCAB
-    vocab_ids = {source_vocabulary_id}
-    sibling = ICD10_CROSS_VOCAB.get(source_vocabulary_id)
-    if sibling:
-        vocab_ids.add(sibling)
-    return vocab_ids
+    """Every source vocabulary sharing the same code space."""
+    return {source_vocabulary_id}
 
 
 def suggestable_mappings(omop_table=None, *, source_vocabulary_id=None,

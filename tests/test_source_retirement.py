@@ -19,7 +19,7 @@ def source(code='O35.0XX0', **kwargs):
 
 
 def mapping(code='O35.0XX0', **kwargs):
-    return SourceCodeConceptMapping.objects.create(source_vocabulary_id='ICD10', source_code=code, **kwargs)
+    return SourceCodeConceptMapping.objects.create(source_vocabulary_id='ICD10CM', source_code=code, **kwargs)
 
 
 @pytest.mark.parametrize('reason', ['D', 'U'])
@@ -65,10 +65,15 @@ def test_same_code_in_unrelated_vocabulary_is_not_evidence():
     assert mapping_source_retirement([row])[row.pk]['source_retired'] is None
 
 
-def test_any_linked_source_retirement_evidence_is_kept():
-    active = ConceptFactory(vocabulary=VocabularyFactory(vocabulary_id='ICD10'), concept_code='O35.0XX0',
+def test_any_linked_source_retirement_evidence_is_kept(monkeypatch):
+    """A retired concept under an aliased vocabulary spelling is still evidence."""
+    monkeypatch.setattr('omop_core.services.source_retirement.VOCABULARY_OID_ALIASES',
+                        {'ICD10_ALIAS': 'ICD10CM'})
+    active = ConceptFactory(vocabulary=VocabularyFactory(vocabulary_id='ICD10CM'), concept_code='O35.0XX0',
                             invalid_reason=None, valid_end_date=date(2099, 12, 31))
-    retired = source(invalid_reason='U', valid_end_date=date(2020, 1, 1))
+    retired = ConceptFactory(vocabulary=VocabularyFactory(vocabulary_id='ICD10_ALIAS'),
+                             concept_code='O35.0XX0', source='Athena',
+                             invalid_reason='U', valid_end_date=date(2020, 1, 1))
     row = mapping(source_concept=active)
     payload = mapping_source_retirement([row])[row.pk]
     assert payload['source_retired'] is True
@@ -88,7 +93,7 @@ def test_list_returns_source_metadata_for_all_sections():
     source(invalid_reason='D')
     rows = [mapping(status='proposed')]
     rows.append(SourceCodeConceptMapping.objects.create(
-        source_vocabulary_id='ICD10CM', source_code='O35.0XX0', status='approved', origin_system='athena'))
+        source_vocabulary_id='ICD10CM', source_code=' O35.0XX0', status='approved', origin_system='athena'))
     request = APIRequestFactory().get('/')
     force_authenticate(request, user=Identity.objects.create_user(email='retirement-admin@example.test', is_staff=True))
     response = code_mapping_list(request)

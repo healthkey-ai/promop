@@ -135,15 +135,11 @@ def test_duplicate_edges_to_same_target_do_not_create_ambiguity(old_target, expo
     assert 'would_change_destination=1' in run_command(path=build(extra_edges=[edge]))[0]
 
 
-@pytest.mark.parametrize('vocabulary,origin,expected', [
-    ('ICD10', 'HT-One', 'would_change_destination'),
-    ('ICD10', 'curator', 'not_found'),
-    ('ICD10CM', 'HT-One', 'would_change_destination'),
-])
-def test_only_documented_ht_one_alias_is_used(old_target, export, vocabulary, origin, expected):
+@pytest.mark.parametrize('origin', ['HT-One', 'curator'])
+def test_any_non_athena_icd10cm_row_is_reconciled(old_target, export, origin):
     build, _, _, _ = export
-    _mapping('A01.0', vocabulary, old_target, origin_system=origin)
-    assert f'{expected}=1' in run_command(path=build())[0]
+    _mapping('A01.0', 'ICD10CM', old_target, origin_system=origin)
+    assert 'would_change_destination=1' in run_command(path=build())[0]
 
 
 @pytest.mark.parametrize('changes,expected', [

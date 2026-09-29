@@ -22181,9 +22181,9 @@ class CodeMappingApiTest(TestCase):
         from io import StringIO
         successor = self._retire_standard_with_replacement()
         SourceCodeConceptMapping.objects.filter(
-            source_vocabulary_id='ICD10', source_code='F98.8').delete()
+            source_vocabulary_id='ICD10CM', source_code='F98.8').delete()
         SourceCodeConceptMapping.objects.create(
-            source_vocabulary_id='ICD10', source_code='F98.8', omop_table='measurement',
+            source_vocabulary_id='ICD10CM', source_code='F98.8', omop_table='measurement',
             target_concept=self.standard, destination_vocabulary_id='LOINC',
             status='approved', origin='import',
         )
@@ -22192,7 +22192,7 @@ class CodeMappingApiTest(TestCase):
             call_command('audit_retired_mapping_destinations', stdout=out)
         self.assertEqual(raised.exception.code, 1)
         report = out.getvalue()
-        self.assertIn('ICD10:F98.8', report)
+        self.assertIn('ICD10CM:F98.8', report)
         self.assertIn(f'-> {successor.concept_id} LOINC:33358-4', report)
         self.assertIn('1 mapping(s)', report)
 
@@ -22212,9 +22212,9 @@ class CodeMappingApiTest(TestCase):
         from io import StringIO
         self._retire_standard_with_replacement()
         SourceCodeConceptMapping.objects.filter(
-            source_vocabulary_id='ICD10', source_code='Z76.82').delete()
+            source_vocabulary_id='ICD10CM', source_code='Z76.82').delete()
         SourceCodeConceptMapping.objects.create(
-            source_vocabulary_id='ICD10', source_code='Z76.82', omop_table='measurement',
+            source_vocabulary_id='ICD10CM', source_code='Z76.82', omop_table='measurement',
             target_concept=self.standard, destination_vocabulary_id='LOINC',
             status='proposed', origin='import',
         )

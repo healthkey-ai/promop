@@ -6,17 +6,13 @@ from django.db.models.functions import Trim, Upper
 from django.utils import timezone
 
 from omop_core.models import Concept
-from omop_core.services.source_vocabularies import (
-    ICD10_CANONICAL, ICD10_CROSS_VOCAB, VOCABULARY_OID_ALIASES,
-)
+from omop_core.services.source_vocabularies import VOCABULARY_OID_ALIASES
 
 
 def mapping_source_retirement(mappings):
     mappings = list(mappings)
-    # Cross-vocab expands the concept lookup (ICD10 ↔ ICD10CM); canonical
-    # groups both under one key so a mapping finds its sibling's concepts.
-    cross = {**ICD10_CROSS_VOCAB, **VOCABULARY_OID_ALIASES}
-    aliases = {**ICD10_CANONICAL, **VOCABULARY_OID_ALIASES}
+    cross = {**VOCABULARY_OID_ALIASES}
+    aliases = {**VOCABULARY_OID_ALIASES}
 
     def canonical(vocabulary):
         return aliases.get(vocabulary, vocabulary)

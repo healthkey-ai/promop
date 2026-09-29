@@ -9,9 +9,7 @@ exists somewhere already loaded:
 1. **Athena** — ``concept`` by ``(vocabulary_id, concept_code)``.  Covers
    SNOMED, LOINC, RxNorm, CVX, HemOnc and every other Athena vocabulary.
    ``VOCABULARY_OID_ALIASES`` folds source ids that spell a vocabulary
-   differently (the SNOMED OID); ``ICD10_CROSS_VOCAB`` tries ICD-10-CM when
-   an "ICD-10" code has no WHO entry (HT-One's ICD-10 codes are ICD-10-CM
-   codes: ``C85.90`` exists only under ICD10CM), and vice versa.
+   differently (the SNOMED OID).
 2. **UMLS** — ``umls_source_code`` by ``(root_source, code)`` for vocabularies
    Athena does not carry on a deployment (MedDRA and CPT4 are licensed and
    absent from staging), or for codes Athena lacks.  The best atom per code
@@ -33,7 +31,7 @@ from django.db import connections
 from psycopg import sql
 
 from omop_core.services.source_vocabularies import (
-    ICD10_CROSS_VOCAB, VOCABULARY_OID_ALIASES, VOCAB_TO_UMLS_ROOT,
+    VOCABULARY_OID_ALIASES, VOCAB_TO_UMLS_ROOT,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,10 +39,7 @@ logger = logging.getLogger(__name__)
 DESCRIPTION_MAX = 255
 
 # (source vocabulary as it arrives, Athena vocabulary to look it up in).
-# ICD-10 codes from HT-One are ICD-10-CM format; Athena stores them as ICD10CM.
-ATHENA_ALIASES = list(VOCABULARY_OID_ALIASES.items()) + [
-    (vocab, cross) for vocab, cross in ICD10_CROSS_VOCAB.items()
-]
+ATHENA_ALIASES = list(VOCABULARY_OID_ALIASES.items())
 
 # (source vocabulary as it arrives, UMLS root_source), OID spellings included.
 UMLS_ROOTS = list(VOCAB_TO_UMLS_ROOT.items()) + [
