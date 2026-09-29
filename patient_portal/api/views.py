@@ -11012,7 +11012,8 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
             repoint['persons_marked_stale'] = len(affected_persons)
 
     # Mirror to concept_relationship when both concepts exist.
-    if status_value == 'approved' and mapping.source_concept_id and concept:
+    if (status_value == 'approved' and mapping.source_concept_id and concept
+            and not source_vocabularies.is_catalog_source(mapping.source_vocabulary_id)):
         _mirror_to_concept_relationship(mapping)
 
     return mapping, repoint
