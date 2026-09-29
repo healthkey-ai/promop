@@ -15,6 +15,16 @@ import { normalizeGeneticMutations } from "@/components/PatientInfo/patientConst
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
+// The form stores "United States", but the record can also carry what an import or another
+// client wrote: "US" from FHIR/Synthea, "United States of America" from CB's geolocation.
+const US_SPELLINGS = new Set(["us", "usa", "united states", "united states of america"]);
+
+/** True unless the country is set to something that is not the US. */
+function mayBeUnitedStates(country: unknown): boolean {
+  if (country == null || String(country).trim() === "") return true;
+  return US_SPELLINGS.has(String(country).trim().toLowerCase());
+}
+
 function SaveStatusIndicator({ status, onRetry }: { status: SaveStatus; onRetry: () => void }) {
   if (status === "idle") return null;
   return (
@@ -216,9 +226,11 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated }: Pick<Patien
   const handleZipcodeChange = useCallback(async (zipcode: string) => {
     handleFieldChange("postal_code", zipcode);
     // The lookup is US-only, and Germany, France, Spain and Italy use 5-digit postcodes too:
-    // without this, a German 10115 would autofill New York / NY and save it.
-    const country = (pendingDataRef.current ?? editedInfoRef.current)?.country;
-    if (country && country !== "United States") return;
+    // without this, a German 10115 would autofill New York / NY and save it. Only a country
+    // that is set and not the US skips it -- one entered after the ZIP cannot help.
+    const countryAllowsLookup = () =>
+      mayBeUnitedStates((pendingDataRef.current ?? editedInfoRef.current)?.country);
+    if (!countryAllowsLookup()) return;
     if (zipcode.length === 5 && /^\d{5}$/.test(zipcode)) {
       try {
         const res = await fetch(`https://api.zippopotam.us/us/${zipcode}`);
@@ -226,8 +238,10 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated }: Pick<Patien
           const zipData = await res.json();
           // Drop a stale response: if the ZIP changed while this lookup was in flight, applying
           // its city/region would pair ZIP A's place with ZIP B's postal_code.
+          // The same for a country picked while it was in flight.
           const current = pendingDataRef.current ?? editedInfoRef.current;
-          if (zipData.places?.length > 0 && String(current?.postal_code ?? "") === zipcode) {
+          if (zipData.places?.length > 0 && String(current?.postal_code ?? "") === zipcode
+              && countryAllowsLookup()) {
             const place = zipData.places[0];
             // `state` is the full name ("California"); `region` maps to OMOP Location.state,
             // which the CDM caps at two characters, so the full name fails the save with a 400.

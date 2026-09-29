@@ -40,7 +40,7 @@ function mockLookup(place: Record<string, string>) {
   return fetch;
 }
 
-async function typeZipAndWaitForSave(country: string, zip: string) {
+async function typeZipAndWaitForSave(country: string | null, zip: string) {
   data = { patient_info: { country }, user: null, patient_name: "Patient" };
   render(<PatientInfo apiClient={{} as AxiosInstance} federated />);
   fireEvent.change(screen.getByPlaceholderText(/5-digit US zip code/i), { target: { value: zip } });
@@ -65,6 +65,17 @@ describe("PatientInfo ZIP autofill", () => {
     const sent = await typeZipAndWaitForSave("United States", "90210");
     expect(sent).toStrictEqual({ postal_code: "90210", city: "Beverly Hills" });
   }, TIMEOUT);
+
+  // Unset, and the spellings imports and CB's geolocation write, not only the form's option.
+  it.each([null, "", "US", "united states", "United States of America"])(
+    "looks up when country is %j",
+    async (country) => {
+      mockLookup(BEVERLY_HILLS);
+      const sent = await typeZipAndWaitForSave(country, "90210");
+      expect(sent).toStrictEqual({ postal_code: "90210", city: "Beverly Hills", region: "CA" });
+    },
+    TIMEOUT,
+  );
 
   it("does not look up a 5-digit postcode outside the US", async () => {
     const fetch = mockLookup(BEVERLY_HILLS);
