@@ -2192,6 +2192,34 @@ class SourceCodeConceptMapping(models.Model):
         return f"{source}:{self.source_code} -> {self.target_concept_id}"
 
 
+class CodeMappingUpload(models.Model):
+    """Immutable receipt for one atomic source-code CSV upload."""
+
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL,
+        related_name='+',
+    )
+    source_vocabulary_id = models.CharField(max_length=255)
+    provenance = models.CharField(max_length=50)
+    filename = models.CharField(max_length=255)
+    content_sha256 = models.CharField(max_length=64)
+    total_rows = models.PositiveIntegerField(default=0)
+    inserted_rows = models.PositiveIntegerField(default=0)
+    updated_rows = models.PositiveIntegerField(default=0)
+    unchanged_rows = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'code_mapping_upload'
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['source_vocabulary_id', 'provenance', 'content_sha256'],
+                name='uq_code_mapping_upload_artifact',
+            ),
+        ]
+
+
 class MappingSuggestionReview(models.Model):
     """Feedback on a reviewed suggestion replaced by a later Suggest run.
 

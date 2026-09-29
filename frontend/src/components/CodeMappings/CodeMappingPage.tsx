@@ -1,5 +1,6 @@
 import CanonicalUnitEditor from "./CanonicalUnitEditor";
 import ConceptToCodeTab from "./ConceptToCodeTab";
+import CodeMappingUploadDialog, { type CodeMappingUploadResult } from "./CodeMappingUploadDialog";
 import PageTitle from '@/components/Branding/PageTitle';
 import IndividualSuggestCandidates from "./IndividualSuggestCandidates";
 import InlineDestinationPicker from "./InlineDestinationPicker";
@@ -8,7 +9,7 @@ import { searchDestinationConcepts } from "./destinationSearch";
 import SuggestCandidates, { type CandidateActivity } from "./SuggestCandidates";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, Check, ChevronDown, ChevronRight, Download, Pencil, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, ChevronRight, Download, Pencil, Plus, Search, Sparkles, Trash2, Upload, X } from "lucide-react";
 import api from "@/api/axios";
 import MintConceptDialog from "./MintConceptDialog";
 import ConceptInputDetails from "@/components/UI/ConceptInputDetails";
@@ -633,6 +634,7 @@ export default function CodeMappingPage() {
   const [accuracy, setAccuracy] = useState<AccuracyResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [uploadOpen, setUploadOpen] = useState(false);
   const [mintOpen, setMintOpen] = useState(false);
   const [error, setError] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -1902,13 +1904,20 @@ export default function CodeMappingPage() {
               </p>
             </div>
           </div>
-          <button
-            onClick={openNewDialog}
-            className="inline-flex items-center gap-2 rounded-md bg-slate-950 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
-          >
-            <Plus size={16} />
-            New Mapping
-          </button>
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => setUploadOpen(true)}
+              className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100">
+              <Upload size={16} />
+              Upload
+            </button>
+            <button
+              onClick={openNewDialog}
+              className="inline-flex items-center gap-2 rounded-md bg-slate-950 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
+            >
+              <Plus size={16} />
+              New Mapping
+            </button>
+          </div>
         </div>
 
         {directionControls}
@@ -2296,6 +2305,19 @@ export default function CodeMappingPage() {
           </section>
         )}
       </div>
+
+      {uploadOpen && <CodeMappingUploadDialog
+        defaultProvenance={currentUser?.email || ""}
+        onClose={() => setUploadOpen(false)}
+        onUploaded={async (result: CodeMappingUploadResult) => {
+          setUploadOpen(false);
+          setPages({});
+          setBanner(result.duplicate
+            ? `This CSV was already uploaded. ${result.total} rows; no counts were added twice.`
+            : `Uploaded ${result.total} rows: ${result.inserted} inserted, ${result.updated} updated, ${result.unchanged} unchanged.`);
+          await refreshCurrent.current();
+        }}
+      />}
 
       {dialogMode && (
         <div inert={mintOpen} className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4">

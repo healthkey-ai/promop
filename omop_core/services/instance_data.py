@@ -41,7 +41,7 @@ SYSTEM: frozenset[str] = frozenset({
     'omop_core.CdmSource', 'omop_core.ConceptEmbedding', 'omop_core.RegimenMappingGap',
     'omop_core.SuggestEmbeddingSnapshot', 'omop_core.SuggestRun',
     # Historical model-quality feedback for this instance, not a live mapping.
-    'omop_core.MappingSuggestionReview',
+    'omop_core.CodeMappingUpload', 'omop_core.MappingSuggestionReview',
     # Derived from concept + concept_synonym; rebuilt locally, never copied.
     'omop_core.SuggestSynonymTerm',
     'omop_core.AthenaVocabularySync', 'omop_core.VocabularyRelease',
