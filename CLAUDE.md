@@ -1025,9 +1025,13 @@ Three rules that keep it honest:
   stale since the last refresh can cost a shortlist slot; it can never put a
   retired concept in front of the ranker.
 
-Not fixed by this: drug names. "ASPIRIN 81 MG ORAL TABLET" shares "MG ORAL TABLET"
-with ~350,000 RxNorm names, and that is one domain, so scoping cannot help
-(~4.5s). That needs a different similarity measure, not a narrower index.
+Domain indexes alone do not fix drug names: "ASPIRIN 81 MG ORAL TABLET" shares
+"MG ORAL TABLET" with many RxNorm names in the same domain. Drug names now use
+ingredient narrowing, followed by a selective top-N probe that falls back to the
+original query unless its shortlist is complete. The probe preserves the existing
+candidate output; ingredient narrowing itself can change it. See
+[drug lexical retrieval](docs/drug_lexical_retrieval_architecture.md) for the
+algorithm, differential tests, and before/after comparison command.
 
 Cost: ~135 MB for the concept indexes and ~660 MB for the table and its indexes
 on a fully loaded instance.
