@@ -33,7 +33,37 @@ This is the easiest path for local setup and staging repairs. The command
 downloads the first zip from the shared folder, extracts it under `/tmp/vocab`,
 loads the vocabulary tables, and publishes a `vocabulary_release` manifest.
 
-[Open the supplied vocabulary folder](https://drive.google.com/drive/u/0/folders/1HoRWGepqcH3pMKK03KNb1oWpaVs0Avl7).
+[Open the supplied vocabulary folder](https://drive.google.com/drive/u/1/folders/1HoRWGepqcH3pMKK03KNb1oWpaVs0Avl7).
+
+## Athena freshness and insert-only updates
+
+Deployments resolve the selected ZIP in the governed Drive folder before
+downloading it. A file identity already recorded by a successful sync exits
+without downloading the archive or touching vocabulary tables. Check a database
+manually without changing it:
+
+```bash
+python manage.py sync_athena_vocabulary --gdrive
+```
+
+When that reports a different artifact, measure the missing-row delta inside a
+transaction that is rolled back:
+
+```bash
+python manage.py sync_athena_vocabulary --gdrive --dry-run
+```
+
+Apply only absent rows with the existing conflict-tolerant Athena loader:
+
+```bash
+python manage.py sync_athena_vocabulary --gdrive --apply
+```
+
+The apply path holds a database advisory lock, never enables `--replace`, and
+records an `AthenaVocabularySync` receipt containing the source identity,
+SHA-256, prior/new releases, per-table insert counts, outcome, and any failure.
+Failures roll back the vocabulary transaction and may be retried. A repeated
+successful command is a metadata-only no-op.
 
 ```bash
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \

@@ -8,6 +8,15 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Athena freshness and scoped deploy deltas** — deployment preparation now
+  compares the selected artifact in the governed Google Drive folder with a
+  durable local sync receipt. An unchanged Drive file exits before downloading
+  the archive or touching vocabulary tables; a changed artifact is SHA-256
+  fingerprinted and passed through the existing insert-only loader under a
+  database advisory lock and transaction. Only absent rows commit, failures
+  roll back to the previous published release, and check/dry-run/apply modes
+  record structured outcomes and per-table delta counts (#1652).
+
 - **LOINC loads itself from loinc.org** — `sync_loinc_release` checks
   `GET /api/v1/Loinc` for the published version and, when ours is older, streams
   the release archive and loads both tables from it: `LoincTable/Loinc.csv` into
