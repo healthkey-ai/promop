@@ -11061,7 +11061,7 @@ def code_mapping_group(request):
     # provenance filter expands into all 2,557 -- including the rows the filter
     # existed to hide -- and a cross-tab search expands into one tab only.
     rows = list(with_destination_counts(
-        SECTION_FILTERS[section](group_members(visible_rows(mappings, request.query_params), label))
+        SECTION_FILTERS[section](group_members(visible_rows(mappings, request.query_params, section=section), label))
     ).order_by('-occurrence_count', 'source_code', 'id')[:MAX_GROUP_MEMBERS + 1])
     truncated = len(rows) > MAX_GROUP_MEMBERS
     rows = rows[:MAX_GROUP_MEMBERS]

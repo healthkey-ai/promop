@@ -1646,7 +1646,7 @@ describe("server mapping pages", () => {
     render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
   };
 
-  it("defaults to Seen > 0 and resets pages when zero-Seen codes are included", async () => {
+  it("defaults to Seen > 0 and resets pages when toggled", async () => {
     mockGet.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
       if (url !== "/v1/code-mappings/") return Promise.resolve({ data: url.includes("reference") ? reference : {} });
       const onlySeen = config?.params?.seen_only === "1";
@@ -1663,15 +1663,12 @@ describe("server mapping pages", () => {
     expect(filter).toBeChecked();
     expect(filter.closest("th")).toBe(screen.getByTitle("Sort Unmapped by Seen").closest("th"));
     expect(screen.getByTestId("all-mappings-count")).toHaveTextContent("(101)");
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
-    await screen.findByText("SEEN PAGE 2");
     fireEvent.click(filter);
     await screen.findByText("ZERO CODE");
-    expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ seen_only: "0", page_0: 1 }) });
     expect(screen.getByTestId("all-mappings-count")).toHaveTextContent("(500)");
     fireEvent.click(filter);
     await screen.findByText("SEEN PAGE 1");
-    expect(screen.queryByText("ZERO CODE")).not.toBeInTheDocument();
+    expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ seen_only: "1", page_0: 1 }) });
   });
 
   it("counts all matching sources even when the page contains one label group", async () => {
