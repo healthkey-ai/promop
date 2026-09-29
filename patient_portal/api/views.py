@@ -8,7 +8,7 @@ from drf_spectacular.utils import (
 from rest_framework import serializers, viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.exceptions import ValidationError
-from rest_framework.pagination import PageNumberPagination
+from rest_framework.pagination import CursorPagination, PageNumberPagination
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -7877,7 +7877,18 @@ def concept_detail(request, concept_id):
     concept = Concept.objects.filter(concept_id=concept_id).first()
     if concept is None:
         return Response({'detail': 'Concept not found.'}, status=status.HTTP_404_NOT_FOUND)
-    return _set_release_etag(request, Response(_serialize_concept(concept, _vocab_version_map())))
+    from omop_core.services.loinc_metadata import loinc_metadata_for_concepts
+    payload = _serialize_concept(concept, _vocab_version_map())
+    payload['loinc'] = loinc_metadata_for_concepts([concept]).get(concept.pk)
+    response = Response(payload)
+    if payload['loinc'] is None:
+        return _set_release_etag(request, response)
+    snapshot = _measurement_concept_snapshot()
+    etag = _measurement_concept_etag(snapshot)
+    if etag and _etag_matches(request.META.get('HTTP_IF_NONE_MATCH', ''), etag):
+        from django.http import HttpResponseNotModified
+        return _set_measurement_concept_etag(HttpResponseNotModified(), etag)
+    return _set_measurement_concept_etag(response, etag)
 
 
 @api_view(['GET'])
@@ -7958,6 +7969,13 @@ class ConceptPagination(PageNumberPagination):
     max_page_size = 100
 
 
+class MeasurementConceptPagination(CursorPagination):
+    page_size = 500
+    page_size_query_param = 'page_size'
+    max_page_size = 1000
+    ordering = 'concept_id'
+
+
 # Query params accepted as exact-match filters by both concept endpoints.
 _CONCEPT_FILTER_PARAMS = ('vocabulary_id', 'domain_id', 'concept_class_id', 'standard_concept')
 
@@ -7994,9 +8012,8 @@ def _concept_name_search_filter(query):
     return Q(concept_name__icontains=query) | token_match
 
 
-def _serialize_concept(concept, versions=None):
-    from omop_core.services.concept_unit_info import concept_unit_fields
-    payload = {
+def _serialize_concept_base(concept, versions=None):
+    return {
         'concept_id': concept.concept_id,
         'concept_name': concept.concept_name,
         'vocabulary_id': concept.vocabulary_id,
@@ -8007,8 +8024,44 @@ def _serialize_concept(concept, versions=None):
         'standard_concept': concept.standard_concept,
         'invalid_reason': concept.invalid_reason,
     }
+
+
+def _serialize_concept(concept, versions=None):
+    from omop_core.services.concept_unit_info import concept_unit_fields
+    payload = _serialize_concept_base(concept, versions)
     payload.update(concept_unit_fields(concept))
     return payload
+
+
+def _measurement_concept_snapshot():
+    from omop_core.models import LoincRelease
+    from omop_core.services.vocab_release import get_latest_release
+
+    vocabulary_release = get_latest_release()
+    loinc_release = LoincRelease.objects.order_by('-loaded_at', '-release_version').first()
+    return {
+        'vocabulary_release_id': vocabulary_release.pk if vocabulary_release else None,
+        'athena_version': vocabulary_release.athena_version if vocabulary_release else None,
+        'loinc_release_version': loinc_release.release_version if loinc_release else None,
+    }
+
+
+def _measurement_concept_etag(snapshot):
+    # Without a published vocabulary release, concept-graph changes have no
+    # trustworthy staleness signal. Serve the catalogue, but do not emit an
+    # ETag that could stay unchanged across an Athena reload.
+    if snapshot['vocabulary_release_id'] is None:
+        return None
+    raw = json.dumps(snapshot, sort_keys=True, separators=(',', ':'))
+    digest = hashlib.sha256(raw.encode()).hexdigest()[:16]
+    return f'"measurement-concepts-{digest}"'
+
+
+def _set_measurement_concept_etag(response, etag):
+    if etag:
+        response['ETag'] = etag
+        response['Cache-Control'] = 'public, max-age=300'
+    return response
 
 
 def _truthy_param(query_params, name):
@@ -8232,6 +8285,36 @@ def concept_list(request):
 
     queryset = _apply_concept_filters(Concept.objects.all(), request.query_params)
     return _paginated_concept_response(queryset, request)
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def measurement_concept_catalog(request):
+    """Active standard Measurement concepts with relationship-backed LOINC metadata."""
+    from django.http import HttpResponseNotModified
+    from omop_core.services.loinc_metadata import loinc_metadata_for_concepts
+
+    snapshot = _measurement_concept_snapshot()
+    etag = _measurement_concept_etag(snapshot)
+    if etag and _etag_matches(request.META.get('HTTP_IF_NONE_MATCH', ''), etag):
+        return _set_measurement_concept_etag(HttpResponseNotModified(), etag)
+
+    queryset = Concept.objects.filter(
+        domain_id='Measurement',
+        standard_concept='S',
+    ).filter(Q(invalid_reason__isnull=True) | Q(invalid_reason=''))
+    paginator = MeasurementConceptPagination()
+    page = paginator.paginate_queryset(queryset, request)
+    versions = _vocab_version_map()
+    loinc_metadata = loinc_metadata_for_concepts(page)
+    results = []
+    for concept in page:
+        payload = _serialize_concept_base(concept, versions)
+        payload['loinc'] = loinc_metadata.get(concept.pk)
+        results.append(payload)
+    response = paginator.get_paginated_response(results)
+    response.data['snapshot'] = snapshot
+    return _set_measurement_concept_etag(response, etag)
 
 
 @api_view(['GET'])
