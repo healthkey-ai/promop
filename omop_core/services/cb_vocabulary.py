@@ -180,19 +180,21 @@ def resolve_concepts(keys):
 def destination_problem(concept):
     """Why this concept cannot be a CB term's destination, or '' if it can.
 
-    HK-* concepts are accepted on a par with standard ones (product decision,
-    cancerbot #5363); they are non-standard by construction. Classification
-    concepts ('C') are accepted because several CB terms name a drug class,
-    which is exactly what a classification concept is.
+    Standardness is deliberately not a condition. HK-* concepts are accepted on
+    a par with standard ones (product decision, cancerbot #5363), and CB's
+    committed therapy crosswalk is built on HemOnc component concepts that are
+    non-standard in CTOMOP. A CB row is a catalog entry, so a non-standard
+    destination never reaches ingest here; ``standard_concept`` travels in the
+    export and CB decides what it activates.
+
+    What is refused is a destination that is broken rather than debatable:
+    absent, retired or replaced, or a local-range id posing as a public
+    vocabulary.
     """
     if concept is None:
         return 'not on this instance'
     if concept.invalid_reason:
         return f'invalid_reason={concept.invalid_reason}'
-    if (concept.vocabulary_id or '').startswith('HK-'):
-        return ''
-    if concept.concept_id >= LOCAL_CONCEPT_ID_FLOOR:
+    if concept.concept_id >= LOCAL_CONCEPT_ID_FLOOR and not (concept.vocabulary_id or '').startswith('HK-'):
         return f'local-range id labelled {concept.vocabulary_id}'
-    if concept.standard_concept not in ('S', 'C'):
-        return 'not standard'
     return ''

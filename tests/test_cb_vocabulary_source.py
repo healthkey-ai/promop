@@ -49,6 +49,8 @@ def concepts():
         'fake': concept('SNOMED', '999999999', concept_id=2_000_000_100),
         'set_a': concept('HemOnc', '35807219', domain='Drug'),
         'set_b': concept('HemOnc', '35807319', domain='Drug'),
+        'hemonc_component': concept('HemOnc', '12', domain='Drug', standard_concept=None),
+        'retired': concept('HemOnc', '45895', domain='Drug', invalid_reason='D'),
     }
 
 
@@ -66,6 +68,11 @@ def proposals(tmp_path, concepts):
          'match': 'no_concept', 'note': 'absent from CTOMOP'},
         {'table': 'concomitantmedication', 'code': 'antivirals_and_antifungals', 'title': 'Antivirals',
          'match': 'concept_set', 'concept_set': 'HemOnc|35807219; HemOnc|35807319'},
+        {'table': 'therapycomponent', 'code': 'trastuzumab_emtansine', 'title': 'T-DM1',
+         'omop_vocabulary_id': 'HemOnc', 'omop_concept_code': '12', 'match': 'curated', 'verified': 'ok'},
+        {'table': 'therapycomponentcategory', 'code': 'her2_targeted_therapy', 'title': 'HER2',
+         'omop_vocabulary_id': 'HemOnc', 'omop_concept_code': '45895', 'match': 'auto_exact',
+         'verified': 'ok'},
         {'table': 'therapy', 'code': 'esa', 'title': 'ESA', 'omop_vocabulary_id': 'NDFRT',
          'omop_concept_code': 'N0000175425', 'match': 'curated', 'verified': 'NOT IN MIRROR'},
     ])
@@ -129,6 +136,12 @@ def test_import_seeds_proposed_rows_with_usable_destinations_only(proposals, con
     assert esa.target_concept_id is None
     assert esa.destination_candidates.get().target_concept_id is None
     assert cb('cytogenicmarker:chromothripsis').target_concept_id is None
+    # Non-standard but valid (CB's HemOnc component convention) is a destination;
+    # a retired concept is not.
+    assert cb('therapycomponent:trastuzumab_emtansine').target_concept_id == concepts['hemonc_component'].concept_id
+    retired = cb('therapycomponentcategory:her2_targeted_therapy')
+    assert retired.target_concept_id is None
+    assert 'invalid_reason=D' in retired.notes
 
 
 def test_concept_set_members_become_candidates(proposals, concepts):
@@ -193,6 +206,8 @@ def test_bulk_approval_signs_off_only_unchanged_verified_proposals(proposals, co
     # Rejected at import (local-range id) and unverified curated rows stay for the SME.
     assert cb('binetstage:binet_stage_a').status == 'proposed'
     assert cb('therapy:esa').status == 'proposed'
+    assert cb('therapycomponentcategory:her2_targeted_therapy').status == 'proposed'
+    assert cb('therapycomponent:trastuzumab_emtansine').status == 'approved'
     # Categories outside the bulk set are untouched.
     assert cb('cytogenicmarker:1q21Amplification').status == 'proposed'
 
@@ -230,7 +245,7 @@ def test_export_is_a_complete_snapshot_keyed_by_natural_concept_key(tmp_path, pr
     payload = json.loads(out.read_text())
     by_code = {m['source_code']: m for m in payload['mappings']}
     assert set(by_code) == {r.source_code for r in SourceCodeConceptMapping.objects.filter(source_vocabulary_id='CB')}
-    assert payload['counts'] == {'approved': 1, 'proposed': 5}
+    assert payload['counts'] == {'approved': 2, 'proposed': 6}
     bc = by_code['disease:BC']
     assert (bc['table'], bc['code'], bc['status'], bc['reviewer']) == ('disease', 'BC', 'approved', 'sme@example.com')
     assert (bc['target']['vocabulary_id'], bc['target']['concept_code']) == ('SNOMED', '254837009')
