@@ -11,12 +11,18 @@ from omop_core.services.source_retirement import mapping_source_retirement
 OVERALL = '__overall__'
 
 def _is_athena(origin_system):
-    """True for any Athena-family origin (athena, athena-multiple, athena-local-maps-to, etc.)."""
-    return bool(origin_system) and origin_system.startswith('athena')
+    """True for resolved Athena origins (athena, athena-local-maps-to, athena-standard-self).
+
+    ``athena-multiple`` is excluded: it means Athena found several candidates
+    and a curator has not chosen yet, so it belongs in Unmapped.
+    """
+    return (bool(origin_system)
+            and origin_system.startswith('athena')
+            and origin_system != 'athena-multiple')
 
 
-# ORM filter for athena-family origins.
-_Q_ATHENA = Q(origin_system__startswith='athena')
+# ORM filter for resolved athena-family origins.
+_Q_ATHENA = Q(origin_system__startswith='athena') & ~Q(origin_system='athena-multiple')
 # A blank origin_system is a real value -- enqueue_unmapped_source_codes writes
 # it for every newly queued code -- but '' already means "no filter" on the
 # wire, so filtering to it needs a sentinel.
