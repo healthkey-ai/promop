@@ -4,7 +4,7 @@ import django.db.models.deletion
 
 class Migration(migrations.Migration):
     dependencies = [
-        ('omop_core', '0267_relabel_icd10_to_icd10cm'),
+        ('omop_core', '0268_widen_source_vocabulary_ids'),
     ]
 
     operations = [
