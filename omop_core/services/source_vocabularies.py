@@ -214,9 +214,9 @@ VOCABULARY_OID_ALIASES = {
 
 
 # Exact standard FHIR system identifiers. Vendor-local systems are recognised
-# separately below: their tenant segment is deliberately not part of the SCCM
-# key, so one curated Epic or Cerner code/label decision can apply across
-# hospitals instead of being fragmented into hundreds of tenant tabs.
+# separately below: their tenant segment remains part of the SCCM resolver key
+# because opaque codes can mean different things at different hospitals. The
+# browse layer rolls those exact identities into two practical vendor tabs.
 FHIR_SYSTEM_VOCABULARIES = {
     'http://loinc.org': 'LOINC',
     'http://snomed.info/sct': 'SNOMED',
