@@ -114,6 +114,10 @@ separates source measurements from normalized presentation values. These policie
 matter whenever facts from multiple sources contribute to the same patient field.
 
 [Patient file uploads](patient-file-upload.md) describes file-routing behavior.
+The [FHIR import analysis plan](fhir_import_analysis_plan.md) defines the future
+batch ledger, Org Stats reporting, mapping work queue, and completeness feedback
+loop for ETL imports; implemented behavior will move to its companion
+`fhir_import_analysis_architecture.md` as it lands.
 [Lab-result deduplication](lab-results-dedup-architecture.md) explains how repeated
 uploads share measurements while retaining upload ownership and deletion behavior.
 [Wearable-to-OMOP mapping](wearable-omop-mapping.md) covers device normalization,
