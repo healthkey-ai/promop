@@ -215,6 +215,10 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated }: Pick<Patien
 
   const handleZipcodeChange = useCallback(async (zipcode: string) => {
     handleFieldChange("postal_code", zipcode);
+    // The lookup is US-only, and Germany, France, Spain and Italy use 5-digit postcodes too:
+    // without this, a German 10115 would autofill New York / NY and save it.
+    const country = (pendingDataRef.current ?? editedInfoRef.current)?.country;
+    if (country && country !== "United States") return;
     if (zipcode.length === 5 && /^\d{5}$/.test(zipcode)) {
       try {
         const res = await fetch(`https://api.zippopotam.us/us/${zipcode}`);
