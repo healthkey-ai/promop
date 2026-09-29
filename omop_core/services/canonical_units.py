@@ -32,7 +32,20 @@ RELATIONSHIP_PROPERTY_NAMES = {
     'number concentration': 'NCnc',
     'catalytic activity concentration': 'CCnc',
 }
-QUANTITATIVE_SCALE_NAMES = {'qn', 'quantitative'}
+RELATIONSHIP_SCALE_TYPES = {
+    'qn': 'Qn',
+    'quantitative': 'Qn',
+    'ord': 'Ord',
+    'ordinal': 'Ord',
+    'nom': 'Nom',
+    'nominal': 'Nom',
+    'nar': 'Nar',
+    'narrative': 'Nar',
+    'doc': 'Doc',
+    'document': 'Doc',
+    'multi': 'Multi',
+    'multi-dimensional': 'Multi',
+}
 UNIT_ALIASES = {'cells/uL': '/uL', 'cell/uL': '/uL', '{cells}/uL': '/uL', '#/uL': '/uL',
                 'cells/L': '/L', 'cell/L': '/L', '{cells}/L': '/L', '#/L': '/L',
                 '10^3/uL': '10*3/uL', '10^9/L': '10*9/L', '10^6/uL': '10*6/uL',
@@ -41,7 +54,7 @@ UNIT_ALIASES = {'cells/uL': '/uL', 'cell/uL': '/uL', '{cells}/uL': '/uL', '#/uL'
 
 @dataclass(frozen=True)
 class LoincAxes:
-    """The relationship-backed LOINC axes needed for unit normalization.
+    """Relationship-backed LOINC axes used by normalization and concept APIs.
 
     ``None`` means Athena supplied no active relationship, so callers may use
     the legacy Loinc.csv/name fallbacks. An unrecognized non-None value is
@@ -50,10 +63,25 @@ class LoincAxes:
 
     property_name: str | None = None
     scale_type_name: str | None = None
+    class_code: str | None = None
+    class_name: str | None = None
+
+    @property
+    def property_code(self):
+        if self.property_name is None:
+            return None
+        return RELATIONSHIP_PROPERTY_NAMES.get(self.property_name.strip().casefold(), '')
+
+    @property
+    def scale_type_code(self):
+        if self.scale_type_name is None:
+            return None
+        return RELATIONSHIP_SCALE_TYPES.get(self.scale_type_name.strip().casefold(), '')
 
 
 def loinc_axes_for_concepts(concepts):
-    """Load property and scale axes for many LOINC concepts in one query."""
+    """Load property, scale and class axes for many LOINC concepts in one query."""
+    from django.db.models import Q
     from omop_core.models import ConceptRelationship
 
     concept_ids = {
@@ -68,16 +96,27 @@ def loinc_axes_for_concepts(concepts):
         ConceptRelationship.objects
         .filter(
             concept_1_id__in=concept_ids,
-            relationship_id__in=('Has property', 'Has scale type'),
             invalid_reason__isnull=True,
         )
+        .filter(
+            Q(relationship_id__in=('Has property', 'Has scale type'))
+            | Q(relationship_id='Is a', concept_2__concept_class_id='LOINC Class')
+        )
         .order_by('concept_1_id', 'relationship_id', 'concept_2_id')
-        .values_list('concept_1_id', 'relationship_id', 'concept_2__concept_name')
+        .values_list(
+            'concept_1_id', 'relationship_id',
+            'concept_2__concept_code', 'concept_2__concept_name',
+        )
     )
-    for concept_id, relationship_id, target_name in rows:
+    for concept_id, relationship_id, target_code, target_name in rows:
         axes = values.setdefault(concept_id, {})
-        key = 'property_name' if relationship_id == 'Has property' else 'scale_type_name'
-        axes.setdefault(key, target_name)
+        if relationship_id == 'Has property':
+            axes.setdefault('property_name', target_name)
+        elif relationship_id == 'Has scale type':
+            axes.setdefault('scale_type_name', target_name)
+        else:
+            axes.setdefault('class_code', target_code)
+            axes.setdefault('class_name', target_name)
     return {concept_id: LoincAxes(**axes) for concept_id, axes in values.items()}
 
 
@@ -90,12 +129,12 @@ def property_for(concept, metadata=None, axes=None):
     if concept.vocabulary_id != 'LOINC' or concept.domain_id != 'Measurement':
         return ''
     if axes and axes.scale_type_name is not None:
-        if axes.scale_type_name.strip().casefold() not in QUANTITATIVE_SCALE_NAMES:
+        if axes.scale_type_code != 'Qn':
             return ''
     elif metadata and metadata.scale_type not in ('', 'Qn'):
         return ''
     if axes and axes.property_name is not None:
-        return RELATIONSHIP_PROPERTY_NAMES.get(axes.property_name.strip().casefold(), '')
+        return axes.property_code
     if metadata and metadata.property:
         return metadata.property
     match = re.search(r'\[([^]]+)\]', concept.concept_name or '')
