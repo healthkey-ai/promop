@@ -225,12 +225,20 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated }: Pick<Patien
           const current = pendingDataRef.current ?? editedInfoRef.current;
           if (zipData.places?.length > 0 && String(current?.postal_code ?? "") === zipcode) {
             const place = zipData.places[0];
+            // `state` is the full name ("California"); `region` maps to OMOP Location.state,
+            // which the CDM caps at two characters, so the full name fails the save with a 400.
+            // Take the abbreviation, and leave region alone when the lookup has none.
+            const abbreviation = place["state abbreviation"];
             // Mark the auto-filled fields dirty and reschedule — otherwise the diff-PATCH sends
             // only postal_code and the server's derived response overwrites the local city/region.
             dirtyFieldsRef.current.add("city");
-            dirtyFieldsRef.current.add("region");
+            if (abbreviation) dirtyFieldsRef.current.add("region");
             setEditedInfo((prev) => {
-              const updated = { ...prev, city: place["place name"], region: place["state"] };
+              const updated = {
+                ...prev,
+                city: place["place name"],
+                ...(abbreviation ? { region: abbreviation } : {}),
+              };
               scheduleAutoSave(updated);
               return updated;
             });
