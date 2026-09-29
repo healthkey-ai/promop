@@ -3785,6 +3785,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         )
 
                     def _vocab_from_system(system):
+                        vendor_or_standard = source_vocabularies.fhir_source_vocabulary(system)
+                        if vendor_or_standard:
+                            return vendor_or_standard
                         system = (system or '').lower()
                         if 'rxnorm' in system:
                             return 'RxNorm'

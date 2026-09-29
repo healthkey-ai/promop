@@ -6687,6 +6687,47 @@ class OpenWearablesVocabularyTest(TestCase):
         self.assertIn('observation', tables)
 
 
+class HospitalSourceVocabularyTest(TestCase):
+    """Epic and Cerner local namespaces stay vendor-scoped, not tenant-scoped."""
+
+    def test_epic_systems_are_recognised(self):
+        from omop_core.services.source_vocabularies import fhir_source_vocabulary
+
+        self.assertEqual(fhir_source_vocabulary(
+            'urn:oid:1.2.840.114350.1.13.211.2.7.5.737384.45'), 'EPIC')
+        self.assertEqual(fhir_source_vocabulary(
+            'http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id'), 'EPIC')
+
+    def test_cerner_codeset_is_recognised_without_retaining_the_tenant(self):
+        from omop_core.services.source_vocabularies import fhir_source_vocabulary
+
+        self.assertEqual(fhir_source_vocabulary(
+            'https://fhir.cerner.com/993df7f9-6163-4b2c-9388-9d472c4ef3f9/codeSet/72'),
+            'CERNER')
+
+    def test_generic_and_unknown_systems_are_not_misclassified(self):
+        from omop_core.services.source_vocabularies import fhir_source_vocabulary
+
+        self.assertEqual(fhir_source_vocabulary('http://loinc.org'), 'LOINC')
+        self.assertEqual(fhir_source_vocabulary(
+            'http://hl7.org/fhir/us/core/CodeSystem/us-core-category'), '')
+        self.assertEqual(fhir_source_vocabulary('https://fhir.cerner.com/metadata'), '')
+
+    def test_hospital_tabs_precede_other_curation_queues(self):
+        from omop_core.services.source_vocabularies import source_tab_sort_key
+
+        self.assertLess(source_tab_sort_key('EPIC'), source_tab_sort_key('ICD10CM'))
+        self.assertLess(source_tab_sort_key('CERNER'), source_tab_sort_key('ICD10CM'))
+
+    def test_hospital_sources_are_available_for_every_clinical_domain(self):
+        from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE, source_systems_for
+
+        for domain in DOMAIN_TO_TABLE:
+            with self.subTest(domain=domain):
+                vocabularies = {entry['vocabulary_id'] for entry in source_systems_for(domain)}
+                self.assertTrue({'EPIC', 'CERNER'} <= vocabularies)
+
+
 class SeedOpenWearablesMappingsTest(TestCase):
     """Test the seed_openwearables_mappings management command."""
 

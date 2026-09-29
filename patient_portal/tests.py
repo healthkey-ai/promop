@@ -25682,6 +25682,16 @@ class CodeMappingSourceVocabTabsTest(TestCase):
                 status='proposed',
                 origin='import',
             ),
+            SourceCodeConceptMapping(
+                source_vocabulary_id='EPIC', source_code='EPIC#31000013118',
+                source_code_description='Albumin', domain_id='Measurement',
+                omop_table='measurement', status='proposed', origin='import',
+            ),
+            SourceCodeConceptMapping(
+                source_vocabulary_id='CERNER', source_code='674310',
+                source_code_description='Albumin', domain_id='Measurement',
+                omop_table='measurement', status='proposed', origin='import',
+            ),
         ]
         SourceCodeConceptMapping.objects.bulk_create(mappings)
         self.client.force_authenticate(user=self.staff)
@@ -25697,9 +25707,13 @@ class CodeMappingSourceVocabTabsTest(TestCase):
         self.assertFalse(icd_tab['is_standard'])
         self.assertIn('MedDRA', [tab['vocabulary_id'] for tab in tabs])
         self.assertIn('PartnerCodes', [tab['vocabulary_id'] for tab in tabs])
+        self.assertEqual(
+            [(tab['vocabulary_id'], tab['label']) for tab in tabs[:2]],
+            [('EPIC', 'Epic'), ('CERNER', 'Cerner')],
+        )
         # Clean up
         SourceCodeConceptMapping.objects.filter(
-            source_code__in=['E11', '10000001', 'CUSTOM-1'],
+            source_code__in=['E11', '10000001', 'CUSTOM-1', 'EPIC#31000013118', '674310'],
         ).delete()
 
     def test_list_includes_mapping_origin(self):

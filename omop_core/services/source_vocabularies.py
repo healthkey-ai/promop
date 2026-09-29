@@ -37,6 +37,8 @@ DOMAIN_CHOICES = (
 # (vocabulary_id, display label). Ordered so the systems a curator meets most
 # often sit at the top of each domain's list rather than alphabetically.
 _CONDITION_SYSTEMS = (
+    ('EPIC', 'Epic — hospital-local codes'),
+    ('CERNER', 'Cerner — hospital-local codes'),
     ('SNOMED', 'SNOMED CT — OMOP standard; FHIR problem lists'),
     ('ICD10CM', 'ICD-10-CM — US claims and EHR billing'),
     ('ICD10', 'ICD-10 — WHO international'),
@@ -61,6 +63,8 @@ _CONDITION_SYSTEMS = (
 )
 
 _PROCEDURE_SYSTEMS = (
+    ('EPIC', 'Epic — hospital-local codes'),
+    ('CERNER', 'Cerner — hospital-local codes'),
     ('NCIt', 'NCIt — oncology procedures'),
     ('MeSH', 'MeSH — biomedical procedures'),
     ('SNOMED', 'SNOMED CT procedures — OMOP standard'),
@@ -77,6 +81,8 @@ _PROCEDURE_SYSTEMS = (
 )
 
 _DRUG_SYSTEMS = (
+    ('EPIC', 'Epic — hospital-local codes'),
+    ('CERNER', 'Cerner — hospital-local codes'),
     ('RxNorm', 'RxNorm — OMOP standard for drugs'),
     ('NCIt', 'NCIt — oncology drugs, investigational agents and regimens'),
     ('MeSH', 'MeSH — substances, drug aliases and investigational agents'),
@@ -101,6 +107,8 @@ _DRUG_SYSTEMS = (
 )
 
 _MEASUREMENT_SYSTEMS = (
+    ('EPIC', 'Epic — hospital-local codes'),
+    ('CERNER', 'Cerner — hospital-local codes'),
     ('NCIt', 'NCIt — oncology measurements and biomarkers'),
     ('MeSH', 'MeSH — biomedical measurements and findings'),
     ('LOINC', 'LOINC — OMOP standard for labs and measurements'),
@@ -115,6 +123,8 @@ _MEASUREMENT_SYSTEMS = (
 )
 
 _OBSERVATION_SYSTEMS = (
+    ('EPIC', 'Epic — hospital-local codes'),
+    ('CERNER', 'Cerner — hospital-local codes'),
     ('SNOMED', 'SNOMED CT — OMOP standard for observations'),
     ('LOINC', 'LOINC — survey and assessment items'),
     ('OpenWearables', 'OpenWearables — unified wearable device metrics'),
@@ -168,6 +178,7 @@ def domain_for_table(omop_table):
 # Non-standard vocabularies (the ones curators actually need to map) come first,
 # then uncoded, then standard vocabularies last (they self-resolve).
 SOURCE_TAB_ORDER = [
+    'EPIC', 'CERNER',  # Hospital-local codes are the largest curation queues
     'ICD10CM',
     'ICD9CM', 'CPT4', 'HCPCS',
     'RxNorm', 'NDC',
@@ -179,6 +190,8 @@ SOURCE_TAB_ORDER = [
 ]
 
 SOURCE_TAB_LABELS = {
+    'EPIC': 'Epic',
+    'CERNER': 'Cerner',
     'ICD10CM': 'ICD-10-CM',
     'ICD9CM': 'ICD-9-CM',
     'ICD10PCS': 'ICD-10-PCS',
@@ -198,6 +211,46 @@ WEARABLE_SOURCE_VOCABULARIES = {'OpenWearables', 'Apple', 'Garmin'}
 VOCABULARY_OID_ALIASES = {
     'urn:oid:2.16.840.1.113883.6.96': 'SNOMED',
 }
+
+
+# Exact standard FHIR system identifiers. Vendor-local systems are recognised
+# separately below: their tenant segment is deliberately not part of the SCCM
+# key, so one curated Epic or Cerner code/label decision can apply across
+# hospitals instead of being fragmented into hundreds of tenant tabs.
+FHIR_SYSTEM_VOCABULARIES = {
+    'http://loinc.org': 'LOINC',
+    'http://snomed.info/sct': 'SNOMED',
+    'http://www.nlm.nih.gov/research/umls/rxnorm': 'RxNorm',
+    'http://hl7.org/fhir/sid/icd-10-cm': 'ICD10CM',
+    'http://hl7.org/fhir/sid/icd-10': 'ICD10CM',
+    'http://hl7.org/fhir/sid/cvx': 'CVX',
+}
+
+
+def fhir_source_vocabulary(system):
+    """Return the stable source vocabulary for a FHIR ``Coding.system`` URI.
+
+    Epic embeds a hospital id in ``urn:oid:1.2.840.114350.*`` and Cerner embeds
+    an instance id before ``codeSet``. Keeping either full URI as the
+    vocabulary would create a tab per hospital; dropping it to blank would mix
+    opaque vendor codes with genuinely uncoded text. Collapse only these
+    vendor-owned namespaces to their vendor while leaving unknown systems
+    unresolved.
+    """
+    normalized = (system or '').strip().casefold().rstrip('/')
+    if not normalized:
+        return ''
+    standard = FHIR_SYSTEM_VOCABULARIES.get(normalized)
+    if standard:
+        return standard
+    if normalized.startswith('urn:oid:1.2.840.114350.'):
+        return 'EPIC'
+    if normalized.startswith(('http://open.epic.com/', 'https://open.epic.com/')):
+        return 'EPIC'
+    if normalized.startswith(('http://fhir.cerner.com/', 'https://fhir.cerner.com/')) \
+            and '/codeset/' in normalized:
+        return 'CERNER'
+    return ''
 
 
 def canonical_source_vocabulary(vocabulary_id):

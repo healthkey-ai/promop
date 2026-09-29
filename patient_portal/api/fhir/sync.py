@@ -44,6 +44,7 @@ from omop_core.mapping.code_resolution import (
     resolve_source_code,
 )
 from omop_core.services.pk import next_pk_batch
+from omop_core.services.source_vocabularies import fhir_source_vocabulary
 from omop_core.signals import suppress_patient_record_refresh
 from patient_portal.api.permissions import (
     ScopedTokenPermission, get_request_org, is_service_token, is_machine_request,
@@ -56,16 +57,6 @@ logger = logging.getLogger(__name__)
 
 EHR_TYPE_CONCEPT_ID = 32817        # "EHR"
 NO_MATCHING_CONCEPT_ID = 0         # OMOP "No matching concept"
-
-# FHIR CodeableConcept system URI → OMOP vocabulary_id.
-_SYSTEM_VOCAB = {
-    'http://loinc.org': 'LOINC',
-    'http://snomed.info/sct': 'SNOMED',
-    'http://www.nlm.nih.gov/research/umls/rxnorm': 'RxNorm',
-    'http://hl7.org/fhir/sid/icd-10-cm': 'ICD10CM',
-    'http://hl7.org/fhir/sid/icd-10': 'ICD10CM',
-    'http://hl7.org/fhir/sid/cvx': 'CVX',
-}
 
 _FALLBACK_CONCEPTS = {
     NO_MATCHING_CONCEPT_ID: ('No matching concept', 'Metadata', 'Undefined'),
@@ -417,7 +408,7 @@ class FhirSyncView(APIView):
                 if not code:
                     continue
                 all_codes.add(code)
-                vocab = _SYSTEM_VOCAB.get(coding.get('system', ''))
+                vocab = fhir_source_vocabulary(coding.get('system', ''))
                 if vocab:
                     by_vocab[vocab].add(code)
 
@@ -503,7 +494,7 @@ class FhirSyncView(APIView):
             code = coding.get('code')
             if not code:
                 continue
-            vocab = _SYSTEM_VOCAB.get(coding.get('system', ''))
+            vocab = fhir_source_vocabulary(coding.get('system', ''))
             concept = (cache.get((vocab, code)) if vocab else None) or cache.get(('*', code))
             if concept:
                 return concept
@@ -519,7 +510,7 @@ class FhirSyncView(APIView):
         for coding in _codings(codeable):
             if coding.get('code'):
                 source_code = coding['code']
-                source_vocab = _SYSTEM_VOCAB.get(coding.get('system', '')) or ''
+                source_vocab = fhir_source_vocabulary(coding.get('system', ''))
                 break
         if not source_code:
             return None
