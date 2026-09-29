@@ -42,7 +42,11 @@ ORIGIN_VALUE = 'cb-value'
 #: real thing (promop #461, #1223).
 LOCAL_CONCEPT_ID_FLOOR = 2_000_000_000
 
-REQUIRED_COLUMNS = ('table', 'code', 'title', 'match')
+#: Every column the reader uses. A renamed or dropped column must stop the
+#: import: read as blank, it would quietly strip every row of its destination.
+REQUIRED_COLUMNS = ('table', 'code', 'title', 'match', 'confidence', 'verified', 'note',
+                    'omop_domain', 'trial_count', 'omop_vocabulary_id', 'omop_concept_code',
+                    'concept_set', 'value_vocabulary_id', 'value_concept_code')
 SOURCE_CODE_MAX = 100
 
 
@@ -146,7 +150,9 @@ def read_proposals(path):
                     concept_set=_concept_set(raw.get('concept_set')),
                     value=_concept_key(raw.get('value_vocabulary_id'), raw.get('value_concept_code')),
                 )
-            except (ValueError, KeyError) as exc:
+            except (ValueError, KeyError, AttributeError, TypeError) as exc:
+                # AttributeError/TypeError: a short row, whose missing cells
+                # DictReader fills with None.
                 raise ValueError(f'{path.name} line {line}: {exc}') from exc
             if not row.table or not row.code:
                 raise ValueError(f'{path.name} line {line}: empty table or code')
@@ -173,7 +179,12 @@ def resolve_concepts(keys):
         concept_code__in={k.concept_code for k in keys},
     ).only('concept_id', 'concept_code', 'concept_name', 'vocabulary_id', 'domain_id',
            'standard_concept', 'invalid_reason')
-    by_key = {ConceptKey(c.vocabulary_id, c.concept_code): c for c in found}
+    by_key = {}
+    # Two concepts can share a vocabulary and code: the seeding defect behind
+    # LOCAL_CONCEPT_ID_FLOOR copies real codes into the local range. Prefer
+    # the real one, whatever order the rows come back in.
+    for c in sorted(found, key=lambda c: c.concept_id >= LOCAL_CONCEPT_ID_FLOOR, reverse=True):
+        by_key[ConceptKey(c.vocabulary_id, c.concept_code)] = c
     return {k: by_key[k] for k in keys if k in by_key}
 
 
@@ -198,3 +209,26 @@ def destination_problem(concept):
     if concept.concept_id >= LOCAL_CONCEPT_ID_FLOOR and not (concept.vocabulary_id or '').startswith('HK-'):
         return f'local-range id labelled {concept.vocabulary_id}'
     return ''
+
+
+#: Non-standard vocabularies whose concepts CB already uses as destinations by
+#: an earlier decision: HemOnc for the therapy crosswalk (cancerbot #4447).
+BULK_APPROVABLE_NON_STANDARD = frozenset({'HemOnc'})
+
+
+def bulk_approval_problem(concept):
+    """Why a destination needs a person rather than the bulk command, or ''.
+
+    Bulk approval skips a human, so it only covers destinations of a kind that
+    is already decided: standard or classification concepts, HK-* (cancerbot
+    #5363), and the vocabularies in BULK_APPROVABLE_NON_STANDARD. Any other
+    non-standard destination is valid but goes to the SME.
+    """
+    problem = destination_problem(concept)
+    if problem:
+        return problem
+    vocabulary_id = concept.vocabulary_id or ''
+    if (concept.standard_concept in ('S', 'C') or vocabulary_id.startswith('HK-')
+            or vocabulary_id in BULK_APPROVABLE_NON_STANDARD):
+        return ''
+    return f'non-standard {vocabulary_id} needs the SME'

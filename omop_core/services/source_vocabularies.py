@@ -168,12 +168,12 @@ def domain_for_table(omop_table):
 # Non-standard vocabularies (the ones curators actually need to map) come first,
 # then uncoded, then standard vocabularies last (they self-resolve).
 SOURCE_TAB_ORDER = [
-    'CB',  # CancerBot's own terminology, mapped once rather than seen at ingest
     'ICD10CM',
     'ICD9CM', 'CPT4', 'HCPCS',
     'RxNorm', 'NDC',
     'Read', 'MeSH', 'OPCS4', 'Nebraska Lexicon',
     'MedDRA', 'ICDO3', 'dm+d',
+    'CB',  # CancerBot's own terminology, mapped once rather than seen at ingest
     'OpenWearables',  # Wearable device metrics (includes Apple + Garmin)
     '',  # Uncoded / free text
     'LOINC', 'SNOMED',  # Standard — last

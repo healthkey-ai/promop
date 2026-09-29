@@ -51,6 +51,7 @@ def concepts():
         'set_b': concept('HemOnc', '35807319', domain='Drug'),
         'hemonc_component': concept('HemOnc', '12', domain='Drug', standard_concept=None),
         'retired': concept('HemOnc', '45895', domain='Drug', invalid_reason='D'),
+        'cdisc': concept('CDISC', 'C101526', domain='Observation', standard_concept=None),
     }
 
 
@@ -73,6 +74,10 @@ def proposals(tmp_path, concepts):
         {'table': 'therapycomponentcategory', 'code': 'her2_targeted_therapy', 'title': 'HER2',
          'omop_vocabulary_id': 'HemOnc', 'omop_concept_code': '45895', 'match': 'auto_exact',
          'verified': 'ok'},
+        {'table': 'trialpurpose', 'code': 'treatment', 'title': 'Treatment', 'omop_vocabulary_id': 'CDISC',
+         'omop_concept_code': 'C101526', 'match': 'auto_exact', 'verified': 'ok'},
+        {'table': 'disease', 'code': 'MM', 'title': 'Multiple myeloma', 'omop_vocabulary_id': 'SNOMED',
+         'omop_concept_code': '254837009', 'match': 'auto_exact', 'verified': 'check'},
         {'table': 'therapy', 'code': 'esa', 'title': 'ESA', 'omop_vocabulary_id': 'NDFRT',
          'omop_concept_code': 'N0000175425', 'match': 'curated', 'verified': 'NOT IN MIRROR'},
     ])
@@ -85,18 +90,23 @@ def _stored_row_with_label(label):
     return ConditionOccurrenceFactory(condition_concept=zero, condition_source_value=label)
 
 
+@pytest.mark.parametrize('match_description', [True, False])
 @pytest.mark.parametrize('vocabulary, moved', [('CB', 0), ('EPIC', 1)])
-def test_approving_a_cb_term_does_not_repoint_rows_that_share_its_label(concepts, vocabulary, moved):
+def test_approving_a_cb_term_does_not_repoint_rows_that_share_its_code(
+        concepts, vocabulary, moved, match_description):
     # EPIC is the control: the same row under an ingest vocabulary does move,
     # which is what makes the CB case a test of the guard and not of the setup.
-    row = _stored_row_with_label('Breast cancer')
+    # The stored row carries the code itself, so both sweeps -- with and
+    # without the description in the match key -- would reach it.
+    row = _stored_row_with_label('disease:BC')
     mapping = SourceCodeConceptMapping.objects.create(
         source_vocabulary_id=vocabulary, source_code='disease:BC',
-        source_code_description='Breast cancer', origin='import', omop_table='condition',
+        source_code_description='Breast cancer (disease)', origin='import', omop_table='condition',
         target_concept=concepts['bc'], status='approved')
 
     result = repoint_clinical_rows(mapping=mapping, old_concept_id=0,
-                                   new_concept_id=concepts['bc'].concept_id)
+                                   new_concept_id=concepts['bc'].concept_id,
+                                   match_description=match_description)
 
     assert result['rows_updated'] == moved
     row.refresh_from_db()
@@ -193,7 +203,7 @@ def test_keys_that_differ_only_in_case_stop_the_import(tmp_path):
 
 @pytest.fixture
 def reviewer():
-    return get_user_model().objects.create_user(email='sme@example.com', password='x')
+    return get_user_model().objects.create_user(email='sme@example.com', password='x', is_staff=True)
 
 
 def test_bulk_approval_signs_off_only_unchanged_verified_proposals(proposals, concepts, reviewer):
@@ -245,9 +255,85 @@ def test_export_is_a_complete_snapshot_keyed_by_natural_concept_key(tmp_path, pr
     payload = json.loads(out.read_text())
     by_code = {m['source_code']: m for m in payload['mappings']}
     assert set(by_code) == {r.source_code for r in SourceCodeConceptMapping.objects.filter(source_vocabulary_id='CB')}
-    assert payload['counts'] == {'approved': 2, 'proposed': 6}
+    assert payload['counts'] == {'approved': 2, 'proposed': 8}
     bc = by_code['disease:BC']
     assert (bc['table'], bc['code'], bc['status'], bc['reviewer']) == ('disease', 'BC', 'approved', 'sme@example.com')
     assert (bc['target']['vocabulary_id'], bc['target']['concept_code']) == ('SNOMED', '254837009')
     assert by_code['cytogenicmarker:chromothripsis']['target'] is None
     assert {'vocabulary_id': 'HK-Labs', 'vocabulary_version': 'HK-Labs v1'} in payload['vocabularies']
+
+
+def test_bulk_approval_leaves_unverified_and_undecided_kinds_for_the_sme(proposals, concepts, reviewer):
+    call_command('import_cb_vocabularies', '--file', proposals, '--apply')
+    call_command('approve_cb_mappings', '--file', proposals, '--reviewer', reviewer.email, '--apply')
+    # Valid destination, but the proposal file did not verify it.
+    assert cb('disease:MM').status == 'proposed'
+    # Valid, non-standard, and not a kind already decided: the SME's call.
+    treatment = cb('trialpurpose:treatment')
+    assert treatment.target_concept_id == concepts['cdisc'].concept_id
+    assert treatment.status == 'proposed'
+
+
+def test_bulk_approval_skips_a_row_under_another_users_lock(proposals, concepts, reviewer):
+    from django.utils import timezone
+    call_command('import_cb_vocabularies', '--file', proposals, '--apply')
+    other = get_user_model().objects.create_user(email='other@example.com', password='x')
+    SourceCodeConceptMapping.objects.filter(source_code='disease:BC').update(
+        locked_by=other, locked_at=timezone.now())
+    call_command('approve_cb_mappings', '--file', proposals, '--reviewer', reviewer.email, '--apply')
+    assert cb('disease:BC').status == 'proposed'
+
+
+def test_bulk_approval_requires_a_reviewer_the_ui_would_accept(proposals):
+    analyst = get_user_model().objects.create_user(email='analyst@example.com', password='x')
+    with pytest.raises(CommandError, match='may not approve'):
+        call_command('approve_cb_mappings', '--file', proposals, '--reviewer', analyst.email, '--apply')
+
+
+def test_a_missing_column_stops_the_import(tmp_path):
+    path = tmp_path / 'short.csv'
+    path.write_text('table,code,title,match\ndisease,BC,Breast cancer,auto_exact\n')
+    with pytest.raises(CommandError, match='missing columns'):
+        call_command('import_cb_vocabularies', '--file', str(path), '--apply')
+
+
+def test_reimport_fills_a_destination_once_its_concept_arrives(tmp_path, concepts):
+    path = write_csv(tmp_path / 'late.csv', [
+        {'table': 'disease', 'code': 'FL', 'title': 'Follicular lymphoma', 'omop_vocabulary_id': 'SNOMED',
+         'omop_concept_code': '308121000', 'match': 'auto_exact', 'verified': 'ok'},
+    ])
+    call_command('import_cb_vocabularies', '--file', path, '--apply')
+    assert cb('disease:FL').target_concept_id is None
+    assert cb('disease:FL').destination_candidates.get().target_concept_id is None
+
+    arrived = concept('SNOMED', '308121000')
+    call_command('import_cb_vocabularies', '--file', path)  # dry run: still nothing
+    assert cb('disease:FL').target_concept_id is None
+    call_command('import_cb_vocabularies', '--file', path, '--apply')
+
+    fl = cb('disease:FL')
+    assert fl.target_concept_id == arrived.concept_id
+    assert fl.destination_candidates.get().target_concept_id == arrived.concept_id
+
+
+def test_reimport_keeps_the_description_of_a_row_a_person_edited(tmp_path, proposals, reviewer):
+    call_command('import_cb_vocabularies', '--file', proposals, '--apply')
+    SourceCodeConceptMapping.objects.filter(source_code='disease:BC').update(
+        source_code_description='Breast carcinoma (edited)', updated_by=reviewer)
+    call_command('import_cb_vocabularies', '--file', proposals, '--apply')
+    assert cb('disease:BC').source_code_description == 'Breast carcinoma (edited)'
+    assert cb('cytogenicmarker:chromothripsis').source_code_description == 'Chromothripsis (cytogenicmarker)'
+
+
+def test_cb_candidates_are_selectable_by_the_import_rule(proposals, concepts):
+    from omop_core.services.mapping_destinations import destination_options
+    call_command('import_cb_vocabularies', '--file', proposals, '--apply')
+    hk = {o['vocabulary_id']: o['selectable']
+          for o in destination_options(cb('cytogenicmarker:1q21Amplification'))}
+    assert hk == {'HK-Labs': True}
+    retired = destination_options(cb('therapycomponentcategory:her2_targeted_therapy'))
+    assert [o['selectable'] for o in retired] == [False]
+    # Ingest vocabularies keep the standard-only rule.
+    epic = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id='EPIC', source_code='X', target_concept=concepts['hk'], status='proposed')
+    assert [o['selectable'] for o in destination_options(epic)] == [False]

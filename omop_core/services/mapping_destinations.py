@@ -4,6 +4,18 @@ from django.db.models.functions import Coalesce
 
 from omop_core.models import MappingDestinationCandidate
 from omop_core.services.concept_unit_info import concept_unit_fields
+from omop_core.services.source_vocabularies import is_catalog_source
+
+
+def _selectable(mapping, concept):
+    if not concept or concept.invalid_reason:
+        return False
+    if is_catalog_source(mapping.source_vocabulary_id):
+        # A catalog term may point at any live concept, standard or not (#1649);
+        # the rule is shared with the importer so the UI offers what it accepts.
+        from omop_core.services.cb_vocabulary import destination_problem
+        return not destination_problem(concept)
+    return concept.standard_concept == 'S'
 
 
 def with_destination_counts(mappings):
@@ -28,7 +40,7 @@ def destination_options(mapping):
         'target_concept__concept_name', 'target_vocabulary_id', 'target_concept_code',
     ):
         concept = candidate.target_concept
-        selectable = bool(concept and concept.standard_concept == 'S' and not concept.invalid_reason)
+        selectable = _selectable(mapping, concept)
         options.append({
             'concept_id': concept.pk if concept else None,
             'concept_name': concept.concept_name if concept else 'Concept not loaded',
@@ -51,7 +63,7 @@ def destination_options(mapping):
             'concept_code': concept.concept_code, 'vocabulary_id': concept.vocabulary_id,
             'domain_id': concept.domain_id, 'concept_class_id': concept.concept_class_id,
             'standard_concept': concept.standard_concept, 'invalid_reason': concept.invalid_reason,
-            'selectable': concept.standard_concept == 'S' and not concept.invalid_reason,
+            'selectable': _selectable(mapping, concept),
             'origins': [mapping.origin_system] if mapping.origin_system else [], 'selected': True,
             **concept_unit_fields(concept),
         })

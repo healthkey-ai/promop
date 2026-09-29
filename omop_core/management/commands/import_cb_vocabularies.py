@@ -6,14 +6,22 @@ proposal, each member of a concept set, the value concept of a
 measurement/value pair -- is kept as a MappingDestinationCandidate, so the
 reviewer sees all of them whichever one is chosen.
 
-Re-running is safe. A row a curator has already approved or rejected is never
-touched, and neither is the destination of a row still in review: after the
-first import the destination belongs to the reviewer. What a re-run does add
-is new candidates and a refreshed trial count. Terms that are in the queue but
-missing from the file are reported, never deleted: whether a term was retired
-is CB's call, and the export tells CB what the queue still holds.
+Re-running is safe:
 
-Dry run unless ``--apply``.
+* a row a curator has approved or rejected is not touched, nor are its
+  candidates;
+* a row still in review that a person has edited (``updated_by`` set) keeps its
+  destination and description; only its trial count and candidates refresh;
+* a row nobody has edited is brought up to date: its description follows the
+  CB title, and a destination that could not be resolved before is filled in
+  once the concept is on this instance;
+* candidates are re-resolved, so a vocabulary loaded since the last run shows.
+
+Terms that are in the queue but missing from the file are reported, never
+deleted: whether a term was retired is CB's call, and the export tells CB what
+the queue still holds.
+
+Dry run unless ``--apply``; the dry run computes the same counts.
 """
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
@@ -38,6 +46,17 @@ def _notes(row, problem):
     return '\n'.join(parts)
 
 
+def _destination_fields(target, row):
+    domain = (target.domain_id if target else row.domain_id) or ''
+    domain = domain if domain in DOMAIN_TO_TABLE else ''
+    return {
+        'target_concept': target,
+        'destination_vocabulary_id': target.vocabulary_id if target else '',
+        'domain_id': domain,
+        'omop_table': DOMAIN_TO_TABLE.get(domain, ''),
+    }
+
+
 class Command(BaseCommand):
     help = "Seed the Code Mapping queue with CancerBot's vocabulary terms (dry run unless --apply)."
 
@@ -50,17 +69,20 @@ class Command(BaseCommand):
             rows = read_proposals(options['file'])
         except (OSError, ValueError) as exc:
             raise CommandError(f'Cannot read CB proposals: {exc}') from exc
+        apply = options['apply']
 
         concepts = resolve_concepts(k for row in rows for k in row.candidate_keys())
-        stats = {'created': 0, 'refreshed': 0, 'decided_kept': 0, 'with_destination': 0,
-                 'without_destination': 0, 'rejected_proposals': 0, 'candidates_added': 0,
-                 'candidates_unavailable': 0}
+        stats = dict.fromkeys(
+            ('created', 'refreshed', 'destination_filled', 'decided_kept', 'rejected_proposals',
+             'candidates_added', 'candidates_updated', 'candidates_unavailable'), 0)
         problems = []
 
         with transaction.atomic():
             existing = {
                 m.source_code.lower(): m
-                for m in SourceCodeConceptMapping.objects.filter(source_vocabulary_id=SOURCE_VOCABULARY_ID)
+                for m in SourceCodeConceptMapping.objects
+                .filter(source_vocabulary_id=SOURCE_VOCABULARY_ID)
+                .prefetch_related('destination_candidates')
             }
             file_keys = {row.source_code.lower() for row in rows}
             absent = sorted(m.source_code for key, m in existing.items() if key not in file_keys)
@@ -72,62 +94,64 @@ class Command(BaseCommand):
                     stats['rejected_proposals'] += 1
                     problems.append(f'{row.source_code}: {row.proposal} {problem}')
                     target = None
-                stats['with_destination' if target else 'without_destination'] += 1
                 stats['candidates_unavailable'] += sum(k not in concepts for k in row.candidate_keys())
-                domain = (target.domain_id if target else row.domain_id) or ''
 
                 mapping = existing.get(row.source_code.lower())
                 if mapping is not None and mapping.status != 'proposed':
                     stats['decided_kept'] += 1
                     continue
+
                 if mapping is None:
                     stats['created'] += 1
-                    if not options['apply']:
-                        continue
-                    mapping = SourceCodeConceptMapping.objects.create(
-                        source_vocabulary_id=SOURCE_VOCABULARY_ID,
-                        source_code=row.source_code,
-                        source_code_description=row.description,
-                        domain_id=domain if domain in DOMAIN_TO_TABLE else '',
-                        omop_table=DOMAIN_TO_TABLE.get(domain, ''),
-                        target_concept=target,
-                        destination_vocabulary_id=target.vocabulary_id if target else '',
-                        source=MAPPING_SOURCE,
-                        status='proposed',
-                        origin='import',
-                        origin_system=ORIGIN_SYSTEM,
-                        occurrence_count=row.trial_count,
-                        notes=_notes(row, problem),
-                    )
+                    prior = {}
+                    if apply:
+                        mapping = SourceCodeConceptMapping.objects.create(
+                            source_vocabulary_id=SOURCE_VOCABULARY_ID,
+                            source_code=row.source_code,
+                            source_code_description=row.description,
+                            source=MAPPING_SOURCE,
+                            status='proposed',
+                            origin='import',
+                            origin_system=ORIGIN_SYSTEM,
+                            occurrence_count=row.trial_count,
+                            notes=_notes(row, problem),
+                            **_destination_fields(target, row),
+                        )
                 else:
                     stats['refreshed'] += 1
-                    if not options['apply']:
-                        continue
-                    SourceCodeConceptMapping.objects.filter(pk=mapping.pk).update(
-                        source_code_description=row.description,
-                        occurrence_count=row.trial_count,
-                    )
+                    prior = {(c.target_vocabulary_id, c.target_concept_code): c
+                             for c in mapping.destination_candidates.all()}
+                    updates = {'occurrence_count': row.trial_count}
+                    if mapping.updated_by_id is None:
+                        updates['source_code_description'] = row.description
+                        if mapping.target_concept_id is None and target is not None:
+                            stats['destination_filled'] += 1
+                            updates.update(_destination_fields(target, row))
+                            updates['notes'] = _notes(row, problem)
+                    if apply:
+                        SourceCodeConceptMapping.objects.filter(pk=mapping.pk).update(**updates)
 
-                prior = {(c.target_vocabulary_id, c.target_concept_code): c
-                         for c in mapping.destination_candidates.all()}
                 for key, origins in row.candidate_keys().items():
                     concept = concepts.get(key)
                     old = prior.get((key.vocabulary_id, key.concept_code))
                     if old is None:
-                        MappingDestinationCandidate.objects.create(
-                            mapping=mapping, target_vocabulary_id=key.vocabulary_id,
-                            target_concept_code=key.concept_code, target_concept=concept,
-                            origins=sorted(origins),
-                        )
                         stats['candidates_added'] += 1
-                    elif set(old.origins) | origins != set(old.origins):
-                        old.origins = sorted(set(old.origins) | origins)
-                        old.save(update_fields=['origins'])
+                        if apply:
+                            MappingDestinationCandidate.objects.create(
+                                mapping=mapping, target_vocabulary_id=key.vocabulary_id,
+                                target_concept_code=key.concept_code, target_concept=concept,
+                                origins=sorted(origins),
+                            )
+                        continue
+                    merged = sorted(set(old.origins) | origins)
+                    concept_id = concept.concept_id if concept else None
+                    if merged != sorted(old.origins) or old.target_concept_id != concept_id:
+                        stats['candidates_updated'] += 1
+                        if apply:
+                            old.origins, old.target_concept_id = merged, concept_id
+                            old.save(update_fields=['origins', 'target_concept'])
 
-            if not options['apply']:
-                transaction.set_rollback(True)
-
-        verb = 'Imported' if options['apply'] else 'Dry run -- would import'
+        verb = 'Imported' if apply else 'Dry run -- would import'
         self.stdout.write(self.style.SUCCESS(
             f'{verb} {len(rows):,} CB terms: ' + ', '.join(f'{k}={v:,}' for k, v in stats.items())))
         for line in problems:

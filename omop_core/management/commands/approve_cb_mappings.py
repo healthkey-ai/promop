@@ -9,11 +9,11 @@ By product decision (cancerbot #5363) two categories are signed off in bulk:
 
 Everything else stays for the SME in the Code Mapping UI.
 
-A row is approved only if its destination is still exactly what CB proposed:
-it exists on this instance, passes ``destination_problem``, and nobody has
-re-pointed it since the import. Anything else is a reviewer's business and is
-skipped with the reason. The named reviewer is stamped on every approval, so
-a bulk sign-off is as attributable as a click.
+A row is approved only if its destination is still exactly what CB proposed
+and is of a kind already decided (``bulk_approval_problem``). The comparison
+is part of the UPDATE itself, so a curator who re-points the row while this
+runs wins. Rows under another user's active edit lock are skipped, and the
+reviewer must be someone the UI would let approve.
 
 Approval here writes the queue row only. CB terms are catalog entries, so the
 clinical-row re-point that a UI approval runs is not wanted, and
@@ -22,18 +22,33 @@ clinical-row re-point that a UI approval runs is not wanted, and
 Dry run unless ``--apply``.
 """
 from collections import Counter
+from datetime import timedelta
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from omop_core.models import SourceCodeConceptMapping
+from omop_core.services.access import has_org_admin_access
 from omop_core.services.cb_vocabulary import (
-    SOURCE_VOCABULARY_ID, destination_problem, read_proposals, resolve_concepts,
+    SOURCE_VOCABULARY_ID, bulk_approval_problem, read_proposals, resolve_concepts,
 )
 
 DEFAULT_MATCHES = ('auto_exact', 'curated')
+
+
+def _reviewer(email):
+    users = list(get_user_model().objects.filter(email__iexact=email, is_active=True))
+    if len(users) != 1:
+        raise CommandError(f'Expected one active user with email {email!r}, found {len(users)}')
+    user = users[0]
+    # The same rule as the UI's _can_approve_mappings.
+    if not (user.is_staff or has_org_admin_access(user)):
+        raise CommandError(f'{user.email} may not approve mappings (staff or org admin only)')
+    return user
 
 
 class Command(BaseCommand):
@@ -52,9 +67,7 @@ class Command(BaseCommand):
         if unknown:
             # Widening the bulk set is a product decision, not a flag.
             raise CommandError(f'Only {sorted(DEFAULT_MATCHES)} may be bulk-approved; got {sorted(unknown)}')
-        reviewer = get_user_model().objects.filter(email__iexact=options['reviewer']).first()
-        if reviewer is None:
-            raise CommandError(f'No user with email {options["reviewer"]!r}')
+        reviewer = _reviewer(options['reviewer'])
         try:
             rows = read_proposals(options['file'])
         except (OSError, ValueError) as exc:
@@ -62,47 +75,50 @@ class Command(BaseCommand):
 
         rows = [r for r in rows if r.match in matches]
         concepts = resolve_concepts(r.proposal for r in rows if r.proposal)
+        now = timezone.now()
+        lock_cutoff = now - timedelta(minutes=settings.MAPPING_LOCK_TIMEOUT_MINUTES)
+        unlocked = Q(locked_by__isnull=True) | Q(locked_at__lt=lock_cutoff) | Q(locked_by=reviewer)
         mappings = {
             m.source_code.lower(): m
-            for m in SourceCodeConceptMapping.objects.filter(
-                source_vocabulary_id=SOURCE_VOCABULARY_ID,
-                source_code__in=[r.source_code for r in rows],
-            )
+            for m in SourceCodeConceptMapping.objects.filter(source_vocabulary_id=SOURCE_VOCABULARY_ID)
         }
-        skipped, to_approve = Counter(), []
-        details = []
-        for row in rows:
-            mapping = mappings.get(row.source_code.lower())
-            concept = concepts.get(row.proposal) if row.proposal else None
-            if row.verified != 'ok':
-                reason = f'verified={row.verified or "-"}'
-            elif row.proposal is None:
-                reason = 'no proposal'
-            elif destination_problem(concept):
-                reason = f'destination {row.proposal}: {destination_problem(concept)}'
-            elif mapping is None:
-                reason = 'not in the queue (import first)'
-            elif mapping.status != 'proposed':
-                reason = f'already {mapping.status}'
-            elif mapping.target_concept_id != concept.concept_id:
-                reason = 're-pointed since import'
-            else:
-                to_approve.append(mapping)
-                continue
-            skipped[reason.split(':')[0]] += 1
-            details.append(f'{row.source_code}: {reason}')
 
-        if options['apply'] and to_approve:
-            now = timezone.now()
-            with transaction.atomic():
-                SourceCodeConceptMapping.objects.filter(
-                    pk__in=[m.pk for m in to_approve], status='proposed',
-                ).update(status='approved', reviewer=reviewer, reviewed_at=now,
-                         updated_by=reviewer, updated_at=now, pending_repoint_concept_ids=[])
+        skipped, details, approved = Counter(), [], 0
+        with transaction.atomic():
+            for row in rows:
+                mapping = mappings.get(row.source_code.lower())
+                concept = concepts.get(row.proposal) if row.proposal else None
+                if row.verified != 'ok':
+                    reason = f'verified={row.verified or "-"}'
+                elif row.proposal is None:
+                    reason = 'no proposal'
+                elif bulk_approval_problem(concept):
+                    reason = bulk_approval_problem(concept)
+                elif mapping is None:
+                    reason = 'not in the queue (import first)'
+                elif mapping.status != 'proposed':
+                    reason = f'already {mapping.status}'
+                elif mapping.target_concept_id != concept.concept_id:
+                    reason = 're-pointed since import'
+                else:
+                    current = SourceCodeConceptMapping.objects.filter(
+                        unlocked, pk=mapping.pk, status='proposed', target_concept_id=concept.concept_id)
+                    if not options['apply']:
+                        reason = '' if current.exists() else 'locked or changed'
+                    else:
+                        reason = '' if current.update(
+                            status='approved', reviewer=reviewer, reviewed_at=now, updated_by=reviewer,
+                            updated_at=now, pending_repoint_concept_ids=[],
+                        ) else 'locked or changed'
+                    if not reason:
+                        approved += 1
+                        continue
+                skipped[reason] += 1
+                details.append(f'{row.source_code} ({row.proposal or "-"}): {reason}')
 
         verb = 'Approved' if options['apply'] else 'Dry run -- would approve'
         self.stdout.write(self.style.SUCCESS(
-            f'{verb} {len(to_approve):,} of {len(rows):,} rows in {sorted(matches)} as {reviewer.email}.'))
+            f'{verb} {approved:,} of {len(rows):,} rows in {sorted(matches)} as {reviewer.email}.'))
         for reason, count in sorted(skipped.items()):
             self.stdout.write(f'  skipped {count:,}: {reason}')
         for line in details:
