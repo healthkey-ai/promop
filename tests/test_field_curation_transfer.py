@@ -625,26 +625,26 @@ def _sync(rows: list[dict[str, object]]) -> TransferStats:
 
 
 def test_code_under_another_vocabulary_spelling_is_updated_in_place():
-    _seed_code_mapping(source_vocabulary_id='ICD10', source_code='A41.9', notes='from source')
+    _seed_code_mapping(source_vocabulary_id='urn:oid:2.16.840.1.113883.6.96', source_code='433144002', notes='from source')
     rows = _read_code_mappings()
     _wipe_code_mappings()
-    here = _seed_code_mapping(source_vocabulary_id='ICD10CM', source_code='A41.9', notes='local')
+    here = _seed_code_mapping(source_vocabulary_id='SNOMED', source_code='433144002', notes='local')
 
     stats = _sync(rows)
 
     mapping = SourceCodeConceptMapping.objects.get()
-    assert (mapping.pk, mapping.source_vocabulary_id, mapping.notes) == (here.pk, 'ICD10', 'from source')
+    assert (mapping.pk, mapping.source_vocabulary_id, mapping.notes) == (here.pk, 'urn:oid:2.16.840.1.113883.6.96', 'from source')
     assert (stats.created.get('code_mappings', 0), stats.updated['code_mappings']) == (0, 1)
 
 
 def test_extra_rows_for_the_same_code_are_deleted():
-    _seed_code_mapping(source_vocabulary_id='ICD10', source_code='A41.9')
+    _seed_code_mapping(source_vocabulary_id='urn:oid:2.16.840.1.113883.6.96', source_code='433144002')
     rows = _read_code_mappings()
-    _seed_code_mapping(source_vocabulary_id='ICD10CM', source_code='A41.9')
+    _seed_code_mapping(source_vocabulary_id='SNOMED', source_code='433144002')
 
     stats = _sync(rows)
 
-    assert list(SourceCodeConceptMapping.objects.values_list('source_vocabulary_id', flat=True)) == ['ICD10']
+    assert list(SourceCodeConceptMapping.objects.values_list('source_vocabulary_id', flat=True)) == ['urn:oid:2.16.840.1.113883.6.96']
     assert stats.deleted['code_mappings'] == 1
 
 
@@ -662,10 +662,10 @@ def test_source_rows_under_two_spellings_are_both_kept():
 
 
 def test_code_matches_regardless_of_case_and_padding():
-    _seed_code_mapping(source_vocabulary_id='ICD10', source_code='A41.9')
+    _seed_code_mapping(source_vocabulary_id='ICD10CM', source_code='A41.9')
     rows = _read_code_mappings()
     _wipe_code_mappings()
-    here = _seed_code_mapping(source_vocabulary_id='ICD10', source_code='a41.9 ')
+    here = _seed_code_mapping(source_vocabulary_id='ICD10CM', source_code='a41.9 ')
 
     _sync(rows)
 
@@ -675,8 +675,8 @@ def test_code_matches_regardless_of_case_and_padding():
 
 def test_chunks_never_split_the_rows_of_one_code(monkeypatch):
     monkeypatch.setattr(field_curation_transfer, 'CODE_MAPPING_CHUNK', 1)
-    _seed_code_mapping(source_vocabulary_id='ICD10', source_code='A41.9')
-    _seed_code_mapping(source_vocabulary_id='ICD10CM', source_code='A41.9')
+    _seed_code_mapping(source_vocabulary_id='urn:oid:2.16.840.1.113883.6.96', source_code='433144002')
+    _seed_code_mapping(source_vocabulary_id='SNOMED', source_code='433144002')
     rows = _read_code_mappings()
 
     stats = _sync(rows)

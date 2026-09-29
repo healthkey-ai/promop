@@ -18,7 +18,8 @@ def source_tab_vocabularies(vocabulary_id):
 
 
 def athena_supplies_mapping(vocabulary_id, source_code, destination_id, *, exclude_id=None):
-    if not destination_id or not source_code.strip():
+    icd10cm = vocabulary_id == 'ICD10CM'
+    if (not icd10cm and not destination_id) or not source_code.strip():
         return False
     vocab_set = source_tab_vocabularies(vocabulary_id)
     mappings = SourceCodeConceptMapping.objects.filter(
@@ -26,7 +27,9 @@ def athena_supplies_mapping(vocabulary_id, source_code, destination_id, *, exclu
         origin_system='athena', target_concept_id__isnull=False,
     ).alias(trimmed_source_code=Trim('source_code')).filter(
         trimmed_source_code__iexact=source_code.strip(),
-    ).filter(target_concept_id=destination_id)
+    )
+    if not icd10cm:
+        mappings = mappings.filter(target_concept_id=destination_id)
     if exclude_id is not None:
         mappings = mappings.exclude(pk=exclude_id)
     return mappings.exists()

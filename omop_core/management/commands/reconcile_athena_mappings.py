@@ -24,8 +24,8 @@ class Command(BaseCommand):
             'Default: read-only, using the configured default Google Drive export.')
 
     def add_arguments(self, parser):
-        parser.add_argument('vocabulary', nargs='?', choices=('ICD10', 'ICD10CM'),
-                            help='Exact stored vocabulary; default: both ICD10 and ICD10CM')
+        parser.add_argument('vocabulary', nargs='?', choices=('ICD10CM',),
+                            help='Exact stored vocabulary; default: ICD10CM')
         sources = parser.add_mutually_exclusive_group()
         sources.add_argument('--path', help='Directory containing original Athena TSV files')
         sources.add_argument('--archive', help='Original Athena ZIP file')
@@ -40,7 +40,7 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         using = options['database']
         log = self.stderr if options['report'] == '-' else self.stdout
-        vocabularies = [options['vocabulary']] if options['vocabulary'] else ['ICD10', 'ICD10CM']
+        vocabularies = [options['vocabulary']] if options['vocabulary'] else ['ICD10CM']
         with ExitStack() as stack:
             writer = None
             if options['report']:

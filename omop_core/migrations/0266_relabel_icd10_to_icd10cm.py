@@ -23,13 +23,11 @@ def relabel_icd10_forward(apps, schema_editor):
 
 
 def relabel_icd10_reverse(apps, schema_editor):
-    # Lossy: the original 9,316 ICD10CM rows would also be relabeled to ICD10.
-    # After reversal, manual correction is required to separate ICD10 from
-    # ICD10CM rows.
-    SourceCodeConceptMapping = apps.get_model('omop_core', 'SourceCodeConceptMapping')
-    SourceCodeConceptMapping.objects.filter(
-        source_vocabulary_id='ICD10CM',
-    ).update(source_vocabulary_id='ICD10')
+    # The original ICD10/ICD10CM split cannot be reconstructed: all rows are
+    # now ICD10CM and there is no marker distinguishing which were originally
+    # ICD10.  Rolling back this migration is a no-op; manual correction is
+    # required if the split needs to be restored.
+    pass
 
 
 class Migration(migrations.Migration):

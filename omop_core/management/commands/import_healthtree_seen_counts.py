@@ -21,7 +21,7 @@ FHIR_ALIASES = {
     'http://www.nlm.nih.gov/research/umls/rxnorm': 'RxNorm',
     'http://www.ama-assn.org/go/cpt': 'CPT4',
     'http://hl7.org/fhir/sid/icd-9': 'ICD9CM',
-    'http://hl7.org/fhir/sid/icd-10': 'ICD10',
+    'http://hl7.org/fhir/sid/icd-10': 'ICD10CM',
     'http://hl7.org/fhir/sid/icd-10-cm': 'ICD10CM',
     'http://hl7.org/fhir/sid/ndc': 'NDC',
     'CPT': 'CPT4',
@@ -32,7 +32,7 @@ for oid, vocabulary in {
     '2.16.840.1.113883.6.88': 'RxNorm',
     '2.16.840.1.113883.6.12': 'CPT4',
     '2.16.840.1.113883.6.42': 'ICD9CM',
-    '2.16.840.1.113883.6.3': 'ICD10',
+    '2.16.840.1.113883.6.3': 'ICD10CM',
     '2.16.840.1.113883.6.90': 'ICD10CM',
 }.items():
     FHIR_ALIASES[oid] = FHIR_ALIASES[f'urn:oid:{oid}'] = vocabulary
