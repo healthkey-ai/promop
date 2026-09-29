@@ -17,7 +17,7 @@ def _extract_from_archive(archive_path, stdout):
 
     The archive is how the files are actually kept — ~110MB unzipped, ~12MB
     zipped — so a deployment that has the zip should not also need the CSVs
-    unpacked beside it at a bucket root.
+    unpacked beside it.
     """
     tmpdir = Path(tempfile.mkdtemp(prefix='loinc_classes_'))
     wanted = ('LoincClass.csv', 'Loinc.csv')
@@ -35,25 +35,11 @@ def _extract_from_archive(archive_path, stdout):
     return tmpdir / 'LoincClass.csv', tmpdir / 'Loinc.csv'
 
 
-def _download_gcs_blob(bucket, filename, stdout):
-    blob = bucket.blob(filename)
-    if not blob.exists():
-        raise CommandError(f'Required blob not found: gs://{bucket.name}/{filename}')
-    dest = Path('/tmp/loinc') / filename
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    size_mb = (blob.size or 0) / 1048576
-    stdout.write(f'  Downloading {filename} ({size_mb:.0f}MB)...')
-    blob.download_to_filename(str(dest))
-    stdout.write(f'  Downloaded {filename}.')
-    return dest
-
-
 class Command(BaseCommand):
     help = (
         'Load LOINC class data from the loinc.org archive.\n'
         '  --classes-csv: LoincClass.csv (CLASS → DISPLAY_NAME, ~470 rows)\n'
         '  --loinc-csv:   Loinc.csv (LOINC_NUM → CLASS mapping, ~100k rows)\n'
-        '  --bucket:      GCS bucket to download files from (alternative to local paths)\n'
         'Both files come from the quarterly Loinc_x.yy.zip archive.'
     )
 
@@ -62,8 +48,6 @@ class Command(BaseCommand):
                             help='Path to LoincClass.csv')
         parser.add_argument('--loinc-csv',
                             help='Path to Loinc.csv (loads LOINC_NUM → CLASS mapping)')
-        parser.add_argument('--bucket',
-                            help='GCS bucket name to download files from')
         parser.add_argument('--archive',
                             help=('Path or gs:// URI of a loinc.org archive zip '
                                   'containing LoincClass.csv and Loinc.csv'))
@@ -71,35 +55,22 @@ class Command(BaseCommand):
                             help='Clear existing rows before loading')
 
     def handle(self, *args, **options):
-        bucket_name = options.get('bucket')
+        # GCS sourcing and the Cloud Run job that drove it are gone (#1624);
+        # routine refreshes come from the release API via sync_loinc_release.
         archive = options.get('archive')
-        gcs_bucket = None
         archive_loinc_path = None
 
         if archive:
-            if archive.startswith('gs://'):
-                from google.cloud import storage as gcs
-
-                bkt, _, blob_name = archive[len('gs://'):].partition('/')
-                if not bkt or not blob_name:
-                    raise CommandError(
-                        f'Archive URI needs a bucket and an object: {archive}'
-                    )
-                self.stdout.write(f'Loading from {archive}')
-                archive = _download_gcs_blob(gcs.Client().bucket(bkt), blob_name, self.stdout)
-            else:
-                archive = Path(archive)
-                if not archive.exists():
-                    raise CommandError(f'File not found: {archive}')
+            archive = Path(archive)
+            if not archive.exists():
+                raise CommandError(f'File not found: {archive}')
             classes_path, archive_loinc_path = _extract_from_archive(archive, self.stdout)
-        elif bucket_name:
-            from google.cloud import storage as gcs
-            gcs_bucket = gcs.Client().bucket(bucket_name)
-            self.stdout.write(f'Loading from gs://{bucket_name}/')
-            classes_path = _download_gcs_blob(gcs_bucket, 'LoincClass.csv', self.stdout)
         else:
             if not options.get('classes_csv'):
-                raise CommandError('Provide either --classes-csv or --bucket')
+                raise CommandError(
+                    'Provide --classes-csv or --archive. For a routine refresh '
+                    'from loinc.org, use: manage.py sync_loinc_release'
+                )
             classes_path = Path(options['classes_csv'])
             if not classes_path.exists():
                 raise CommandError(f'File not found: {classes_path}')
@@ -113,11 +84,6 @@ class Command(BaseCommand):
 
         if archive_loinc_path is not None:
             self._load_code_class_mapping(archive_loinc_path)
-        elif gcs_bucket:
-            loinc_path = _download_gcs_blob(gcs_bucket, 'Loinc.csv', self.stdout)
-            self._load_code_class_mapping(loinc_path)
-            loinc_path.unlink()
-            self.stdout.write('  Cleaned up Loinc.csv.')
         elif options.get('loinc_csv'):
             loinc_path = Path(options['loinc_csv'])
             if not loinc_path.exists():

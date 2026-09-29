@@ -82,3 +82,17 @@ def suggest_mappings_task(self, run_id: str, params: dict[str, Any]) -> dict[str
         'total': run.total,
         'destinations': run.destinations,
     }
+
+
+@shared_task(
+    name='omop_core.sync_loinc_release',
+    # The download endpoint is rate limited -- a repeat request minutes after a
+    # success has been seen to answer 401 -- so a retry storm makes things
+    # worse. Few attempts, spread widely.
+    autoretry_for=(Exception,), retry_backoff=600, retry_backoff_max=7200,
+    retry_jitter=True, max_retries=3,
+)
+def sync_loinc_release_task():
+    from omop_core.services.loinc_release import sync_release
+
+    sync_release()

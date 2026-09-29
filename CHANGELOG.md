@@ -8,6 +8,19 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **LOINC loads itself from loinc.org** — `sync_loinc_release` checks
+  `GET /api/v1/Loinc` for the published version and, when ours is older, streams
+  the release archive and loads both tables from it: `LoincTable/Loinc.csv` into
+  `LoincCodeClass` (including the `property` and `scale_type` that migration
+  0249 added and no load had ever filled), and `AccessoryFiles/PartFile/Part.csv`
+  into `LoincClass` — LOINC models CLASS as a Part, which is why the archive has
+  no file named after classes. The loaded release is recorded in `LoincRelease`,
+  so "is our copy stale" finally has an answer. The deployment bootstrap runs
+  the check and queues the load on Celery; a hand-run Cloud Run job, a one-off
+  GCS bucket and a dependency on an hk-labs checkout all go away. Needs
+  `LOINC_USER` / `LOINC_PASSWORD` (#1624).
+
+
 - **Label rollup for the Code Mapping queue** — a "Group by label" toggle shows
   one review row per label instead of one per vendor code, ordered by the
   group's summed Seen and paginated by group. Expanding a row fetches its codes
