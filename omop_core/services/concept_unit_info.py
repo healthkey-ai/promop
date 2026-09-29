@@ -5,12 +5,39 @@ and by code-mapping serialisation to show curators the expected unit for a
 LOINC Measurement concept.
 """
 import logging
+import functools
 from functools import lru_cache
 
 logger = logging.getLogger(__name__)
 
 
-@lru_cache(maxsize=1)
+def _memoize_when_populated(build):
+    """Cache like ``lru_cache(maxsize=1)``, but never cache an empty result.
+
+    These caches are process-local with no TTL, and the LOINC tables are now
+    loaded *after* the web process is up -- queued on Celery at boot (#1624).
+    A first-ever load therefore completes on a worker while every gunicorn
+    worker keeps serving the empty mapping it cached at boot, leaving
+    ``property_for()`` and unit checks degraded until the next restart with
+    nothing to indicate it.
+
+    Not caching the empty case costs one cheap query per call while the table
+    is genuinely empty, and nothing at all once it is populated -- which is the
+    steady state.
+    """
+    cached = {}
+
+    @functools.wraps(build)
+    def wrapper():
+        if not cached.get('value'):
+            cached['value'] = build()
+        return cached['value']
+
+    wrapper.cache_clear = cached.clear
+    return wrapper
+
+
+@_memoize_when_populated
 def get_loinc_to_unit() -> dict[str, str]:
     """Build LOINC-code -> unit mapping, DB-backed with curated overrides.
 
@@ -99,7 +126,7 @@ def concept_unit_fields(concept):
     return result
 
 
-@lru_cache(maxsize=1)
+@_memoize_when_populated
 def get_loinc_example_units():
     return {code: list(dict.fromkeys(u.strip() for u in units.split(';') if u.strip()))
             for code, units in _db_loinc_units().items()}

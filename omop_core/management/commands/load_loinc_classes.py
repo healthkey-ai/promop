@@ -13,26 +13,62 @@ BATCH = 2000
 
 
 def _extract_from_archive(archive_path, stdout):
-    """Pull the two CSVs out of a loinc.org archive zip.
+    """Pull the two CSVs out of a release archive, or a hand-made one.
 
-    The archive is how the files are actually kept — ~110MB unzipped, ~12MB
-    zipped — so a deployment that has the zip should not also need the CSVs
-    unpacked beside it.
+    A real loinc.org archive has no ``LoincClass.csv``: LOINC models CLASS as a
+    Part, so the class table is ``AccessoryFiles/PartFile/Part.csv`` filtered to
+    ``PartTypeName == 'CLASS'``. This used to demand a ``LoincClass.csv``
+    member, which only the hand-assembled zip from the retired upload script
+    ever had -- so ``--archive`` could not read the very thing it names (#1624).
     """
     tmpdir = Path(tempfile.mkdtemp(prefix='loinc_classes_'))
-    wanted = ('LoincClass.csv', 'Loinc.csv')
     with zipfile.ZipFile(archive_path) as zf:
-        names = {Path(n).name: n for n in zf.namelist()}
-        missing = [w for w in wanted if w not in names]
-        if missing:
-            raise CommandError(
-                f'Archive {archive_path} is missing {", ".join(missing)}'
-            )
-        for w in wanted:
-            with zf.open(names[w]) as src, (tmpdir / w).open('wb') as dst:
+        names = zf.namelist()
+        loinc = _member_ending(names, 'LoincTable/Loinc.csv') or _member_ending(names, 'Loinc.csv')
+        if loinc is None:
+            raise CommandError(f'Archive {archive_path} is missing Loinc.csv')
+        with zf.open(loinc) as src, (tmpdir / 'Loinc.csv').open('wb') as dst:
+            dst.write(src.read())
+
+        classes = _member_ending(names, 'LoincClass.csv')
+        if classes is not None:
+            with zf.open(classes) as src, (tmpdir / 'LoincClass.csv').open('wb') as dst:
                 dst.write(src.read())
-    stdout.write(f'  Extracted {", ".join(wanted)} from archive.')
+            stdout.write('  Extracted Loinc.csv and LoincClass.csv from archive.')
+        else:
+            part = _member_ending(names, 'AccessoryFiles/PartFile/Part.csv')
+            if part is None:
+                raise CommandError(
+                    f'Archive {archive_path} has neither LoincClass.csv nor '
+                    f'AccessoryFiles/PartFile/Part.csv, so classes cannot be read.'
+                )
+            with zf.open(part) as src:
+                _write_classes_from_part_file(src, tmpdir / 'LoincClass.csv')
+            stdout.write('  Extracted Loinc.csv and CLASS parts from Part.csv.')
     return tmpdir / 'LoincClass.csv', tmpdir / 'Loinc.csv'
+
+
+def _member_ending(names, suffix):
+    return next((n for n in names if n.endswith(suffix)), None)
+
+
+def _write_classes_from_part_file(handle, destination):
+    """Write the CLASS parts out in the CLASS/DISPLAY_NAME shape _load_classes reads."""
+    import io
+
+    reader = csv.DictReader(io.TextIOWrapper(handle, encoding='utf-8-sig', newline=''))
+    with destination.open('w', encoding='utf-8', newline='') as out:
+        writer = csv.DictWriter(out, fieldnames=['CLASS', 'DISPLAY_NAME'])
+        writer.writeheader()
+        for row in reader:
+            if (row.get('PartTypeName') or '').strip() != 'CLASS':
+                continue
+            code = (row.get('PartName') or '').strip()
+            if code:
+                writer.writerow({
+                    'CLASS': code,
+                    'DISPLAY_NAME': (row.get('PartDisplayName') or '').strip() or code,
+                })
 
 
 class Command(BaseCommand):

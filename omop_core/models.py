@@ -2313,8 +2313,13 @@ class LoincRelease(models.Model):
     could say so.
 
     Mirrors :class:`UmlsRelease`, for the same reason: this is a loaded raw
-    release, not an OMOP vocabulary. ``archive_md5`` is the ``downloadMD5Hash``
-    the release API supplies, so a truncated download stops being silent.
+    release, not an OMOP vocabulary.
+
+    ``archive_md5`` is the ``downloadMD5Hash`` the release API reported, kept
+    as a record of which bytes a load claimed to come from. It is **not
+    verified**: the reader stops as soon as both wanted members are out, so the
+    rest of the archive is never fetched and there is nothing to hash. Adding
+    verification means reading all ~92MB to hash a tail nothing else needs.
     """
     release_version = models.CharField(max_length=20, primary_key=True)
     release_url = models.URLField(max_length=500)

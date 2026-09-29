@@ -43,6 +43,9 @@ PART_FILE_MEMBER = 'AccessoryFiles/PartFile/Part.csv'
 VERSION_TIMEOUT = 30
 DOWNLOAD_TIMEOUT = (30, 600)
 
+#: Advisory-lock key for the load. Arbitrary but fixed; scoped to this loader.
+_LOCK_KEY = 0x10C1_0AD1
+
 
 class LoincCredentialsMissing(RuntimeError):
     """No LOINC_USER / LOINC_PASSWORD configured."""
@@ -148,14 +151,23 @@ def load_from_archive(chunks, stdout=None):
     ``Loinc.csv`` under ``LoincTable/``, and ``stream_unzip`` yields members in
     whatever order the archive stores them -- but ``LoincCodeClass`` rows are
     dropped when their class is unknown, so classes have to be in place first.
-    The class rows are small (476), so they are buffered; the 112k code rows
-    are not, and stream straight into batches.
+    Both are buffered, which is the cost of not assuming order: the 476 class
+    rows are trivial, the 112k code rows are roughly 120MB of dicts and model
+    instances at peak. A real archive happens to store ``AccessoryFiles/``
+    before ``LoincTable/``, so the code rows could stream once classes are
+    known -- but relying on that makes the loader silently wrong on an archive
+    laid out the other way, which is the case ``test_classes_load_even_when_
+    the_part_file_comes_last`` covers.
     """
     from stream_unzip import stream_unzip
 
     from omop_core.models import LoincClass, LoincCodeClass
 
-    def say(message):
+    def say(message, level=logging.INFO):
+        # Also logged: the Celery task passes no stdout, and that is the only
+        # automated path. A load that leaves no record is the failure this
+        # whole change exists to stop.
+        logger.log(level, message.strip())
         if stdout is not None:
             stdout.write(message)
 
@@ -193,7 +205,7 @@ def load_from_archive(chunks, stdout=None):
     if unknown:
         dropped = sum(1 for row in code_rows if row['loinc_class_id'] in unknown)
         say(f'  WARNING: {dropped} codes reference {len(unknown)} classes absent '
-            f'from {PART_FILE_MEMBER}: {sorted(unknown)[:5]}')
+            f'from {PART_FILE_MEMBER}: {sorted(unknown)[:5]}', logging.WARNING)
         code_rows = [row for row in code_rows if row['loinc_class_id'] not in unknown]
 
     LoincCodeClass.objects.bulk_create(
@@ -265,6 +277,26 @@ def _read_loinc_rows(member_chunks):
         }
 
 
+def _try_lock():
+    """Take the loader lock, or report that someone else holds it.
+
+    Session-level and re-entrant within one connection, which is why this is
+    a guard against other *processes* rather than against re-entry here.
+    """
+    from django.db import connection
+
+    with connection.cursor() as cursor:
+        cursor.execute('SELECT pg_try_advisory_lock(%s)', [_LOCK_KEY])
+        return bool(cursor.fetchone()[0])
+
+
+def _unlock():
+    from django.db import connection
+
+    with connection.cursor() as cursor:
+        cursor.execute('SELECT pg_advisory_unlock(%s)', [_LOCK_KEY])
+
+
 def sync_release(force=False, stdout=None):
     """Load the current release if ours is stale. Returns the version, or None.
 
@@ -276,6 +308,7 @@ def sync_release(force=False, stdout=None):
     from omop_core.models import LoincRelease
 
     def say(message):
+        logger.info(message.strip())
         if stdout is not None:
             stdout.write(message)
 
@@ -284,37 +317,68 @@ def sync_release(force=False, stdout=None):
         say(f'LOINC {published["version"]} already loaded; nothing to do.')
         return None
 
-    say(f'Loading LOINC {published["version"]} (have {loaded_version() or "nothing"})...')
-    classes, codes = load_from_archive(stream_archive(published['download_url']), stdout=stdout)
-    with transaction.atomic():
-        LoincRelease.objects.update_or_create(
-            release_version=published['version'],
-            defaults={
-                'release_url': published['download_url'],
-                'archive_md5': published['md5'],
-                'release_date': published['release_date'] or None,
-                'loinc_count': published['loinc_count'],
-            },
-        )
-    say(f'Loaded LOINC {published["version"]}: {classes} classes, {codes} codes.')
+    # One loader at a time. prepare-deployment.sh runs on every instance boot,
+    # so scaling to three instances -- or restarting while a worker is mid-load
+    # -- otherwise means concurrent 92MB downloads and concurrent
+    # bulk_create(update_conflicts=True) over the same 112k rows, which can
+    # deadlock on the ON CONFLICT updates. A session-level advisory lock is
+    # enough: the loser exits rather than queueing behind the winner, because
+    # by the time the winner finishes there is nothing left to do.
+    if not _try_lock():
+        say('Another LOINC load holds the lock; skipping this one.')
+        return None
 
-    from omop_core.services.concept_unit_info import get_loinc_to_unit, get_loinc_example_units
-    get_loinc_to_unit.cache_clear()
-    get_loinc_example_units.cache_clear()
-    return published['version']
+    try:
+        say(f'Loading LOINC {published["version"]} (have {loaded_version() or "nothing"})...')
+        chunks = stream_archive(published['download_url'])
+    # One transaction over the load and the version row. Recording the version
+    # separately would let the tables update while the row failed to write --
+    # after which every check reports stale and re-spends the download, with
+    # no way to notice.
+        with transaction.atomic():
+            classes, codes = load_from_archive(chunks, stdout=stdout)
+            LoincRelease.objects.update_or_create(
+                release_version=published['version'],
+                defaults={
+                    'release_url': published['download_url'],
+                    'archive_md5': published['md5'],
+                    'release_date': published['release_date'] or None,
+                    'loinc_count': published['loinc_count'],
+                },
+            )
+        say(f'Loaded LOINC {published["version"]}: {classes} classes, {codes} codes.')
+
+        # Only clears this process. Other gunicorn workers self-heal because
+        # concept_unit_info refuses to cache an empty mapping (#1624).
+        from omop_core.services.concept_unit_info import (
+            get_loinc_to_unit, get_loinc_example_units)
+        get_loinc_to_unit.cache_clear()
+        get_loinc_example_units.cache_clear()
+        return published['version']
+    finally:
+        _unlock()
 
 
-def dispatch_release_sync():
-    """Queue the release sync on Celery, or run it inline.
+def dispatch_release_sync(allow_inline=False):
+    """Queue a release load if ours is stale. Returns whether one was started.
 
-    Same rule as ``embedding_jobs.dispatch_concept_embedding_build``: Celery
-    when a broker is configured, inline otherwise. The archive is ~92MB and the
-    load is bulk work, so a web boot dispatches rather than doing it.
+    **Never raises.** Every caller is a deployment step, and a stale LOINC
+    table degrades ``property_for()`` and unit checks -- it is not a reason to
+    refuse to serve. An exception escaping here reaches
+    ``check_loinc_release``, whose non-zero exit fails
+    ``scripts/prepare-deployment.sh`` under ``set -euo pipefail``, turning a
+    degraded table into a web service that will not boot. Only
+    ``sync_loinc_release``, run deliberately, surfaces errors.
 
-    Never raises. A boot that cannot reach the API still has whatever release
-    it already loaded, and refusing to serve over that would trade a degraded
-    ``property_for()`` for an outage. Only the caller that explicitly asks --
-    the management command -- gets the exception.
+    ``allow_inline`` is off by default and the boot path leaves it off. Without
+    a broker the inline branch would fetch ~92MB and load 112k rows *before*
+    gunicorn binds its port, and Render kills an instance that does not bind in
+    time. Production is exactly that shape: ``render.yaml`` leaves
+    ``CELERY_BROKER_URL`` dashboard-managed (``sync: false``) on the web
+    service, so a deployment that has not pasted the Redis URL in has no broker
+    -- the trap CLAUDE.md already documents for the Suggest inline ceiling.
+    Staging has both a broker and a pre-deploy hook and would not have shown
+    it.
     """
     try:
         stale, published = is_out_of_date()
@@ -333,16 +397,37 @@ def dispatch_release_sync():
     except LoincReleaseUnavailable as exc:
         logger.warning('Could not check the LOINC release version: %s', exc)
         return False
+    except Exception:
+        logger.exception('Unexpected error checking the LOINC release version.')
+        return False
 
     if not stale:
         logger.info('LOINC %s is current.', published['version'])
         return False
 
     if getattr(settings, 'CELERY_BROKER_URL', ''):
-        from omop_core.tasks import sync_loinc_release_task
+        try:
+            from omop_core.tasks import sync_loinc_release_task
 
-        sync_loinc_release_task.delay()
+            sync_loinc_release_task.delay()
+        except Exception:
+            # An unreachable broker raises kombu.exceptions.OperationalError.
+            logger.exception('Could not queue the LOINC %s load.', published['version'])
+            return False
         logger.info('Queued a LOINC %s load on Celery.', published['version'])
-    else:
+        return True
+
+    if not allow_inline:
+        logger.warning(
+            'LOINC %s is available but CELERY_BROKER_URL is not set, so there '
+            'is nowhere to run the load. Refusing to fetch ~92MB in this '
+            'process. Configure a broker, or run: manage.py sync_loinc_release',
+            published['version'])
+        return False
+
+    try:
         sync_release()
+    except Exception:
+        logger.exception('LOINC %s load failed.', published['version'])
+        return False
     return True
