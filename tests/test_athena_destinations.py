@@ -508,14 +508,14 @@ def test_missing_browser_is_reported_and_command_finishes(tmp_path, monkeypatch)
 
 
 @pytest.mark.django_db
-def test_explicit_ht_one_vocabulary_correction_is_reported_and_used(tmp_path):
-    row = Mapping.objects.create(source_vocabulary_id='ICD10', source_code='C91.10', origin='import')
+def test_explicit_vocabulary_correction_is_reported_and_used(tmp_path):
+    row = Mapping.objects.create(source_vocabulary_id='CUSTOM_ICD', source_code='C91.10', origin='import')
     records, _ = run(tmp_path, path=str(export(tmp_path / 'local')), offline=True,
-                     lookup_vocabulary=['ICD10=ICD10CM'])
+                     vocabulary=['CUSTOM_ICD'], lookup_vocabulary=['CUSTOM_ICD=ICD10CM'])
     assert records[0]['lookup_vocabulary'] == 'ICD10CM'
-    assert records[0]['vocabulary'] == 'ICD10' and records[0]['outcome'] == 'loaded'
+    assert records[0]['vocabulary'] == 'CUSTOM_ICD' and records[0]['outcome'] == 'loaded'
     row.refresh_from_db()
-    assert row.source_vocabulary_id == 'ICD10' and row.target_concept_id == 201
+    assert row.source_vocabulary_id == 'CUSTOM_ICD' and row.target_concept_id == 201
     assert 'ICD10CM:C91.10' in row.notes
 
 

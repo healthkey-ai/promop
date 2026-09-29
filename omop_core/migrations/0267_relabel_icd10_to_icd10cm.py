@@ -32,7 +32,7 @@ def relabel_icd10_reverse(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ('omop_core', '0265_reconcile_lab_alias_units'),
+        ('omop_core', '0266_loincrelease'),
     ]
 
     operations = [
