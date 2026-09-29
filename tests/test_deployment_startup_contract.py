@@ -118,19 +118,57 @@ def test_render_lets_the_platform_choose_bind_and_workers():
     assert '--workers' not in script
 
 
-def test_render_prepares_once_per_deploy():
-    """Render gains the release phase Cloud Run already has.
+def web_services():
+    blueprint = yaml.safe_load((ROOT / 'render.yaml').read_text())
+    return [s for s in blueprint['services'] if s.get('type') == 'web']
+
+
+def test_staging_prepares_once_per_deploy():
+    """Staging gains the release phase Cloud Run already has.
 
     A failure in a pre-deploy stops the deploy and leaves the running version
     serving; the same failure during web boot gives a crash-looping service.
     """
-    blueprint = yaml.safe_load((ROOT / 'render.yaml').read_text())
-    web = [s for s in blueprint['services'] if s.get('type') == 'web']
+    staging = [s for s in web_services() if s.get('branch') == 'dev']
 
-    assert web, 'no web services in the blueprint'
-    for service in web:
+    assert staging, 'no web service tracking dev'
+    for service in staging:
         assert service.get('preDeployCommand') == 'bash scripts/prepare-deployment.sh', (
             f"{service['name']} does not prepare in its release phase"
+        )
+
+
+def test_a_pre_deploy_only_names_a_script_this_branch_actually_has():
+    """A Blueprint sync applies settings to every service it declares, whatever
+    branch each one deploys code from -- and changing a service's settings
+    redeploys it. Pointing production at a script that exists on dev but not on
+    main failed every production deploy on "No such file or directory", from a
+    sync alone, with no release to main involved.
+
+    A service can therefore only carry a pre-deploy naming a file present on the
+    branch it deploys. This checks the weaker thing a test can see: the file
+    exists here at all. The branch-relative half is why the production service
+    carries a comment instead of a hook.
+    """
+    for service in web_services():
+        command = service.get('preDeployCommand')
+        if not command:
+            continue
+        script = command.split()[-1]
+        assert (ROOT / script).exists(), (
+            f"{service['name']} pre-deploys {script}, which is not in the repo"
+        )
+
+
+def test_production_waits_for_the_script_to_reach_its_branch():
+    production = [s for s in web_services() if s.get('branch') == 'main']
+
+    assert production, 'no web service tracking main'
+    for service in production:
+        # Remove this only together with dev reaching main, or the next
+        # Blueprint sync breaks production deploys again.
+        assert service.get('preDeployCommand') is None, (
+            f"{service['name']} pre-deploys a script main may not have"
         )
 
 
