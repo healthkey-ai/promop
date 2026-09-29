@@ -11,9 +11,14 @@ a re-run never sets a destination, a description or a status. It refreshes
 the trial count and the candidates -- adding new ones and re-resolving old
 ones, so a vocabulary loaded since the last run shows -- and only on rows
 still in review that still carry this importer's provenance. A row a curator
-has approved, rejected, cleared or re-pointed is left exactly as it is. A row
-without a destination whose proposal has since become usable is listed, for
-a person to pick.
+has approved, rejected or cleared, or re-pointed while it stayed proposed, is
+left as it is. A row without a destination whose proposal has since become
+usable is listed, for a person to pick.
+
+**Reject a CB term, do not delete it.** Deleting a row leaves no trace, so the
+next import proposes the term again as new -- with a destination, if its
+concept has arrived meanwhile. Setting it to ``rejected`` is what keeps it
+out. Whether a term exists at all is CB's decision, made in the file.
 
 Terms that are in the queue but missing from the file are reported, never
 deleted: whether a term was retired is CB's call, and the export tells CB what
