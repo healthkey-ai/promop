@@ -3,6 +3,7 @@
 Conversions are deliberately limited to explicit, property-compatible UCUM scales.
 No inference of molecular weight, assay calibration, missing units or free text.
 """
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 import re
 
@@ -24,10 +25,60 @@ PROPERTY_NAMES = {
     'catalytic activity/volume': 'CCnc', 'time': 'Time', 'mass': 'Mass',
     'length': 'Len', 'volume': 'Vol', 'temperature': 'Temp',
 }
+RELATIONSHIP_PROPERTY_NAMES = {
+    **PROPERTY_NAMES,
+    'mass concentration': 'MCnc',
+    'substance concentration': 'SCnc',
+    'number concentration': 'NCnc',
+    'catalytic activity concentration': 'CCnc',
+}
+QUANTITATIVE_SCALE_NAMES = {'qn', 'quantitative'}
 UNIT_ALIASES = {'cells/uL': '/uL', 'cell/uL': '/uL', '{cells}/uL': '/uL', '#/uL': '/uL',
                 'cells/L': '/L', 'cell/L': '/L', '{cells}/L': '/L', '#/L': '/L',
                 '10^3/uL': '10*3/uL', '10^9/L': '10*9/L', '10^6/uL': '10*6/uL',
                 '10^12/L': '10*12/L', 'K/uL': '10*3/uL', 'G/L': '10*9/L'}
+
+
+@dataclass(frozen=True)
+class LoincAxes:
+    """The relationship-backed LOINC axes needed for unit normalization.
+
+    ``None`` means Athena supplied no active relationship, so callers may use
+    the legacy Loinc.csv/name fallbacks. An unrecognized non-None value is
+    authoritative and therefore fails closed.
+    """
+
+    property_name: str | None = None
+    scale_type_name: str | None = None
+
+
+def loinc_axes_for_concepts(concepts):
+    """Load property and scale axes for many LOINC concepts in one query."""
+    from omop_core.models import ConceptRelationship
+
+    concept_ids = {
+        concept.pk for concept in concepts
+        if concept.vocabulary_id == 'LOINC' and concept.domain_id == 'Measurement'
+    }
+    if not concept_ids:
+        return {}
+
+    values = {}
+    rows = (
+        ConceptRelationship.objects
+        .filter(
+            concept_1_id__in=concept_ids,
+            relationship_id__in=('Has property', 'Has scale type'),
+            invalid_reason__isnull=True,
+        )
+        .order_by('concept_1_id', 'relationship_id', 'concept_2_id')
+        .values_list('concept_1_id', 'relationship_id', 'concept_2__concept_name')
+    )
+    for concept_id, relationship_id, target_name in rows:
+        axes = values.setdefault(concept_id, {})
+        key = 'property_name' if relationship_id == 'Has property' else 'scale_type_name'
+        axes.setdefault(key, target_name)
+    return {concept_id: LoincAxes(**axes) for concept_id, axes in values.items()}
 
 
 def unit_code(unit):
@@ -35,12 +86,16 @@ def unit_code(unit):
     return UNIT_ALIASES.get(unit, unit)
 
 
-def property_for(concept, metadata=None):
+def property_for(concept, metadata=None, axes=None):
     if concept.vocabulary_id != 'LOINC' or concept.domain_id != 'Measurement':
         return ''
-    # Authoritative imported PROPERTY takes precedence; unknown properties fail closed.
-    if metadata and metadata.scale_type not in ('', 'Qn'):
+    if axes and axes.scale_type_name is not None:
+        if axes.scale_type_name.strip().casefold() not in QUANTITATIVE_SCALE_NAMES:
+            return ''
+    elif metadata and metadata.scale_type not in ('', 'Qn'):
         return ''
+    if axes and axes.property_name is not None:
+        return RELATIONSHIP_PROPERTY_NAMES.get(axes.property_name.strip().casefold(), '')
     if metadata and metadata.property:
         return metadata.property
     match = re.search(r'\[([^]]+)\]', concept.concept_name or '')
@@ -79,9 +134,10 @@ def policies():
     from omop_core.models import CanonicalUnitPreference, LoincCodeClass
     configured = list(CanonicalUnitPreference.objects.exclude(unit='').select_related('concept'))
     metadata = LoincCodeClass.objects.filter(loinc_num__in=[p.concept.concept_code for p in configured]).in_bulk()
+    axes = loinc_axes_for_concepts(p.concept for p in configured)
     for preference in configured:
         concept = preference.concept
-        prop = property_for(concept, metadata.get(concept.concept_code))
+        prop = property_for(concept, metadata.get(concept.concept_code), axes.get(concept.pk))
         if (concept.standard_concept != 'S' or concept.invalid_reason or prop != preference.property
                 or preference.unit not in UNIT_GROUPS.get(prop, {})):
             preference.validation_error = 'The vocabulary changed; an administrator must review the canonical unit setting.'
