@@ -471,6 +471,12 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 JEV_API_KEY = os.environ.get("JEV_API_KEY", "")
 JEV_API_URL = os.environ.get("JEV_API_URL", "https://api.typesafe.ai/v1/systemone")
 
+# loinc.org release API. LOINC is licensed, so there is no anonymous access and
+# no default to fall back to -- an instance without these cannot refresh its
+# LOINC tables, and says so rather than serving a stale copy silently (#1624).
+LOINC_USER = os.environ.get("LOINC_USER", "")
+LOINC_PASSWORD = os.environ.get("LOINC_PASSWORD", "")
+
 _auth_classes = [
     'patient_portal.api.authentication.ServiceTokenAuthentication',
     'patient_portal.api.authentication.PartnerAuthentication',

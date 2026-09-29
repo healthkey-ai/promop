@@ -11,7 +11,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-@pytest.mark.parametrize("failed_command", [None, "check", "prepare_production_database", "setup_admin"])
+@pytest.mark.parametrize("failed_command", [None, "check", "prepare_production_database",
+                                           "setup_admin", "check_loinc_release"])
 def test_web_startup_commands_and_failure_gates(tmp_path, failed_command):
     log = tmp_path / "commands"
     for executable, body in {
@@ -44,6 +45,10 @@ def test_web_startup_commands_and_failure_gates(tmp_path, failed_command):
         "manage.py check --deploy --fail-level ERROR",
         "manage.py prepare_production_database --gdrive https://example.test/athena",
         "manage.py setup_admin",
+        # Last of the preparation steps, and deliberately unable to stop the
+        # boot: it dispatches a LOINC load when the release has moved, and a
+        # stale LOINC table is not a reason to refuse to serve (#1624).
+        "manage.py check_loinc_release",
         "gunicorn promop.wsgi:application",
     ]
     if failed_command:

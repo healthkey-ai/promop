@@ -65,7 +65,12 @@ REFERENCE_FROM_RELEASE: dict[str, str] = {
         'omop_core.UmlsConcept', 'omop_core.UmlsRelease', 'omop_core.UmlsSourceCode',
     ), 'load_umls_release'),
     **dict.fromkeys(('omop_core.SourceVocabulary', 'omop_core.SourceVocabularyTerm'), 'load_ncit_source'),
-    **dict.fromkeys(('omop_core.LoincClass', 'omop_core.LoincCodeClass'), 'load_loinc_classes'),
+    # Routine refreshes come from the release API now (#1624); the loader name
+    # stays the marker for 'has its own loader, so is not copied between
+    # instances'. LoincRelease records which release the other two came from.
+    **dict.fromkeys((
+        'omop_core.LoincClass', 'omop_core.LoincCodeClass', 'omop_core.LoincRelease',
+    ), 'sync_loinc_release'),
     **dict.fromkeys((
         'prolog_surveys.Survey', 'prolog_surveys.SurveyOption',
         'prolog_surveys.SurveyQuestion', 'prolog_surveys.SurveyVersion',

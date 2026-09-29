@@ -2368,9 +2368,48 @@ class LoadLoincClassesArchiveTest(TestCase):
         with self.assertRaisesMessage(CommandError, 'File not found'):
             call_command('load_loinc_classes', archive='/nonexistent/loinc.zip')
 
-    def test_malformed_gcs_uri_is_reported(self):
-        with self.assertRaisesMessage(CommandError, 'bucket and an object'):
-            call_command('load_loinc_classes', archive='gs://bucket-only')
+    def test_a_real_release_archive_has_no_loincclass_csv_and_loads_anyway(self):
+        """The central finding of #1624: a loinc.org release carries no
+        LoincClass.csv. LOINC models CLASS as a Part, so the class table is
+        AccessoryFiles/PartFile/Part.csv filtered to PartTypeName == 'CLASS'.
+
+        This path used to demand a LoincClass.csv member, so --archive could
+        not read the very thing it names -- only the hand-assembled zip from
+        the retired upload script.
+        """
+        import zipfile
+        from omop_core.models import LoincClass, LoincCodeClass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'Loinc_2.83.zip'
+            with zipfile.ZipFile(path, 'w') as zf:
+                zf.writestr(
+                    'AccessoryFiles/PartFile/Part.csv',
+                    '"PartNumber","PartTypeName","PartName","PartDisplayName","Status"\n'
+                    '"LP7786-9","CLASS","CHEM","Chemistry - non-challenge","ACTIVE"\n'
+                    '"LP1234-5","COMPONENT","Albumin","Albumin","ACTIVE"\n')
+                zf.writestr(
+                    'LoincTable/Loinc.csv',
+                    'LOINC_NUM,CLASS,EXAMPLE_UNITS,PROPERTY,SCALE_TYP\n'
+                    '2160-0,CHEM,mg/dL,MCnc,Qn\n')
+            call_command('load_loinc_classes', archive=str(path))
+
+        self.assertEqual(
+            LoincClass.objects.get(code='CHEM').display_name, 'Chemistry - non-challenge')
+        # Only CLASS parts become classes.
+        self.assertFalse(LoincClass.objects.filter(code='Albumin').exists())
+        row = LoincCodeClass.objects.get(loinc_num='2160-0')
+        self.assertEqual((row.property, row.scale_type), ('MCnc', 'Qn'))
+
+    def test_an_archive_with_neither_class_source_is_reported(self):
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'loinc.zip'
+            with zipfile.ZipFile(path, 'w') as zf:
+                zf.writestr('LoincTable/Loinc.csv', 'LOINC_NUM,CLASS\n2160-0,CHEM\n')
+            with self.assertRaisesMessage(CommandError, 'Part.csv'):
+                call_command('load_loinc_classes', archive=str(path))
 
 
 # ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@
 
 from typing import Any
 
+import requests
 from celery import shared_task
 
 from omop_core.models import Person
@@ -82,3 +83,21 @@ def suggest_mappings_task(self, run_id: str, params: dict[str, Any]) -> dict[str
         'total': run.total,
         'destinations': run.destinations,
     }
+
+
+@shared_task(
+    name='omop_core.sync_loinc_release',
+    # Retry only what a retry can fix. A missing credential or a malformed
+    # archive is permanent, and retrying it three times over an hour just
+    # delays the error reaching a log. Network faults are worth another go.
+    autoretry_for=(requests.RequestException,),
+    # Total retry span stays well inside CELERY_TASK_TIME_LIMIT (900s default)
+    # per attempt; a hard TimeLimitExceeded is not caught by autoretry_for and
+    # would land mid-load, which the single transaction in sync_release()
+    # rolls back rather than leaving half-applied.
+    retry_backoff=60, retry_backoff_max=300, retry_jitter=True, max_retries=3,
+)
+def sync_loinc_release_task():
+    from omop_core.services.loinc_release import sync_release
+
+    sync_release()

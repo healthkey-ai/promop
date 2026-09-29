@@ -44,3 +44,11 @@ python manage.py prepare_production_database --gdrive "$ATHENA_VOCABULARY_GDRIVE
 
 echo "Creating/resetting admin user..."
 python manage.py setup_admin
+
+# Check the LOINC release version and queue a load when it has moved. The check
+# is one small authenticated request; the archive is ~92MB and goes to a Celery
+# worker, so this does not hold up a deploy. It never fails the deploy either --
+# a stale LOINC table degrades property_for() and unit checks, which is not a
+# reason to refuse to serve (#1624).
+echo "Checking the LOINC release..."
+python manage.py check_loinc_release

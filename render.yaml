@@ -22,6 +22,10 @@ services:
         value: "0"
       - key: PYTHON_VERSION
         value: 3.12.0
+      - key: LOINC_USER
+        sync: false
+      - key: LOINC_PASSWORD
+        sync: false
       - key: SECRET_KEY
         generateValue: true
       # Required by patient_portal.E001/E002/E003, which start.sh enforces
@@ -112,6 +116,10 @@ services:
         value: "0"
       - key: PYTHON_VERSION
         value: 3.12.0
+      - key: LOINC_USER
+        sync: false
+      - key: LOINC_PASSWORD
+        sync: false
       # Taken from the web service rather than generated: two different keys
       # would be two different signing secrets for the same data.
       - key: SECRET_KEY
@@ -167,6 +175,10 @@ services:
         value: "0"
       - key: PYTHON_VERSION
         value: 3.12.0
+      - key: LOINC_USER
+        sync: false
+      - key: LOINC_PASSWORD
+        sync: false
       - key: SECRET_KEY
         generateValue: true
       - key: AUDIT_HMAC_KEY
@@ -259,6 +271,10 @@ services:
         value: "0"
       - key: PYTHON_VERSION
         value: 3.12.0
+      - key: LOINC_USER
+        sync: false
+      - key: LOINC_PASSWORD
+        sync: false
       - key: DEBUG
         value: 'False'
       - key: CELERY_BROKER_URL
