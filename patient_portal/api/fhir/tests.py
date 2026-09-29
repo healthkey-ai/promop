@@ -981,6 +981,33 @@ class CuratedMappingResolutionTest(TestCase):
         row = Measurement.objects.get(person_id=resp.json()['person_id'])
         self.assertEqual(row.measurement_concept_id, target.concept_id)
 
+    def test_epic_and_cerner_local_codes_enter_separate_vendor_queues(self):
+        from omop_core.models import SourceCodeConceptMapping
+
+        cases = [
+            ('urn:oid:1.2.840.114350.1.13.211.2.7.5.737384.45', 'LOCAL-EPIC', 'EPIC'),
+            ('http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id',
+             'LOCAL-EPIC', 'EPIC'),
+            ('https://fhir.cerner.com/993df7f9-6163-4b2c-9388-9d472c4ef3f9/codeSet/72',
+             '674310', 'CERNER'),
+        ]
+        for system, code, expected in cases:
+            with self.subTest(system=system):
+                resp = self.client.post('/api/fhir/sync/', {
+                    'bundle': self._bundle(system, code, text=f'{expected} albumin'),
+                }, format='json')
+                self.assertEqual(resp.status_code, 201, resp.content)
+                mapping = SourceCodeConceptMapping.objects.get(
+                    source_vocabulary_id=system, source_code=code)
+                self.assertEqual(mapping.source_code_description, f'{expected} albumin')
+
+        # The same opaque Epic code in two systems must remain two resolver
+        # rows. The supplied corpus has 34,755 vendor/code keys with multiple
+        # labels, including genuine semantic conflicts.
+        self.assertEqual(SourceCodeConceptMapping.objects.filter(
+            source_code='LOCAL-EPIC').count(), 2)
+        self.assertTrue(Measurement.objects.filter(unit_source_value='g/dL').exists())
+
     def test_reimport_after_a_curator_moves_the_concept_does_not_duplicate(self):
         """The trap this design exists to avoid.
 

@@ -25647,6 +25647,25 @@ class CodeMappingSourceVocabTabsTest(TestCase):
     def setUp(self):
         self.client = APIClient()
 
+    def test_reference_includes_valid_render_release_commit(self):
+        """The mapping header can identify the exact deployed Render build."""
+        commit = '8798ec24f4cc16e47f8c0ceec69d38d7e5858b17'
+        self.client.force_authenticate(user=self.staff)
+        with patch.dict(os.environ, {'RENDER_GIT_COMMIT': commit}):
+            resp = self.client.get('/api/v1/code-mappings/reference/')
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['release_commit'], commit)
+
+    def test_reference_omits_invalid_render_release_commit(self):
+        """Unexpected environment values are never reflected into the UI."""
+        self.client.force_authenticate(user=self.staff)
+        with patch.dict(os.environ, {'RENDER_GIT_COMMIT': 'not-a-commit'}):
+            resp = self.client.get('/api/v1/code-mappings/reference/')
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['release_commit'], '')
+
     def test_reference_includes_source_vocabulary_tabs(self):
         """The reference endpoint returns a tab for every mapped source system."""
         mappings = [
@@ -25682,6 +25701,19 @@ class CodeMappingSourceVocabTabsTest(TestCase):
                 status='proposed',
                 origin='import',
             ),
+            SourceCodeConceptMapping(
+                source_vocabulary_id='urn:oid:1.2.840.114350.1.13.211.2.7.5.737384.45',
+                source_code='EPIC#31000013118',
+                source_code_description='Albumin', domain_id='Measurement',
+                omop_table='measurement', status='proposed', origin='import',
+            ),
+            SourceCodeConceptMapping(
+                source_vocabulary_id=(
+                    'https://fhir.cerner.com/993df7f9-6163-4b2c-9388-9d472c4ef3f9/codeSet/72'),
+                source_code='674310',
+                source_code_description='Albumin', domain_id='Measurement',
+                omop_table='measurement', status='proposed', origin='import',
+            ),
         ]
         SourceCodeConceptMapping.objects.bulk_create(mappings)
         self.client.force_authenticate(user=self.staff)
@@ -25697,9 +25729,13 @@ class CodeMappingSourceVocabTabsTest(TestCase):
         self.assertFalse(icd_tab['is_standard'])
         self.assertIn('MedDRA', [tab['vocabulary_id'] for tab in tabs])
         self.assertIn('PartnerCodes', [tab['vocabulary_id'] for tab in tabs])
+        self.assertEqual(
+            [(tab['vocabulary_id'], tab['label']) for tab in tabs[:2]],
+            [('EPIC', 'Epic'), ('CERNER', 'Cerner')],
+        )
         # Clean up
         SourceCodeConceptMapping.objects.filter(
-            source_code__in=['E11', '10000001', 'CUSTOM-1'],
+            source_code__in=['E11', '10000001', 'CUSTOM-1', 'EPIC#31000013118', '674310'],
         ).delete()
 
     def test_list_includes_mapping_origin(self):

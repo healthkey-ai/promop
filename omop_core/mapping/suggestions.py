@@ -512,7 +512,8 @@ def suggestable_queryset(omop_table=None, *, source_vocabulary_id=None,
         tables = [omop_table] if isinstance(omop_table, str) else list(omop_table)
         rows = rows.filter(omop_table__in=tables)
     if source_vocabulary_id is not None:
-        rows = rows.filter(source_vocabulary_id__in=vocabulary_aliases(source_vocabulary_id))
+        from omop_core.services.athena_mapping_guard import source_tab_filter
+        rows = rows.filter(source_tab_filter(source_vocabulary_id))
     if resuggest:
         # Rows with no destination, plus ones whose destination only a previous
         # Suggest run put there.
@@ -607,7 +608,8 @@ def unmapped_source_values(omop_table, min_occurrences=DEFAULT_MIN_OCCURRENCES,
     # Expand merged vocabularies (e.g. ICD10 → [ICD10, ICD10CM]) so the merged
     # tab sees clinical rows from both the canonical and aliased vocab.
     if source_vocabulary_id is not None:
-        rows = rows.filter(source_vocabulary_id__in=vocabulary_aliases(source_vocabulary_id))
+        from omop_core.services.athena_mapping_guard import source_tab_filter
+        rows = rows.filter(source_tab_filter(source_vocabulary_id))
 
     out = []
     for row in rows.iterator():

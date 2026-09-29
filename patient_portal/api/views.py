@@ -3785,6 +3785,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         )
 
                     def _vocab_from_system(system):
+                        vendor_or_standard = source_vocabularies.fhir_source_vocabulary(system)
+                        if vendor_or_standard:
+                            return vendor_or_standard
                         system = (system or '').lower()
                         if 'rxnorm' in system:
                             return 'RxNorm'
@@ -11855,6 +11858,13 @@ def _merge_vocab_counts(counts):
     for oid, canonical in source_vocabularies.VOCABULARY_OID_ALIASES.items():
         if oid in counts:
             counts[canonical] = counts.get(canonical, 0) + counts.pop(oid)
+    # Tenant-specific Epic/Cerner resolver keys → vendor tabs. Iterate over a
+    # snapshot because several hundred hospital systems can be present.
+    for source, count in list(counts.items()):
+        vendor = source_vocabularies.hospital_vendor(source)
+        if vendor and source != vendor:
+            counts[vendor] = counts.get(vendor, 0) + count
+            counts.pop(source)
 
 
 def _source_vocabulary_tabs():
@@ -11920,6 +11930,10 @@ def _source_vocabulary_tabs():
 
 
 def _code_mapping_reference_payload():
+    deployed_commit = (os.environ.get('RENDER_GIT_COMMIT') or '').strip()
+    if not re.fullmatch(r'[0-9a-fA-F]{7,64}', deployed_commit):
+        deployed_commit = ''
+
     known = {
         v.vocabulary_id: v.vocabulary_name
         for v in Vocabulary.objects.filter(
@@ -11936,6 +11950,9 @@ def _code_mapping_reference_payload():
     ]
 
     return {
+        # Render injects the deployed Git commit. Keep it out of local UI when
+        # absent, and expose the full value for the marker tooltip/label.
+        'release_commit': deployed_commit,
         'domains': [
             {'domain_id': domain_id, 'label': label}
             for domain_id, label in source_vocabularies.DOMAIN_CHOICES
