@@ -185,6 +185,39 @@ def test_the_boot_path_still_prepares_until_the_blueprint_sync_is_verified():
     assert 'bash scripts/prepare-deployment.sh' in commands(START)
 
 
+def test_workers_inherit_the_loinc_credentials_rather_than_repeating_them():
+    """The load runs on Celery, so the workers need the credentials too -- but
+    a secret entered in four dashboards is a secret that ends up different in
+    one of them. They inherit from their web service, as ANTHROPIC_API_KEY
+    already does (#1624).
+    """
+    blueprint = yaml.safe_load((ROOT / 'render.yaml').read_text())
+    services = {s['name']: s for s in blueprint['services']}
+
+    for worker, web in (('promop-worker', 'promop'),
+                        ('promop-staging-worker', 'promop-staging')):
+        env = {e['key']: e for e in services[worker].get('envVars', [])}
+        for key in ('LOINC_USER', 'LOINC_PASSWORD'):
+            assert key in env, f'{worker} has no {key}; the release load would fail there'
+            source = env[key].get('fromService') or {}
+            assert source.get('name') == web and source.get('envVarKey') == key, (
+                f'{worker}.{key} should inherit from {web}, not be set separately'
+            )
+
+
+def test_the_web_services_are_where_the_loinc_credentials_are_entered():
+    blueprint = yaml.safe_load((ROOT / 'render.yaml').read_text())
+
+    for service in blueprint['services']:
+        if service.get('type') != 'web':
+            continue
+        env = {e['key']: e for e in service.get('envVars', [])}
+        for key in ('LOINC_USER', 'LOINC_PASSWORD'):
+            assert env.get(key, {}).get('sync') is False, (
+                f"{service['name']}.{key} must be dashboard-managed, never committed"
+            )
+
+
 def test_render_requires_the_athena_source_for_the_web_service():
     blueprint = (ROOT / 'render.yaml').read_text()
 
