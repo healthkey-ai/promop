@@ -6,7 +6,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from omop_core.models import Concept, LoincCodeClass, CanonicalUnitPreference, CanonicalUnitChange
-from omop_core.services.canonical_units import UNIT_GROUPS, property_for
+from omop_core.services.canonical_units import UNIT_GROUPS, loinc_axes_for_concepts, property_for
 
 
 @api_view(['GET', 'PUT'])
@@ -21,7 +21,8 @@ def canonical_unit(request, concept_id):
         concepts = concepts.select_for_update()
     concept = get_object_or_404(concepts, pk=concept_id, vocabulary_id='LOINC', domain_id='Measurement')
     metadata = LoincCodeClass.objects.filter(pk=concept.concept_code).first()
-    prop = property_for(concept, metadata)
+    axes = loinc_axes_for_concepts([concept]).get(concept.pk)
+    prop = property_for(concept, metadata, axes)
     available = list(UNIT_GROUPS.get(prop, {}))
     preference = CanonicalUnitPreference.objects.filter(concept=concept).first()
     revision = preference.revision if preference else 0

@@ -1,11 +1,17 @@
+from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
 from rest_framework.test import APIClient
 
-from omop_core.models import CanonicalUnitPreference, CanonicalUnitChange, LoincClass, LoincCodeClass
-from omop_core.services.canonical_units import convert, normalize, property_for
+from omop_core.models import (
+    CanonicalUnitPreference, CanonicalUnitChange, ConceptRelationship,
+    LoincClass, LoincCodeClass, Relationship,
+)
+from omop_core.services.canonical_units import (
+    LoincAxes, convert, loinc_axes_for_concepts, normalize, property_for,
+)
 from patient_portal.models import Identity
 from tests.factories import ConceptFactory, MeasurementFactory, PersonFactory, PatientRecordFactory
 
@@ -52,6 +58,85 @@ def test_imported_property_wins_over_name():
     assert property_for(concept, SimpleNamespace(property='MCnc', scale_type='Ord')) == ''
 
 
+def _link_axis(source, relationship_id, target_name, target_code, invalid_reason=None):
+    Relationship.objects.get_or_create(
+        relationship_id=relationship_id,
+        defaults={
+            'relationship_name': relationship_id,
+            'is_hierarchical': 0,
+            'defines_ancestry': 0,
+            'reverse_relationship_id': '',
+            'relationship_concept_id': 0,
+        },
+    )
+    target = ConceptFactory(concept_name=target_name, concept_code=target_code)
+    return ConceptRelationship.objects.create(
+        concept_1=source,
+        concept_2=target,
+        relationship_id=relationship_id,
+        valid_start_date=date(1970, 1, 1),
+        valid_end_date=date(2099, 12, 31),
+        invalid_reason=invalid_reason,
+    )
+
+
+def test_relationship_axes_are_authoritative(db):
+    concept = ConceptFactory(concept_name='Test [Mass/volume]')
+    _link_axis(concept, 'Has property', 'Substance Concentration', 'LP-SCNC')
+    _link_axis(concept, 'Has scale type', 'Quantitative', 'LP-QN')
+    axes = loinc_axes_for_concepts([concept])[concept.pk]
+
+    assert property_for(
+        concept,
+        SimpleNamespace(property='MCnc', scale_type='Ord'),
+        axes,
+    ) == 'SCnc'
+
+
+def test_relationship_axis_loader_batches_concepts(db, django_assert_num_queries):
+    first = ConceptFactory(concept_code='LOINC-FIRST')
+    second = ConceptFactory(concept_code='LOINC-SECOND')
+    _link_axis(first, 'Has property', 'Mass Concentration', 'LP-MCNC')
+    _link_axis(second, 'Has property', 'Substance Concentration', 'LP-SCNC')
+
+    with django_assert_num_queries(1):
+        axes = loinc_axes_for_concepts([first, second])
+
+    assert axes[first.pk].property_name == 'Mass Concentration'
+    assert axes[second.pk].property_name == 'Substance Concentration'
+
+
+@pytest.mark.parametrize('scale_name', ['Ordinal', 'Presence', 'Unrecognized scale'])
+def test_relationship_scale_fails_closed_for_non_quantitative_values(scale_name):
+    concept = SimpleNamespace(
+        vocabulary_id='LOINC', domain_id='Measurement', concept_name='Test [Mass/volume]',
+    )
+    metadata = SimpleNamespace(property='MCnc', scale_type='Qn')
+
+    assert property_for(concept, metadata, LoincAxes(scale_type_name=scale_name)) == ''
+
+
+def test_unrecognized_relationship_property_does_not_use_weaker_fallbacks():
+    concept = SimpleNamespace(
+        vocabulary_id='LOINC', domain_id='Measurement', concept_name='Test [Mass/volume]',
+    )
+    metadata = SimpleNamespace(property='MCnc', scale_type='Qn')
+
+    assert property_for(
+        concept,
+        metadata,
+        LoincAxes(property_name='Unrecognized property', scale_type_name='Quantitative'),
+    ) == ''
+
+
+def test_retired_relationship_axes_fall_back_to_loinc_metadata(db):
+    concept = ConceptFactory(concept_name='Test [Mass/volume]')
+    _link_axis(concept, 'Has property', 'Substance Concentration', 'LP-SCNC', invalid_reason='D')
+    axes = loinc_axes_for_concepts([concept]).get(concept.pk)
+
+    assert property_for(concept, SimpleNamespace(property='MCnc', scale_type='Qn'), axes) == 'MCnc'
+
+
 @pytest.fixture
 def setup_units(db):
     client = APIClient()
@@ -60,6 +145,8 @@ def setup_units(db):
     concept = ConceptFactory(concept_code='33358-3', concept_name='Protein.monoclonal [Mass/volume]', standard_concept='S')
     LoincClass.objects.get_or_create(code='CHEM', defaults={'display_name': 'Chemistry'})
     LoincCodeClass.objects.create(loinc_num='33358-3', loinc_class_id='CHEM', example_units='g/L;g/dL', property='MCnc', scale_type='Qn')
+    _link_axis(concept, 'Has property', 'Mass Concentration', 'LP-MCNC')
+    _link_axis(concept, 'Has scale type', 'Quantitative', 'LP-QN')
     url = f'/api/v1/concepts/{concept.pk}/canonical-unit/'
     return client, admin, concept, url
 
@@ -191,7 +278,7 @@ def test_policy_snapshot_does_not_query_once_per_measurement(setup_units, django
     for value in (10, 20, 30):
         MeasurementFactory(person=person, measurement_concept=concept, value_as_number=value, unit_source_value='g/L')
     rows = list(Measurement.objects.select_related('measurement_concept', 'unit_concept').filter(person=person))
-    with django_assert_num_queries(2):
+    with django_assert_num_queries(3):
         data = MeasurementSerializer(rows, many=True).data
     assert sorted(d['normalized']['value'] for d in data) == [1, 2, 3]
 
@@ -201,7 +288,13 @@ def test_vocabulary_property_change_invalidates_normalization(setup_units):
     client, _, concept, url = setup_units
     client.put(url, {'unit': 'g/dL', 'revision': 0}, format='json')
     row = MeasurementFactory(measurement_concept=concept, value_as_number=20, unit_source_value='g/L')
-    LoincCodeClass.objects.filter(pk='33358-3').update(property='SCnc')
+    relationship = ConceptRelationship.objects.get(
+        concept_1=concept, relationship_id='Has property', invalid_reason__isnull=True,
+    )
+    relationship.concept_2 = ConceptFactory(
+        concept_name='Substance Concentration', concept_code='LP-SCNC',
+    )
+    relationship.save(update_fields=['concept_2'])
     result = measurement_normalized(row, policies())
     assert result['value'] is None
     assert 'vocabulary changed' in result['error']
