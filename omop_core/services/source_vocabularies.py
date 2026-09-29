@@ -170,10 +170,9 @@ def domain_for_table(omop_table):
 SOURCE_TAB_ORDER = [
     'ICD10CM',
     'ICD9CM', 'CPT4', 'HCPCS',
-    'RxNorm', 'RxNorm Extension', 'NDC',
+    'RxNorm', 'NDC',
     'Read', 'MeSH', 'OPCS4', 'Nebraska Lexicon',
     'MedDRA', 'ICDO3', 'dm+d',
-    'HemOnc', 'ATC', 'CVX',
     'OpenWearables',  # Wearable device metrics (includes Apple + Garmin)
     '',  # Uncoded / free text
     'LOINC', 'SNOMED',  # Standard — last
