@@ -9,6 +9,14 @@ from omop_core.services.mapping_rollup import count_groups, group_entries
 from omop_core.services.source_retirement import mapping_source_retirement
 
 OVERALL = '__overall__'
+
+def _is_athena(origin_system):
+    """True for any Athena-family origin (athena, athena-multiple, athena-local-maps-to, etc.)."""
+    return bool(origin_system) and origin_system.startswith('athena')
+
+
+# ORM filter for athena-family origins.
+_Q_ATHENA = Q(origin_system__startswith='athena')
 # A blank origin_system is a real value -- enqueue_unmapped_source_codes writes
 # it for every newly queued code -- but '' already means "no filter" on the
 # wire, so filtering to it needs a sentinel.
@@ -35,10 +43,10 @@ def canonical_source(source):
 #: label whose codes are split across Unmapped and Mapped is two entries, and
 #: expanding either must not show the other's rows.
 SECTION_FILTERS = {
-    'Unmapped': lambda qs: qs.exclude(origin_system='athena').exclude(status__in=['approved', 'rejected']),
-    'Mapped': lambda qs: qs.exclude(origin_system='athena').filter(status='approved'),
-    'Rejected': lambda qs: qs.exclude(origin_system='athena').filter(status='rejected'),
-    'Athena Mapped': lambda qs: qs.filter(origin_system='athena'),
+    'Unmapped': lambda qs: qs.exclude(_Q_ATHENA).exclude(status__in=['approved', 'rejected']),
+    'Mapped': lambda qs: qs.exclude(_Q_ATHENA).filter(status='approved'),
+    'Rejected': lambda qs: qs.exclude(_Q_ATHENA).filter(status='rejected'),
+    'Athena Mapped': lambda qs: qs.filter(_Q_ATHENA),
 }
 
 
@@ -112,18 +120,19 @@ def browse_mappings(mappings, params, serialize):
         source = canonical_source(group['source_vocabulary_id'])
         bucket = counts.setdefault(source, dict(proposed=0, approved=0, athena=0))
         totals = section_counts.setdefault(source, dict(unmapped=0, mapped=0, athena=0, rejected=0, athena_rejected=0))
-        section = ('athena_rejected' if group['origin_system'] == 'athena' and group['status'] == 'rejected' else
-                   'athena' if group['origin_system'] == 'athena' else
+        is_ath = _is_athena(group['origin_system'])
+        section = ('athena_rejected' if is_ath and group['status'] == 'rejected' else
+                   'athena' if is_ath else
                    'mapped' if group['status'] == 'approved' else
                    'rejected' if group['status'] == 'rejected' else 'unmapped')
         totals[section] += group['n']
-        key = 'athena' if group['origin_system'] == 'athena' else group['status']
+        key = 'athena' if is_ath else group['status']
         if key in bucket:
             bucket[key] += group['n']
         # Athena rows are excluded: they are reference, they sit in a section
         # that starts collapsed, and on the ICD-10 tab they outnumber
         # everything else -- offering them would read as emptying the page.
-        if group['origin_system'] != 'athena':
+        if not is_ath:
             per_source = provenance_counts.setdefault(source, {})
             per_source[group['origin_system']] = per_source.get(group['origin_system'], 0) + group['n']
     ordered = sorted(counts, key=lambda key: (vocab.source_tab_sort_key(key), key))
@@ -174,7 +183,7 @@ def browse_mappings(mappings, params, serialize):
         # describe a different set of rows than the filter acts on -- offering
         # values that match nothing and hiding ones that dominate the hits.
         provenances = _provenance_options(dict(
-            filtered.exclude(origin_system='athena').order_by()
+            filtered.exclude(_Q_ATHENA).order_by()
             .values_list('origin_system').annotate(n=Count('pk'))
         ))
     # Narrows a cross-tab search as well as a single tab. Duplicates are left
@@ -183,11 +192,11 @@ def browse_mappings(mappings, params, serialize):
     filtered = apply_provenance(filtered, provenance)
     if search or provenance:
         totals = filtered.aggregate(
-            unmapped=Count('pk', filter=~Q(origin_system='athena') & ~Q(status__in=['approved', 'rejected'])),
-            mapped=Count('pk', filter=~Q(origin_system='athena') & Q(status='approved')),
-            athena=Count('pk', filter=Q(origin_system='athena') & ~Q(status='rejected')),
-            rejected=Count('pk', filter=~Q(origin_system='athena') & Q(status='rejected')),
-            athena_rejected=Count('pk', filter=Q(origin_system='athena', status='rejected')),
+            unmapped=Count('pk', filter=~_Q_ATHENA & ~Q(status__in=['approved', 'rejected'])),
+            mapped=Count('pk', filter=~_Q_ATHENA & Q(status='approved')),
+            athena=Count('pk', filter=_Q_ATHENA & ~Q(status='rejected')),
+            rejected=Count('pk', filter=~_Q_ATHENA & Q(status='rejected')),
+            athena_rejected=Count('pk', filter=_Q_ATHENA & Q(status='rejected')),
         )
     else:
         selected_counts = section_counts.values() if source == OVERALL else [section_counts.get(canonical_source(source), {})]

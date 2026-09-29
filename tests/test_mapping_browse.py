@@ -126,6 +126,28 @@ def test_every_section_shares_the_seen_default(browse):
     assert by_section['Athena Mapped'] == ['athena-high', 'athena-low']
 
 
+def test_athena_family_origins_land_in_athena_mapped(browse):
+    """athena-local-maps-to, athena-multiple etc. are Athena Mapped, not Unmapped."""
+    row('exact', origin_system='athena', status='approved', occurrence_count=1)
+    row('local', origin_system='athena-local-maps-to', status='approved', occurrence_count=1)
+    row('multi', origin_system='athena-multiple', status='proposed', occurrence_count=1)
+    row('self', origin_system='athena-standard-self', status='approved', occurrence_count=1)
+    row('curator', origin_system='curator', status='proposed', occurrence_count=1)
+    data = browse().data
+    athena_codes = sorted(
+        r['source_code'] for r in data['results']
+        if r['origin_system'].startswith('athena')
+    )
+    non_athena_codes = sorted(
+        r['source_code'] for r in data['results']
+        if not r['origin_system'].startswith('athena')
+    )
+    assert athena_codes == ['exact', 'local', 'multi', 'self']
+    assert non_athena_codes == ['curator']
+    assert data['pages']['Athena Mapped']['total'] == 4
+    assert data['pages']['Unmapped']['total'] == 1
+
+
 def test_provenance_filter_narrows_rows_totals_and_pagination(browse):
     for i in range(3):
         row(f'CUR-{i}', origin_system='curator', occurrence_count=10)

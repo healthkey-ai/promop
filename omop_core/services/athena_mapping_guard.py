@@ -24,7 +24,7 @@ def athena_supplies_mapping(vocabulary_id, source_code, destination_id, *, exclu
     vocab_set = source_tab_vocabularies(vocabulary_id)
     mappings = SourceCodeConceptMapping.objects.filter(
         source_vocabulary_id__in=vocab_set,
-        origin_system='athena', target_concept_id__isnull=False,
+        origin_system__startswith='athena', target_concept_id__isnull=False,
     ).alias(trimmed_source_code=Trim('source_code')).filter(
         trimmed_source_code__iexact=source_code.strip(),
     )
@@ -43,11 +43,11 @@ def without_icd10_athena_duplicates(mappings):
     """
     athena = SourceCodeConceptMapping.objects.using(mappings.db).filter(
         source_vocabulary_id='ICD10CM',
-        origin_system='athena', target_concept_id__isnull=False,
+        origin_system__startswith='athena', target_concept_id__isnull=False,
     ).annotate(normalized_code=Lower(Trim('source_code'))).exclude(
         normalized_code='',
     ).order_by().values('normalized_code')
     return mappings.alias(normalized_code=Lower(Trim('source_code'))).exclude(
         Q(source_vocabulary_id='ICD10CM')
-        & ~Q(origin_system='athena') & Q(normalized_code__in=athena)
+        & ~Q(origin_system__startswith='athena') & Q(normalized_code__in=athena)
     )

@@ -516,11 +516,16 @@ describe("CodeMappingPage", () => {
   it("also filters legacy list responses and keeps the checkbox synchronized across sections", async () => {
     renderPage([proposedRow, { ...proposedRow, mapping_id: 77, source_code: "NEVER SEEN", occurrence_count: 0 },
       { ...approvedRow, source_vocabulary_id: "" }]);
-    await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
-    expect(screen.queryByText("NEVER SEEN")).not.toBeInTheDocument();
+    // seenOnly defaults to false, so all codes (including zero-seen) are shown.
+    await screen.findByText("NEVER SEEN");
+    expect(screen.getByTestId("all-mappings-count")).toHaveTextContent("(3)");
+    // Toggle seen-only ON: zero-seen row disappears, checkbox syncs across sections.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Unmapped: only codes with Seen greater than zero" }));
+    await waitFor(() => expect(screen.queryByText("NEVER SEEN")).not.toBeInTheDocument());
     expect(screen.getByTestId("all-mappings-count")).toHaveTextContent("(2)");
     fireEvent.click(screen.getByRole("button", { name: /^Mapped/ }));
     expect(screen.getByRole("checkbox", { name: "Mapped: only codes with Seen greater than zero" })).toBeChecked();
+    // Toggle seen-only OFF again: zero-seen row reappears.
     fireEvent.click(screen.getByRole("checkbox", { name: "Unmapped: only codes with Seen greater than zero" }));
     await screen.findByText("NEVER SEEN");
     expect(screen.getByRole("checkbox", { name: "Mapped: only codes with Seen greater than zero" })).not.toBeChecked();
@@ -1646,7 +1651,7 @@ describe("server mapping pages", () => {
     render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
   };
 
-  it("defaults to Seen > 0 and resets pages when zero-Seen codes are included", async () => {
+  it("defaults to all codes and filters to Seen > 0 when toggled", async () => {
     mockGet.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
       if (url !== "/v1/code-mappings/") return Promise.resolve({ data: url.includes("reference") ? reference : {} });
       const onlySeen = config?.params?.seen_only === "1";
@@ -1658,20 +1663,18 @@ describe("server mapping pages", () => {
       }) });
     });
     render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
-    await screen.findByText("SEEN PAGE 1");
-    const filter = screen.getByRole("checkbox", { name: "Unmapped: only codes with Seen greater than zero" });
-    expect(filter).toBeChecked();
-    expect(filter.closest("th")).toBe(screen.getByTitle("Sort Unmapped by Seen").closest("th"));
-    expect(screen.getByTestId("all-mappings-count")).toHaveTextContent("(101)");
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
-    await screen.findByText("SEEN PAGE 2");
-    fireEvent.click(filter);
     await screen.findByText("ZERO CODE");
-    expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ seen_only: "0", page_0: 1 }) });
+    const filter = screen.getByRole("checkbox", { name: "Unmapped: only codes with Seen greater than zero" });
+    expect(filter).not.toBeChecked();
+    expect(filter.closest("th")).toBe(screen.getByTitle("Sort Unmapped by Seen").closest("th"));
     expect(screen.getByTestId("all-mappings-count")).toHaveTextContent("(500)");
     fireEvent.click(filter);
     await screen.findByText("SEEN PAGE 1");
-    expect(screen.queryByText("ZERO CODE")).not.toBeInTheDocument();
+    expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ seen_only: "1", page_0: 1 }) });
+    expect(screen.getByTestId("all-mappings-count")).toHaveTextContent("(101)");
+    fireEvent.click(filter);
+    await screen.findByText("ZERO CODE");
+    expect(screen.queryByText("SEEN PAGE 1")).not.toBeInTheDocument();
   });
 
   it("counts all matching sources even when the page contains one label group", async () => {
@@ -1692,12 +1695,12 @@ describe("server mapping pages", () => {
     });
     render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
     fireEvent.click(await screen.findByRole("button", { name: "Expand Albumin" }));
-    await screen.findByText("SEEN MEMBER");
-    fireEvent.click(screen.getByRole("checkbox", { name: "Unmapped: only codes with Seen greater than zero" }));
-    await waitFor(() => expect(screen.queryByText("SEEN MEMBER")).not.toBeInTheDocument());
-    fireEvent.click(await screen.findByRole("button", { name: "Expand Albumin" }));
     await screen.findByText("ALL MEMBER");
-    expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/group/", { params: expect.objectContaining({ seen_only: "0" }) });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Unmapped: only codes with Seen greater than zero" }));
+    await waitFor(() => expect(screen.queryByText("ALL MEMBER")).not.toBeInTheDocument());
+    fireEvent.click(await screen.findByRole("button", { name: "Expand Albumin" }));
+    await screen.findByText("SEEN MEMBER");
+    expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/group/", { params: expect.objectContaining({ seen_only: "1" }) });
   });
 
   it("filters by provenance, labelling the blank value and showing counts", async () => {
