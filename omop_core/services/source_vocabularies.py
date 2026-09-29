@@ -184,7 +184,6 @@ SOURCE_TAB_ORDER = [
     'RxNorm', 'NDC',
     'Read', 'MeSH', 'OPCS4', 'Nebraska Lexicon',
     'MedDRA', 'ICDO3', 'dm+d',
-    'CB',  # CancerBot's own terminology, mapped once rather than seen at ingest
     'OpenWearables',  # Wearable device metrics (includes Apple + Garmin)
     '',  # Uncoded / free text
     'LOINC', 'SNOMED',  # Standard — last
@@ -198,7 +197,6 @@ SOURCE_TAB_LABELS = {
     'ICD10PCS': 'ICD-10-PCS',
     'ICD9Proc': 'ICD-9-Proc',
     'OpenWearables': 'Wearables',
-    'CB': 'CancerBot',
     '': 'Uncoded',
     # Others use vocabulary_id as-is.
 }
@@ -267,19 +265,6 @@ def canonical_source_vocabulary(vocabulary_id):
     """Normalize equivalent identifiers, without merging distinct vocabularies."""
     vocabulary_id = (vocabulary_id or '').strip()
     return VOCABULARY_OID_ALIASES.get(vocabulary_id, vocabulary_id)
-
-
-# Source vocabularies that are a partner's own terminology, mapped once as a
-# catalog, rather than codes that arrive in patient data. Approving one records
-# what the term means and nothing else: no stored clinical row carries these
-# codes, and the re-point sweep would otherwise match on the display text and
-# claim other producers' rows that happen to share a label (#1649).
-CATALOG_SOURCE_VOCABULARIES = frozenset({'CB'})
-
-
-def is_catalog_source(vocabulary_id):
-    """True when approving this vocabulary's mappings must not touch clinical rows."""
-    return canonical_source_vocabulary(vocabulary_id) in CATALOG_SOURCE_VOCABULARIES
 
 # OMOP vocabulary_id → UMLS root_source (SAB), for the UMLS bridge in Suggest
 # and for naming source codes from UMLS atoms. ICD10CM must precede ICD10:
