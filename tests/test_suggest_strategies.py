@@ -7,6 +7,8 @@ Covers:
 - Pipeline orchestration (UMLS winner, progressive retrieval, strategy filtering)
 - API endpoint parameter validation
 """
+import os
+
 import pytest
 
 from django.db import connection
@@ -50,6 +52,13 @@ from tests.factories import (
 )
 
 pytestmark = pytest.mark.django_db
+
+
+def test_live_ranking_credentials_are_disabled_by_default(settings):
+    assert settings.ANTHROPIC_API_KEY == ''
+    assert settings.JEV_API_KEY == ''
+    assert os.environ['ANTHROPIC_API_KEY'] == ''
+    assert os.environ['JEV_API_KEY'] == ''
 
 
 # ---------------------------------------------------------------------------
