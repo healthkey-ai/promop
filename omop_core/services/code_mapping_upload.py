@@ -163,6 +163,7 @@ def import_upload(*, upload, vocabulary, provenance, actor):
         source_codes = [row.source_code for row in rows]
         for offset in range(0, len(source_codes), 10_000):
             locked = SourceCodeConceptMapping.objects.select_for_update().filter(
+                organization__isnull=True,
                 source_vocabulary_id=vocabulary,
                 source_code__in=source_codes[offset:offset + 10_000],
             )
@@ -175,6 +176,7 @@ def import_upload(*, upload, vocabulary, provenance, actor):
             mapping = existing.get(row.source_code)
             if mapping is None:
                 inserts.append(SourceCodeConceptMapping(
+                    organization=None,
                     source_vocabulary_id=vocabulary,
                     source_code=row.source_code,
                     source_code_description=row.source_description,
