@@ -70,7 +70,16 @@ MANUAL_ATTESTATIONS = [
 def render_resource_id(url, kind):
     """The Render resource id a datastore URL points at, or None."""
     parts = urlsplit(url or '')
-    for candidate in ((parts.hostname or '').split('.')[0], parts.username or ''):
+    host = parts.hostname or ''
+    # Only a bare internal hostname or a Render domain is Render's; a matching
+    # label on any other host is someone else's datastore.
+    on_render = host.endswith('.render.com')
+    candidates = []
+    if '.' not in host or on_render:
+        candidates.append(host.split('.')[0])
+    if on_render:
+        candidates.append(parts.username or '')
+    for candidate in candidates:
         match = _RENDER_HOST_ID[kind].match(candidate)
         if match:
             return match.group(1)
