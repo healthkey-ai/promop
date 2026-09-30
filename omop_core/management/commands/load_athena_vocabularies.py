@@ -91,7 +91,7 @@ LOINC_DOMAIN_SCOPE = frozenset({
 })
 BATCH = 100_000
 PROGRESS_EVERY = 500_000
-DEFAULT_GDRIVE_URL = 'https://drive.google.com/drive/u/0/folders/1HoRWGepqcH3pMKK03KNb1oWpaVs0Avl7'
+DEFAULT_GDRIVE_URL = 'https://drive.google.com/drive/u/1/folders/1HoRWGepqcH3pMKK03KNb1oWpaVs0Avl7'
 UMLS_RELEASES_URL = 'https://uts-ws.nlm.nih.gov/releases'
 UMLS_DOWNLOAD_URL = 'https://uts-ws.nlm.nih.gov/download'
 DEFAULT_UMLS_CACHE_DIR = '/tmp/promop-umls'
@@ -184,8 +184,8 @@ class _VocabularyArchive:
             return io.TextIOWrapper(stream, encoding='utf-8', newline='')
 
 
-def _download_gdrive_vocabulary(url, download_dir, log):
-    """Download only the selected ZIP, leaving unrelated folder files on Drive."""
+def _resolve_gdrive_vocabulary(url, log):
+    """Resolve the selected Drive ZIP without downloading its multi-GB payload."""
     try:
         import gdown
     except ImportError as exc:
@@ -194,12 +194,9 @@ def _download_gdrive_vocabulary(url, download_dir, log):
             'from requirements.txt, then rerun with --gdrive.'
         ) from exc
 
-    download_dir.mkdir(parents=True, exist_ok=True)
-
-    log(f'Loading Athena vocabulary archive from Google Drive: {url}')
     if '/folders/' in url:
         result = gdown.download_folder(
-            url=url, output=str(download_dir), quiet=False,
+            url=url, output=None, quiet=True,
             use_cookies=False, skip_download=True,
         )
         if result is None:
@@ -215,8 +212,45 @@ def _download_gdrive_vocabulary(url, download_dir, log):
                 f'  Found {len(zips)} zip files; using first by name: {zips[0].path}. '
                 'Pass a direct Google Drive file URL to select a specific zip.'
             )
+        name = Path(zips[0].path).name
+        return {
+            'id': zips[0].id,
+            'name': name,
+            # The governed folder names bundles with their Athena UUID and
+            # build timestamp. Include both provider ID and name so either a
+            # replacement upload or a renamed in-place revision invalidates
+            # the cheap deploy-time check. SHA-256 is recorded after download.
+            'identity': f'gdrive-file:{zips[0].id}:{name}',
+        }
+
+    match = re.search(r'(?:/d/|[?&]id=)([-\w]+)', url)
+    file_id = match.group(1) if match else None
+    return {
+        'id': file_id,
+        'name': 'athena-vocabulary.zip',
+        'identity': (
+            f'gdrive-file:{file_id}' if file_id else
+            f'gdrive-url-sha256:{hashlib.sha256(url.encode()).hexdigest()}'
+        ),
+    }
+
+
+def _download_gdrive_vocabulary(url, download_dir, log, selection=None):
+    """Download only the selected ZIP, leaving unrelated folder files on Drive."""
+    try:
+        import gdown
+    except ImportError as exc:
+        raise CommandError(
+            'Google Drive vocabulary loading requires gdown. Install dependencies '
+            'from requirements.txt, then rerun with --gdrive.'
+        ) from exc
+
+    download_dir.mkdir(parents=True, exist_ok=True)
+    log(f'Loading Athena vocabulary archive from Google Drive: {url}')
+    selection = selection or _resolve_gdrive_vocabulary(url, log)
+    if '/folders/' in url and selection.get('id'):
         filename = gdown.download(
-            id=zips[0].id, output=str(download_dir / 'athena-vocabulary.zip'),
+            id=selection['id'], output=str(download_dir / 'athena-vocabulary.zip'),
             quiet=False, use_cookies=False,
         )
     else:

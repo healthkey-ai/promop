@@ -30,7 +30,7 @@ def commands(script_path):
     )
 
 
-def test_preparation_runs_the_bounded_loader_and_nothing_unbounded():
+def test_preparation_never_invokes_an_unconditional_full_loader():
     script = commands(PREPARE)
 
     # prepare_production_database loads only what migration 0201 needs. The two
@@ -38,6 +38,8 @@ def test_preparation_runs_the_bounded_loader_and_nothing_unbounded():
     assert 'python manage.py seed_omop_concepts' not in script
     assert 'python manage.py load_athena_vocabularies' not in script
     assert 'python manage.py prepare_production_database --gdrive' in script
+    assert 'python manage.py sync_athena_vocabulary --gdrive' in script
+    assert '--apply' in script
 
 
 def test_preparation_checks_the_environment_before_touching_the_database():

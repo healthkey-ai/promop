@@ -44,7 +44,8 @@ SYSTEM: frozenset[str] = frozenset({
     'omop_core.MappingSuggestionReview',
     # Derived from concept + concept_synonym; rebuilt locally, never copied.
     'omop_core.SuggestSynonymTerm',
-    'omop_core.VocabularyRelease', 'omop_core.VocabularyVersionHistory',
+    'omop_core.AthenaVocabularySync', 'omop_core.VocabularyRelease',
+    'omop_core.VocabularyVersionHistory',
     # Outreach state, not answers.
     'prolog_surveys.ParticipantMergeCandidate', 'prolog_surveys.SurveyAdministration',
     'prolog_surveys.SurveyContact', 'prolog_surveys.SurveyInvitation',

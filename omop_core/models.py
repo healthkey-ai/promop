@@ -4582,6 +4582,14 @@ class VocabularyRelease(models.Model):
         blank=True,
         help_text="Raw UMLS archive provenance cached alongside this Athena load.",
     )
+    source_artifact_identity = models.CharField(
+        max_length=500, null=True, blank=True, db_index=True,
+        help_text="Stable provider identity for the Athena source artifact.",
+    )
+    source_artifact_sha256 = models.CharField(
+        max_length=64, null=True, blank=True, db_index=True,
+        help_text="SHA-256 of the Athena ZIP used for this release.",
+    )
     status = models.CharField(
         max_length=20, choices=STATUS_CHOICES, default='staged',
         db_index=True,
@@ -4605,6 +4613,39 @@ class VocabularyRelease(models.Model):
             f"VocabularyRelease(pk={self.pk}, status={self.status}, "
             f"published_at={self.published_at})"
         )
+
+
+class AthenaVocabularySync(models.Model):
+    """Durable receipt for an Athena freshness check or scoped delta load."""
+
+    OUTCOME_CHOICES = [
+        ('current', 'Current'),
+        ('delta_available', 'Delta available'),
+        ('dry_run', 'Dry run'),
+        ('applied', 'Applied'),
+        ('failed', 'Failed'),
+    ]
+
+    source_url = models.TextField()
+    source_artifact_identity = models.CharField(max_length=500, blank=True)
+    source_artifact_sha256 = models.CharField(max_length=64, blank=True)
+    previous_release = models.ForeignKey(
+        VocabularyRelease, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='+',
+    )
+    installed_release = models.ForeignKey(
+        VocabularyRelease, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='+',
+    )
+    missing_rows = models.JSONField(default=dict, blank=True)
+    outcome = models.CharField(max_length=32, choices=OUTCOME_CHOICES, db_index=True)
+    failure_reason = models.TextField(blank=True)
+    started_at = models.DateTimeField()
+    completed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'athena_vocabulary_sync'
+        ordering = ['-completed_at']
 
 
 class UmlsRelease(models.Model):

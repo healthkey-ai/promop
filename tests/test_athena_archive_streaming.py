@@ -69,9 +69,29 @@ def test_folder_download_fetches_only_one_selected_zip(tmp_path, monkeypatch):
         'https://drive.google.com/drive/folders/test', tmp_path, lambda msg: None,
     )
     assert listing.call_args.kwargs['skip_download'] is True
+    assert listing.call_args.kwargs['quiet'] is True
     download.assert_called_once_with(
         id='selected-zip', output=str(result), quiet=False, use_cookies=False,
     )
+
+
+def test_folder_resolution_exposes_stable_file_identity_without_download(monkeypatch):
+    listing = Mock(return_value=[
+        SimpleNamespace(id='selected-zip', path='athena.zip'),
+    ])
+    monkeypatch.setattr(gdown, 'download_folder', listing)
+    download = Mock()
+    monkeypatch.setattr(gdown, 'download', download)
+
+    selected = loader._resolve_gdrive_vocabulary(
+        'https://drive.google.com/drive/folders/test', lambda msg: None,
+    )
+
+    assert selected == {
+        'id': 'selected-zip', 'name': 'athena.zip',
+        'identity': 'gdrive-file:selected-zip:athena.zip',
+    }
+    download.assert_not_called()
 
 
 def test_direct_file_download_does_not_list_a_folder(tmp_path, monkeypatch):
