@@ -10764,6 +10764,16 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
         mapping = SourceCodeConceptMapping.objects.select_for_update().filter(id=data['mapping_id']).first()
         if mapping is None:
             raise serializers.ValidationError({'mapping_id': 'Mapping not found.'})
+        if 'organization_id' not in data:
+            organization = mapping.organization
+
+    if (
+        mapping is not None and mapping.organization_id
+        and not get_admin_orgs(user).filter(pk=mapping.organization_id).exists()
+    ):
+        raise serializers.ValidationError({
+            'organization_id': 'You do not administer this mapping organization.'
+        })
 
     # Validate what the caller actually sent before deciding what to store, so
     # a typo'd status is still a 400 rather than being silently swallowed by

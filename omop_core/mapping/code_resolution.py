@@ -671,6 +671,7 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
             result['rows_collapsed'] = _collapse_duplicates(
                 model, concept_col, source_col, match,
                 new_concept_id, person_ids,
+                organization_id=mapping.organization_id,
             )
 
     logger.info(
@@ -683,7 +684,7 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
 
 
 def _collapse_duplicates(model, concept_col, source_col, match,
-                         concept_id, person_ids):
+                         concept_id, person_ids, organization_id=None):
     """Collapse rows the re-point just made identical.
 
     "Identical" is the event identity CLAUDE.md documents for the bulk write
@@ -695,9 +696,18 @@ def _collapse_duplicates(model, concept_col, source_col, match,
     identity_cols = _COLLAPSE_IDENTITY[concept_col]
     pk_col = model._meta.pk.name
 
+    candidates = model.objects.filter(
+        match, person_id__in=person_ids, **{concept_col: concept_id},
+    )
+    if organization_id:
+        content_type = ContentType.objects.get_for_model(model)
+        attributed_ids = ProvenanceRecord.objects.filter(
+            content_type=content_type,
+            organization_id=organization_id,
+        ).values('object_id')
+        candidates = candidates.filter(pk__in=attributed_ids)
     rows = (
-        model.objects
-        .filter(match, person_id__in=person_ids, **{concept_col: concept_id})
+        candidates
         .order_by(pk_col)
         .values_list(pk_col, 'person_id', *identity_cols)
     )

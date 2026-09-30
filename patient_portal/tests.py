@@ -24574,11 +24574,20 @@ class CodeMappingRepointSafetyTest(TestCase):
             measurement_type_concept=self.type_concept,
             measurement_source_value='10627', value_as_number=Decimal('4.1'),
         )
+        other_org_target = Measurement.objects.create(
+            measurement_id=8893014, person=self.person,
+            measurement_concept_id=self.standard.concept_id,
+            measurement_date=date(2026, 9, 11),
+            measurement_type_concept=self.type_concept,
+            measurement_source_value='10627', value_as_number=Decimal('4.1'),
+        )
         # Match the same opaque code at both hospitals.
         row_a.measurement_source_value = '10627'
         row_a.save(update_fields=['measurement_source_value'])
         content_type = ContentType.objects.get_for_model(Measurement)
-        for row, organization in ((row_a, org_a), (row_b, org_b)):
+        for row, organization in (
+            (row_a, org_a), (row_b, org_b), (other_org_target, org_b),
+        ):
             ProvenanceRecord.objects.create(
                 content_type=content_type, object_id=row.pk,
                 source='EHR_SYNC', organization=organization,
@@ -24601,6 +24610,7 @@ class CodeMappingRepointSafetyTest(TestCase):
         row_b.refresh_from_db()
         self.assertEqual(row_a.measurement_concept_id, self.standard.concept_id)
         self.assertEqual(row_b.measurement_concept_id, self.minted.concept_id)
+        self.assertTrue(Measurement.objects.filter(pk=other_org_target.pk).exists())
         self.assertEqual(response.data['repoint']['rows_updated'], 1)
 
 
@@ -24642,11 +24652,15 @@ class CodeMappingCuratorWorkflowTest(TestCase):
             standard_concept='S', concept_code='1111-1',
             valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
         )
-        cls.type_concept = Concept.objects.create(
-            concept_id=32817, concept_name='EHR',
-            domain=cls.domain, vocabulary=cls.vocab, concept_class=cls.concept_class,
-            standard_concept='S', concept_code='EHR',
-            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        cls.type_concept, _ = Concept.objects.get_or_create(
+            concept_id=32817,
+            defaults={
+                'concept_name': 'EHR', 'domain': cls.domain,
+                'vocabulary': cls.vocab, 'concept_class': cls.concept_class,
+                'standard_concept': 'S', 'concept_code': 'EHR',
+                'valid_start_date': date(1970, 1, 1),
+                'valid_end_date': date(2099, 12, 31),
+            },
         )
 
     def setUp(self):
