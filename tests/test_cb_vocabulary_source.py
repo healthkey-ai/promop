@@ -352,3 +352,33 @@ def test_cb_candidates_are_selectable_by_the_import_rule(proposals, concepts):
     epic = SourceCodeConceptMapping.objects.create(
         source_vocabulary_id='EPIC', source_code='X', target_concept=concepts['hk'], status='proposed')
     assert [o['selectable'] for o in destination_options(epic)] == [False]
+
+
+def test_deleting_a_cb_row_in_the_ui_clears_it_so_a_reimport_keeps_out(tmp_path, concepts, reviewer):
+    from rest_framework.test import APIClient
+    path = write_csv(tmp_path / 'one.csv', [
+        {'table': 'disease', 'code': 'FL', 'title': 'Follicular lymphoma', 'omop_vocabulary_id': 'SNOMED',
+         'omop_concept_code': '308121000', 'match': 'auto_exact', 'verified': 'ok'},
+    ])
+    call_command('import_cb_vocabularies', '--file', path, '--apply')  # no destination yet
+    client = APIClient()
+    client.force_authenticate(user=reviewer)
+    for _ in range(2):  # a second delete must not turn the clear into a removal
+        assert client.delete(f"/api/v1/code-mappings/{cb('disease:FL').pk}/").status_code in (200, 204)
+    concept('SNOMED', '308121000')  # its concept arrives
+
+    call_command('import_cb_vocabularies', '--file', path, '--apply')
+    call_command('approve_cb_mappings', '--file', path, '--reviewer', reviewer.email, '--apply')
+
+    fl = cb('disease:FL')
+    assert (fl.target_concept_id, fl.status) == (None, 'proposed')
+    assert not fl.destination_candidates.exists()
+
+
+def test_a_non_catalog_row_without_destination_is_still_deleted(reviewer):
+    from rest_framework.test import APIClient
+    row = SourceCodeConceptMapping.objects.create(source_vocabulary_id='EPIC', source_code='X', status='proposed')
+    client = APIClient()
+    client.force_authenticate(user=reviewer)
+    assert client.delete(f'/api/v1/code-mappings/{row.pk}/').status_code == 204
+    assert not SourceCodeConceptMapping.objects.filter(pk=row.pk).exists()
