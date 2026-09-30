@@ -101,3 +101,42 @@ def sync_loinc_release_task():
     from omop_core.services.loinc_release import sync_release
 
     sync_release()
+
+
+@shared_task(
+    bind=True,
+    name='omop_core.sync_athena_vocabulary',
+    # A full first load scans the governed Athena export and publishes table
+    # checksums. Render pre-deploy cannot accommodate that work; the dedicated
+    # worker task can, and its transaction makes worker-loss redelivery safe.
+    time_limit=6 * 60 * 60,
+)
+def sync_athena_vocabulary_task(self, sync_id: int) -> dict[str, Any]:
+    from django.core.management import call_command
+    from django.utils import timezone
+
+    from omop_core.models import AthenaVocabularySync
+
+    sync = AthenaVocabularySync.objects.get(pk=sync_id)
+    if sync.outcome in ('current', 'applied'):
+        return {'sync_id': sync_id, 'outcome': sync.outcome}
+
+    AthenaVocabularySync.objects.filter(pk=sync_id).update(
+        outcome='running', started_at=timezone.now(), completed_at=None,
+        failure_reason='', task_id=self.request.id or sync.task_id,
+    )
+    try:
+        call_command(
+            'sync_athena_vocabulary', gdrive=sync.source_url, apply=True,
+            sync_id=sync_id,
+        )
+    except Exception as exc:
+        # The command records failures reached inside its handler. Keep the
+        # durable state correct for failures before that catch as well (option
+        # parsing, command discovery, or a future refactor).
+        AthenaVocabularySync.objects.filter(pk=sync_id, outcome='running').update(
+            outcome='failed', failure_reason=str(exc), completed_at=timezone.now(),
+        )
+        raise
+    sync.refresh_from_db()
+    return {'sync_id': sync_id, 'outcome': sync.outcome}

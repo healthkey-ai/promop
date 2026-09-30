@@ -8,14 +8,21 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
-- **Athena freshness and scoped deploy deltas** — deployment preparation now
-  compares the selected artifact in the governed Google Drive folder with a
-  durable local sync receipt. An unchanged Drive file exits before downloading
-  the archive or touching vocabulary tables; a changed artifact is SHA-256
-  fingerprinted and passed through the existing insert-only loader under a
-  database advisory lock and transaction. Only absent rows commit, failures
-  roll back to the previous published release, and check/dry-run/apply modes
-  record structured outcomes and per-table delta counts (#1652).
+- **Asynchronous Athena setup and refresh** — deployment preparation now queues
+  durable Athena work instead of downloading and scanning the vocabulary in
+  Render pre-deploy. New instances and changed Drive artifacts load on the
+  dedicated Celery `athena` queue with deduplicated queued/running state,
+  observable success/failure receipts, retryable failures, and a task/visibility
+  window sized for the full initial release (#1674).
+
+- **Athena freshness and scoped deploy deltas** — the Athena sync compares the
+  selected artifact in the governed Google Drive folder with a durable local
+  receipt. An unchanged Drive file exits before downloading the archive or
+  touching vocabulary tables; a changed artifact is SHA-256 fingerprinted and
+  passed through the existing insert-only loader under a database advisory lock
+  and transaction. Only absent rows commit, failures roll back to the previous
+  published release, and check/dry-run/apply modes record structured outcomes
+  and per-table delta counts (#1652).
 
 - **Code Mapping CSV upload** — mapping users can upload source-code
   inventories from the Code Mapping page with a source vocabulary and editable

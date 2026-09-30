@@ -4684,6 +4684,8 @@ class AthenaVocabularySync(models.Model):
     """Durable receipt for an Athena freshness check or scoped delta load."""
 
     OUTCOME_CHOICES = [
+        ('queued', 'Queued'),
+        ('running', 'Running'),
         ('current', 'Current'),
         ('delta_available', 'Delta available'),
         ('dry_run', 'Dry run'),
@@ -4704,13 +4706,21 @@ class AthenaVocabularySync(models.Model):
     )
     missing_rows = models.JSONField(default=dict, blank=True)
     outcome = models.CharField(max_length=32, choices=OUTCOME_CHOICES, db_index=True)
+    task_id = models.CharField(max_length=255, blank=True)
     failure_reason = models.TextField(blank=True)
     started_at = models.DateTimeField()
-    completed_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = 'athena_vocabulary_sync'
         ordering = ['-completed_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['source_url'],
+                condition=Q(outcome__in=('queued', 'running')),
+                name='uq_athena_sync_active_source',
+            ),
+        ]
 
 
 class UmlsRelease(models.Model):

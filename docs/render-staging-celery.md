@@ -42,6 +42,14 @@ diagnosis of the reported memory failure. The broker is 256 MB with
 `noeviction`, so memory pressure cannot silently evict queued jobs. These are
 additional paid Render resources. Measure memory before raising concurrency.
 
+The worker consumes `celery` and the dedicated `athena` queue. Deployment
+preparation writes a durable request and publishes only to `athena`; the worker
+then performs initial vocabulary setup or a changed-release insert-only update
+without holding the web pre-deploy open. Older workers do not consume this
+queue, which prevents a rolling deployment from discarding the newly introduced
+task as unregistered. Athena tasks have a six-hour hard limit and the Redis
+visibility timeout is longer than that limit.
+
 If using the Dashboard instead, create the worker and broker with the settings
 in `render.yaml`, supply the same database and secret values to the worker,
 and set the web service's broker and result backend to the broker's internal
@@ -51,7 +59,7 @@ Django uses the broker for its shared cache.
 ## Verify
 
 - Worker logs must show a connection to the staging broker and registration of
-  `omop_core.suggest_mappings`. From the Render shell,
+  `omop_core.suggest_mappings` and `omop_core.sync_athena_vocabulary`. From the Render shell,
   `celery -A promop inspect ping` must get a worker response.
 - Authenticated `/api/v1/code-mappings/reference/` must return
   `suggest_max_per_run: 100`.
@@ -60,6 +68,10 @@ Django uses the broker for its shared cache.
   100 in the UI proves broker configuration, not worker health.
 - Check web and worker memory during the run. Do not run the test suite against
   staging.
+- After a changed Athena artifact, `athena_vocabulary_sync` must progress from
+  `queued` to `running` and then `applied` (or `current` when no table work is
+  needed). A `failed` row can be retried with
+  `queue_athena_vocabulary_sync --gdrive ...` without redeploying.
 
 To roll back, remove staging's broker/result-backend references from the
 Blueprint and clear those web environment values in Render, then redeploy.

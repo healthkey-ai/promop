@@ -71,8 +71,13 @@ class Command(BaseCommand):
         action = parser.add_mutually_exclusive_group()
         action.add_argument('--apply', action='store_true')
         action.add_argument('--dry-run', action='store_true', dest='dry_run')
+        parser.add_argument(
+            '--sync-id', type=int,
+            help='Update an existing queued sync receipt (worker use only).',
+        )
 
     def handle(self, *args, **options):
+        self._sync_id = options.get('sync_id')
         started_at = timezone.now()
         gdrive = options.get('gdrive')
         archive = options.get('archive')
@@ -91,6 +96,10 @@ class Command(BaseCommand):
                     selection = _resolve_gdrive_vocabulary(gdrive, self.stdout.write)
                     identity = selection['identity']
                     if self._identity_is_current(identity):
+                        self._receipt(
+                            source_url, identity, '', previous, previous, {},
+                            'current', started_at,
+                        )
                         self.stdout.write(
                             self.style.SUCCESS(
                                 f'Athena vocabulary is current ({identity}); no archive download or table work.'
@@ -218,10 +227,9 @@ class Command(BaseCommand):
             status='published', source_artifact_sha256=sha256,
         ).exists()
 
-    @staticmethod
-    def _receipt(source_url, identity, sha256, previous, installed, missing,
+    def _receipt(self, source_url, identity, sha256, previous, installed, missing,
                  outcome, started_at, failure_reason=''):
-        return AthenaVocabularySync.objects.create(
+        values = dict(
             source_url=str(source_url),
             source_artifact_identity=identity,
             source_artifact_sha256=sha256,
@@ -231,4 +239,11 @@ class Command(BaseCommand):
             outcome=outcome,
             failure_reason=failure_reason,
             started_at=started_at,
+            completed_at=timezone.now(),
         )
+        if self._sync_id:
+            updated = AthenaVocabularySync.objects.filter(pk=self._sync_id).update(**values)
+            if not updated:
+                raise CommandError(f'Athena sync receipt {self._sync_id} does not exist.')
+            return AthenaVocabularySync.objects.get(pk=self._sync_id)
+        return AthenaVocabularySync.objects.create(**values)
