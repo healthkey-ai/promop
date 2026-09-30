@@ -7,7 +7,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("omop_core", "0269_athena_vocabulary_sync"),
+        ("omop_core", "0270_code_mapping_upload"),
     ]
 
     operations = [
