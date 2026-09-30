@@ -111,6 +111,13 @@ def test_a_group_reports_how_many_members_a_write_may_touch():
     assert found[0]['status'] is None
 
 
+def test_a_group_surfaces_one_machine_proposed_action():
+    row('A', 'Comment', suggested_action='reject')
+    row('B', 'COMMENT', suggested_action='reject')
+    found, _ = entries()
+    assert found[0]['suggested_action'] == 'reject'
+
+
 def test_pagination_counts_groups_not_rows():
     for i in range(250):
         row(f'C{i:03}', f'Analyte {i}', seen=1000 - i)
@@ -282,3 +289,152 @@ def test_expanding_follows_a_search_across_tabs_the_way_browse_does(api):
     assert sorted(r['source_code'] for r in both) == ['HIT-ICD', 'HIT-RX']
     # Without a search it stays on the tab.
     assert [r['source_code'] for r in members(label='albumin', source='ICD10').data['results']] == ['HIT-ICD']
+
+
+# --- one decision for the complete eligible group --------------------------
+
+@pytest.fixture
+def group_post_api():
+    from rest_framework.test import APIRequestFactory, force_authenticate
+    from patient_portal.api.views import code_mapping_group_action, code_mapping_group_suggest
+    from patient_portal.models import Identity
+    user = Identity.objects.create_user(email='group-action@example.test', is_staff=True)
+
+    def call(view, payload):
+        request = APIRequestFactory().post('/api/v1/code-mappings/group/action/', payload, format='json')
+        force_authenticate(request, user=user)
+        return view(request)
+
+    return user, lambda **p: call(code_mapping_group_action, p), lambda **p: call(code_mapping_group_suggest, p)
+
+
+def test_group_reject_is_queued_and_touches_only_proposed_members(group_post_api):
+    from omop_core.services.suggest_jobs import InlineDispatcher, use_dispatcher
+    _user, act, _suggest = group_post_api
+    proposed = row('A', 'Comment')
+    already_decided = row('B', 'COMMENT', status='approved')
+    with use_dispatcher(InlineDispatcher()):
+        response = act(label='comment', source='EPIC', seen_only='0', action='reject')
+    assert response.status_code == 202
+    assert response.data['state'] == 'success', response.data
+    proposed.refresh_from_db()
+    already_decided.refresh_from_db()
+    assert proposed.status == 'rejected'
+    assert already_decided.status == 'approved'
+
+
+def test_group_action_accepts_the_uncoded_tab(group_post_api):
+    from omop_core.services.suggest_jobs import InlineDispatcher, use_dispatcher
+    _user, act, _suggest = group_post_api
+    mapping = row('FREE TEXT', 'Narrative note', source_vocabulary_id='')
+    with use_dispatcher(InlineDispatcher()):
+        response = act(label='narrativenote', source='', seen_only='0', action='reject')
+    assert response.status_code == 202
+    mapping.refresh_from_db()
+    assert mapping.status == 'rejected'
+
+
+def test_group_approve_applies_one_destination_to_every_proposed_member(
+    group_post_api, concept_pair,
+):
+    from omop_core.services.suggest_jobs import InlineDispatcher, use_dispatcher
+    _user, act, _suggest = group_post_api
+    destination, _ = concept_pair
+    rows = [
+        row('A', 'Ferritin', domain_id=destination.domain_id, omop_table='measurement'),
+        row('B', 'FERRITIN', domain_id=destination.domain_id, omop_table='measurement'),
+    ]
+    with use_dispatcher(InlineDispatcher()):
+        response = act(
+            label='ferritin', source='EPIC', seen_only='0', action='approve',
+            destination_concept_id=destination.pk,
+        )
+    assert response.status_code == 202
+    assert response.data['state'] == 'success', response.data
+    for mapping in rows:
+        mapping.refresh_from_db()
+        assert mapping.status == 'approved'
+        assert mapping.target_concept_id == destination.pk
+
+
+def test_group_preflight_locks_every_member_or_writes_nothing(group_post_api, django_user_model):
+    from django.utils import timezone
+    from omop_core.services.suggest_jobs import FakeDispatcher, use_dispatcher
+    _user, act, _suggest = group_post_api
+    first = row('A', 'Albumin')
+    second = row('B', 'ALBUMIN')
+    other = django_user_model.objects.create_user(email='other-lock@example.test')
+    second.locked_by = other
+    second.locked_at = timezone.now()
+    second.save(update_fields=['locked_by', 'locked_at'])
+    with use_dispatcher(FakeDispatcher()):
+        response = act(label='albumin', source='EPIC', seen_only='0', action='reject')
+    assert response.status_code == 409
+    first.refresh_from_db()
+    assert first.locked_by_id is None
+    assert first.status == 'proposed'
+
+
+def test_group_dispatch_failure_releases_the_preflight_locks(group_post_api):
+    from omop_core.services.suggest_jobs import use_dispatcher
+    _user, act, _suggest = group_post_api
+    mapping = row('A', 'Albumin')
+
+    class BrokenDispatcher:
+        max_codes = 100
+
+        def dispatch(self, run, params):
+            raise RuntimeError('broker unavailable')
+
+    with use_dispatcher(BrokenDispatcher()):
+        response = act(label='albumin', source='EPIC', seen_only='0', action='reject')
+    assert response.status_code == 503
+    mapping.refresh_from_db()
+    assert mapping.locked_by_id is None
+    assert mapping.status == 'proposed'
+
+
+def test_group_action_refuses_a_hospital_the_curator_does_not_administer(django_user_model):
+    from omop_core.models import GroupAccess, Organization
+    from patient_portal.api.views import code_mapping_group_action
+    from rest_framework.test import APIRequestFactory, force_authenticate
+    owner = Organization.objects.create(name='Owner Hospital', slug='owner-hospital')
+    outsider_org = Organization.objects.create(name='Other Hospital', slug='other-hospital')
+    outsider = django_user_model.objects.create_user(email='group-outsider@example.test')
+    GroupAccess.objects.create(identity=outsider, org=outsider_org, role='org_admin')
+    mapping = row('A', 'Albumin', organization=owner)
+    request = APIRequestFactory().post('/api/v1/code-mappings/group/action/', {
+        'label': 'albumin', 'source': 'EPIC', 'seen_only': '0', 'action': 'reject',
+    }, format='json')
+    force_authenticate(request, user=outsider)
+    response = code_mapping_group_action(request)
+    assert response.status_code == 403
+    mapping.refresh_from_db()
+    assert mapping.status == 'proposed'
+    assert mapping.locked_by_id is None
+
+
+def test_noise_is_proposed_for_rejection_not_silently_rejected(group_post_api):
+    from omop_core.services.suggest_jobs import InlineDispatcher, use_dispatcher
+    _user, _act, suggest = group_post_api
+    rows = [row('A', 'Please note'), row('B', 'PLEASE NOTE')]
+    with use_dispatcher(InlineDispatcher()):
+        response = suggest(label='pleasenote', source='EPIC', seen_only='0')
+    assert response.status_code == 202
+    assert response.data['state'] == 'success'
+    for mapping in rows:
+        mapping.refresh_from_db()
+        assert mapping.status == 'proposed'
+        assert mapping.suggested_action == 'reject'
+        assert mapping.target_concept_id is None
+
+
+def test_deterministic_exact_match_avoids_the_ranker(monkeypatch):
+    from omop_core.services.group_mapping_jobs import deterministic_proposal
+    candidate = {
+        'concept_id': 123, 'concept_name': 'Ferritin', 'concept_code': '2276-4',
+        'vocabulary_id': 'LOINC', 'domain_id': 'Measurement',
+        'standard_concept': 'S', 'lexical_score': 1.0, 'retrieval': 'lexical',
+    }
+    monkeypatch.setattr('omop_core.mapping.suggestions.lexical_candidates', lambda *a, **k: [candidate])
+    assert deterministic_proposal('Ferritin', 'Measurement')['concept']['concept_id'] == 123

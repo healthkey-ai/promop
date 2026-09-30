@@ -23,6 +23,7 @@ type Alternative = {
 };
 export type CandidateActivity = {
   stage: string;
+  action?: string;
   mapping_id?: number;
   source_code?: string;
   source_vocabulary_id?: string;

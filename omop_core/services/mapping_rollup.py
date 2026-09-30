@@ -68,6 +68,8 @@ def _grouped(queryset):
             # name, so Q(status='proposed') below would resolve against
             # MAX(status) and Postgres refuses an aggregate inside a FILTER.
             only_status=Max('status'),
+            suggested_actions=Count('suggested_action', distinct=True),
+            suggested_action=Max('suggested_action'),
             # What a group write may touch: an approved or rejected member is
             # somebody's decision, not a gap.
             proposed=Count('pk', filter=Q(status='proposed')),
@@ -109,6 +111,9 @@ def group_entries(queryset, page, page_size):
             'mixed_destinations': entry['destinations'] > 1,
             'status': entry['only_status'] if entry['statuses'] == 1 else None,
             'mixed_statuses': entry['statuses'] > 1,
+            'suggested_action': (
+                entry['suggested_action'] if entry['suggested_actions'] == 1 else ''
+            ),
             'mapping_id': entry['max_id'] if entry['members'] == 1 else None,
         }
         for entry in grouped[start:start + page_size]

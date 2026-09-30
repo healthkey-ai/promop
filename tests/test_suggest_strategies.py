@@ -1184,6 +1184,15 @@ class TestPipelineIntegration:
         assert row.origin_system == SUGGESTION_PROVENANCE
         assert row.suggestion_model_version == SUGGESTION_MODEL_VERSION
 
+    def test_a_destination_supersedes_a_seeded_noise_rejection(self, glucose_bridge):
+        row = queue_row(
+            '2345-7', source_vocabulary_id='LOINC', suggested_action='reject',
+        )
+        suggest_mappings('measurement', min_occurrences=10, strategies=['umls'])
+        row.refresh_from_db()
+        assert row.target_concept_id == glucose_bridge.concept_id
+        assert row.suggested_action == ''
+
     def test_a_declined_row_keeps_the_provenance_that_raised_it(self):
         """Nothing was proposed, so nothing here is a suggestion. Stamping the
         provenance anyway would erase the ingest channel *and* enrol the code in

@@ -10578,6 +10578,7 @@ def _serialize_code_mapping_row(concept, mapping=None, source_metadata=None, des
         'origin': mapping.origin if mapping else '',
         'origin_system': mapping.origin_system if mapping else '',
         'suggestion_model_version': mapping.suggestion_model_version if mapping else '',
+        'suggested_action': mapping.suggested_action if mapping else '',
         'suggest_strategy': mapping.suggest_strategy if mapping else '',
         'umls_cui': mapping.umls_cui if mapping else '',
         'created_by': _mapping_author(mapping),
@@ -10890,6 +10891,11 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     # table, move nothing, and still report success.
     values = {'updated_by': user,
               'pending_repoint_concept_ids': [] if status_value == 'approved' else pending_repoints}
+    # A curator touching the row has answered any machine-proposed group action.
+    # Leaving this set after choosing a destination would keep advertising
+    # "Reject suggested" over the curator's newer decision.
+    if mapping is not None:
+        values['suggested_action'] = ''
     if mapping is None or 'organization_id' in data:
         values['organization'] = organization
     if mapping is None or 'domain_id' in data:
@@ -11144,6 +11150,152 @@ def code_mapping_group(request):
     })
 
 
+def _group_job_rows(data):
+    """Still-proposed members of one label on one vendor tab/filter scope."""
+    from omop_core.services.athena_mapping_guard import without_icd10_athena_duplicates
+    from omop_core.services.mapping_browse import visible_rows
+    from omop_core.services.mapping_rollup import group_members
+
+    label = str(data.get('label') or '')
+    raw_source = data.get('source')
+    source = str(raw_source or '')
+    if not label or raw_source is None or source == '__overall__':
+        raise serializers.ValidationError({
+            'detail': 'label and a specific source tab are required.'
+        })
+    # A search deliberately reaches across tabs for browsing. A group decision
+    # never does: Epic and Cerner albumin are two decisions.
+    filters = {key: data.get(key) for key in ('source', 'provenance', 'organization', 'seen_only')}
+    filters['search'] = ''
+    mappings = without_icd10_athena_duplicates(
+        SourceCodeConceptMapping.objects.select_related('organization')
+    )
+    return group_members(
+        visible_rows(mappings, filters, section='Unmapped'), label,
+    ).filter(status='proposed').order_by('pk')
+
+
+def _lock_group_job(request, *, mode, action=''):
+    """Preflight and lock a complete batch before dispatching any mutation."""
+    if not _can_manage_field_mappings(request.user):
+        return None, Response({'detail': 'Organization admin access required.'}, status=403)
+    if action == 'approve' and not _can_approve_mappings(request.user):
+        return None, Response({'detail': 'Only org admins and staff can approve mappings.'}, status=403)
+    try:
+        with transaction.atomic():
+            rows = list(_group_job_rows(request.data).select_for_update(of=('self',)))
+            if not rows:
+                raise serializers.ValidationError({'detail': 'No still-proposed members remain in this group.'})
+            forbidden = [row.pk for row in rows if not _can_administer_code_mapping(request.user, row)]
+            if forbidden:
+                return None, Response({
+                    'detail': 'You do not administer every organization in this group.',
+                    'mapping_ids': forbidden,
+                }, status=403)
+            cutoff = timezone.now() - timedelta(minutes=settings.MAPPING_LOCK_TIMEOUT_MINUTES)
+            conflicts = [row.pk for row in rows if (
+                row.locked_by_id not in (None, request.user.pk)
+                and row.locked_at and row.locked_at > cutoff
+            )]
+            if conflicts:
+                return None, Response({
+                    'detail': 'Some mappings are locked by another user.',
+                    'locked_mapping_ids': conflicts,
+                }, status=status.HTTP_409_CONFLICT)
+            ids = [row.pk for row in rows]
+            selected_targets = {str(row.pk): row.target_concept_id for row in rows}
+            SourceCodeConceptMapping.objects.filter(pk__in=ids).update(
+                locked_by=request.user, locked_at=timezone.now(),
+            )
+            run = SuggestRun.objects.create(
+                source_vocabulary_id=str(request.data.get('source') or ''),
+                total=len(ids), created_by=request.user,
+                selection={
+                    'mode': mode, 'action': action,
+                    'label': request.data.get('label'), 'members': len(ids),
+                },
+            )
+    except serializers.ValidationError as exc:
+        return None, Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+    return (run, ids, selected_targets), None
+
+
+def _dispatch_group_job(run, ids, actor, params):
+    """Dispatch, releasing the preflight locks if the queue itself rejects it."""
+    try:
+        get_suggest_dispatcher().dispatch(run, params)
+    except Exception as exc:  # noqa: BLE001 - a queue outage is an API result
+        SourceCodeConceptMapping.objects.filter(pk__in=ids, locked_by=actor).update(
+            locked_by=None, locked_at=None,
+        )
+        SuggestRun.objects.filter(pk=run.pk).update(
+            state=SuggestRun.FAILURE, error=str(exc)[:2000], finished_at=timezone.now(),
+        )
+        return Response(
+            {'detail': 'Could not queue the group job; no mappings were changed.'},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    return None
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def code_mapping_group_action(request):
+    """Queue one approve/reject decision for every eligible label member."""
+    action = str(request.data.get('action') or '')
+    if action not in ('approve', 'reject'):
+        return Response({'action': 'Use approve or reject.'}, status=400)
+    destination_id = request.data.get('destination_concept_id')
+    if action == 'approve':
+        try:
+            destination_id = int(destination_id)
+            Concept.objects.get(pk=destination_id)
+        except (TypeError, ValueError, Concept.DoesNotExist):
+            return Response({'destination_concept_id': 'Choose a valid destination concept.'}, status=400)
+    locked, error = _lock_group_job(request, mode='group-action', action=action)
+    if error:
+        return error
+    run, ids, selected_targets = locked
+    params = {
+        'mode': 'group-action', 'action': action,
+        'destination_concept_id': destination_id, 'actor_id': request.user.pk,
+        '_locked_mapping_ids': ids,
+        '_selected_target_ids': selected_targets,
+    }
+    dispatch_error = _dispatch_group_job(run, ids, request.user, params)
+    if dispatch_error:
+        return dispatch_error
+    run.refresh_from_db()
+    return Response(_serialize_suggest_run(run), status=status.HTTP_202_ACCEPTED)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def code_mapping_group_suggest(request):
+    """Rank a label once, then copy the proposal to its eligible members."""
+    strategies = request.data.get('strategies') or list(DEFAULT_STRATEGIES)
+    if not isinstance(strategies, list) or any(item not in ALL_STRATEGIES for item in strategies):
+        return Response({'strategies': 'Choose valid Suggest strategies.'}, status=400)
+    ranking_model = str(request.data.get('ranking_model') or DEFAULT_RANKING_MODEL)
+    if ranking_model not in RANKING_MODELS:
+        return Response({'ranking_model': f'Must be one of {sorted(RANKING_MODELS)}.'}, status=400)
+    locked, error = _lock_group_job(request, mode='group-suggest')
+    if error:
+        return error
+    run, ids, selected_targets = locked
+    params = {
+        'mode': 'group-suggest', 'actor_id': request.user.pk,
+        '_locked_mapping_ids': ids, 'strategies': strategies,
+        '_selected_target_ids': selected_targets,
+        'lexical_limit': CANDIDATE_LIMIT, 'ranking_model': ranking_model,
+    }
+    dispatch_error = _dispatch_group_job(run, ids, request.user, params)
+    if dispatch_error:
+        return dispatch_error
+    run.refresh_from_db()
+    return Response(_serialize_suggest_run(run, include_activity=True), status=202)
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def code_mapping_upload(request):
@@ -11319,6 +11471,7 @@ def code_mapping_detail(request, mapping_id):
         mapping.reviewer = None
         mapping.reviewed_at = None
         mapping.suggestion_outcome = ''
+        mapping.suggested_action = ''
         mapping.suggestion_model_version = ''
         mapping.last_suggest_attempt = ''
         mapping.suggest_strategy = ''

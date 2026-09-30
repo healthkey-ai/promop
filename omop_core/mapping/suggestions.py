@@ -1917,9 +1917,13 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
                     )
                 mapping.status = 'proposed'
                 mapping.suggestion_outcome = ''
+                mapping.suggested_action = ''
                 mapping.reviewer = None
                 mapping.reviewed_at = None
-                fields += ['status', 'suggestion_outcome', 'reviewer', 'reviewed_at']
+                fields += [
+                    'status', 'suggestion_outcome', 'suggested_action',
+                    'reviewer', 'reviewed_at',
+                ]
                 mapping.target_concept = concept
                 mapping.suggested_target_concept = concept
                 mapping.destination_vocabulary_id = concept.vocabulary_id
