@@ -132,6 +132,25 @@ describe('PatientDetail ZIP autofill', () => {
     expect(calls[1][1]).toStrictEqual({ city: 'Beverly Hills', region: 'CA' });
   });
 
+  it('drops a lookup answer for a ZIP that has since changed', async () => {
+    country = 'United States';
+    const answers: Record<string, () => void> = {};
+    vi.stubGlobal('fetch', vi.fn((url: string) => new Promise(resolve => {
+      answers[url.split('/').pop()!] = () => resolve({ ok: true, json: async () => ({ places: [BEVERLY_HILLS] }) });
+    })));
+    baseRender(<MemoryRouter><PatientDetail /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByDisplayValue('Ada Lovelace')).toBeInTheDocument());
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const zip = screen.getByPlaceholderText(/5-digit US zip code/i);
+    fireEvent.change(zip, { target: { value: '90210' } });
+    fireEvent.change(zip, { target: { value: '10001' } });
+    await act(async () => { answers['90210'](); });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    await waitFor(() => expect(api.patch).toHaveBeenCalled());
+    const calls = (api.patch as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.map(c => c[1])).toStrictEqual([{ postal_code: '10001' }]);
+  });
+
   it('does not look up a 5-digit postcode outside the US', async () => {
     country = 'Germany';
     const fetch = mockLookup(BEVERLY_HILLS);
