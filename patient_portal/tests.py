@@ -21655,6 +21655,16 @@ class CodeMappingApiTest(TestCase):
         with self.assertRaises(DjangoValidationError):
             mapping.clean()
 
+    def test_model_rejects_organization_scope_for_standard_vocabulary(self):
+        mapping = SourceCodeConceptMapping(
+            organization=self.org,
+            source_vocabulary_id='LOINC',
+            source_code='33358-3',
+            target_concept=self.standard,
+        )
+        with self.assertRaises(DjangoValidationError):
+            mapping.clean()
+
     # ------------------------------------------------------------ CRUD
 
     def test_create_mapping_to_existing_standard_concept(self):
@@ -21691,6 +21701,34 @@ class CodeMappingApiTest(TestCase):
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('omop_table', resp.data)
+
+    def test_create_rejects_organization_scope_for_standard_vocabulary(self):
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.post('/api/v1/code-mappings/', {
+            'organization_id': self.org.pk,
+            'source_vocabulary_id': 'LOINC',
+            'source_code': '33358-3',
+            'destination_concept_id': self.standard.concept_id,
+            'omop_table': 'measurement',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('organization_id', resp.data)
+
+    def test_org_admin_cannot_delete_another_organizations_mapping(self):
+        other_org = Organization.objects.create(
+            name='Other Code Mapping Org', slug='other-code-mapping-org',
+        )
+        mapping = SourceCodeConceptMapping.objects.create(
+            organization=other_org,
+            source_vocabulary_id='EPIC',
+            source_code='OTHER-ORG-CODE',
+            omop_table='measurement',
+            status='proposed',
+        )
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.delete(f'/api/v1/code-mappings/{mapping.pk}/')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(SourceCodeConceptMapping.objects.filter(pk=mapping.pk).exists())
 
     def test_two_source_codes_may_share_one_destination(self):
         """The normal case, and what made the old concept-keyed URL ambiguous."""
@@ -26185,6 +26223,22 @@ class CodeMappingLookupTest(TestCase):
             self.org_a.pk,
         )
 
+    def test_hospital_local_code_requires_organization_context(self):
+        response = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': self.epic_system,
+                'source_code': 'UNATTRIBUTED-FLOWSHEET',
+                'source_text': 'Local observation',
+                'omop_table': 'measurement',
+            }],
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('organization_id', response.data)
+        self.assertFalse(SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id=self.epic_system,
+            source_code='UNATTRIBUTED-FLOWSHEET',
+        ).exists())
+
     def test_global_standard_mapping_resolves_with_organization_context(self):
         response = self.client.post(self.url, {
             'organization_id': self.org_a.pk,
@@ -28852,6 +28906,30 @@ class CodeMappingLockTest(TestCase):
         resp = self.client.post(self._lock_url(), content_type='application/json')
         self.assertEqual(resp.status_code, 423)
         self.assertIn('locked_by', resp.json())
+
+    def test_org_admin_cannot_lock_another_organizations_mapping(self):
+        own_org = Organization.objects.create(name='Lock Owner Org', slug='lock-owner-org')
+        other_org = Organization.objects.create(name='Lock Other Org', slug='lock-other-org')
+        owner = Identity.objects.create_user(email='lock-owner@test.com', password='x')
+        outsider = Identity.objects.create_user(email='lock-outsider@test.com', password='x')
+        GroupAccess.objects.create(identity=owner, org=own_org, role='org_admin')
+        GroupAccess.objects.create(identity=outsider, org=other_org, role='org_admin')
+        mapping = SourceCodeConceptMapping.objects.create(
+            organization=own_org,
+            source_vocabulary_id='EPIC',
+            source_code='LOCK-OWNER-CODE',
+            omop_table='measurement',
+            status='proposed',
+        )
+
+        self.client.force_login(outsider)
+        resp = self.client.post(
+            f'/api/v1/code-mappings/{mapping.pk}/lock/',
+            content_type='application/json',
+        )
+        self.assertEqual(resp.status_code, 403)
+        mapping.refresh_from_db()
+        self.assertIsNone(mapping.locked_by_id)
 
     def test_acquire_lock_expired(self):
         """An expired lock can be taken over."""

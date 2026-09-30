@@ -429,6 +429,12 @@ class FhirSyncView(APIView):
 
         cache: dict = {}
         for vocab, codes in by_vocab.items():
+            # Hospital-local identifiers are not globally meaningful concepts.
+            # Only an organization-scoped approved mapping may place one in
+            # this cache; otherwise _lookup must send it through the resolver
+            # so it reaches that hospital's review queue.
+            if hospital_vendor(vocab):
+                continue
             for c in Concept.objects.filter(vocabulary_id=vocab, concept_code__in=list(codes)):
                 cache[(vocab, c.concept_code)] = c
         if all_codes:
@@ -512,16 +518,20 @@ class FhirSyncView(APIView):
         into `cache`, so a code repeated across a bundle costs one mint, not
         one per occurrence.
         """
+        has_hospital_code = False
         for coding in _codings(codeable):
             code = coding.get('code')
             if not code:
                 continue
             vocab = fhir_source_vocabulary(coding.get('system', ''))
-            concept = (cache.get((vocab, code)) if vocab else None) or cache.get(('*', code))
+            has_hospital_code = has_hospital_code or bool(hospital_vendor(vocab))
+            concept = cache.get((vocab, code)) if vocab else None
+            if concept is None and not hospital_vendor(vocab):
+                concept = cache.get(('*', code))
             if concept:
                 return concept
         text = _source_text(codeable)
-        if text and cache.get(('*', text)):
+        if text and not has_hospital_code and cache.get(('*', text)):
             return cache[('*', text)]
         if omop_table is None:
             return None

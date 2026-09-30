@@ -139,8 +139,7 @@ def _mapping_scope(source_vocabulary_id, source_code, organization=None):
     Hospital-local systems must never fall through to another institution's
     row.  With organization context they require an exact organization match;
     without it, legacy global rows remain available for backward compatibility.
-    Non-hospital vocabularies remain global, while allowing a deliberately
-    scoped override to win when one exists.
+    Non-hospital vocabularies remain global.
     """
     queryset = SourceCodeConceptMapping.objects.filter(
         source_vocabulary_id=source_vocabulary_id or '',
@@ -150,15 +149,7 @@ def _mapping_scope(source_vocabulary_id, source_code, organization=None):
         return queryset.filter(organization__isnull=True)
     if source_vocabularies.hospital_vendor(source_vocabulary_id):
         return queryset.filter(organization=organization)
-    return queryset.filter(
-        Q(organization=organization) | Q(organization__isnull=True)
-    ).order_by(
-        Case(
-            When(organization=organization, then=0),
-            default=1,
-            output_field=IntegerField(),
-        )
-    )
+    return queryset.filter(organization__isnull=True)
 
 
 def approved_mapping_for(source_vocabulary_id, source_code, organization=None):

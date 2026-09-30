@@ -1037,6 +1037,39 @@ class CuratedMappingResolutionTest(TestCase):
         )
         self.assertEqual(mapping.source_code_description, 'Local albumin')
 
+    def test_hospital_code_does_not_use_cross_vocabulary_concept_collision(self):
+        from omop_core.models import SourceCodeConceptMapping
+        from omop_core.services.pk import next_pk
+
+        organization = Organization.objects.create(
+            name='FHIR Collision Hospital', slug='fhir-collision-hospital',
+        )
+        person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=person, organization=organization)
+        collision = self._concept(
+            3046999, '10627', 'LOINC', 'Unrelated global concept',
+        )
+        system = 'http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id'
+
+        with patch(
+            'patient_portal.api.fhir.sync.get_request_org',
+            return_value=organization,
+        ):
+            response = self.client.post('/api/fhir/sync/', {
+                'person_id': person.person_id,
+                'bundle': self._bundle(system, '10627', text='Local collision code'),
+            }, format='json')
+
+        self.assertEqual(response.status_code, 201, response.content)
+        mapping = SourceCodeConceptMapping.objects.get(
+            organization=organization,
+            source_vocabulary_id=system,
+            source_code='10627',
+        )
+        self.assertEqual(mapping.source_code_description, 'Local collision code')
+        measurement = Measurement.objects.get(person=person)
+        self.assertNotEqual(measurement.measurement_concept_id, collision.concept_id)
+
     def test_reimport_after_a_curator_moves_the_concept_does_not_duplicate(self):
         """The trap this design exists to avoid.
 

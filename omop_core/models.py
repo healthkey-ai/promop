@@ -2186,6 +2186,20 @@ class SourceCodeConceptMapping(models.Model):
                 ),
             })
 
+        # Organization scope exists only to disambiguate hospital-local code
+        # namespaces. Standard and other shared vocabularies are global; a
+        # scoped row for one of them would be accepted by curation but ignored
+        # by the resolver, leaving an inert and misleading mapping behind.
+        if self.organization_id and not source_vocabularies.hospital_vendor(
+            self.source_vocabulary_id
+        ):
+            raise ValidationError({
+                'organization': (
+                    'Organization scope is only supported for Epic and Cerner '
+                    'hospital-local source systems.'
+                ),
+            })
+
         # The domain decides the table (§3.2), so the two cannot disagree. A
         # row saying "Drug" while pointing at `measurement` would send the
         # fact somewhere the curator did not choose and a re-point would

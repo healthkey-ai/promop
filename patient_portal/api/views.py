@@ -10414,6 +10414,14 @@ def _can_approve_mappings(user):
     return bool(getattr(user, 'is_staff', False) or has_org_admin_access(user))
 
 
+def _can_administer_code_mapping(user, mapping):
+    """Whether *user* may mutate this mapping's organization-owned state."""
+    return bool(
+        mapping.organization_id is None
+        or get_admin_orgs(user).filter(pk=mapping.organization_id).exists()
+    )
+
+
 LOCAL_CONCEPT_ID_MIN = 2_000_000_000
 LOCAL_CONCEPT_VALID_END = _date(2099, 12, 31)
 
@@ -10764,8 +10772,22 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
         mapping = SourceCodeConceptMapping.objects.select_for_update().filter(id=data['mapping_id']).first()
         if mapping is None:
             raise serializers.ValidationError({'mapping_id': 'Mapping not found.'})
+        if 'source_vocabulary_id' not in data:
+            source_vocabulary_id = mapping.source_vocabulary_id
+        if 'source_code' not in data:
+            source_code = mapping.source_code
         if 'organization_id' not in data:
             organization = mapping.organization
+
+    if organization is not None and not source_vocabularies.hospital_vendor(
+        source_vocabulary_id
+    ):
+        raise serializers.ValidationError({
+            'organization_id': (
+                'Organization scope is only supported for Epic and Cerner '
+                'hospital-local source systems.'
+            ),
+        })
 
     if (
         mapping is not None and mapping.organization_id
@@ -11267,6 +11289,12 @@ def code_mapping_detail(request, mapping_id):
         payload['destination_options'] = options
         return Response(payload)
 
+    if not _can_administer_code_mapping(request.user, mapping):
+        return Response(
+            {'detail': 'You do not administer this mapping organization.'},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
     if request.method == 'DELETE':
         if mapping.status == 'approved' and not _can_approve_mappings(request.user):
             return Response(
@@ -11385,6 +11413,12 @@ def code_mapping_lock(request, mapping_id):
         )
         if mapping is None:
             return Response({'detail': 'Mapping not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if not _can_administer_code_mapping(request.user, mapping):
+            return Response(
+                {'detail': 'You do not administer this mapping organization.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         if request.method == 'POST':
             try:
@@ -12166,6 +12200,20 @@ def code_mapping_lookup(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         lookup_entries.append((vocab, code, table, str(entry.get('source_text') or '').strip()))
+
+    if request_organization is None and any(
+        source_vocabularies.hospital_vendor(vocab)
+        for vocab, _code, _table, _source_text in lookup_entries
+    ):
+        return Response(
+            {
+                'organization_id': (
+                    'Epic and Cerner hospital-local codes require organization '
+                    'context from the service credential or request body.'
+                ),
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     # Build response preserving request order.
     result = {}
