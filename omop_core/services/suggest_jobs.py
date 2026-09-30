@@ -198,6 +198,10 @@ def execute_run(run_id: str, params: dict) -> None:
     Never raises: a failure belongs on the row, where the page is already
     looking, rather than in a worker log the curator cannot see.
     """
+    if params.get('mode') in {'group-action', 'group-suggest'}:
+        from omop_core.services.group_mapping_jobs import execute_group_run
+        execute_group_run(run_id, params)
+        return
     if params.get('direction') == 'reverse':
         from omop_core.services.reverse_suggest_jobs import execute_reverse_run
         execute_reverse_run(run_id, params)

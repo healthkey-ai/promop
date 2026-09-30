@@ -63,6 +63,7 @@ interface CodeMappingRow {
   origin: string;
   origin_system: string;
   suggest_strategy: string;
+  suggested_action?: string;
   umls_cui: string;
   created_by: string;
   // Who signed the mapping off, and when. Distinct from created_by: approval
@@ -602,6 +603,7 @@ type GroupEntry = {
   mixed_destinations: boolean;
   status: string | null;
   mixed_statuses: boolean;
+  suggested_action?: string;
   mapping_id: number | null;
 };
 
@@ -664,6 +666,7 @@ export default function CodeMappingPage() {
   const [seenOnly, setSeenOnly] = useState(true);
   // key -> members, or null while the fetch is in flight.
   const [expandedGroups, setExpandedGroups] = useState<Record<string, CodeMappingRow[] | null>>({});
+  const [groupRunning, setGroupRunning] = useState<string | null>(null);
   const [navigationTarget, setNavigationTarget] = useState<{ id: string } | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
   const [suggesting, setSuggesting] = useState(false);
@@ -985,6 +988,56 @@ export default function CodeMappingPage() {
     }
     void loadGroup(entry, section);
   }, [expandedGroups, loadGroup]);
+
+  const runGroupJob = async (entry: GroupEntry, action: "suggest" | "approve" | "reject") => {
+    const key = expansionKey(entry, "Unmapped");
+    if (action !== "suggest" && !window.confirm(
+      `${action === "approve" ? "Approve" : "Reject"} ${entry.proposed.toLocaleString()} still-proposed code(s) in this label group?`,
+    )) return;
+    setGroupRunning(key);
+    setError("");
+    setBanner(null);
+    try {
+      const payload = {
+        label: groupKey(entry), source: selectedVocabulary,
+        seen_only: seenOnly ? "1" : "0",
+        ...(provenanceFilter ? { provenance: provenanceFilter } : {}),
+        ...(organizationFilter ? { organization: organizationFilter } : {}),
+        ...(action === "suggest" ? {
+          strategies: Object.entries(strategies).filter(([, enabled]) => enabled).map(([name]) => name),
+          ranking_model: rankingModel,
+        } : {
+          action,
+          ...(action === "approve" ? { destination_concept_id: entry.destination_concept_id } : {}),
+        }),
+      };
+      const endpoint = action === "suggest"
+        ? "/v1/code-mappings/group/suggest/"
+        : "/v1/code-mappings/group/action/";
+      const { data: started } = await api.post<SuggestRunProgress>(endpoint, payload);
+      suggestRunRef.current = started.run_id;
+      setSuggestRun(started);
+      const finished = await pollSuggestRun(started);
+      if (finished.state === "failure") throw new Error(finished.error || "Group job failed.");
+      await refreshCurrent.current();
+      setExpandedGroups({});
+      const proposedRejection = finished.activity?.some((event) => event.action === "reject");
+      setBanner(
+        action === "suggest"
+          ? proposedRejection
+            ? `Proposed rejection for ${finished.done} eligible code(s); confirm it on the group row.`
+            : finished.destinations
+              ? `Suggested once and applied the destination to ${finished.destinations} eligible code(s).`
+              : "Group Suggest found no safe destination; no mapping was changed."
+          : `${action === "approve" ? "Approved" : "Rejected"} ${finished.done} eligible code(s).`,
+      );
+    } catch (err) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setError(detail || (err instanceof Error ? err.message : "Could not update the label group."));
+    } finally {
+      setGroupRunning(null);
+    }
+  };
   // A filter can outlive the values that produced it -- the rows carrying it
   // get approved away, or the server's default tab moves before any tab has
   // been clicked. Keep it listed and keep the control mounted, or there is no
@@ -1839,9 +1892,33 @@ export default function CodeMappingPage() {
                     </td>
                     <td className="px-4 py-3" />
                     {!hideStatus && <td className="px-4 py-3 text-xs text-slate-700">
-                      {entry.mixed_statuses ? "Mixed" : entry.status || "—"}
+                      {entry.suggested_action === "reject"
+                        ? <span className="font-medium text-amber-700">Reject suggested</span>
+                        : entry.mixed_statuses ? "Mixed" : entry.status || "—"}
                     </td>}
-                    {!hideStatus && <td className="px-4 py-3" />}
+                    {!hideStatus && <td className="px-4 py-3">
+                      {section === "Unmapped" && entry.proposed > 0 && (
+                        <div className="flex flex-col gap-1">
+                          <button type="button" disabled={groupRunning === cacheKey}
+                            onClick={() => void runGroupJob(entry, "suggest")}
+                            className="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-white disabled:opacity-50">
+                            Suggest group
+                          </button>
+                          {entry.destination_concept_id && !entry.mixed_destinations && canApprove && (
+                            <button type="button" disabled={groupRunning === cacheKey}
+                              onClick={() => void runGroupJob(entry, "approve")}
+                              className="rounded border border-green-300 px-2 py-1 text-xs text-green-800 hover:bg-green-50 disabled:opacity-50">
+                              Approve {entry.proposed.toLocaleString()}
+                            </button>
+                          )}
+                          <button type="button" disabled={groupRunning === cacheKey}
+                            onClick={() => void runGroupJob(entry, "reject")}
+                            className="rounded border border-red-200 px-2 py-1 text-xs text-red-700 hover:bg-red-50 disabled:opacity-50">
+                            {entry.suggested_action === "reject" ? "Confirm reject" : "Reject group"}
+                          </button>
+                        </div>
+                      )}
+                    </td>}
                   </tr>
                   {open && members === null && (
                     <tr><td colSpan={colCount} className="px-4 py-3 text-center text-xs text-slate-500" role="status">Loading codes…</td></tr>

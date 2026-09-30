@@ -1867,6 +1867,36 @@ describe("server mapping pages", () => {
     expect(within(table).getByText("LOINC:1751-7")).toBeInTheDocument();
   });
 
+  it("suggests once for a label group and sends the active vendor/filter scope", async () => {
+    mockPost.mockResolvedValue({ data: suggestRun({ total: 2557, done: 2557, destinations: 2557 }) });
+    renderBrowse({
+      rollup: true, selected_source: "EPIC",
+      tabs: [{ vocabulary_id: "EPIC", label: "Epic", is_standard: false, proposed: 2557, approved: 0, athena: 0 }],
+      groups: { Unmapped: [entry()] },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Suggest group" }));
+    await waitFor(() => expect(mockPost).toHaveBeenCalledWith(
+      "/v1/code-mappings/group/suggest/",
+      expect.objectContaining({ label: "albumin", source: "EPIC", seen_only: "1" }),
+    ));
+    expect(await screen.findByText(/Suggested once and applied the destination/)).toBeInTheDocument();
+  });
+
+  it("shows and confirms a seeded noise rejection without auto-rejecting", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    mockPost.mockResolvedValue({ data: suggestRun({ total: 34_298, done: 34_298, destinations: 34_298 }) });
+    renderBrowse({ rollup: true, groups: { Unmapped: [entry({
+      label: "comment", description: "Comment", members: 34_298, proposed: 34_298,
+      suggested_action: "reject",
+    })] } });
+    expect(await screen.findByText("Reject suggested")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm reject" }));
+    await waitFor(() => expect(mockPost).toHaveBeenCalledWith(
+      "/v1/code-mappings/group/action/",
+      expect.objectContaining({ label: "comment", action: "reject" }),
+    ));
+  });
+
   it("expands a group into its vendor codes, and collapses again", async () => {
     mockGet.mockImplementation((url: string) => {
       if (url === "/v1/code-mappings/") {
