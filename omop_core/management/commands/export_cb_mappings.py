@@ -16,6 +16,7 @@ from collections import Counter
 from pathlib import Path
 
 from django.core.management.base import BaseCommand
+from django.db import connection, transaction
 from django.utils import timezone
 
 from omop_core.models import SourceCodeConceptMapping, Vocabulary
@@ -45,6 +46,21 @@ class Command(BaseCommand):
         parser.add_argument('--out', required=True, help='Output JSON path.')
 
     def handle(self, **options):
+        # One snapshot: the rows, their candidates and the vocabulary versions
+        # are read by separate queries, and a review saved between them would
+        # otherwise export a row with another moment's candidates.
+        outermost = not connection.in_atomic_block
+        with transaction.atomic():
+            if outermost:  # inside a caller's transaction the level is already set
+                with connection.cursor() as cursor:
+                    cursor.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ')
+            payload = self._payload()
+        out = Path(options['out'])
+        out.write_text(json.dumps(payload, indent=1, ensure_ascii=False) + '\n', encoding='utf-8')
+        self.stdout.write(self.style.SUCCESS(
+            f'Wrote {len(payload["mappings"]):,} CB mappings ({payload["counts"]}) to {out}'))
+
+    def _payload(self):
         rows = (
             SourceCodeConceptMapping.objects
             .filter(source_vocabulary_id=SOURCE_VOCABULARY_ID)
@@ -87,7 +103,7 @@ class Command(BaseCommand):
                 'notes': m.notes,
             })
 
-        payload = {
+        return {
             'format_version': FORMAT_VERSION,
             'source_vocabulary_id': SOURCE_VOCABULARY_ID,
             'exported_at': timezone.now().isoformat(),
@@ -98,7 +114,3 @@ class Command(BaseCommand):
             ],
             'mappings': mappings,
         }
-        out = Path(options['out'])
-        out.write_text(json.dumps(payload, indent=1, ensure_ascii=False) + '\n', encoding='utf-8')
-        self.stdout.write(self.style.SUCCESS(
-            f'Wrote {len(mappings):,} CB mappings ({dict(statuses)}) to {out}'))

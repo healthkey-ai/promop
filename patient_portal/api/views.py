@@ -11196,8 +11196,11 @@ def code_mapping_detail(request, mapping_id):
         except MappingLocked as exc:
             return exc.as_response()
         # If the mapping has no destination and is still proposed, truly delete
-        # the row — it is an unwanted queue entry with nothing to clear.
-        if mapping.target_concept_id is None and mapping.status == 'proposed':
+        # the row — it is an unwanted queue entry with nothing to clear. Not a
+        # catalog term, though: its importer would propose it again as new, so
+        # a delete there always clears and the cleared row is what keeps it out.
+        if (mapping.target_concept_id is None and mapping.status == 'proposed'
+                and not source_vocabularies.is_catalog_source(mapping.source_vocabulary_id)):
             mapping.delete()
             return Response(status=status.HTTP_204_NO_CONTENT)
         # Otherwise, clear the destination but keep the source code in the

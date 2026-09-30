@@ -15,10 +15,10 @@ has approved, rejected or cleared, or re-pointed while it stayed proposed, is
 left as it is. A row without a destination whose proposal has since become
 usable is listed, for a person to pick.
 
-**Reject a CB term, do not delete it.** Deleting a row leaves no trace, so the
-next import proposes the term again as new -- with a destination, if its
-concept has arrived meanwhile. Setting it to ``rejected`` is what keeps it
-out. Whether a term exists at all is CB's decision, made in the file.
+Deleting a CB row in the UI clears it rather than removing it (catalog
+sources are never hard-deleted), so the cleared row stays and the importer
+keeps skipping it. Whether a term exists at all is CB's decision, made in the
+file; ``rejected`` is how a reviewer says it has no mapping.
 
 Terms that are in the queue but missing from the file are reported, never
 deleted: whether a term was retired is CB's call, and the export tells CB what
