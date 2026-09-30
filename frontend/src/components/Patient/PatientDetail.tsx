@@ -425,22 +425,10 @@ export default function PatientDetail({
 
    
   const doSave = useCallback(async () => {
-    const data = pendingDataRef.current;
-    if (!data || !personId) return;
+    if (!pendingDataRef.current || !personId) return;
     const seq = ++saveSeqRef.current;
     setSaveStatus("saving");
     try {
-      // scheduleAutoSave carries the edited name alongside the field data, but
-      // only data.info was ever sent — and data.info is the whole GET response,
-      // which already carries the ORIGINAL patient_name. So a rename never
-      // reached the server, and every autosave echoed the old name back.
-      //
-      // Strip it unconditionally and re-add only on a real rename. Sending the
-      // server's own value back is never useful, and for a patient with no name
-      // it is harmful: the rendered value is the synthesised "Patient 3542".
-      const { patient_name: _echoed, ...info } = data.info as Record<string, unknown>;
-      const renamed = !!data.name && data.name !== patientNameRef.current;
-
       // All fields — clinical and profile alike — go through PatientRecord
       // PATCH. The backend projects profile fields to Person/Location and
       // clinical fields to OMOP tables after the PATCH lands.
@@ -455,7 +443,24 @@ export default function PatientDetail({
           + 'attempted. Retry once the connection is back.',
         );
       }
+      // The snapshot and the baseline it is diffed against are read together,
+      // after the await: a server refresh landing while the descriptor loads
+      // moves the baseline and rebases pendingDataRef, and a snapshot taken
+      // before it would send the server's moved values back as edits (#1668).
+      // Checked on entry, and nothing resets it to null.
+      const data = pendingDataRef.current!;
       const baseline = patientInfoRef.current ?? {};
+
+      // scheduleAutoSave carries the edited name alongside the field data, but
+      // only data.info was ever sent — and data.info is the whole GET response,
+      // which already carries the ORIGINAL patient_name. So a rename never
+      // reached the server, and every autosave echoed the old name back.
+      //
+      // Strip it unconditionally and re-add only on a real rename. Sending the
+      // server's own value back is never useful, and for a patient with no name
+      // it is harmful: the rendered value is the synthesised "Patient 3542".
+      const { patient_name: _echoed, ...info } = data.info as Record<string, unknown>;
+      const renamed = !!data.name && data.name !== patientNameRef.current;
       const patchFields: Record<string, unknown> = {};
 
       for (const [f, v] of Object.entries(info)) {

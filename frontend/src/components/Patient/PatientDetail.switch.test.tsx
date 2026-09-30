@@ -45,6 +45,10 @@ const RECORDS: Record<string, Record<string, unknown>> = {
   '102': { person_id: 102, patient_name: 'Grace Hopper', city: 'Paris', phone_number: '2025550102', current_line_of_therapy: 1 },
 };
 
+// When set, the descriptor fetch waits on it: the window between a save starting
+// and the save reading its baseline.
+let descriptorGate: Promise<void> | null = null;
+
 const router: { navigate?: NavigateFunction } = {};
 function CaptureNavigate() {
   const navigate = useNavigate();
@@ -55,8 +59,13 @@ function CaptureNavigate() {
 beforeEach(() => {
   vi.clearAllMocks();
   __resetWritableFieldsCache();
+  descriptorGate = null;
   (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
-    if (url.includes('writable-fields')) return Promise.resolve({ data: DESCRIPTORS });
+    if (url.includes('writable-fields')) {
+      return descriptorGate
+        ? descriptorGate.then(() => ({ data: DESCRIPTORS }))
+        : Promise.resolve({ data: DESCRIPTORS });
+    }
     const id = url.match(/\/patient-info\/(\d+)\//)?.[1];
     if (id && RECORDS[id]) {
       const record = { ...RECORDS[id] };
@@ -163,5 +172,22 @@ describe('PatientDetail — a server refresh on the same patient', () => {
     await flushAutosave();
     await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1));
     expect(lastPatch()!.body).toEqual({ city: 'Milan' });
+  });
+
+  it('does not send the pre-refresh snapshot when a refresh lands mid-save', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    // The server moved a writable column too.
+    refreshedRecord = { ...RECORDS['101'], city: 'Paris', current_line_of_therapy: 2 };
+    let release!: () => void;
+    await renderAt('101');
+    descriptorGate = new Promise((r) => { release = r; });
+
+    edit('2025550101', '2025550199');
+    await flushAutosave();  // the save is now waiting on the descriptor
+    await openTreatmentAndRefresh();
+    await act(async () => { release(); });
+
+    await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1));
+    expect(lastPatch()!.body).toEqual({ phone_number: '2025550199' });
   });
 });
