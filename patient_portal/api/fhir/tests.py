@@ -1,6 +1,7 @@
 """Tests for POST /api/fhir/sync/ — identity-resolved FHIR ingest."""
 from copy import deepcopy
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.db import connection
 from django.test import TestCase, override_settings
@@ -1007,6 +1008,34 @@ class CuratedMappingResolutionTest(TestCase):
         self.assertEqual(SourceCodeConceptMapping.objects.filter(
             source_code='LOCAL-EPIC').count(), 2)
         self.assertTrue(Measurement.objects.filter(unit_source_value='g/dL').exists())
+
+    def test_hospital_context_is_attached_to_shared_epic_flowsheet_code(self):
+        from omop_core.models import SourceCodeConceptMapping
+        from omop_core.services.pk import next_pk
+
+        organization = Organization.objects.create(
+            name='FHIR Hospital', slug='fhir-hospital',
+        )
+        person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=person, organization=organization)
+        system = 'http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id'
+
+        with patch(
+            'patient_portal.api.fhir.sync.get_request_org',
+            return_value=organization,
+        ):
+            response = self.client.post('/api/fhir/sync/', {
+                'person_id': person.person_id,
+                'bundle': self._bundle(system, 'SHARED-10627', text='Local albumin'),
+            }, format='json')
+
+        self.assertEqual(response.status_code, 201, response.content)
+        mapping = SourceCodeConceptMapping.objects.get(
+            organization=organization,
+            source_vocabulary_id=system,
+            source_code='SHARED-10627',
+        )
+        self.assertEqual(mapping.source_code_description, 'Local albumin')
 
     def test_reimport_after_a_curator_moves_the_concept_does_not_duplicate(self):
         """The trap this design exists to avoid.

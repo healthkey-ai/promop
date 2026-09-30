@@ -27,6 +27,7 @@ _Q_ATHENA = Q(origin_system__startswith='athena') & ~Q(origin_system='athena-mul
 # it for every newly queued code -- but '' already means "no filter" on the
 # wire, so filtering to it needs a sentinel.
 BLANK_PROVENANCE = '__blank__'
+GLOBAL_ORGANIZATION = '__none__'
 PAGE_SIZE = 100
 ORDER_FIELDS = {
     'origin_system': 'origin_system', 'source_code': 'source_code',
@@ -74,7 +75,8 @@ def apply_search(mappings, tab_rows, search):
         return tab_rows
     query = Q()
     for field in ('source_code', 'source_vocabulary_id', 'source_code_description',
-                  'target_concept__concept_name', 'target_concept__concept_code'):
+                  'target_concept__concept_name', 'target_concept__concept_code',
+                  'organization__name', 'organization__slug'):
         query |= Q(**{f'{field}__icontains': search})
     if search.isdigit():
         query |= Q(target_concept_id__icontains=search)
@@ -86,6 +88,14 @@ def apply_provenance(queryset, provenance):
         return queryset
     return queryset.filter(
         origin_system='' if provenance == BLANK_PROVENANCE else provenance)
+
+
+def apply_organization(queryset, organization):
+    if not organization:
+        return queryset
+    if organization == GLOBAL_ORGANIZATION:
+        return queryset.filter(organization__isnull=True)
+    return queryset.filter(organization__slug=organization)
 
 
 def _seen_only(params):
@@ -124,6 +134,7 @@ def visible_rows(mappings, params, section=None):
     search = (params.get('search') or '').strip()
     rows = apply_search(mappings, tab_queryset(mappings, source), search)
     rows = apply_provenance(rows, (params.get('provenance') or '').strip())
+    rows = apply_organization(rows, (params.get('organization') or '').strip())
     if section is not None:
         return _apply_seen_for_section(rows, params, section)
     return apply_seen(rows, params)
@@ -146,7 +157,11 @@ def browse_mappings(mappings, params, serialize):
     # origin_system carries no index, so a query of its own is a sequential
     # scan of the tab on every browse and on every refresh after an approve.
     provenance_counts = {}
-    for group in mappings.order_by().values('source_vocabulary_id', 'status', 'origin_system').annotate(n=Count('pk')):
+    organization_counts = {}
+    for group in mappings.order_by().values(
+        'source_vocabulary_id', 'status', 'origin_system',
+        'organization_id', 'organization__slug', 'organization__name',
+    ).annotate(n=Count('pk')):
         source = canonical_source(group['source_vocabulary_id'])
         bucket = counts.setdefault(source, dict(proposed=0, approved=0, athena=0))
         totals = section_counts.setdefault(source, dict(unmapped=0, mapped=0, athena=0, rejected=0, athena_rejected=0))
@@ -165,6 +180,15 @@ def browse_mappings(mappings, params, serialize):
         if not is_ath:
             per_source = provenance_counts.setdefault(source, {})
             per_source[group['origin_system']] = per_source.get(group['origin_system'], 0) + group['n']
+        organization_key = group['organization__slug'] or GLOBAL_ORGANIZATION
+        per_source_org = organization_counts.setdefault(source, {})
+        current = per_source_org.setdefault(organization_key, {
+            'organization_id': group['organization_id'],
+            'slug': group['organization__slug'] or '',
+            'name': group['organization__name'] or 'Global / unattributed',
+            'count': 0,
+        })
+        current['count'] += group['n']
     ordered = sorted(counts, key=lambda key: (vocab.source_tab_sort_key(key), key))
     tabs = [{
         'vocabulary_id': key, 'label': vocab.source_tab_label(key),
@@ -190,7 +214,10 @@ def browse_mappings(mappings, params, serialize):
         canonical=Case(*alias_cases, default=F('source_vocabulary_id'), output_field=CharField()),
         code=Upper(Trim('source_code')),
     ).exclude(code='').annotate(
-        duplicate_count=Window(Count('pk'), partition_by=[F('canonical'), F('code')]),
+        duplicate_count=Window(
+            Count('pk'),
+            partition_by=[F('organization_id'), F('canonical'), F('code')],
+        ),
     ).filter(duplicate_count__gt=1).values_list('pk', flat=True)
     duplicates = list(with_destination_counts(catalog.filter(pk__in=duplicate_ids)))
 
@@ -204,9 +231,22 @@ def browse_mappings(mappings, params, serialize):
     else:
         totals_by_provenance = provenance_counts.get(canonical_source(source), {})
     provenances = _provenance_options(totals_by_provenance)
+    if source == OVERALL:
+        totals_by_organization = {}
+        for per_source in organization_counts.values():
+            for key, option in per_source.items():
+                current = totals_by_organization.setdefault(key, {**option, 'count': 0})
+                current['count'] += option['count']
+    else:
+        totals_by_organization = organization_counts.get(canonical_source(source), {})
+    organizations = sorted(
+        totals_by_organization.values(),
+        key=lambda option: (-option['count'], option['name']),
+    )
 
     search = params.get('search', '').strip()
     provenance = params.get('provenance', '').strip()
+    organization = params.get('organization', '').strip()
     filtered = apply_search(mappings, tab_rows, search)
     if search:
         # A search reaches across every tab, so the tab's own counts would
@@ -220,7 +260,8 @@ def browse_mappings(mappings, params, serialize):
     # unfiltered on purpose: hiding one half of a duplicated code would turn a
     # warning into a puzzle.
     filtered = apply_provenance(filtered, provenance)
-    if search or provenance:
+    filtered = apply_organization(filtered, organization)
+    if search or provenance or organization:
         _unmapped_filter = ~_Q_ATHENA & ~Q(status__in=['approved', 'rejected'])
         if seen_only:
             _unmapped_filter = _unmapped_filter & Q(occurrence_count__gt=0)
@@ -302,4 +343,5 @@ def browse_mappings(mappings, params, serialize):
                 total=sum(section_totals), seen_only=params.get('seen_only') == '1',
                 tabs=tabs, selected_source=source, pages=pages, rejected_count=rejected,
                 provenances=provenances, selected_provenance=provenance,
+                organizations=organizations, selected_organization=organization,
                 groups=groups, rollup=rollup)

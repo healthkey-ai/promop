@@ -94,6 +94,7 @@ class Command(EmbeddingLoadCommand):
             domain_id = target_concept.domain_id or 'Procedure'
             omop_table = self.DOMAIN_TO_TABLE.get(domain_id, 'procedure')
             obj, was_created = SourceCodeConceptMapping.objects.get_or_create(
+                organization=None,
                 source_vocabulary_id='CPT4', source_code=source_code,
                 defaults={
                     'domain_id': domain_id, 'source_code_description': description,
@@ -149,6 +150,7 @@ class Command(EmbeddingLoadCommand):
             if identity:
                 identity_defaults.update(notes=f'Active standard SNOMED identity preferred to etl-cross-map RxNorm:{rxnorm_code}.')
             obj, was_created = SourceCodeConceptMapping.objects.get_or_create(
+                organization=None,
                 source_vocabulary_id='SNOMED', source_code=snomed_code[:100],
                 defaults={
                     'domain_id': 'Drug', 'source_code_description': (snomed_concept.concept_name if snomed_concept else '')[:255],

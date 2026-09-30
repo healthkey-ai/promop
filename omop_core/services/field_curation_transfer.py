@@ -20,9 +20,9 @@ The transfer is split in two so it is testable without a second database:
 Two things deliberately do not survive the trip:
 
 * **Row IDs.** Rows are matched on their natural key (``field_name``,
-  ``(field_name, display)`` for a choice, ``(source_vocabulary_id,
-  source_code)`` for a code mapping), never on the source PK, because the two
-  instances assign PKs independently.
+  ``(field_name, display)`` for a choice, and ``(organization_slug,
+  source_vocabulary_id, source_code)`` for a code mapping), never on the source
+  PK, because the two instances assign PKs independently.
 * **User foreign keys.** ``reviewer`` and ``created_by`` point at ``Identity``
   rows whose IDs mean something different on each instance, so they are cleared
   rather than carried over — a wrong attribution is worse than none.
@@ -54,6 +54,7 @@ from omop_core.models import (
     FieldConceptMapping,
     FieldFormula,
     FieldSynonym,
+    Organization,
     SourceCodeConceptMapping,
 )
 from omop_core.services.source_vocabularies import VOCABULARY_OID_ALIASES
@@ -113,7 +114,7 @@ class TransferStats:
     warnings: list[str] = dataclass_field(default_factory=list)
     suppressed_warnings: int = 0
     # Prune needs the source keys, but streaming does not keep the rows.
-    code_mapping_keys: set[tuple[str, str]] = dataclass_field(default_factory=set)
+    code_mapping_keys: set[tuple[str, str, str]] = dataclass_field(default_factory=set)
     # Target rows already written from a source row, so a later chunk leaves them alone.
     claimed_code_mappings: set[int] = dataclass_field(default_factory=set)
 
@@ -230,6 +231,7 @@ def read_payload(
 def _code_mapping_row(m: SourceCodeConceptMapping) -> dict[str, object]:
     """One source-code mapping as a JSON-safe dict."""
     return {
+        'organization_slug': m.organization.slug if m.organization_id else '',
         'source_vocabulary_id': m.source_vocabulary_id,
         'source_code': m.source_code,
         **{
@@ -245,9 +247,13 @@ def _code_mapping_row(m: SourceCodeConceptMapping) -> dict[str, object]:
     }
 
 
-def _code_key(vocabulary_id: str, source_code: str) -> tuple[str, str]:
+def _code_key(vocabulary_id: str, source_code: str, organization_slug: str = '') -> tuple[str, str, str]:
     """The code a mapping is about, whatever spelling of its vocabulary it uses."""
-    return _VOCABULARY_ALIASES.get(vocabulary_id, vocabulary_id), source_code.strip(' ').lower()
+    return (
+        organization_slug,
+        _VOCABULARY_ALIASES.get(vocabulary_id, vocabulary_id),
+        source_code.strip(' ').lower(),
+    )
 
 
 def _canonical_vocabulary() -> Case:
@@ -262,7 +268,7 @@ def iter_code_mappings(using: str) -> Iterator[dict[str, object]]:
     """Yield source-code mapping rows without materializing the table."""
     queryset = (
         SourceCodeConceptMapping.objects.using(using)
-        .select_related(*_CODE_MAPPING_CONCEPT_FKS)
+        .select_related('organization', *_CODE_MAPPING_CONCEPT_FKS)
         # Rows for one code stay next to each other, so a chunk rarely splits them.
         .order_by(_canonical_vocabulary(), Lower(Trim('source_code')), 'source_vocabulary_id')
     )
@@ -506,8 +512,11 @@ def _chunked_by_code(
     """
     chunk: list[dict[str, object]] = []
     for row in rows:
-        key = _code_key(row['source_vocabulary_id'], row['source_code'])
-        if len(chunk) >= size and _code_key(chunk[-1]['source_vocabulary_id'], chunk[-1]['source_code']) != key:
+        key = _code_key(row['source_vocabulary_id'], row['source_code'], row.get('organization_slug') or '')
+        if len(chunk) >= size and _code_key(
+            chunk[-1]['source_vocabulary_id'], chunk[-1]['source_code'],
+            chunk[-1].get('organization_slug') or '',
+        ) != key:
             yield chunk
             chunk = []
         chunk.append(row)
@@ -553,11 +562,21 @@ def _apply_code_mapping_chunk(
     rows: list[dict[str, object]], stats: TransferStats,
 ) -> None:
     """Sync one chunk: per code update what is here, create what is missing, delete extras."""
-    stats.code_mapping_keys.update((row['source_vocabulary_id'], row['source_code']) for row in rows)
+    stats.code_mapping_keys.update(
+        (row.get('organization_slug') or '', row['source_vocabulary_id'], row['source_code'])
+        for row in rows
+    )
     targets = _target_code_mappings(rows, stats)
     by_code, by_id = _concept_caches(rows)
-    rows = sorted(rows, key=lambda r: _code_key(r['source_vocabulary_id'], r['source_code']))
-    for key, group in groupby(rows, key=lambda r: _code_key(r['source_vocabulary_id'], r['source_code'])):
+    organization_slugs = {row.get('organization_slug') or '' for row in rows} - {''}
+    organizations = {
+        organization.slug: organization
+        for organization in Organization.objects.filter(slug__in=organization_slugs)
+    }
+    rows = sorted(rows, key=lambda r: _code_key(
+        r['source_vocabulary_id'], r['source_code'], r.get('organization_slug') or ''))
+    for key, group in groupby(rows, key=lambda r: _code_key(
+            r['source_vocabulary_id'], r['source_code'], r.get('organization_slug') or '')):
         group = list(group)
         here = targets.get(key, [])
         exact = {(m.source_vocabulary_id, m.source_code): m for m in here}
@@ -571,22 +590,30 @@ def _apply_code_mapping_chunk(
             SourceCodeConceptMapping.objects.filter(pk__in=[m.pk for m in spare]).delete()
             stats._bump(stats.deleted, 'code_mappings', len(spare))
         for row in group:
-            _write_code_mapping(row, paired[id(row)], stats, by_code, by_id)
+            _write_code_mapping(
+                row, paired[id(row)], stats, by_code, by_id, organizations,
+            )
 
 
 def _target_code_mappings(
     rows: list[dict[str, object]], stats: TransferStats,
-) -> dict[tuple[str, str], list[SourceCodeConceptMapping]]:
+) -> dict[tuple[str, str, str], list[SourceCodeConceptMapping]]:
     """Rows here with the same codes as the chunk, under any spelling, not yet claimed."""
-    keys = {_code_key(row['source_vocabulary_id'], row['source_code']) for row in rows}
-    canonical = {vocabulary for vocabulary, _ in keys}
+    keys = {
+        _code_key(row['source_vocabulary_id'], row['source_code'], row.get('organization_slug') or '')
+        for row in rows
+    }
+    canonical = {vocabulary for _, vocabulary, _ in keys}
     spellings = canonical | {alias for alias, target in _VOCABULARY_ALIASES.items() if target in canonical}
-    found: dict[tuple[str, str], list[SourceCodeConceptMapping]] = defaultdict(list)
-    candidates = SourceCodeConceptMapping.objects.filter(source_vocabulary_id__in=spellings).alias(
+    found: dict[tuple[str, str, str], list[SourceCodeConceptMapping]] = defaultdict(list)
+    candidates = SourceCodeConceptMapping.objects.select_related('organization').filter(source_vocabulary_id__in=spellings).alias(
         code=Lower(Trim('source_code')),
-    ).filter(code__in={code for _, code in keys}).exclude(pk__in=stats.claimed_code_mappings)
+    ).filter(code__in={code for _, _, code in keys}).exclude(pk__in=stats.claimed_code_mappings)
     for mapping in candidates:
-        key = _code_key(mapping.source_vocabulary_id, mapping.source_code)
+        key = _code_key(
+            mapping.source_vocabulary_id, mapping.source_code,
+            mapping.organization.slug if mapping.organization_id else '',
+        )
         if key in keys:
             found[key].append(mapping)
     return found
@@ -595,10 +622,20 @@ def _target_code_mappings(
 def _write_code_mapping(
     row: dict[str, object], mapping: SourceCodeConceptMapping | None, stats: TransferStats,
     by_code: dict[tuple[str, str], Concept], by_id: dict[int, Concept],
+    organizations: dict[str, Organization],
 ) -> None:
     """Create the row, or overwrite mapping with it, spelling included."""
     label = f"{row['source_vocabulary_id'] or '(uncoded)'}:{row['source_code']}"
     values = {name: row[name] for name in _CODE_MAPPING_FIELDS}
+    organization_slug = row.get('organization_slug') or ''
+    if organization_slug:
+        values['organization'] = organizations.get(organization_slug)
+        if values['organization'] is None:
+            stats.warn(f'{label}: organization {organization_slug!r} does not exist; skipped')
+            stats._bump(stats.skipped, 'code_mappings')
+            return
+    else:
+        values['organization'] = None
     for fk in _CODE_MAPPING_CONCEPT_FKS:
         ref = row.get(fk) or {}
         values[fk] = _resolve_concept_ref(
@@ -665,10 +702,10 @@ def _prune(payload: dict, tables: tuple[str, ...], stats: TransferStats) -> None
         # Apply gathers these because the payload rows may be a spent generator.
         keep = stats.code_mapping_keys
         stale = [
-            pk for pk, vocab, code in SourceCodeConceptMapping.objects
-            .values_list('pk', 'source_vocabulary_id', 'source_code')
+            pk for pk, org_slug, vocab, code in SourceCodeConceptMapping.objects
+            .values_list('pk', 'organization__slug', 'source_vocabulary_id', 'source_code')
             .iterator(chunk_size=CODE_MAPPING_CHUNK)
-            if (vocab, code) not in keep
+            if (org_slug or '', vocab, code) not in keep
         ]
         if stale:
             # Approved rows steer ingest, so this is a live behaviour change.

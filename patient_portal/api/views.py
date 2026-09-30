@@ -10494,6 +10494,9 @@ def _serialize_code_mapping_row(concept, mapping=None, source_metadata=None, des
             'source_vocabulary_id': mapping.source_vocabulary_id if mapping else '',
             'source_code': mapping.source_code if mapping else '',
             'source_code_description': mapping.source_code_description if mapping else '',
+            'organization_id': mapping.organization_id if mapping else None,
+            'organization_slug': mapping.organization.slug if mapping and mapping.organization_id else '',
+            'organization_name': mapping.organization.name if mapping and mapping.organization_id else '',
             'source_concept_id': mapping.source_concept_id if mapping else None,
             'umls_source_name': mapping.umls_source_name if mapping else '',
             'source': mapping.source if mapping else '',
@@ -10553,6 +10556,9 @@ def _serialize_code_mapping_row(concept, mapping=None, source_metadata=None, des
         'source_vocabulary_id': mapping.source_vocabulary_id if mapping else '',
         'source_code': mapping.source_code if mapping else '',
         'source_code_description': mapping.source_code_description if mapping else '',
+        'organization_id': mapping.organization_id if mapping else None,
+        'organization_slug': mapping.organization.slug if mapping and mapping.organization_id else '',
+        'organization_name': mapping.organization.name if mapping and mapping.organization_id else '',
         # The concept for the source code itself, when that vocabulary is
         # loaded. Null is the normal case and means nothing is wrong.
         'source_concept_id': mapping.source_concept_id if mapping else None,
@@ -10712,7 +10718,28 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     else:
         source_code = mapping.source_code
 
-    if mapping and (source_vocabulary_id, source_code) != (mapping.source_vocabulary_id, mapping.source_code) and mapping.destination_candidates.exists():
+    organization = mapping.organization if mapping is not None else None
+    if 'organization_id' in data:
+        raw_organization_id = data.get('organization_id')
+        if raw_organization_id in (None, ''):
+            organization = None
+        else:
+            try:
+                organization = Organization.objects.get(pk=int(raw_organization_id))
+            except (TypeError, ValueError, Organization.DoesNotExist):
+                raise serializers.ValidationError({
+                    'organization_id': 'Organization not found.'
+                })
+            if not get_admin_orgs(user).filter(pk=organization.pk).exists():
+                raise serializers.ValidationError({
+                    'organization_id': 'You do not administer this organization.'
+                })
+
+    if mapping and (
+        source_vocabulary_id, source_code, organization.pk if organization else None,
+    ) != (
+        mapping.source_vocabulary_id, mapping.source_code, mapping.organization_id,
+    ) and mapping.destination_candidates.exists():
         raise serializers.ValidationError({'source_code': (
             'Imported destinations belong to this source code. Create a new mapping for a different source.'
         )})
@@ -10812,6 +10839,7 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     if pending_repoints and (
         source_vocabulary_id != mapping.source_vocabulary_id
         or source_code != mapping.source_code
+        or (organization.pk if organization else None) != mapping.organization_id
         or domain_id != mapping.domain_id
         or (omop_table and omop_table != mapping.omop_table)
     ):
@@ -10830,6 +10858,8 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     # table, move nothing, and still report success.
     values = {'updated_by': user,
               'pending_repoint_concept_ids': [] if status_value == 'approved' else pending_repoints}
+    if mapping is None or 'organization_id' in data:
+        values['organization'] = organization
     if mapping is None or 'domain_id' in data:
         values['domain_id'] = domain_id
     if mapping is None or 'source_vocabulary_id' in data:
@@ -10958,7 +10988,7 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
             mapping.save()
     except IntegrityError:
         raise serializers.ValidationError({
-            'source_code': 'This source vocabulary/code pair is already mapped.'
+            'source_code': 'This organization/source vocabulary/code is already mapped.'
         })
 
     # What should move the stored rows is a human signing off on what a code
@@ -11058,7 +11088,7 @@ def code_mapping_group(request):
         return Response({'detail': 'Unknown section.'}, status=status.HTTP_400_BAD_REQUEST)
 
     mappings = without_icd10_athena_duplicates(SourceCodeConceptMapping.objects.select_related(
-        'target_concept', 'created_by', 'reviewer', 'locked_by'))
+        'target_concept', 'created_by', 'reviewer', 'locked_by', 'organization'))
     # Same tab, search and provenance narrowing browse applied before it
     # counted the entry. Without this, an entry reading "3 codes" under a
     # provenance filter expands into all 2,557 -- including the rows the filter
@@ -11125,7 +11155,7 @@ def code_mapping_list(request):
 
     if request.method == 'GET':
         mappings = SourceCodeConceptMapping.objects.select_related(
-            'target_concept', 'created_by', 'reviewer', 'locked_by')
+            'target_concept', 'created_by', 'reviewer', 'locked_by', 'organization')
         from omop_core.services.athena_mapping_guard import without_icd10_athena_duplicates
         mappings = without_icd10_athena_duplicates(mappings)
         if request.query_params.get('browse') == '1':
@@ -11149,6 +11179,11 @@ def code_mapping_list(request):
         status_filter = request.query_params.get('status')
         if status_filter:
             mappings = mappings.filter(status=status_filter)
+        organization_filter = request.query_params.get('organization')
+        if organization_filter == '__none__':
+            mappings = mappings.filter(organization__isnull=True)
+        elif organization_filter:
+            mappings = mappings.filter(organization__slug=organization_filter)
         from rest_framework.pagination import PageNumberPagination
         from omop_core.services.mapping_browse import PAGE_SIZE
         from omop_core.services.mapping_destinations import with_destination_counts
@@ -11208,7 +11243,7 @@ def code_mapping_detail(request, mapping_id):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     mappings = SourceCodeConceptMapping.objects.filter(id=mapping_id).select_related(
-        'target_concept', 'created_by', 'reviewer', 'locked_by')
+        'target_concept', 'created_by', 'reviewer', 'locked_by', 'organization')
     if request.method != 'GET':
         mappings = mappings.select_for_update(of=('self',))
     mapping = mappings.first()
@@ -12041,13 +12076,17 @@ def code_mapping_lookup(request):
     Request body::
 
         {
+          "organization_id": 41,
           "codes": [
-            {"source_vocabulary_id": "CPT4", "source_code": "99213",
-             "omop_table": "procedure"},
-            {"source_vocabulary_id": "SNOMED", "source_code": "386789000",
-             "omop_table": "condition"}
+            {"source_vocabulary_id": "urn:oid:1.2.840.114350.1.13.99999.7.10.688867.4150",
+             "source_code": "10627", "source_text": "Glucose flowsheet",
+             "omop_table": "measurement"}
           ]
         }
+
+    ``organization_id`` is batch-wide. An organization-bound OAuth service
+    obtains it from its credential and may omit the field; a machine credential
+    without that binding must send it explicitly for Epic/Cerner local codes.
 
     Response::
 
@@ -12073,6 +12112,30 @@ def code_mapping_lookup(request):
             {'detail': f'Maximum {max_rows} codes per request.'},
             status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
         )
+
+    request_organization = get_request_org(request)
+    raw_organization_id = request.data.get('organization_id')
+    if raw_organization_id not in (None, ''):
+        try:
+            explicit_organization = Organization.objects.get(pk=int(raw_organization_id))
+        except (TypeError, ValueError, Organization.DoesNotExist):
+            return Response(
+                {'organization_id': 'Organization not found.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if request_organization is not None and explicit_organization != request_organization:
+            return Response(
+                {'organization_id': 'Organization does not match the authenticated service.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if request_organization is None and not (
+            is_machine_request(request) or getattr(request.user, 'is_staff', False)
+        ):
+            return Response(
+                {'organization_id': 'Explicit organization requires a machine or staff credential.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        request_organization = explicit_organization
 
     # This is an ingest operation, not the UI's list/browse read path.  The
     # canonical resolver records an encounter for a proposed code, so prevent
@@ -12106,6 +12169,7 @@ def code_mapping_lookup(request):
             source_text=source_text,
             omop_table=table,
             source_system=source_system,
+            organization=request_organization,
         )
         if concept is not None:
             result[key] = {
@@ -12118,6 +12182,7 @@ def code_mapping_lookup(request):
                 'domain_id': mapping.domain_id if mapping else concept.domain_id,
                 'omop_table': mapping.omop_table if mapping else table,
                 'mapping_id': mapping.id if mapping else None,
+                'organization_id': mapping.organization_id if mapping else None,
             }
             resolved += 1
         else:
@@ -12125,6 +12190,7 @@ def code_mapping_lookup(request):
                 'status': mapping.status if mapping else 'unresolved',
                 'resolved': False,
                 'mapping_id': mapping.id if mapping else None,
+                'organization_id': mapping.organization_id if mapping else None,
                 'occurrence_count': mapping.occurrence_count if mapping else 0,
                 'first_seen': mapping.first_seen if mapping else None,
                 'last_seen': mapping.last_seen if mapping else None,

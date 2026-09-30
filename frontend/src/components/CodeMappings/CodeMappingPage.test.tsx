@@ -1639,6 +1639,8 @@ describe("server mapping pages", () => {
     rejected_count: 0,
     provenances: [{ origin_system: "curator", count: 2 }, { origin_system: "", count: 1 }],
     selected_provenance: "",
+    organizations: [],
+    selected_organization: "",
     groups: {},
     rollup: false,
     ...overrides,
@@ -1682,6 +1684,41 @@ describe("server mapping pages", () => {
     fireEvent.click(filter);
     await screen.findByText("SEEN PAGE 1");
     expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ seen_only: "1", page_0: 1 }) });
+  });
+
+  it("shows and filters hospital organization on vendor tabs", async () => {
+    const epicRow = {
+      ...proposedRow,
+      source_vocabulary_id: "http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id",
+      source_code: "10627",
+      organization_id: 41,
+      organization_slug: "hospital-a",
+      organization_name: "Hospital A",
+    };
+    mockGet.mockImplementation((url: string) => {
+      if (url !== "/v1/code-mappings/") {
+        return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+      }
+      return Promise.resolve({ data: browseData({
+        results: [epicRow], selected_source: "EPIC",
+        tabs: [{ vocabulary_id: "EPIC", label: "Epic", is_standard: false, proposed: 1, approved: 0, athena: 0 }],
+        organizations: [
+          { organization_id: 41, slug: "hospital-a", name: "Hospital A", count: 1 },
+          { organization_id: 42, slug: "hospital-b", name: "Hospital B", count: 1 },
+        ],
+      }) });
+    });
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+
+    const row = (await screen.findByText("10627")).closest("tr")!;
+    expect(cellUnder(row, "Organization")).toHaveTextContent("Hospital A");
+    fireEvent.change(screen.getByRole("combobox", { name: "Filter by organization" }), {
+      target: { value: "hospital-a" },
+    });
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith(
+      "/v1/code-mappings/",
+      { params: expect.objectContaining({ organization: "hospital-a" }) },
+    ));
   });
 
   it("counts all matching sources even when the page contains one label group", async () => {

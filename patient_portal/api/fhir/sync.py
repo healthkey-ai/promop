@@ -44,7 +44,7 @@ from omop_core.mapping.code_resolution import (
     resolve_source_code,
 )
 from omop_core.services.pk import next_pk_batch
-from omop_core.services.source_vocabularies import fhir_source_vocabulary
+from omop_core.services.source_vocabularies import fhir_source_vocabulary, hospital_vendor
 from omop_core.signals import suppress_patient_record_refresh
 from patient_portal.api.permissions import (
     ScopedTokenPermission, get_request_org, is_service_token, is_machine_request,
@@ -288,6 +288,9 @@ class FhirSyncView(APIView):
         if isinstance(resolution, Response):
             return resolution
         person, org = resolution
+        # Resolution/enqueueing of hospital-local source codes needs the same
+        # organization that owns the clinical rows and their provenance.
+        self._mapping_organization = org
 
         ehr_type = _ensure_concept(EHR_TYPE_CONCEPT_ID)
         no_match = _ensure_concept(NO_MATCHING_CONCEPT_ID)
@@ -453,14 +456,33 @@ class FhirSyncView(APIView):
             ).filter(
                 status='approved', _code_upper__in=list(wanted),
             ).select_related('target_concept')
+            organization = getattr(self, '_mapping_organization', None)
+            if organization is None:
+                approved = approved.filter(organization__isnull=True)
+            else:
+                approved = approved.filter(
+                    Q(organization=organization) | Q(organization__isnull=True)
+                )
             # value.upper() -> the inbound spellings, so the loop below is
             # O(mappings) rather than O(mappings x distinct values).
             by_upper = defaultdict(list)
             for value in (all_codes | all_source_texts):
                 by_upper[value.upper()].append(value)
 
+            # Global rows load first, then an exact organization override can
+            # replace their cache entry. Shared hospital vendor namespaces do
+            # not admit a global fallback when organization context exists.
+            approved = sorted(
+                approved,
+                key=lambda mapping: mapping.organization_id is not None,
+            )
             for mapping in approved:
                 vocab = mapping.source_vocabulary_id or '*'
+                if hospital_vendor(vocab):
+                    if organization is not None and mapping.organization_id != organization.id:
+                        continue
+                    if organization is None and mapping.organization_id is not None:
+                        continue
                 # Keyed by the *inbound* spelling, since that is what _lookup
                 # has in hand, not by however the curator typed it. A mapping
                 # with no source code system is written under every vocabulary
@@ -529,6 +551,7 @@ class FhirSyncView(APIView):
             source_text=text or source_code,
             omop_table=omop_table,
             source_system='fhir-sync',
+            organization=getattr(self, '_mapping_organization', None),
         )
         cache[mint_key] = concept
         if concept is not None:

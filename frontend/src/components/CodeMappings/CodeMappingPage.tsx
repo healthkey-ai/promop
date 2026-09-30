@@ -42,6 +42,9 @@ interface CodeMappingRow {
   source_vocabulary_id: string;
   source_code: string;
   source_code_description: string;
+  organization_id?: number | null;
+  organization_slug?: string;
+  organization_name?: string;
   source_concept_id?: number | null;
   source_retired?: boolean | null;
   source_retirement_evidence?: string[];
@@ -79,7 +82,7 @@ interface CodeMappingRow {
 }
 
 const EXPORT_COLUMNS: (keyof CodeMappingRow)[] = [
-  "source_vocabulary_id", "source_code", "source_code_description",
+  "organization_slug", "organization_name", "source_vocabulary_id", "source_code", "source_code_description",
   "occurrence_count", "origin_system", "destination_concept_id",
   "destination_concept_name", "destination_concept_code",
   "destination_vocabulary_id", "destination_domain_id", "status",
@@ -579,6 +582,8 @@ type BrowseResponse = {
   rejected_count: number;
   provenances: { origin_system: string; count: number }[];
   selected_provenance: string;
+  organizations: { organization_id: number | null; slug: string; name: string; count: number }[];
+  selected_organization: string;
   groups: Partial<Record<MappingSection, GroupEntry[]>>;
   rollup: boolean;
 };
@@ -612,6 +617,7 @@ const DEFAULT_SECTION_SORT: SectionSort = { column: "occurrence_count", descendi
 // it for every newly queued code -- but "" is already the select's "no filter"
 // value, so filtering to blank needs a sentinel the server translates back.
 const BLANK_PROVENANCE = "__blank__";
+const GLOBAL_ORGANIZATION = "__none__";
 
 export default function CodeMappingPage() {
   const navigate = useNavigate();
@@ -653,6 +659,7 @@ export default function CodeMappingPage() {
       (sorts, section) => ({ ...sorts, [section]: DEFAULT_SECTION_SORT }), {}),
   );
   const [provenanceFilter, setProvenanceFilter] = useState("");
+  const [organizationFilter, setOrganizationFilter] = useState("");
   const [rollup, setRollup] = useState(false);
   const [seenOnly, setSeenOnly] = useState(true);
   // key -> members, or null while the fetch is in flight.
@@ -736,6 +743,7 @@ export default function CodeMappingPage() {
     };
     if (activeVocabulary !== null) params.source = activeVocabulary;
     if (provenanceFilter) params.provenance = provenanceFilter;
+    if (organizationFilter) params.organization = organizationFilter;
     if (rollup) params.rollup = 1;
     sectionNames.forEach((section, index) => {
       params[`page_${index}`] = pages[section] || 1;
@@ -766,7 +774,7 @@ export default function CodeMappingPage() {
     } finally {
       if (sequence === loadSequence.current) setLoading(false);
     }
-  }, [activeVocabulary, debouncedSearch, pages, sectionSorts, provenanceFilter, rollup, seenOnly, direction]);
+  }, [activeVocabulary, debouncedSearch, pages, sectionSorts, provenanceFilter, organizationFilter, rollup, seenOnly, direction]);
 
   const refreshCurrent = useRef(fetchAll);
   useEffect(() => { refreshCurrent.current = fetchAll; }, [fetchAll]);
@@ -856,7 +864,7 @@ export default function CodeMappingPage() {
       if (!code) continue;
       // Keyed on the vocabulary, not the tab: LOINC:123 and ICD10:123 are not
       // duplicates on Overall, nor Apple:123 and Garmin:123 on Wearables.
-      const key = JSON.stringify([vocabulary, code]);
+      const key = JSON.stringify([row.organization_id ?? null, vocabulary, code]);
       const group = groups.get(key) ?? { code, vocabulary, rows: [] };
       group.rows.push(row);
       groups.set(key, group);
@@ -899,6 +907,8 @@ export default function CodeMappingPage() {
         row.source_code,
         row.source_vocabulary_id,
         row.source_code_description,
+        row.organization_name,
+        row.organization_slug,
         row.destination_concept_name,
         row.destination_concept_code,
         String(row.destination_concept_id),
@@ -926,12 +936,15 @@ export default function CodeMappingPage() {
     [overallTab, visibleRows, selectedVocabulary],
   );
   const showSystemColumn = foreignHits > 0;
+  const showOrganizationColumn = selectedVocabulary === "EPIC" || selectedVocabulary === "CERNER"
+    || visibleRows.some((row) => !!row.organization_id);
   // The debounced query is what the server has answered, so the message
   // describes the rows on screen rather than re-announcing every keystroke.
   const crossTabSearch = !overallTab && debouncedSearch.trim() !== "";
   // Server-supplied, and taken from the whole tab rather than the filtered
   // rows, so picking one option does not remove the rest.
   const provenanceOptions = browse?.provenances ?? [];
+  const organizationOptions = browse?.organizations ?? [];
   const provenanceValue = (origin: string) => origin || BLANK_PROVENANCE;
 
   const loadGroup = useCallback(async (entry: GroupEntry, section: MappingSection) => {
@@ -950,6 +963,7 @@ export default function CodeMappingPage() {
           ...(selectedVocabulary !== null ? { source: selectedVocabulary } : {}),
           ...(debouncedSearch ? { search: debouncedSearch } : {}),
           ...(provenanceFilter ? { provenance: provenanceFilter } : {}),
+          ...(organizationFilter ? { organization: organizationFilter } : {}),
         },
       });
       if (sequence !== loadSequence.current) return;
@@ -961,7 +975,7 @@ export default function CodeMappingPage() {
       setExpandedGroups(({ [cacheKey]: _failed, ...rest }) => rest);
       setError("Could not load the codes in that group.");
     }
-  }, [selectedVocabulary, debouncedSearch, provenanceFilter, seenOnly]);
+  }, [selectedVocabulary, debouncedSearch, provenanceFilter, organizationFilter, seenOnly]);
 
   const toggleGroup = useCallback((entry: GroupEntry, section: MappingSection) => {
     const cacheKey = expansionKey(entry, section);
@@ -1620,7 +1634,7 @@ export default function CodeMappingPage() {
   };
 
   const renderTable = (sectionRows: CodeMappingRow[], emptyText: string, section: MappingSection, { hideStatus = false }: { hideStatus?: boolean } = {}) => {
-    const colCount = 7 + (showSystemColumn ? 1 : 0) + (hideStatus ? 0 : 2);
+    const colCount = 7 + (showSystemColumn ? 1 : 0) + (showOrganizationColumn ? 1 : 0) + (hideStatus ? 0 : 2);
     const sort = sectionSorts[section];
     // Present only when the server grouped this response; otherwise the flat
     // queue renders exactly as before.
@@ -1679,6 +1693,9 @@ export default function CodeMappingPage() {
             </td>
             {showSystemColumn && (
               <td className="px-4 py-3 text-xs text-slate-700">{systemLabel(row)}</td>
+            )}
+            {showOrganizationColumn && (
+              <td className="px-4 py-3 text-xs text-slate-700">{row.organization_name || "Global / unattributed"}</td>
             )}
             <td className="px-4 py-3 text-right font-mono text-xs text-slate-700">{row.occurrence_count || 0}</td>
             <td className="px-4 py-3 text-xs text-slate-700">{row.source_code_description || "—"}</td>
@@ -1766,6 +1783,7 @@ export default function CodeMappingPage() {
           <tr>
             {header("Source code", "source_code")}
             {showSystemColumn && <th className="px-4 py-3 font-semibold">System</th>}
+            {showOrganizationColumn && <th className="px-4 py-3 font-semibold">Organization</th>}
             {header("Seen", "occurrence_count")}
             {header("Source description", "source_code_description")}
             {header("Provenance", "origin_system")}
@@ -1798,6 +1816,7 @@ export default function CodeMappingPage() {
                       </button>
                     </td>
                     {showSystemColumn && <td className="px-4 py-3" />}
+                    {showOrganizationColumn && <td className="px-4 py-3" />}
                     <td className="px-4 py-3 text-right font-mono text-xs text-slate-700">{entry.seen.toLocaleString()}</td>
                     <td className="px-4 py-3 text-xs font-medium text-slate-900">{entry.description || "—"}</td>
                     <td className="px-4 py-3" />
@@ -1980,6 +1999,21 @@ export default function CodeMappingPage() {
                 )}
               </select>
             )}
+            {organizationOptions.length > 1 && (
+              <select
+                aria-label="Filter by organization"
+                value={organizationFilter}
+                onChange={(e) => { setPages({}); setExpandedGroups({}); setOrganizationFilter(e.target.value); }}
+                className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950 outline-none focus:border-slate-700 sm:w-64"
+              >
+                <option value="">All organizations</option>
+                {organizationOptions.map((option) => (
+                  <option key={option.slug || GLOBAL_ORGANIZATION} value={option.slug || GLOBAL_ORGANIZATION}>
+                    {option.name} ({option.count})
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
           {crossTabSearch && (
             <p className="mt-1 text-xs text-slate-600" role="status">
@@ -2009,6 +2043,7 @@ export default function CodeMappingPage() {
                   // Provenance values differ per tab; a stale filter would
                   // show an empty tab with no visible reason.
                   setProvenanceFilter("");
+                  setOrganizationFilter("");
                   setExpandedGroups({});
                   setActiveVocabulary(tab.vocabulary_id);
                   if (tab.vocabulary_id === OVERALL_TAB) {
