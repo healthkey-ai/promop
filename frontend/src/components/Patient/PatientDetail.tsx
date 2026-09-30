@@ -582,20 +582,20 @@ export default function PatientDetail({
             // Location.state, two characters, and the PATCH is refused whole for a longer
             // value. Take the abbreviation, and leave region alone when the lookup has none.
             const abbreviation = place["state abbreviation"];
-            setEditedInfo((prev: Record<string, unknown>) => {
-              const updated = {
-                ...prev,
-                city: place["place name"],
-                ...(abbreviation ? { region: abbreviation } : {}),
-              };
-              pendingDataRef.current = { info: updated, name: editedNameRef.current };
-              return updated;
-            });
+            // Schedule a save of its own, like handleFieldChange: the keystroke's 2s autosave
+            // may already have run, and then nothing would send city/region.
+            const updated = {
+              ...(pendingDataRef.current?.info ?? editedInfoRef.current),
+              city: place["place name"],
+              ...(abbreviation ? { region: abbreviation } : {}),
+            };
+            setEditedInfo(updated);
+            scheduleAutoSave(updated, editedNameRef.current);
           }
         }
       } catch { /* ignore zip lookup failures */ }
     }
-  }, [handleFieldChange]);
+  }, [handleFieldChange, scheduleAutoSave]);
 
   const handleDownloadFhir = useCallback(async () => {
     if (!personId) return;
