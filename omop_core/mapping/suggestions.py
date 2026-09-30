@@ -151,6 +151,10 @@ RANK_CONCURRENCY = 8
 # candidate 0.59.
 MIN_TRIGRAM_SCORE = 0.3
 
+# A complete top-N above this cutoff is also the exact top-N of the wider
+# search. Sparse matches fall back; this is not a new minimum accepted score.
+DRUG_TRIGRAM_PROBE_SCORE = 0.6
+
 # A synonym match beats a name match at equal similarity. Synonyms are what
 # clinicians write, and a source value is a clinician's words.
 SYNONYM_BONUS = 0.05
@@ -648,10 +652,43 @@ def _narrowing_filter(query: str, domain_id: str | None) -> dict[str, str]:
     return {'name_upper__trigram_similar': query}
 
 
+def _lexical_top_matches(matches, query, domain_id, lookup, limit, *, optimize=True):
+    """Use a selective GIN probe only when it proves the existing top-N.
+
+    Scoring and ties are unchanged. At least N matches at the stricter cutoff
+    means every excluded match sorts below them, including for synonyms (whose
+    scores are grouped by concept before LIMIT). Otherwise rerun the original
+    query. Keep the caller's threshold, including non-default session settings,
+    and restore it before another retrieval path uses the connection.
+    """
+    # Single ingredient words are already selective, and length mismatch with
+    # product names makes a complete high-score shortlist unlikely.
+    if not optimize or domain_id != 'Drug' or not limit or len(query.split()) < 2:
+        return list(matches[:limit])
+
+    with transaction.atomic():
+        with connection.cursor() as cursor:
+            cursor.execute("SHOW pg_trgm.similarity_threshold")
+            previous = cursor.fetchone()[0]
+            if float(previous) >= DRUG_TRIGRAM_PROBE_SCORE:
+                return list(matches[:limit])
+            cursor.execute("SELECT set_config('pg_trgm.similarity_threshold', %s, true)",
+                           [str(DRUG_TRIGRAM_PROBE_SCORE)])
+            # Adding % is needed for ingredient-narrowed names, whose existing
+            # %> predicate uses word_similarity_threshold instead.
+            found = list(matches.filter(**{lookup: query})[:limit])
+            cursor.execute("SELECT set_config('pg_trgm.similarity_threshold', %s, true)",
+                           [previous])
+        # On an exception the atomic block rolls back SET LOCAL as well.
+    if len(found) == limit:
+        return found
+    return list(matches[:limit])
+
+
 def _name_matches(query: str, domain_id: str | None, limit: int,
-                  narrowing: dict[str, str]):
+                  narrowing: dict[str, str], *, optimize=True):
     """Concepts whose name matches, narrowed however the caller asked."""
-    return (
+    matches = (
         Concept.objects
         .filter(standard_concept='S', invalid_reason__isnull=True,
                 **({'domain_id': domain_id} if domain_id else {}))
@@ -660,16 +697,22 @@ def _name_matches(query: str, domain_id: str | None, limit: int,
         .annotate(score=TrigramSimilarity(Upper('concept_name'), query))
         .filter(score__gt=MIN_TRIGRAM_SCORE)
         # Equal scores are common, so every slice and the final sort tiebreak on id.
-        .order_by('-score', 'concept_id')[:limit]
+        .order_by('-score', 'concept_id')
     )
+    return _lexical_top_matches(matches, query, domain_id,
+                                'name_upper__trigram_similar', limit, optimize=optimize)
 
 
-def lexical_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
+def lexical_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT, *,
+                       optimize_drug_search=True):
     """Concepts whose name or synonyms look like this source value.
 
     Scoped to the domain when supplied; ICD-10 searches all domains. Standard
     concepts only -- a curator re-pointing at a non-standard one is a decision
     they can still make by hand, but it is never what we should suggest.
+
+    ``optimize_drug_search=False`` retains the pre-probe queries for read-only
+    before/after benchmarks. It does not disable existing ingredient narrowing.
     """
     query = (source_value or '').strip().upper()
     if len(query) < 3:
@@ -693,14 +736,16 @@ def lexical_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
     # MIN_TRIGRAM_SCORE applies -- the explicit filter stays so the constant
     # governs regardless of the session setting.
     narrowing = _narrowing_filter(query, domain_id)
-    by_name = list(_name_matches(query, domain_id, limit, narrowing))
+    by_name = _name_matches(query, domain_id, limit, narrowing,
+                            optimize=optimize_drug_search)
     wide = {'name_upper__trigram_similar': query}
     if not by_name and narrowing != wide:
         # A key word the names spell differently, "cutaneous" against "topical",
         # excludes everything. Nothing found means the key was wrong, not that
         # the vocabulary is empty, so pay for the wide search rather than return
         # less than the old code did.
-        by_name = list(_name_matches(query, domain_id, limit, wide))
+        by_name = _name_matches(query, domain_id, limit, wide,
+                                optimize=optimize_drug_search)
 
     # Synonyms are a separate index and a separate signal; merged by concept,
     # keeping whichever route scored higher.
@@ -720,8 +765,9 @@ def lexical_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
             .filter(score__gt=MIN_TRIGRAM_SCORE)
             .values('concept_id')
             .annotate(score=Max('score'))
-            .order_by('-score', 'concept_id')[:limit]
+            .order_by('-score', 'concept_id')
         )
+        synonym_lookup = 'term__trigram_similar'
     else:
         # No domain (ICD-10 searches all of them), or a table nobody has built:
         # search concept_synonym directly. Slow, but complete.
@@ -735,8 +781,13 @@ def lexical_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
             .filter(score__gt=MIN_TRIGRAM_SCORE)
             .values('concept_id')
             .annotate(score=Max('score'))
-            .order_by('-score', 'concept_id')[:limit]
+            .order_by('-score', 'concept_id')
         )
+        synonym_lookup = 'name_upper__trigram_similar'
+    synonym_hits = _lexical_top_matches(
+        synonym_hits, query, domain_id, synonym_lookup, limit,
+        optimize=optimize_drug_search,
+    )
     synonym_scores = {h['concept_id']: h['score'] + SYNONYM_BONUS for h in synonym_hits}
 
     merged = {}
