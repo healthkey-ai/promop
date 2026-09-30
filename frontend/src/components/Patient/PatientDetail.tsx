@@ -575,8 +575,11 @@ export default function PatientDetail({
         const res = await fetch(`https://api.zippopotam.us/us/${zipcode}`);
         if (res.ok) {
           const data = await res.json();
-          // Re-checked for a country picked while the lookup was in flight.
-          if (data.places?.length > 0 && countryAllowsLookup()) {
+          // Re-checked for a country picked while the lookup was in flight, and dropped when
+          // the ZIP has changed since: ZIP A's place must not land next to ZIP B.
+          const current = pendingDataRef.current?.info ?? editedInfoRef.current;
+          if (data.places?.length > 0 && countryAllowsLookup()
+              && String(current?.postal_code ?? "") === zipcode) {
             const place = data.places[0];
             // `state` is the full name ("California"); `region` is projected to OMOP
             // Location.state, two characters, and the PATCH is refused whole for a longer
