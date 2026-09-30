@@ -24,6 +24,7 @@ import WearableTab from "@/components/PatientInfo/tabs/WearableTab";
 import ClinicalSummaryTab from "@/components/PatientInfo/tabs/ClinicalSummaryTab";
 import PatientOmopTab from "./PatientOmopTab";
 import { confirmRecord } from "@/api/clinicalFacts";
+import { mayBeUnitedStates } from "@/lib/usZip";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
@@ -564,24 +565,40 @@ export default function PatientDetail({
 
   const handleZipcodeChange = useCallback(async (zipcode: string) => {
     handleFieldChange("postal_code", zipcode);
+    // Only a country that is set and not the US skips the lookup -- one entered after the
+    // ZIP does not re-run it, so requiring a US country would block ZIP-first patients.
+    const countryAllowsLookup = () =>
+      mayBeUnitedStates((pendingDataRef.current?.info ?? editedInfoRef.current)?.country);
+    if (!countryAllowsLookup()) return;
     if (zipcode.length === 5 && /^\d{5}$/.test(zipcode)) {
       try {
         const res = await fetch(`https://api.zippopotam.us/us/${zipcode}`);
         if (res.ok) {
           const data = await res.json();
-          if (data.places?.length > 0) {
+          // Re-checked for a country picked while the lookup was in flight, and dropped when
+          // the ZIP has changed since: ZIP A's place must not land next to ZIP B.
+          const current = pendingDataRef.current?.info ?? editedInfoRef.current;
+          if (data.places?.length > 0 && countryAllowsLookup()
+              && String(current?.postal_code ?? "") === zipcode) {
             const place = data.places[0];
-             
-            setEditedInfo((prev: Record<string, unknown>) => {
-              const updated = { ...prev, city: place["place name"], region: place["state"] };
-              pendingDataRef.current = { info: updated, name: editedNameRef.current };
-              return updated;
-            });
+            // `state` is the full name ("California"); `region` is projected to OMOP
+            // Location.state, two characters, and the PATCH is refused whole for a longer
+            // value. Take the abbreviation, and leave region alone when the lookup has none.
+            const abbreviation = place["state abbreviation"];
+            // Schedule a save of its own, like handleFieldChange: the keystroke's 2s autosave
+            // may already have run, and then nothing would send city/region.
+            const updated = {
+              ...(pendingDataRef.current?.info ?? editedInfoRef.current),
+              city: place["place name"],
+              ...(abbreviation ? { region: abbreviation } : {}),
+            };
+            setEditedInfo(updated);
+            scheduleAutoSave(updated, editedNameRef.current);
           }
         }
       } catch { /* ignore zip lookup failures */ }
     }
-  }, [handleFieldChange]);
+  }, [handleFieldChange, scheduleAutoSave]);
 
   const handleDownloadFhir = useCallback(async () => {
     if (!personId) return;
