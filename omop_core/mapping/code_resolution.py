@@ -51,7 +51,9 @@ from omop_core.mapping.therapy import (
     _slug,
 )
 from omop_core.signals import suppress_patient_record_refresh
-from omop_core.services.source_vocabularies import VOCABULARY_OID_ALIASES, canonical_source_vocabulary
+from omop_core.services.source_vocabularies import (
+    VOCABULARY_OID_ALIASES, canonical_source_vocabulary, is_catalog_source,
+)
 from omop_core.data_migrations.snomed_relationships_v1 import SINGLE_ORIGIN, MULTIPLE_ORIGIN
 from omop_core.services.snomed_identity import IDENTITY_ORIGIN, is_standard_snomed, promote_crossmap_identity
 from omop_core.services.source_vocabularies import table_for_domain
@@ -585,6 +587,8 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
     # `is None`, not falsiness: concept 0 is OMOP's "No matching concept" and is
     # the single most common value a re-point moves rows *off*.
     if old_concept_id is None or not new_concept_id or old_concept_id == new_concept_id:
+        return result
+    if is_catalog_source(mapping.source_vocabulary_id):
         return result
 
     table = normalize_omop_table(mapping.omop_table)
