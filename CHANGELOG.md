@@ -17,6 +17,13 @@ All notable changes to PRomop are documented here.
   roll back to the previous published release, and check/dry-run/apply modes
   record structured outcomes and per-table delta counts (#1652).
 
+- **Code Mapping CSV upload** — mapping users can upload source-code
+  inventories from the Code Mapping page with a source vocabulary and editable
+  provenance (defaulting to their email). The atomic importer accepts `source
+  code`, `source description`, and optional `seen count`, preserves existing
+  curation decisions, reports row-level validation errors, and deduplicates
+  identical artifacts so encounter counts cannot be applied twice (#1656).
+
 - **LOINC loads itself from loinc.org** — `sync_loinc_release` checks
   `GET /api/v1/Loinc` for the published version and, when ours is older, streams
   the release archive and loads both tables from it: `LoincTable/Loinc.csv` into

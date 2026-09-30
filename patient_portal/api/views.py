@@ -11082,6 +11082,40 @@ def code_mapping_group(request):
     })
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def code_mapping_upload(request):
+    """Atomically add/update source-code queue metadata from a small CSV."""
+    if not _can_manage_field_mappings(request.user):
+        return Response(
+            {'detail': 'Code Mapping access required.'},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+    upload = request.FILES.get('file')
+    if upload is None:
+        return Response({'detail': 'CSV file is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    from omop_core.services.code_mapping_upload import (
+        CodeMappingUploadError, import_upload, serialize_receipt,
+    )
+    try:
+        receipt, duplicate = import_upload(
+            upload=upload,
+            vocabulary=request.data.get('source_vocabulary_id'),
+            provenance=request.data.get('provenance') or request.user.email,
+            actor=request.user,
+        )
+    except CodeMappingUploadError as exc:
+        return Response(
+            {'detail': exc.detail, 'errors': exc.errors},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return Response(
+        serialize_receipt(receipt, duplicate=duplicate),
+        status=status.HTTP_200_OK if duplicate else status.HTTP_201_CREATED,
+    )
+
+
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def code_mapping_list(request):

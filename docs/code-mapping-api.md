@@ -76,6 +76,38 @@ is another recorded encounter.
 The Code Mapping UI list and curator CRUD endpoints are different APIs. Browsing
 or searching those endpoints never changes `Seen`.
 
+## Uploading a source-code inventory
+
+Users with Code Mapping access can select **Upload** on the Code Mapping page,
+choose a CSV, name its source vocabulary, and set its provenance. Provenance
+defaults to the signed-in user's email but remains editable.
+
+The CSV header is case- and surrounding-whitespace-insensitive and must contain
+`source code` and `source description`. `seen count` is optional; an absent or
+blank value means zero. Unknown or duplicate headers, duplicate source codes,
+negative/non-integer counts, malformed rows, and overlong values reject the
+entire upload with row-numbered errors. Uploads are limited to 5 MB and 100,000
+nonblank data rows.
+
+The browser sends the form to:
+
+```http
+POST /api/v1/code-mappings/upload/
+Content-Type: multipart/form-data
+
+file=<CSV>
+source_vocabulary_id=VendorLab
+provenance=curator@example.com
+```
+
+New codes become proposed, unmapped SCCM rows. Existing rows receive a nonblank
+description update and the uploaded count is added to `Seen`; destination,
+status, notes, review state, and other curation fields are not changed.
+Provenance fills only a blank existing provenance value. The operation is
+atomic, and an immutable receipt records its result. Re-uploading identical CSV
+bytes for the same vocabulary and provenance returns that receipt with
+`duplicate: true` and does not add the counts again.
+
 ## What SCCM does under the hood
 
 SCCM is the `source_code_concept_mapping` table. Its identity is the source
