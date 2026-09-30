@@ -79,8 +79,7 @@ async function typeZipAndSave(zip: string) {
   await waitFor(() => expect(screen.getByDisplayValue('Ada Lovelace')).toBeInTheDocument());
   vi.useFakeTimers({ shouldAdvanceTime: true });
   fireEvent.change(screen.getByPlaceholderText(/5-digit US zip code/i), { target: { value: zip } });
-  // Let the lookup resolve and render before the 2s autosave fires, as it does in a browser.
-  // Inside one act() the render is deferred to the end, after the timer.
+  // Let the mocked lookup resolve before the 2s autosave fires.
   await act(async () => {});
   await act(async () => { vi.advanceTimersByTime(2100); });
   await waitFor(() => expect(api.patch).toHaveBeenCalled());
@@ -113,6 +112,25 @@ describe('PatientDetail ZIP autofill', () => {
       expect(sent).toMatchObject({ postal_code: '90210', city: 'Beverly Hills', region: 'CA' });
     },
   );
+
+  it('saves the autofill when the lookup answers after the autosave', async () => {
+    country = 'United States';
+    let answer!: () => void;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(resolve => {
+      answer = () => resolve({ ok: true, json: async () => ({ places: [BEVERLY_HILLS] }) });
+    })));
+    baseRender(<MemoryRouter><PatientDetail /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByDisplayValue('Ada Lovelace')).toBeInTheDocument());
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.change(screen.getByPlaceholderText(/5-digit US zip code/i), { target: { value: '90210' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1));
+    await act(async () => { answer(); });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(2));
+    const calls = (api.patch as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls[1][1]).toStrictEqual({ city: 'Beverly Hills', region: 'CA' });
+  });
 
   it('does not look up a 5-digit postcode outside the US', async () => {
     country = 'Germany';
