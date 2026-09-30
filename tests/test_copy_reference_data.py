@@ -17,6 +17,7 @@ from omop_core.models import (
     MappingDestinationCandidate,
     MutationCode,
     MutationGene,
+    Organization,
     SourceCodeConceptMapping,
     TherapyComponent,
     TherapyOutcome,
@@ -146,6 +147,38 @@ def test_healthkey_concept_gets_a_local_id_and_mappings_resolve_to_it():
     assert SourceCodeConceptMapping.objects.get(source_code='337535').target_concept_id == copied.concept_id
     candidate = MappingDestinationCandidate.objects.get()
     assert (candidate.mapping.source_code, candidate.target_concept_id) == ('337535', copied.concept_id)
+
+
+def test_candidates_follow_same_code_to_the_right_hospital_mapping():
+    placeholder = _hk_concept()
+    organizations = [
+        Organization.objects.create(name='Hospital A', slug='candidate-hospital-a'),
+        Organization.objects.create(name='Hospital B', slug='candidate-hospital-b'),
+    ]
+    for index, organization in enumerate(organizations):
+        mapping = SourceCodeConceptMapping.objects.create(
+            organization=organization,
+            source_vocabulary_id='http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id',
+            source_code='10627', target_concept=placeholder,
+            destination_vocabulary_id='HK-Drug', omop_table='measurement',
+            status='proposed', domain_id='Measurement',
+        )
+        MappingDestinationCandidate.objects.create(
+            mapping=mapping, target_vocabulary_id='HK-Drug',
+            target_concept_code=f'hkd:candidate-{index}', target_concept=placeholder,
+        )
+
+    _roundtrip(lambda: SourceCodeConceptMapping.objects.all().delete())
+
+    assert {
+        (candidate.mapping.organization.slug, candidate.target_concept_code)
+        for candidate in MappingDestinationCandidate.objects.select_related(
+            'mapping__organization'
+        )
+    } == {
+        ('candidate-hospital-a', 'hkd:candidate-0'),
+        ('candidate-hospital-b', 'hkd:candidate-1'),
+    }
 
 
 def test_dry_run_writes_nothing():

@@ -18,6 +18,7 @@ from omop_core.models import (
     Concept,
     FieldFormula,
     FieldSynonym,
+    Organization,
     SourceCodeConceptMapping,
 )
 from django.db import connection
@@ -395,6 +396,26 @@ def test_code_mapping_round_trip():
     assert row.status == 'approved'
     assert row.notes == 'approved on instance A'
     assert row.reviewed_at == datetime(2026, 1, 2, tzinfo=timezone.utc)
+
+
+def test_hospital_code_mapping_round_trip_preserves_organization_by_slug():
+    organization = Organization.objects.create(
+        name='Transfer Hospital', slug='transfer-hospital',
+    )
+    _seed_code_mapping(
+        organization=organization,
+        source_vocabulary_id='http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id',
+        source_code='10627',
+    )
+    payload = read_payload('default', tables=('code_mappings',))
+    _wipe_code_mappings()
+
+    stats = apply_payload(payload, tables=('code_mappings',))
+
+    assert stats.created['code_mappings'] == 1
+    row = SourceCodeConceptMapping.objects.get()
+    assert row.organization == organization
+    assert payload['code_mappings'][0]['organization_slug'] == organization.slug
 
 
 def test_code_mapping_natural_key_is_vocabulary_and_code():

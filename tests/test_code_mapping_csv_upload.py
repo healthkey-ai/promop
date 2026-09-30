@@ -2,7 +2,7 @@ import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework.test import APIClient
 
-from omop_core.models import CodeMappingUpload, SourceCodeConceptMapping
+from omop_core.models import CodeMappingUpload, Organization, SourceCodeConceptMapping
 from patient_portal.models import Identity
 
 
@@ -70,6 +70,34 @@ def test_upload_updates_metadata_without_overwriting_curation(staff_client):
     assert mapping.destination_vocabulary_id == 'SNOMED'
     assert mapping.origin == 'curator'
     assert mapping.updated_by == user
+
+
+@pytest.mark.django_db
+def test_global_upload_does_not_overwrite_hospital_scoped_code(staff_client):
+    client, _ = staff_client
+    organization = Organization.objects.create(name='Upload Hospital', slug='upload-hospital')
+    scoped = SourceCodeConceptMapping.objects.create(
+        organization=organization,
+        source_vocabulary_id='VendorLab', source_code='A01',
+        source_code_description='Hospital label', occurrence_count=4,
+        origin_system='hospital-feed', status='proposed',
+    )
+
+    response = client.post(URL, {
+        'file': csv_file('source code,source description,seen count\nA01,Global label,3\n'),
+        'source_vocabulary_id': 'VendorLab',
+        'provenance': 'global-feed',
+    }, format='multipart')
+
+    assert response.status_code == 201, response.data
+    scoped.refresh_from_db()
+    assert (scoped.source_code_description, scoped.occurrence_count) == ('Hospital label', 4)
+    global_mapping = SourceCodeConceptMapping.objects.get(
+        organization__isnull=True, source_vocabulary_id='VendorLab', source_code='A01',
+    )
+    assert (global_mapping.source_code_description, global_mapping.occurrence_count) == (
+        'Global label', 3,
+    )
 
 
 @pytest.mark.django_db

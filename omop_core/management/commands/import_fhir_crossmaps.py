@@ -193,6 +193,7 @@ class Command(EmbeddingLoadCommand):
                 continue
 
             obj, was_created = SourceCodeConceptMapping.objects.get_or_create(
+                organization=None,
                 source_vocabulary_id='CPT4',
                 source_code=cpt_code[:100],
                 defaults={
@@ -303,6 +304,7 @@ class Command(EmbeddingLoadCommand):
             if identity:
                 identity_defaults.update(notes=f'Active standard SNOMED identity preferred to HK-ETL RxNorm:{rxnorm_code}.')
             obj, was_created = SourceCodeConceptMapping.objects.get_or_create(
+                organization=None,
                 source_vocabulary_id='SNOMED',
                 source_code=snomed_code[:100],
                 defaults={

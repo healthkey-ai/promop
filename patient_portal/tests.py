@@ -21655,6 +21655,16 @@ class CodeMappingApiTest(TestCase):
         with self.assertRaises(DjangoValidationError):
             mapping.clean()
 
+    def test_model_rejects_organization_scope_for_standard_vocabulary(self):
+        mapping = SourceCodeConceptMapping(
+            organization=self.org,
+            source_vocabulary_id='LOINC',
+            source_code='33358-3',
+            target_concept=self.standard,
+        )
+        with self.assertRaises(DjangoValidationError):
+            mapping.clean()
+
     # ------------------------------------------------------------ CRUD
 
     def test_create_mapping_to_existing_standard_concept(self):
@@ -21691,6 +21701,34 @@ class CodeMappingApiTest(TestCase):
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('omop_table', resp.data)
+
+    def test_create_rejects_organization_scope_for_standard_vocabulary(self):
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.post('/api/v1/code-mappings/', {
+            'organization_id': self.org.pk,
+            'source_vocabulary_id': 'LOINC',
+            'source_code': '33358-3',
+            'destination_concept_id': self.standard.concept_id,
+            'omop_table': 'measurement',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('organization_id', resp.data)
+
+    def test_org_admin_cannot_delete_another_organizations_mapping(self):
+        other_org = Organization.objects.create(
+            name='Other Code Mapping Org', slug='other-code-mapping-org',
+        )
+        mapping = SourceCodeConceptMapping.objects.create(
+            organization=other_org,
+            source_vocabulary_id='EPIC',
+            source_code='OTHER-ORG-CODE',
+            omop_table='measurement',
+            status='proposed',
+        )
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.delete(f'/api/v1/code-mappings/{mapping.pk}/')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(SourceCodeConceptMapping.objects.filter(pk=mapping.pk).exists())
 
     def test_two_source_codes_may_share_one_destination(self):
         """The normal case, and what made the old concept-keyed URL ambiguous."""
@@ -24355,7 +24393,16 @@ class CodeMappingRepointSafetyTest(TestCase):
 
         cls.minted = concept(2039000301, 'hkl:glucose', 'GLUCOSE')
         cls.standard = concept(3046320, '2345-7', 'Glucose [Mass/volume] in Serum')
-        cls.type_concept = concept(32817, 'EHR', 'EHR')
+        cls.type_concept, _ = Concept.objects.get_or_create(
+            concept_id=32817,
+            defaults={
+                'concept_name': 'EHR', 'domain': cls.domain,
+                'vocabulary': cls.vocab, 'concept_class': cls.concept_class,
+                'standard_concept': 'S', 'concept_code': 'EHR',
+                'valid_start_date': date(1970, 1, 1),
+                'valid_end_date': date(2099, 12, 31),
+            },
+        )
 
     def setUp(self):
         self.client = APIClient()
@@ -24544,6 +24591,66 @@ class CodeMappingRepointSafetyTest(TestCase):
             self.standard.concept_id,
         )
 
+    def test_hospital_mapping_repoints_only_rows_attributed_to_that_organization(self):
+        org_a = Organization.objects.create(name='Repoint Hospital A', slug='repoint-a')
+        org_b = Organization.objects.create(name='Repoint Hospital B', slug='repoint-b')
+        other_person = Person.objects.create(
+            person_id=910003, gender_concept_id=0, year_of_birth=1970,
+            race_concept_id=0, ethnicity_concept_id=0,
+        )
+        PatientRecord.objects.update_or_create(
+            person=self.person, defaults={'organization': org_a},
+        )
+        PatientRecord.objects.update_or_create(
+            person=other_person, defaults={'organization': org_b},
+        )
+        row_a = self._measurement(8893012, date(2026, 9, 11), Decimal('4.1'))
+        row_b = Measurement.objects.create(
+            measurement_id=8893013, person=other_person,
+            measurement_concept_id=self.minted.concept_id,
+            measurement_date=date(2026, 9, 11),
+            measurement_type_concept=self.type_concept,
+            measurement_source_value='10627', value_as_number=Decimal('4.1'),
+        )
+        other_org_target = Measurement.objects.create(
+            measurement_id=8893014, person=self.person,
+            measurement_concept_id=self.standard.concept_id,
+            measurement_date=date(2026, 9, 11),
+            measurement_type_concept=self.type_concept,
+            measurement_source_value='10627', value_as_number=Decimal('4.1'),
+        )
+        # Match the same opaque code at both hospitals.
+        row_a.measurement_source_value = '10627'
+        row_a.save(update_fields=['measurement_source_value'])
+        content_type = ContentType.objects.get_for_model(Measurement)
+        for row, organization in (
+            (row_a, org_a), (row_b, org_b), (other_org_target, org_b),
+        ):
+            ProvenanceRecord.objects.create(
+                content_type=content_type, object_id=row.pk,
+                source='EHR_SYNC', organization=organization,
+            )
+        mapping = SourceCodeConceptMapping.objects.create(
+            organization=org_a,
+            source_vocabulary_id='http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id',
+            source_code='10627', target_concept=self.minted,
+            destination_vocabulary_id='HK-Labs', omop_table='measurement',
+            status='proposed', origin='import',
+        )
+
+        response = self.client.patch(f'/api/v1/code-mappings/{mapping.id}/', {
+            'destination_concept_id': self.standard.concept_id,
+            'status': 'approved',
+        }, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        row_a.refresh_from_db()
+        row_b.refresh_from_db()
+        self.assertEqual(row_a.measurement_concept_id, self.standard.concept_id)
+        self.assertEqual(row_b.measurement_concept_id, self.minted.concept_id)
+        self.assertTrue(Measurement.objects.filter(pk=other_org_target.pk).exists())
+        self.assertEqual(response.data['repoint']['rows_updated'], 1)
+
 
 class CodeMappingCuratorWorkflowTest(TestCase):
     """A curator-created mapping is proposed, and approval is what moves rows.
@@ -24583,11 +24690,15 @@ class CodeMappingCuratorWorkflowTest(TestCase):
             standard_concept='S', concept_code='1111-1',
             valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
         )
-        cls.type_concept = Concept.objects.create(
-            concept_id=32817, concept_name='EHR',
-            domain=cls.domain, vocabulary=cls.vocab, concept_class=cls.concept_class,
-            standard_concept='S', concept_code='EHR',
-            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        cls.type_concept, _ = Concept.objects.get_or_create(
+            concept_id=32817,
+            defaults={
+                'concept_name': 'EHR', 'domain': cls.domain,
+                'vocabulary': cls.vocab, 'concept_class': cls.concept_class,
+                'standard_concept': 'S', 'concept_code': 'EHR',
+                'valid_start_date': date(1970, 1, 1),
+                'valid_end_date': date(2099, 12, 31),
+            },
         )
 
     def setUp(self):
@@ -25760,6 +25871,42 @@ class CodeMappingSourceVocabTabsTest(TestCase):
         self.assertEqual(row['mapping_origin'], 'healthkey')
         mapping.delete()
 
+    def test_vendor_browse_exposes_and_filters_organization(self):
+        other_org = Organization.objects.create(
+            name='Other Hospital', slug='other-hospital',
+        )
+        system = 'http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id'
+        rows = [
+            SourceCodeConceptMapping(
+                organization=organization,
+                source_vocabulary_id=system,
+                source_code=f'LOCAL-{organization.pk}',
+                source_code_description='Albumin',
+                target_concept=self.target_concept,
+                destination_vocabulary_id='SNOMED',
+                domain_id='Measurement', omop_table='measurement',
+                status='proposed', origin='import', occurrence_count=1,
+            )
+            for organization in (self.org, other_org)
+        ]
+        SourceCodeConceptMapping.objects.bulk_create(rows)
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.client.get('/api/v1/code-mappings/', {
+            'browse': '1', 'source': 'EPIC', 'seen_only': '0',
+            'organization': self.org.slug,
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(
+            {row['organization_slug'] for row in response.data['results']},
+            {self.org.slug},
+        )
+        self.assertEqual(
+            {option['slug'] for option in response.data['organizations']},
+            {self.org.slug, other_org.slug},
+        )
+        self.assertEqual(response.data['selected_organization'], self.org.slug)
+
     def test_list_athena_origin(self):
         """Rows with origin_system='athena' report mapping_origin='athena'."""
         mapping = SourceCodeConceptMapping.objects.create(
@@ -25972,6 +26119,25 @@ class CodeMappingLookupTest(TestCase):
             status='proposed',
             origin='import',
         )
+        cls.org_a = Organization.objects.create(name='Hospital A', slug='hospital-a')
+        cls.org_b = Organization.objects.create(name='Hospital B', slug='hospital-b')
+        cls.epic_system = 'http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id'
+        for organization, target in (
+            (cls.org_a, cls.target_concept),
+            (cls.org_b, cls.proposed_target),
+        ):
+            SourceCodeConceptMapping.objects.create(
+                organization=organization,
+                source_vocabulary_id=cls.epic_system,
+                source_code='10627',
+                source_code_description='Hospital-local result',
+                target_concept=target,
+                destination_vocabulary_id='SNOMED',
+                domain_id='Procedure',
+                omop_table='procedure',
+                status='approved',
+                origin='import',
+            )
 
     def setUp(self):
         self.client = APIClient()
@@ -26010,6 +26176,82 @@ class CodeMappingLookupTest(TestCase):
         self.assertEqual(hit['target_concept_code'], '12345')
         self.assertEqual(hit['destination_vocabulary_id'], 'SNOMED')
         self.assertEqual(hit['domain_id'], 'Procedure')
+
+    def test_hospital_local_mapping_is_scoped_by_organization(self):
+        def lookup(organization):
+            return self.client.post(self.url, {
+                'organization_id': organization.pk,
+                'codes': [{
+                    'source_vocabulary_id': self.epic_system,
+                    'source_code': '10627',
+                    'omop_table': 'procedure',
+                }],
+            }, format='json')
+
+        response_a = lookup(self.org_a)
+        response_b = lookup(self.org_b)
+        self.assertEqual(response_a.status_code, 200, response_a.data)
+        self.assertEqual(response_b.status_code, 200, response_b.data)
+        self.assertEqual(
+            response_a.data['mappings'][f'{self.epic_system}|10627']['target_concept_id'],
+            self.target_concept.concept_id,
+        )
+        self.assertEqual(
+            response_b.data['mappings'][f'{self.epic_system}|10627']['target_concept_id'],
+            self.proposed_target.concept_id,
+        )
+
+    def test_new_hospital_code_is_enqueued_with_organization(self):
+        response = self.client.post(self.url, {
+            'organization_id': self.org_a.pk,
+            'codes': [{
+                'source_vocabulary_id': self.epic_system,
+                'source_code': 'NEW-FLOWSHEET',
+                'source_text': 'Local observation',
+                'omop_table': 'measurement',
+            }],
+        }, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        mapping = SourceCodeConceptMapping.objects.get(
+            organization=self.org_a,
+            source_vocabulary_id=self.epic_system,
+            source_code='NEW-FLOWSHEET',
+        )
+        self.assertEqual(mapping.source_code_description, 'Local observation')
+        self.assertEqual(
+            response.data['mappings'][f'{self.epic_system}|NEW-FLOWSHEET']['organization_id'],
+            self.org_a.pk,
+        )
+
+    def test_hospital_local_code_requires_organization_context(self):
+        response = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': self.epic_system,
+                'source_code': 'UNATTRIBUTED-FLOWSHEET',
+                'source_text': 'Local observation',
+                'omop_table': 'measurement',
+            }],
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('organization_id', response.data)
+        self.assertFalse(SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id=self.epic_system,
+            source_code='UNATTRIBUTED-FLOWSHEET',
+        ).exists())
+
+    def test_global_standard_mapping_resolves_with_organization_context(self):
+        response = self.client.post(self.url, {
+            'organization_id': self.org_a.pk,
+            'codes': [{
+                'source_vocabulary_id': 'CPT4',
+                'source_code': '99213',
+                'omop_table': 'procedure',
+            }],
+        }, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        hit = response.data['mappings']['CPT4|99213']
+        self.assertTrue(hit['resolved'])
+        self.assertIsNone(hit['organization_id'])
 
     def test_lookup_reports_proposed_mapping_and_increments_seen(self):
         resp = self.client.post(self.url, {
@@ -28664,6 +28906,30 @@ class CodeMappingLockTest(TestCase):
         resp = self.client.post(self._lock_url(), content_type='application/json')
         self.assertEqual(resp.status_code, 423)
         self.assertIn('locked_by', resp.json())
+
+    def test_org_admin_cannot_lock_another_organizations_mapping(self):
+        own_org = Organization.objects.create(name='Lock Owner Org', slug='lock-owner-org')
+        other_org = Organization.objects.create(name='Lock Other Org', slug='lock-other-org')
+        owner = Identity.objects.create_user(email='lock-owner@test.com', password='x')
+        outsider = Identity.objects.create_user(email='lock-outsider@test.com', password='x')
+        GroupAccess.objects.create(identity=owner, org=own_org, role='org_admin')
+        GroupAccess.objects.create(identity=outsider, org=other_org, role='org_admin')
+        mapping = SourceCodeConceptMapping.objects.create(
+            organization=own_org,
+            source_vocabulary_id='EPIC',
+            source_code='LOCK-OWNER-CODE',
+            omop_table='measurement',
+            status='proposed',
+        )
+
+        self.client.force_login(outsider)
+        resp = self.client.post(
+            f'/api/v1/code-mappings/{mapping.pk}/lock/',
+            content_type='application/json',
+        )
+        self.assertEqual(resp.status_code, 403)
+        mapping.refresh_from_db()
+        self.assertIsNone(mapping.locked_by_id)
 
     def test_acquire_lock_expired(self):
         """An expired lock can be taken over."""

@@ -191,6 +191,7 @@ class Command(BaseCommand):
                     continue
 
                 _, was_created = SourceCodeConceptMapping.objects.get_or_create(
+                    organization=None,
                     source_vocabulary_id=VOCABULARY_ID,
                     source_code=ow_code,
                     defaults={

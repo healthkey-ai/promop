@@ -52,6 +52,7 @@ from omop_core.mapping.therapy import (
 )
 from omop_core.signals import suppress_patient_record_refresh
 from omop_core.services.source_vocabularies import VOCABULARY_OID_ALIASES, canonical_source_vocabulary
+from omop_core.services import source_vocabularies
 from omop_core.data_migrations.snomed_relationships_v1 import SINGLE_ORIGIN, MULTIPLE_ORIGIN
 from omop_core.services.snomed_identity import IDENTITY_ORIGIN, is_standard_snomed, promote_crossmap_identity
 from omop_core.services.source_vocabularies import table_for_domain
@@ -132,7 +133,26 @@ def normalize_omop_table(omop_table):
 SOURCE_CODE_MAX = 100
 
 
-def approved_mapping_for(source_vocabulary_id, source_code):
+def _mapping_scope(source_vocabulary_id, source_code, organization=None):
+    """Mappings eligible for this encounter, safest choice first.
+
+    Hospital-local systems must never fall through to another institution's
+    row.  With organization context they require an exact organization match;
+    without it, legacy global rows remain available for backward compatibility.
+    Non-hospital vocabularies remain global.
+    """
+    queryset = SourceCodeConceptMapping.objects.filter(
+        source_vocabulary_id=source_vocabulary_id or '',
+        source_code__iexact=source_code[:SOURCE_CODE_MAX],
+    )
+    if organization is None:
+        return queryset.filter(organization__isnull=True)
+    if source_vocabularies.hospital_vendor(source_vocabulary_id):
+        return queryset.filter(organization=organization)
+    return queryset.filter(organization__isnull=True)
+
+
+def approved_mapping_for(source_vocabulary_id, source_code, organization=None):
     """Return the approved mapping for this code, or None.
 
     Matched case-insensitively on the code: an uncoded source is a lab's or a
@@ -142,11 +162,9 @@ def approved_mapping_for(source_vocabulary_id, source_code):
     if not source_code:
         return None
     source_vocabulary_id = _resolution_vocabulary(source_vocabulary_id, source_code)
-    return SourceCodeConceptMapping.objects.filter(
-        source_vocabulary_id=source_vocabulary_id or '',
-        source_code__iexact=source_code[:SOURCE_CODE_MAX],
-        status='approved',
-    ).select_related('target_concept').first()
+    return _mapping_scope(
+        source_vocabulary_id, source_code, organization,
+    ).filter(status='approved').select_related('target_concept').first()
 
 
 def _resolution_vocabulary(vocabulary_id, source_code):
@@ -196,7 +214,8 @@ def _description_for(source_vocabulary_id, source_code, source_text):
 
 
 def _record_proposal(*, source_vocabulary_id, source_code, source_text,
-                     concept, omop_table, source_system, notes='', is_suggestion=False):
+                     concept, omop_table, source_system, organization=None,
+                     notes='', is_suggestion=False):
     """Create or bump the proposed mapping for a code an import had to invent.
 
     Idempotent: the first sighting creates the row, later sightings bump
@@ -209,10 +228,9 @@ def _record_proposal(*, source_vocabulary_id, source_code, source_text,
     # string but storing 100 chars means every later sighting of a longer source
     # text misses, re-enters the create branch, and trips the unique constraint.
     source_code = source_code[:SOURCE_CODE_MAX]
-    mapping = SourceCodeConceptMapping.objects.filter(
-        source_vocabulary_id=source_vocabulary_id or '',
-        source_code__iexact=source_code,
-    ).first()
+    mapping = _mapping_scope(
+        source_vocabulary_id, source_code, organization,
+    ).filter(organization=organization).first()
 
     if mapping is None:
         try:
@@ -222,6 +240,7 @@ def _record_proposal(*, source_vocabulary_id, source_code, source_text,
             # a normal condition for a parallel import, not an error.
             with transaction.atomic():
                 return SourceCodeConceptMapping.objects.create(
+                    organization=organization,
                     source_vocabulary_id=source_vocabulary_id or '',
                     source_code=source_code,
                     source_code_description=_description_for(
@@ -244,10 +263,9 @@ def _record_proposal(*, source_vocabulary_id, source_code, source_text,
                     notes=notes,
                 )
         except IntegrityError:
-            mapping = SourceCodeConceptMapping.objects.filter(
-                source_vocabulary_id=source_vocabulary_id or '',
-                source_code__iexact=source_code,
-            ).first()
+            mapping = _mapping_scope(
+                source_vocabulary_id, source_code, organization,
+            ).filter(organization=organization).first()
             if mapping is None:
                 raise
 
@@ -277,7 +295,8 @@ def _effective_direct_mapping(*, source_vocabulary_id, source_code, concept, omo
     """
     source_code = source_code[:SOURCE_CODE_MAX]
     existing = SourceCodeConceptMapping.objects.filter(
-        source_vocabulary_id=source_vocabulary_id or '', source_code__iexact=source_code,
+        organization__isnull=True, source_vocabulary_id=source_vocabulary_id or '',
+        source_code__iexact=source_code,
     ).select_related('target_concept').first()
     if existing is not None:
         return existing
@@ -285,6 +304,7 @@ def _effective_direct_mapping(*, source_vocabulary_id, source_code, concept, omo
     try:
         with transaction.atomic():
             return SourceCodeConceptMapping.objects.create(
+                organization=None,
                 source_vocabulary_id=source_vocabulary_id or '',
                 source_code=source_code,
                 source_code_description=(concept.concept_name or '')[:255],
@@ -298,7 +318,8 @@ def _effective_direct_mapping(*, source_vocabulary_id, source_code, concept, omo
             )
     except IntegrityError:
         return SourceCodeConceptMapping.objects.filter(
-            source_vocabulary_id=source_vocabulary_id or '', source_code__iexact=source_code,
+            organization__isnull=True, source_vocabulary_id=source_vocabulary_id or '',
+            source_code__iexact=source_code,
         ).select_related('target_concept').get()
 
 
@@ -375,7 +396,7 @@ def _identity_for_table(mapping, table):
 
 
 def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
-                        source_text='', source_system='fhir-upload'):
+                        source_text='', source_system='fhir-upload', organization=None):
     """Resolve an inbound source code to a destination concept.
 
     Implements the four rules in the module docstring. Returns
@@ -387,11 +408,16 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
         return None, None
     source_vocabulary_id = _resolution_vocabulary(source_vocabulary_id, source_code)
     table = normalize_omop_table(omop_table)
+    mapping_organization = (
+        organization if source_vocabularies.hospital_vendor(source_vocabulary_id) else None
+    )
 
     # Rule 1 — SCCM is the primary resolver for every source vocabulary,
     # including LOINC, SNOMED, and CPT4. A curator-approved exception must not
     # lose to an automatic natural-key lookup.
-    approved = approved_mapping_for(source_vocabulary_id, source_code)
+    approved = approved_mapping_for(
+        source_vocabulary_id, source_code, mapping_organization,
+    )
     if approved is not None:
         if approved.origin_system in (IDENTITY_ORIGIN, SINGLE_ORIGIN):
             return _identity_for_table(approved, table)
@@ -400,10 +426,9 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
     # A proposed target is a review aid, never an effective mapping.  Once a
     # code is in the queue, every ingest caller receives the same unresolved
     # answer and the proposal's Seen count records that encounter.
-    pending = SourceCodeConceptMapping.objects.filter(
-        source_vocabulary_id=source_vocabulary_id or '',
-        source_code__iexact=source_code[:SOURCE_CODE_MAX], status='proposed',
-    ).select_related('target_concept').first()
+    pending = _mapping_scope(
+        source_vocabulary_id, source_code, mapping_organization,
+    ).filter(status='proposed').select_related('target_concept').first()
     if pending is not None:
         identity = promote_crossmap_identity(pending)
         if identity is not None:
@@ -418,6 +443,7 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
             concept=pending.target_concept,
             omop_table=table,
             source_system=source_system,
+            organization=mapping_organization,
         )
 
     # Rule 2 — LOINC/SNOMED retain direct Athena lookup only as a fallback.
@@ -448,6 +474,7 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
             concept=None,
             omop_table=table,
             source_system=source_system,
+            organization=mapping_organization,
         )
         return None, gap
 
@@ -477,6 +504,7 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
             concept=suggested,
             omop_table=table,
             source_system=source_system,
+            organization=mapping_organization,
             notes=note,
             is_suggestion=True,
         )
@@ -506,6 +534,7 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
         concept=concept,
         omop_table=table,
         source_system=source_system,
+        organization=mapping_organization,
         notes=note,
     )
     return None, mapping
@@ -600,6 +629,17 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
     match = _source_value_match(
         model, source_col, mapping, include_description=match_description)
     qs = model.objects.filter(match, **{concept_col: old_concept_id})
+    if mapping.organization_id:
+        # A shared Epic flowsheet code can mean different things at two
+        # hospitals.  Only rows whose write provenance names this mapping's
+        # organization are safe to move; historical rows with no attribution
+        # deliberately remain unresolved rather than being guessed.
+        content_type = ContentType.objects.get_for_model(model)
+        attributed_ids = ProvenanceRecord.objects.filter(
+            content_type=content_type,
+            organization_id=mapping.organization_id,
+        ).values('object_id')
+        qs = qs.filter(pk__in=attributed_ids)
     person_ids = set(qs.values_list('person_id', flat=True).distinct())
     result['rows_updated'] = qs.count()
     if not apply_changes or not result['rows_updated']:
@@ -622,6 +662,7 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
             result['rows_collapsed'] = _collapse_duplicates(
                 model, concept_col, source_col, match,
                 new_concept_id, person_ids,
+                organization_id=mapping.organization_id,
             )
 
     logger.info(
@@ -634,7 +675,7 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
 
 
 def _collapse_duplicates(model, concept_col, source_col, match,
-                         concept_id, person_ids):
+                         concept_id, person_ids, organization_id=None):
     """Collapse rows the re-point just made identical.
 
     "Identical" is the event identity CLAUDE.md documents for the bulk write
@@ -646,9 +687,18 @@ def _collapse_duplicates(model, concept_col, source_col, match,
     identity_cols = _COLLAPSE_IDENTITY[concept_col]
     pk_col = model._meta.pk.name
 
+    candidates = model.objects.filter(
+        match, person_id__in=person_ids, **{concept_col: concept_id},
+    )
+    if organization_id:
+        content_type = ContentType.objects.get_for_model(model)
+        attributed_ids = ProvenanceRecord.objects.filter(
+            content_type=content_type,
+            organization_id=organization_id,
+        ).values('object_id')
+        candidates = candidates.filter(pk__in=attributed_ids)
     rows = (
-        model.objects
-        .filter(match, person_id__in=person_ids, **{concept_col: concept_id})
+        candidates
         .order_by(pk_col)
         .values_list(pk_col, 'person_id', *identity_cols)
     )

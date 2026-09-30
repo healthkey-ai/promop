@@ -1943,6 +1943,15 @@ class SourceCodeConceptMapping(models.Model):
         ),
     )
     source_code = models.CharField(max_length=100, db_index=True)
+    organization = models.ForeignKey(
+        Organization, on_delete=models.CASCADE, null=True, blank=True,
+        related_name='source_code_mappings',
+        help_text=(
+            'Hospital that supplied a local source code. Null means the '
+            'mapping is global; Epic and Cerner mappings use this field to '
+            'separate shared vendor namespaces across institutions.'
+        ),
+    )
     source_code_description = models.CharField(max_length=255, blank=True, default='')
     source_label_norm = models.GeneratedField(
         expression=Case(
@@ -2144,7 +2153,10 @@ class SourceCodeConceptMapping(models.Model):
     class Meta:
         db_table = 'source_code_concept_mapping'
         indexes = [
-            models.Index(fields=['source_vocabulary_id', 'source_code'], name='ix_sccm_source_code'),
+            models.Index(
+                fields=['organization', 'source_vocabulary_id', 'source_code'],
+                name='ix_sccm_org_source_code',
+            ),
             models.Index(fields=['target_concept', 'status'], name='ix_sccm_target_status'),
             models.Index(fields=['destination_vocabulary_id', 'status'], name='ix_sccm_dest_status'),
             GinIndex(OpClass(Upper('source_code_description'), name='gin_trgm_ops'),
@@ -2155,8 +2167,9 @@ class SourceCodeConceptMapping(models.Model):
             # '' as a value, not NULL, so ('', 'M-PROTEIN') and ('', 'M PROTEIN')
             # are two rows and uncoded codes do not collide.
             models.UniqueConstraint(
-                fields=['source_vocabulary_id', 'source_code'],
-                name='uq_sccm_source_vocabulary_code',
+                fields=['organization', 'source_vocabulary_id', 'source_code'],
+                name='uq_sccm_org_source_vocabulary_code',
+                nulls_distinct=False,
             ),
         ]
 
@@ -2170,6 +2183,20 @@ class SourceCodeConceptMapping(models.Model):
                 'source_vocabulary_id': (
                     'HK-* vocabularies are minting destinations, not source '
                     'code systems. Leave this blank for an uncoded source.'
+                ),
+            })
+
+        # Organization scope exists only to disambiguate hospital-local code
+        # namespaces. Standard and other shared vocabularies are global; a
+        # scoped row for one of them would be accepted by curation but ignored
+        # by the resolver, leaving an inert and misleading mapping behind.
+        if self.organization_id and not source_vocabularies.hospital_vendor(
+            self.source_vocabulary_id
+        ):
+            raise ValidationError({
+                'organization': (
+                    'Organization scope is only supported for Epic and Cerner '
+                    'hospital-local source systems.'
                 ),
             })
 

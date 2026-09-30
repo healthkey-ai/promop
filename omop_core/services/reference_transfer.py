@@ -17,7 +17,7 @@ from functools import cache
 from typing import Any, TypedDict
 
 from django.db import transaction
-from django.db.models import Field, Model
+from django.db.models import Field, Model, Q
 
 from omop_core.models import (
     Concept,
@@ -117,9 +117,14 @@ CANDIDATES = ReferenceTable(
 
 @cache
 def _related_keys() -> dict[type[Model], tuple[str, ...]]:
-    """Natural key of every model a copied row may point at. Plain columns only."""
+    """Natural key of every model a copied row may point at."""
     keys = {t.model: t.key for t in copied_tables() if len(t.key) == 1}
-    keys[SourceCodeConceptMapping] = ('source_vocabulary_id', 'source_code')
+    # Organization slugs are stable across instances; organization PKs are not.
+    # Relation traversal keeps candidate links unambiguous when hospitals reuse
+    # the same Epic or Cerner source code.
+    keys[SourceCodeConceptMapping] = (
+        'organization__slug', 'source_vocabulary_id', 'source_code',
+    )
     return keys
 
 
@@ -217,10 +222,17 @@ def _key_to_pk(model: type[Model], keys: Iterable[Key | None]) -> dict[Key, Any]
     if not wanted:
         return {}
     fields = _related_keys()[model]
-    lookup = {f'{name}__in': {k[i] for k in wanted} for i, name in enumerate(fields)}
+    lookup = Q()
+    for i, name in enumerate(fields):
+        values = {key[i] for key in wanted}
+        present = values - {None}
+        dimension = Q(**{f'{name}__in': present}) if present else Q(pk__in=[])
+        if None in values:
+            dimension |= Q(**{f'{name}__isnull': True})
+        lookup &= dimension
     return {
         tuple(rest): pk
-        for pk, *rest in model.objects.filter(**lookup).values_list('pk', *fields)
+        for pk, *rest in model.objects.filter(lookup).values_list('pk', *fields)
         if tuple(rest) in wanted
     }
 
