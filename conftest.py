@@ -60,6 +60,21 @@ _PK_SEQUENCES = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def _disable_live_ranking_credentials(monkeypatch, settings):
+    """Keep tests from inheriting metered ranking credentials from ``.env``.
+
+    Tests that exercise either provider opt in explicitly by overriding the
+    corresponding Django setting with a test key and mocking the client.  The
+    process environment is cleared too so code that consults it directly
+    cannot accidentally reach a live service.
+    """
+    monkeypatch.setenv('ANTHROPIC_API_KEY', '')
+    monkeypatch.setenv('JEV_API_KEY', '')
+    settings.ANTHROPIC_API_KEY = ''
+    settings.JEV_API_KEY = ''
+
+
 def _seed_reference_data():
     """Create the reference rows that most tests depend on.
 
