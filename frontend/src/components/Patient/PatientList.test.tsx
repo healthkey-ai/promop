@@ -5,12 +5,14 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import api from '@/api/axios';
 
 const navigate = vi.hoisted(() => vi.fn());
+const mockUseAuth = vi.hoisted(() => vi.fn());
 vi.mock('react-router-dom', async importOriginal => ({ ...await importOriginal<typeof import('react-router-dom')>(), useNavigate: () => navigate }));
 vi.mock('@/api/axios', () => ({ default: { get: vi.fn(), delete: vi.fn() } }));
-vi.mock('@/hooks/useAuth', () => ({ useAuth: () => ({ currentUser: { is_staff: true } }) }));
+vi.mock('@/hooks/useAuth', () => ({ useAuth: () => mockUseAuth() }));
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockUseAuth.mockReturnValue({ currentUser: { is_staff: true } });
   localStorage.clear();
 });
 
@@ -111,6 +113,21 @@ it('places Upload immediately after Mappings', async () => {
   fireEvent.click(upload);
   expect(navigate).toHaveBeenCalledWith('/upload');
   expect(screen.queryByRole('button', { name: 'Upload CSV' })).not.toBeInTheDocument();
+});
+
+it.each(['analyst', 'doctor'])('does not show Org Admin to an organization %s', async role => {
+  mockUseAuth.mockReturnValue({
+    currentUser: {
+      org_accesses: [{ role, org_name: 'Example', org_slug: 'example', expires_at: null }],
+    },
+  });
+  vi.mocked(api.get).mockResolvedValue({ data: { count: 0, results: [] } });
+
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
+
+  expect(await screen.findByRole('button', { name: 'Mappings' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Upload' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Org Admin' })).not.toBeInTheDocument();
 });
 
 

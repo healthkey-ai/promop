@@ -239,6 +239,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
     (selectAllMode || visibleSelectedCount === patients.length);
   const canManageMappings = !!(currentUser?.is_staff || currentUser?.is_org_admin
     || currentUser?.org_accesses?.some(a => ['org_admin', 'doctor', 'analyst'].includes(a.role ?? '')));
+  const canAdministerOrganizations = !!(currentUser?.is_staff || currentUser?.is_org_admin);
 
   const handleLogout = () => {
     void logout();
@@ -277,7 +278,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
             </>
           )}
           <div className="ml-auto flex gap-2">
-            {canManageMappings && (
+            {canAdministerOrganizations && (
               <button
                 onClick={() => navigate("/org-admin")}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 border border-gray-300 rounded hover:bg-gray-50"
