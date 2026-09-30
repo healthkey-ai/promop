@@ -1,0 +1,33 @@
+name: Merge readiness
+
+on:
+  pull_request:
+    types: [opened, reopened, edited, synchronize, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  merge_readiness:
+    name: Merge readiness
+    runs-on: ubuntu-latest
+    steps:
+      # Via env, not interpolation: a PR title would otherwise run as shell.
+      - env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          # "wip"/"draft" need a delimiter after them, or "Wipe stale data" and
+          # "Drafting instructions" would block. "do not merge" cannot be a
+          # false positive, so a word boundary is enough.
+          title="${PR_TITLE,,}"
+          if [[ "$title" =~ ^[[:space:]]*[\[\(]?[[:space:]]*(wip|draft)[[:space:]]*([][\(\):;,.!|/-]|$) ]] \
+            || [[ "$title" =~ ^[[:space:]]*[\[\(]?[[:space:]]*do[-_\ ]?not[-_\ ]?merge([^a-z0-9]|$) ]]; then
+            echo "Unfinished title: $PR_TITLE"
+            echo "Clear it, or use GitHub's draft state, which blocks merge outright."
+            exit 1
+          fi
+          if grep -qiE '"(do[-_ ]?not[-_ ]?merge|wip|draft)"' <<<"$PR_LABELS"; then
+            echo "Blocking label: $PR_LABELS"
+            exit 1
+          fi

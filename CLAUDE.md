@@ -449,6 +449,22 @@ rule below for when that is called for.
    - **Exception — small, local, low-risk fixes** (typos, docstring updates, single-line bug fixes, config tweaks): these may proceed all the way through to a merge into `dev` without waiting for user review, provided the code review found no unfixable issues.
 7. **After the PR merges into `dev` successfully, delete the feature branch.** Prefer `gh pr merge --delete-branch`, which removes the remote branch as part of the merge. Then delete the local copy (`git branch -d <branch>`) and remove any worktree created for it (`git worktree remove <path>`). Do not leave merged feature branches lingering locally or on the remote.
 
+### Rule: Unfinished Means Draft, Not a Title Prefix
+
+**A PR that is not ready goes in GitHub's draft state** — `gh pr create --draft`,
+or `gh pr ready --undo <number>`. Draft disables the merge button with no
+override, which is stronger than any branch protection. A `[WIP]` prefix is
+plain text: #1608, #1609 and #1654 all carried one, none were drafts, and all
+three merged into `dev` anyway.
+
+The `Merge readiness` check fails on such a title, and on a `do-not-merge`,
+`wip` or `draft` label. It re-runs on `edited`/`labeled`, so clearing the marker
+clears the failure without a push. `wip` and `draft` must be followed by a
+delimiter or end the title, or "Wipe stale staging data" and "Drafting
+instructions" would block the queue; the cost is that a bare "wip fix the thing"
+passes. Requiring it is one context on ruleset 8217318, which covers `dev`
+through `~DEFAULT_BRANCH`.
+
 ### Rule: Targeted Tests Before a Push, CI for the Full Suites
 
 **GitHub CI is the gate for the full suites. Do not run the full Django or
