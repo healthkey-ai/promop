@@ -8,11 +8,11 @@ reviewer sees all of them whichever one is chosen.
 
 Re-running is safe. After the first import a row belongs to the reviewer:
 a re-run never sets a destination, a description or a status. It refreshes
-the trial count and the candidates -- adding new ones and re-resolving old
-ones, so a vocabulary loaded since the last run shows -- and only on rows
-still in review that still carry this importer's provenance. A row a curator
-has approved, rejected or cleared, or re-pointed while it stayed proposed, is
-left as it is. A row without a destination whose proposal has since become
+the trial count of every row still in review, and the candidates -- adding
+new ones and re-resolving old ones, so a vocabulary loaded since the last run
+shows -- only on rows that still carry this importer's provenance. A row a
+curator has approved or rejected is left as it is; one cleared, or re-pointed
+while it stayed proposed, gets its trial count and nothing else. A row without a destination whose proposal has since become
 usable is listed, for a person to pick.
 
 Deleting a CB row in the UI clears it rather than removing it (catalog
@@ -100,11 +100,17 @@ class Command(BaseCommand):
                 stats['candidates_unavailable'] += sum(k not in concepts for k in row.candidate_keys())
 
                 mapping = existing.get(row.source_code.lower())
-                # A clear through the UI blanks origin_system and a curator's
-                # re-point replaces it: either way the row is no longer ours.
-                if mapping is not None and (mapping.status != 'proposed'
-                                            or mapping.origin_system != ORIGIN_SYSTEM):
+                if mapping is not None and mapping.status != 'proposed':
                     stats['kept'] += 1
+                    continue
+                # A clear through the UI blanks origin_system and a curator's
+                # re-point replaces it: the row is no longer ours, and only its
+                # trial count -- the queue order -- is still refreshed.
+                if mapping is not None and mapping.origin_system != ORIGIN_SYSTEM:
+                    stats['kept'] += 1
+                    if apply:
+                        SourceCodeConceptMapping.objects.filter(pk=mapping.pk).update(
+                            occurrence_count=row.trial_count)
                     continue
 
                 if mapping is None:

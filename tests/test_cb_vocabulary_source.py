@@ -382,3 +382,32 @@ def test_a_non_catalog_row_without_destination_is_still_deleted(reviewer):
     client.force_authenticate(user=reviewer)
     assert client.delete(f'/api/v1/code-mappings/{row.pk}/').status_code == 204
     assert not SourceCodeConceptMapping.objects.filter(pk=row.pk).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_export_reads_one_repeatable_read_snapshot(tmp_path, proposals, concepts):
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+    call_command('import_cb_vocabularies', '--file', proposals, '--apply')
+    with CaptureQueriesContext(connection) as queries:
+        call_command('export_cb_mappings', '--out', str(tmp_path / 'export.json'))
+    statements = [q['sql'] for q in queries.captured_queries if q['sql'] != 'BEGIN']
+    # First statement of the transaction, so every read of the export sees
+    # the one snapshot it fixes.
+    assert statements[0] == 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ'
+    assert any('source_code_concept_mapping' in s for s in statements[1:])
+
+
+def test_reimport_refreshes_only_the_trial_count_of_a_cleared_row(tmp_path, proposals, concepts):
+    call_command('import_cb_vocabularies', '--file', proposals, '--apply')
+    SourceCodeConceptMapping.objects.filter(source_code='disease:BC').update(
+        target_concept=None, origin_system='')
+    cb('disease:BC').destination_candidates.all().delete()
+    rows = list(csv.DictReader(open(proposals)))
+    for r in rows:
+        if r['code'] == 'BC':
+            r['trial_count'] = '99'
+    call_command('import_cb_vocabularies', '--file', write_csv(tmp_path / 'more.csv', rows), '--apply')
+    bc = cb('disease:BC')
+    assert (bc.occurrence_count, bc.target_concept_id) == (99, None)
+    assert not bc.destination_candidates.exists()
