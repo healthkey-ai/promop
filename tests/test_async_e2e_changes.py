@@ -273,3 +273,17 @@ def test_required_backend_gate_rejects_incomplete_matrix(result, passes):
     command = gate['steps'][0]['run']
     process = subprocess.run(['bash', '-c', command], env={**os.environ, 'BACKEND_RESULT': result})
     assert (process.returncode == 0) is passes
+
+
+def test_backend_suites_are_bounded_and_do_not_migrate_twice():
+    import yaml
+    workflow = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
+    job = workflow['jobs']['backend_suites']
+    assert job['timeout-minutes'] == 25
+    steps = job['steps']
+    assert all(step.get('name') != 'Run migrations' for step in steps)
+    django_command = next(
+        step['run'] for step in steps if step.get('name') == 'Run tests (Django runner)'
+    )
+    assert '--parallel auto' in django_command
+    assert '--timing' in django_command

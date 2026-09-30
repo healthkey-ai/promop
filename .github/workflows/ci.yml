@@ -40,6 +40,9 @@ jobs:
       !cancelled() &&
       (needs.changes.result != 'success' || needs.changes.outputs.backend != 'false')
     runs-on: ubuntu-latest
+    # A backend leg normally completes within 16 minutes. Bound genuine hangs
+    # without making ordinary runner variance look like a failure.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -99,10 +102,6 @@ jobs:
           psql -h localhost -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
           psql -h localhost -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS vector"
 
-      - name: Run migrations
-        if: matrix.suite == 'django'
-        run: python manage.py migrate --noinput
-
       - name: Run production deploy checks
         env:
           DEBUG: 'False'
@@ -115,7 +114,12 @@ jobs:
 
       - name: Run tests (Django runner)
         if: matrix.suite == 'django'
-        run: python manage.py test omop_core patient_portal --verbosity=2 --noinput
+        # DiscoverRunner creates its test database by applying the complete
+        # migration graph. Do not run `manage.py migrate` first: that loads the
+        # large publisher catalogs into a database the tests never use.
+        run: >-
+          python manage.py test omop_core patient_portal
+          --parallel auto --timing --verbosity=2 --noinput
 
       # These suites discover different tests. Separate runners give each its
       # own PostgreSQL/test database while retaining migrations and deploy checks.
