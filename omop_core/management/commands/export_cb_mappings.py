@@ -49,9 +49,12 @@ class Command(BaseCommand):
         # One snapshot: the rows, their candidates and the vocabulary versions
         # are read by separate queries, and a review saved between them would
         # otherwise export a row with another moment's candidates.
+        # Only the outermost transaction can choose its isolation level; inside
+        # a caller's transaction the caller's level applies. SQLite has no
+        # such statement, and a single connection there sees one state anyway.
         outermost = not connection.in_atomic_block
         with transaction.atomic():
-            if outermost:  # inside a caller's transaction the level is already set
+            if outermost and connection.vendor == 'postgresql':
                 with connection.cursor() as cursor:
                     cursor.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ')
             payload = self._payload()
