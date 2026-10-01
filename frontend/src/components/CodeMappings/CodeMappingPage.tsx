@@ -214,6 +214,7 @@ interface Reference {
   release_commit?: string;
   domains: DomainRef[];
   source_code_systems_by_domain: Record<string, SourceCodeSystemRef[]>;
+  source_catalog_vocabularies?: string[];
   destination_vocabularies: VocabularyRef[];
   omop_tables: Record<string, string>;
   source_vocabulary_tabs?: SourceVocabularyTab[];
@@ -294,6 +295,7 @@ const emptyForm: MappingForm = {
 const emptyReference: Reference = {
   domains: [],
   source_code_systems_by_domain: {},
+  source_catalog_vocabularies: [],
   destination_vocabularies: [],
   omop_tables: {},
 };
@@ -2367,7 +2369,7 @@ export default function CodeMappingPage() {
             className="mb-2 inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-slate-700"
           >
             {unmappedCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-            Unmapped <span className="font-normal text-slate-500">({browse?.pages.Unmapped.total ?? unmappedRows.length})</span>
+            Unmapped <span className="font-normal text-slate-500">({browse?.pages.Unmapped.total ?? unmappedRows.length}{browse?.rollup ? " groups" : ""})</span>
           </button>
           <DownloadMenu rows={unmappedRows} section="Unmapped" />
           {!unmappedCollapsed && (
@@ -2389,7 +2391,7 @@ export default function CodeMappingPage() {
             className="mb-2 inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-slate-700"
           >
             {mappedCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-            Mapped <span className="font-normal text-slate-500">({browse?.pages.Mapped.total ?? mappedRows.length})</span>
+            Mapped <span className="font-normal text-slate-500">({browse?.pages.Mapped.total ?? mappedRows.length}{browse?.rollup ? " groups" : ""})</span>
           </button>
           <DownloadMenu rows={mappedRows} section="Mapped" />
           {!mappedCollapsed && renderTable(mappedRows, "No approved mappings in this vocabulary.", "Mapped")}
@@ -2403,7 +2405,7 @@ export default function CodeMappingPage() {
               className="mb-2 inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-slate-700"
             >
               {rejectedCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-              Rejected <span className="font-normal text-slate-500">({browse?.pages.Rejected?.total ?? rejectedRows.length})</span>
+              Rejected <span className="font-normal text-slate-500">({browse?.pages.Rejected?.total ?? rejectedRows.length}{browse?.rollup ? " groups" : ""})</span>
             </button>
             <DownloadMenu rows={rejectedRows} section="Rejected" />
             {!rejectedCollapsed && renderTable(rejectedRows, "No rejected mappings in this vocabulary.", "Rejected")}
@@ -2418,7 +2420,7 @@ export default function CodeMappingPage() {
               className="mb-2 inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-slate-700"
             >
               {athenaCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-              Athena Mapped <span className="font-normal text-slate-500">({browse?.pages["Athena Mapped"].total ?? athenaRows.length})</span>
+              Athena Mapped <span className="font-normal text-slate-500">({browse?.pages["Athena Mapped"].total ?? athenaRows.length}{browse?.rollup ? " groups" : ""})</span>
             </button>
             <DownloadMenu rows={athenaRows} section="Athena Mapped" />
             {!athenaCollapsed && renderTable(athenaRows, "No Athena mappings in this vocabulary.", "Athena Mapped", { hideStatus: true })}
@@ -2475,6 +2477,17 @@ export default function CodeMappingPage() {
                 <legend className="px-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
                   Source — the code as it arrived
                 </legend>
+                {dialogMode === "edit" && selectedRow && (
+                  <p data-testid="source-organization" className="mb-4 text-sm text-slate-700">
+                    <span className="font-medium">Hospital / organization: </span>
+                    {selectedRow.organization_name || sourceEvidence?.organization?.name || "Global / unattributed"}
+                    {(selectedRow.organization_slug || sourceEvidence?.organization?.slug) && (
+                      <span className="ml-1 text-xs text-slate-500">
+                        ({selectedRow.organization_slug || sourceEvidence?.organization?.slug})
+                      </span>
+                    )}
+                  </p>
+                )}
                 <div data-testid="source-fields" className="grid gap-4 md:grid-cols-2">
                   {/* Domain is first on purpose: it decides which code systems
                       are offered and which OMOP table the fact lands in. */}
@@ -2529,16 +2542,6 @@ export default function CodeMappingPage() {
                     )}
                   </Field>
 
-                  <SourceVocabularyLookup
-                    vocabularyId={form.source_vocabulary_id}
-                    code={form.source_code}
-                    onSelect={(term) => {
-                      setField("source_code", term.code);
-                      setField("source_code_description", term.name.slice(0, 255));
-                      setField("source_concept_id", "");
-                    }}
-                  />
-
                   <Field id="source_code_description" label="Source Description" tip={TIP.source_description}>
                     <input
                       id="source_code_description"
@@ -2548,6 +2551,18 @@ export default function CodeMappingPage() {
                       className={INPUT_CLASS}
                     />
                   </Field>
+
+                  {(reference.source_catalog_vocabularies || []).includes(form.source_vocabulary_id) && (
+                    <SourceVocabularyLookup
+                      vocabularyId={form.source_vocabulary_id}
+                      code={form.source_code}
+                      onSelect={(term) => {
+                        setField("source_code", term.code);
+                        setField("source_code_description", term.name.slice(0, 255));
+                        setField("source_concept_id", "");
+                      }}
+                    />
+                  )}
 
                 </div>
               </fieldset>

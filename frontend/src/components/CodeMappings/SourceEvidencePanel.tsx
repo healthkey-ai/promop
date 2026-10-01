@@ -69,6 +69,8 @@ export default function SourceEvidencePanel({ evidence, loading, error }: {
   const metadata = evidence?.metadata || {};
   const units = evidence?.units || [];
   const range = metadata.reference_range;
+  const valueTypes = metadata.value_types || {};
+  const selectedValueTypeTotal = Object.values(valueTypes).reduce((sum, value) => sum + value, 0);
   return <section aria-label="Source evidence" className="mb-5 rounded-md border border-slate-200 bg-slate-50 p-4">
     <div className="flex flex-wrap items-baseline justify-between gap-2">
       <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-600">Source evidence</h3>
@@ -80,14 +82,18 @@ export default function SourceEvidencePanel({ evidence, loading, error }: {
       <dl className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
         <Stat label="Organization" value={evidence.organization?.name || "Global / unattributed"}
           detail={evidence.organization?.slug || "Awaiting hospital provenance"} />
-        <Stat label="Seen" value={number(evidence.occurrence_count)} detail="This exact source code" />
+        <Stat label="Records (this code)" value={number(evidence.occurrence_count)} detail="Distinct source records" />
         {metadata.patients != null && <Stat label="Patients" value={number(metadata.patients)} />}
-        {metadata.codings != null && <Stat label="Codings" value={number(metadata.codings)} />}
+        {metadata.codings != null && metadata.codings !== evidence.occurrence_count && (
+          <Stat label="Coding occurrences" value={number(metadata.codings)}
+            detail="A source record can repeat the same code" />
+        )}
         {metadata.unit_coverage?.records != null && <Stat label="Records with units"
           value={number(metadata.unit_coverage.records)}
           detail={metadata.unit_coverage.percent != null ? `${number(metadata.unit_coverage.percent)}% of source records` : undefined} />}
-        {evidence.group_occurrence_count != null && <Stat label="Label-group records"
-          value={number(evidence.group_occurrence_count)} detail="Deduplicates sibling codings on the same record" />}
+        {evidence.group_occurrence_count != null && <Stat label="Records across same-label codes"
+          value={number(evidence.group_occurrence_count)}
+          detail="Deduplicated records across codes with this description" />}
       </dl>
 
       {units.length > 0 && <div className="mt-4 overflow-x-auto">
@@ -138,8 +144,12 @@ export default function SourceEvidencePanel({ evidence, loading, error }: {
       {(metadata.category?.top || metadata.category?.mix || metadata.value_types) && <dl className="mt-4 grid gap-2 text-xs sm:grid-cols-2">
         {(metadata.category?.top || metadata.category?.mix) && <div><dt className="font-semibold text-slate-600">Observation category</dt>
           <dd className="text-slate-800">{metadata.category.mix || metadata.category.top}</dd></div>}
-        {metadata.value_types && <div><dt className="font-semibold text-slate-600">Value types</dt>
-          <dd className="text-slate-800">{Object.entries(metadata.value_types).map(([key, value]) => `${key} ${number(value)}%`).join(" · ")}</dd></div>}
+        {metadata.value_types && <div><dt className="font-semibold text-slate-600">Selected FHIR value types</dt>
+          <dd className="text-slate-800">{Object.entries(metadata.value_types).map(([key, value]) => `${key} ${number(value)}%`).join(" · ")}</dd>
+          {selectedValueTypeTotal === 0 && <dd className="mt-0.5 text-slate-500">
+            Values use another FHIR type or are absent; the source extract does not distinguish those cases.
+          </dd>}
+        </div>}
       </dl>}
     </>}
   </section>;

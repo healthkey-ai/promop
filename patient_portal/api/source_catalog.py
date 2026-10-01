@@ -16,8 +16,13 @@ def source_catalog(request):
     vocabulary = request.query_params.get('vocabulary_id', '').strip()
     code = request.query_params.get('code', '').strip()
     query = request.query_params.get('q', '').strip()
-    if not vocabulary or len(vocabulary) > 50 or len(code) > 255 or len(query) > 200:
+    if not vocabulary or len(code) > 255 or len(query) > 200:
         return Response({'detail': 'Provide a vocabulary and a code or search term of valid length.'}, status=400)
+    # SourceCodeConceptMapping accepts 255-character sender systems, while a
+    # publisher SourceVocabulary key is at most 50. A long Epic/Cerner URI is
+    # therefore a valid source system, just not an available publisher catalog.
+    if len(vocabulary) > 50:
+        return Response({'available': False, 'results': [], 'term': None})
     if query and len(query) < 2:
         return Response({'detail': 'Enter at least two characters to search.'}, status=400)
     return Response(catalog_response(

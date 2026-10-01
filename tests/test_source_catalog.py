@@ -7,6 +7,7 @@ from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import DatabaseError
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from omop_core.models import Concept, SourceCodeConceptMapping, SourceVocabulary, SourceVocabularyTerm
@@ -110,6 +111,26 @@ def test_api_requires_mapping_access_and_returns_source_metadata(tmp_path):
     assert response.data['results'][0]['code'] == 'C141394'
     assert client.get(url, {'vocabulary_id': 'NCIt', 'q': 'x'}).status_code == 400
     assert client.get(url, {'vocabulary_id': 'NCIt', 'q': 'x'*201}).status_code == 400
+    hospital = 'http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id'
+    response = client.get(url, {'vocabulary_id': hospital, 'code': 'local-code'})
+    assert response.status_code == 200
+    assert response.data == {'available': False, 'results': [], 'term': None}
+
+
+def test_reference_identifies_only_loaded_publisher_source_catalogs():
+    SourceVocabulary.objects.create(
+        vocabulary_id='NCIt', name='NCI Thesaurus', release_version='test',
+        source_url='https://example.test/ncit', archive_sha256='0' * 64,
+        term_count=0, loaded_at=timezone.now(),
+    )
+    user = get_user_model().objects.create_user(
+        email='reference-catalog@example.test', password='test-password', is_staff=True,
+    )
+    client = APIClient()
+    client.force_authenticate(user)
+    response = client.get('/api/v1/code-mappings/reference/')
+    assert response.status_code == 200
+    assert response.data['source_catalog_vocabularies'] == ['NCIt']
 
 
 def test_ncit_available_for_drug_sources_and_umls_bridge():
