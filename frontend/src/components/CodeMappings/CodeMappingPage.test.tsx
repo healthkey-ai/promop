@@ -72,6 +72,7 @@ const approvedRow = {
 /** Shape of GET /v1/code-mappings/reference/. */
 const reference = {
   release_commit: "8798ec24f4cc16e47f8c0ceec69d38d7e5858b17",
+  source_catalog_vocabularies: ["NCIt", "MeSH"],
   domains: [
     { domain_id: "Condition", label: "Condition — diagnoses, problems, findings" },
     { domain_id: "Drug", label: "Drug — medications and substances" },
@@ -880,6 +881,8 @@ describe("CodeMappingPage", () => {
     it("shows organization, percentiles, reference-range evidence, and suppression", async () => {
       renderPage([{
         ...proposedRow,
+        organization_name: "Memorial Hospital",
+        organization_slug: "memorial",
         source_evidence: {
           organization: { id: 4, slug: "memorial", name: "Memorial Hospital" },
           occurrence_count: 12398,
@@ -890,6 +893,7 @@ describe("CodeMappingPage", () => {
             unit_coverage: { records: 12004, percent: 96.8 },
             reference_range: { records: 9000, percent: 72.6, low_p50: 0.6, high_p50: 1.17, unit: "mg/dL" },
             category: { top: "laboratory", mix: "laboratory (12398)" },
+            value_types: { quantity: 0, coded: 0, text: 0 },
           },
           units: [
             { display: "mg/dL", code: "mg/dL", count: 12000, patients: 204, values: 11990, distribution: { min: 0.1, p25: 0.7, p50: 0.9, p75: 1.1, max: 8.2 } },
@@ -901,7 +905,11 @@ describe("CodeMappingPage", () => {
       fireEvent.click(cell.closest("tr")!);
       const evidence = await screen.findByRole("region", { name: "Source evidence" });
       await waitFor(() => expect(evidence).toHaveTextContent("Memorial Hospital"));
+      expect(screen.getByTestId("source-organization")).toHaveTextContent("Hospital / organization: Memorial Hospital");
       expect(evidence).toHaveTextContent("13,032");
+      expect(evidence).toHaveTextContent("Records across same-label codes");
+      expect(evidence).not.toHaveTextContent("Coding occurrences");
+      expect(evidence).toHaveTextContent("Values use another FHIR type or are absent");
       expect(evidence).toHaveTextContent("96.8% of source records");
       expect(within(evidence).getByRole("table", { name: "Observed source units" })).toHaveTextContent("Median0.9");
       expect(evidence).toHaveTextContent("204 patients · 11,990 numeric values");
@@ -910,6 +918,21 @@ describe("CodeMappingPage", () => {
       expect(evidence).toHaveTextContent("Recognition evidence only");
       expect(evidence).not.toHaveTextContent("Mean");
       expect(evidence).not.toHaveTextContent("standard deviation");
+    });
+
+    it("keeps source code and description adjacent and skips publisher lookup for hospital codes", async () => {
+      renderPage([{ ...proposedRow,
+        source_vocabulary_id: "http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id",
+      }]);
+      const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      fireEvent.click(cell.closest("tr")!);
+      const codeField = (await screen.findByLabelText("Source Code Value")).closest("div");
+      const descriptionField = screen.getByLabelText("Source Description").closest("div");
+      expect(codeField?.nextElementSibling).toBe(descriptionField);
+      expect(mockGet).not.toHaveBeenCalledWith(
+        "/v1/code-mappings/source-catalog/", expect.anything(),
+      );
+      expect(screen.queryByText("Could not load source terminology.")).not.toBeInTheDocument();
     });
 
     it("offers the source code system as a select with a blank option", async () => {
@@ -1805,6 +1828,7 @@ describe("server mapping pages", () => {
       pages: { ...browseData().pages, Unmapped: { page: 1, page_size: 100, total: 1 } } });
     await screen.findByText("Albumin");
     expect(screen.getByTestId("all-mappings-count")).toHaveTextContent("(2557)");
+    expect(screen.getByRole("button", { name: "Unmapped (1 groups)" })).toBeInTheDocument();
     expect(screen.getByText("Downloads include loaded rows only.")).toBeInTheDocument();
   });
 

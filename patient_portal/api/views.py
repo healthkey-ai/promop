@@ -31,7 +31,7 @@ from django.core.validators import validate_email
 from omop_core.models import (
     Organization,
     Person, PatientRecord, Concept, ConceptClass, Domain, ProvenanceRecord, Vocabulary,
-    SourceCodeConceptMapping, MappingSuggestionReview, SuggestRun, UmlsSourceCode,
+    SourceCodeConceptMapping, SourceVocabulary, MappingSuggestionReview, SuggestRun, UmlsSourceCode,
     ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
     Observation, ProcedureOccurrence, VisitOccurrence, VisitDetail, Location, Death,
     PatientDocument, PatientTrialEnrollment, TrialSearchPreferences,
@@ -12319,6 +12319,12 @@ def _code_mapping_reference_payload():
             domain_id: source_vocabularies.source_systems_for(domain_id)
             for domain_id, _label in source_vocabularies.DOMAIN_CHOICES
         },
+        # Only these publisher vocabularies have a separately loaded source
+        # catalog. Hospital-local Epic/Cerner systems must not probe this API.
+        'source_catalog_vocabularies': list(
+            SourceVocabulary.objects.order_by('vocabulary_id')
+            .values_list('vocabulary_id', flat=True)
+        ),
         # Tab order: the standard vocabularies a curator re-points into first,
         # then the HK-* buckets imports fill.
         'destination_vocabularies': [

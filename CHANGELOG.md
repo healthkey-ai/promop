@@ -6,6 +6,15 @@ All notable changes to PRomop are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Clearer source-code curation evidence** — Edit Mapping now keeps Source
+  Code Value beside Source Description, only loads publisher terminology for
+  catalogs actually present, makes hospital/organization attribution explicit,
+  omits redundant coding counts, explains value types outside the three extract
+  categories, and labels grouped section totals and same-description record
+  counts explicitly (#1691).
+
 ### Added
 
 - **Source evidence in Edit Mapping** — the dialog now shows the hospital
