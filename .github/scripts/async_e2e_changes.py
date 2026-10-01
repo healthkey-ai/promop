@@ -95,6 +95,23 @@ ASYNC_WORDS = (
     ".delay(", ".apply_async(", ".send_task(", "_dispatch_projection",
 )
 
+# A real Chromium install/launch is a deployment packaging check, not a
+# prerequisite for the unit suite (which uses fake Playwright modules). Keep
+# the expensive smoke test focused on changes that can affect that packaging.
+BROWSER_RUNTIME_PATHS = (
+    "Dockerfile", "Dockerfile.gcp", "render.yaml", "runtime.txt",
+    "requirements.txt", "requirements-athena-scrape.txt",
+    "scripts/install_athena_browser.py", "tests/test_athena_browser_build.py",
+    ".github/scripts/async_e2e_changes.py", ".github/workflows/ci.yml",
+)
+
+
+def requires_browser_runtime(paths):
+    """Run the browser smoke check only for its code and deployment wiring."""
+    if not paths:
+        return True
+    return any(path in BROWSER_RUNTIME_PATHS for path in paths)
+
 
 def mentions_async(text):
     return any(word in text.lower() for word in ASYNC_WORDS)
@@ -172,7 +189,12 @@ def select_checks(base, head, *, merge_base=True):
         base = subprocess.check_output(["git", "merge-base", base, head], text=True).strip()
     paths = changed_paths(base, head, merge_base=False)
     docs_only = is_docs_only(paths)
-    return (False if docs_only else requires_async_e2e(paths, base, head)), docs_only, requires_backend(paths)
+    return (
+        False if docs_only else requires_async_e2e(paths, base, head),
+        docs_only,
+        requires_backend(paths),
+        requires_browser_runtime(paths),
+    )
 
 
 def select_range(base, head, *, merge_base=True):
@@ -193,20 +215,27 @@ def changed_paths(base, head, *, merge_base=True):
 
 
 def main():
-    run, docs_only, backend = True, False, True
+    run, docs_only, backend, browser_runtime = True, False, True, True
     event_name = os.environ["GITHUB_EVENT_NAME"]
     if event_name in {"pull_request", "push"}:
         event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
     if event_name == "pull_request":
         pr = event["pull_request"]
-        run, docs_only, backend = select_checks(pr["base"]["sha"], pr["head"]["sha"])
+        run, docs_only, backend, browser_runtime = select_checks(
+            pr["base"]["sha"], pr["head"]["sha"])
     elif event_name == "push":
         # Reusable workflows keep the caller's push event. Compare both ends
         # of the entire push, not HEAD^ (which would miss multi-commit pushes).
         before, after = event.get("before"), event.get("after")
         if before and after and before != "0" * 40 and after != "0" * 40:
-            run, docs_only, backend = select_checks(before, after, merge_base=False)
-    output = f"async_e2e={str(run).lower()}\ndocs_only={str(docs_only).lower()}\nbackend={str(backend).lower()}"
+            run, docs_only, backend, browser_runtime = select_checks(
+                before, after, merge_base=False)
+    output = (
+        f"async_e2e={str(run).lower()}\n"
+        f"docs_only={str(docs_only).lower()}\n"
+        f"backend={str(backend).lower()}\n"
+        f"browser_runtime={str(browser_runtime).lower()}"
+    )
     print(output)
     with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
         stream.write(output + "\n")
