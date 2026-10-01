@@ -8,13 +8,16 @@ from dataclasses import dataclass
 from django.db import connection, transaction
 from django.utils import timezone
 
-from omop_core.models import CodeMappingUpload, SourceCodeConceptMapping
+from omop_core.mapping.code_resolution import repoint_clinical_rows
+from omop_core.models import CodeMappingUpload, Concept, SourceCodeConceptMapping
+from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE
 
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 MAX_UPLOAD_ROWS = 100_000
 REQUIRED_HEADERS = frozenset({'source code', 'source description'})
-ALLOWED_HEADERS = REQUIRED_HEADERS | {'seen count'}
+DESTINATION_HEADER = 'destination concept id'
+ALLOWED_HEADERS = REQUIRED_HEADERS | {'seen count', DESTINATION_HEADER}
 
 
 class CodeMappingUploadError(ValueError):
@@ -30,6 +33,7 @@ class UploadRow:
     source_code: str
     source_description: str
     seen_count: int
+    destination_concept_id: int | None
 
 
 def _normalise_header(value):
@@ -84,6 +88,10 @@ def parse_upload(upload):
             code = values[indexes['source code']].strip()
             description = values[indexes['source description']].strip()
             raw_count = values[indexes['seen count']].strip() if 'seen count' in indexes else ''
+            raw_destination = (
+                values[indexes[DESTINATION_HEADER]].strip()
+                if DESTINATION_HEADER in indexes else ''
+            )
             if not code:
                 errors.append({'row': line, 'field': 'source code', 'detail': 'Source code is required.'})
                 continue
@@ -101,6 +109,16 @@ def parse_upload(upload):
             except ValueError:
                 errors.append({'row': line, 'field': 'seen count', 'detail': 'Seen count must be a non-negative integer.'})
                 continue
+            try:
+                destination_concept_id = int(raw_destination) if raw_destination else None
+                if destination_concept_id is not None and destination_concept_id <= 0:
+                    raise ValueError
+            except ValueError:
+                errors.append({
+                    'row': line, 'field': DESTINATION_HEADER,
+                    'detail': 'Destination concept ID must be a positive integer.',
+                })
+                continue
             if code in seen_codes:
                 errors.append({
                     'row': line, 'field': 'source code',
@@ -110,7 +128,9 @@ def parse_upload(upload):
             seen_codes[code] = line
             if invalid:
                 continue
-            rows.append(UploadRow(line, code, description, seen_count))
+            rows.append(UploadRow(
+                line, code, description, seen_count, destination_concept_id,
+            ))
     except csv.Error as exc:
         raise CodeMappingUploadError(f'Malformed CSV near row {reader.line_num}: {exc}.') from exc
 
@@ -132,7 +152,54 @@ def _lock_vocabulary(vocabulary):
             )
 
 
-def import_upload(*, upload, vocabulary, provenance, actor):
+def _destination_concepts(rows):
+    """Resolve and validate every requested destination before writing anything."""
+    ids = {row.destination_concept_id for row in rows if row.destination_concept_id}
+    concepts = {}
+    requested = sorted(ids)
+    for offset in range(0, len(requested), 10_000):
+        concepts.update(Concept.objects.in_bulk(requested[offset:offset + 10_000]))
+
+    errors = []
+    for row in rows:
+        concept_id = row.destination_concept_id
+        if concept_id is None:
+            continue
+        concept = concepts.get(concept_id)
+        if concept is None:
+            errors.append({
+                'row': row.line, 'field': DESTINATION_HEADER,
+                'detail': f'Destination OMOP concept {concept_id} was not found.',
+            })
+        elif concept.invalid_reason:
+            errors.append({
+                'row': row.line, 'field': DESTINATION_HEADER,
+                'detail': f'Destination OMOP concept {concept_id} is retired.',
+            })
+        elif concept.standard_concept != 'S' and concept.source != 'HealthKey':
+            errors.append({
+                'row': row.line, 'field': DESTINATION_HEADER,
+                'detail': (
+                    f'Destination OMOP concept {concept_id} is not standard or '
+                    'HealthKey-authored.'
+                ),
+            })
+        elif concept.domain_id not in DOMAIN_TO_TABLE:
+            errors.append({
+                'row': row.line, 'field': DESTINATION_HEADER,
+                'detail': (
+                    f'Destination OMOP concept {concept_id} has unsupported '
+                    f'domain {concept.domain_id!r}.'
+                ),
+            })
+    if errors:
+        raise CodeMappingUploadError(
+            f'CSV validation failed on {len(errors)} row(s).', errors=errors[:100],
+        )
+    return concepts
+
+
+def import_upload(*, upload, vocabulary, provenance, actor, can_approve=True):
     vocabulary = (vocabulary or '').strip()
     provenance = (provenance or '').strip()
     if not vocabulary:
@@ -147,6 +214,11 @@ def import_upload(*, upload, vocabulary, provenance, actor):
         raise CodeMappingUploadError('Provenance exceeds 50 characters.')
 
     rows, digest = parse_upload(upload)
+    if not can_approve and any(row.destination_concept_id for row in rows):
+        raise CodeMappingUploadError(
+            'Only org admins and staff can approve mappings with a destination concept ID.'
+        )
+    concepts = _destination_concepts(rows)
     filename = (getattr(upload, 'name', '') or 'upload.csv')[:255]
     with transaction.atomic():
         _lock_vocabulary(vocabulary)
@@ -172,8 +244,10 @@ def import_upload(*, upload, vocabulary, provenance, actor):
         inserts = []
         updates = []
         unchanged = 0
+        approval_repoints = []
         for row in rows:
             mapping = existing.get(row.source_code)
+            concept = concepts.get(row.destination_concept_id)
             if mapping is None:
                 inserts.append(SourceCodeConceptMapping(
                     organization=None,
@@ -185,10 +259,18 @@ def import_upload(*, upload, vocabulary, provenance, actor):
                     last_seen=now if row.seen_count else None,
                     origin='import',
                     origin_system=provenance,
-                    status='proposed',
+                    target_concept=concept,
+                    destination_vocabulary_id=concept.vocabulary_id if concept else '',
+                    domain_id=concept.domain_id if concept else '',
+                    omop_table=DOMAIN_TO_TABLE.get(concept.domain_id, '') if concept else '',
+                    status='approved' if concept else 'proposed',
+                    reviewer=actor if concept else None,
+                    reviewed_at=now if concept else None,
                     created_by=actor,
                     updated_by=actor,
                 ))
+                if concept:
+                    approval_repoints.append((row.source_code, False, set(), concept.pk))
                 continue
 
             changed = False
@@ -203,6 +285,35 @@ def import_upload(*, upload, vocabulary, provenance, actor):
             if not mapping.origin_system:
                 mapping.origin_system = provenance
                 changed = True
+            if concept:
+                approval_changed = (
+                    mapping.status != 'approved'
+                    or mapping.target_concept_id != concept.pk
+                )
+                if approval_changed:
+                    old_concept_ids = set(mapping.pending_repoint_concept_ids)
+                    if mapping.target_concept_id not in (None, concept.pk):
+                        old_concept_ids.add(mapping.target_concept_id)
+                    approval_repoints.append((
+                        row.source_code, mapping.status == 'approved',
+                        old_concept_ids, concept.pk,
+                    ))
+                    mapping.reviewer = actor
+                    mapping.reviewed_at = now
+                    mapping.pending_repoint_concept_ids = []
+                expected_table = DOMAIN_TO_TABLE[concept.domain_id]
+                if (
+                    approval_changed
+                    or mapping.destination_vocabulary_id != concept.vocabulary_id
+                    or mapping.domain_id != concept.domain_id
+                    or mapping.omop_table != expected_table
+                ):
+                    mapping.target_concept = concept
+                    mapping.destination_vocabulary_id = concept.vocabulary_id or ''
+                    mapping.domain_id = concept.domain_id
+                    mapping.omop_table = expected_table
+                    mapping.status = 'approved'
+                    changed = True
             if changed:
                 mapping.updated_by = actor
                 mapping.updated_at = now
@@ -216,9 +327,33 @@ def import_upload(*, upload, vocabulary, provenance, actor):
             SourceCodeConceptMapping.objects.bulk_update(
                 updates,
                 ['source_code_description', 'occurrence_count', 'first_seen',
-                 'last_seen', 'origin_system', 'updated_by', 'updated_at'],
+                 'last_seen', 'origin_system', 'target_concept',
+                 'destination_vocabulary_id', 'domain_id', 'omop_table', 'status',
+                 'reviewer', 'reviewed_at', 'pending_repoint_concept_ids',
+                 'updated_by', 'updated_at'],
                 batch_size=1_000,
             )
+        if approval_repoints:
+            approved = {
+                mapping.source_code: mapping
+                for mapping in SourceCodeConceptMapping.objects.filter(
+                    organization__isnull=True,
+                    source_vocabulary_id=vocabulary,
+                    source_code__in=[item[0] for item in approval_repoints],
+                )
+            }
+            for source_code, was_approved, old_concept_ids, new_concept_id in approval_repoints:
+                mapping = approved[source_code]
+                if not was_approved:
+                    repoint_clinical_rows(
+                        mapping=mapping, old_concept_id=0,
+                        new_concept_id=new_concept_id, match_description=False,
+                    )
+                for old_concept_id in sorted(old_concept_ids - {new_concept_id}):
+                    repoint_clinical_rows(
+                        mapping=mapping, old_concept_id=old_concept_id,
+                        new_concept_id=new_concept_id,
+                    )
         receipt.total_rows = len(rows)
         receipt.inserted_rows = len(inserts)
         receipt.updated_rows = len(updates)

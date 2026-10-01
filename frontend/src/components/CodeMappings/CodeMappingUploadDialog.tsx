@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { X } from "lucide-react";
+import { Upload, X } from "lucide-react";
 import api from "@/api/axios";
 import { INPUT_CLASS } from "@/components/UI/MappingFormPrimitives";
 import { formatUploadError } from "./codeMappingUploadError";
@@ -58,15 +58,25 @@ export default function CodeMappingUploadDialog({ defaultProvenance, onClose, on
         </div>
         <div className="space-y-4 px-5 py-5">
           <p className="text-sm text-slate-600">
-            CSV headers: <code>source code</code>, <code>source description</code>, and optional <code>seen count</code>.
+            CSV headers: <code>source code</code>, <code>source description</code>, optional <code>seen count</code>,
+            and optional <code>destination concept ID</code>. Rows with a destination are imported as approved mappings.
           </p>
           {error && <div role="alert" className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
-          <label className="block text-sm font-medium text-slate-800">
-            CSV file
-            <input aria-label="CSV file" type="file" accept=".csv,text/csv" required
-              onChange={(event) => setFile(event.target.files?.[0] || null)}
-              className="mt-1 block w-full text-sm" />
-          </label>
+          <div className="block text-sm font-medium text-slate-800">
+            <span>CSV file</span>
+            <div className="mt-1 flex min-h-10 items-center gap-3 rounded-md border border-slate-300 px-3 py-1.5">
+              <label className="inline-flex shrink-0 cursor-pointer items-center gap-2 rounded-md bg-slate-950 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800 focus-within:ring-2 focus-within:ring-slate-400 focus-within:ring-offset-2">
+                <Upload size={15} aria-hidden="true" />
+                Choose file
+                <input aria-label="CSV file" type="file" accept=".csv,text/csv" required
+                  onChange={(event) => setFile(event.target.files?.[0] || null)}
+                  className="sr-only" />
+              </label>
+              <span className="min-w-0 truncate text-sm font-normal text-slate-600">
+                {file?.name || "No file selected"}
+              </span>
+            </div>
+          </div>
           <label className="block text-sm font-medium text-slate-800">
             Source vocabulary
             <input aria-label="Source vocabulary" value={vocabulary} maxLength={255} required

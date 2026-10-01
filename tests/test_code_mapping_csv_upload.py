@@ -4,6 +4,7 @@ from rest_framework.test import APIClient
 
 from omop_core.models import CodeMappingUpload, Organization, SourceCodeConceptMapping
 from patient_portal.models import Identity
+from tests.factories import ConceptFactory
 
 
 URL = '/api/v1/code-mappings/upload/'
@@ -41,6 +42,80 @@ def test_two_column_upload_defaults_seen_to_zero_and_provenance_to_email(staff_c
             for row in rows] == [('A01', 'Alpha', 0), ('B02', '', 0)]
     assert all(row.origin_system == user.email for row in rows)
     assert all(row.created_by == user and row.status == 'proposed' for row in rows)
+
+
+@pytest.mark.django_db
+def test_optional_destination_concept_id_creates_approved_mapping(staff_client):
+    client, user = staff_client
+    destination = ConceptFactory(domain_id='Measurement', vocabulary_id='LOINC')
+
+    response = client.post(URL, {
+        'file': csv_file(
+            'source code,source description,seen count,destination concept ID\n'
+            f'A01,Albumin,8,{destination.pk}\n'
+            'B02,Needs review,2,\n'
+        ),
+        'source_vocabulary_id': 'VendorLab',
+        'provenance': 'reviewed-catalogue',
+    }, format='multipart')
+
+    assert response.status_code == 201, response.data
+    approved = SourceCodeConceptMapping.objects.get(source_code='A01')
+    assert approved.target_concept == destination
+    assert approved.destination_vocabulary_id == 'LOINC'
+    assert approved.domain_id == 'Measurement'
+    assert approved.omop_table == 'measurement'
+    assert approved.status == 'approved'
+    assert approved.reviewer == user
+    assert approved.reviewed_at is not None
+    assert SourceCodeConceptMapping.objects.get(source_code='B02').status == 'proposed'
+
+
+@pytest.mark.django_db
+def test_destination_ids_are_validated_before_any_rows_are_imported(staff_client):
+    client, _ = staff_client
+    response = client.post(URL, {
+        'file': csv_file(
+            'source code,source description,destination concept ID\n'
+            'GOOD,Would otherwise import,\nBAD,Missing destination,999999999\n'
+        ),
+        'source_vocabulary_id': 'VendorLab',
+        'provenance': 'reviewed-catalogue',
+    }, format='multipart')
+
+    assert response.status_code == 400
+    assert response.data['errors'][0]['row'] == 3
+    assert 'was not found' in response.data['errors'][0]['detail']
+    assert not SourceCodeConceptMapping.objects.exists()
+
+
+@pytest.mark.django_db
+def test_destination_upload_repairs_metadata_without_reassigning_reviewer(staff_client):
+    client, _ = staff_client
+    destination = ConceptFactory(domain_id='Measurement', vocabulary_id='LOINC')
+    original_reviewer = Identity.objects.create_user(
+        email='original-reviewer@example.com', password='x', is_staff=True,
+    )
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id='VendorLab', source_code='A01',
+        target_concept=destination, status='approved', reviewer=original_reviewer,
+    )
+
+    response = client.post(URL, {
+        'file': csv_file(
+            'source code,source description,destination concept ID\n'
+            f'A01,Albumin,{destination.pk}\n'
+        ),
+        'source_vocabulary_id': 'VendorLab',
+        'provenance': 'reviewed-catalogue',
+    }, format='multipart')
+
+    assert response.status_code == 201, response.data
+    mapping.refresh_from_db()
+    assert mapping.destination_vocabulary_id == 'LOINC'
+    assert mapping.domain_id == 'Measurement'
+    assert mapping.omop_table == 'measurement'
+    assert mapping.reviewer == original_reviewer
 
 
 @pytest.mark.django_db

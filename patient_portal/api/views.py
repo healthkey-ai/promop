@@ -11374,6 +11374,7 @@ def code_mapping_upload(request):
             vocabulary=request.data.get('source_vocabulary_id'),
             provenance=request.data.get('provenance') or request.user.email,
             actor=request.user,
+            can_approve=_can_approve_mappings(request.user),
         )
     except CodeMappingUploadError as exc:
         return Response(
