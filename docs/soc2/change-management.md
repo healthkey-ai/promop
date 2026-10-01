@@ -101,9 +101,9 @@ retain the corresponding organization audit-log entries where available.
 
 ## Scope changes to the required review
 
-Narrowing the set of paths that require @larsburgess approval is itself a change
-to this control, so each narrowing is recorded here with its rationale and the
-risks accepted. The authoritative list stays in
+Narrowing the set of paths that require approval from the designated security
+reviewer is itself a change to this control, so each narrowing is recorded here
+with its rationale and the risks accepted. The authoritative list stays in
 [the policy script](../../.github/scripts/security-review.cjs); this section says
 why it holds the shape it does.
 
@@ -204,7 +204,7 @@ as covering more than it does:
   about these files beyond the committed-secret case.
 
 **Approval.** #1496 changes `.github/**` and `CODEOWNERS`, so it required
-@larsburgess approval under the control it modifies. Record the approving review
+the designated security reviewer's approval under the control it modifies. Record the approving review
 and the merge commit alongside the evidence capture for the period.
 
 ## Deployment authorization
