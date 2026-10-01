@@ -126,9 +126,10 @@ jobs:
       # own PostgreSQL/test database while retaining migrations and deploy checks.
       - name: Run tests (pytest)
         if: matrix.suite == 'pytest'
-        # Work stealing keeps workers busy when a few files dominate loadfile's
-        # groups. Durations remain in the log so sharding can be evidence-led.
-        run: pytest -n auto --dist worksteal -q --durations=20
+        # CI measured worksteal at 6m46s versus loadfile's 5m47s baseline for
+        # this database-heavy suite. Keep the faster scheduler and its timing
+        # report so any future sharding decision remains evidence-led.
+        run: pytest -n auto --dist loadfile -q --durations=20
 
   athena_browser:
     name: Athena browser runtime

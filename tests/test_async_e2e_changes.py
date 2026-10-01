@@ -365,7 +365,7 @@ def test_backend_suites_are_bounded_and_do_not_migrate_twice():
     pytest_command = next(
         step['run'] for step in steps if step.get('name') == 'Run tests (pytest)'
     )
-    assert '--dist worksteal' in pytest_command
+    assert '--dist loadfile' in pytest_command
     assert '--durations=20' in pytest_command
 
 
