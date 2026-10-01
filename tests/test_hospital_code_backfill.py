@@ -24,14 +24,22 @@ def primary(system, code, label, count, **values):
 
 def test_build_inventory_unions_only_supplement_keys_and_preserves_exact_systems():
     result = build_inventory([
-        primary(EPIC, 'ALB', 'albumin', 8),
+        primary(EPIC, 'ALB', 'albumin', 8, n_patients=5, n_codings=8,
+                label_group_records_if_mapped=12,
+                n_records_with_unit=7, n_records_with_reference_range=6,
+                reference_range_low_p50=3.5, reference_range_high_p50=5.0,
+                unit_from_reference_range_top='g/dL', category_mix='laboratory (8)',
+                pct_value_quantity=100.0),
         primary(EPIC, 'ALB', 'Albumin serum', 2, field_path='component[].code'),
         primary(CERNER, '3595840059', 'education needs', 4,
                 category_top='survey'),
         primary('http://example.test/local', 'UNSAFE', 'unknown vendor', 99),
     ], unit_rows=[
         {'coding_system': EPIC, 'coding_code': 'ALB', 'unit_display': 'g/dL',
-         'unit_ucum': 'g/dL', 'n_records': 7},
+         'unit_ucum': 'g/dL', 'n_records': 7, 'n_patients': 5, 'n_values': 7,
+         'is_suppressed': False, 'value_min': 2.1, 'value_p5': 2.5,
+         'value_p25': 3.4, 'value_p50': 4.1, 'value_p75': 4.6,
+         'value_p95': 5.2, 'value_max': 6.0},
         {'coding_system': EPIC, 'coding_code': 'ALB', 'unit_display': '<no unit>',
          'unit_ucum': '', 'n_records': 1},
     ], supplemental_rows=[
@@ -50,9 +58,24 @@ def test_build_inventory_unions_only_supplement_keys_and_preserves_exact_systems
     assert albumin.occurrence_count == 10
     assert albumin.source_code_description == 'albumin'
     assert albumin.domain_id == 'Measurement'
+    assert albumin.source_group_occurrence_count == 12
+    assert albumin.source_metadata == {
+        'records': 10, 'patients': 5, 'codings': 8,
+        'unit_coverage': {'records': 7, 'percent': 70.0},
+        'reference_range': {
+            'records': 6, 'percent': 60.0, 'low_p50': 3.5,
+            'high_p50': 5.0, 'unit': 'g/dL',
+        },
+        'category': {'top': 'laboratory', 'mix': 'laboratory (8)'},
+        'value_types': {'quantity': 100.0},
+    }
     assert albumin.source_unit_evidence == [{
         'display': 'g/dL', 'code': 'g/dL', 'count': 7,
-        'source': 'healthtree-unmapped-v2',
+        'source': 'healthtree-unmapped-v2', 'patients': 5, 'values': 7,
+        'distribution': {
+            'min': 2.1, 'p5': 2.5, 'p25': 3.4, 'p50': 4.1,
+            'p75': 4.6, 'p95': 5.2, 'max': 6.0,
+        },
     }]
     assert result.rows[(EPIC, 'OLD')].occurrence_count == 3
     assert result.rows[(EPIC, 'OLD')].domain_id == ''
@@ -70,6 +93,24 @@ def test_coded_observation_values_are_not_misclassified_as_measurements():
 
     row = result.rows[(EPIC, 'ANSWER')]
     assert (row.domain_id, row.omop_table) == ('Observation', 'observation')
+
+
+def test_unsuppressed_distribution_wins_when_duplicate_paths_share_a_unit():
+    result = build_inventory([
+        primary(EPIC, 'ALB', 'albumin', 30),
+    ], unit_rows=[
+        {'coding_system': EPIC, 'coding_code': 'ALB', 'unit_display': 'g/dL',
+         'unit_ucum': 'g/dL', 'n_records': 5, 'n_values': 5,
+         'is_suppressed': True},
+        {'coding_system': EPIC, 'coding_code': 'ALB', 'unit_display': 'g/dL',
+         'unit_ucum': 'g/dL', 'n_records': 25, 'n_values': 25,
+         'is_suppressed': False, 'value_p50': 4.2},
+    ])
+
+    evidence = result.rows[(EPIC, 'ALB')].source_unit_evidence[0]
+    assert evidence['count'] == 30
+    assert evidence['distribution']['p50'] == 4.2
+    assert 'suppressed' not in evidence
 
 
 def test_upsert_is_idempotent_and_does_not_overwrite_curator_decisions():
@@ -101,6 +142,7 @@ def test_upsert_is_idempotent_and_does_not_overwrite_curator_decisions():
     assert curated.domain_id == ''
     assert curated.occurrence_count == 10
     assert curated.source_unit_evidence[0]['code'] == 'g/dL'
+    assert curated.source_metadata['records'] == 10
     imported = SourceCodeConceptMapping.objects.get(
         source_vocabulary_id=CERNER, source_code='NEW',
     )

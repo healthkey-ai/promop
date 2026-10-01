@@ -46,7 +46,8 @@ def _grouped(queryset):
         .annotate(group_key=_group_key())
         .values('group_key')
         .annotate(
-            seen=Coalesce(Sum('occurrence_count'), Value(0)),
+            summed_seen=Sum('occurrence_count'),
+            supplied_group_seen=Max('source_group_occurrence_count'),
             members=Count('pk'),
             label=Max('source_label_norm'),
             # Any member's spelling will do as a heading: they differ only by
@@ -78,6 +79,7 @@ def _grouped(queryset):
             # will not compile.
             max_id=Max('id'),
         )
+        .annotate(seen=Coalesce('supplied_group_seen', 'summed_seen', Value(0)))
         .order_by('-seen', 'group_key')
     )
 

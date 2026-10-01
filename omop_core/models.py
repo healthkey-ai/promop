@@ -2114,6 +2114,22 @@ class SourceCodeConceptMapping(models.Model):
         help_text='Comma-separated UMLS CUIs used to retrieve candidates for this mapping.',
     )
     occurrence_count = models.IntegerField(default=0)
+    source_group_occurrence_count = models.BigIntegerField(
+        null=True, blank=True,
+        help_text=(
+            'Deduplicated source-record count for this label group when an '
+            'extract supplies one. Grouped review uses this instead of '
+            'summing sibling codings that can coexist on the same record.'
+        ),
+    )
+    source_metadata = models.JSONField(
+        default=dict, db_default={}, blank=True,
+        help_text=(
+            'Read-only source evidence retained from an import, such as '
+            'patient counts, category mix, value types and reference-range '
+            'coverage. It informs curation and is not clinical reference data.'
+        ),
+    )
     source_unit_evidence = models.JSONField(
         default=list, db_default=[], blank=True,
         help_text=(

@@ -16,6 +16,7 @@ import ConceptInputDetails from "@/components/UI/ConceptInputDetails";
 import { useAuth } from "@/hooks/useAuth";
 import { HelpTip, Field, ReadOnlyField, INPUT_CLASS } from "@/components/UI/MappingFormPrimitives";
 import { confirmUnitOverride, unitConfirmation } from "./unitConfirmation";
+import SourceEvidencePanel, { type SourceEvidence } from "./SourceEvidencePanel";
 
 /**
  * Code Mapping: incoming source codes -> destination OMOP concepts.
@@ -81,6 +82,7 @@ interface CodeMappingRow {
   example_units?: string[];
   locked_by_username?: string | null;
   locked_at?: string | null;
+  source_evidence?: SourceEvidence;
 }
 
 const EXPORT_COLUMNS: (keyof CodeMappingRow)[] = [
@@ -425,10 +427,6 @@ type SortColumn = "origin_system" | "source_code" | "occurrence_count" | "source
   | "destination_concept_name" | "destination_concept_id" | "destination_count" | "status";
 type SectionSort = { column: SortColumn; descending: boolean };
 
-function retirementLabel(row: CodeMappingRow | null): string {
-  return row?.source_retired === true ? "Retired" : row?.source_retired === false ? "No" : "Unknown";
-}
-
 function retirementDetail(row: CodeMappingRow | null): string {
   return row?.source_retirement_evidence?.join("; ")
     || (row?.source_retired === false ? "No retirement indication in the loaded source metadata."
@@ -477,8 +475,6 @@ const TIP = {
     "Exactly what appears in the source data — the code if there is one, otherwise the raw text.",
   source_description:
     "Human-readable description of the source code, where the source supplies one.",
-  source_concept_id:
-    "The OMOP concept for the source code itself, if that vocabulary is loaded. Blank is normal — most source systems are ones we receive codes in without holding their concepts.",
   destination_concept_id:
     "The OMOP concept this source code means. Type an id directly or pick one from the search above.",
   destination_concept_name:
@@ -693,23 +689,33 @@ export default function CodeMappingPage() {
   const [destinationOptions, setDestinationOptions] = useState<DestinationOption[]>([]);
   const [loadingDestinations, setLoadingDestinations] = useState(false);
   const [destinationError, setDestinationError] = useState("");
+  const [sourceEvidence, setSourceEvidence] = useState<SourceEvidence | null>(null);
+  const [sourceEvidenceError, setSourceEvidenceError] = useState("");
 
   useEffect(() => {
     setDestinationOptions([]);
     setDestinationError("");
+    setSourceEvidence(null);
+    setSourceEvidenceError("");
     if (dialogMode !== "edit" || !selectedRow?.mapping_id) return;
     let active = true;
     setLoadingDestinations(true);
-    api.get<{ destination_options: DestinationOption[] }>(`/v1/code-mappings/${selectedRow.mapping_id}/`)
-      .then(({ data }) => { if (active) setDestinationOptions(data.destination_options || []); })
-      .catch(() => { if (active) setDestinationError("Could not load imported destinations. Close and reopen this mapping to retry."); })
+    api.get<CodeMappingRow & { destination_options: DestinationOption[] }>(`/v1/code-mappings/${selectedRow.mapping_id}/`)
+      .then(({ data }) => {
+        if (!active) return;
+        setDestinationOptions(data.destination_options || []);
+        setSourceEvidence(data.source_evidence || null);
+      })
+      .catch(() => {
+        if (!active) return;
+        setDestinationError("Could not load imported destinations. Close and reopen this mapping to retry.");
+        setSourceEvidenceError("Could not load source evidence. Close and reopen this mapping to retry.");
+      })
       .finally(() => { if (active) setLoadingDestinations(false); });
     return () => { active = false; };
   }, [dialogMode, selectedRow?.mapping_id]);
 
   const [searchingConcepts, setSearchingConcepts] = useState(false);
-  const [checkingUmls, setCheckingUmls] = useState(false);
-  const [umlsCheckMessage, setUmlsCheckMessage] = useState("");
   const [suggestionMessage, setSuggestionMessage] = useState("");
   const [repointing, setRepointing] = useState<{ from: string; to: string } | null>(null);
   const [repointResult, setRepointResult] = useState<RepointResult | null>(null);
@@ -1098,14 +1104,12 @@ export default function CodeMappingPage() {
     dialogRequest.current += 1;
     setError("");
     setSearchingConcepts(false);
-    setCheckingUmls(false);
     setSelectedRow(null);
     setForm({ ...emptyForm });
     setSearchVocabulary("");
     setSearchScope(DEFAULT_SEARCH_SCOPE);
     setConceptSearchQuery("");
     setConceptResults([]);
-    setUmlsCheckMessage("");
     setRepointResult(null);
     setDialogMode("new");
   };
@@ -1116,7 +1120,6 @@ export default function CodeMappingPage() {
     dialogRequest.current += 1;
     setError("");
     setSearchingConcepts(false);
-    setCheckingUmls(false);
     // Acquire edit lock before opening the dialog.
     if (row.mapping_id) {
       try {
@@ -1145,7 +1148,6 @@ export default function CodeMappingPage() {
     setSearchScope(DEFAULT_SEARCH_SCOPE);
     setConceptSearchQuery("");
     setConceptResults([]);
-    setUmlsCheckMessage("");
     setRepointResult(null);
     setDialogMode("edit");
   };
@@ -1155,7 +1157,6 @@ export default function CodeMappingPage() {
     dialogRequest.current += 1;
     setError("");
     setSearchingConcepts(false);
-    setCheckingUmls(false);
     setMintOpen(false);
     // Release edit lock when closing.
     if (selectedRow?.mapping_id) {
@@ -1166,7 +1167,6 @@ export default function CodeMappingPage() {
     setSaving(false);
     setRepointing(null);
     setRepointResult(null);
-    setUmlsCheckMessage("");
   };
 
   const setField = (field: keyof MappingForm, value: string) => {
@@ -1175,7 +1175,6 @@ export default function CodeMappingPage() {
     if (["source_code", "source_vocabulary_id", "source_code_description", "omop_table"].includes(field)) {
       dialogRequest.current += 1;
       setSearchingConcepts(false);
-      setCheckingUmls(false);
       setError("");
     }
     setForm((prev) => ({ ...prev, [field]: value }));
@@ -1189,7 +1188,6 @@ export default function CodeMappingPage() {
     setSuggestionMessage("");
     dialogRequest.current += 1;
     setSearchingConcepts(false);
-    setCheckingUmls(false);
     setError("");
     setForm((prev) => {
       const offered = reference.source_code_systems_by_domain[domainId] || [];
@@ -1281,7 +1279,6 @@ export default function CodeMappingPage() {
     // re-rendered without it, and a multi-word search could never be typed.
     const request = ++dialogRequest.current;
     setConceptSearchQuery(query);
-    setCheckingUmls(false);
     // At most one search is ever outstanding (#1466). Firing one per keystroke
     // queued a second-long query per letter behind each other on the server —
     // discarding the stale responses here did not stop the server running them.
@@ -1318,7 +1315,6 @@ export default function CodeMappingPage() {
     const request = ++dialogRequest.current;
     dialogChoice.current = null;
     setIndividualSuggestion({ request, activity: [], running: true });
-    setCheckingUmls(false);
     setError("");
     setSearchingConcepts(true);
     try {
@@ -1369,40 +1365,16 @@ export default function CodeMappingPage() {
     }
   };
 
-  const checkUmls = async () => {
-    const request = ++dialogRequest.current;
-    setSearchingConcepts(false);
-    setError("");
-    setCheckingUmls(true);
-    setUmlsCheckMessage("");
-    try {
-      const { data } = await api.post("/v1/code-mappings/check-umls/", {
-        source_code: form.source_code,
-        source_vocabulary_id: form.source_vocabulary_id,
-      });
-      if (request !== dialogRequest.current) return;
-      if (!data.found) {
-        setUmlsCheckMessage("Missing from UMLS");
-        return;
-      }
-      setForm((prev) => ({
-        ...prev,
-        source_code_description: data.source_code_description || prev.source_code_description,
-        source_concept_id: data.source_concept_id ? String(data.source_concept_id) : "",
-      }));
-      setUmlsCheckMessage("Found in UMLS");
-    } catch {
-      if (request === dialogRequest.current) setError("Failed to check UMLS.");
-    } finally {
-      if (request === dialogRequest.current) setCheckingUmls(false);
-    }
-  };
-
   // Keyed on the same condition submitForm branches on. dialogMode can say
   // "edit" for a row with no mapping_id (toggleApproval opens one that way),
   // and the two diverging let a curator pick Approved on what the server then
   // treats as a create and silently downgrades.
   const isNewMapping = !selectedRow?.mapping_id;
+  const sourceIdentityUnchanged = Boolean(
+    selectedRow
+    && form.source_code === selectedRow.source_code
+    && form.source_vocabulary_id === selectedRow.source_vocabulary_id,
+  );
 
   const willRepoint =
     dialogMode === "edit"
@@ -2548,19 +2520,14 @@ export default function CodeMappingPage() {
                       required
                       className={`${INPUT_CLASS} font-mono`}
                     />
+                    {sourceIdentityUnchanged && (selectedRow?.source_concept_id || selectedRow?.source_retired) && (
+                      <p data-testid="source-code-metadata" className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-600">
+                        {selectedRow.source_concept_id && <span>(OMOP concept {selectedRow.source_concept_id})</span>}
+                        {selectedRow.source_retired && <span className="font-semibold text-red-700"
+                          title={retirementDetail(selectedRow)}>Retired</span>}
+                      </p>
+                    )}
                   </Field>
-
-                  <div className="flex items-end gap-2">
-                    <button
-                      type="button"
-                      onClick={checkUmls}
-                      disabled={checkingUmls || !form.source_code.trim() || !form.source_vocabulary_id}
-                      className="rounded-md border border-sky-300 px-3 py-2 text-sm font-medium text-sky-700 hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      {checkingUmls ? "Checking UMLS…" : "Check UMLS"}
-                    </button>
-                    {umlsCheckMessage && <span className="pb-2 text-sm text-slate-600">{umlsCheckMessage}</span>}
-                  </div>
 
                   <SourceVocabularyLookup
                     vocabularyId={form.source_vocabulary_id}
@@ -2582,36 +2549,13 @@ export default function CodeMappingPage() {
                     />
                   </Field>
 
-                  <ReadOnlyField
-                    id="source_concept_id"
-                    label="Source Concept ID"
-                    tip={TIP.source_concept_id}
-                    value={form.source_concept_id}
-                    testId="source-concept-id"
-                  />
-                  <ReadOnlyField
-                    id="source_retirement"
-                    label="Source code retirement"
-                    tip="Retirement is based on the source vocabulary's invalid reason or expired validity date, never the destination or UMLS preference flag."
-                    value={retirementLabel(selectedRow && form.source_code === selectedRow.source_code
-                      && form.source_vocabulary_id === selectedRow.source_vocabulary_id ? selectedRow : null)}
-                    testId="source-retirement"
-                  />
-                  {selectedRow?.source_retired && form.source_code === selectedRow.source_code
-                    && form.source_vocabulary_id === selectedRow.source_vocabulary_id && (
-                    <p className="text-sm font-semibold text-red-700" role="status">Source code is retired. {retirementDetail(selectedRow)}</p>
-                  )}
-                  {selectedRow?.umls_source_name && (
-                    <ReadOnlyField
-                      id="umls_source_name"
-                      label="UMLS Name"
-                      tip="Canonical UMLS preferred name for this source code. Read-only — edit Source Description instead."
-                      value={selectedRow.umls_source_name}
-                      testId="umls-source-name"
-                    />
-                  )}
                 </div>
               </fieldset>
+
+              {dialogMode === "edit" && selectedRow?.mapping_id && (
+                <SourceEvidencePanel evidence={sourceEvidence} loading={loadingDestinations}
+                  error={sourceEvidenceError} />
+              )}
 
               {/* ── DESTINATION ──────────────────────────────────────────── */}
               <fieldset

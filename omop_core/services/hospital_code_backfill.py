@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
+import math
 
 from django.db import transaction
 from django.utils import timezone
@@ -29,6 +30,8 @@ class InventoryRow:
     source_code: str
     source_code_description: str
     occurrence_count: int
+    source_group_occurrence_count: int | None = None
+    source_metadata: dict = field(default_factory=dict)
     domain_id: str = ''
     omop_table: str = ''
     source_unit_evidence: list[dict] = field(default_factory=list)
@@ -49,6 +52,98 @@ def _count(value):
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def _number(value):
+    """Return a finite JSON-safe number, or None for absent/invalid evidence."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _source_metadata(state):
+    """Compact the code-level extract evidence without claiming clinical truth."""
+    if not state['has_metadata']:
+        return {}
+    records = state['occurrence_count']
+    metadata = {
+        'records': records,
+        'patients': state['patients'],
+        'codings': state['codings'],
+    }
+    range_records = state['range_records']
+    unit_records = state['unit_records']
+    if unit_records:
+        metadata['unit_coverage'] = {
+            'records': unit_records,
+            'percent': round(unit_records * 100 / records, 1) if records else None,
+        }
+    if range_records:
+        metadata['reference_range'] = {
+            'records': range_records,
+            'percent': round(range_records * 100 / records, 1) if records else None,
+            **state['range_summary'],
+        }
+    representative = state['representative']
+    category = representative.get('category_top', '')
+    category_mix = representative.get('category_mix', '')
+    if category or category_mix:
+        metadata['category'] = {'top': category, 'mix': category_mix}
+    value_types = {}
+    for key, label in (
+        ('pct_value_quantity', 'quantity'),
+        ('pct_value_codeable_concept', 'coded'),
+        ('pct_value_string', 'text'),
+    ):
+        value = representative.get(key)
+        if value is not None:
+            value_types[label] = value
+    if value_types:
+        metadata['value_types'] = value_types
+    return metadata
+
+
+def _empty_state(primary):
+    return {
+        'occurrence_count': 0, 'descriptions': Counter(),
+        'domains': Counter(), 'primary': primary,
+        'source_group_occurrence_count': None,
+        # Streaming aggregates only. Keeping each wide Parquet row here would
+        # multiply memory use across a 690k-key import.
+        'has_metadata': False, 'patients': 0, 'codings': 0,
+        'unit_records': 0, 'range_records': 0,
+        'range_evidence_records': -1, 'range_summary': {},
+        'representative_records': -1, 'representative': {},
+    }
+
+
+def _merge_source_metadata(state, raw, count):
+    state['has_metadata'] = True
+    state['patients'] += _count(raw.get('n_patients'))
+    state['codings'] += _count(raw.get('n_codings'))
+    state['unit_records'] += _count(raw.get('n_records_with_unit'))
+    range_records = _count(raw.get('n_records_with_reference_range'))
+    state['range_records'] += range_records
+    if range_records > state['range_evidence_records']:
+        # A weighted median cannot be reconstructed from medians. Retain the
+        # highest-evidence extract row and identify these values as medians.
+        state['range_evidence_records'] = range_records
+        state['range_summary'] = {
+            'low_p50': _number(raw.get('reference_range_low_p50')),
+            'high_p50': _number(raw.get('reference_range_high_p50')),
+            'unit': _text(raw.get('unit_from_reference_range_top')),
+        }
+    if count > state['representative_records']:
+        state['representative_records'] = count
+        state['representative'] = {
+            'category_top': _text(raw.get('category_top')),
+            'category_mix': _text(raw.get('category_mix')),
+            'pct_value_quantity': _number(raw.get('pct_value_quantity')),
+            'pct_value_codeable_concept': _number(raw.get('pct_value_codeable_concept')),
+            'pct_value_string': _number(raw.get('pct_value_string')),
+        }
 
 
 def _key(raw, stats, cohort):
@@ -109,11 +204,14 @@ def build_inventory(primary_rows, *, unit_rows=(), supplemental_rows=(),
         if key is None:
             continue
         count = _count(raw.get('n_records'))
-        state = states.setdefault(key, {
-            'occurrence_count': 0, 'descriptions': Counter(),
-            'domains': Counter(), 'primary': True,
-        })
+        state = states.setdefault(key, _empty_state(True))
         state['occurrence_count'] += count
+        _merge_source_metadata(state, raw, count)
+        group_count = _count(raw.get('label_group_records_if_mapped'))
+        if group_count:
+            state['source_group_occurrence_count'] = max(
+                state['source_group_occurrence_count'] or 0, group_count,
+            )
         description = _description(raw)
         if description:
             state['descriptions'][description] += max(1, count)
@@ -130,10 +228,7 @@ def build_inventory(primary_rows, *, unit_rows=(), supplemental_rows=(),
                 stats['supplement_overlap_rows'] += 1
             continue
         count = _count(raw.get('fhir_n_records') or raw.get('n_records'))
-        state = supplement.setdefault(key, {
-            'occurrence_count': 0, 'descriptions': Counter(),
-            'domains': Counter(), 'primary': False,
-        })
+        state = supplement.setdefault(key, _empty_state(False))
         # The CSV repeats the code-level count once per candidate unit, so max
         # is the only non-duplicating aggregation at this grain.
         state['occurrence_count'] = max(state['occurrence_count'], count)
@@ -157,7 +252,33 @@ def build_inventory(primary_rows, *, unit_rows=(), supplemental_rows=(),
             stats['skipped_no_unit'] += 1
             continue
         unit_key = (display[:UNIT_MAX], code[:UNIT_MAX])
-        evidence.setdefault(key, Counter())[unit_key] += _count(raw.get('n_records'))
+        units = evidence.setdefault(key, {})
+        current = units.setdefault(unit_key, {
+            'count': 0, 'patients': 0, 'values': 0, 'distribution': None,
+            'all_suppressed': True,
+        })
+        current['count'] += _count(raw.get('n_records'))
+        current['patients'] += _count(raw.get('n_patients'))
+        values = _count(raw.get('n_values'))
+        current['values'] += values
+        suppressed = bool(raw.get('is_suppressed'))
+        current['all_suppressed'] = current['all_suppressed'] and suppressed
+        if not suppressed:
+            distribution = {
+                label: _number(raw.get(column))
+                for label, column in (
+                    ('min', 'value_min'), ('p5', 'value_p5'),
+                    ('p25', 'value_p25'), ('p50', 'value_p50'),
+                    ('p75', 'value_p75'), ('p95', 'value_p95'),
+                    ('max', 'value_max'),
+                )
+            }
+            if any(value is not None for value in distribution.values()):
+                # Quantiles cannot be combined correctly. Retain the row with
+                # the most numeric values when duplicate paths share a unit.
+                if current['distribution'] is None or values >= current.get('distribution_values', 0):
+                    current['distribution'] = distribution
+                    current['distribution_values'] = values
 
     result = {}
     for key, state in states.items():
@@ -169,22 +290,30 @@ def build_inventory(primary_rows, *, unit_rows=(), supplemental_rows=(),
             max(domains, key=lambda value: (domains[value], value))
             if domains else ('', '')
         )
-        units = [
-            {
-                'display': display,
-                'code': code,
-                'count': count,
+        units = []
+        for (display, code), values in sorted(
+                evidence.get(key, {}).items(),
+                key=lambda item: (-item[1]['count'], item[0]),
+        ):
+            unit = {
+                'display': display, 'code': code, 'count': values['count'],
                 'source': evidence_source,
             }
-            for (display, code), count in sorted(
-                evidence.get(key, {}).items(),
-                key=lambda item: (-item[1], item[0]),
-            )
-        ]
+            if values['patients']:
+                unit['patients'] = values['patients']
+            if values['values']:
+                unit['values'] = values['values']
+            if values['all_suppressed']:
+                unit['suppressed'] = True
+            if values['distribution'] is not None:
+                unit['distribution'] = values['distribution']
+            units.append(unit)
         result[key] = InventoryRow(
             source_vocabulary_id=key[0], source_code=key[1],
             source_code_description=description,
             occurrence_count=state['occurrence_count'],
+            source_group_occurrence_count=state['source_group_occurrence_count'],
+            source_metadata=_source_metadata(state),
             domain_id=domain_id, omop_table=omop_table,
             source_unit_evidence=units,
         )
@@ -217,6 +346,7 @@ def upsert_inventory(build, *, provenance, actor=None, dry_run=False,
                 'id', 'source_vocabulary_id', 'source_code',
                 'source_code_description', 'domain_id', 'omop_table',
                 'occurrence_count', 'source_unit_evidence', 'origin',
+                'source_group_occurrence_count', 'source_metadata',
                 'origin_system', 'updated_by',
             )
         )
@@ -245,6 +375,8 @@ def upsert_inventory(build, *, provenance, actor=None, dry_run=False,
                     domain_id=rows[key].domain_id,
                     omop_table=rows[key].omop_table,
                     occurrence_count=rows[key].occurrence_count,
+                    source_group_occurrence_count=rows[key].source_group_occurrence_count,
+                    source_metadata=rows[key].source_metadata,
                     source_unit_evidence=rows[key].source_unit_evidence,
                     origin='import', origin_system=provenance,
                     source='HealthTree', status='proposed',
@@ -262,6 +394,12 @@ def upsert_inventory(build, *, provenance, actor=None, dry_run=False,
                 changed = True
             if imported.source_unit_evidence != mapping.source_unit_evidence:
                 mapping.source_unit_evidence = imported.source_unit_evidence
+                changed = True
+            if imported.source_group_occurrence_count != mapping.source_group_occurrence_count:
+                mapping.source_group_occurrence_count = imported.source_group_occurrence_count
+                changed = True
+            if imported.source_metadata != mapping.source_metadata:
+                mapping.source_metadata = imported.source_metadata
                 changed = True
             may_refresh = mapping.origin == 'import' and mapping.origin_system == provenance
             if imported.source_code_description and (
@@ -285,6 +423,7 @@ def upsert_inventory(build, *, provenance, actor=None, dry_run=False,
                 [
                     'source_code_description', 'domain_id', 'omop_table',
                     'occurrence_count', 'source_unit_evidence', 'updated_by',
+                    'source_group_occurrence_count', 'source_metadata',
                     'updated_at',
                 ],
                 batch_size=batch_size,

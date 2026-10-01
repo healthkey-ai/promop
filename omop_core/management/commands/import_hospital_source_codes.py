@@ -13,10 +13,18 @@ from omop_core.services.hospital_code_backfill import (
 PRIMARY_COLUMNS = [
     'resource_type', 'field_path', 'coding_system', 'coding_code',
     'source_label', 'sample_display', 'sample_codeable_concept_text',
-    'n_records', 'category_top',
+    'n_records', 'n_patients', 'n_codings', 'label_group_records_if_mapped',
+    'n_records_with_unit', 'pct_records_with_unit',
+    'n_records_with_reference_range', 'pct_records_with_reference_range',
+    'reference_range_low_p50', 'reference_range_high_p50',
+    'unit_from_reference_range_top',
+    'category_top', 'category_mix', 'pct_value_quantity',
+    'pct_value_codeable_concept', 'pct_value_string',
 ]
 UNIT_COLUMNS = [
     'coding_system', 'coding_code', 'unit_display', 'unit_ucum', 'n_records',
+    'n_patients', 'n_values', 'is_suppressed', 'value_min', 'value_p5',
+    'value_p25', 'value_p50', 'value_p75', 'value_p95', 'value_max',
 ]
 
 

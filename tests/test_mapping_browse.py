@@ -449,6 +449,47 @@ def _delete(user, mapping_id):
     return code_mapping_detail(request, mapping_id=mapping_id)
 
 
+def _detail(user, mapping_id):
+    request = APIRequestFactory().get(f'/api/v1/code-mappings/{mapping_id}/')
+    force_authenticate(request, user=user)
+    return code_mapping_detail(request, mapping_id=mapping_id)
+
+
+def test_detail_includes_source_evidence_without_putting_it_on_browse_rows(staff_user):
+    from omop_core.models import Organization
+    organization = Organization.objects.create(name='Memorial Hospital', slug='memorial')
+    mapping = row(
+        'LOCAL-ALB', organization=organization, occurrence_count=20,
+        source_group_occurrence_count=37,
+        source_metadata={
+            'patients': 9,
+            'reference_range': {'records': 12, 'low_p50': 3.5, 'high_p50': 5.0},
+        },
+        source_unit_evidence=[{
+            'display': 'g/dL', 'code': 'g/dL', 'count': 18,
+            'distribution': {'p25': 3.6, 'p50': 4.2, 'p75': 4.7},
+        }],
+    )
+
+    detail = _detail(staff_user, mapping.pk)
+    assert detail.status_code == 200
+    assert detail.data['source_evidence'] == {
+        'organization': {'id': organization.pk, 'slug': 'memorial', 'name': 'Memorial Hospital'},
+        'occurrence_count': 20,
+        'group_occurrence_count': 37,
+        'first_seen': None,
+        'last_seen': None,
+        'metadata': mapping.source_metadata,
+        'units': mapping.source_unit_evidence,
+    }
+
+    client = APIClient()
+    client.force_authenticate(user=staff_user)
+    listed = client.get('/api/v1/code-mappings/', {'source': 'ICD10CM'})
+    assert listed.status_code == 200
+    assert 'source_evidence' not in listed.data[0]
+
+
 def test_delete_with_destination_clears_instead_of_removing(staff_user):
     """DELETE on a mapping with a destination clears the destination, keeping the row."""
     concept = ConceptFactory(concept_id=999999, concept_name='Test Concept', concept_code='12345')
