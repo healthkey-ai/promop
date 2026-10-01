@@ -911,7 +911,10 @@ describe("CodeMappingPage", () => {
       expect(evidence).not.toHaveTextContent("Coding occurrences");
       expect(evidence).toHaveTextContent("Values use another FHIR type or are absent");
       expect(evidence).toHaveTextContent("96.8% of source records");
-      expect(within(evidence).getByRole("table", { name: "Observed source units" })).toHaveTextContent("Median0.9");
+      expect(within(evidence).getByRole("img", {
+        name: "Value distribution: Min 0.1; P25 0.7; Median 0.9; P75 1.1; Max 8.2",
+      })).toBeInTheDocument();
+      expect(within(evidence).getByRole("table", { name: "Observed source units" })).toHaveTextContent("Median 0.9");
       expect(evidence).toHaveTextContent("204 patients · 11,990 numeric values");
       expect(evidence).toHaveTextContent("Suppressed for a small cohort");
       expect(evidence).toHaveTextContent("0.6–1.17 mg/dL");
@@ -2169,13 +2172,22 @@ describe("server mapping pages", () => {
     expect(await screen.findByRole("table", { name: "Athena Mapped mappings" })).toBeInTheDocument();
   });
 
-  it("does not offer a sort it cannot apply while grouped", async () => {
+  it("offers Seen and Source description sorting while grouped", async () => {
     renderBrowse({ rollup: true, groups: { Unmapped: [entry()] } });
+    fireEvent.click(await screen.findByLabelText("Group by label"));
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", {
+      params: expect.objectContaining({ rollup: 1 }),
+    }));
     const table = await screen.findByRole("table", { name: "Unmapped mappings" });
-    // Grouped entries are always ordered by summed Seen; browse validates
-    // order_<index> and then ignores it.
-    expect(within(table).queryByRole("button", { name: "Seen" })).not.toBeInTheDocument();
-    expect(within(table).getByText("Seen").closest("th")).toHaveAttribute("aria-sort", "none");
+    expect(within(table).getByTitle("Sort Unmapped by Seen").closest("th")).toHaveAttribute("aria-sort", "descending");
+    const descriptionSort = within(table).getByTitle("Sort Unmapped by Source description");
+    expect(descriptionSort).toBeInTheDocument();
+    expect(within(table).queryByTitle("Sort Unmapped by Source code")).not.toBeInTheDocument();
+    fireEvent.click(descriptionSort);
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", {
+      params: expect.objectContaining({ rollup: 1, page_0: 1, order_0: "source_code_description" }),
+    }));
+    expect(descriptionSort.closest("th")).toHaveAttribute("aria-sort", "ascending");
   });
 
   it("requests the next page and sorts the full section on the server", async () => {

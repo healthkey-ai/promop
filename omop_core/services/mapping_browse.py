@@ -5,7 +5,7 @@ from rest_framework.exceptions import ValidationError
 
 from omop_core.services import source_vocabularies as vocab
 from omop_core.services.mapping_destinations import with_destination_counts
-from omop_core.services.mapping_rollup import count_groups, group_entries
+from omop_core.services.mapping_rollup import GROUP_ORDER_FIELDS, count_groups, group_entries
 from omop_core.services.source_retirement import mapping_source_retirement
 
 OVERALL = '__overall__'
@@ -309,6 +309,10 @@ def browse_mappings(mappings, params, serialize):
             raise ValidationError({'order': 'Unknown sort column.'})
         total = section_totals[index]
         if rollup:
+            if order.lstrip('-') not in GROUP_ORDER_FIELDS:
+                raise ValidationError({
+                    'order': 'Grouped queues can only sort by Seen or Source description.',
+                })
             # Pagination counts groups, not rows -- a page of 100 rows ordered
             # by a group's summed Seen would cut groups in half, and the whole
             # point is that one entry is one decision. Count first so an
@@ -316,7 +320,7 @@ def browse_mappings(mappings, params, serialize):
             # a second aggregate.
             group_total = count_groups(query)
             page = min(requested_page, max(1, (group_total + PAGE_SIZE - 1) // PAGE_SIZE))
-            groups[section] = group_entries(query, page, PAGE_SIZE)
+            groups[section] = group_entries(query, page, PAGE_SIZE, order=order)
             pages[section] = dict(page=page, page_size=PAGE_SIZE, total=group_total)
             continue
         page = min(requested_page, max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE))

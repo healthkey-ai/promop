@@ -13,9 +13,9 @@ def row(code, description='', seen=0, **kwargs):
         **{'source_vocabulary_id': 'EPIC', 'status': 'proposed', **kwargs})
 
 
-def entries(page=1, page_size=100):
+def entries(page=1, page_size=100, order='-occurrence_count'):
     qs = SourceCodeConceptMapping.objects.all()
-    return group_entries(qs, page, page_size), count_groups(qs)
+    return group_entries(qs, page, page_size, order=order), count_groups(qs)
 
 
 def test_codes_sharing_a_label_become_one_entry_carrying_their_summed_seen():
@@ -65,6 +65,19 @@ def test_entries_are_ordered_by_summed_seen_not_by_the_largest_member():
         row(f'ALB{i}', 'Albumin', seen=100)
     found, _ = entries()
     assert [(e['label'], e['seen']) for e in found] == [('albumin', 300), ('hourlyroundingbundle', 250)]
+
+
+@pytest.mark.parametrize('order, expected', [
+    ('source_code_description', ['Albumin', 'Ferritin', 'Zinc']),
+    ('-source_code_description', ['Zinc', 'Ferritin', 'Albumin']),
+    ('occurrence_count', ['Ferritin', 'Zinc', 'Albumin']),
+])
+def test_entries_can_sort_by_description_or_seen(order, expected):
+    row('Z', 'zinc', seen=2)
+    row('A', 'Albumin', seen=3)
+    row('F', 'Ferritin', seen=1)
+    found, _ = entries(order=order)
+    assert [entry['description'].title() for entry in found] == expected
 
 
 def test_rows_with_no_label_stay_separate_instead_of_becoming_one_group():
@@ -217,6 +230,25 @@ def test_rollup_returns_one_entry_per_label_and_pages_by_group(api):
     assert [(e['label'], e['members'], e['seen']) for e in unmapped] == [
         ('albumin', 3, 30), ('ferritin', 1, 5)]
     assert rolled['pages']['Unmapped']['total'] == 2
+
+
+def test_rollup_api_applies_description_order_before_pagination(api):
+    browse, _ = api
+    row('Z', 'Zinc', seen=20)
+    row('A', 'Albumin', seen=10)
+    row('F', 'Ferritin', seen=30)
+    rolled = browse(rollup='1', order_0='source_code_description').data
+    assert [entry['description'] for entry in rolled['groups']['Unmapped']] == [
+        'Albumin', 'Ferritin', 'Zinc',
+    ]
+
+
+def test_rollup_api_rejects_row_only_sort_fields(api):
+    browse, _ = api
+    row('A', 'Albumin', seen=10)
+    response = browse(rollup='1', order_0='source_code')
+    assert response.status_code == 400
+    assert response.data['order'] == 'Grouped queues can only sort by Seen or Source description.'
 
 
 def test_expanding_an_entry_returns_its_codes_newest_volume_first(api):

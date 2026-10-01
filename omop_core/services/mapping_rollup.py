@@ -20,15 +20,22 @@ mappable in a single click. Each such row therefore gets a synthetic key of its
 own, ``:<pk>``. The ``:`` is deliberate: it is outside the ``[a-z0-9%#]`` set a
 real key is built from, so a synthetic key can never collide with a label.
 
-Ordering is by summed occurrence -- records retired per curated decision, which
-is the question a curator is really answering.
+The review queue can order groups by summed occurrence or by their displayed
+description. Ordering happens here, before pagination, so pages remain stable.
 """
-from django.db.models import CharField, Count, Max, Min, Q, Sum, Value
-from django.db.models.functions import Cast, Coalesce, Concat
+from django.db.models import CharField, Count, F, Max, Min, Q, Sum, Value
+from django.db.models.functions import Cast, Coalesce, Concat, Lower
 
 #: Separates a synthetic single-row key from a real label. Outside the
 #: character set source_labels.normalise keeps, so the two cannot collide.
 SYNTHETIC_PREFIX = ':'
+
+# Group rows do not have most of a source-code row's sortable fields. These
+# are the two group-level values the review table can honestly order by.
+GROUP_ORDER_FIELDS = {
+    'occurrence_count': 'seen',
+    'source_code_description': 'description_sort',
+}
 
 
 def _group_key():
@@ -79,8 +86,10 @@ def _grouped(queryset):
             # will not compile.
             max_id=Max('id'),
         )
-        .annotate(seen=Coalesce('supplied_group_seen', 'summed_seen', Value(0)))
-        .order_by('-seen', 'group_key')
+        .annotate(
+            seen=Coalesce('supplied_group_seen', 'summed_seen', Value(0)),
+            description_sort=Lower('description'),
+        )
     )
 
 
@@ -89,14 +98,19 @@ def count_groups(queryset):
     return _grouped(queryset).count()
 
 
-def group_entries(queryset, page, page_size):
-    """One page of entries for a section, ordered by summed Seen.
+def group_entries(queryset, page, page_size, order='-occurrence_count'):
+    """One ordered page of entries for a section.
 
     Entries are dicts, not model instances: a group has no single row behind
     it. A one-member group carries ``mapping_id`` so the client can act on it
     the way it acts on a row.
     """
-    grouped = _grouped(queryset)
+    field = GROUP_ORDER_FIELDS.get(order.lstrip('-'))
+    if field is None:
+        raise ValueError('Unknown group sort column.')
+    ordering = (F(field).desc(nulls_last=True) if order.startswith('-')
+                else F(field).asc(nulls_last=True))
+    grouped = _grouped(queryset).order_by(ordering, 'group_key')
     start = (page - 1) * page_size
     return [
         {

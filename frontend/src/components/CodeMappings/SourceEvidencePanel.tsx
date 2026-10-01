@@ -53,6 +53,51 @@ function number(value: number | null | undefined) {
   return value == null ? "—" : new Intl.NumberFormat(undefined, { maximumFractionDigits: 5 }).format(value);
 }
 
+function DistributionMiniGraph({ distribution }: { distribution: SourceDistribution }) {
+  const supplied = distributionOrder.flatMap(([key, label]) => {
+    const value = distribution[key];
+    return typeof value === "number" && Number.isFinite(value) ? [{ key, label, value }] : [];
+  });
+  if (supplied.length === 0) return <>No numeric distribution supplied</>;
+
+  const values = supplied.map((point) => point.value);
+  const low = Math.min(...values);
+  const high = Math.max(...values);
+  const x = (value: number) => high === low ? 100 : 8 + ((value - low) / (high - low)) * 184;
+  const point = (key: keyof SourceDistribution) => {
+    const value = distribution[key];
+    return typeof value === "number" && Number.isFinite(value) ? x(value) : null;
+  };
+  const minX = point("min") ?? x(low);
+  const maxX = point("max") ?? x(high);
+  const p5X = point("p5");
+  const p25X = point("p25");
+  const medianX = point("p50");
+  const p75X = point("p75");
+  const p95X = point("p95");
+  const summary = supplied.map(({ label, value }) => `${label} ${number(value)}`).join("; ");
+
+  return <div role="img" aria-label={`Value distribution: ${summary}`} title={summary} className="min-w-[210px] max-w-xs">
+    <svg viewBox="0 0 200 24" className="h-6 w-full" aria-hidden="true" focusable="false">
+      <line x1={minX} x2={maxX} y1="12" y2="12" stroke="currentColor" className="text-slate-300" strokeWidth="2" />
+      {p5X != null && p95X != null &&
+        <line x1={p5X} x2={p95X} y1="12" y2="12" stroke="currentColor" className="text-sky-500" strokeWidth="3" />}
+      {p25X != null && p75X != null &&
+        <rect x={Math.min(p25X, p75X)} y="6" width={Math.max(2, Math.abs(p75X - p25X))} height="12" rx="2"
+          fill="currentColor" className="text-sky-200" stroke="currentColor" strokeWidth="1" />}
+      <circle cx={minX} cy="12" r="2.5" fill="currentColor" className="text-slate-500" />
+      <circle cx={maxX} cy="12" r="2.5" fill="currentColor" className="text-slate-500" />
+      {medianX != null &&
+        <line x1={medianX} x2={medianX} y1="4" y2="20" stroke="currentColor" className="text-sky-900" strokeWidth="2" />}
+    </svg>
+    <div className="flex justify-between gap-2 text-[10px] text-slate-500" aria-hidden="true">
+      <span>Min {number(distribution.min ?? low)}</span>
+      {distribution.p50 != null && <span>Median {number(distribution.p50)}</span>}
+      <span>Max {number(distribution.max ?? high)}</span>
+    </div>
+  </div>;
+}
+
 function Stat({ label, value, detail }: { label: string; value: string; detail?: string }) {
   return <div className="rounded border border-slate-200 bg-white px-3 py-2">
     <dt className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{label}</dt>
@@ -121,10 +166,7 @@ export default function SourceEvidencePanel({ evidence, loading, error }: {
                 {unit.suppressed
                   ? <span className="font-medium text-amber-700">Suppressed for a small cohort</span>
                   : unit.distribution
-                    ? <dl className="flex flex-wrap gap-x-3 gap-y-1">
-                        {distributionOrder.map(([key, label]) => unit.distribution?.[key] == null ? null :
-                          <div key={key} className="flex gap-1"><dt className="text-slate-500">{label}</dt><dd>{number(unit.distribution[key])}</dd></div>)}
-                      </dl>
+                    ? <DistributionMiniGraph distribution={unit.distribution} />
                     : "No numeric distribution supplied"}
               </td>
             </tr>)}
