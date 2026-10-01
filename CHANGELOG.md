@@ -65,6 +65,14 @@ All notable changes to PRomop are documented here.
 
 ### Changed
 
+- **Faster backend CI provisioning** — ordinary pytest runs no longer download
+  Chromium or install its operating-system libraries. A separate path-gated
+  smoke job performs the real browser install and launch when Playwright or
+  deployment packaging changes. Backend and async jobs use a cached, pinned
+  `uv` installer. Pytest retains its faster file-grouped xdist scheduler and
+  slow-test report after CI measurement showed work stealing was slower for
+  this database-heavy suite (#1678).
+
 - **Render staging prepares once per deploy** — the staging web service gains a
   `preDeployCommand` running `scripts/prepare-deployment.sh`, the release phase
   Cloud Run already has via its gated `<service>-migrate` job. A failure now

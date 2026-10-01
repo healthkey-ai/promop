@@ -102,13 +102,27 @@ def test_event_selection_and_job_output(tmp_path, monkeypatch, event_name, paths
             assert (base, head, merge_base) == ("before-push", "after-push", False)
         else:
             assert (base, head, merge_base) == ("base", "head", True)
-        return filter_module.requires_async_e2e(paths), filter_module.is_docs_only(paths), filter_module.requires_backend(paths)
+        return (
+            filter_module.requires_async_e2e(paths),
+            filter_module.is_docs_only(paths),
+            filter_module.requires_backend(paths),
+            filter_module.requires_browser_runtime(paths),
+        )
 
     monkeypatch.setattr(filter_module, "select_checks", select_checks)
     filter_module.main()
     docs_only = event_name in {"pull_request", "push"} and filter_module.is_docs_only(paths)
     backend = event_name not in {"pull_request", "push"} or filter_module.requires_backend(paths)
-    assert output.read_text() == f"async_e2e={expected}\ndocs_only={str(docs_only).lower()}\nbackend={str(backend).lower()}\n"
+    browser_runtime = (
+        event_name not in {"pull_request", "push"}
+        or filter_module.requires_browser_runtime(paths)
+    )
+    assert output.read_text() == (
+        f"async_e2e={expected}\n"
+        f"docs_only={str(docs_only).lower()}\n"
+        f"backend={str(backend).lower()}\n"
+        f"browser_runtime={str(browser_runtime).lower()}\n"
+    )
 
 
 def test_new_branch_push_runs_without_a_comparison(tmp_path, monkeypatch):
@@ -119,7 +133,9 @@ def test_new_branch_push_runs_without_a_comparison(tmp_path, monkeypatch):
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
     monkeypatch.setenv("GITHUB_OUTPUT", str(output))
     filter_module.main()
-    assert output.read_text() == "async_e2e=true\ndocs_only=false\nbackend=true\n"
+    assert output.read_text() == (
+        "async_e2e=true\ndocs_only=false\nbackend=true\nbrowser_runtime=true\n"
+    )
 
 
 @pytest.mark.parametrize("path,before,after,expected", [
@@ -198,7 +214,7 @@ def test_docs_diff_uses_merge_base_and_includes_deleted_code_on_rename(tmp_path,
     (tmp_path / "README.md").write_text("Guide\n")
     git("add", ".")
     git("commit", "-qm", "docs PR")
-    assert filter_module.select_checks(base, "HEAD") == (False, True, False)
+    assert filter_module.select_checks(base, "HEAD") == (False, True, False, False)
     before_push = git("rev-parse", "HEAD")
     (tmp_path / "docs").mkdir()
     git("mv", "app.py", "docs/example.md")
@@ -255,11 +271,42 @@ def test_empty_diff_keeps_backend():
     assert filter_module.requires_backend([])
 
 
-@pytest.mark.parametrize('result,passes', [
-    ('success', True), ('failure', False), ('cancelled', False),
-    ('skipped', False), ('', False),
+@pytest.mark.parametrize('path', [
+    'Dockerfile', 'Dockerfile.gcp', 'render.yaml', 'runtime.txt',
+    'requirements.txt', 'requirements-athena-scrape.txt',
+    'scripts/install_athena_browser.py', 'tests/test_athena_browser_build.py',
+    '.github/workflows/ci.yml', '.github/scripts/async_e2e_changes.py',
 ])
-def test_required_backend_gate_rejects_incomplete_matrix(result, passes):
+def test_browser_packaging_changes_run_runtime_smoke(path):
+    assert filter_module.requires_browser_runtime([path])
+
+
+@pytest.mark.parametrize('paths', [
+    ['omop_core/models.py'],
+    ['tests/test_models.py', 'patient_portal/api/views.py'],
+    ['frontend/src/App.tsx'],
+    ['docs/guide.md'],
+])
+def test_ordinary_changes_skip_browser_runtime_smoke(paths):
+    assert not filter_module.requires_browser_runtime(paths)
+
+
+def test_unknown_browser_diff_runs_runtime_smoke():
+    assert filter_module.requires_browser_runtime([])
+
+
+@pytest.mark.parametrize('backend_result,browser_required,browser_result,passes', [
+    ('success', 'false', 'skipped', True),
+    ('success', 'true', 'success', True),
+    ('success', 'true', 'failure', False),
+    ('success', 'false', 'failure', False),
+    ('failure', 'false', 'skipped', False),
+    ('cancelled', 'false', 'skipped', False),
+    ('skipped', 'false', 'skipped', False),
+    ('', 'false', 'skipped', False),
+])
+def test_required_backend_gate_rejects_incomplete_matrix(
+        backend_result, browser_required, browser_result, passes):
     import os
     import yaml
     workflow = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
@@ -267,12 +314,33 @@ def test_required_backend_gate_rejects_incomplete_matrix(result, passes):
     jobs = workflow['jobs']
     gate = jobs['backend']
     assert gate['name'] == 'Backend tests'
-    assert set(gate['needs']) == {'changes', 'backend_suites'}
+    assert set(gate['needs']) == {'changes', 'backend_suites', 'athena_browser'}
     assert 'always()' in gate['if']
     assert set(jobs['backend_suites']['strategy']['matrix']['suite']) == {'django', 'pytest'}
     command = gate['steps'][0]['run']
-    process = subprocess.run(['bash', '-c', command], env={**os.environ, 'BACKEND_RESULT': result})
+    process = subprocess.run(['bash', '-c', command], env={
+        **os.environ,
+        'CHANGES_RESULT': 'success',
+        'BACKEND_RESULT': backend_result,
+        'BROWSER_REQUIRED': browser_required,
+        'BROWSER_RESULT': browser_result,
+    })
     assert (process.returncode == 0) is passes
+
+
+def test_required_backend_gate_runs_browser_when_detection_fails():
+    import os
+    import yaml
+    workflow = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
+    command = workflow['jobs']['backend']['steps'][0]['run']
+    process = subprocess.run(['bash', '-c', command], env={
+        **os.environ,
+        'CHANGES_RESULT': 'failure',
+        'BACKEND_RESULT': 'success',
+        'BROWSER_REQUIRED': '',
+        'BROWSER_RESULT': 'success',
+    })
+    assert process.returncode == 0
 
 
 def test_backend_suites_are_bounded_and_do_not_migrate_twice():
@@ -287,3 +355,30 @@ def test_backend_suites_are_bounded_and_do_not_migrate_twice():
     )
     assert '--parallel auto' in django_command
     assert '--timing' in django_command
+    assert all(step.get('name') != 'Verify deployed Athena browser runtime' for step in steps)
+    setup_uv = next(step for step in steps if step.get('name') == 'Set up cached uv')
+    assert setup_uv['uses'] == 'astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7'
+    assert setup_uv['with']['version'] == '0.12.20'
+    assert setup_uv['with']['enable-cache'] is True
+    install = next(step['run'] for step in steps if step.get('name') == 'Install dependencies')
+    assert install == 'uv pip install --system -r requirements.txt'
+    pytest_command = next(
+        step['run'] for step in steps if step.get('name') == 'Run tests (pytest)'
+    )
+    assert '--dist loadfile' in pytest_command
+    assert '--durations=20' in pytest_command
+
+
+def test_browser_runtime_is_a_separate_path_gated_job():
+    import yaml
+    workflow = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
+    job = workflow['jobs']['athena_browser']
+    assert job['needs'] == 'changes'
+    assert "outputs.browser_runtime == 'true'" in job['if']
+    assert job['timeout-minutes'] == 20
+    steps = job['steps']
+    setup_uv = next(step for step in steps if step.get('name') == 'Set up cached uv')
+    assert setup_uv['uses'] == 'astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7'
+    assert setup_uv['with']['version'] == '0.12.20'
+    smoke = next(step for step in steps if step.get('name') == 'Install and launch Athena Chromium')
+    assert smoke['run'] == 'python scripts/install_athena_browser.py --with-deps'

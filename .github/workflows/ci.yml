@@ -22,6 +22,7 @@ jobs:
       async_e2e: ${{ steps.filter.outputs.async_e2e }}
       docs_only: ${{ steps.filter.outputs.docs_only }}
       backend: ${{ steps.filter.outputs.backend }}
+      browser_runtime: ${{ steps.filter.outputs.browser_runtime }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -78,16 +79,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: pip
+
+      - name: Set up cached uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.12.20'
+          enable-cache: true
+          cache-dependency-glob: requirements.txt
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Verify deployed Athena browser runtime
-        if: matrix.suite == 'pytest'
-        env:
-          PLAYWRIGHT_BROWSERS_PATH: '0'
-        run: python scripts/install_athena_browser.py --with-deps
+        run: uv pip install --system -r requirements.txt
 
       # pytest runs with --no-migrations, so the test DB is built by reflecting
       # model state. That recreates concept's GIN trigram index during CREATE
@@ -125,12 +126,48 @@ jobs:
       # own PostgreSQL/test database while retaining migrations and deploy checks.
       - name: Run tests (pytest)
         if: matrix.suite == 'pytest'
+        # CI measured worksteal at 6m46s versus loadfile's 5m47s baseline for
+        # this database-heavy suite. Keep the faster scheduler and its timing
+        # report so any future sharding decision remains evidence-led.
         run: pytest -n auto --dist loadfile -q --durations=20
+
+  athena_browser:
+    name: Athena browser runtime
+    needs: changes
+    # Unit tests fake Playwright. Pay for a real Chromium install and launch
+    # only when browser/deployment packaging changes or detection is uncertain.
+    if: >-
+      !cancelled() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.browser_runtime == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up cached uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.12.20'
+          enable-cache: true
+          cache-dependency-glob: requirements-athena-scrape.txt
+
+      - name: Install Playwright
+        run: uv pip install --system -r requirements-athena-scrape.txt
+
+      - name: Install and launch Athena Chromium
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: '0'
+        run: python scripts/install_athena_browser.py --with-deps
 
 
   backend:
     name: Backend tests
-    needs: [changes, backend_suites]
+    needs: [changes, backend_suites, athena_browser]
     # Keep the existing required check. Never turn a failed/cancelled matrix
     # into a skipped green gate; only a recognized frontend/docs diff skips it.
     if: >-
@@ -140,8 +177,18 @@ jobs:
     steps:
       - name: Require both backend suites to pass
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
           BACKEND_RESULT: ${{ needs.backend_suites.result }}
-        run: test "$BACKEND_RESULT" = success
+          BROWSER_REQUIRED: ${{ needs.changes.outputs.browser_runtime }}
+          BROWSER_RESULT: ${{ needs.athena_browser.result }}
+        run: |
+          set -e
+          test "$BACKEND_RESULT" = success
+          if [ "$CHANGES_RESULT" != success ] || [ "$BROWSER_REQUIRED" = true ]; then
+            test "$BROWSER_RESULT" = success
+          else
+            test "$BROWSER_RESULT" = skipped
+          fi
 
   application_ci:
     name: Application CI
@@ -209,10 +256,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: pip
+
+      - name: Set up cached uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.12.20'
+          enable-cache: true
+          cache-dependency-glob: requirements.txt
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: uv pip install --system -r requirements.txt
 
       - name: Enable database extensions on template1 (required by the pytest suite)
         env:
