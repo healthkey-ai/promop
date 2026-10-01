@@ -59,7 +59,8 @@ export default function CodeMappingUploadDialog({ defaultProvenance, onClose, on
         <div className="space-y-4 px-5 py-5">
           <p className="text-sm text-slate-600">
             CSV headers: <code>source code</code>, <code>source description</code>, optional <code>seen count</code>,
-            and optional <code>destination concept ID</code>. Rows with a destination are imported as approved mappings.
+            optional <code>destination concept ID</code>, and optional <code>state</code>. State accepts <code>Proposed</code> or
+            {" "}<code>Approved</code>; blank defaults to Proposed.
           </p>
           {error && <div role="alert" className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
           <div className="block text-sm font-medium text-slate-800">

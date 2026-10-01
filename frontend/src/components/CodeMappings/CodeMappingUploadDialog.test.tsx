@@ -22,6 +22,7 @@ describe("CodeMappingUploadDialog", () => {
     expect(screen.getByLabelText("Provenance")).toHaveValue("curator@example.com");
     expect(screen.getByText("Choose file")).toBeVisible();
     expect(screen.getByText(/destination concept ID/i)).toBeVisible();
+    expect(screen.getByText(/blank defaults to Proposed/i)).toBeVisible();
     fireEvent.change(screen.getByLabelText("Source vocabulary"), { target: { value: "VendorLab" } });
     const file = new File(["source code,source description\nA01,Alpha\n"], "codes.csv", { type: "text/csv" });
     fireEvent.change(screen.getByLabelText("CSV file"), { target: { files: [file] } });

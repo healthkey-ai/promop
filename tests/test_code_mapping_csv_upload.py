@@ -45,15 +45,47 @@ def test_two_column_upload_defaults_seen_to_zero_and_provenance_to_email(staff_c
 
 
 @pytest.mark.django_db
-def test_optional_destination_concept_id_creates_approved_mapping(staff_client):
+@pytest.mark.parametrize(('state_header', 'state_value'), [
+    ('', ''),
+    (',state', ','),
+])
+def test_destination_without_or_with_blank_state_creates_proposed_mapping(
+    staff_client, state_header, state_value,
+):
+    client, _ = staff_client
+    destination = ConceptFactory(domain_id='Measurement', vocabulary_id='LOINC')
+
+    response = client.post(URL, {
+        'file': csv_file(
+            f'source code,source description,seen count,destination concept ID{state_header}\n'
+            f'A01,Albumin,8,{destination.pk}{state_value}\n'
+            f'B02,Needs review,2,{state_value}\n'
+        ),
+        'source_vocabulary_id': 'VendorLab',
+        'provenance': 'reviewed-catalogue',
+    }, format='multipart')
+
+    assert response.status_code == 201, response.data
+    proposed = SourceCodeConceptMapping.objects.get(source_code='A01')
+    assert proposed.target_concept == destination
+    assert proposed.destination_vocabulary_id == 'LOINC'
+    assert proposed.domain_id == 'Measurement'
+    assert proposed.omop_table == 'measurement'
+    assert proposed.status == 'proposed'
+    assert proposed.reviewer is None
+    assert proposed.reviewed_at is None
+    assert SourceCodeConceptMapping.objects.get(source_code='B02').status == 'proposed'
+
+
+@pytest.mark.django_db
+def test_approved_state_creates_approved_mapping(staff_client):
     client, user = staff_client
     destination = ConceptFactory(domain_id='Measurement', vocabulary_id='LOINC')
 
     response = client.post(URL, {
         'file': csv_file(
-            'source code,source description,seen count,destination concept ID\n'
-            f'A01,Albumin,8,{destination.pk}\n'
-            'B02,Needs review,2,\n'
+            'source code,source description,seen count,destination concept ID,state\n'
+            f'A01,Albumin,8,{destination.pk}, Approved \n'
         ),
         'source_vocabulary_id': 'VendorLab',
         'provenance': 'reviewed-catalogue',
@@ -62,13 +94,9 @@ def test_optional_destination_concept_id_creates_approved_mapping(staff_client):
     assert response.status_code == 201, response.data
     approved = SourceCodeConceptMapping.objects.get(source_code='A01')
     assert approved.target_concept == destination
-    assert approved.destination_vocabulary_id == 'LOINC'
-    assert approved.domain_id == 'Measurement'
-    assert approved.omop_table == 'measurement'
     assert approved.status == 'approved'
     assert approved.reviewer == user
     assert approved.reviewed_at is not None
-    assert SourceCodeConceptMapping.objects.get(source_code='B02').status == 'proposed'
 
 
 @pytest.mark.django_db
@@ -103,8 +131,8 @@ def test_destination_upload_repairs_metadata_without_reassigning_reviewer(staff_
 
     response = client.post(URL, {
         'file': csv_file(
-            'source code,source description,destination concept ID\n'
-            f'A01,Albumin,{destination.pk}\n'
+            'source code,source description,destination concept ID,state\n'
+            f'A01,Albumin,{destination.pk},Approved\n'
         ),
         'source_vocabulary_id': 'VendorLab',
         'provenance': 'reviewed-catalogue',
@@ -116,6 +144,86 @@ def test_destination_upload_repairs_metadata_without_reassigning_reviewer(staff_
     assert mapping.domain_id == 'Measurement'
     assert mapping.omop_table == 'measurement'
     assert mapping.reviewer == original_reviewer
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('state,destination,message', [
+    ('Rejected', 'destination', 'Approved, Proposed, or blank'),
+    ('Approved', '', 'requires a destination concept ID'),
+])
+def test_invalid_state_rejects_the_entire_upload(
+    staff_client, state, destination, message,
+):
+    client, _ = staff_client
+    concept = ConceptFactory(domain_id='Measurement', vocabulary_id='LOINC')
+    destination_value = str(concept.pk) if destination else ''
+    response = client.post(URL, {
+        'file': csv_file(
+            'source code,source description,destination concept ID,state\n'
+            f'GOOD,Would otherwise import,,Proposed\n'
+            f'BAD,Invalid state,{destination_value},{state}\n'
+        ),
+        'source_vocabulary_id': 'VendorLab',
+        'provenance': 'reviewed-catalogue',
+    }, format='multipart')
+
+    assert response.status_code == 400
+    assert response.data['errors'][0]['row'] == 3
+    assert response.data['errors'][0]['field'] == 'state'
+    assert message in response.data['errors'][0]['detail']
+    assert not SourceCodeConceptMapping.objects.exists()
+
+
+@pytest.mark.django_db
+def test_non_approver_can_import_proposed_destination_but_not_approved(
+    monkeypatch,
+):
+    user = Identity.objects.create_user(email='analyst@example.com', password='x')
+    client = APIClient()
+    client.force_authenticate(user=user)
+    destination = ConceptFactory(domain_id='Measurement', vocabulary_id='LOINC')
+    protected = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id='VendorLab', source_code='C03',
+        target_concept=destination, status='approved', reviewer=user,
+    )
+    monkeypatch.setattr(
+        'patient_portal.api.views._can_manage_field_mappings', lambda _user: True,
+    )
+    monkeypatch.setattr(
+        'patient_portal.api.views._can_approve_mappings', lambda _user: False,
+    )
+
+    proposed = client.post(URL, {
+        'file': csv_file(
+            'source code,source description,destination concept ID,state\n'
+            f'A01,Albumin,{destination.pk},Proposed\n'
+        ),
+        'source_vocabulary_id': 'VendorLab', 'provenance': 'analyst-feed',
+    }, format='multipart')
+    approved = client.post(URL, {
+        'file': csv_file(
+            'source code,source description,destination concept ID,state\n'
+            f'B02,Albumin,{destination.pk},Approved\n'
+        ),
+        'source_vocabulary_id': 'VendorLab', 'provenance': 'analyst-feed',
+    }, format='multipart')
+    demotion = client.post(URL, {
+        'file': csv_file(
+            'source code,source description,destination concept ID,state\n'
+            f'C03,Albumin,{destination.pk},Proposed\n'
+        ),
+        'source_vocabulary_id': 'VendorLab', 'provenance': 'analyst-feed',
+    }, format='multipart')
+
+    assert proposed.status_code == 201, proposed.data
+    assert SourceCodeConceptMapping.objects.get(source_code='A01').status == 'proposed'
+    assert approved.status_code == 400
+    assert 'Only org admins and staff' in approved.data['detail']
+    assert not SourceCodeConceptMapping.objects.filter(source_code='B02').exists()
+    assert demotion.status_code == 400
+    assert 'change an approved mapping' in demotion.data['errors'][0]['detail']
+    protected.refresh_from_db()
+    assert protected.status == 'approved'
 
 
 @pytest.mark.django_db
