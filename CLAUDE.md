@@ -512,8 +512,9 @@ this project used before. Two requirements force it:
   without the extension. That is a collection-time error on *every* pytest test,
   not a few. Homebrew's `pgvector` bottle builds only for postgresql@17 and @18,
   so @14 cannot have it.
-* **CI parity.** CI's Postgres service is `pgvector/pgvector:pg16`, so pgvector
-  is present there; a local server without it fails tests that CI passes.
+* **CI parity.** CI's Postgres service is `pgvector/pgvector:0.8.6-pg18`,
+  matching the local PostgreSQL major version and providing pgvector. A local
+  server without pgvector fails tests that CI passes.
 
 Port **5433**, because Postgres.app's PostgreSQL 14 commonly holds 5432 on this
 machine. Nothing needs 5432 — set `DATABASE_URL` to 5433 everywhere locally.
