@@ -96,6 +96,25 @@ def _unit_counts(mappings):
     return result
 
 
+def _imported_unit_counts(mappings):
+    """Normalize unit evidence carried by an imported source-code inventory."""
+    result = {}
+    for mapping in mappings:
+        counts = Counter()
+        for evidence in mapping.source_unit_evidence or []:
+            if not isinstance(evidence, dict):
+                continue
+            normalized = unit_code(evidence.get('code') or evidence.get('display'))
+            try:
+                count = max(0, int(evidence.get('count') or 0))
+            except (TypeError, ValueError):
+                count = 0
+            if normalized and count:
+                counts[normalized] += count
+        result[mapping.pk] = counts
+    return result
+
+
 def unit_consistency_for_mappings(mappings, *, destination=None):
     """Return unit evidence for mappings, optionally against one destination.
 
@@ -119,9 +138,19 @@ def unit_consistency_for_mappings(mappings, *, destination=None):
     preferences = CanonicalUnitPreference.objects.filter(
         concept_id__in=concepts,
     ).in_bulk()
-    observed_by_mapping = _unit_counts([
+    measurement_mappings = [
         mapping for mapping in mappings if mapping.omop_table == 'measurement'
-    ])
+    ]
+    live_units = _unit_counts(measurement_mappings)
+    imported_units = _imported_unit_counts(measurement_mappings)
+    # Independent exports can describe the same clinical records. Counter's
+    # union takes the larger count per normalized unit, retaining new live
+    # units without inflating overlapping evidence by summing it twice.
+    observed_by_mapping = {
+        mapping.pk: live_units.get(mapping.pk, Counter())
+        | imported_units.get(mapping.pk, Counter())
+        for mapping in measurement_mappings
+    }
 
     reports = []
     for mapping in mappings:
