@@ -4,7 +4,7 @@ from django.db.models import Q
 
 class Migration(migrations.Migration):
     dependencies = [
-        ('omop_core', '0271_source_code_mapping_organization'),
+        ('omop_core', '0272_sourcecodeconceptmapping_suggested_action'),
     ]
 
     operations = [
