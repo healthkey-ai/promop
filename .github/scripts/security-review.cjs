@@ -59,9 +59,12 @@ const CONTROL_PATHS = [
   // while the pins cannot be relaxed in the same ungated change:
   // `test_web_startup` asserts the exact command sequence of start.sh, so
   // deleting its `check --deploy` line turns the suite red, and the render
-  // blueprint tests pin DEBUG, CORS_ALLOWED_ORIGINS, SERVICE_AUTH_SCOPES and
-  // the broker's empty ipAllowList. This list is matched before TEST_PATHS, so
-  // naming them here is what overrides the test exemption.
+  // blueprint tests pin DEBUG, SERVICE_AUTH_SCOPES and the broker's empty
+  // ipAllowList. For ALLOWED_HOSTS and CORS_ALLOWED_ORIGINS they reject only a
+  // wildcard written into the blueprint; production supplies both from the
+  // dashboard (`sync: false`), so their values are not pinned. This list is
+  // matched before TEST_PATHS, so naming them here is what overrides the test
+  // exemption.
   'tests/test_web_startup.py', 'tests/test_deployment_startup_contract.py',
   'tests/test_render_*.py',
   // The sole pin on ops/artemis/Dockerfile: USER artemis, no EXPOSE, and the
@@ -87,11 +90,17 @@ const CONTROL_PATHS = [
 // ran in production.
 //
 // What the argument still does not reach, and is accepted risk: the root
-// Dockerfile and Dockerfile.gcp carry no security pin of their own (only the
-// wsgi entrypoint and build command are asserted), .dockerignore has none, and
-// no test constrains a service's buildCommand. Bandit and gitleaks cover the
-// secret case. The root URLconf is the one path the pinning argument cannot
-// cover at all; it is gated above with the rest of its package.
+// Dockerfile, Procfile, nixpacks.toml and the compose files have no pin at
+// all, and nixpacks.toml's start command skips `check --deploy`. Dockerfile.gcp
+// has two assertions (wsgi entrypoint, build command), but they live in
+// tests/test_project_package_compatibility.py, which is not gated, so the file
+// and its pins can move together. .dockerignore has no pin, no test constrains
+// a service's buildCommand, and production ALLOWED_HOSTS and
+// CORS_ALLOWED_ORIGINS are reviewed by nothing here. Of the scanners, only
+// gitleaks reaches these files, and only for committed secrets; bandit scans
+// Python packages. docs/soc2/change-management.md records each of these. The
+// root URLconf is the one path the pinning argument cannot cover at all; it is
+// gated above with the rest of its package.
 //
 // Both dependency manifests are here, because the scanners answer a different
 // question than review does. `pip-audit -r requirements.txt` and Dependabot
