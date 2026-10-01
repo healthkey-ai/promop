@@ -15,6 +15,7 @@ import MintConceptDialog from "./MintConceptDialog";
 import ConceptInputDetails from "@/components/UI/ConceptInputDetails";
 import { useAuth } from "@/hooks/useAuth";
 import { HelpTip, Field, ReadOnlyField, INPUT_CLASS } from "@/components/UI/MappingFormPrimitives";
+import { confirmUnitOverride, unitConfirmation } from "./unitConfirmation";
 
 /**
  * Code Mapping: incoming source codes -> destination OMOP concepts.
@@ -1014,7 +1015,17 @@ export default function CodeMappingPage() {
       const endpoint = action === "suggest"
         ? "/v1/code-mappings/group/suggest/"
         : "/v1/code-mappings/group/action/";
-      const { data: started } = await api.post<SuggestRunProgress>(endpoint, payload);
+      let started: SuggestRunProgress;
+      try {
+        ({ data: started } = await api.post<SuggestRunProgress>(endpoint, payload));
+      } catch (err) {
+        const warning = unitConfirmation(err);
+        if (!warning) throw err;
+        if (!confirmUnitOverride(warning)) return;
+        ({ data: started } = await api.post<SuggestRunProgress>(endpoint, {
+          ...payload, confirm_unit_mismatch: true,
+        }));
+      }
       suggestRunRef.current = started.run_id;
       setSuggestRun(started);
       const finished = await pollSuggestRun(started);
@@ -1456,9 +1467,23 @@ export default function CodeMappingPage() {
         destination_concept_id: Number(form.destination_concept_id),
         target_concept_id: Number(form.destination_concept_id),
       };
-      const resp = selectedRow?.mapping_id
-        ? await api.patch(`/v1/code-mappings/${selectedRow.mapping_id}/`, payload)
-        : await api.post("/v1/code-mappings/", payload);
+      let resp;
+      try {
+        resp = selectedRow?.mapping_id
+          ? await api.patch(`/v1/code-mappings/${selectedRow.mapping_id}/`, payload)
+          : await api.post("/v1/code-mappings/", payload);
+      } catch (err) {
+        const warning = unitConfirmation(err);
+        if (!warning || !selectedRow?.mapping_id) throw err;
+        if (!confirmUnitOverride(warning)) {
+          setRepointing(null);
+          setSaving(false);
+          return;
+        }
+        resp = await api.patch(`/v1/code-mappings/${selectedRow.mapping_id}/`, {
+          ...payload, confirm_unit_mismatch: true,
+        });
+      }
       const repoint: RepointResult | null = resp.data?.repoint ?? null;
       applySavedMapping(resp.data);
       void refreshCurrent.current();
@@ -1642,7 +1667,7 @@ export default function CodeMappingPage() {
     const approving = row.status !== "approved";
     if (approving) setBanner(null);
     try {
-      const resp = await api.patch(`/v1/code-mappings/${row.mapping_id}/`, {
+      const payload = {
         domain_id: row.domain_id || row.destination_domain_id || "",
         source_vocabulary_id: row.source_vocabulary_id,
         source_code: row.source_code,
@@ -1652,7 +1677,18 @@ export default function CodeMappingPage() {
         omop_table: row.destination_omop_table,
         status: row.status === "approved" ? "proposed" : "approved",
         notes: row.notes,
-      });
+      };
+      let resp;
+      try {
+        resp = await api.patch(`/v1/code-mappings/${row.mapping_id}/`, payload);
+      } catch (err) {
+        const warning = unitConfirmation(err);
+        if (!warning) throw err;
+        if (!confirmUnitOverride(warning)) return;
+        resp = await api.patch(`/v1/code-mappings/${row.mapping_id}/`, {
+          ...payload, confirm_unit_mismatch: true,
+        });
+      }
       const repoint: RepointResult | null = resp.data?.repoint ?? null;
       applySavedMapping(resp.data);
       void refreshCurrent.current();

@@ -204,7 +204,8 @@ def concept_to_code_propose(request, concept_id):
 def concept_to_code_apply(request, concept_id, mapping_id):
     """One reviewed source per transaction, with an exact revision precondition."""
     from patient_portal.api.views import (
-        _check_mapping_lock, _upsert_source_code_mapping, MappingLocked,
+        _can_approve_mappings, _check_mapping_lock, _unit_confirmation_response,
+        _upsert_source_code_mapping, MappingLocked,
     )
     _authorize(request.user)
     if not isinstance(request.data, dict):
@@ -225,6 +226,12 @@ def concept_to_code_apply(request, concept_id, mapping_id):
     selected_status = request.data.get('status', 'proposed')
     if selected_status not in ('proposed', 'approved'):
         raise ValidationError({'status': 'Choose proposed or approved.'})
+    unit_warning = (
+        _unit_confirmation_response(row, concept, request.data)
+        if _can_approve_mappings(request.user) else None
+    )
+    if unit_warning is not None:
+        return unit_warning
     row, repoint = _upsert_source_code_mapping(concept, {
         'status': selected_status, 'domain_id': concept.domain_id, 'omop_table': table,
         'destination_vocabulary_id': concept.vocabulary_id,

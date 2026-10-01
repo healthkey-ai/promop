@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import api from '@/api/axios';
 import { destinationError } from './destinationSearch';
+import { confirmUnitOverride, unitConfirmation } from './unitConfirmation';
 
 type Concept = {
   concept_id: number; concept_name: string; concept_code: string;
@@ -219,13 +220,27 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting }: {
         if (!active.current) break;
         setProgress(`Reviewing ${index + 1} of ${batch.length}…`);
         try {
-          const { data: updated } = row.mapping_id === null
-            ? await api.post<Source>(`/v1/concept-to-code/${concept.concept_id}/mappings/`, {
+          let updated: Source;
+          if (row.mapping_id === null) {
+            ({ data: updated } = await api.post<Source>(`/v1/concept-to-code/${concept.concept_id}/mappings/`, {
               run_id: run?.run_id, source_vocabulary_id: row.source_vocabulary_id, source_code: row.source_code, status: 'proposed',
-            })
-            : await api.post<Source>(`/v1/concept-to-code/${concept.concept_id}/mappings/${row.mapping_id}/`, {
+            }));
+          } else {
+            const applyUrl = `/v1/concept-to-code/${concept.concept_id}/mappings/${row.mapping_id}/`;
+            const applyPayload = {
               status: approve ? 'approved' : 'proposed', expected_updated_at: row.updated_at,
-            });
+            };
+            try {
+              ({ data: updated } = await api.post<Source>(applyUrl, applyPayload));
+            } catch (failure) {
+              const warning = unitConfirmation(failure);
+              if (!warning) throw failure;
+              if (!confirmUnitOverride(warning)) continue;
+              ({ data: updated } = await api.post<Source>(applyUrl, {
+                ...applyPayload, confirm_unit_mismatch: true,
+              }));
+            }
+          }
           saved += 1;
           if (active.current) {
             setData(previous => previous ? { ...previous, results: previous.results.map(item => sourceKey(item) === sourceKey(row) ? updated : item) } : null);

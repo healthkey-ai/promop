@@ -158,6 +158,31 @@ describe('concept-first curation', () => {
     });
   });
 
+  it('confirms unit evidence before retrying concept-first approval', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    post
+      .mockRejectedValueOnce({ response: { data: {
+        code: 'unit_mismatch_confirmation_required',
+        unit_consistency: {
+          source_code: 'S1', destination_concept_name: 'Serum albumin', property: 'MCnc',
+          expected_units: ['g/dL'],
+          observed_units: [{ unit: 'mmol/L', count: 8, compatible: false }],
+        },
+      } } })
+      .mockResolvedValueOnce({ data: { ...source, destination_concept_id: 123, status: 'approved' } });
+    await selectConcept();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select SNOMED S1' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Approve selected (1)' }));
+
+    await screen.findByText('Approved 1 of 1 selected mappings.');
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('mmol/L (8 results)'));
+    expect(post).toHaveBeenLastCalledWith('/v1/concept-to-code/123/mappings/7/', {
+      status: 'approved', expected_updated_at: source.updated_at,
+      confirm_unit_mismatch: true,
+    });
+    confirm.mockRestore();
+  });
+
   it('allows proposals but hides approval for non-admin curators', async () => {
     await selectConcept(false);
     expect(screen.queryByRole('button', { name: /Approve selected/ })).not.toBeInTheDocument();
