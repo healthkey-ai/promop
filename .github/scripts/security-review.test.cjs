@@ -41,7 +41,9 @@ const { securityFiles, evaluate, run } = require('./security-review.cjs');
 
 test('file classification covers security code and renames while excluding test-only edits', () => {
   for (const filename of ['ctomop/settings.py', 'frontend/src/components/Auth/Login.tsx', '.github/workflows/ci.yml', 'patient_portal/api/permissions.py', '.bandit-baseline.json']) assert.equal(securityFiles([{ filename }]), true, filename);
-  for (const filename of ['patient_portal/tests.py', 'tests/test_browser_oauth_retirement.py', 'frontend/src/components/Auth/Login.test.tsx', 'omop_core/services/genomics.py']) assert.equal(securityFiles([{ filename }]), false, filename);
+  for (const filename of ['patient_portal/tests.py', 'tests/test_browser_oauth_retirement.py', 'frontend/src/components/Auth/Login.test.tsx', 'omop_core/services/genomics.py', 'Dockerfile', 'render.yaml', 'start.sh', 'patient_portal/api/v1_urls.py']) assert.equal(securityFiles([{ filename }]), false, filename);
+  assert.equal(securityFiles([{ filename: 'retired.py', previous_filename: 'patient_portal/api/permissions.py' }]), true);
+  // Renaming the OAuth validator out of the way is still a gated change.
   assert.equal(securityFiles([{ filename: 'retired.py', previous_filename: 'ctomop/oauth.py' }]), true);
 });
 
@@ -72,7 +74,7 @@ function fixture({ labels = [], files = [], issueLabels = [], reviews = [], brok
 }
 
 test('either a file, PR label, or linked issue label requires review', async () => {
-  for (const options of [{ files: [{ filename: 'ctomop/oauth.py' }] }, { labels: [{ name: 'security' }] }, { issueLabels: [{ name: 'security' }] }]) {
+  for (const options of [{ files: [{ filename: 'patient_portal/api/permissions.py' }] }, { labels: [{ name: 'security' }] }, { issueLabels: [{ name: 'security' }] }]) {
     const { github, current } = fixture(options);
     assert.equal((await evaluate(github, 'healthkey-ai', 'promop', current)).state, 'failure');
     const approved = fixture({ ...options, reviews: [review('APPROVED')] });
@@ -128,7 +130,7 @@ test('security changes need an approver with write access and no team requiremen
 });
 
 test('security control and existing protected paths require review', () => {
-  for (const filename of ['omop_core/authorization.py', 'patient_portal/services.py', 'patient_portal/api/break_glass.py', 'patient_portal/checks.py', 'start.sh', 'CODEOWNERS', '.github/CODEOWNERS', 'docs/soc2/change-management.md', 'scripts/capture_change_management_evidence.py']) {
+  for (const filename of ['omop_core/authorization.py', 'patient_portal/services.py', 'patient_portal/api/break_glass.py', 'patient_portal/checks.py', 'CODEOWNERS', '.github/CODEOWNERS', 'docs/soc2/change-management.md', 'scripts/capture_change_management_evidence.py']) {
     assert.equal(securityFiles([{ filename }]), true, filename);
   }
 });
@@ -165,28 +167,139 @@ test('application test files stay exempt', () => {
   ]) assert.equal(securityPath(filename), false, filename);
 });
 
-test('the live settings package and other previously missed paths are gated', () => {
-  // Paths present in the tree today.
+test('auth/identity, settings and credential handling are gated', () => {
   for (const filename of [
-    'promop/settings.py', 'promop/oauth.py', 'promop/urls.py', 'promop/celery.py',
-    'ctomop/settings.py', 'patient_portal/api/v1_urls.py', 'patient_portal/urls.py',
-    'start.sh', 'start-worker.sh', 'requirements.txt', 'ops/artemis/Dockerfile',
+    // Both project packages whole, in every spelling: the settings module as a
+    // file and as a package, the OAuth validator, the Sentry scrubber, and any
+    // module that does not exist yet.
+    'promop/settings.py', 'ctomop/settings.py', 'promop/settings/base.py',
+    'promop/settings_prod.py', 'ctomop/settings_staging.py', 'promop/settings/__init__.py',
+    'ctomop/settings/base.py', 'promop/config/settings.py',
+    'promop/oauth.py', 'ctomop/oauth.py', 'promop/sentry.py', 'ctomop/sentry.py',
+    'promop/oauth/validators.py', 'promop/sentry/scrubber.py',
     'frontend/src/api/publicAxios.ts', 'frontend/src/api/clinicalTransport.ts',
     'frontend/src/federation/assertLabsTokens.ts', 'patient_portal/service_tokens.py',
     'patient_portal/management/commands/import_service_tokens.py',
-    'Procfile', 'nixpacks.toml', 'docs/promop-security-soc2-remediation-plan.md',
-  ]) assert.equal(securityPath(filename), true, filename);
-  // Spellings the tree does not use today but the deployment targets accept.
-  for (const filename of [
-    'ctomop/settings_staging.py', 'frontend/.env.production', 'requirements/base.txt',
-    'deploy/Dockerfile',
+    'docs/promop-security-soc2-remediation-plan.md',
+    // Both manifests: the scanners fire on an advisory against a dependency
+    // already present, not on one being added, which is the reviewable event
+    // and is the same event in both ecosystems.
+    'frontend/package.json', 'frontend/package-lock.json',
+    'requirements.txt', 'requirements/base.txt',
+    // The project route table — the only urls.py carrying AllowAny, and the
+    // one that mounts admin/ and the OAuth2 provider tree.
+    'promop/urls.py', 'ctomop/urls.py',
+    // One path per pattern, for every pattern on either list: a pattern that no
+    // path here exercises can be deleted without a test noticing, and eight of
+    // them could be when this list was written. Every single-file entry has a
+    // directory form beside it, so splitting a module into a package cannot
+    // ungate its own subject.
+    'patient_portal/api/permissions/base.py', 'patient_portal/api/middleware/audit.py',
+    'omop_core/authorization/rules.py', 'patient_portal/service_tokens/mint.py',
+    'ctomop/oauth/validators.py', 'ctomop/sentry/scrubber.py',
+    'patient_portal/services/consent.py', 'patient_portal/api/break_glass/views.py',
+    'patient_portal/checks/settings_checks.py', 'patient_portal/api/authentication/jwt.py',
+    'patient_portal/service_applications/models.py',
+    'promop/urls/__init__.py', 'ctomop/urls/api.py',
+    'manage.py',
+    'frontend/src/api/axios/interceptors.ts', 'frontend/src/api/publicAxios/index.ts',
+    'frontend/src/api/clinicalTransport/index.ts',
+    'frontend/src/federation/assertLabsTokens/index.ts',
+    'frontend/src/utils/oauth/pkce.ts', 'frontend/src/hooks/useAuth/context.ts',
+    'scripts/capture_change_management_evidence/api.py',
+    // Entries that predate this list and were exercised by nothing: deleting
+    // any of them left the suite green.
+    'SECURITY.md', 'patient_portal/api/authentication.py',
+    'patient_portal/api/middleware.py', 'patient_portal/api/providers/base.py',
+    'patient_portal/service_applications.py', 'frontend/src/utils/oauth.ts',
+    'frontend/src/hooks/useAuth.ts', 'frontend/src/api/axios.ts',
   ]) assert.equal(securityPath(filename), true, filename);
 });
 
-test('a test-named file inside the Django project packages is still gated', () => {
+// Deliberately not gated. Shaped as one list of whatever the classifier does
+// gate, rather than as 24 assertions that each path MUST be false. It fails on
+// the same inputs — re-gating render.yaml still turns this red — so the gain is
+// in what the failure says, not in when it happens: the name and the message
+// read as "this list changed", and they name every newly gated path at once
+// instead of stopping at the first.
+test('the narrowed scope leaves operational paths out', () => {
+  const out = [
+    'patient_portal/api/v1_urls.py',
+    'patient_portal/urls.py', 'start.sh', 'start-worker.sh',
+    'ops/artemis/Dockerfile', 'deploy/Dockerfile',
+    'Procfile', 'nixpacks.toml', 'frontend/.env.production', 'render.yaml',
+    'docker-compose.yml', 'Dockerfile', 'Dockerfile.gcp', '.env.example',
+  ].filter(securityPath);
+  assert.deepEqual(out, [], `unexpectedly gated: ${out.join(', ')}`);
+});
+
+test('the root URLconf is gated while app route tables are not', () => {
+  // promop/urls.py is not DRF: AllowAny, the admin mount, the OAuth2 AS mount
+  // and a plain-Django catch-all all live there, so IsAuthenticated-by-default
+  // does not cover a path() added to it. App URLconfs do get that default.
   for (const filename of [
-    'promop/test_settings.py', 'promop/tests/urls.py', 'ctomop/test_settings.py',
+    'promop/urls.py', 'ctomop/urls.py', 'promop/urls/__init__.py', 'ctomop/urls/api.py',
   ]) assert.equal(securityPath(filename), true, filename);
+  // And the module that decides which settings define that default, in each of
+  // the three places it is spelled. Nothing pins these: the tests that name
+  // DJANGO_SETTINGS_MODULE set it in the environment before asserting anything,
+  // so a change to the setdefault would leave every one of them green while
+  // production loaded a different settings module.
+  for (const filename of [
+    'promop/wsgi.py', 'promop/asgi.py', 'promop/celery.py',
+    'ctomop/wsgi.py', 'ctomop/asgi.py', 'ctomop/celery.py', 'manage.py',
+  ]) assert.equal(securityPath(filename), true, filename);
+  // A module that does not exist yet is the case a per-filename list cannot
+  // reach: repointing wsgi.py at `promop.conf` needs promop/conf.py to be
+  // gated on the strength of its directory alone.
+  for (const filename of [
+    'promop/conf.py', 'promop/whitenoise.py', 'promop/frontend_paths.py',
+    'ctomop/conf.py',
+  ]) assert.equal(securityPath(filename), true, filename);
+  for (const filename of [
+    'patient_portal/urls.py', 'patient_portal/api/urls.py', 'patient_portal/api/v1_urls.py',
+    'omop_core/urls.py',
+  ]) assert.equal(securityPath(filename), false, filename);
+});
+
+test('the tests that pin the ungated operational files are themselves gated', () => {
+  // start.sh and render.yaml stay out of scope on the grounds that their
+  // security-relevant values are pinned by tests. That holds only while the
+  // pins cannot be relaxed in the same ungated change, so the pins are gated:
+  // test_web_startup asserts start.sh's exact command sequence including
+  // `check --deploy --fail-level ERROR`, and the render tests pin DEBUG,
+  // CORS_ALLOWED_ORIGINS, SERVICE_AUTH_SCOPES and the broker ipAllowList.
+  for (const filename of [
+    'tests/test_web_startup.py', 'tests/test_deployment_startup_contract.py',
+    'tests/test_render_staging_blueprint.py', 'tests/test_render_production_settings.py',
+    'tests/test_render_blueprint_invariants.py', 'tests/test_artemis_runtime.py',
+  ]) assert.equal(securityPath(filename), true, filename);
+  // The exemption still covers ordinary application tests.
+  for (const filename of ['tests/test_webhooks.py', 'tests/test_suggest_strategies.py']) {
+    assert.equal(securityPath(filename), false, filename);
+  }
+});
+
+test('the test exemption does not reach inside the project packages', () => {
+  // A test_settings.py is a settings module whatever it is named, and wherever
+  // it sits — ctomop/ carried one until 0ba8665d. CONTROL_PATHS is matched
+  // before TEST_PATHS, so inside these two packages the exemption is off
+  // entirely: that is what reaches a settings module parked under tests/.
+  for (const filename of [
+    'promop/test_settings.py', 'promop/settings/test_base.py', 'ctomop/test_settings.py',
+    'promop/tests/test_settings.py',
+  ]) assert.equal(securityPath(filename), true, filename);
+  // It reaches an ordinary-looking test in there too, which is the cost of the
+  // rule and is deliberate rather than an oversight: neither directory exists,
+  // and a 20-file configuration package holds nothing a test-shaped name makes
+  // safe. Asserted so that ungating it has to be a decision someone writes down.
+  for (const filename of [
+    'promop/tests/test_views.py', 'promop/tests/urls.py', 'ctomop/tests/test_urls.py',
+  ]) assert.equal(securityPath(filename), true, filename);
+  // Outside them, the exemption is untouched at any depth.
+  for (const filename of [
+    'patient_portal/api/tests/test_permissions.py', 'omop_core/tests/test_access.py',
+  ]) assert.equal(securityPath(filename), false, filename);
 });
 
 test('a path carrying stray whitespace cannot slip past classification', () => {
