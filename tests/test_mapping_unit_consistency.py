@@ -90,6 +90,22 @@ def test_convertible_source_units_are_consistent():
     ]
 
 
+def test_imported_unit_evidence_is_used_without_double_counting_live_rows():
+    destination = loinc_destination()
+    row = mapping(destination, source_unit_evidence=[{
+        'display': 'g/dL', 'code': 'g/dL', 'count': 20,
+        'source': 'healthtree-unmapped-v2',
+    }])
+    measurement(destination, 'g/dL')
+
+    report = unit_consistency_for_mapping(row, destination)
+
+    assert report['warning'] is False
+    assert report['observed_units'] == [
+        {'unit': 'g/dL', 'count': 20, 'compatible': True},
+    ]
+
+
 def test_incompatible_units_warn_without_forbidding_the_mapping():
     destination = loinc_destination()
     row = mapping(destination)

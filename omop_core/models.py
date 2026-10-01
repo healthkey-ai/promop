@@ -2114,6 +2114,15 @@ class SourceCodeConceptMapping(models.Model):
         help_text='Comma-separated UMLS CUIs used to retrieve candidates for this mapping.',
     )
     occurrence_count = models.IntegerField(default=0)
+    source_unit_evidence = models.JSONField(
+        default=list, db_default=[], blank=True,
+        help_text=(
+            'Raw unit evidence imported with a source-code inventory. Each '
+            'entry preserves the sender display/code and occurrence count; '
+            'approval checks normalize it at read time. Live Measurement '
+            'evidence remains authoritative when it is more recent or larger.'
+        ),
+    )
     first_seen = models.DateTimeField(null=True, blank=True)
     last_seen = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey(

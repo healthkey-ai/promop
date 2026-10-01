@@ -8,6 +8,13 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Epic/Cerner hospital-code inventory backfill** — an idempotent management
+  command unions the deletion-cleaned HealthTree Parquet inventory with
+  supplement-only keys from the earlier CSV, preserves exact vendor tenant
+  systems, and attaches raw per-code unit evidence to approval warnings. This
+  populates the data-driven Epic and Cerner Code Mapping tabs without treating
+  ingestion-channel labels as hospital organizations (#1683).
+
 - **Asynchronous Athena setup and refresh** — deployment preparation now queues
   durable Athena work instead of downloading and scanning the vocabulary in
   Render pre-deploy. New instances and changed Drive artifacts load on the
