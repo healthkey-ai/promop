@@ -74,10 +74,11 @@ independent approval after bootstrap.
 The status writer executes only trusted default-branch code with metadata read and
 status-write permissions. It never checks out PR code, and it checks out only the policy
 module itself: the policy's tests run in a separate job that holds no write permissions,
-so no test file executes in the job that publishes the verdict. Files under `.github/`,
-CODEOWNERS, `docs/soc2/`, and the scanner configurations are classified as
-security-sensitive even when named like tests, because a test file in the control plane
-still runs with the control plane's privileges. A separate unprivileged
+so no test file executes in the job that publishes the verdict. The security policy,
+deployment/release/publishing/CodeQL workflows, custom actions, CODEOWNERS, Dependabot,
+`docs/soc2/`, and scanner configurations are classified as security-sensitive even when
+named like tests. Ordinary CI/test orchestration under `.github/` is not security-scoped
+solely by its directory; required CI statuses continue to gate it. A separate unprivileged
 review-event workflow signals trusted reevaluation. PR/issue events and a five-minute
 scheduled reconciliation refresh results; scheduled runs can be delayed. API errors fail
 closed: a commit that cannot be evaluated is marked `failure`, and if even that

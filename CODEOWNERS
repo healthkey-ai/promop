@@ -33,9 +33,18 @@
 /Dockerfile.gcp                     @larsburgess
 /requirements.txt                   @larsburgess
 
-# ── CI and the security gates themselves ──────────────────────────────────────
-# A change that weakens a gate should be as visible as a change that trips it.
-/.github/                           @larsburgess
+# ── Security and privileged GitHub controls ───────────────────────────────────
+# Ordinary CI/test orchestration stays with the default owner. Changes to the
+# security policy, deployment/publishing workflows, dependency automation, or a
+# reusable action can alter privileged execution and route to Lars.
+/.github/dependabot.yml             @larsburgess
+/.github/actions/                   @larsburgess
+/.github/workflows/*security*.yml   @larsburgess
+/.github/workflows/*codeql*.yml     @larsburgess
+/.github/workflows/*deploy*.yml     @larsburgess
+/.github/workflows/*release*.yml    @larsburgess
+/.github/workflows/*publish*.yml    @larsburgess
+/.github/scripts/*security*         @larsburgess
 /.gitleaks.toml                     @larsburgess
 /.bandit-baseline.json              @larsburgess
 

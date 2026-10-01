@@ -7,15 +7,24 @@ const CONTEXT = 'Security review';
 // text the PR author controls. Cap the fan-out well below the hourly budget.
 const MAX_ISSUE_REFERENCES = 20;
 // Paths the test-file exemption must never reach. Two groups:
-//   the control plane — CI, the policy that gates it, the scanners it runs, the
-//   change-management evidence: a file here executes with the control plane's
-//   privileges whatever it is named (`.github/workflows/*.test.yml` is a
-//   workflow Actions will run; `.github/scripts/*.test.cjs` was executed by this
-//   policy's own workflow), and
+//   the security/privileged control plane — the review policy itself, workflows
+//   that deploy or publish, scanner workflows, custom actions, ownership and
+//   dependency-update configuration, and change-management evidence. Ordinary
+//   CI/test orchestration is deliberately not security-scoped merely because it
+//   lives below .github/; for example ci.yml and async_e2e_changes.py do not
+//   need an unrelated writer approval, and their required checks still enforce
+//   the repository ruleset; and
 //   the Django project packages, where a `test_settings.py` or a `tests/urls.py`
 //   is still a settings module or a route table.
+const GITHUB_CONTROL_PATHS = [
+  '.github/CODEOWNERS', '.github/dependabot.yml', '.github/actions/**',
+  '.github/workflows/*security*.yml', '.github/workflows/*codeql*.yml',
+  '.github/workflows/*deploy*.yml', '.github/workflows/*release*.yml',
+  '.github/workflows/*publish*.yml', '.github/scripts/*security*',
+];
 const CONTROL_PATHS = [
-  '.github/**', '**/CODEOWNERS', 'docs/soc2/**', '.bandit*', '.gitleaks*',
+  ...GITHUB_CONTROL_PATHS,
+  '**/CODEOWNERS', 'docs/soc2/**', '.bandit*', '.gitleaks*',
   'SECURITY.md', 'scripts/capture_change_management_evidence.py',
   'promop/**', 'ctomop/**',
 ];

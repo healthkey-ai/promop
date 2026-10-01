@@ -40,8 +40,8 @@ test('dismissal and requested changes invalidate approval; comments do not', () 
 const { securityFiles, evaluate, run } = require('./security-review.cjs');
 
 test('file classification covers security code and renames while excluding test-only edits', () => {
-  for (const filename of ['ctomop/settings.py', 'frontend/src/components/Auth/Login.tsx', '.github/workflows/ci.yml', 'patient_portal/api/permissions.py', '.bandit-baseline.json']) assert.equal(securityFiles([{ filename }]), true, filename);
-  for (const filename of ['patient_portal/tests.py', 'tests/test_browser_oauth_retirement.py', 'frontend/src/components/Auth/Login.test.tsx', 'omop_core/services/genomics.py']) assert.equal(securityFiles([{ filename }]), false, filename);
+  for (const filename of ['ctomop/settings.py', 'frontend/src/components/Auth/Login.tsx', '.github/workflows/security-review.yml', 'patient_portal/api/permissions.py', '.bandit-baseline.json']) assert.equal(securityFiles([{ filename }]), true, filename);
+  for (const filename of ['patient_portal/tests.py', 'tests/test_browser_oauth_retirement.py', 'frontend/src/components/Auth/Login.test.tsx', 'omop_core/services/genomics.py', '.github/workflows/ci.yml']) assert.equal(securityFiles([{ filename }]), false, filename);
   assert.equal(securityFiles([{ filename: 'retired.py', previous_filename: 'ctomop/oauth.py' }]), true);
 });
 
@@ -153,8 +153,28 @@ test('a test-named file inside the control plane is still gated', () => {
   for (const filename of [
     '.github/scripts/security-review.test.cjs', '.github/workflows/deploy.test.yml',
     '.github/workflows/security.test.yml', '.github/actions/tests/action.yml',
-    '.github/tests/policy.yml', 'docs/soc2/tests/evidence.json',
+    'docs/soc2/tests/evidence.json',
     'tests/CODEOWNERS', '.gitleaks.test.toml',
+  ]) assert.equal(securityPath(filename), true, filename);
+});
+
+test('ordinary GitHub CI and repository automation do not require security review', () => {
+  for (const filename of [
+    '.github/workflows/ci.yml', '.github/workflows/post-merge.yml',
+    '.github/workflows/draft-pdf.yml', '.github/scripts/async_e2e_changes.py',
+    '.github/scripts/application_ci_gate.py', '.github/tests/policy.yml',
+    '.github/PULL_REQUEST_TEMPLATE.md',
+  ]) assert.equal(securityPath(filename), false, filename);
+});
+
+test('security and privileged GitHub control paths remain gated', () => {
+  for (const filename of [
+    '.github/CODEOWNERS', '.github/dependabot.yml',
+    '.github/scripts/security-review.cjs', '.github/scripts/security-review.test.cjs',
+    '.github/workflows/security-review.yml', '.github/workflows/security-review-updates.yml',
+    '.github/workflows/deploy-staging.yml', '.github/workflows/release-production.yml',
+    '.github/workflows/publish-package.yml', '.github/workflows/codeql-analysis.yml',
+    '.github/actions/deploy/action.yml',
   ]) assert.equal(securityPath(filename), true, filename);
 });
 
