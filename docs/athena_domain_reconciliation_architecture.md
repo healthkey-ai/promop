@@ -31,33 +31,24 @@ failure is reported as a successful match.
 
 ## Running it
 
-Render and Docker builds install Playwright and Chromium and verify a headless
-browser launch. No installation is needed in a deployed shell. For local setup:
+Ordinary Render and Docker application builds intentionally omit Playwright and
+Chromium. These browser-only operator commands are not part of serving web or
+worker traffic. Run them from a purpose-built environment with the optional
+dependency:
 
 ```sh
-pip install -r requirements.txt
+pip install -r requirements.txt -r requirements-athena-scrape.txt
 export PLAYWRIGHT_BROWSERS_PATH=0
-python scripts/install_athena_browser.py
+python scripts/install_athena_browser.py --require-package
 ```
 
-The Render Blueprint sets `PLAYWRIGHT_BROWSERS_PATH=0` for all four active
-Python web/worker services and runs `python scripts/install_athena_browser.py`
-after dependency installation. Chromium is retained inside the Python package,
-so changing the build/runtime home directory does not lose it. The helper verifies
-a real browser launch and rendering before the build succeeds. It installs the
-headless Chromium shell used by both Athena commands.
-
-Docker images use the same helper with `--with-deps`; the GCP image installs OS
-libraries in its final runtime stage. The Python CI job also exercises the real
-Linux browser installation and launch. The native Render build relies on its
-preinstalled Linux libraries; the launch check reports an incompatible image at
-build time rather than during a curator job.
-
-Existing dashboard-managed Render services must synchronize the Blueprint's
-build command and `PLAYWRIGHT_BROWSERS_PATH` setting. A repository change alone
-does not replace a dashboard override. Production build commands conditionally
-run the helper when the deployed `main` revision contains it, preserving older
-production revisions.
+Use `--with-deps` in a disposable Linux job that also needs Chromium's system
+libraries. The focused CI job installs the optional requirements and verifies a
+real browser launch when optional browser packaging changes. Existing
+dashboard-managed Render services must synchronize the Blueprint build commands;
+a repository change alone does not replace a dashboard override. Until they are
+synchronized, a stale Render build command safely skips browser setup when the
+optional Playwright package is absent.
 
 Audit only (the default):
 

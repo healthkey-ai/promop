@@ -162,7 +162,7 @@ jobs:
       - name: Install and launch Athena Chromium
         env:
           PLAYWRIGHT_BROWSERS_PATH: '0'
-        run: python scripts/install_athena_browser.py --with-deps
+        run: python scripts/install_athena_browser.py --with-deps --require-package
 
 
   backend:
