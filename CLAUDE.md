@@ -1042,13 +1042,12 @@ Three rules that keep it honest:
   stale since the last refresh can cost a shortlist slot; it can never put a
   retired concept in front of the ranker.
 
-Domain indexes alone do not fix drug names: "ASPIRIN 81 MG ORAL TABLET" shares
-"MG ORAL TABLET" with many RxNorm names in the same domain. Drug names now use
-ingredient narrowing, followed by a selective top-N probe that falls back to the
-original query unless its shortlist is complete. The probe preserves the existing
-candidate output; ingredient narrowing itself can change it. See
-[drug lexical retrieval](docs/drug_lexical_retrieval_architecture.md) for the
-algorithm, differential tests, and before/after comparison command.
+Drug names need an additional narrowing step because a source such as
+"ASPIRIN 81 MG ORAL TABLET" shares dose and form words with many RxNorm names
+in the same domain. `source_text.narrowing_text` searches on ingredient words
+and falls back to the full source text when that finds no names. Narrowing can
+change the candidate set; `tests/test_lexical_narrowing.py` covers its recall
+trade-offs.
 
 Cost: ~135 MB for the concept indexes and ~660 MB for the table and its indexes
 on a fully loaded instance.

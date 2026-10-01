@@ -97,6 +97,29 @@ class TestNarrowingText:
 
 
 class TestLexicalRecall:
+    def test_multiword_drug_search_runs_one_name_and_one_synonym_query(self):
+        """Ingredient narrowing already makes queue lookups selective."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        target = _drug('aspirin 81 MG Oral Tablet')
+        query = 'ASPIRIN 81 MG ORAL TABLET'
+
+        with CaptureQueriesContext(connection) as captured:
+            hits = lexical_candidates(query, 'Drug')
+
+        assert target.pk in [hit['concept_id'] for hit in hits]
+        name_queries = [q for q in captured if 'UPPER("concept"."concept_name")' in q['sql']]
+        synonym_queries = [
+            q for q in captured
+            if 'concept_synonym_name' in q['sql']
+            or ('suggest_synonym_term' in q['sql'] and '"term"' in q['sql'])
+        ]
+        assert len(name_queries) == 1
+        assert len(synonym_queries) == 1
+        assert not any('pg_trgm.similarity_threshold' in q['sql'] or 'set_config' in q['sql']
+                       for q in captured)
+
     def test_finds_the_exact_product_despite_the_dose_words(self):
         target = _drug('aspirin 81 MG Oral Tablet')
         _drug('ibuprofen 200 MG Oral Tablet')
