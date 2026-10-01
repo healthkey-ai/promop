@@ -99,8 +99,7 @@ ASYNC_WORDS = (
 # prerequisite for the unit suite (which uses fake Playwright modules). Keep
 # the expensive smoke test focused on changes that can affect that packaging.
 BROWSER_RUNTIME_PATHS = (
-    "Dockerfile", "Dockerfile.gcp", "render.yaml", "runtime.txt",
-    "requirements.txt", "requirements-athena-scrape.txt",
+    "requirements-athena-scrape.txt",
     "scripts/install_athena_browser.py", "tests/test_athena_browser_build.py",
     ".github/scripts/async_e2e_changes.py", ".github/workflows/ci.yml",
 )

@@ -272,13 +272,20 @@ def test_empty_diff_keeps_backend():
 
 
 @pytest.mark.parametrize('path', [
-    'Dockerfile', 'Dockerfile.gcp', 'render.yaml', 'runtime.txt',
-    'requirements.txt', 'requirements-athena-scrape.txt',
+    'requirements-athena-scrape.txt',
     'scripts/install_athena_browser.py', 'tests/test_athena_browser_build.py',
     '.github/workflows/ci.yml', '.github/scripts/async_e2e_changes.py',
 ])
 def test_browser_packaging_changes_run_runtime_smoke(path):
     assert filter_module.requires_browser_runtime([path])
+
+
+@pytest.mark.parametrize('path', [
+    'Dockerfile', 'Dockerfile.gcp', 'render.yaml', 'runtime.txt',
+    'requirements.txt',
+])
+def test_application_packaging_changes_do_not_run_browser_smoke(path):
+    assert not filter_module.requires_browser_runtime([path])
 
 
 @pytest.mark.parametrize('paths', [
@@ -381,4 +388,4 @@ def test_browser_runtime_is_a_separate_path_gated_job():
     assert setup_uv['uses'] == 'astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7'
     assert setup_uv['with']['version'] == '0.12.20'
     smoke = next(step for step in steps if step.get('name') == 'Install and launch Athena Chromium')
-    assert smoke['run'] == 'python scripts/install_athena_browser.py --with-deps'
+    assert smoke['run'] == 'python scripts/install_athena_browser.py --with-deps --require-package'

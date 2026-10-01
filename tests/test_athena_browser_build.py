@@ -1,4 +1,4 @@
-"""Browser packaging must survive deployment and fail early when unusable."""
+"""Athena browser tooling stays explicit and out of app deployments."""
 import os
 from pathlib import Path
 import subprocess
@@ -7,46 +7,25 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from scripts.install_athena_browser import install
+from scripts.install_athena_browser import install, main
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVICES = ('promop', 'promop-worker', 'promop-staging', 'promop-staging-worker')
 
 
 @pytest.mark.parametrize('name', SERVICES)
-@pytest.mark.parametrize('browser_state', ['working', 'broken'])
-def test_actual_render_build_installs_browser_after_pip_and_propagates_failure(tmp_path, name, browser_state):
+def test_render_application_builds_do_not_install_browser(name):
     service = next(s for s in yaml.safe_load((ROOT / 'render.yaml').read_text())['services'] if s['name'] == name)
     environment = {e['key']: e.get('value') for e in service['envVars']}
-    assert environment['PLAYWRIGHT_BROWSERS_PATH'] == '0'
-    (tmp_path / 'scripts').mkdir(); (tmp_path / 'frontend').mkdir(); (tmp_path / 'bin').mkdir()
-    for filename in ('verify_source_catalog_snapshots.py', 'install_athena_browser.py'):
-        (tmp_path / 'scripts' / filename).write_text('placeholder')
-    stub = '''#!/bin/sh
-printf '%s %s\\n' "${0##*/}" "$*" >> "$BUILD_TEST_LOG"
-if [ "$1" = scripts/install_athena_browser.py ]; then
-    [ "$PLAYWRIGHT_BROWSERS_PATH" = 0 ] || exit 8
-    [ "$BROWSER_STATE" != broken ] || exit 9
-fi
-'''
-    for executable in ('python', 'pip', 'npm'):
-        path = tmp_path / 'bin' / executable; path.write_text(stub); path.chmod(0o755)
-    log = tmp_path / 'build.log'
-    result = subprocess.run(['/bin/sh', '-c', service['buildCommand']], cwd=tmp_path,
-        env={**os.environ, 'PATH': str(tmp_path / 'bin')+':'+os.environ['PATH'],
-             'PLAYWRIGHT_BROWSERS_PATH': environment['PLAYWRIGHT_BROWSERS_PATH'],
-             'BUILD_TEST_LOG': str(log), 'BROWSER_STATE': browser_state}, capture_output=True, text=True)
-    calls = log.read_text().splitlines()
-    assert calls.index('pip install -r requirements.txt') < calls.index('python scripts/install_athena_browser.py')
-    assert result.returncode == (0 if browser_state == 'working' else 9), result.stderr
-    if browser_state == 'broken':
-        assert calls[-1] == 'python scripts/install_athena_browser.py'
+    assert 'PLAYWRIGHT_BROWSERS_PATH' not in environment
+    assert 'install_athena_browser.py' not in service['buildCommand']
 
 
-def test_python_dependency_is_pinned_and_legacy_install_remains_consistent():
-    def pin(filename):
-        return next(line for line in (ROOT / filename).read_text().splitlines() if line.startswith('playwright=='))
-    assert pin('requirements.txt') == pin('requirements-athena-scrape.txt')
+def test_python_dependency_is_only_in_optional_browser_requirements():
+    main = (ROOT / 'requirements.txt').read_text().splitlines()
+    optional = (ROOT / 'requirements-athena-scrape.txt').read_text().splitlines()
+    assert not any(line.startswith('playwright') for line in main)
+    assert any(line.startswith('playwright==') for line in optional)
 
 
 @pytest.mark.parametrize('with_deps', [False, True])
@@ -74,12 +53,24 @@ def test_installer_propagates_download_and_launch_failures(monkeypatch, failure_
     assert os.environ['PLAYWRIGHT_BROWSERS_PATH'] == '/custom/browser/location'
 
 
-def test_docker_final_images_include_browser_and_linux_libraries():
-    docker = (ROOT / 'Dockerfile').read_text()
-    assert 'ENV PLAYWRIGHT_BROWSERS_PATH=0' in docker
-    assert 'COPY scripts/install_athena_browser.py ./scripts/' in docker
-    assert 'python scripts/install_athena_browser.py --with-deps' in docker
-    final = (ROOT / 'Dockerfile.gcp').read_text().rsplit('FROM ', 1)[1]
-    assert 'ENV PLAYWRIGHT_BROWSERS_PATH=0' in final
-    assert final.index('COPY --from=backend /usr/local/lib/python3.12/site-packages') < final.index('python scripts/install_athena_browser.py --with-deps')
-    assert final.index('COPY --from=backend /app /app') < final.index('python scripts/install_athena_browser.py --with-deps')
+def test_stale_deploy_command_skips_when_optional_package_is_absent(capsys):
+    with patch('scripts.install_athena_browser.importlib.util.find_spec', return_value=None), \
+            patch('scripts.install_athena_browser.install') as install_browser:
+        main([])
+    install_browser.assert_not_called()
+    assert 'skipping optional Athena Chromium setup' in capsys.readouterr().out
+
+
+def test_explicit_operator_install_fails_when_optional_package_is_absent(capsys):
+    with patch('scripts.install_athena_browser.importlib.util.find_spec', return_value=None), \
+            pytest.raises(SystemExit) as exc:
+        main(['--require-package'])
+    assert exc.value.code == 2
+    assert 'Install requirements-athena-scrape.txt first' in capsys.readouterr().err
+
+
+@pytest.mark.parametrize('filename', ['Dockerfile', 'Dockerfile.gcp'])
+def test_default_docker_images_do_not_install_browser(filename):
+    docker = (ROOT / filename).read_text()
+    assert 'PLAYWRIGHT_BROWSERS_PATH' not in docker
+    assert 'python scripts/install_athena_browser.py' not in docker

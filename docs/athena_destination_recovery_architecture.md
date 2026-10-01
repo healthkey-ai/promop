@@ -90,9 +90,9 @@ unchanged. Keep the CSV as the run receipt; do not commit environment-specific r
 The browser fallback needs an additional operator dependency:
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt -r requirements-athena-scrape.txt
 export PLAYWRIGHT_BROWSERS_PATH=0
-python scripts/install_athena_browser.py
+python scripts/install_athena_browser.py --require-package
 ```
 
 An existing Chrome installation can be supplied with `--browser-executable`.

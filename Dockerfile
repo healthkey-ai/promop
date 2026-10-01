@@ -19,14 +19,12 @@ RUN python --version && node --version && npm --version
 # Set working directory
 WORKDIR /app
 
-# Copy Python requirements and install
-ENV PLAYWRIGHT_BROWSERS_PATH=0
+# Copy Python requirements and install. Browser-only Athena operator tooling
+# uses requirements-athena-scrape.txt and scripts/install_athena_browser.py in
+# a purpose-built environment; it is not part of the application image.
 COPY requirements.txt .
-COPY scripts/install_athena_browser.py ./scripts/
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt && \
-    python scripts/install_athena_browser.py --with-deps && \
-    rm -rf /var/lib/apt/lists/*
+    pip install --no-cache-dir -r requirements.txt
 
 # Copy frontend package files and install Node dependencies
 COPY frontend/package*.json ./frontend/

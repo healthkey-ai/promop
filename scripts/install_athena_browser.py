@@ -1,10 +1,11 @@
 """Install and verify the headless browser used by Athena management commands.
 
-Render installs into the Python package (PLAYWRIGHT_BROWSERS_PATH=0) so its browser
-survives the build-to-runtime handoff. Docker/CI use --with-deps to also install
-Linux libraries; native Render builds use the platform's installed libraries.
+The ordinary application environment intentionally omits Playwright and
+Chromium. Install ``requirements-athena-scrape.txt`` first, then use this helper
+in an operator or CI environment. ``--with-deps`` also installs Linux libraries.
 """
 import argparse
+import importlib.util
 import os
 import subprocess
 import sys
@@ -33,7 +34,22 @@ def install(*, with_deps=False):
     subprocess.run([sys.executable, '-c', SMOKE], check=True)
 
 
-if __name__ == '__main__':
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--with-deps', action='store_true', help='Install Linux OS libraries (requires root/sudo)')
-    install(with_deps=parser.parse_args().with_deps)
+    parser.add_argument(
+        '--require-package', action='store_true',
+        help='Fail when the optional Playwright package is not installed',
+    )
+    args = parser.parse_args(argv)
+    if importlib.util.find_spec('playwright') is None:
+        message = 'Playwright is not installed; skipping optional Athena Chromium setup.'
+        if args.require_package:
+            parser.error(f'{message} Install requirements-athena-scrape.txt first.')
+        print(message)
+        return
+    install(with_deps=args.with_deps)
+
+
+if __name__ == '__main__':
+    main()
