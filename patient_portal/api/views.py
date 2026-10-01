@@ -10468,7 +10468,8 @@ def _concept_unit_fields(concept):
     return concept_unit_fields(concept)
 
 
-def _serialize_code_mapping_row(concept, mapping=None, source_metadata=None, destination_count=None):
+def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
+                                destination_count=None, include_source_evidence=False):
     """One row of the Code Mapping list: a source code and where it lands.
 
     Keys read in the direction of the mapping. The source side never falls back
@@ -10477,16 +10478,31 @@ def _serialize_code_mapping_row(concept, mapping=None, source_metadata=None, des
     code system reports '', which is a real state: paper labs and clinicians'
     notes carry no code system at all.
     """
-    if source_metadata is None:
+    if source_retirement is None:
         from omop_core.services.source_retirement import mapping_source_retirement
-        source_metadata = mapping_source_retirement([mapping]).get(mapping.pk) if mapping else {
+        source_retirement = mapping_source_retirement([mapping]).get(mapping.pk) if mapping else {
             'source_retired': None, 'source_retirement_evidence': [],
         }
     # A mapping can legitimately have no destination yet: a code seen at ingest
     # whose concept is not loaded is a review-queue row, not an error.
+    source_evidence = ({
+        'organization': ({
+            'id': mapping.organization_id,
+            'slug': mapping.organization.slug,
+            'name': mapping.organization.name,
+        } if mapping and mapping.organization_id else None),
+        'occurrence_count': mapping.occurrence_count if mapping else 0,
+        'group_occurrence_count': (
+            mapping.source_group_occurrence_count if mapping else None
+        ),
+        'first_seen': mapping.first_seen if mapping else None,
+        'last_seen': mapping.last_seen if mapping else None,
+        'metadata': mapping.source_metadata if mapping else {},
+        'units': mapping.source_unit_evidence if mapping else [],
+    } if include_source_evidence else None)
     if concept is None:
-        return {
-            **source_metadata,
+        payload = {
+            **source_retirement,
             'destination_concept_id': None,
             'destination_concept_name': '',
             'destination_concept_code': '',
@@ -10538,8 +10554,11 @@ def _serialize_code_mapping_row(concept, mapping=None, source_metadata=None, des
             'locked_by_username': _user_display(mapping.locked_by) if mapping and mapping.locked_by_id else None,
             'locked_at': (mapping.locked_at.isoformat() if mapping and mapping.locked_at else None),
         }
-    return {
-        **source_metadata,
+        if include_source_evidence:
+            payload['source_evidence'] = source_evidence
+        return payload
+    payload = {
+        **source_retirement,
         # Destination
         'destination_concept_id': concept.concept_id,
         'destination_concept_name': concept.concept_name,
@@ -10609,6 +10628,9 @@ def _serialize_code_mapping_row(concept, mapping=None, source_metadata=None, des
         'locked_by_username': _user_display(mapping.locked_by) if mapping and mapping.locked_by_id else None,
         'locked_at': (mapping.locked_at.isoformat() if mapping and mapping.locked_at else None),
     }
+    if include_source_evidence:
+        payload['source_evidence'] = source_evidence
+    return payload
 
 
 def _clean_required(data, field_name):
@@ -11396,7 +11418,8 @@ def code_mapping_list(request):
 
     if request.method == 'GET':
         mappings = SourceCodeConceptMapping.objects.select_related(
-            'target_concept', 'created_by', 'reviewer', 'locked_by', 'organization')
+            'target_concept', 'created_by', 'reviewer', 'locked_by', 'organization',
+        ).defer('source_metadata', 'source_unit_evidence')
         from omop_core.services.athena_mapping_guard import without_icd10_athena_duplicates
         mappings = without_icd10_athena_duplicates(mappings)
         if request.query_params.get('browse') == '1':
@@ -11494,7 +11517,10 @@ def code_mapping_detail(request, mapping_id):
     if request.method == 'GET':
         from omop_core.services.mapping_destinations import destination_options
         options = destination_options(mapping)
-        payload = _serialize_code_mapping_row(mapping.target_concept, mapping, destination_count=len(options))
+        payload = _serialize_code_mapping_row(
+            mapping.target_concept, mapping, destination_count=len(options),
+            include_source_evidence=True,
+        )
         payload['destination_options'] = options
         return Response(payload)
 

@@ -8,6 +8,14 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Source evidence in Edit Mapping** — the dialog now shows the hospital
+  organization (or explicit unattributed state), source record/patient counts,
+  raw units, supplied per-unit percentiles, and source reference-range evidence.
+  Source retirement and its OMOP concept id are compact inline annotations;
+  manual UMLS lookup is left to Suggest. Hospital-code imports retain the v2
+  evidence and use its deduplicated label count so sibling Epic codings on the
+  same observations do not inflate grouped Seen (#1688).
+
 - **Epic/Cerner hospital-code inventory backfill** — an idempotent management
   command unions the deletion-cleaned HealthTree Parquet inventory with
   supplement-only keys from the earlier CSV, preserves exact vendor tenant

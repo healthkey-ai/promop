@@ -37,13 +37,24 @@ The importer:
 - never changes an existing curator label, status, destination, or domain; and
 - is idempotent.
 
+The v2 code extract also carries curation evidence. The importer retains its
+record/patient/coding summary, category and value-type mix, reference-range
+coverage, and median reference-range bounds in `source_metadata`. It retains
+the extract's `label_group_records_if_mapped` separately: several Epic sibling
+codings can coexist on one Observation, so their individually correct Seen
+counts must not be added together in grouped review. The supplied deduplicated
+label count is used when present; ordinary mappings without it keep the summed
+Seen fallback.
+
 ## Units
 
 The v2 `(code, unit)` distribution is stored as raw `source_unit_evidence` on
-the mapping. Display and sender-supplied UCUM code remain separate. Approval
-checks normalize them at read time and take the larger count per unit across
-imported and live `Measurement` evidence, avoiding double-counting records
-that occur in both datasets.
+the mapping. Display and sender-supplied UCUM code remain separate. Counts,
+patient/value totals, suppression state, and the supplied min/p5/p25/p50/p75/
+p95/max distribution are retained; suppressed cohorts never acquire invented
+quantiles. Approval checks normalize units at read time and take the larger
+count per unit across imported and live `Measurement` evidence, avoiding
+double-counting records that occur in both datasets.
 
 The older CSV is useful for code coverage but its unit rows are a label-level
 join repeated for each code, not direct per-code observations. It therefore
@@ -57,3 +68,9 @@ trustworthy hospital `Organization` records. Backfilled rows remain global
 supplies an actual organization identity, it can create organization-scoped
 rows without inventing hospital names from `OPEN_EPIC`, `CERNER`, or
 `HEALTHEX` channel labels.
+
+The mapping browse response stays compact. `GET /api/v1/code-mappings/{id}/`
+adds the structured source evidence only when the curator opens Edit Mapping.
+The dialog labels median reference bounds as recognition evidence, not an
+authoritative clinical range, and displays a null organization as
+`Global / unattributed`.

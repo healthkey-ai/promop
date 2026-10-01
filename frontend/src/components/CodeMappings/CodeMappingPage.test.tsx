@@ -146,6 +146,7 @@ type TestMappingRow = Omit<typeof proposedRow, "status"> & {
   destination_count?: number;
   source_retired?: boolean | null;
   source_retirement_evidence?: string[];
+  source_evidence?: Record<string, unknown>;
 };
 
 /** A /suggest-runs/<id>/ payload, defaulted to a finished run. */
@@ -172,6 +173,21 @@ function renderPage(rows: TestMappingRow[] = [proposedRow, approvedRow]) {
     if (url.endsWith("/canonical-unit/")) return Promise.resolve({ data: { unit: "", revision: 0, available_units: ["mg/dL", "g/L"], example_units: ["mg/dL"], can_edit: true } });
     if (url === "/v1/code-mappings/") return Promise.resolve({ data: [...rows] });
     if (url === "/v1/code-mappings/reference/") return Promise.resolve({ data: reference });
+    const detail = url.match(/^\/v1\/code-mappings\/(\d+)\/$/);
+    if (detail) {
+      const row = rows.find((candidate) => candidate.mapping_id === Number(detail[1]));
+      return Promise.resolve({ data: {
+        ...row,
+        destination_options: [],
+        source_evidence: row?.source_evidence || {
+          organization: null,
+          occurrence_count: row?.occurrence_count || 0,
+          group_occurrence_count: null,
+          metadata: {},
+          units: [],
+        },
+      } });
+    }
     if (url === "/v1/concepts/search/") {
       return Promise.resolve({ data: { results: [loincHit] } });
     }
@@ -442,7 +458,7 @@ describe("CodeMappingPage", () => {
       source_retirement_evidence: [], occurrence_count: 3, destination_count: 3, status: "proposed" };
     const ids = (table: HTMLElement) => Array.from(table.querySelectorAll("tbody tr[id]")).map((row) => row.id);
 
-    it("shows retirement in the dialog, where #1080 left it after taking its column", async () => {
+    it("shows retirement inline with the unchanged source code", async () => {
       // #1080 replaced the Retired column with Seen and added Dest count. The
       // retirement metadata is still served and still shown, but only once a
       // curator opens the row -- so this is the only place it can be asserted.
@@ -457,11 +473,11 @@ describe("CodeMappingPage", () => {
       // dialog — and its GET — even existed.
       await screen.findByRole("dialog");
       await waitFor(() => expect(screen.queryByText("Loading source destinations…")).not.toBeInTheDocument());
-      expect(screen.getByTestId("source-retirement")).toHaveValue("Retired");
-      expect(within(screen.getByRole("dialog")).getByRole("status")).toHaveTextContent("invalid reason D");
+      expect(screen.getByTestId("source-code-metadata")).toHaveTextContent("Retired");
+      expect(within(screen.getByTestId("source-code-metadata")).getByText("Retired"))
+        .toHaveAttribute("title", expect.stringContaining("invalid reason D"));
       fireEvent.change(screen.getByLabelText("Source Code Value"), { target: { value: "A3" } });
-      expect(screen.getByTestId("source-retirement")).toHaveValue("Unknown");
-      expect(within(screen.getByRole("dialog")).queryByRole("status")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("source-code-metadata")).not.toBeInTheDocument();
     });
 
     // #1575 replaced the Provenance-then-Seen default with plain Seen. Grouping
@@ -523,15 +539,12 @@ describe("CodeMappingPage", () => {
       expect(within(athena).queryByRole("columnheader", { name: "Status" })).not.toBeInTheDocument();
     });
 
-    it("still labels missing retirement metadata as Unknown in the dialog", async () => {
-      // The Retired column and its sort went with #1080, so "sorts Unknown
-      // last" has no subject any more. What survives is the distinction the
-      // label exists for: absent metadata is not evidence of retirement.
+    it("does not spend dialog space on absent retirement metadata", async () => {
       renderPage([{ ...low, mapping_id: 33, source_code: "A3", source_retired: null }]);
       const cell = await screen.findByText("A3", { selector: "td" });
       fireEvent.click(cell.closest("tr")!);
       await screen.findByText("Edit Mapping");
-      expect(screen.getByTestId("source-retirement")).toHaveValue("Unknown");
+      expect(screen.queryByTestId("source-code-metadata")).not.toBeInTheDocument();
     });
   });
 
@@ -825,7 +838,7 @@ describe("CodeMappingPage", () => {
       expect(screen.getByLabelText("Source Description")).toHaveValue("M-protein, serum");
     });
 
-    it("shows a populated Source Concept ID in the dialog", async () => {
+    it("shows a populated source concept ID parenthetically beside the code", async () => {
       renderPage([{
         ...proposedRow,
         source_vocabulary_id: "ICD10CM",
@@ -840,7 +853,8 @@ describe("CodeMappingPage", () => {
       expect(screen.getByLabelText("Source Description")).toHaveValue(
         "Extramedullary plasmacytoma not having achieved remission",
       );
-      expect(screen.getByTestId("source-concept-id")).toHaveValue("45542660");
+      expect(screen.getByTestId("source-code-metadata")).toHaveTextContent("(OMOP concept 45542660)");
+      expect(screen.queryByLabelText("Source Concept ID")).not.toBeInTheDocument();
     });
 
     it("puts Domain first in the source block", async () => {
@@ -853,10 +867,49 @@ describe("CodeMappingPage", () => {
         "Source Code System",
         "Source Code Value",
         "Source Description",
-        "Source Concept ID",
-        "Source code retirement",
       ]);
       expect((screen.getByLabelText("Domain") as HTMLSelectElement).value).toBe("Measurement");
+    });
+
+    it("removes the manual UMLS action from the dialog", async () => {
+      await openDialog();
+      expect(screen.queryByRole("button", { name: "Check UMLS" })).not.toBeInTheDocument();
+      expect(mockPost).not.toHaveBeenCalledWith("/v1/code-mappings/check-umls/", expect.anything());
+    });
+
+    it("shows organization, percentiles, reference-range evidence, and suppression", async () => {
+      renderPage([{
+        ...proposedRow,
+        source_evidence: {
+          organization: { id: 4, slug: "memorial", name: "Memorial Hospital" },
+          occurrence_count: 12398,
+          group_occurrence_count: 13032,
+          metadata: {
+            patients: 205,
+            codings: 12398,
+            unit_coverage: { records: 12004, percent: 96.8 },
+            reference_range: { records: 9000, percent: 72.6, low_p50: 0.6, high_p50: 1.17, unit: "mg/dL" },
+            category: { top: "laboratory", mix: "laboratory (12398)" },
+          },
+          units: [
+            { display: "mg/dL", code: "mg/dL", count: 12000, patients: 204, values: 11990, distribution: { min: 0.1, p25: 0.7, p50: 0.9, p75: 1.1, max: 8.2 } },
+            { display: "mmol/L", code: "mmol/L", count: 4, suppressed: true },
+          ],
+        },
+      }]);
+      const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      fireEvent.click(cell.closest("tr")!);
+      const evidence = await screen.findByRole("region", { name: "Source evidence" });
+      await waitFor(() => expect(evidence).toHaveTextContent("Memorial Hospital"));
+      expect(evidence).toHaveTextContent("13,032");
+      expect(evidence).toHaveTextContent("96.8% of source records");
+      expect(within(evidence).getByRole("table", { name: "Observed source units" })).toHaveTextContent("Median0.9");
+      expect(evidence).toHaveTextContent("204 patients · 11,990 numeric values");
+      expect(evidence).toHaveTextContent("Suppressed for a small cohort");
+      expect(evidence).toHaveTextContent("0.6–1.17 mg/dL");
+      expect(evidence).toHaveTextContent("Recognition evidence only");
+      expect(evidence).not.toHaveTextContent("Mean");
+      expect(evidence).not.toHaveTextContent("standard deviation");
     });
 
     it("offers the source code system as a select with a blank option", async () => {
@@ -921,7 +974,7 @@ describe("CodeMappingPage", () => {
       expect(readOnly("Destination Concept Class")).toBe(true);
       expect(readOnly("Standard Concept")).toBe(true);
       expect(readOnly("Destination Table")).toBe(true);
-      expect((screen.getByLabelText("Source Concept ID") as HTMLInputElement).readOnly).toBe(true);
+      expect(screen.queryByLabelText("Source Concept ID")).not.toBeInTheDocument();
     });
 
     it("leaves Destination Concept ID writable when editing", async () => {

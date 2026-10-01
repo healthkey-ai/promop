@@ -32,6 +32,24 @@ def test_codes_sharing_a_label_become_one_entry_carrying_their_summed_seen():
     assert found[0]['mapping_id'] is None
 
 
+def test_extract_group_count_deduplicates_sibling_codings_on_the_same_records():
+    """Several Epic codings can coexist on every Observation. Their individual
+    Seen counts stay truthful, while the extract-provided label count prevents
+    grouped review from multiplying the same records."""
+    for code in ['10627', '200128', '2011827', 'MONOCL']:
+        row(code, 'Monoclonal protein', seen=12398,
+            source_group_occurrence_count=13032)
+    found, _ = entries()
+    assert found[0]['seen'] == 13032
+
+
+def test_group_count_falls_back_to_sum_without_extract_evidence():
+    row('A', 'Albumin', seen=4)
+    row('B', 'Albumin', seen=6)
+    found, _ = entries()
+    assert found[0]['seen'] == 10
+
+
 def test_a_lone_code_is_an_entry_that_still_names_its_row():
     row('SOLO', 'Ferritin', seen=7)
     found, _ = entries()
