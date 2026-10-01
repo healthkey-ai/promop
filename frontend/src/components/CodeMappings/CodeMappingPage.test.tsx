@@ -394,6 +394,32 @@ describe("CodeMappingPage", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
+  it("shows unit evidence and retries approval only after curator confirmation", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    mockPatch
+      .mockRejectedValueOnce({ response: { data: {
+        code: "unit_mismatch_confirmation_required",
+        unit_consistency: {
+          source_code: "M-PROTEIN, SERUM",
+          destination_concept_name: "Protein.monoclonal [Mass/volume] in Serum",
+          property: "MCnc",
+          expected_units: ["mg/dL"],
+          observed_units: [{ unit: "mmol/L", count: 14, compatible: false }],
+        },
+      } } })
+      .mockResolvedValueOnce({ data: { ...proposedRow, status: "approved" } });
+    renderPage([proposedRow]);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Approve M-PROTEIN, SERUM" }));
+
+    await waitFor(() => expect(confirm).toHaveBeenCalledWith(expect.stringContaining("mmol/L (14 results)")));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Approve anyway?"));
+    expect(mockPatch).toHaveBeenLastCalledWith("/v1/code-mappings/7/", expect.objectContaining({
+      status: "approved", confirm_unit_mismatch: true,
+    }));
+    confirm.mockRestore();
+  });
+
   it("shows the exact Athena duplicate error inside the edit dialog", async () => {
     const message = "This source and destination map is already supplied by Athena";
     mockPatch.mockRejectedValueOnce({ response: { data: { detail: message } } });
@@ -1895,6 +1921,49 @@ describe("server mapping pages", () => {
       "/v1/code-mappings/group/action/",
       expect.objectContaining({ label: "comment", action: "reject" }),
     ));
+  });
+
+  it("confirms unit evidence before retrying a group approval", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    mockPost
+      .mockRejectedValueOnce({ response: { data: {
+        code: "unit_mismatch_confirmation_required",
+        unit_consistency: {
+          warning_count: 12,
+          destination_concept_name: "Albumin [Mass/volume] in Serum or Plasma",
+          property: "MCnc",
+          expected_units: ["g/dL"],
+          observed_units: [{ unit: "mmol/L", count: 12 }],
+          observed_unit_count_kind: "mappings",
+        },
+      } } })
+      .mockResolvedValueOnce({ data: suggestRun({ total: 12, done: 12, destinations: 12 }) });
+    const payload = browseData({
+      rollup: true, selected_source: "EPIC",
+      tabs: [{ vocabulary_id: "EPIC", label: "Epic", is_standard: false, proposed: 12, approved: 0, athena: 0 }],
+      groups: { Unmapped: [entry({
+        members: 12, proposed: 12,
+        destination_concept_id: 3024561,
+        destination_concept_name: "Albumin [Mass/volume] in Serum or Plasma",
+        destination_concept_code: "1751-7", destination_vocabulary_id: "LOINC",
+      })] },
+    });
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/v1/code-mappings/") return Promise.resolve({ data: payload });
+      if (url === "/user/") return Promise.resolve({ data: { user: { is_staff: true } } });
+      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+    });
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Approve 12" }));
+
+    await waitFor(() => expect(mockPost).toHaveBeenLastCalledWith(
+      "/v1/code-mappings/group/action/",
+      expect.objectContaining({ action: "approve", confirm_unit_mismatch: true }),
+    ));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("12 mappings in this group"));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("mmol/L (12 mappings)"));
+    confirm.mockRestore();
   });
 
   it("expands a group into its vendor codes, and collapses again", async () => {

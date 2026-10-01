@@ -10641,6 +10641,36 @@ def _get_destination_concept(data):
         })
 
 
+def _unit_confirmation_requested(data):
+    return str(data.get('confirm_unit_mismatch') or '').strip().lower() in {
+        '1', 'true', 'yes', 'on',
+    }
+
+
+def _unit_confirmation_response(mapping, concept, data):
+    """Return a non-blocking approval warning that requires explicit consent."""
+    requested_status = str(data.get('status') or '').strip()
+    destination_changed = concept is not None and mapping.target_concept_id != concept.pk
+    if (
+        requested_status != 'approved'
+        or (mapping.status == 'approved' and not destination_changed)
+        or _unit_confirmation_requested(data)
+    ):
+        return None
+    from omop_core.services.mapping_unit_consistency import unit_consistency_for_mapping
+    report = unit_consistency_for_mapping(mapping, concept)
+    if not report['warning']:
+        return None
+    return Response({
+        'code': 'unit_mismatch_confirmation_required',
+        'detail': (
+            'Stored measurement units may not fit this LOINC destination. '
+            'Review the unit evidence and confirm to approve anyway.'
+        ),
+        'unit_consistency': report,
+    }, status=status.HTTP_409_CONFLICT)
+
+
 def _mirror_to_concept_relationship(mapping):
     """Write a 'Maps to' (and reverse 'Mapped from') row to concept_relationship.
 
@@ -11175,7 +11205,7 @@ def _group_job_rows(data):
     ).filter(status='proposed').order_by('pk')
 
 
-def _lock_group_job(request, *, mode, action=''):
+def _lock_group_job(request, *, mode, action='', destination=None):
     """Preflight and lock a complete batch before dispatching any mutation."""
     if not _can_manage_field_mappings(request.user):
         return None, Response({'detail': 'Organization admin access required.'}, status=403)
@@ -11192,6 +11222,28 @@ def _lock_group_job(request, *, mode, action=''):
                     'detail': 'You do not administer every organization in this group.',
                     'mapping_ids': forbidden,
                 }, status=403)
+            if (
+                action == 'approve'
+                and destination is not None
+                and not _unit_confirmation_requested(request.data)
+            ):
+                from omop_core.services.mapping_unit_consistency import (
+                    summarize_unit_warnings,
+                    unit_consistency_for_mappings,
+                )
+                unit_summary = summarize_unit_warnings(
+                    unit_consistency_for_mappings(rows, destination=destination)
+                )
+                if unit_summary['warning']:
+                    return None, Response({
+                        'code': 'unit_mismatch_confirmation_required',
+                        'detail': (
+                            'Stored measurement units for some group members may not fit '
+                            'this LOINC destination. Review the unit evidence and confirm '
+                            'to approve anyway.'
+                        ),
+                        'unit_consistency': unit_summary,
+                    }, status=status.HTTP_409_CONFLICT)
             cutoff = timezone.now() - timedelta(minutes=settings.MAPPING_LOCK_TIMEOUT_MINUTES)
             conflicts = [row.pk for row in rows if (
                 row.locked_by_id not in (None, request.user.pk)
@@ -11249,10 +11301,14 @@ def code_mapping_group_action(request):
     if action == 'approve':
         try:
             destination_id = int(destination_id)
-            Concept.objects.get(pk=destination_id)
+            destination = Concept.objects.get(pk=destination_id)
         except (TypeError, ValueError, Concept.DoesNotExist):
             return Response({'destination_concept_id': 'Choose a valid destination concept.'}, status=400)
-    locked, error = _lock_group_job(request, mode='group-action', action=action)
+    else:
+        destination = None
+    locked, error = _lock_group_job(
+        request, mode='group-action', action=action, destination=destination,
+    )
     if error:
         return error
     run, ids, selected_targets = locked
@@ -11498,6 +11554,12 @@ def code_mapping_detail(request, mapping_id):
         if (data.get('destination_concept_id') or data.get('target_concept_id') or data.get('concept_id'))
         else mapping.target_concept
     )
+    unit_warning = (
+        _unit_confirmation_response(mapping, concept, data)
+        if _can_approve_mappings(request.user) else None
+    )
+    if unit_warning is not None:
+        return unit_warning
     with transaction.atomic():
         mapping, repoint = _upsert_source_code_mapping(concept, data, request.user, mapping=mapping)
     from omop_core.services.mapping_destinations import destination_options
