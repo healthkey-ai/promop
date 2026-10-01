@@ -6,7 +6,8 @@ from django.core.management import CommandError
 from django.utils import timezone
 
 from omop_core.management.commands import sync_athena_vocabulary as sync
-from omop_core.models import Relationship, VocabularyRelease
+from omop_core.models import AthenaVocabularySync, Relationship, VocabularyRelease
+from omop_core.services import athena_vocabulary_jobs
 
 
 def _options(**overrides):
@@ -29,12 +30,15 @@ def test_current_drive_identity_skips_archive_download_and_table_work(monkeypatc
                         'identity': 'gdrive-file:current-file'},
     )
     monkeypatch.setattr(command, '_identity_is_current', lambda identity: True)
+    receipt = Mock()
+    monkeypatch.setattr(command, '_receipt', receipt)
     download = Mock(side_effect=AssertionError('current artifacts must not download'))
     monkeypatch.setattr(sync, '_download_gdrive_vocabulary', download)
 
     command.handle(**_options())
 
     download.assert_not_called()
+    assert receipt.call_args.args[6] == 'current'
     assert 'no archive download or table work' in command.stdout.getvalue()
 
 
@@ -182,3 +186,90 @@ def test_dry_run_rolls_back_rows_and_release(monkeypatch):
     assert installed is None
     assert not Relationship.objects.filter(pk='Dry-run relationship').exists()
     assert list(VocabularyRelease.objects.values_list('pk', flat=True)) == [previous.pk]
+
+
+@pytest.mark.django_db
+def test_enqueue_is_durable_and_deduplicates_active_work(monkeypatch):
+    queued = Mock(id='celery-task-1')
+    monkeypatch.setattr(
+        'omop_core.tasks.sync_athena_vocabulary_task.apply_async',
+        Mock(return_value=queued),
+    )
+
+    first, created = athena_vocabulary_jobs.enqueue_sync('https://example.test/athena')
+    second, duplicate = athena_vocabulary_jobs.enqueue_sync('https://example.test/athena')
+
+    assert created is True
+    assert duplicate is False
+    assert second.pk == first.pk
+    first.refresh_from_db()
+    assert first.outcome == 'queued'
+    assert first.task_id == 'celery-task-1'
+
+
+@pytest.mark.django_db
+def test_enqueue_failure_is_recorded_and_can_be_retried(monkeypatch):
+    publish = Mock(side_effect=RuntimeError('broker unavailable'))
+    monkeypatch.setattr(
+        'omop_core.tasks.sync_athena_vocabulary_task.apply_async', publish,
+    )
+
+    with pytest.raises(RuntimeError, match='broker unavailable'):
+        athena_vocabulary_jobs.enqueue_sync('https://example.test/athena')
+
+    failed = AthenaVocabularySync.objects.get()
+    assert failed.outcome == 'failed'
+    assert failed.completed_at is not None
+
+    publish.side_effect = None
+    publish.return_value = Mock(id='retry-task')
+    retried, created = athena_vocabulary_jobs.enqueue_sync('https://example.test/athena')
+    assert created is True
+    assert retried.pk != failed.pk
+
+
+@pytest.mark.django_db
+def test_worker_updates_the_queued_receipt(monkeypatch):
+    from django.core import management
+    from omop_core.tasks import sync_athena_vocabulary_task
+
+    sync_row = AthenaVocabularySync.objects.create(
+        source_url='https://example.test/athena', outcome='queued',
+        started_at=timezone.now(),
+    )
+
+    def command(name, **options):
+        assert name == 'sync_athena_vocabulary'
+        assert options['sync_id'] == sync_row.pk
+        AthenaVocabularySync.objects.filter(pk=sync_row.pk).update(
+            outcome='applied', completed_at=timezone.now(),
+        )
+
+    monkeypatch.setattr(management, 'call_command', command)
+    result = sync_athena_vocabulary_task.run(sync_row.pk)
+
+    sync_row.refresh_from_db()
+    assert sync_row.outcome == 'applied'
+    assert result == {'sync_id': sync_row.pk, 'outcome': 'applied'}
+
+
+@pytest.mark.django_db
+def test_worker_records_failures_that_escape_before_the_command_receipt(monkeypatch):
+    from django.core import management
+    from omop_core.tasks import sync_athena_vocabulary_task
+
+    sync_row = AthenaVocabularySync.objects.create(
+        source_url='https://example.test/athena', outcome='queued',
+        started_at=timezone.now(),
+    )
+    monkeypatch.setattr(
+        management, 'call_command', Mock(side_effect=RuntimeError('command unavailable')),
+    )
+
+    with pytest.raises(RuntimeError, match='command unavailable'):
+        sync_athena_vocabulary_task.run(sync_row.pk)
+
+    sync_row.refresh_from_db()
+    assert sync_row.outcome == 'failed'
+    assert sync_row.failure_reason == 'command unavailable'
+    assert sync_row.completed_at is not None

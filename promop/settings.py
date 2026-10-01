@@ -713,8 +713,11 @@ CELERY_TASK_TRACK_STARTED = True
 CELERY_BROKER_TRANSPORT_OPTIONS = {
     # Must exceed CELERY_TASK_TIME_LIMIT. Below it, Redis decides a still
     # running task was lost and hands the same job to a second worker.
+    # The Athena queue can perform a first full vocabulary load. Keep its
+    # message invisible longer than that task's six-hour hard limit so Redis
+    # cannot hand the same release to a second worker while the first is live.
     'visibility_timeout': int(
-        os.environ.get('CELERY_BROKER_VISIBILITY_TIMEOUT', '1800')),
+        os.environ.get('CELERY_BROKER_VISIBILITY_TIMEOUT', '25200')),
     # The refresh endpoint enqueues inside the request, so an unreachable
     # broker has to fail fast. Unset, kombu waits on the connect indefinitely
     # and the caller sits there until gunicorn kills the worker.

@@ -37,10 +37,23 @@ loads the vocabulary tables, and publishes a `vocabulary_release` manifest.
 
 ## Athena freshness and insert-only updates
 
-Deployments resolve the selected ZIP in the governed Drive folder before
-downloading it. A file identity already recorded by a successful sync exits
-without downloading the archive or touching vocabulary tables. Check a database
-manually without changing it:
+Deployments only create a durable sync request and publish it to the dedicated
+Celery `athena` queue. The worker resolves the selected ZIP in the governed
+Drive folder and performs both a new instance's initial load and later updates;
+archive processing, synonym refresh, and release hashing never block a web
+deploy. Repeated deploy/boot preparation deduplicates queued or running work.
+
+A file identity already recorded by a successful sync exits on the worker
+without downloading the archive or touching vocabulary tables. Queue the same
+asynchronous check manually (including to retry a failed job):
+
+```bash
+python manage.py queue_athena_vocabulary_sync --gdrive "$ATHENA_VOCABULARY_GDRIVE_URL"
+```
+
+The durable receipt progresses through `queued`, `running`, and then
+`current`, `applied`, or `failed`. Check a database synchronously without
+changing it only for diagnosis:
 
 ```bash
 python manage.py sync_athena_vocabulary --gdrive
@@ -62,8 +75,10 @@ python manage.py sync_athena_vocabulary --gdrive --apply
 The apply path holds a database advisory lock, never enables `--replace`, and
 records an `AthenaVocabularySync` receipt containing the source identity,
 SHA-256, prior/new releases, per-table insert counts, outcome, and any failure.
-Failures roll back the vocabulary transaction and may be retried. A repeated
-successful command is a metadata-only no-op.
+Failures roll back the vocabulary transaction and may be queued again without
+another application deploy. A repeated successful check is a metadata-only
+no-op. Workers must consume both the default `celery` queue and the `athena`
+queue; `start-worker.sh` provides that configuration.
 
 ```bash
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \

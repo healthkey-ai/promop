@@ -42,12 +42,12 @@ python manage.py check --deploy --fail-level ERROR
 echo "Preparing the production database..."
 python manage.py prepare_production_database --gdrive "$ATHENA_VOCABULARY_GDRIVE_URL"
 
-# Resolve the selected Drive file without downloading it. A previously applied
-# file identity exits here; a changed file is downloaded, fingerprinted, and
-# passed through the insert-only Athena loader under a database lock. Existing
-# vocabulary and clinical rows are never replaced by this deploy path.
-echo "Checking the Athena vocabulary release..."
-python manage.py sync_athena_vocabulary --gdrive "$ATHENA_VOCABULARY_GDRIVE_URL" --apply
+# Record one durable request and publish it to the worker's dedicated Athena
+# queue. The worker resolves the Drive identity and performs either the initial
+# load or a later insert-only update. No archive download, scan, synonym refresh
+# or release hashing is allowed to hold the web deployment open (#1674).
+echo "Queuing the Athena vocabulary freshness check..."
+python manage.py queue_athena_vocabulary_sync --gdrive "$ATHENA_VOCABULARY_GDRIVE_URL"
 
 echo "Creating/resetting admin user..."
 python manage.py setup_admin

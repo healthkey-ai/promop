@@ -109,7 +109,10 @@ services:
     autoDeploy: true
     # No frontend build: the worker serves nothing.
     buildCommand: "if [ -f scripts/verify_source_catalog_snapshots.py ]; then python scripts/verify_source_catalog_snapshots.py; fi && pip install -r requirements.txt && if [ -f scripts/install_athena_browser.py ]; then python scripts/install_athena_browser.py; fi"
-    startCommand: "celery -A promop worker --loglevel=info"
+    # Safe to apply before the corresponding main release: an older worker can
+    # listen to an empty queue, while only the new web code publishes Athena
+    # jobs. This keeps the production worker ready when async sync reaches main.
+    startCommand: "celery -A promop worker --loglevel=info --queues=celery,athena"
     envVars:
       # Keep Chromium inside the deployed Python environment, not a build-only cache.
       - key: PLAYWRIGHT_BROWSERS_PATH

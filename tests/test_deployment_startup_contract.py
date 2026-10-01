@@ -38,8 +38,8 @@ def test_preparation_never_invokes_an_unconditional_full_loader():
     assert 'python manage.py seed_omop_concepts' not in script
     assert 'python manage.py load_athena_vocabularies' not in script
     assert 'python manage.py prepare_production_database --gdrive' in script
-    assert 'python manage.py sync_athena_vocabulary --gdrive' in script
-    assert '--apply' in script
+    assert 'python manage.py queue_athena_vocabulary_sync --gdrive' in script
+    assert 'python manage.py sync_athena_vocabulary --gdrive' not in script
 
 
 def test_preparation_checks_the_environment_before_touching_the_database():
@@ -205,6 +205,15 @@ def test_workers_inherit_the_loinc_credentials_rather_than_repeating_them():
             assert source.get('name') == web and source.get('envVarKey') == key, (
                 f'{worker}.{key} should inherit from {web}, not be set separately'
             )
+
+
+def test_every_render_worker_consumes_the_dedicated_athena_queue():
+    blueprint = yaml.safe_load((ROOT / 'render.yaml').read_text())
+    services = {service['name']: service for service in blueprint['services']}
+
+    assert '--queues=celery,athena' in services['promop-worker']['startCommand']
+    assert services['promop-staging-worker']['startCommand'] == 'bash start-worker.sh'
+    assert '--queues=celery,athena' in commands(ROOT / 'start-worker.sh')
 
 
 def test_the_web_services_are_where_the_loinc_credentials_are_entered():
