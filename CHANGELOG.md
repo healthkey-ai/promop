@@ -65,6 +65,13 @@ All notable changes to PRomop are documented here.
 
 ### Changed
 
+- **Security review is scoped to security-sensitive GitHub controls** — ordinary
+  CI/test workflows and repository automation under `.github/` no longer need
+  an automatic Lars review request or independent writer approval solely because
+  of their directory. CODEOWNERS and the status policy still protect security
+  policy, deployment, release, publishing, CodeQL, custom-action, ownership, and
+  dependency-update controls (#1681).
+
 - **Faster backend CI provisioning** — ordinary pytest runs no longer download
   Chromium or install its operating-system libraries. A separate path-gated
   smoke job performs the real browser install and launch when Playwright or
