@@ -900,7 +900,7 @@ describe("CodeMappingPage", () => {
       const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
       fireEvent.click(cell.closest("tr")!);
       const evidence = await screen.findByRole("region", { name: "Source evidence" });
-      expect(evidence).toHaveTextContent("Memorial Hospital");
+      await waitFor(() => expect(evidence).toHaveTextContent("Memorial Hospital"));
       expect(evidence).toHaveTextContent("13,032");
       expect(evidence).toHaveTextContent("96.8% of source records");
       expect(within(evidence).getByRole("table", { name: "Observed source units" })).toHaveTextContent("Median0.9");
