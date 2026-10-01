@@ -1703,12 +1703,12 @@ export default function CodeMappingPage() {
     // queue renders exactly as before.
     const groupEntries = browse?.rollup ? browse.groups[section] ?? [] : null;
     const pagination = browse?.pages[section];
-    // Grouped entries are always ordered by summed Seen: browse validates
-    // order_<index> and then ignores it. A header that still toggled would
-    // announce an ordering the table never applies, and refetch for nothing.
-    const header = (label: string, column: SortColumn) => (
+    const header = (label: string, column: SortColumn) => {
+      const canSortGroup = column === "occurrence_count" || column === "source_code_description";
+      const sortable = groupEntries === null || canSortGroup;
+      return (
       <th className="px-4 py-3 font-semibold" aria-label={column === "occurrence_count" ? label : undefined}
-        aria-sort={groupEntries || sort?.column !== column ? "none" : sort.descending ? "descending" : "ascending"}>
+        aria-sort={!sortable || sort?.column !== column ? "none" : sort.descending ? "descending" : "ascending"}>
         {column === "occurrence_count" && <label className="mb-1 flex items-center gap-1 whitespace-nowrap text-xs font-normal normal-case tracking-normal">
           <input type="checkbox" checked={seenOnly}
             aria-label={`${section}: only codes with Seen greater than zero`}
@@ -1716,18 +1716,19 @@ export default function CodeMappingPage() {
             onChange={(event) => { setPages({}); setExpandedGroups({}); setSeenOnly(event.target.checked); }} />
           &gt; 0 only
         </label>}
-        {groupEntries ? (
-          <span title={`${section} is grouped by label and ordered by Seen`}>{label}</span>
-        ) : (
+        {sortable ? (
           <button type="button" title={`Sort ${section} by ${label}`} className="inline-flex items-center gap-1 hover:underline focus:outline-2"
             onClick={() => { setPages((previous) => ({ ...previous, [section]: 1 })); setSectionSorts((previous) => ({ ...previous, [section]: {
               column, descending: previous[section]?.column === column ? !previous[section]?.descending : false,
             } })); }}>
             {label}<span aria-hidden="true">{sort?.column === column ? (sort.descending ? "↓" : "↑") : "↕"}</span>
           </button>
+        ) : (
+          <span>{label}</span>
         )}
       </th>
-    );
+      );
+    };
     // Extracted so the rollup can render the same row under a group entry.
     // A member row must behave exactly like a queue row -- same click to
     // edit, same lock badge, same inline destination picker -- or expanding
@@ -2061,7 +2062,17 @@ export default function CodeMappingPage() {
                 there are, and leaves the queue in Seen order. */}
             <label className="inline-flex h-10 shrink-0 items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-700">
               <input type="checkbox" checked={rollup}
-                onChange={(e) => { setPages({}); setExpandedGroups({}); setRollup(e.target.checked); }} />
+                onChange={(e) => {
+                  setPages({});
+                  setExpandedGroups({});
+                  setSectionSorts((previous) => sectionNames.reduce<Partial<Record<MappingSection, SectionSort>>>((next, section) => {
+                    const current = previous[section];
+                    next[section] = current && (current.column === "occurrence_count" || current.column === "source_code_description")
+                      ? current : DEFAULT_SECTION_SORT;
+                    return next;
+                  }, {}));
+                  setRollup(e.target.checked);
+                }} />
               {/* One decision per label rather than per vendor code: albumin
                   arrives under 2,557 of them. */}
               Group by label
