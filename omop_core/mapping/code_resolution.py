@@ -51,6 +51,7 @@ from omop_core.mapping.therapy import (
     _slug,
 )
 from omop_core.signals import suppress_patient_record_refresh
+from omop_core.services.provenance_attribution import ATTRIBUTION, exclusively_attributed, with_attribution
 from omop_core.services.source_vocabularies import VOCABULARY_OID_ALIASES, canonical_source_vocabulary
 from omop_core.services import source_vocabularies
 from omop_core.data_migrations.snomed_relationships_v1 import SINGLE_ORIGIN, MULTIPLE_ORIGIN
@@ -634,12 +635,7 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
         # hospitals.  Only rows whose write provenance names this mapping's
         # organization are safe to move; historical rows with no attribution
         # deliberately remain unresolved rather than being guessed.
-        content_type = ContentType.objects.get_for_model(model)
-        attributed_ids = ProvenanceRecord.objects.filter(
-            content_type=content_type,
-            organization_id=mapping.organization_id,
-        ).values('object_id')
-        qs = qs.filter(pk__in=attributed_ids)
+        qs = exclusively_attributed(qs, mapping.organization_id)
     person_ids = set(qs.values_list('person_id', flat=True).distinct())
     result['rows_updated'] = qs.count()
     if not apply_changes or not result['rows_updated']:
@@ -691,21 +687,16 @@ def _collapse_duplicates(model, concept_col, source_col, match,
         match, person_id__in=person_ids, **{concept_col: concept_id},
     )
     if organization_id:
-        content_type = ContentType.objects.get_for_model(model)
-        attributed_ids = ProvenanceRecord.objects.filter(
-            content_type=content_type,
-            organization_id=organization_id,
-        ).values('object_id')
-        candidates = candidates.filter(pk__in=attributed_ids)
+        candidates = exclusively_attributed(candidates, organization_id)
     rows = (
-        candidates
+        with_attribution(candidates)
         .order_by(pk_col)
-        .values_list(pk_col, 'person_id', *identity_cols)
+        .values_list(pk_col, ATTRIBUTION, 'person_id', *identity_cols)
     )
 
     seen, doomed = set(), []
     for row in rows:
-        pk, key = row[0], row[1:]
+        pk, key = row[0], (tuple(row[1]),) + row[2:]
         if key in seen:
             doomed.append(pk)
         else:
