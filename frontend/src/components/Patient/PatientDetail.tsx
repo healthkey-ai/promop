@@ -282,6 +282,35 @@ interface PatientDetailProps {
   user?: User | null;
 }
 
+/** The record as the editor holds it: ECOG as a select value, TNBC derived. */
+function normalizeRecord(raw: Record<string, unknown>): Record<string, unknown> {
+  const d = { ...raw };
+  if (d.ecog_performance_status != null)
+    d.ecog_performance_status = String(d.ecog_performance_status);
+
+  if (d.estrogen_receptor_status && d.progesterone_receptor_status && d.her2_status) {
+    const erNeg = d.estrogen_receptor_status === "Negative";
+    const prNeg = d.progesterone_receptor_status === "Negative";
+    const her2Neg = d.her2_status === "Negative";
+    d.tnbc_status = erNeg && prNeg && her2Neg;
+  }
+  return d;
+}
+
+/**
+ * The /patient/:personId route, remounted per patient.
+ *
+ * PatientDetail's editor state -- the pending autosave, the save baseline, the
+ * timer, the save sequence -- belongs to one patient. React Router keeps the
+ * element mounted when only the param changes (e.g. picking another patient
+ * from the browser's history menu), and B's first edit was then built on A's
+ * values and PATCHed into B. Keying by id drops all of it at once (#1668).
+ */
+export function PatientDetailRoute({ user }: { user?: User | null }) {
+  const { personId } = useParams<{ personId: string }>();
+  return <PatientDetail key={personId} user={user} />;
+}
+
 export default function PatientDetail({
   personIdOverride,
   patientMode = false,
@@ -342,6 +371,30 @@ export default function PatientDetail({
   useEffect(() => { patientNameRef.current = patientName; }, [patientName]);
   useEffect(() => () => { if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current); }, []);
 
+  // Take a record the server returned as the new save baseline and editor state.
+  //
+  // pendingDataRef is the synchronous copy of the editor state -- every edit is
+  // built on it -- so replacing editedInfo alone let the next edit resurrect the
+  // pre-refresh values, and diffed against the new baseline they were sent as
+  // edits. Edits not yet saved are kept on top of the fresh record, so a refresh
+  // landing inside the autosave window neither drops them nor shows them reverted.
+  const adoptServerRecord = useCallback((raw: Record<string, unknown>) => {
+    const fresh = normalizeRecord(raw);
+    const oldBaseline = patientInfoRef.current ?? {};
+    const pending = pendingDataRef.current;
+    const unsaved = pending
+      ? Object.fromEntries(Object.entries(pending.info).filter(
+          ([f, v]) => !LIFECYCLE.has(f) && v !== oldBaseline[f],
+        ))
+      : {};
+    const edited = { ...fresh, ...unsaved };
+
+    patientInfoRef.current = { ...fresh };
+    setPatientInfo(fresh);
+    if (pending) pendingDataRef.current = { ...pending, info: edited };
+    setEditedInfo(edited);
+  }, []);
+
   useEffect(() => {
     if (!personId) return;
     (async () => {
@@ -349,20 +402,7 @@ export default function PatientDetail({
         setLoading(true);
         const res = await api.get(`/patient-info/${personId}/`);
         const d = res.data.patient_info;
-
-        if (d.ecog_performance_status != null)
-          d.ecog_performance_status = String(d.ecog_performance_status);
-
-        if (d.estrogen_receptor_status && d.progesterone_receptor_status && d.her2_status) {
-          const erNeg = d.estrogen_receptor_status === "Negative";
-          const prNeg = d.progesterone_receptor_status === "Negative";
-          const her2Neg = d.her2_status === "Negative";
-          d.tnbc_status = erNeg && prNeg && her2Neg;
-        }
-
-        setPatientInfo(d);
-        patientInfoRef.current = { ...d };
-        setEditedInfo(d);
+        adoptServerRecord(d);
 
         const user = res.data.user;
         const name = d.patient_name
@@ -381,26 +421,14 @@ export default function PatientDetail({
         setLoading(false);
       }
     })();
-  }, [personId]);
+  }, [personId, adoptServerRecord]);
 
    
   const doSave = useCallback(async () => {
-    const data = pendingDataRef.current;
-    if (!data || !personId) return;
+    if (!pendingDataRef.current || !personId) return;
     const seq = ++saveSeqRef.current;
     setSaveStatus("saving");
     try {
-      // scheduleAutoSave carries the edited name alongside the field data, but
-      // only data.info was ever sent — and data.info is the whole GET response,
-      // which already carries the ORIGINAL patient_name. So a rename never
-      // reached the server, and every autosave echoed the old name back.
-      //
-      // Strip it unconditionally and re-add only on a real rename. Sending the
-      // server's own value back is never useful, and for a patient with no name
-      // it is harmful: the rendered value is the synthesised "Patient 3542".
-      const { patient_name: _echoed, ...info } = data.info as Record<string, unknown>;
-      const renamed = !!data.name && data.name !== patientNameRef.current;
-
       // All fields — clinical and profile alike — go through PatientRecord
       // PATCH. The backend projects profile fields to Person/Location and
       // clinical fields to OMOP tables after the PATCH lands.
@@ -415,7 +443,24 @@ export default function PatientDetail({
           + 'attempted. Retry once the connection is back.',
         );
       }
+      // The snapshot and the baseline it is diffed against are read together,
+      // after the await: a server refresh landing while the descriptor loads
+      // moves the baseline and rebases pendingDataRef, and a snapshot taken
+      // before it would send the server's moved values back as edits (#1668).
+      // Checked on entry, and nothing resets it to null.
+      const data = pendingDataRef.current!;
       const baseline = patientInfoRef.current ?? {};
+
+      // scheduleAutoSave carries the edited name alongside the field data, but
+      // only data.info was ever sent — and data.info is the whole GET response,
+      // which already carries the ORIGINAL patient_name. So a rename never
+      // reached the server, and every autosave echoed the old name back.
+      //
+      // Strip it unconditionally and re-add only on a real rename. Sending the
+      // server's own value back is never useful, and for a patient with no name
+      // it is harmful: the rendered value is the synthesised "Patient 3542".
+      const { patient_name: _echoed, ...info } = data.info as Record<string, unknown>;
+      const renamed = !!data.name && data.name !== patientNameRef.current;
       const patchFields: Record<string, unknown> = {};
 
       for (const [f, v] of Object.entries(info)) {
@@ -506,13 +551,9 @@ export default function PatientDetail({
   const reloadPatientInfo = useCallback(() => {
     if (!personId) return;
     api.get(`/patient-info/${personId}/`)
-      .then((res) => {
-        const d = res.data.patient_info;
-        setPatientInfo(d);
-        setEditedInfo(d);
-      })
+      .then((res) => adoptServerRecord(res.data.patient_info))
       .catch(() => {});
-  }, [personId]);
+  }, [personId, adoptServerRecord]);
 
   const handleFieldChange = useCallback((field: string, value: unknown) => {
     const base = pendingDataRef.current?.info ?? editedInfoRef.current;
@@ -830,20 +871,12 @@ export default function PatientDetail({
                         onConfirm={async () => {
                           try {
                             const result = await confirmRecord();
-                            setEditedInfo((prev) => ({
-                              ...prev,
+                            adoptServerRecord({
+                              ...patientInfoRef.current,
                               validated: result.validated,
                               validated_by: result.validated_by,
                               validation_date: result.validation_date,
-                            }));
-                            setPatientInfo((prev) =>
-                              prev ? {
-                                ...prev,
-                                validated: result.validated,
-                                validated_by: result.validated_by,
-                                validation_date: result.validation_date,
-                              } : prev,
-                            );
+                            });
                           } catch {
                             setSaveErrorMsg('Failed to confirm record. Please try again.');
                           }
@@ -878,9 +911,7 @@ export default function PatientDetail({
                         // Advancing the baseline too stops the next autosave
                         // reading these derived moves as edits to read-only
                         // columns — the failure #627 fixed.
-                        setPatientInfo(info);
-                        setEditedInfo(info);
-                        patientInfoRef.current = { ...info };
+                        adoptServerRecord(info);
                       }}
                     />
                     {patientMode && (

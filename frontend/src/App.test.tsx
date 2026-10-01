@@ -11,7 +11,7 @@ vi.mock("@/hooks/useAuth", () => ({ useAuth: () => mockUseAuth() }));
 vi.mock("@/components/Patient/PatientList", () => ({ default: () => <div>PROVIDER_LIST</div> }));
 vi.mock("@/components/Patient/PatientHome", () => ({ default: () => <div>PATIENT_HOME</div> }));
 vi.mock("@/components/Patient/PatientDetail", () => ({
-  default: (props: { user?: { id?: number } | null }) => (
+  PatientDetailRoute: (props: { user?: { id?: number } | null }) => (
     <div>{`PATIENT_DETAIL:${props.user?.id ?? "none"}`}</div>
   ),
 }));

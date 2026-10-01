@@ -12,7 +12,7 @@ import AcceptPatientInvite from "@/components/Auth/AcceptPatientInvite";
 import ResetPassword from "@/components/Auth/ResetPassword";
 import ChangePassword from "@/components/Auth/ChangePassword";
 import PatientList from "@/components/Patient/PatientList";
-import PatientDetail from "@/components/Patient/PatientDetail";
+import { PatientDetailRoute } from "@/components/Patient/PatientDetail";
 import PatientHome from "@/components/Patient/PatientHome";
 import UploadPage from "@/components/Patient/UploadPage";
 import UploadFHIR from "@/components/Patient/UploadFHIR";
@@ -157,7 +157,7 @@ function AppRoutes() {
           )
         }
       />
-      <Route path="/patient/:personId" element={providerRoute(<PatientDetail user={currentUser} />)} />
+      <Route path="/patient/:personId" element={providerRoute(<PatientDetailRoute user={currentUser} />)} />
       <Route path="/upload" element={orgAdminRoute(<UploadPage />)} />
       <Route path="/upload-fhir" element={orgAdminRoute(<UploadFHIR />)} />
       <Route path="/upload-csv" element={orgAdminRoute(<UploadCSV />)} />
