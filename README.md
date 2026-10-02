@@ -11,6 +11,8 @@ See [paper.md](paper.md) for the full research description.
 
 **Architecture and documentation:** [Read the overview](docs/README.md) for the data flow, current contracts, and a guided route through the documentation.
 
+**HL7 PHR-S FM conformance:** [Conformance claim](docs/phrs-fm-conformance-claim.md) — HL7 PHR-S FM R2 self-attestation scoped to an [oncology functional profile](docs/phrs-fm-onco-profile.md) (26 functions, 78 SHALL criteria, 75 MET / 3 PARTIAL / 0 NOT MET).
+
 Field concept mapping: [implemented architecture](docs/field_concept_mapping_architecture.md)
 and [enhancements plan](docs/field_concept_mapping_plan.md).
 
