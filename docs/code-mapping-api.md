@@ -83,11 +83,22 @@ choose a CSV, name its source vocabulary, and set its provenance. Provenance
 defaults to the signed-in user's email but remains editable.
 
 The CSV header is case- and surrounding-whitespace-insensitive and must contain
-`source code` and `source description`. `seen count` is optional; an absent or
-blank value means zero. Unknown or duplicate headers, duplicate source codes,
-negative/non-integer counts, malformed rows, and overlong values reject the
-entire upload with row-numbered errors. Uploads are limited to 5 MB and 100,000
-nonblank data rows.
+`source code` and `source description`. `seen count`, `destination concept ID`,
+and `state` are optional. An absent or blank seen count means zero. State accepts
+`Approved` or `Proposed` (case- and surrounding-whitespace-insensitive); an
+absent or blank state means `Proposed`. `Approved` requires a destination and
+is restricted to staff and organization admins. Unknown or duplicate headers,
+duplicate source codes, negative/non-integer counts, invalid states, malformed
+rows, and overlong values reject the entire upload with row-numbered errors.
+Uploads are limited to 5 MB and 100,000 nonblank data rows.
+
+For example, the complete five-column shape is:
+
+```csv
+source code,source description,seen count,destination concept ID,state
+A01,Albumin,8,3024561,Approved
+B02,Needs review,2,3024561,
+```
 
 The browser sends the form to:
 
@@ -100,13 +111,17 @@ source_vocabulary_id=VendorLab
 provenance=curator@example.com
 ```
 
-New codes become proposed, unmapped SCCM rows. Existing rows receive a nonblank
-description update and the uploaded count is added to `Seen`; destination,
-status, notes, review state, and other curation fields are not changed.
-Provenance fills only a blank existing provenance value. The operation is
-atomic, and an immutable receipt records its result. Re-uploading identical CSV
-bytes for the same vocabulary and provenance returns that receipt with
-`duplicate: true` and does not add the counts again.
+New codes become proposed SCCM rows unless their state is explicitly Approved.
+A destination with Proposed or blank state remains in the review queue; only an
+Approved destination becomes effective and re-points matching clinical rows.
+Existing rows receive a nonblank description update and the uploaded count is
+added to `Seen`. When a destination is present, its state updates the mapping;
+without a destination, existing destination and review state are preserved.
+Notes and other curation fields are not changed. Provenance fills only a blank
+existing provenance value. The operation is atomic, and an immutable receipt
+records its result. Re-uploading identical CSV bytes for the same vocabulary
+and provenance returns that receipt with `duplicate: true` and does not add the
+counts again.
 
 ## What SCCM does under the hood
 
