@@ -19912,6 +19912,241 @@ class PartialPatchValueColumnTest(TestCase):
 
 
 @override_settings(SERVICE_AUTH_SCOPES='patient/*.read patient/*.write')
+class ConceptDuplicateDetectionTest(TestCase):
+    """Opt-in concept+date duplicate detection on Measurement writes (#1699).
+
+    Two query params control the check:
+    - ?warn_concept_duplicates=true  — 201, rows written, warnings in response
+    - ?reject_concept_duplicates=true — 409, batch rolled back
+    Neither → no check performed.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.person = Person.objects.create(person_id=33001)
+        PatientRecord.objects.create(person=cls.person)
+
+        cls.m_concept = Concept.objects.get(concept_id=3000963)
+        cls.alt_concept = Concept.objects.get(concept_id=4112853)
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+
+        cls.service_identity = Identity.objects.get_or_create(
+            issuer='urn:service', sub='concept-dup-test',
+        )[0]
+        cls.service_identity.set_unusable_password()
+        cls.service_identity.save()
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.client = APIClient()
+        self.client.force_authenticate(
+            user=self.service_identity, token="service-token")
+
+    def _row(self, source_value, day='2024-01-01', concept=None,
+             value=5.0):
+        concept = concept or self.m_concept
+        return {
+            'person': self.person.person_id,
+            'measurement_concept': concept.concept_id,
+            'measurement_date': day,
+            'measurement_type_concept': self.type_concept.concept_id,
+            'value_as_number': value,
+            'measurement_source_value': source_value,
+        }
+
+    def _post(self, rows, query='?skip_refresh=true'):
+        if isinstance(rows, dict):
+            return self.client.post(
+                f'/api/v1/measurements/{query}', rows, format='json')
+        return self.client.post(
+            f'/api/v1/measurements/{query}', rows, format='json')
+
+    # --- warn mode --------------------------------------------------------
+
+    def test_warn_no_duplicates(self):
+        """Distinct concept+date pairs produce no warnings."""
+        rows = [
+            self._row('A', '2024-01-01'),
+            self._row('B', '2024-01-02'),
+        ]
+        resp = self._post(rows, '?skip_refresh=true&warn_concept_duplicates=true')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertNotIn('concept_duplicates', resp.data)
+
+    def test_warn_existing_conflict(self):
+        """Pre-existing row with same concept+date triggers a warning."""
+        from omop_core.models import Measurement
+        # Seed an existing row.
+        self._post([self._row('GLUCOSE-SERUM', '2024-02-01')])
+        count_before = Measurement.objects.filter(person=self.person).count()
+
+        # POST a new row with different source_value but same concept+date.
+        resp = self._post(
+            [self._row('GLU-RANDOM', '2024-02-01')],
+            '?skip_refresh=true&warn_concept_duplicates=true')
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertIn('concept_duplicates', resp.data)
+        dups = resp.data['concept_duplicates']
+        self.assertTrue(any(d['type'] == 'existing_conflict' for d in dups))
+        # Row was still written.
+        self.assertEqual(
+            Measurement.objects.filter(person=self.person).count(),
+            count_before + 1)
+
+    def test_warn_intra_batch(self):
+        """Two rows in one batch with same concept+date triggers a warning."""
+        rows = [
+            self._row('SRC-A', '2024-03-01', value=1.0),
+            self._row('SRC-B', '2024-03-01', value=2.0),
+        ]
+        resp = self._post(
+            rows, '?skip_refresh=true&warn_concept_duplicates=true')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertIn('concept_duplicates', resp.data)
+        dups = resp.data['concept_duplicates']
+        intra = [d for d in dups if d['type'] == 'intra_batch']
+        self.assertEqual(len(intra), 1)
+        self.assertEqual(sorted(intra[0]['batch_indices']), [0, 1])
+
+    # --- reject mode ------------------------------------------------------
+
+    def test_reject_rolls_back(self):
+        """Reject mode returns 409 and writes no rows."""
+        from omop_core.models import Measurement
+        self._post([self._row('EXISTING', '2024-04-01')])
+        count_before = Measurement.objects.filter(person=self.person).count()
+
+        resp = self._post(
+            [self._row('DUPLICATE', '2024-04-01')],
+            '?skip_refresh=true&reject_concept_duplicates=true')
+
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn('concept_duplicates', resp.data)
+        # No new row written.
+        self.assertEqual(
+            Measurement.objects.filter(person=self.person).count(),
+            count_before)
+
+    # --- exclusions -------------------------------------------------------
+
+    def test_concept_zero_excluded(self):
+        """concept_id=0 rows do not trigger warnings."""
+        from omop_core.test_utils import ensure_test_concept_zero
+        ensure_test_concept_zero()
+        rows = [
+            self._row('UNMAPPED-A', '2024-05-01', concept=Concept.objects.get(concept_id=0)),
+            self._row('UNMAPPED-B', '2024-05-01', concept=Concept.objects.get(concept_id=0)),
+        ]
+        resp = self._post(
+            rows, '?skip_refresh=true&warn_concept_duplicates=true')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertNotIn('concept_duplicates', resp.data)
+
+    def test_upserted_rows_not_flagged(self):
+        """A re-POST that upserts (matches by source_value+date+value) does not warn."""
+        row = self._row('STABLE', '2024-06-01')
+        self._post([row])
+        # Re-POST the same row — upsert matches, no new insert.
+        resp = self._post(
+            [row], '?skip_refresh=true&warn_concept_duplicates=true')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertNotIn('concept_duplicates', resp.data)
+
+    def test_erroneous_rows_excluded(self):
+        """An existing is_erroneous row does not trigger a warning."""
+        from omop_core.models import Measurement
+        resp = self._post([self._row('OLD-VALUE', '2024-07-01')])
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        old_id = resp.data['ids'][0]
+        Measurement.objects.filter(measurement_id=old_id).update(is_erroneous=True)
+
+        resp = self._post(
+            [self._row('NEW-VALUE', '2024-07-01')],
+            '?skip_refresh=true&warn_concept_duplicates=true')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        # The erroneous row should not count as a conflict.
+        existing_conflicts = [
+            d for d in resp.data.get('concept_duplicates', [])
+            if d['type'] == 'existing_conflict'
+        ]
+        self.assertEqual(len(existing_conflicts), 0)
+
+    # --- no flag = no check -----------------------------------------------
+
+    def test_no_flag_no_check(self):
+        """Without query params, colliding rows produce no warnings."""
+        self._post([self._row('BASE', '2024-08-01')])
+        resp = self._post(
+            [self._row('COLLIDER', '2024-08-01')],
+            '?skip_refresh=true')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertNotIn('concept_duplicates', resp.data)
+
+    # --- single-row path --------------------------------------------------
+
+    def test_single_row_warns(self):
+        """Single-dict POST with warn flag returns warning in response."""
+        self._post([self._row('SINGLE-BASE', '2024-09-01')])
+        resp = self._post(
+            self._row('SINGLE-DUP', '2024-09-01'),
+            '?skip_refresh=true&warn_concept_duplicates=true')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertIn('concept_duplicates', resp.data)
+
+    def test_single_row_rejects(self):
+        """Single-dict POST with reject flag returns 409."""
+        from omop_core.models import Measurement
+        self._post([self._row('SINGLE-OK', '2024-10-01')])
+        count_before = Measurement.objects.filter(person=self.person).count()
+
+        resp = self._post(
+            self._row('SINGLE-REJECT', '2024-10-01'),
+            '?skip_refresh=true&reject_concept_duplicates=true')
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(
+            Measurement.objects.filter(person=self.person).count(),
+            count_before)
+
+    # --- query count ------------------------------------------------------
+
+    def test_query_count_flat(self):
+        """The duplicate check adds one query regardless of batch size."""
+        from django.test.utils import CaptureQueriesContext
+        from django.db import connection
+
+        rows_2 = [
+            self._row(f'QC-{i}', f'2024-11-{i+1:02d}')
+            for i in range(2)
+        ]
+        with CaptureQueriesContext(connection) as ctx_2:
+            self._post(
+                rows_2,
+                '?skip_refresh=true&warn_concept_duplicates=true')
+        q2 = len(ctx_2.captured_queries)
+
+        rows_10 = [
+            self._row(f'QC-{i}', f'2024-12-{i+1:02d}')
+            for i in range(10)
+        ]
+        with CaptureQueriesContext(connection) as ctx_10:
+            self._post(
+                rows_10,
+                '?skip_refresh=true&warn_concept_duplicates=true')
+        q10 = len(ctx_10.captured_queries)
+
+        # The concept-dup check is one query; so query count growth comes only
+        # from the DRF validation path (flat in batch size already). Allow a
+        # tolerance of 2 for cache/content-type lookups that may or may not
+        # be cached across calls.
+        self.assertLessEqual(abs(q10 - q2), 2,
+                             f'queries grew from {q2} to {q10}; '
+                             f'the concept-duplicate check should be O(1)')
+
+
+@override_settings(SERVICE_AUTH_SCOPES='patient/*.read patient/*.write')
 class BulkOmopUpdateTest(TestCase):
     """PATCH /api/v1/<resource>/bulk_update/ with a list of partial rows."""
 
