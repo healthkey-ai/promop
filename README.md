@@ -222,6 +222,8 @@ See **[docs/reproducing-benchmark-results.md](docs/reproducing-benchmark-results
 - Backend: `https://promop.onrender.com` (this is just our public example which you can sign up to as demo user, but you cannot deploy to it)
 - Admin credentials: set via `ADMIN_EMAIL` / `ADMIN_PASSWORD` env vars on Render
 
+To deploy your own instance on Google Cloud, see the [Terraform example](docs/terraform/README.md).
+
 ---
 
 ## Contributing and Support
