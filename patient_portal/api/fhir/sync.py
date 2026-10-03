@@ -33,6 +33,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from omop_core.authorization import can_write_patient
+from omop_core.services.provenance_attribution import with_attribution
 from django.db.models import Q
 from django.db.models.functions import Upper
 
@@ -204,6 +205,12 @@ def _is_daily_rollup(obs):
         if ext.get('url') == AGGREGATION_EXT_URL and ext.get('valueCode') == 'daily':
             return True
     return False
+
+
+def _same_attribution_extras(rows):
+    """Later rows from the same hospital as the first; another hospital's row
+    is a separate fact, not a duplicate."""
+    return [row for row in rows[1:] if row.attribution == rows[0].attribution]
 
 
 class FhirSyncRequestSerializer(serializers.Serializer):
@@ -697,7 +704,7 @@ class FhirSyncView(APIView):
                 existing_qs = Measurement.objects.filter(
                     match, person=person, measurement_date=obs_date,
                 )
-                existing = list(existing_qs.order_by('measurement_id'))
+                existing = list(with_attribution(existing_qs).order_by('measurement_id'))
                 if not existing:
                     # Nothing stored yet, but a row for this same concept and
                     # day may already be staged from an earlier entry in this
@@ -724,7 +731,7 @@ class FhirSyncView(APIView):
                     ))
                     continue
 
-                keep, extras = existing[0], existing[1:]
+                keep, extras = existing[0], _same_attribution_extras(existing)
                 if extras:  # collapse historical stacked rows for this concept/day
                     extra_ids = [m.measurement_id for m in extras]
                     ProvenanceRecord.objects.filter(
@@ -1023,12 +1030,12 @@ class FhirSyncView(APIView):
         touched, new_rows = [], []
         with suppress_patient_record_refresh():
             for (sv, date), inst in desired.items():
-                existing = list(model.objects.filter(**{
-                    'person': person, sv_field: sv, date_field: date}).order_by(pk_field))
+                existing = list(with_attribution(model.objects.filter(**{
+                    'person': person, sv_field: sv, date_field: date})).order_by(pk_field))
                 if not existing:
                     new_rows.append(inst)
                     continue
-                keep, extras = existing[0], existing[1:]
+                keep, extras = existing[0], _same_attribution_extras(existing)
                 if extras:  # collapse historical stacked rows for this event
                     extra_ids = [getattr(m, pk_field) for m in extras]
                     ProvenanceRecord.objects.filter(

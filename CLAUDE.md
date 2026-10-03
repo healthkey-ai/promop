@@ -1267,7 +1267,7 @@ The five OMOP clinical CRUD endpoints (`conditions`, `drug-exposures`, `measurem
 `observations`, `procedures`) accept a **JSON array** on POST for callers that have
 already parsed FHIR into OMOP rows. Single-dict POSTs are unchanged.
 
-Contract: `201` with `{"created": N, "updated": M, "ids": [...]}`, one id per
+Contract: `201` with `{"created": N, "updated": M, "unattributed_matches": K, "ids": [...]}`, one id per
 request row in request order. One transaction, all-or-nothing. One batch is one
 person (mixed-person → 400). Server assigns PKs via `next_pk_batch`
 (client-supplied PKs → 400). Per-index validation errors. Max 1,000 rows
@@ -1309,6 +1309,43 @@ error line, not 500. The whole batch rolled back, so the caller can retry, and a
 500 reads as "the service is down".
 
 A row with no `source_value` or no date has no identity and is always inserted.
+
+### Source hospital (`X-Provenance-Organization-ID`, #1690)
+
+One ETL credential reads several hospitals, and a hospital-scoped mapping only
+repoints rows whose provenance names that hospital. The five clinical endpoints
+on `/api/v1/` take the hospital as a header; the legacy `/api/` registration
+ignores it. Validation is shared with `code-mappings/lookup/`'s body
+`organization_id` (`patient_portal/api/provenance_org.py`).
+
+- **Validated before any write.** 400 for a malformed, empty, unknown or
+  inactive id, or for a header without a source (`X-Provenance-Source`, or
+  `source` in a single-dict body). 403 when it differs from an org-bound
+  credential's organization, or when the caller is neither a machine credential
+  nor staff.
+- **Attribution, not access.** It is stored on `ProvenanceRecord.organization`.
+  Authorization follows the credential, and `PatientRecord.organization` is
+  never changed.
+- **Hospital-aware matching.** With the header, existing rows are classed by
+  the non-null organizations on their provenance
+  (`omop_core/services/provenance_attribution.py`):
+
+  | Class | Outcome |
+  |---|---|
+  | own (exactly this hospital) | matched as above |
+  | unattributed | left as stored; each input position counts in `unattributed_matches` |
+  | foreign (another hospital, or two) | never touched; the event is inserted when only these hold the key |
+
+  A replay does not add attribution to historical rows. Without the header,
+  matching is unchanged, so ETL sends the header on every write.
+- **Duplicates collapse only within one attribution**, everywhere rows are
+  collapsed: this upsert, `fhir/sync.py`, and `repoint_clinical_rows`. Two
+  hospitals' rows for one event are two facts.
+- **A row's hospital is set once.** `_record_provenance` never replaces a stored
+  organization, and an update that names a second hospital gets 409. The check
+  runs with the clinical row locked, before it is read.
+- **Scoped repoint needs exclusive attribution**: a row naming two hospitals
+  stays where it is.
 
 Three things to know before touching this code:
 

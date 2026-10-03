@@ -18758,7 +18758,8 @@ class BulkOmopWriteTest(TestCase):
     def test_empty_list_is_a_noop(self):
         resp = self.client.post('/api/v1/measurements/', [], format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(resp.data, {'created': 0, 'updated': 0, 'ids': []})
+        self.assertEqual(resp.data, {'created': 0, 'updated': 0,
+                                     'unattributed_matches': 0, 'ids': []})
 
     # --- query count ------------------------------------------------------
 
@@ -29023,3 +29024,775 @@ class CodeMappingLockTest(TestCase):
         self.assertIsNotNone(locked_row)
         self.assertIsNotNone(locked_row['locked_by_username'])
         self.assertIsNotNone(locked_row['locked_at'])
+
+
+# ---------------------------------------------------------------------------
+# Source organization on clinical writes (#1690)
+# ---------------------------------------------------------------------------
+
+_ORG_ROUTES = [
+    ('conditions', 'condition_occurrence_id', ConditionOccurrence, {
+        'condition_start_date': '2024-01-01',
+        'condition_source_value': '10627',
+    }, 'condition'),
+    ('drug-exposures', 'drug_exposure_id', DrugExposure, {
+        'drug_exposure_start_date': '2024-01-01',
+        'drug_source_value': '10627',
+    }, 'drug'),
+    ('measurements', 'measurement_id', Measurement, {
+        'measurement_date': '2024-01-01',
+        'measurement_source_value': '10627',
+        'value_as_number': 4.1,
+    }, 'measurement'),
+    ('observations', 'observation_id', Observation, {
+        'observation_date': '2024-01-01',
+        'observation_source_value': '10627',
+    }, 'observation'),
+    ('procedures', 'procedure_occurrence_id', ProcedureOccurrence, {
+        'procedure_date': '2024-01-01',
+        'procedure_source_value': '10627',
+    }, 'procedure'),
+]
+
+
+class ProvenanceOrganizationIdParsingTest(TestCase):
+
+    def test_accepts_positive_integers_and_their_strings(self):
+        from patient_portal.api.provenance_org import parse_organization_id
+
+        for raw, expected in ((41, 41), ('41', 41), (' 41 ', 41),
+                              (2 ** 63 - 1, 2 ** 63 - 1)):
+            with self.subTest(raw=raw):
+                self.assertEqual(parse_organization_id(raw), expected)
+
+    def test_rejects_everything_else(self):
+        from rest_framework.exceptions import ValidationError as DrfValidationError
+        from patient_portal.api.provenance_org import parse_organization_id
+
+        for raw in ('', ' ', 'abc', '0', '-3', '1.5', '041', '9223372036854775808',
+                    0, -3, 2 ** 63, True, False, 1.0, 1.9, None, [1], {'id': 1}):
+            with self.subTest(raw=raw):
+                with self.assertRaises(DrfValidationError):
+                    parse_organization_id(raw)
+
+
+@override_settings(SERVICE_AUTH_SCOPES='patient/*.read patient/*.write')
+class BulkOmopProvenanceOrganizationTest(TestCase):
+    """X-Provenance-Organization-ID (#1690)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from oauth2_provider.models import AccessToken, Application
+        from omop_core.models import ApplicationOrganization
+
+        _make_vocab_fixtures()
+        cls.concept = Concept.objects.get(concept_id=3000963)
+        cls.other_concept = Concept.objects.get(concept_id=4112853)
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+        cls.org_a = Organization.objects.create(name='Prov Hospital A', slug='prov-a')
+        cls.org_b = Organization.objects.create(name='Prov Hospital B', slug='prov-b')
+        cls.tenant = Organization.objects.create(name='Prov Tenant', slug='prov-tenant')
+        cls.person = Person.objects.create(person_id=33001)
+        cls.person_b = Person.objects.create(person_id=33002)
+        PatientRecord.objects.create(person=cls.person)
+        PatientRecord.objects.create(person=cls.person_b)
+
+        cls.service_identity = Identity.objects.get_or_create(
+            issuer='urn:service', sub='prov-org-test')[0]
+        cls.service_identity.set_unusable_password()
+        cls.service_identity.save()
+        cls.staff = Identity.objects.create_user(
+            email='prov-org-staff@test.com', password='x', is_staff=True)
+        cls.patient_user = Identity.objects.create_user(
+            email='prov-org-patient@test.com', password='x')
+
+        owner = Identity.objects.create_user(email='prov-org-app@test.com', password='x')
+        cls.bound_app = Application.objects.create(
+            name='Prov bound app', client_id='prov-bound-client',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+            user=owner,
+        )
+        ApplicationOrganization.objects.create(
+            application=cls.bound_app, organization=cls.org_a)
+        expires = timezone.now() + timedelta(hours=1)
+        cls.bound_token = AccessToken.objects.create(
+            user=owner, application=cls.bound_app, token='prov-bound-write',
+            expires=expires, scope='patient/*.write')
+        cls.bound_read_token = AccessToken.objects.create(
+            user=owner, application=cls.bound_app, token='prov-bound-read',
+            expires=expires, scope='patient/*.read')
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.service_identity, token='service-token')
+
+
+    def _bound_client(self, token=None):
+        client = APIClient()
+        client.credentials(
+            HTTP_AUTHORIZATION=f'Bearer {(token or self.bound_token).token}')
+        return client
+
+    @staticmethod
+    def _headers(org=None, source='EHR_SYNC'):
+        headers = {}
+        if source is not None:
+            headers['HTTP_X_PROVENANCE_SOURCE'] = source
+        if org is not None:
+            headers['HTTP_X_PROVENANCE_ORGANIZATION_ID'] = (
+                str(org.pk) if isinstance(org, Organization) else org)
+        return headers
+
+    def _row(self, person=None, concept=None, value=4.1, sv='10627', day='2024-01-01'):
+        return {
+            'person': (person or self.person).person_id,
+            'measurement_concept': (concept or self.concept).concept_id,
+            'measurement_date': day,
+            'measurement_type_concept': self.type_concept.concept_id,
+            'measurement_source_value': sv,
+            'value_as_number': value,
+        }
+
+    def _post(self, rows, org=None, client=None, query='', **extra):
+        return (client or self.client).post(
+            f'/api/v1/measurements/{query}', rows, format='json',
+            **self._headers(org), **extra)
+
+    def _seed(self, org=None, person=None, concept=None, pk=None, value=4.1):
+        pk = pk or (Measurement.objects.order_by('-measurement_id')
+                    .values_list('measurement_id', flat=True).first() or 9_300_000) + 1
+        row = Measurement.objects.create(
+            measurement_id=pk, person=person or self.person,
+            measurement_concept=concept or self.concept,
+            measurement_date=date(2024, 1, 1),
+            measurement_type_concept=self.type_concept,
+            measurement_source_value='10627', value_as_number=Decimal(str(value)),
+        )
+        if org is not None:
+            self._attribute(row, org)
+        return row
+
+    @staticmethod
+    def _attribute(row, org, source='EHR_SYNC', actor='seed'):
+        ProvenanceRecord.objects.create(
+            content_type=ContentType.objects.get_for_model(type(row)),
+            object_id=row.pk, source=source, source_user_id=actor,
+            organization=org)
+
+    @staticmethod
+    def _orgs(model, pk):
+        return set(ProvenanceRecord.objects.filter(
+            content_type=ContentType.objects.get_for_model(model), object_id=pk,
+        ).values_list('organization_id', flat=True))
+
+    def _counts(self):
+        return (Measurement.objects.count(), ProvenanceRecord.objects.count())
+
+
+    def test_header_attributes_inserted_rows_on_all_five_endpoints(self):
+        for route, pk_field, model, fields, prefix in _ORG_ROUTES:
+            with self.subTest(route=route):
+                row = dict(fields, person=self.person.person_id, **{
+                    f'{prefix}_concept': self.concept.concept_id,
+                    f'{prefix}_type_concept': self.type_concept.concept_id,
+                })
+                resp = self.client.post(
+                    f'/api/v1/{route}/', [row], format='json',
+                    **self._headers(self.org_a))
+                self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+                self.assertEqual(resp.data['unattributed_matches'], 0)
+                self.assertEqual(self._orgs(model, resp.data['ids'][0]), {self.org_a.pk})
+
+    def test_attribution_does_not_change_the_patient_tenant(self):
+        PatientRecord.objects.filter(person=self.person_b).update(organization=self.tenant)
+        self._post([self._row()], org=self.org_a)
+        self._post([self._row(person=self.person_b)], org=self.org_a)
+        self.assertIsNone(PatientRecord.objects.get(person=self.person).organization_id)
+        self.assertEqual(
+            PatientRecord.objects.get(person=self.person_b).organization_id, self.tenant.pk)
+
+    def test_absent_header_keeps_credential_attribution(self):
+        unbound = self._post([self._row(value=1)])
+        bound = self._post([self._row(value=2)], client=self._bound_client())
+        self.assertEqual(unbound.status_code, status.HTTP_201_CREATED, unbound.data)
+        self.assertEqual(bound.status_code, status.HTTP_201_CREATED, bound.data)
+        self.assertEqual(self._orgs(Measurement, unbound.data['ids'][0]), {None})
+        self.assertEqual(self._orgs(Measurement, bound.data['ids'][0]), {self.org_a.pk})
+        self.assertEqual(unbound.data['unattributed_matches'], 0)
+
+    def test_staff_may_name_an_organization(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self._post([self._row()], org=self.org_b)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(self._orgs(Measurement, resp.data['ids'][0]), {self.org_b.pk})
+
+
+    def test_malformed_ids_are_rejected_before_writing(self):
+        before = self._counts()
+        for raw in ('', '   ', 'abc', '0', '-3', '1.5', '9223372036854775808'):
+            with self.subTest(raw=raw):
+                resp = self._post([self._row()], org=raw)
+                self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn('organization_id', resp.data)
+        self.assertEqual(self._counts(), before)
+
+    def test_unknown_id_is_rejected(self):
+        resp = self._post([self._row()], org='987654321')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(str(resp.data['organization_id']), 'Organization not found.')
+        self.assertEqual(Measurement.objects.count(), 0)
+
+    def test_bound_credential_must_name_its_own_organization(self):
+        mismatch = self._post([self._row()], org=self.org_b, client=self._bound_client())
+        self.assertEqual(mismatch.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(Measurement.objects.count(), 0)
+        same = self._post([self._row()], org=self.org_a, client=self._bound_client())
+        self.assertEqual(same.status_code, status.HTTP_201_CREATED, same.data)
+
+    def test_interactive_user_cannot_name_an_organization(self):
+        self.client.force_authenticate(user=self.patient_user)
+        resp = self._post([self._row()], org=self.org_a)
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(Measurement.objects.count(), 0)
+
+    def test_header_grants_no_access(self):
+        resp = self._post([self._row()], org=self.org_a,
+                          client=self._bound_client(self.bound_read_token))
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        anonymous = APIClient().post('/api/v1/measurements/', [self._row()], format='json',
+                                     **self._headers(self.org_a))
+        self.assertIn(anonymous.status_code,
+                      (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+        self.assertEqual(Measurement.objects.count(), 0)
+
+    def test_header_requires_a_source(self):
+        resp = self.client.post('/api/v1/measurements/', [self._row()], format='json',
+                                **self._headers(self.org_a, source=None))
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Measurement.objects.count(), 0)
+
+        resp = self.client.post('/api/v1/measurements/', dict(self._row(), source='EHR_SYNC'),
+                                format='json', **self._headers(self.org_a, source=None))
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(self._orgs(Measurement, resp.data['measurement_id']), {self.org_a.pk})
+
+    def test_oversized_body_is_refused_before_provenance_is_resolved(self):
+        from unittest import mock
+        with mock.patch('patient_portal.api.views.OMOP_BULK_MAX_BYTES', 10), \
+                mock.patch('patient_portal.api.views._provenance_context') as resolve:
+            resp = self._post([self._row()], org=self.org_a)
+        self.assertEqual(resp.status_code, status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+        resolve.assert_not_called()
+
+    def test_a_bad_header_writes_nothing_on_any_entrance(self):
+        row = self._seed(org=None, concept=self.concept)
+        before = self._counts()
+        bad = self._headers('abc')
+        attempts = [
+            ('single upsert', lambda: self.client.post(
+                '/api/v1/measurements/', self._row(value=9), format='json', **bad)),
+            ('append-only single', lambda: self.client.post(
+                '/api/v1/measurements/?upsert=false', self._row(value=9), format='json', **bad)),
+            ('patch', lambda: self.client.patch(
+                f'/api/v1/measurements/{row.pk}/', {'value_as_number': 9}, format='json', **bad)),
+            ('put', lambda: self.client.put(
+                f'/api/v1/measurements/{row.pk}/', dict(self._row(value=9)), format='json', **bad)),
+            ('bulk_update', lambda: self.client.patch(
+                '/api/v1/measurements/bulk_update/',
+                [{'measurement_id': row.pk, 'value_as_number': 9}], format='json', **bad)),
+        ]
+        for name, call in attempts:
+            with self.subTest(entrance=name):
+                self.assertEqual(call().status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(self._counts(), before)
+        row.refresh_from_db()
+        self.assertEqual(row.value_as_number, Decimal('4.1'))
+
+    def test_provenance_is_resolved_once_per_request(self):
+        from unittest import mock
+        from patient_portal.api import provenance_org
+        with mock.patch('patient_portal.api.views.header_organization',
+                        wraps=provenance_org.header_organization) as resolve:
+            self._post([self._row()], org=self.org_a)
+        self.assertEqual(resolve.call_count, 1)
+        row_id = Measurement.objects.get().pk
+        with mock.patch('patient_portal.api.views.header_organization',
+                        wraps=provenance_org.header_organization) as resolve:
+            self.client.patch(f'/api/v1/measurements/{row_id}/', {'value_as_number': 5},
+                              format='json', **self._headers(self.org_a))
+        self.assertEqual(resolve.call_count, 1)
+
+
+    def test_two_hospitals_reporting_one_event_keep_two_attributed_rows(self):
+        a = self._post([self._row()], org=self.org_a)
+        b = self._post([self._row()], org=self.org_b)
+        self.assertEqual((a.data['created'], b.data['created']), (1, 1))
+        self.assertNotEqual(a.data['ids'], b.data['ids'])
+        self.assertEqual(self._orgs(Measurement, a.data['ids'][0]), {self.org_a.pk})
+        self.assertEqual(self._orgs(Measurement, b.data['ids'][0]), {self.org_b.pk})
+
+    def test_another_hospital_never_rewrites_a_rows_concept(self):
+        a = self._post([self._row(concept=self.concept)], org=self.org_a)
+        b = self._post([self._row(concept=self.other_concept)], org=self.org_b)
+        row_a = Measurement.objects.get(pk=a.data['ids'][0])
+        row_b = Measurement.objects.get(pk=b.data['ids'][0])
+        self.assertEqual(row_a.measurement_concept_id, self.concept.concept_id)
+        self.assertEqual(row_b.measurement_concept_id, self.other_concept.concept_id)
+        self.assertEqual(self._orgs(Measurement, row_a.pk), {self.org_a.pk})
+
+    def test_same_hospital_replay_and_correction_match_as_before(self):
+        first = self._post([self._row()], org=self.org_a)
+        replay = self._post([self._row()], org=self.org_a)
+        self.assertEqual(replay.data['created'], 0)
+        self.assertEqual(replay.data['ids'], first.data['ids'])
+        corrected = self._post([self._row(concept=self.other_concept)], org=self.org_a)
+        self.assertEqual((corrected.data['created'], corrected.data['updated']), (0, 1))
+        self.assertEqual(
+            Measurement.objects.get(pk=first.data['ids'][0]).measurement_concept_id,
+            self.other_concept.concept_id)
+
+    def test_an_unattributed_row_is_left_exactly_as_stored(self):
+        stored = self._seed(org=None)
+        resp = self._post([self._row(concept=self.other_concept)], org=self.org_a)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual((resp.data['created'], resp.data['updated']), (0, 0))
+        self.assertEqual(resp.data['unattributed_matches'], 1)
+        self.assertEqual(resp.data['ids'], [stored.pk])
+        stored.refresh_from_db()
+        self.assertEqual(stored.measurement_concept_id, self.concept.concept_id)
+        self.assertEqual(self._orgs(Measurement, stored.pk), set())
+
+    def test_stacked_unattributed_duplicates_are_not_collapsed(self):
+        first, second = self._seed(org=None), self._seed(org=None)
+        self._post([self._row()], org=self.org_a)
+        self.assertEqual(
+            set(Measurement.objects.values_list('pk', flat=True)), {first.pk, second.pk})
+
+    def test_own_duplicates_collapse_and_a_foreign_duplicate_survives(self):
+        own_1, own_2 = self._seed(org=self.org_a), self._seed(org=self.org_a)
+        foreign = self._seed(org=self.org_b)
+        resp = self._post([self._row()], org=self.org_a)
+        self.assertEqual(resp.data['ids'], [own_1.pk])
+        self.assertEqual(
+            set(Measurement.objects.values_list('pk', flat=True)), {own_1.pk, foreign.pk})
+        self.assertFalse(Measurement.objects.filter(pk=own_2.pk).exists())
+
+    def test_a_row_attributed_to_two_hospitals_is_foreign(self):
+        mixed = self._seed(org=self.org_a)
+        self._attribute(mixed, self.org_b, actor='other-actor')
+        resp = self._post([self._row(concept=self.other_concept)], org=self.org_a)
+        self.assertEqual(resp.data['created'], 1)
+        mixed.refresh_from_db()
+        self.assertEqual(mixed.measurement_concept_id, self.concept.concept_id)
+
+    def test_an_own_row_takes_precedence_over_unattributed_rows(self):
+        unattributed = self._seed(org=None)
+        own = self._seed(org=self.org_a)
+        resp = self._post([self._row(concept=self.other_concept)], org=self.org_a)
+        self.assertEqual(resp.data['ids'], [own.pk])
+        self.assertEqual((resp.data['updated'], resp.data['unattributed_matches']), (1, 0))
+        own.refresh_from_db()
+        unattributed.refresh_from_db()
+        self.assertEqual(own.measurement_concept_id, self.other_concept.concept_id)
+        self.assertEqual(unattributed.measurement_concept_id, self.concept.concept_id)
+
+    def test_unattributed_matches_counts_input_positions(self):
+        self._seed(org=None)
+        twice = [self._row(), self._row()]
+        self.assertEqual(self._post(twice, org=self.org_a).data['unattributed_matches'], 2)
+        self.assertEqual(self._post(twice, org=self.org_a).data['unattributed_matches'], 2)
+        self.assertEqual(self._post(twice).data['unattributed_matches'], 0)
+
+    def test_a_hospital_retry_converges(self):
+        self._seed(org=self.org_a)
+        first = self._post([self._row()], org=self.org_b)
+        retry = self._post([self._row()], org=self.org_b)
+        self.assertEqual((first.data['created'], retry.data['created']), (1, 0))
+        self.assertEqual(retry.data['ids'], first.data['ids'])
+
+    def test_single_row_upsert_keeps_its_response_shape(self):
+        stored = self._seed(org=None)
+        resp = self.client.post('/api/v1/measurements/', self._row(), format='json',
+                                **self._headers(self.org_a))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['measurement_id'], stored.pk)
+        self.assertNotIn('unattributed_matches', resp.data)
+
+    def test_query_count_stays_flat_with_the_header(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        def run(n, day):
+            rows = [self._row(value=i, day=day) for i in range(n)]
+            with CaptureQueriesContext(connection) as ctx:
+                resp = self._post(rows, org=self.org_a, query='?skip_refresh=true')
+            self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+            return len(ctx.captured_queries)
+
+        self._seed(org=None)
+        self.assertEqual(run(3, '2024-02-01'), run(30, '2024-03-01'))
+
+
+    def test_update_attribution_rules(self):
+        cases = [
+            ('A to A', self.org_a, self.org_a, status.HTTP_200_OK, {self.org_a.pk}),
+            ('A to absent', self.org_a, None, status.HTTP_200_OK, {self.org_a.pk}),
+            ('NULL to A', None, self.org_a, status.HTTP_200_OK, {self.org_a.pk}),
+            ('A to B', self.org_a, self.org_b, status.HTTP_409_CONFLICT, {self.org_a.pk}),
+        ]
+        actor = f'urn:service|{self.service_identity.sub}'
+        for name, stored, named, expected, orgs in cases:
+            with self.subTest(case=name):
+                row = self._seed(org=None)
+                self._attribute(row, stored, actor=actor)
+                resp = self.client.patch(
+                    f'/api/v1/measurements/{row.pk}/', {'value_as_number': 7},
+                    format='json', **self._headers(named))
+                self.assertEqual(resp.status_code, expected, resp.data)
+                self.assertEqual(self._orgs(Measurement, row.pk), orgs)
+                row.refresh_from_db()
+                self.assertEqual(
+                    row.value_as_number,
+                    Decimal('7') if expected == status.HTTP_200_OK else Decimal('4.1'))
+
+    def test_put_cannot_relabel_a_row(self):
+        row = self._seed(org=self.org_a)
+        resp = self.client.put(f'/api/v1/measurements/{row.pk}/', self._row(value=8),
+                               format='json', **self._headers(self.org_b))
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT, resp.data)
+        self.assertEqual(resp.data['conflicts'], [{'id': row.pk, 'organization_id': self.org_a.pk}])
+
+    def test_bulk_update_with_one_conflicting_row_writes_nothing(self):
+        free = self._seed(org=None)
+        taken = self._seed(org=self.org_b)
+        resp = self.client.patch(
+            '/api/v1/measurements/bulk_update/',
+            [{'measurement_id': free.pk, 'value_as_number': 9},
+             {'measurement_id': taken.pk, 'value_as_number': 9}],
+            format='json', **self._headers(self.org_a))
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT, resp.data)
+        for row in (free, taken):
+            row.refresh_from_db()
+            self.assertEqual(row.value_as_number, Decimal('4.1'))
+        self.assertEqual(self._orgs(Measurement, free.pk), set())
+
+    def test_bulk_update_without_organization_keeps_a_stored_one(self):
+        row = self._seed(org=None)
+        self._attribute(row, self.org_a, actor=f'urn:service|{self.service_identity.sub}')
+        resp = self.client.patch(
+            '/api/v1/measurements/bulk_update/',
+            [{'measurement_id': row.pk, 'value_as_number': 9}],
+            format='json', **self._headers())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(self._orgs(Measurement, row.pk), {self.org_a.pk})
+
+    def test_a_conflict_through_another_actor_still_counts(self):
+        row = self._seed(org=None)
+        self._attribute(row, self.org_b, source='ADMIN_CORRECTION', actor='someone-else')
+        resp = self.client.patch(f'/api/v1/measurements/{row.pk}/', {'value_as_number': 7},
+                                 format='json', **self._headers(self.org_a))
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT, resp.data)
+
+    def test_a_bound_credential_cannot_relabel_another_hospitals_row(self):
+        PatientRecord.objects.filter(person=self.person).update(organization=self.org_a)
+        row = self._seed(org=self.org_b)
+        resp = self._bound_client().patch(
+            f'/api/v1/measurements/{row.pk}/', {'value_as_number': 7},
+            format='json', **self._headers())
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT, resp.data)
+
+    def test_bulk_update_locks_rows_in_primary_key_order(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        rows = [self._seed(org=None) for _ in range(3)]
+        with CaptureQueriesContext(connection) as ctx:
+            self.client.patch(
+                '/api/v1/measurements/bulk_update/',
+                [{'measurement_id': r.pk, 'value_as_number': 9} for r in reversed(rows)],
+                format='json', **self._headers(self.org_a))
+        locking = [q['sql'] for q in ctx.captured_queries if 'FOR UPDATE' in q['sql']
+                   and 'measurement' in q['sql']]
+        self.assertTrue(locking)
+        self.assertIn('ORDER BY', locking[0])
+
+
+    def test_record_provenance_sets_the_organization_once(self):
+        from patient_portal.api.views import _record_provenance
+        row = self._seed(org=None)
+        _record_provenance(row, 'EHR_SYNC', 'fhir-upload', organization=self.org_a)
+        _record_provenance(row, 'EHR_SYNC', 'fhir-upload', organization=None,
+                           modification_reason='re-upload')
+        record = ProvenanceRecord.objects.get(object_id=row.pk, source_user_id='fhir-upload')
+        self.assertEqual(record.organization_id, self.org_a.pk)
+        self.assertEqual(record.modification_reason, 're-upload')
+        _record_provenance(row, 'EHR_SYNC', 'fhir-upload', organization=self.org_b)
+        record.refresh_from_db()
+        self.assertEqual(record.organization_id, self.org_a.pk)
+        _record_provenance(row, 'EHR_SYNC', 'new-actor', organization=None)
+        self.assertIsNone(ProvenanceRecord.objects.get(
+            object_id=row.pk, source_user_id='new-actor').organization_id)
+
+
+    def _scoped_mapping(self, org):
+        return SourceCodeConceptMapping.objects.create(
+            organization=org,
+            source_vocabulary_id='http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id',
+            source_code='10627', target_concept=self.concept,
+            destination_vocabulary_id='HK-Labs', omop_table='measurement',
+            status='proposed', origin='import',
+        )
+
+    def test_approving_a_hospital_mapping_moves_only_that_hospitals_rows(self):
+        from omop_core.mapping.code_resolution import repoint_clinical_rows
+
+        a = self._post([self._row(person=self.person)], org=self.org_a)
+        b = self._post([self._row(person=self.person_b)], org=self.org_b)
+        unattributed = self._seed(org=None, person=self.person_b, value=5.5)
+        mixed = self._seed(org=self.org_a, person=self.person_b, value=6.5)
+        self._attribute(mixed, self.org_b, actor='other-actor')
+        PatientRecord.objects.update(derivation_version=7)
+
+        mapping = self._scoped_mapping(self.org_a)
+        preview = repoint_clinical_rows(
+            mapping=mapping, old_concept_id=self.concept.concept_id,
+            new_concept_id=self.other_concept.concept_id, apply_changes=False)
+        self.assertEqual(preview['rows_updated'], 1)
+        result = repoint_clinical_rows(
+            mapping=mapping, old_concept_id=self.concept.concept_id,
+            new_concept_id=self.other_concept.concept_id)
+
+        self.assertEqual(result['rows_updated'], 1)
+        self.assertEqual(result['person_ids'], {self.person.person_id})
+
+        def concept_of(pk):
+            return Measurement.objects.get(pk=pk).measurement_concept_id
+
+        self.assertEqual(concept_of(a.data['ids'][0]), self.other_concept.concept_id)
+        for pk in (b.data['ids'][0], unattributed.pk, mixed.pk):
+            self.assertEqual(concept_of(pk), self.concept.concept_id)
+        self.assertEqual(PatientRecord.objects.get(person=self.person).derivation_version, 0)
+        self.assertEqual(PatientRecord.objects.get(person=self.person_b).derivation_version, 7)
+
+    def test_scoped_repoint_collapses_only_that_hospitals_duplicates(self):
+        from omop_core.mapping.code_resolution import repoint_clinical_rows
+
+        own_1, own_2 = self._seed(org=self.org_a), self._seed(org=self.org_a)
+        foreign = self._seed(org=self.org_b, concept=self.other_concept)
+        mixed = self._seed(org=self.org_a, concept=self.other_concept)
+        self._attribute(mixed, self.org_b, actor='other-actor')
+
+        result = repoint_clinical_rows(
+            mapping=self._scoped_mapping(self.org_a),
+            old_concept_id=self.concept.concept_id,
+            new_concept_id=self.other_concept.concept_id)
+
+        self.assertEqual((result['rows_updated'], result['rows_collapsed']), (2, 1))
+        surviving = set(Measurement.objects.values_list('pk', flat=True))
+        self.assertEqual(surviving, {own_1.pk, foreign.pk, mixed.pk})
+        self.assertNotIn(own_2.pk, surviving)
+
+    def test_an_inactive_organization_is_rejected(self):
+        Organization.objects.filter(pk=self.org_b.pk).update(is_active=False)
+        resp = self._post([self._row()], org=self.org_b)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(str(resp.data['organization_id']), 'Organization is inactive.')
+        self.assertEqual(Measurement.objects.count(), 0)
+
+    def test_the_legacy_path_ignores_the_header(self):
+        for raw in (str(self.org_b.pk), 'abc'):
+            with self.subTest(raw=raw):
+                resp = self.client.post('/api/measurements/', [self._row(value=len(raw))],
+                                        format='json', **self._headers(raw))
+                self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+                self.assertEqual(self._orgs(Measurement, resp.data['ids'][0]), {None})
+
+    def test_a_write_without_the_header_keeps_each_hospitals_row(self):
+        a = self._post([self._row()], org=self.org_a)
+        b = self._post([self._row()], org=self.org_b)
+        resp = self._post([self._row(concept=self.other_concept)])
+        self.assertEqual(resp.data['ids'], a.data['ids'])
+        self.assertEqual(self._orgs(Measurement, b.data['ids'][0]), {self.org_b.pk})
+        self.assertEqual(
+            Measurement.objects.get(pk=b.data['ids'][0]).measurement_concept_id,
+            self.concept.concept_id)
+
+    def test_a_write_without_the_header_still_collapses_unattributed_duplicates(self):
+        first, second = self._seed(org=None), self._seed(org=None)
+        resp = self._post([self._row()])
+        self.assertEqual(resp.data['ids'], [first.pk])
+        self.assertFalse(Measurement.objects.filter(pk=second.pk).exists())
+
+    def test_fhir_sync_upsert_collapses_only_within_one_hospital(self):
+        from patient_portal.api.fhir.sync import FhirSyncView
+
+        own_1, own_2 = self._seed(org=self.org_a), self._seed(org=self.org_a)
+        foreign = self._seed(org=self.org_b)
+        incoming = Measurement(
+            person=self.person, measurement_concept=self.concept,
+            measurement_date=date(2024, 1, 1), measurement_type_concept=self.type_concept,
+            measurement_source_value='10627', value_as_number=Decimal('4.1'))
+        FhirSyncView()._upsert_clinical(
+            Measurement, 'measurement_id', 'measurement_concept_id', 'measurement_date',
+            'measurement_source_value', self.person, [incoming], 'fhir-actor', None)
+        self.assertEqual(
+            set(Measurement.objects.values_list('pk', flat=True)), {own_1.pk, foreign.pk})
+        self.assertFalse(Measurement.objects.filter(pk=own_2.pk).exists())
+
+    def test_a_global_repoint_keeps_each_hospitals_row(self):
+        from omop_core.mapping.code_resolution import repoint_clinical_rows
+
+        own_1, own_2 = self._seed(org=self.org_a), self._seed(org=self.org_a)
+        foreign = self._seed(org=self.org_b)
+        unattributed = self._seed(org=None)
+        result = repoint_clinical_rows(
+            mapping=self._scoped_mapping(None),
+            old_concept_id=self.concept.concept_id,
+            new_concept_id=self.other_concept.concept_id)
+        self.assertEqual((result['rows_updated'], result['rows_collapsed']), (4, 1))
+        self.assertEqual(
+            set(Measurement.objects.values_list('pk', flat=True)),
+            {own_1.pk, foreign.pk, unattributed.pk})
+        self.assertNotIn(own_2.pk, set(Measurement.objects.values_list('pk', flat=True)))
+
+
+    def test_lookup_rejects_ids_that_only_round_to_an_organization(self):
+        self.client.force_authenticate(user=self.staff)
+        for raw in (True, 1.9, '0', '   '):
+            with self.subTest(raw=raw):
+                resp = self.client.post('/api/v1/code-mappings/lookup/', {
+                    'organization_id': raw,
+                    'codes': [{'source_vocabulary_id': 'CPT4', 'source_code': '99213',
+                               'omop_table': 'procedure'}],
+                }, format='json')
+                self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+                self.assertEqual(str(resp.data['organization_id']),
+                                 'Must be a positive integer organization id.')
+
+    def test_schema_declares_the_header_on_every_write(self):
+        schema = APIClient().get('/api/v1/schema/').data
+        for route, pk_field, *_ in _ORG_ROUTES:
+            for path, method in ((f'/api/v1/{route}/', 'post'),
+                                 (f'/api/v1/{route}/{{{pk_field}}}/', 'patch'),
+                                 (f'/api/v1/{route}/{{{pk_field}}}/', 'put'),
+                                 (f'/api/v1/{route}/bulk_update/', 'patch')):
+                with self.subTest(path=path, method=method):
+                    operation = schema['paths'][path][method]
+                    self.assertIn('X-Provenance-Organization-ID', {
+                        p['name'] for p in operation.get('parameters', [])
+                        if p.get('in') == 'header'})
+
+
+@override_settings(SERVICE_AUTH_SCOPES='patient/*.read patient/*.write')
+class ProvenanceOrganizationLockTest(TransactionTestCase):
+
+    def setUp(self):
+        _make_vocab_fixtures()
+        self.org_a = Organization.objects.create(name='Lock Hospital A', slug='lock-a')
+        self.org_b = Organization.objects.create(name='Lock Hospital B', slug='lock-b')
+        self.person = Person.objects.create(person_id=33101)
+        PatientRecord.objects.create(person=self.person)
+        self.row = Measurement.objects.create(
+            measurement_id=9_310_001, person=self.person,
+            measurement_concept_id=3000963, measurement_date=date(2024, 1, 1),
+            measurement_type_concept_id=32817, measurement_source_value='10627',
+            value_as_number=Decimal('4.1'))
+        self.service_identity = Identity.objects.get_or_create(
+            issuer='urn:service', sub='prov-lock-test')[0]
+
+    def test_the_second_writer_waits_for_the_lock_and_sees_the_first_hospital(self):
+        import threading
+        from django.db import connection, transaction as db_transaction
+
+        locked, release = threading.Event(), threading.Event()
+        responses = {}
+
+        def first_writer():
+            try:
+                with db_transaction.atomic():
+                    Measurement.objects.select_for_update().get(pk=self.row.pk)
+                    ProvenanceRecord.objects.create(
+                        content_type=ContentType.objects.get_for_model(Measurement),
+                        object_id=self.row.pk, source='EHR_SYNC', source_user_id='writer-a',
+                        organization=self.org_a)
+                    locked.set()
+                    release.wait(10)
+            finally:
+                connection.close()
+
+        def second_writer():
+            try:
+                client = APIClient()
+                client.force_authenticate(user=self.service_identity, token='service-token')
+                responses['b'] = client.patch(
+                    f'/api/v1/measurements/{self.row.pk}/', {'value_as_number': 9},
+                    format='json', HTTP_X_PROVENANCE_SOURCE='EHR_SYNC',
+                    HTTP_X_PROVENANCE_ORGANIZATION_ID=str(self.org_b.pk))
+            finally:
+                connection.close()
+
+        a = threading.Thread(target=first_writer)
+        a.start()
+        self.assertTrue(locked.wait(10))
+        b = threading.Thread(target=second_writer)
+        b.start()
+        b.join(1.0)
+        self.assertTrue(b.is_alive(), 'the second writer did not wait for the row lock')
+        release.set()
+        a.join(10)
+        b.join(10)
+
+        self.assertEqual(responses['b'].status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(
+            set(ProvenanceRecord.objects.filter(object_id=self.row.pk)
+                .values_list('organization_id', flat=True)),
+            {self.org_a.pk})
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.value_as_number, Decimal('4.1'))
+
+    def test_an_update_writes_the_row_as_it_stands_after_the_lock(self):
+        import threading
+        from django.db import connection, transaction as db_transaction
+
+        locked, release = threading.Event(), threading.Event()
+        responses = {}
+
+        def first_writer():
+            try:
+                with db_transaction.atomic():
+                    row = Measurement.objects.select_for_update().get(pk=self.row.pk)
+                    row.unit_source_value = 'mg/dL'
+                    row.save(update_fields=['unit_source_value'])
+                    locked.set()
+                    release.wait(10)
+            finally:
+                connection.close()
+
+        def second_writer():
+            try:
+                client = APIClient()
+                client.force_authenticate(user=self.service_identity, token='service-token')
+                responses['b'] = client.patch(
+                    f'/api/v1/measurements/{self.row.pk}/', {'value_as_number': 9},
+                    format='json', HTTP_X_PROVENANCE_SOURCE='EHR_SYNC',
+                    HTTP_X_PROVENANCE_ORGANIZATION_ID=str(self.org_b.pk))
+            finally:
+                connection.close()
+
+        a = threading.Thread(target=first_writer)
+        a.start()
+        self.assertTrue(locked.wait(10))
+        b = threading.Thread(target=second_writer)
+        b.start()
+        b.join(1.0)
+        release.set()
+        a.join(10)
+        b.join(10)
+
+        self.assertEqual(responses['b'].status_code, status.HTTP_200_OK, responses['b'].data)
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.value_as_number, Decimal('9'))
+        self.assertEqual(self.row.unit_source_value, 'mg/dL')

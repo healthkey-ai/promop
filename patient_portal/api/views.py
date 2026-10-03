@@ -1,9 +1,10 @@
 import functools
+from dataclasses import dataclass
 from collections import defaultdict
 from typing import Any, Callable, ContextManager
 
 from drf_spectacular.utils import (
-    OpenApiParameter, OpenApiResponse, extend_schema, inline_serializer,
+    OpenApiParameter, OpenApiResponse, extend_schema, extend_schema_view, inline_serializer,
 )
 from rest_framework import serializers, viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
@@ -73,6 +74,9 @@ from omop_core.services.episode_service import upsert_therapy_line_episode
 from omop_core.services.mappings import CONCEPT_GENERIC_LAB, CONCEPT_PATIENT_REPORTED_TYPE, get_gender_concept
 from omop_core.services.demographics import resolve_concept as resolve_demographic_concept
 from omop_core.services.pk import next_pk, next_pk_batch
+from omop_core.services.provenance_attribution import (
+    ATTRIBUTION, OWN, UNATTRIBUTED, classify, same_attribution, with_attribution,
+)
 from omop_core.signals import suppress_patient_record_refresh
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
 from omop_core.mapping.code_resolution import (
@@ -135,6 +139,10 @@ from .permissions import (
     get_request_org, is_service_token, is_machine_request,
 )
 from .providers.base import TokenClaims
+from .provenance_org import (
+    PROVENANCE_ORG_HEADER, header_organization, raise_on_foreign_attribution,
+    resolve_explicit_organization,
+)
 from .serializers import (
     PrologSurveySerializer, PrologSurveyResponseSerializer,
     UserSerializer, PatientRecordSerializer, PatientListSerializer, ProvenanceRecordSerializer,
@@ -431,6 +439,41 @@ def _extract_provenance(request):
     return source, source_user_id, modification_reason
 
 
+@dataclass(frozen=True)
+class ProvenanceContext:
+    source: str | None
+    source_user_id: str
+    reason: str | None
+    organization: Organization | None
+    explicit: bool
+
+    @property
+    def match_organization(self) -> Organization | None:
+        return self.organization if self.explicit else None
+
+
+_PROVENANCE_CONTEXT_ATTR = '_promop_provenance_context'
+
+
+def _provenance_context(request, *, header: bool) -> ProvenanceContext:
+    cached = getattr(request, _PROVENANCE_CONTEXT_ATTR, None)
+    if cached is not None:
+        return cached
+    if header:
+        organization, explicit = header_organization(request)
+    else:
+        organization, explicit = get_request_org(request), False
+    source, source_user_id, reason = _extract_provenance(request)
+    if explicit and not source:
+        raise ValidationError({'organization_id': (
+            f'{PROVENANCE_ORG_HEADER} requires a provenance source '
+            "(X-Provenance-Source header or body 'source')."
+        )})
+    context = ProvenanceContext(source, source_user_id or '', reason, organization, explicit)
+    setattr(request, _PROVENANCE_CONTEXT_ATTR, context)
+    return context
+
+
 def _echoed_unchanged_fields(patient_info, patch_data):
     """Keys whose submitted value already equals what GET renders for this record.
 
@@ -701,18 +744,31 @@ def _project_profile_fields(person, direct_fields, patch_data):
 
 
 def _record_provenance(record, source, source_user_id, target_patient_id=None, modification_reason=None, organization=None):
-    """Create or update a ProvenanceRecord pointing at any model instance."""
-    ProvenanceRecord.objects.update_or_create(
-        content_type=ContentType.objects.get_for_model(record),
-        object_id=record.pk,
-        source_user_id=source_user_id or '',
-        source=source,
-        defaults={
-            'target_patient_id': target_patient_id,
-            'modification_reason': modification_reason,
-            'organization': organization,
-        },
-    )
+    """Create or update a ProvenanceRecord pointing at any model instance.
+
+    The organization is the hospital the row came from: set once, never changed.
+    """
+    with transaction.atomic():
+        provenance, created = ProvenanceRecord.objects.select_for_update().get_or_create(
+            content_type=ContentType.objects.get_for_model(record),
+            object_id=record.pk,
+            source_user_id=source_user_id or '',
+            source=source,
+            defaults={
+                'target_patient_id': target_patient_id,
+                'modification_reason': modification_reason,
+                'organization': organization,
+            },
+        )
+        if created:
+            return
+        provenance.target_patient_id = target_patient_id
+        provenance.modification_reason = modification_reason
+        fields = ['target_patient_id', 'modification_reason']
+        if provenance.organization_id is None and organization is not None:
+            provenance.organization = organization
+            fields.append('organization')
+        provenance.save(update_fields=fields)
 
 
 def _changed_fields(patient_record, previous_values, prev_val):
@@ -6256,15 +6312,18 @@ class _UpsertPlan:
     not.
     """
 
-    def __init__(self, to_insert, row_slots, collapse_ids, to_update, touched_ids):
+    def __init__(self, to_insert, row_slots, collapse_ids, to_update, touched_ids,
+                 unattributed_matches=0):
         self.to_insert = to_insert        # unsaved rows needing a pk, in order
         self.row_slots = row_slots        # per input row: ('new', slot) | ('old', pk)
         self.collapse_ids = collapse_ids  # stacked duplicates to delete
         self.to_update = to_update        # [(pk, concept_id)] — concept changed
         self.touched_ids = touched_ids    # existing rows updated or de-stacked
+        self.unattributed_matches = unattributed_matches
 
 
-def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances):
+def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
+                      organization=None):
     """Match a batch of unsaved rows against what `person` already has.
 
     Same three outcomes as ``_upsert_clinical``: an event already on file is left
@@ -6275,6 +6334,11 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances):
     Repeats of one event *within* the batch collapse to a single row, last
     occurrence winning, so a source bundle that reports an event twice does not
     write it twice.
+
+    With ``organization`` (the hospital the caller named), only that hospital's
+    rows are matched. An unattributed row could be any hospital's, so it is left
+    as stored; another hospital's row is never touched. Stacked duplicates only
+    collapse into a row with the same attribution.
     """
     sv_field, date_field, concept_field, extra_fields = _UPSERT_KEYS[model_name]
     cid_attr = f'{concept_field}_id'
@@ -6289,7 +6353,8 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances):
     # growth this endpoint exists to avoid. The superset is bounded by the
     # person's own rows for those source values.
     existing = {}   # key -> [pk, …] ascending
-    existing_cid = {}
+    cid_by_pk = {}
+    attribution_by_pk = {}
     if keyed:
         columns = (pk_field, cid_attr, sv_field, date_field) + tuple(extra_fields)
         # Entered-in-error rows are excluded from the match on purpose.
@@ -6309,23 +6374,38 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances):
             'is_erroneous': False,
             f'{sv_field}__in': {k[0] for k in keyed},
             f'{date_field}__in': {k[1] for k in keyed},
-        }).order_by(pk_field).values_list(*columns)
+        })
+        rows = with_attribution(rows).order_by(pk_field).values_list(*columns, ATTRIBUTION)
         for row in rows:
             # Normalise DB-side datetimes the same way _upsert_key does for
             # in-memory instances: naive → UTC-aware. In practice PostgreSQL
             # with USE_TZ=True already returns aware values, but the explicit
             # normalisation keeps the two sides provably symmetric.
             tail = []
-            for v in row[4:]:
+            for v in row[4:-1]:
                 if isinstance(v, datetime) and is_naive(v):
                     v = make_aware(v, _dt.timezone.utc)
                 tail.append(v)
             key = (row[2], row[3]) + tuple(tail)
-            if key in existing:
-                existing[key].append(row[0])
-            else:
-                existing[key] = [row[0]]
-                existing_cid[key] = row[1]
+            existing.setdefault(key, []).append(row[0])
+            cid_by_pk[row[0]] = row[1]
+            attribution_by_pk[row[0]] = tuple(row[-1])
+
+    skipped = {}
+    for key in list(existing):
+        pks = existing[key]
+        if organization is None:
+            existing[key] = same_attribution(pks, attribution_by_pk)
+            continue
+        by_class = defaultdict(list)
+        for pk in pks:
+            by_class[classify(attribution_by_pk[pk], organization.pk)].append(pk)
+        if by_class[OWN]:
+            existing[key] = by_class[OWN]
+            continue
+        del existing[key]
+        if by_class[UNATTRIBUTED]:
+            skipped[key] = by_class[UNATTRIBUTED][0]
 
     # Last occurrence of a repeated key wins, matching _upsert_clinical's
     # "desired" dict — so the batch converges on the row the producer emitted
@@ -6337,11 +6417,17 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances):
 
     to_insert, row_slots = [], [None] * len(instances)
     insert_slot, collapse_ids, to_update, touched_ids = {}, [], [], []
+    unattributed_matches = 0
 
     for i, (inst, key) in enumerate(zip(instances, keys)):
         if key is None:                       # no identity — always insert
             row_slots[i] = ('new', len(to_insert))
             to_insert.append(inst)
+            continue
+
+        if key in skipped:
+            row_slots[i] = ('old', skipped[key])
+            unattributed_matches += 1
             continue
 
         if key in existing:
@@ -6352,7 +6438,7 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances):
             extras = existing[key][1:]
             collapse_ids.extend(extras)
             new_cid = getattr(inst, cid_attr, None)
-            if existing_cid[key] != new_cid:
+            if cid_by_pk[keep] != new_cid:
                 to_update.append((keep, new_cid))
                 touched_ids.append(keep)
             elif extras:
@@ -6368,7 +6454,8 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances):
             to_insert.append(inst)
         row_slots[i] = ('new', slot)
 
-    return _UpsertPlan(to_insert, row_slots, collapse_ids, to_update, touched_ids)
+    return _UpsertPlan(to_insert, row_slots, collapse_ids, to_update, touched_ids,
+                       unattributed_matches)
 
 
 def _apply_upsert_plan(plan, model_cls, pk_field, model_name):
@@ -6481,16 +6568,18 @@ class _OmopDeferRefreshMixin:
     def update(self, request: Request, *args: Any, **kwargs: Any) -> Response:
         from omop_core.signals import suppress_patient_record_refresh
 
+        self._provenance(request)
+
         if _skip_refresh_requested(request):
             with suppress_patient_record_refresh():
-                return super().update(request, *args, **kwargs)
+                return self._attributed_update(request, *args, **kwargs)
 
         # Suppress signal-driven refresh and call it explicitly so failures
         # surface as an HTTP error instead of being silently swallowed.
         instance = self.get_object()
         person = instance.person
         with suppress_patient_record_refresh():
-            response = super().update(request, *args, **kwargs)
+            response = self._attributed_update(request, *args, **kwargs)
         try:
             refresh_patient_record(person)
         except Exception:
@@ -6507,6 +6596,18 @@ class _OmopDeferRefreshMixin:
                 status=status.HTTP_502_BAD_GATEWAY,
             )
         return response
+
+    def _attributed_update(self, request: Request, *args: Any, **kwargs: Any) -> Response:
+        provenance = self._provenance(request)
+        if not (provenance.source and provenance.organization):
+            return super().update(request, *args, **kwargs)
+        pk = self.get_object().pk
+        model_cls = self.get_queryset().model
+        with transaction.atomic():
+            locked = list(model_cls.objects.select_for_update()
+                          .filter(pk=pk).values_list('pk', flat=True))
+            raise_on_foreign_attribution(model_cls, locked, provenance.organization)
+            return super().update(request, *args, **kwargs)
 
     def destroy(self, request: Request, *args: Any, **kwargs: Any) -> Response:
         from omop_core.signals import suppress_patient_record_refresh
@@ -6572,6 +6673,7 @@ class _OmopBulkCreateMixin:
         oversized = _bulk_body_too_large(request)
         if oversized is not None:
             return oversized
+        self._provenance(request)
         if not isinstance(request.data, list):
             if self._should_single_upsert(request):
                 return self._single_upsert_create(request)
@@ -6603,8 +6705,9 @@ class _OmopBulkCreateMixin:
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        org = _authorize_person_write(request, person)
-        source, source_user_id, reason = _extract_provenance(request)
+        _authorize_person_write(request, person)
+        provenance = self._provenance(request)
+        source = provenance.source
         skip_refresh = str(
             request.query_params.get('skip_refresh', 'false')
         ).strip().lower() in ('1', 'true', 'yes')
@@ -6618,7 +6721,8 @@ class _OmopBulkCreateMixin:
             with transaction.atomic():
                 with suppress_patient_record_refresh():
                     plan = _plan_bulk_upsert(
-                        model_cls, pk_field, model_name, person, [instance])
+                        model_cls, pk_field, model_name, person, [instance],
+                        organization=provenance.match_organization)
                     ids, new_ids = _apply_upsert_plan(
                         plan, model_cls, pk_field, model_name)
 
@@ -6627,10 +6731,10 @@ class _OmopBulkCreateMixin:
                     _record_provenance(
                         model_cls.objects.get(**{pk_field: row_id}),
                         source,
-                        source_user_id,
+                        provenance.source_user_id,
                         target_patient_id=str(person.person_id),
-                        modification_reason=reason,
-                        organization=org,
+                        modification_reason=provenance.reason,
+                        organization=provenance.organization,
                     )
                 if not skip_refresh:
                     from omop_core.services.patient_record_service import refresh_patient_record
@@ -6685,7 +6789,8 @@ class _OmopBulkCreateMixin:
         validated = serializer.validated_data
 
         if not validated:
-            return Response({'created': 0, 'updated': 0, 'ids': []},
+            return Response({'created': 0, 'updated': 0,
+                             'unattributed_matches': 0, 'ids': []},
                             status=status.HTTP_201_CREATED)
 
         # One batch is one person, by construction on the producer side.
@@ -6708,9 +6813,9 @@ class _OmopBulkCreateMixin:
 
         # Same authorization the single-row path applies in perform_create, run
         # once for the batch's single person.
-        org = _authorize_person_write(request, person)
+        _authorize_person_write(request, person)
 
-        source, source_user_id, reason = _extract_provenance(request)
+        provenance = self._provenance(request)
         skip_refresh = str(
             request.query_params.get('skip_refresh', 'false')
         ).strip().lower() in ('1', 'true', 'yes')
@@ -6727,8 +6832,8 @@ class _OmopBulkCreateMixin:
 
         try:
             return self._bulk_write(
-                request, person, org, model_cls, pk_field, model_name, validated,
-                source, source_user_id, reason, skip_refresh, upsert,
+                request, person, model_cls, pk_field, model_name, validated,
+                provenance, skip_refresh, upsert,
                 suppress_patient_record_refresh)
         except IntegrityError as exc:
             # A conflict over data, not a server fault. The distinction decides
@@ -6748,14 +6853,11 @@ class _OmopBulkCreateMixin:
         self,
         request: Request,
         person: Person,
-        org: Organization | None,
         model_cls: type[models.Model],
         pk_field: str,
         model_name: str,
         validated: list[dict[str, Any]],
-        source: str | None,
-        source_user_id: str | None,
-        reason: str | None,
+        provenance: ProvenanceContext,
         skip_refresh: bool,
         upsert: bool,
         suppress_patient_record_refresh: Callable[[], ContextManager[None]],
@@ -6771,12 +6873,15 @@ class _OmopBulkCreateMixin:
             # so here the suppression is load-bearing, not just defensive.
             with suppress_patient_record_refresh():
                 instances = [model_cls(**dict(attrs)) for attrs in validated]
+                unattributed_matches = 0
                 if upsert:
                     plan = _plan_bulk_upsert(
-                        model_cls, pk_field, model_name, person, instances)
+                        model_cls, pk_field, model_name, person, instances,
+                        organization=provenance.match_organization)
                     ids, new_ids = _apply_upsert_plan(
                         plan, model_cls, pk_field, model_name)
                     updated = len(plan.touched_ids)
+                    unattributed_matches = plan.unattributed_matches
                 else:
                     new_ids = list(next_pk_batch(model_cls, pk_field, len(instances)))
                     for inst, pk in zip(instances, new_ids):
@@ -6788,15 +6893,15 @@ class _OmopBulkCreateMixin:
             # path — inventing a source would make provenance unfalsifiable.
             # Only inserted rows get one: an upsert that left a row untouched
             # wrote nothing to attribute, matching _upsert_clinical.
-            if source and new_ids:
+            if provenance.source and new_ids:
                 ct = ContentType.objects.get_for_model(model_cls)
                 ProvenanceRecord.objects.bulk_create([
                     ProvenanceRecord(
-                        source=source,
-                        source_user_id=source_user_id or '',
+                        source=provenance.source,
+                        source_user_id=provenance.source_user_id,
                         target_patient_id=str(person.person_id),
-                        modification_reason=reason,
-                        organization=org,
+                        modification_reason=provenance.reason,
+                        organization=provenance.organization,
                         content_type=ct,
                         object_id=pk,
                     )
@@ -6820,7 +6925,8 @@ class _OmopBulkCreateMixin:
                 refresh_patient_record(person)
 
         return Response(
-            {'created': len(new_ids), 'updated': updated, 'ids': list(ids)},
+            {'created': len(new_ids), 'updated': updated,
+             'unattributed_matches': unattributed_matches, 'ids': list(ids)},
             status=status.HTTP_201_CREATED,
         )
 
@@ -6873,6 +6979,7 @@ class _OmopBulkUpdateMixin:
         if isinstance(parsed, Response):
             return parsed
         ids, payloads = parsed
+        self._provenance(request)
         if not ids:
             return Response({'updated': 0, 'missing': []})
 
@@ -6908,7 +7015,8 @@ class _OmopBulkUpdateMixin:
         by_id: dict[int, models.Model] = {
             getattr(obj, pk_field): obj
             for obj in _visible_clinical_rows(
-                request, model_cls, pk_field, ids).select_for_update()
+                request, model_cls, pk_field, ids
+            ).order_by(pk_field).select_for_update()
         }
         missing: list[int] = [i for i in ids if i not in by_id]
         present: list[tuple[int, dict[str, Any]]] = [
@@ -6966,13 +7074,19 @@ class _OmopBulkUpdateMixin:
         if not instances:
             return Response({'updated': 0, 'missing': missing})
 
+        provenance = self._provenance(request)
+        if provenance.source:
+            raise_on_foreign_attribution(
+                model_cls, [getattr(obj, pk_field) for obj in instances],
+                provenance.organization)
+
         with suppress_patient_record_refresh():
             # Grouped by patched column set, so a row never writes back a column
             # its own payload did not carry.
             for shape, group in by_shape.items():
                 model_cls.objects.bulk_update(group, sorted(shape))
             self._record_bulk_provenance(
-                request, person, model_cls, pk_field, instances)
+                provenance, person, model_cls, pk_field, instances)
 
         # Unguarded and inside the transaction, so a failed derivation rolls the
         # batch back instead of leaving a stale read model.
@@ -6996,36 +7110,37 @@ class _OmopBulkUpdateMixin:
 
     @staticmethod
     def _record_bulk_provenance(
-        request: Request,
+        provenance: ProvenanceContext,
         person: Person,
         model_cls: type[models.Model],
         pk_field: str,
         instances: list[models.Model],
     ) -> None:
         """Attribute the batch to its source, when the caller names one."""
-        source, source_user_id, reason = _extract_provenance(request)
-        if not source:
+        if not provenance.source:
             return
         content_type = ContentType.objects.get_for_model(model_cls)
         # One record per row, actor and source, as the constraint requires. The
         # conflict update keeps the reason for the latest correction, which
         # _record_provenance also does through update_or_create.
+        update_fields = ['modification_reason', 'target_patient_id']
+        if provenance.organization is not None:
+            update_fields.append('organization')
         ProvenanceRecord.objects.bulk_create(
             [
                 ProvenanceRecord(
-                    source=source,
-                    source_user_id=source_user_id or '',
+                    source=provenance.source,
+                    source_user_id=provenance.source_user_id,
                     target_patient_id=str(person.person_id),
-                    modification_reason=reason,
-                    organization=get_request_org(request),
+                    modification_reason=provenance.reason,
+                    organization=provenance.organization,
                     content_type=content_type,
                     object_id=getattr(obj, pk_field),
                 )
                 for obj in instances
             ],
             update_conflicts=True,
-            update_fields=['modification_reason', 'organization',
-                           'target_patient_id'],
+            update_fields=update_fields,
             unique_fields=['content_type', 'object_id', 'source_user_id',
                            'source'],
         )
@@ -7218,10 +7333,19 @@ class _OmopBulkDeleteMixin:
 
 class _ProvenanceMixin:
     """Record provenance on create/update when source headers/body fields are present."""
+    source_organization_header = False
+
+    def _provenance(self, request) -> ProvenanceContext:
+        return _provenance_context(request, header=self.source_organization_header)
+
     def _prov(self, obj):
-        source, user_id, reason = _extract_provenance(self.request)
-        if source:
-            _record_provenance(obj, source, user_id, modification_reason=reason, organization=get_request_org(self.request))
+        context = self._provenance(self.request)
+        if context.source:
+            _record_provenance(
+                obj, context.source, context.source_user_id,
+                modification_reason=context.reason,
+                organization=context.organization,
+            )
 
     def perform_create(self, serializer):
         # Auto-generate PK if not supplied
@@ -7382,29 +7506,64 @@ class ProcedureOccurrenceViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _
 
 
 # Batch actions are v1 only, the legacy /api/ prefix stays frozen.
+_PROVENANCE_ORG_PARAMETER = OpenApiParameter(
+    name=PROVENANCE_ORG_HEADER,
+    type=int,
+    location=OpenApiParameter.HEADER,
+    required=False,
+    description=(
+        'The hospital the data came from, stored on the provenance of each '
+        'written row. Requires X-Provenance-Source. 400 when malformed, unknown '
+        'or inactive; 403 when it differs from an org-bound credential; 409 when '
+        'an update targets a row attributed to another hospital. With it, an '
+        'upsert matches only this hospital\'s rows; rows with no hospital are '
+        'left as stored and counted in `unattributed_matches`. Grants no access.'
+    ),
+)
+_PROVENANCE_ORG_SCHEMA = extend_schema_view(**{
+    action_name: extend_schema(parameters=[_PROVENANCE_ORG_PARAMETER])
+    for action_name in ('create', 'update', 'partial_update', 'bulk_update')
+})
+
+
+@_PROVENANCE_ORG_SCHEMA
 class V1ConditionOccurrenceViewSet(
         _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, ConditionOccurrenceViewSet):
     """Conditions on /api/v1/, with the batch actions."""
 
+    source_organization_header = True
 
+
+@_PROVENANCE_ORG_SCHEMA
 class V1DrugExposureViewSet(
         _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, DrugExposureViewSet):
     """Drug exposures on /api/v1/, with the batch actions."""
 
+    source_organization_header = True
 
+
+@_PROVENANCE_ORG_SCHEMA
 class V1MeasurementViewSet(
         _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, MeasurementViewSet):
     """Measurements on /api/v1/, with the batch actions."""
 
+    source_organization_header = True
 
+
+@_PROVENANCE_ORG_SCHEMA
 class V1ObservationViewSet(
         _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, ObservationViewSet):
     """Observations on /api/v1/, with the batch actions."""
 
+    source_organization_header = True
 
+
+@_PROVENANCE_ORG_SCHEMA
 class V1ProcedureOccurrenceViewSet(
         _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, ProcedureOccurrenceViewSet):
     """Procedures on /api/v1/, with the batch actions."""
+
+    source_organization_header = True
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -12410,29 +12569,11 @@ def code_mapping_lookup(request):
             status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
         )
 
-    request_organization = get_request_org(request)
     raw_organization_id = request.data.get('organization_id')
-    if raw_organization_id not in (None, ''):
-        try:
-            explicit_organization = Organization.objects.get(pk=int(raw_organization_id))
-        except (TypeError, ValueError, Organization.DoesNotExist):
-            return Response(
-                {'organization_id': 'Organization not found.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        if request_organization is not None and explicit_organization != request_organization:
-            return Response(
-                {'organization_id': 'Organization does not match the authenticated service.'},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-        if request_organization is None and not (
-            is_machine_request(request) or getattr(request.user, 'is_staff', False)
-        ):
-            return Response(
-                {'organization_id': 'Explicit organization requires a machine or staff credential.'},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-        request_organization = explicit_organization
+    request_organization = resolve_explicit_organization(
+        request, raw_organization_id,
+        present=raw_organization_id not in (None, ''),
+    )
 
     # This is an ingest operation, not the UI's list/browse read path.  The
     # canonical resolver records an encounter for a proposed code, so prevent
