@@ -174,9 +174,20 @@ def sync_athena_vocabulary_task(self, sync_id: int) -> dict[str, Any]:
     return {'sync_id': sync_id, 'outcome': sync.outcome}
 
 
-@shared_task(bind=True, name='omop_core.import_hospital_code_seed', time_limit=6 * 60 * 60)
+@shared_task(
+    bind=True,
+    name='omop_core.import_hospital_code_seed',
+    time_limit=6 * 60 * 60,
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
 def import_hospital_code_seed_task(self, import_id: int) -> dict[str, Any]:
-    """Download and install one checksum-pinned hospital-code seed."""
+    """Download and install one checksum-pinned hospital-code seed.
+
+    A Render deploy can replace a worker while this multi-minute import is in
+    progress.  Acknowledge only after completion and ask the broker to
+    redeliver on worker loss; ``execute_import`` is deliberately idempotent.
+    """
     from omop_core.models import HospitalCodeImport
     from omop_core.services.hospital_code_seed import (
         HospitalCodeDownloadError,

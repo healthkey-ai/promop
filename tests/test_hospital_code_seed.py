@@ -124,3 +124,52 @@ def test_dispatch_publishes_queued_intent(tmp_path):
         )
     job.refresh_from_db()
     assert job.task_id == f'hospital-code-import-{job.pk}'
+
+
+def test_import_task_is_redelivered_when_worker_is_lost():
+    from omop_core.tasks import import_hospital_code_seed_task
+
+    assert import_hospital_code_seed_task.acks_late is True
+    assert import_hospital_code_seed_task.reject_on_worker_lost is True
+
+
+@pytest.mark.parametrize('outcome, should_requeue', [
+    ('running', True),
+    ('applied', False),
+    ('failed', False),
+])
+def test_recovery_migration_only_requeues_interrupted_v1(outcome, should_requeue):
+    from django.apps import apps
+    from django.utils import timezone
+
+    migration = importlib.import_module(
+        'omop_core.migrations.0277_requeue_interrupted_hospital_code_import',
+    )
+    job = HospitalCodeImport.objects.create(
+        source_url='https://example.test/folder',
+        artifact_filename='healthtree_hospital_codes_20261002_v1.zip',
+        artifact_identity=migration.ARTIFACT_IDENTITY,
+        artifact_sha256='1' * 64,
+        expected_rows=691_800,
+        outcome=outcome,
+        task_id='hospital-code-import-1',
+        stats={'partial': 860},
+        failure_reason='existing state',
+        started_at=timezone.now(),
+        completed_at=timezone.now() if outcome != 'running' else None,
+    )
+
+    migration.requeue_interrupted_import(apps, None)
+
+    job.refresh_from_db()
+    if should_requeue:
+        assert job.outcome == 'queued'
+        assert job.task_id == ''
+        assert job.stats == {}
+        assert job.started_at is None
+        assert job.completed_at is None
+        assert 'worker replacement' in job.failure_reason
+    else:
+        assert job.outcome == outcome
+        assert job.task_id == 'hospital-code-import-1'
+        assert job.stats == {'partial': 860}

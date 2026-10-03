@@ -98,7 +98,11 @@ Imports use bounded transactions and a PostgreSQL advisory lock. A receipt in
 `hospital_code_import` records queued/running/applied/failed state, task ID,
 counts and failure details. Re-delivery is safe: the ordinary hospital-code
 upsert preserves curator destinations, status, notes, reviewer and curator
-labels while refreshing source evidence.
+labels while refreshing source evidence. The Celery task acknowledges only
+after completion and rejects on worker loss, so replacing a worker redelivers
+the idempotent import. Migration `0277` narrowly requeues the v1 receipt that
+was interrupted during its first Render staging deployment; it is a no-op for
+queued, applied, or explicitly failed receipts.
 
 `scripts/build_hospital_code_seed.py` reproducibly builds the deployment
 artifact from Alex's source-name ZIP and Nikita's FHIR code inventory. Nikita's
