@@ -20145,6 +20145,48 @@ class ConceptDuplicateDetectionTest(TestCase):
                              f'queries grew from {q2} to {q10}; '
                              f'the concept-duplicate check should be O(1)')
 
+    # --- reject + intra-batch, both flags, non-Measurement ----------------
+
+    def test_reject_intra_batch(self):
+        """Reject mode fires on intra-batch duplicates too."""
+        from omop_core.models import Measurement
+        count_before = Measurement.objects.filter(person=self.person).count()
+        rows = [
+            self._row('INTRA-A', '2024-12-01', value=1.0),
+            self._row('INTRA-B', '2024-12-01', value=2.0),
+        ]
+        resp = self._post(
+            rows, '?skip_refresh=true&reject_concept_duplicates=true')
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(
+            Measurement.objects.filter(person=self.person).count(),
+            count_before)
+
+    def test_reject_takes_precedence_over_warn(self):
+        """When both flags are set, reject mode wins."""
+        self._post([self._row('BOTH-BASE', '2025-01-01')])
+        resp = self._post(
+            [self._row('BOTH-DUP', '2025-01-01')],
+            '?skip_refresh=true'
+            '&warn_concept_duplicates=true'
+            '&reject_concept_duplicates=true')
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+
+    def test_non_measurement_endpoint_returns_400(self):
+        """Duplicate flags on a non-Measurement endpoint return 400."""
+        row = {
+            'person': self.person.person_id,
+            'condition_concept': self.m_concept.concept_id,
+            'condition_start_date': '2025-02-01',
+            'condition_type_concept': self.type_concept.concept_id,
+            'condition_source_value': 'TEST',
+        }
+        resp = self.client.post(
+            '/api/v1/conditions/?skip_refresh=true'
+            '&warn_concept_duplicates=true',
+            [row], format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
 
 @override_settings(SERVICE_AUTH_SCOPES='patient/*.read patient/*.write')
 class BulkOmopUpdateTest(TestCase):

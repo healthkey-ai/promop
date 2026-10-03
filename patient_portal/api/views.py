@@ -6409,14 +6409,22 @@ class _ConceptDuplicateConflict(Exception):
         self.duplicates = duplicates
 
 
-def _parse_concept_dup_flags(request):
-    """Read the two opt-in query params for concept-duplicate detection."""
+def _parse_concept_dup_flags(request, model_name=None):
+    """Read the two opt-in query params for concept-duplicate detection.
+
+    Returns ``(warn, reject)`` booleans, or raises ``ValidationError``
+    when the flags are set on a non-Measurement model.
+    """
     warn = str(
         request.query_params.get('warn_concept_duplicates', 'false')
     ).strip().lower() in ('1', 'true', 'yes')
     reject = str(
         request.query_params.get('reject_concept_duplicates', 'false')
     ).strip().lower() in ('1', 'true', 'yes')
+    if (warn or reject) and model_name and model_name != 'Measurement':
+        raise serializers.ValidationError(
+            'warn_concept_duplicates and reject_concept_duplicates are only '
+            'supported on /api/v1/measurements/.')
     return warn, reject
 
 
@@ -6465,6 +6473,10 @@ def _check_concept_date_duplicates(model_cls, person, inserted_instances,
             })
 
     # Collisions with existing rows — one query.
+    # Cross-product filter: concept_id__in × date__in may return rows that
+    # don't match any actual (concept, date) pair. The existing_by_key lookup
+    # below discards those — correctness depends on that step, not this query
+    # alone. Same trade-off as _plan_bulk_upsert: one query, bounded by batch.
     concept_ids = {cid for cid, _ in new_pairs}
     dates = {d for _, d in new_pairs}
 
@@ -6733,7 +6745,7 @@ class _OmopBulkCreateMixin:
 
                     # Concept-duplicate detection (opt-in).
                     concept_dup_warn, concept_dup_reject = (
-                        _parse_concept_dup_flags(request))
+                        _parse_concept_dup_flags(request, model_name))
                     if (concept_dup_warn or concept_dup_reject) and new_ids:
                         concept_duplicates = _check_concept_date_duplicates(
                             model_cls, person, plan.to_insert,
@@ -6926,7 +6938,7 @@ class _OmopBulkCreateMixin:
 
                 # Concept-duplicate detection (opt-in).
                 concept_dup_warn, concept_dup_reject = _parse_concept_dup_flags(
-                    request)
+                    request, model_name)
                 concept_duplicates = []
                 if (concept_dup_warn or concept_dup_reject) and new_ids:
                     inserted = plan.to_insert if upsert else instances
