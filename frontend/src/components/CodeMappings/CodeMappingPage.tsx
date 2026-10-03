@@ -693,6 +693,7 @@ export default function CodeMappingPage() {
   const [destinationError, setDestinationError] = useState("");
   const [sourceEvidence, setSourceEvidence] = useState<SourceEvidence | null>(null);
   const [sourceEvidenceError, setSourceEvidenceError] = useState("");
+  const evidenceFacilities = sourceEvidence?.facilities || [];
 
   useEffect(() => {
     setDestinationOptions([]);
@@ -2491,7 +2492,10 @@ export default function CodeMappingPage() {
                 {dialogMode === "edit" && selectedRow && (
                   <p data-testid="source-organization" className="mb-4 text-sm text-slate-700">
                     <span className="font-medium">Hospital / organization: </span>
-                    {selectedRow.organization_name || sourceEvidence?.organization?.name || "Global / unattributed"}
+                    {selectedRow.organization_name || sourceEvidence?.organization?.name
+                      || (evidenceFacilities.length
+                        ? `${evidenceFacilities[0].name}${evidenceFacilities.length > 1 ? ` (+${evidenceFacilities.length - 1} more)` : ""}`
+                        : "Global / unattributed")}
                     {(selectedRow.organization_slug || sourceEvidence?.organization?.slug) && (
                       <span className="ml-1 text-xs text-slate-500">
                         ({selectedRow.organization_slug || sourceEvidence?.organization?.slug})

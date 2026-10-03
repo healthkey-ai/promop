@@ -4748,6 +4748,36 @@ class AthenaVocabularySync(models.Model):
         ]
 
 
+class HospitalCodeImport(models.Model):
+    """Durable intent and receipt for one governed hospital-code seed."""
+
+    OUTCOME_CHOICES = [
+        ('queued', 'Queued'),
+        ('running', 'Running'),
+        ('applied', 'Applied'),
+        ('failed', 'Failed'),
+    ]
+
+    source_url = models.TextField()
+    artifact_filename = models.CharField(max_length=255)
+    artifact_identity = models.CharField(max_length=255, unique=True)
+    artifact_sha256 = models.CharField(max_length=64, unique=True)
+    expected_rows = models.PositiveIntegerField()
+    outcome = models.CharField(
+        max_length=16, choices=OUTCOME_CHOICES, default='queued', db_index=True,
+    )
+    task_id = models.CharField(max_length=255, blank=True)
+    stats = models.JSONField(default=dict, blank=True)
+    failure_reason = models.TextField(blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'hospital_code_import'
+        ordering = ['-created_at']
+
+
 class UmlsRelease(models.Model):
     """A loaded raw UMLS Metathesaurus release (not an OMOP vocabulary)."""
     release_version = models.CharField(max_length=20, primary_key=True)

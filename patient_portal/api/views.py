@@ -10485,6 +10485,8 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
         }
     # A mapping can legitimately have no destination yet: a code seen at ingest
     # whose concept is not loaded is a review-queue row, not an error.
+    evidence_metadata = dict(mapping.source_metadata or {}) if mapping else {}
+    facility_evidence = evidence_metadata.pop('facilities', [])
     source_evidence = ({
         'organization': ({
             'id': mapping.organization_id,
@@ -10497,7 +10499,8 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
         ),
         'first_seen': mapping.first_seen if mapping else None,
         'last_seen': mapping.last_seen if mapping else None,
-        'metadata': mapping.source_metadata if mapping else {},
+        'metadata': evidence_metadata,
+        'facilities': facility_evidence if isinstance(facility_evidence, list) else [],
         'units': mapping.source_unit_evidence if mapping else [],
     } if include_source_evidence else None)
     if concept is None:

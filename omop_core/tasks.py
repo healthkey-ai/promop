@@ -4,8 +4,40 @@ from typing import Any
 
 import requests
 from celery import shared_task
+from celery.signals import worker_ready
+from django.db import OperationalError, ProgrammingError
 
 from omop_core.models import Person
+
+
+@worker_ready.connect
+def dispatch_hospital_code_imports_on_worker_ready(**_kwargs):
+    """Publish durable migration-created imports from a worker that knows the task."""
+    import logging
+    import threading
+
+    from omop_core.services.hospital_code_seed import dispatch_queued_imports
+
+    def dispatch():
+        try:
+            dispatch_queued_imports()
+        except (OperationalError, ProgrammingError):
+            logging.getLogger(__name__).exception(
+                'Hospital-code import dispatch deferred until the database is ready.'
+            )
+        except Exception:
+            # Never make the worker unavailable because the broker job cannot
+            # be published. The queued database row remains retryable.
+            logging.getLogger(__name__).exception('Could not dispatch hospital-code import.')
+
+    dispatch()
+    # Render can bring the worker up while the web service is still running its
+    # release migration. Recheck without blocking worker readiness; once a task
+    # id is recorded these passes are no-ops.
+    for delay in (60, 180):
+        timer = threading.Timer(delay, dispatch)
+        timer.daemon = True
+        timer.start()
 
 
 @shared_task(name='omop_core.build_concept_embeddings')
@@ -140,3 +172,23 @@ def sync_athena_vocabulary_task(self, sync_id: int) -> dict[str, Any]:
         raise
     sync.refresh_from_db()
     return {'sync_id': sync_id, 'outcome': sync.outcome}
+
+
+@shared_task(bind=True, name='omop_core.import_hospital_code_seed', time_limit=6 * 60 * 60)
+def import_hospital_code_seed_task(self, import_id: int) -> dict[str, Any]:
+    """Download and install one checksum-pinned hospital-code seed."""
+    from omop_core.models import HospitalCodeImport
+    from omop_core.services.hospital_code_seed import (
+        HospitalCodeDownloadError,
+        execute_import,
+    )
+
+    try:
+        return execute_import(import_id)
+    except HospitalCodeDownloadError as exc:
+        if self.request.retries >= 3:
+            raise
+        HospitalCodeImport.objects.filter(pk=import_id).update(
+            outcome='queued', failure_reason=str(exc), completed_at=None,
+        )
+        raise self.retry(exc=exc, countdown=min(60 * (2 ** self.request.retries), 300))
