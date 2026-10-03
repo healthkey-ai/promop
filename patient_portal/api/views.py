@@ -6403,6 +6403,126 @@ def _apply_upsert_plan(plan, model_cls, pk_field, model_name):
     return ids, new_ids
 
 
+class _ConceptDuplicateConflict(Exception):
+    """Raised inside an atomic block to roll back when reject mode is active."""
+    def __init__(self, duplicates):
+        self.duplicates = duplicates
+
+
+def _parse_concept_dup_flags(request, model_name=None):
+    """Read the two opt-in query params for concept-duplicate detection.
+
+    Returns ``(warn, reject)`` booleans, or raises ``ValidationError``
+    when the flags are set on a non-Measurement model.
+    """
+    warn = str(
+        request.query_params.get('warn_concept_duplicates', 'false')
+    ).strip().lower() in ('1', 'true', 'yes')
+    reject = str(
+        request.query_params.get('reject_concept_duplicates', 'false')
+    ).strip().lower() in ('1', 'true', 'yes')
+    if (warn or reject) and model_name and model_name != 'Measurement':
+        raise serializers.ValidationError(
+            'warn_concept_duplicates and reject_concept_duplicates are only '
+            'supported on /api/v1/measurements/.')
+    return warn, reject
+
+
+def _check_concept_date_duplicates(model_cls, person, inserted_instances,
+                                   exclude_ids=None):
+    """Detect Measurement rows whose (concept_id, date) already exists.
+
+    Returns a list of dicts describing each collision, or an empty list.
+    One SELECT regardless of batch size, using ``ix_meas_person_concept_date``.
+
+    ``exclude_ids`` is the set of pks just inserted in this transaction — they
+    must be excluded from the "existing" query so the batch does not conflict
+    with itself.
+    """
+    if model_cls.__name__ != 'Measurement':
+        return []
+
+    # Collect (concept_id, date) pairs from inserted rows, excluding concept 0.
+    new_pairs = {}  # (concept_id, date) -> [indices]
+    for i, inst in enumerate(inserted_instances):
+        cid = inst.measurement_concept_id
+        d = inst.measurement_date
+        if cid and cid != 0 and d is not None:
+            new_pairs.setdefault((cid, d), []).append(i)
+
+    if not new_pairs:
+        return []
+
+    warnings = []
+
+    # Intra-batch collisions: different rows in the same batch share concept+date.
+    for (cid, d), indices in new_pairs.items():
+        if len(indices) > 1:
+            svs = [inserted_instances[idx].measurement_source_value
+                   for idx in indices]
+            warnings.append({
+                'type': 'intra_batch',
+                'measurement_concept_id': cid,
+                'measurement_date': d.isoformat() if hasattr(d, 'isoformat') else str(d),
+                'batch_indices': indices,
+                'batch_source_values': svs,
+                'message': (
+                    f'Rows at indices {indices} in this batch share '
+                    f'concept {cid} on {d}.'
+                ),
+            })
+
+    # Collisions with existing rows — one query.
+    # Cross-product filter: concept_id__in × date__in may return rows that
+    # don't match any actual (concept, date) pair. The existing_by_key lookup
+    # below discards those — correctness depends on that step, not this query
+    # alone. Same trade-off as _plan_bulk_upsert: one query, bounded by batch.
+    concept_ids = {cid for cid, _ in new_pairs}
+    dates = {d for _, d in new_pairs}
+
+    qs = model_cls.objects.filter(
+        person=person,
+        is_erroneous=False,
+        measurement_concept_id__in=concept_ids,
+        measurement_date__in=dates,
+    )
+    if exclude_ids:
+        qs = qs.exclude(measurement_id__in=exclude_ids)
+
+    existing = qs.values_list(
+        'measurement_concept_id', 'measurement_date',
+        'measurement_id', 'measurement_source_value',
+    )
+
+    existing_by_key = {}
+    for cid, d, pk, sv in existing:
+        existing_by_key.setdefault((cid, d), []).append({
+            'measurement_id': pk,
+            'measurement_source_value': sv,
+        })
+
+    for (cid, d), indices in new_pairs.items():
+        if (cid, d) in existing_by_key:
+            new_svs = [inserted_instances[idx].measurement_source_value
+                       for idx in indices]
+            date_str = d.isoformat() if hasattr(d, 'isoformat') else str(d)
+            warnings.append({
+                'type': 'existing_conflict',
+                'measurement_concept_id': cid,
+                'measurement_date': date_str,
+                'batch_indices': indices,
+                'batch_source_values': new_svs,
+                'existing_rows': existing_by_key[(cid, d)],
+                'message': (
+                    f'New row(s) at indices {indices} '
+                    f'(source: {new_svs}) resolve to concept {cid} on {d}, '
+                    f'which already has {len(existing_by_key[(cid, d)])} row(s).'
+                ),
+            })
+
+    return warnings
+
+
 def _bulk_body_too_large(request: Request) -> Response | None:
     """Return a 413 for a body over the byte ceiling, or None to proceed."""
     # Read CONTENT_LENGTH, not request.data, because touching request.data
@@ -6614,6 +6734,7 @@ class _OmopBulkCreateMixin:
         instance = model_cls(**dict(validated))
 
         from omop_core.signals import suppress_patient_record_refresh
+        concept_duplicates = []
         try:
             with transaction.atomic():
                 with suppress_patient_record_refresh():
@@ -6621,6 +6742,16 @@ class _OmopBulkCreateMixin:
                         model_cls, pk_field, model_name, person, [instance])
                     ids, new_ids = _apply_upsert_plan(
                         plan, model_cls, pk_field, model_name)
+
+                    # Concept-duplicate detection (opt-in).
+                    concept_dup_warn, concept_dup_reject = (
+                        _parse_concept_dup_flags(request, model_name))
+                    if (concept_dup_warn or concept_dup_reject) and new_ids:
+                        concept_duplicates = _check_concept_date_duplicates(
+                            model_cls, person, plan.to_insert,
+                            exclude_ids=set(new_ids))
+                        if concept_dup_reject and concept_duplicates:
+                            raise _ConceptDuplicateConflict(concept_duplicates)
 
                 row_id = ids[0]
                 if source and new_ids:
@@ -6635,6 +6766,15 @@ class _OmopBulkCreateMixin:
                 if not skip_refresh:
                     from omop_core.services.patient_record_service import refresh_patient_record
                     refresh_patient_record(person)
+        except _ConceptDuplicateConflict as exc:
+            return Response(
+                {'detail': (
+                    'The row was rolled back because it would create a '
+                    'measurement with a (concept_id, date) combination that '
+                    'already exists for this person.'
+                ), 'concept_duplicates': exc.duplicates},
+                status=status.HTTP_409_CONFLICT,
+            )
         except IntegrityError as exc:
             logger.exception(
                 'single %s upsert for person %s failed on a database constraint',
@@ -6650,7 +6790,10 @@ class _OmopBulkCreateMixin:
         obj = model_cls.objects.get(**{pk_field: row_id})
         response_serializer = self.get_serializer(obj)
         http_status = status.HTTP_201_CREATED if new_ids else status.HTTP_200_OK
-        return Response(response_serializer.data, status=http_status)
+        data = response_serializer.data
+        if concept_duplicates:
+            data['concept_duplicates'] = concept_duplicates
+        return Response(data, status=http_status)
 
     def _bulk_create(self, request):
         rows = request.data
@@ -6730,6 +6873,15 @@ class _OmopBulkCreateMixin:
                 request, person, org, model_cls, pk_field, model_name, validated,
                 source, source_user_id, reason, skip_refresh, upsert,
                 suppress_patient_record_refresh)
+        except _ConceptDuplicateConflict as exc:
+            return Response(
+                {'detail': (
+                    'The batch was rolled back because it would create '
+                    'measurements with (concept_id, date) combinations that '
+                    'already exist for this person.'
+                ), 'concept_duplicates': exc.duplicates},
+                status=status.HTTP_409_CONFLICT,
+            )
         except IntegrityError as exc:
             # A conflict over data, not a server fault. The distinction decides
             # whether the caller retries, and a 500 reads as "service is down".
@@ -6784,6 +6936,18 @@ class _OmopBulkCreateMixin:
                     model_cls.objects.bulk_create(instances)
                     ids, updated = list(new_ids), 0
 
+                # Concept-duplicate detection (opt-in).
+                concept_dup_warn, concept_dup_reject = _parse_concept_dup_flags(
+                    request, model_name)
+                concept_duplicates = []
+                if (concept_dup_warn or concept_dup_reject) and new_ids:
+                    inserted = plan.to_insert if upsert else instances
+                    concept_duplicates = _check_concept_date_duplicates(
+                        model_cls, person, inserted,
+                        exclude_ids=set(new_ids))
+                    if concept_dup_reject and concept_duplicates:
+                        raise _ConceptDuplicateConflict(concept_duplicates)
+
             # No source supplied means no ProvenanceRecord, matching the single-row
             # path — inventing a source would make provenance unfalsifiable.
             # Only inserted rows get one: an upsert that left a row untouched
@@ -6819,10 +6983,10 @@ class _OmopBulkCreateMixin:
             if not skip_refresh:
                 refresh_patient_record(person)
 
-        return Response(
-            {'created': len(new_ids), 'updated': updated, 'ids': list(ids)},
-            status=status.HTTP_201_CREATED,
-        )
+        data = {'created': len(new_ids), 'updated': updated, 'ids': list(ids)}
+        if concept_duplicates:
+            data['concept_duplicates'] = concept_duplicates
+        return Response(data, status=status.HTTP_201_CREATED)
 
 
 def _visible_clinical_rows(
