@@ -885,6 +885,10 @@ describe("CodeMappingPage", () => {
         organization_slug: "memorial",
         source_evidence: {
           organization: { id: 4, slug: "memorial", name: "Memorial Hospital" },
+          facilities: [{
+            name: "Huntsman Cancer Institute", level: "attached", confidence: "medium",
+            parent_name: "University of Utah Health", records: 12000, patients: 204,
+          }],
           occurrence_count: 12398,
           group_occurrence_count: 13032,
           metadata: {
@@ -896,7 +900,7 @@ describe("CodeMappingPage", () => {
             value_types: { quantity: 0, coded: 0, text: 0 },
           },
           units: [
-            { display: "mg/dL", code: "mg/dL", count: 12000, patients: 204, values: 11990, distribution: { min: 0.1, p25: 0.7, p50: 0.9, p75: 1.1, max: 8.2 } },
+            { display: "mg/dL", code: "mg/dL", normalized: "mg/dL", verdict: "valid", verdict_reason: "exact release match", count: 12000, patients: 204, values: 11990, distribution: { min: 0.1, p25: 0.7, p50: 0.9, p75: 1.1, max: 8.2 } },
             { display: "mmol/L", code: "mmol/L", count: 4, suppressed: true },
           ],
         },
@@ -907,6 +911,10 @@ describe("CodeMappingPage", () => {
       await waitFor(() => expect(evidence).toHaveTextContent("Memorial Hospital"));
       expect(screen.getByTestId("source-organization")).toHaveTextContent("Hospital / organization: Memorial Hospital");
       expect(evidence).toHaveTextContent("13,032");
+      expect(within(evidence).getByRole("table", { name: "Observed source facilities" })).toHaveTextContent("Huntsman Cancer Institute");
+      expect(evidence).toHaveTextContent("Parent: University of Utah Health");
+      expect(evidence).toHaveTextContent("attached");
+      expect(evidence).toHaveTextContent("medium");
       expect(evidence).toHaveTextContent("Records across same-label codes");
       expect(evidence).not.toHaveTextContent("Coding occurrences");
       expect(evidence).toHaveTextContent("Values use another FHIR type or are absent");
@@ -915,6 +923,8 @@ describe("CodeMappingPage", () => {
         name: "Value distribution: Min 0.1; P25 0.7; Median 0.9; P75 1.1; Max 8.2",
       })).toBeInTheDocument();
       expect(within(evidence).getByRole("table", { name: "Observed source units" })).toHaveTextContent("Median 0.9");
+      expect(evidence).toHaveTextContent("Normalized: mg/dL · valid");
+      expect(evidence).toHaveTextContent("exact release match");
       expect(evidence).toHaveTextContent("204 patients · 11,990 numeric values");
       expect(evidence).toHaveTextContent("Suppressed for a small cohort");
       expect(evidence).toHaveTextContent("0.6–1.17 mg/dL");

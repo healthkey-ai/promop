@@ -74,3 +74,54 @@ adds the structured source evidence only when the curator opens Edit Mapping.
 The dialog labels median reference bounds as recognition evidence, not an
 authoritative clinical range, and displays a null organization as
 `Global / unattributed`.
+
+## Governed asynchronous seed
+
+Migration `0276_hospital_code_import` records durable intent to install the
+checksum-pinned `healthtree_hospital_codes_20261002_v1.zip` from the governed
+HealthTree Drive folder. It does not access the network or write mapping rows.
+A Celery worker running the new application revision discovers the queued row
+at worker startup and performs the download and import outside deployment.
+
+The artifact contains 691,800 source keys from Alex's bounded unmapped cohort:
+621,497 Epic and 70,303 Cerner. It is a ZIP containing a manifest and one
+pre-aggregated JSONL member, so production needs no Parquet or `pyarrow`
+dependency. Before the first mapping write the worker verifies:
+
+- the migration-pinned archive SHA-256;
+- artifact identity and schema version;
+- manifest-declared and actual row counts;
+- the JSONL member checksum; and
+- every row's required shape and Epic/Cerner source identity.
+
+Imports use bounded transactions and a PostgreSQL advisory lock. A receipt in
+`hospital_code_import` records queued/running/applied/failed state, task ID,
+counts and failure details. Re-delivery is safe: the ordinary hospital-code
+upsert preserves curator destinations, status, notes, reviewer and curator
+labels while refreshing source evidence.
+
+`scripts/build_hospital_code_seed.py` reproducibly builds the deployment
+artifact from Alex's source-name ZIP and Nikita's FHIR code inventory. Nikita's
+larger inventory only enriches matching Alex keys; it does not expand the
+curation queue.
+
+## Facility context in the governed seed
+
+Alex's code-to-facility evidence is retained in `source_metadata.facilities`,
+including facility and parent names, attribution level and method, confidence,
+low-confidence reason, and record/patient counts. These are contextual
+observations on a global mapping, not PRomop `Organization` foreign keys:
+Alex's identifiers mix sites, Epic brands and tenants, attached facilities,
+and patient-entered aliases. Treating them all as authoritative hospitals
+would create false organization scope and multiply the mapping queue.
+
+The detail API moves that list to `source_evidence.facilities`; list responses
+remain compact. Edit Mapping shows the names with level and confidence so a
+curator can distinguish, for example, an individual Cerner site from a broad
+Epic tenant or a low-confidence connection alias.
+
+Nikita's matching unit evidence preserves raw display, raw quantity code and
+system, normalized UCUM when available, validation verdict/reason, and counts.
+Alex's per-unit percentiles and suppression state are merged onto the matching
+untouched display/code pair. The dialog displays both the original and
+normalized forms and retains the percentile mini-graph.

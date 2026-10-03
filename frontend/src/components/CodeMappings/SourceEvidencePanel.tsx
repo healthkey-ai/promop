@@ -11,11 +11,29 @@ export interface SourceDistribution {
 export interface SourceUnitEvidence {
   display?: string;
   code?: string;
+  system?: string;
+  normalized?: string;
+  normalized_source?: string;
+  verdict?: string;
+  verdict_reason?: string;
   count: number;
   patients?: number;
   values?: number;
   suppressed?: boolean;
   distribution?: SourceDistribution | null;
+}
+
+export interface SourceFacilityEvidence {
+  name: string;
+  id?: string;
+  level?: "site" | "brand" | "tenant" | "attached" | "unknown" | string;
+  attribution_method?: string;
+  confidence?: "high" | "medium" | "low" | string;
+  low_confidence_reason?: string;
+  alternate_name?: string;
+  parent_name?: string;
+  records?: number;
+  patients?: number;
 }
 
 interface SourceMetadata {
@@ -36,6 +54,7 @@ interface SourceMetadata {
 
 export interface SourceEvidence {
   organization: { id: number; slug: string; name: string } | null;
+  facilities?: SourceFacilityEvidence[];
   occurrence_count: number;
   group_occurrence_count?: number | null;
   first_seen?: string | null;
@@ -113,6 +132,7 @@ export default function SourceEvidencePanel({ evidence, loading, error }: {
 }) {
   const metadata = evidence?.metadata || {};
   const units = evidence?.units || [];
+  const facilities = evidence?.facilities || [];
   const range = metadata.reference_range;
   const valueTypes = metadata.value_types || {};
   const selectedValueTypeTotal = Object.values(valueTypes).reduce((sum, value) => sum + value, 0);
@@ -125,8 +145,8 @@ export default function SourceEvidencePanel({ evidence, loading, error }: {
     {error && <p role="alert" className="mt-3 text-sm text-red-700">{error}</p>}
     {evidence && <>
       <dl className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-        <Stat label="Organization" value={evidence.organization?.name || "Global / unattributed"}
-          detail={evidence.organization?.slug || "Awaiting hospital provenance"} />
+        <Stat label="Organization" value={evidence.organization?.name || (facilities.length ? `${number(facilities.length)} observed source ${facilities.length === 1 ? "facility" : "facilities"}` : "Global / unattributed")}
+          detail={evidence.organization?.slug || (facilities.length ? "Facility evidence shown below" : "Awaiting hospital provenance")} />
         <Stat label="Records (this code)" value={number(evidence.occurrence_count)} detail="Distinct source records" />
         {metadata.patients != null && <Stat label="Patients" value={number(metadata.patients)} />}
         {metadata.codings != null && metadata.codings !== evidence.occurrence_count && (
@@ -141,6 +161,47 @@ export default function SourceEvidencePanel({ evidence, loading, error }: {
           detail="Deduplicated records across codes with this description" />}
       </dl>
 
+      {facilities.length > 0 && <div className="mt-4">
+        <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-600">Observed hospitals / facilities</h4>
+        <p className="mt-1 text-xs text-slate-500">
+          Context from source connections; the scope and confidence distinguish an individual site from an Epic tenant, brand, attached facility, or patient-entered alias.
+        </p>
+        <div className="mt-2 overflow-x-auto">
+          <table aria-label="Observed source facilities" className="w-full text-left text-xs">
+            <thead className="text-slate-500"><tr>
+              <th className="pb-2 pr-3 font-semibold">Hospital / facility</th>
+              <th className="pb-2 pr-3 font-semibold">Scope</th>
+              <th className="pb-2 pr-3 font-semibold">Confidence</th>
+              <th className="pb-2 text-right font-semibold">Records</th>
+            </tr></thead>
+            <tbody className="divide-y divide-slate-200">
+              {facilities.map((facility, index) => <tr key={`${facility.id || facility.name}|${facility.level || ""}|${index}`}>
+                <td className="py-2 pr-3 text-slate-900">
+                  <span className="font-medium">{facility.name}</span>
+                  {facility.parent_name && facility.parent_name !== facility.name && <span className="block text-[10px] text-slate-500">
+                    Parent: {facility.parent_name}
+                  </span>}
+                  {facility.alternate_name && facility.alternate_name !== facility.name && <span className="block text-[10px] text-slate-500">
+                    Also supplied as: {facility.alternate_name}
+                  </span>}
+                </td>
+                <td className="py-2 pr-3 text-slate-700">{facility.level || "unspecified"}</td>
+                <td className="py-2 pr-3 text-slate-700">
+                  {facility.confidence || "unspecified"}
+                  {facility.low_confidence_reason && <span className="block text-[10px] text-amber-700">
+                    {facility.low_confidence_reason.replace(/_/g, " ")}
+                  </span>}
+                </td>
+                <td className="py-2 text-right text-slate-700">
+                  {number(facility.records)}
+                  {facility.patients != null && <span className="block text-[10px] text-slate-500">{number(facility.patients)} patients</span>}
+                </td>
+              </tr>)}
+            </tbody>
+          </table>
+        </div>
+      </div>}
+
       {units.length > 0 && <div className="mt-4 overflow-x-auto">
         <table aria-label="Observed source units" className="w-full text-left text-xs">
           <thead className="text-slate-500"><tr>
@@ -153,6 +214,11 @@ export default function SourceEvidencePanel({ evidence, loading, error }: {
               <td className="py-2 pr-3 font-mono text-slate-900">
                 {unit.display || unit.code || "<no unit>"}
                 {unit.code && unit.code !== unit.display && <span className="ml-1 text-slate-500">({unit.code})</span>}
+                {(unit.normalized || unit.verdict) && <span className="block text-[10px] text-slate-500">
+                  {unit.normalized ? `Normalized: ${unit.normalized}` : "No normalized UCUM"}
+                  {unit.verdict ? ` · ${unit.verdict.replace(/_/g, " ")}` : ""}
+                </span>}
+                {unit.verdict_reason && <span className="block text-[10px] text-slate-500">{unit.verdict_reason}</span>}
               </td>
               <td className="py-2 pr-3 text-right text-slate-700">
                 <span>{number(unit.count)}</span>

@@ -464,6 +464,10 @@ def test_detail_includes_source_evidence_without_putting_it_on_browse_rows(staff
         source_metadata={
             'patients': 9,
             'reference_range': {'records': 12, 'low_p50': 3.5, 'high_p50': 5.0},
+            'facilities': [{
+                'name': 'University Hospital', 'level': 'site',
+                'confidence': 'high', 'records': 20,
+            }],
         },
         source_unit_evidence=[{
             'display': 'g/dL', 'code': 'g/dL', 'count': 18,
@@ -479,7 +483,14 @@ def test_detail_includes_source_evidence_without_putting_it_on_browse_rows(staff
         'group_occurrence_count': 37,
         'first_seen': None,
         'last_seen': None,
-        'metadata': mapping.source_metadata,
+        'metadata': {
+            'patients': 9,
+            'reference_range': {'records': 12, 'low_p50': 3.5, 'high_p50': 5.0},
+        },
+        'facilities': [{
+            'name': 'University Hospital', 'level': 'site',
+            'confidence': 'high', 'records': 20,
+        }],
         'units': mapping.source_unit_evidence,
     }
 
