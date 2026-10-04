@@ -2063,6 +2063,12 @@ class SourceCodeConceptMapping(models.Model):
         max_length=20, blank=True, default='', db_index=True,
         help_text='Immutable version of the suggestion model that produced this proposal (for example v0.2).',
     )
+    # The ranker's confidence in target_concept, 0-1. Cleared when a curator
+    # moves the destination: it describes the machine's pick, not theirs.
+    suggestion_confidence = models.FloatField(
+        null=True, blank=True,
+        help_text="Ranker confidence (0-1) in the suggested destination; null when no ranker chose it.",
+    )
     # Deliberately separate from suggestion_model_version, which means "this
     # version proposed the destination on this row" and is what the accuracy
     # dashboard selects on. A run that finds nothing has still tried, and has to

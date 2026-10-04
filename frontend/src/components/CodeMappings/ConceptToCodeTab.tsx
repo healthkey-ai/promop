@@ -16,7 +16,10 @@ type Source = {
   origin_system: string; updated_at: string; destination_concept_id: number | null;
   destination_concept_name: string; destination_standard_concept: string | null;
   evidence?: string[]; verdict?: string; note?: string;
+  /** The ranker's confidence (0-1) in this source → concept pairing. */
+  confidence?: number | null;
 };
+type ConfidenceOrder = '' | '-confidence' | 'confidence';
 type Page<T> = { results: T[]; page: number; page_size: number; total: number };
 type Run = {
   run_id: string; state: string; error: string; done: number; total: number;
@@ -30,6 +33,16 @@ const domains = [
 const button = 'rounded border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-100 disabled:opacity-40';
 const input = 'rounded border border-slate-300 bg-white px-3 py-2 text-sm';
 const sourceKey = (source: Source) => JSON.stringify([source.source_vocabulary_id, source.source_code]);
+const percent = (value: number) => `${Math.round(value * 100)}%`;
+// Unscored rows sort last in either direction, as the server orders them.
+const byConfidence = (order: ConfidenceOrder) => (a: Source, b: Source) => {
+  const left = a.confidence ?? null;
+  const right = b.confidence ?? null;
+  if (left === right) return 0;
+  if (left === null) return 1;
+  if (right === null) return -1;
+  return order === 'confidence' ? left - right : right - left;
+};
 
 function Pagination({ data, change, disabled = false }: {
   data: Page<unknown>; change: (page: number) => void; disabled?: boolean;
@@ -153,6 +166,8 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting }: {
   const [strategies, setStrategies] = useState({ umls: true, lexical: true });
   const [writing, setWriting] = useState(false);
   const [progress, setProgress] = useState('');
+  const [order, setOrder] = useState<ConfidenceOrder>('');
+  const [threshold, setThreshold] = useState(80);
   const writingRef = useRef(false);
   const active = useRef(true);
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
@@ -166,7 +181,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting }: {
       setLoading(true);
       try {
         const response = await api.get<Page<Source> & { zero_seen: number }>(`/v1/concept-to-code/${concept.concept_id}/`, {
-          params: { mode, search, seen_only: seenOnly ? '1' : '0', page }, signal: controller.signal,
+          params: { mode, search, seen_only: seenOnly ? '1' : '0', page, ...(order ? { order } : {}) }, signal: controller.signal,
         });
         if (current) { setData(response.data); setSelected(new Set()); }
       } catch {
@@ -174,7 +189,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting }: {
       } finally { if (current) setLoading(false); }
     }, 250);
     return () => { current = false; controller.abort(); window.clearTimeout(timer); };
-  }, [concept.concept_id, mode, search, seenOnly, page, revision]);
+  }, [concept.concept_id, mode, search, seenOnly, page, order, revision]);
 
   useEffect(() => {
     if (!run || !['queued', 'running'].includes(run.state)) return;
@@ -203,10 +218,19 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting }: {
     finally { if (active.current) setStarting(false); }
   };
   const candidates = run?.activity.find(event => event.concept.concept_id === concept.concept_id)?.candidates ?? [];
-  const rows = mode === 'candidates' ? candidates.filter(row => !seenOnly || row.occurrence_count > 0) : data?.results ?? [];
+  const candidateRows = candidates.filter(row => !seenOnly || row.occurrence_count > 0);
+  const rows = mode === 'candidates' ? (order ? [...candidateRows].sort(byConfidence(order)) : candidateRows) : data?.results ?? [];
   const editable = rows.filter(row => (row.status === 'proposed' || (row.status === 'unmapped' && row.mapping_id === null)) && row.origin_system !== 'athena');
   const pending = editable.filter(row => selected.has(sourceKey(row)));
   const approvable = pending.filter(row => row.mapping_id !== null);
+  const validThreshold = Number.isFinite(threshold) && threshold >= 0 && threshold <= 100;
+  const selectConfident = () => setSelected(new Set(editable
+    .filter(row => row.confidence != null && row.confidence * 100 > threshold).map(sourceKey)));
+  const changeOrder = () => {
+    setOrder(previous => previous === '-confidence' ? 'confidence' : '-confidence');
+    setPage(1); setSelected(new Set());
+    if (mode !== 'candidates') setData(null);
+  };
 
   const save = async (approve: boolean) => {
     if (writingRef.current || !pending.length || (approve && !canApprove)) return;
@@ -303,11 +327,24 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting }: {
         <th className="p-2"><input type="checkbox" aria-label="Select displayed proposed sources" disabled={busy || !editable.length}
           checked={editable.length > 0 && editable.every(row => selected.has(sourceKey(row)))}
           onChange={event => setSelected(new Set(event.target.checked ? editable.map(sourceKey) : []))} /></th>
-        <th className="p-2">Source code</th><th className="p-2">Description</th>
-        <th className="p-2" aria-sort="descending"><label className="mb-1 flex whitespace-nowrap items-center gap-1 font-normal">
+        <th className="p-2"><div className="flex flex-wrap items-center gap-2">Source code
+          <span className="flex items-center gap-1 whitespace-nowrap font-normal">
+            <button type="button" className="rounded border border-slate-300 bg-white px-2 py-0.5 hover:bg-slate-100 disabled:opacity-40"
+              disabled={busy || !editable.length || !validThreshold} onClick={selectConfident}>Select</button>
+            &gt;<input type="number" aria-label="Select sources with confidence above, percent" className="w-14 rounded border border-slate-300 bg-white px-1 py-0.5"
+              min={0} max={100} value={Number.isNaN(threshold) ? '' : threshold} disabled={busy}
+              onChange={event => setThreshold(event.target.valueAsNumber)} />% confidence</span></div></th>
+        <th className="p-2">Description</th>
+        <th className="p-2" aria-sort={order ? 'none' : 'descending'}><label className="mb-1 flex whitespace-nowrap items-center gap-1 font-normal">
           <input type="checkbox" aria-label="Only source codes with Seen greater than zero" checked={seenOnly} disabled={busy}
-            onChange={event => { setSeenOnly(event.target.checked); setPage(1); setData(null); setSelected(new Set()); }} />&gt; 0 only</label>Seen ↓</th>
-        <th className="p-2">Current destination</th><th className="p-2">Status / evidence</th>
+            onChange={event => { setSeenOnly(event.target.checked); setPage(1); setData(null); setSelected(new Set()); }} />&gt; 0 only</label>
+          {order ? <button type="button" className="font-semibold hover:text-slate-950 disabled:opacity-40" disabled={busy} title="Order by Seen"
+            onClick={() => { setOrder(''); setPage(1); setSelected(new Set()); if (mode !== 'candidates') setData(null); }}>Seen ↕</button> : 'Seen ↓'}</th>
+        <th className="p-2">Current destination</th>
+        <th className="p-2" aria-sort={order === '-confidence' ? 'descending' : order === 'confidence' ? 'ascending' : 'none'}>
+          <button type="button" className="flex items-center gap-1 font-semibold hover:text-slate-950 disabled:opacity-40" disabled={busy}
+            title="Order by confidence" onClick={changeOrder}>Status / evidence · Confidence
+            <span aria-hidden="true">{order === '-confidence' ? '↓' : order === 'confidence' ? '↑' : '↕'}</span></button></th>
       </tr></thead>
       <tbody>{rows.map(row => <tr key={sourceKey(row)} className="border-b border-slate-100 align-top">
         <td className="p-2"><input type="checkbox" aria-label={`Select ${row.source_vocabulary_id || 'Uncoded'} ${row.source_code}`}
@@ -319,6 +356,8 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting }: {
           OMOP {row.destination_concept_id} · {row.destination_standard_concept === 'S' ? 'Standard' : 'Nonstandard'}</div>}</td>
         <td className="p-2 text-xs"><span className={row.status === 'approved' ? 'font-medium text-green-800' : 'text-slate-700'}>{row.status === 'unmapped' ? 'Not yet mapped' : row.status}</span>
           {!!row.evidence?.length && <div className="mt-1 text-slate-500">{row.evidence.join(' + ')}</div>}
+          {(row.status === 'proposed' || mode === 'candidates') && <div className="mt-1 text-slate-700">
+            Confidence: {row.confidence != null ? <span className="font-medium tabular-nums">{percent(row.confidence)}</span> : <span className="text-slate-500">not scored</span>}</div>}
           {row.verdict === 'supported' && <div className="mt-1 text-sky-800">Model-supported; curator review required</div>}
           {row.note && <p className="mt-1 max-w-xs text-slate-500">{row.note}</p>}</td>
       </tr>)}</tbody>

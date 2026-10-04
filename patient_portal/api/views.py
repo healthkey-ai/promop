@@ -11207,6 +11207,9 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
         and status_value != 'approved'
     ):
         values['origin_system'] = CURATOR_PROVENANCE
+    # The ranker's confidence was in the destination it chose, not this one.
+    if mapping is not None and concept is not None and concept.concept_id != previous_concept_id:
+        values['suggestion_confidence'] = None
     if status_value == 'approved' and (not was_approved or destination_moved):
         values['reviewer'] = user
         values['reviewed_at'] = timezone.now()
@@ -11732,6 +11735,7 @@ def code_mapping_detail(request, mapping_id):
         mapping.suggestion_outcome = ''
         mapping.suggested_action = ''
         mapping.suggestion_model_version = ''
+        mapping.suggestion_confidence = None
         mapping.last_suggest_attempt = ''
         mapping.suggest_strategy = ''
         mapping.umls_cui = ''

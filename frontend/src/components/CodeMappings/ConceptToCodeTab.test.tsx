@@ -290,3 +290,85 @@ describe('concept-first curation', () => {
     expect(screen.queryByRole('button', { name: /Approve selected/ })).not.toBeInTheDocument();
   });
 });
+
+describe('suggestion confidence', () => {
+  const scored = [
+    { ...source, mapping_id: 1, source_code: 'HIGH', confidence: 0.85 },
+    { ...source, mapping_id: 2, source_code: 'MID', confidence: 0.55 },
+    { ...source, mapping_id: 3, source_code: 'NONE', confidence: null },
+    { ...source, mapping_id: 4, source_code: 'DONE', status: 'approved', confidence: 0.9 },
+  ];
+  const sourceGets = () => get.mock.calls.filter(([url]) => url === '/v1/concept-to-code/123/');
+
+  beforeEach(() => {
+    get.mockImplementation((url: string) => Promise.resolve({
+      data: url === '/v1/concept-to-code/' ? page([concept]) : page(scored),
+    }));
+  });
+
+  async function openScored() {
+    render(<ConceptToCodeTab canApprove />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Serum albumin' }));
+    return screen.findByText('SNOMED:HIGH');
+  }
+
+  it('shows the confidence of every proposed mapping in the last column', async () => {
+    await openScored();
+    const cell = (code: string) => screen.getByText(`SNOMED:${code}`).closest('tr')!.lastElementChild as HTMLElement;
+    expect(cell('HIGH')).toHaveTextContent('Confidence: 85%');
+    expect(cell('MID')).toHaveTextContent('Confidence: 55%');
+    expect(cell('NONE')).toHaveTextContent('Confidence: not scored');
+    expect(cell('DONE')).not.toHaveTextContent('Confidence');
+  });
+
+  it('orders by confidence from the last column header and back by Seen', async () => {
+    await openScored();
+    const header = screen.getByRole('button', { name: /Status \/ evidence · Confidence/ });
+    fireEvent.click(header);
+    await waitFor(() => expect(sourceGets().at(-1)![1].params).toMatchObject({ order: '-confidence' }));
+    expect(header.closest('th')).toHaveAttribute('aria-sort', 'descending');
+    await screen.findByText('SNOMED:HIGH');
+    fireEvent.click(header);
+    await waitFor(() => expect(sourceGets().at(-1)![1].params).toMatchObject({ order: 'confidence' }));
+    expect(header.closest('th')).toHaveAttribute('aria-sort', 'ascending');
+    await screen.findByText('SNOMED:HIGH');
+    fireEvent.click(screen.getByRole('button', { name: /Seen/ }));
+    await waitFor(() => expect(sourceGets().at(-1)![1].params).not.toHaveProperty('order'));
+    expect(header.closest('th')).toHaveAttribute('aria-sort', 'none');
+  });
+
+  it('selects proposed sources above the confidence threshold, 80% by default', async () => {
+    await openScored();
+    const threshold = screen.getByRole('spinbutton', { name: 'Select sources with confidence above, percent' });
+    expect(threshold).toHaveValue(80);
+    fireEvent.click(screen.getByRole('button', { name: 'Select' }));
+    expect(screen.getByRole('checkbox', { name: 'Select SNOMED HIGH' })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Select SNOMED MID' })).not.toBeChecked();
+    expect(screen.getByRole('button', { name: 'Approve selected (1)' })).toBeEnabled();
+    fireEvent.change(threshold, { target: { value: '50' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Select' }));
+    expect(screen.getByRole('checkbox', { name: 'Select SNOMED MID' })).toBeChecked();
+    // Unscored and approved rows are never picked by a threshold.
+    expect(screen.getByRole('checkbox', { name: 'Select SNOMED NONE' })).not.toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Select SNOMED DONE' })).not.toBeChecked();
+    expect(screen.getByRole('button', { name: 'Approve selected (2)' })).toBeEnabled();
+  });
+
+  it('orders a suggestion preview by confidence without a request', async () => {
+    post.mockResolvedValue({ data: { ...run(), activity: [{ concept: { concept_id: 123 }, candidates: [
+      { ...source, mapping_id: 11, source_code: 'C-LOW', confidence: 0.25 },
+      { ...source, mapping_id: 12, source_code: 'C-NONE', confidence: null },
+      { ...source, mapping_id: 13, source_code: 'C-HIGH', confidence: 0.85 },
+    ] }] } });
+    await openScored();
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
+    await screen.findByText('SNOMED:C-LOW');
+    const before = sourceGets().length;
+    fireEvent.click(screen.getByRole('button', { name: /Status \/ evidence · Confidence/ }));
+    const codes = () => screen.getAllByText(/^SNOMED:C-/).map(node => node.textContent);
+    expect(codes()).toEqual(['SNOMED:C-HIGH', 'SNOMED:C-LOW', 'SNOMED:C-NONE']);
+    fireEvent.click(screen.getByRole('button', { name: /Status \/ evidence · Confidence/ }));
+    expect(codes()).toEqual(['SNOMED:C-LOW', 'SNOMED:C-HIGH', 'SNOMED:C-NONE']);
+    expect(sourceGets().length).toBe(before);
+  });
+});

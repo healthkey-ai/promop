@@ -979,6 +979,21 @@ def rank_candidates(source_value, candidates, source_description='', *, source_c
     return chosen, note, alternatives
 
 
+def chosen_confidence(chosen, alternatives):
+    """The rankers' numeric confidence (0-1) in *chosen*, or None.
+
+    Dual-ranker alternatives hold both rankers' entries; the higher one is the
+    figure the winner was picked on. Display-only, so anything malformed reads
+    as unscored rather than failing the write that records it.
+    """
+    if not isinstance(chosen, dict) or not isinstance(alternatives, (list, tuple)):
+        return None
+    scores = [a['confidence'] for a in alternatives
+              if isinstance(a, dict) and a.get('concept_id') == chosen.get('concept_id')
+              and isinstance(a.get('confidence'), (int, float))]
+    return max(scores) if scores else None
+
+
 def rank_candidates_jev(source_value, candidates, source_description='', *, source_context=None,
                         require_model_selection=False):
     """Select from the candidate pool using the Jev (Typesafe) ranking API.
@@ -1886,10 +1901,11 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
                 # be recorded as having overridden one.
                 mapping.origin_system = SUGGESTION_PROVENANCE
                 mapping.suggestion_model_version = SUGGESTION_MODEL_VERSION
+                mapping.suggestion_confidence = chosen_confidence(chosen, job.get('alternatives'))
                 fields += [
                     'target_concept', 'suggested_target_concept',
                     'destination_vocabulary_id', 'origin_system',
-                    'suggestion_model_version',
+                    'suggestion_model_version', 'suggestion_confidence',
                 ]
             # Notes is a free-text field a curator writes in, and the row we are
             # writing to may not be one a Suggest run created -- the candidate set is
