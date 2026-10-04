@@ -2,13 +2,14 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ConceptAssignDialog } from "./ConceptAssignDialog";
 
-const { mockPatch, mockPost } = vi.hoisted(() => ({
+const { mockGet, mockPatch, mockPost } = vi.hoisted(() => ({
+  mockGet: vi.fn(),
   mockPatch: vi.fn(),
   mockPost: vi.fn(),
 }));
 
 vi.mock("@/api/axios", () => ({
-  default: { get: vi.fn(), patch: mockPatch, post: mockPost },
+  default: { get: mockGet, patch: mockPatch, post: mockPost },
 }));
 
 const editProps = {
@@ -27,6 +28,25 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockPatch.mockResolvedValue({ data: {} });
   mockPost.mockResolvedValue({ data: {} });
+  mockGet.mockResolvedValue({ data: { results: [] } });
+});
+
+describe("Suggest", () => {
+  it("searches with the field's suggest query", async () => {
+    render(<ConceptAssignDialog {...editProps} fieldName="genomics_t414" suggestQuery="t(4;14)" />);
+    fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith(
+      "/v1/concepts/search/", { params: { q: "t(4;14)", limit: "50" } },
+    ));
+  });
+
+  it("falls back to the field name without a suggest query", async () => {
+    render(<ConceptAssignDialog {...editProps} fieldName="smoking_status" />);
+    fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith(
+      "/v1/concepts/search/", { params: { q: "smoking status", limit: "50" } },
+    ));
+  });
 });
 
 describe("Source Table", () => {

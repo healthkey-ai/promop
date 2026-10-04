@@ -46,6 +46,8 @@ interface FieldDescriptor {
     omop_table: string;
     common_units: string[];
   } | null;
+  /** Concept-search text the dialog's Suggest button seeds. */
+  suggest_query?: string;
   mappable: boolean;
   locked_table: string | null;
   unit_options: string[];
@@ -741,6 +743,7 @@ export default function FieldMappingPage() {
         <ConceptAssignDialog
           fieldName={selectedField.field_name}
           fieldType={selectedField.field_type}
+          suggestQuery={selectedField.suggest_query}
           initialConceptCode={selectedField.mapping?.concept_code || selectedField.suggestion?.concept_code}
           initialVocabularyId={selectedField.mapping?.vocabulary_id || (selectedField.suggestion?.vocabulary_id ?? undefined)}
           initialUnit={selectedField.mapping?.unit || (selectedField.suggestion?.unit ?? undefined)}
