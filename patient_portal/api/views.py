@@ -11200,8 +11200,7 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     # they cannot approve (admin-only). From here the row is not a suggestion:
     # Suggest's Replace re-answers only rows with blank or suggest* provenance,
     # so this stamp is what keeps their pick from being overwritten (#1469).
-    # Approved rows are already protected by status and keep the provenance
-    # the accuracy figures read.
+    # Approval stamps the approver as provenance instead (below).
     if (
         mapping is not None and concept is not None
         and concept.concept_id != previous_concept_id
