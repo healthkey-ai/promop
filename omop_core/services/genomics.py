@@ -307,12 +307,23 @@ def _components(person, parent_id):
     )
 
 
+def _mapped_component_mappings():
+    """Every genetic_mutations.* mapping that names a component code.
+
+    Status is not filtered: reads survive withdrawn approval. A blank
+    source_value is: a row proposed before its recipe is complete names no
+    code, and '' in the code set would claim every linked fact without one.
+    """
+    return FieldConceptMapping.objects.filter(
+        field_name__startswith='genetic_mutations.',
+    ).exclude(source_value__isnull=True).exclude(source_value='')
+
+
 def _component_codes(snapshot):
     if 'component_codes' not in snapshot.genomics_cache:
         codes = component_codes()
-        # Reads survive withdrawn approval; only writes require current approval.
         codes.update({m.source_value: m.field_name.split('.', 1)[1]
-            for m in FieldConceptMapping.objects.filter(field_name__startswith='genetic_mutations.')})
+            for m in _mapped_component_mappings()})
         snapshot.genomics_cache['component_codes'] = codes
     return snapshot.genomics_cache['component_codes']
 
@@ -433,8 +444,8 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_r
     for rows in _components(person, parent.pk):
         # Only replace known component fields; unrelated linked facts survive.
         source_field = f'{rows.model._meta.model_name}_source_value'
-        codes = list(component_codes()) + list(FieldConceptMapping.objects.filter(
-            field_name__startswith='genetic_mutations.').values_list('source_value', flat=True))
+        codes = list(component_codes()) + list(
+            _mapped_component_mappings().values_list('source_value', flat=True))
         concept_field = f'{rows.model._meta.model_name}_concept'
         rows.filter(Q(**{f'{source_field}__in': codes}) | Q(**{
             f'{concept_field}__vocabulary_id': 'LOINC', f'{concept_field}__concept_code__in': codes,
