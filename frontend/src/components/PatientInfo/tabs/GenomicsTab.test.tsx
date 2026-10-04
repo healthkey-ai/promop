@@ -1,6 +1,8 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { MemoryRouter } from 'react-router-dom';
 import GenomicsTab from './GenomicsTab';
+import { FieldMappingLinksProvider } from '../fieldMappingLinks';
 
 const mocks = vi.hoisted(() => ({ historyGet: vi.fn(), get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn(), writable: true }));
 vi.mock('@/api/clinicalTransport', () => ({ clinicalClient: () => ({ ...mocks, get: (path: string, config: unknown) => path.includes('genomics-legacy-cytogenetics') ? mocks.historyGet(path, config) : mocks.get(path, ...(config === undefined ? [] : [config])) }), clinicalUrl: (path: string) => `/host${path}` }));
@@ -316,4 +318,56 @@ it('creates chromosome findings without a fabricated gene and offers every reque
   const payload = mocks.post.mock.calls[0][1];
   expect(payload.gene).toBeUndefined();
   expect(payload).toMatchObject({ genomic_feature: 'Chromosome 12', feature_type: 'Chromosome(s)', finding_category: 'Aneuploidy' });
+});
+
+describe('field concept mapping globes', () => {
+  const brca1 = { key: 'brca1', field_name: 'genomics_brca1', gene: 'BRCA1', label: 'BRCA1', kind: 'gene', aliases: [], writable: true, expert_review: '' };
+  const catalog = { markers: [brca1], attributes: ['status', 'origin', 'interpretation', 'allelic_frequency'] };
+  const freeText = { ...saved, id: 9, gene: 'MYD88', genomic_feature: 'MYD88', variant: 'L265P' };
+
+  beforeEach(() => {
+    mocks.get.mockImplementation(async path => ({ data: path.includes('genomics-catalog') ? catalog : [freeText] }));
+  });
+
+  const renderTab = (admin: boolean) => render(
+    <MemoryRouter><FieldMappingLinksProvider value={admin}>
+      <GenomicsTab formData={{ person_id: 42, disease: 'BC' }} />
+    </FieldMappingLinksProvider></MemoryRouter>,
+  );
+
+  it('links a catalog marker row to its field, but not a free-text finding', async () => {
+    renderTab(true);
+    await screen.findByText('L265P');
+    expect(screen.getByRole('link', { name: 'Field concept mapping for BRCA1' }))
+      .toHaveAttribute('href', '/field-mappings?field=genomics_brca1');
+    expect(screen.queryByRole('link', { name: /MYD88/ })).not.toBeInTheDocument();
+  });
+
+  it('opens the mapping without opening the finding', async () => {
+    renderTab(true);
+    fireEvent.click(await screen.findByRole('link', { name: 'Field concept mapping for BRCA1' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('links component attributes in the finding dialog, and only those', async () => {
+    renderTab(true);
+    fireEvent.click(await screen.findByRole('row', { name: /MYD88/ }));
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByRole('link', { name: 'Field concept mapping for Origin' }))
+      .toHaveAttribute('href', '/field-mappings?field=genetic_mutations.origin');
+    expect(within(dialog).getByRole('link', { name: 'Field concept mapping for Sample variant allele frequency (VAF)' }))
+      .toHaveAttribute('href', '/field-mappings?field=genetic_mutations.allelic_frequency');
+    expect(within(dialog).queryByRole('link', { name: 'Field concept mapping for Genomic feature' })).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Edit result' }));
+    expect(within(screen.getByRole('dialog')).getByRole('link', { name: 'Field concept mapping for Interpretation' }))
+      .toHaveAttribute('href', '/field-mappings?field=genetic_mutations.interpretation');
+    expect(screen.getByLabelText('Origin')).toBeInTheDocument();
+  });
+
+  it('shows no globes to a non-admin', async () => {
+    renderTab(false);
+    await screen.findByText('L265P');
+    fireEvent.click(screen.getByRole('row', { name: /MYD88/ }));
+    expect(screen.queryAllByRole('link')).toHaveLength(0);
+  });
 });
