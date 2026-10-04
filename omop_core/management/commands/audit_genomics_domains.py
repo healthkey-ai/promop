@@ -8,7 +8,7 @@ from django.core.management.base import BaseCommand, CommandError
 from rest_framework.exceptions import ValidationError
 
 from omop_core.models import Concept, FieldConceptMapping
-from omop_core.services.genomics import _event_concept, approved_mapping, mapped_concept, mapping_is_usable
+from omop_core.services.genomics import _event_concept, mapped_concept, mapping_is_usable, recipe_mapping
 from omop_core.services.genomics_catalog import patient_fields
 from omop_core.services.genomics_components import components
 from omop_core.services.genomics_vocabulary import resolve_loinc
@@ -27,10 +27,10 @@ class Command(BaseCommand):
         incomplete = parents = local = 0
         for field in patient_fields():
             try:
-                mapping = approved_mapping(field)
+                mapping = recipe_mapping(field)
             except ValidationError:
                 incomplete += 1
-                self.stdout.write(f'{field}: missing or incomplete approved parent recipe')
+                self.stdout.write(f'{field}: missing or incomplete parent recipe')
                 continue
             if not mapping_is_usable(mapping, parent=True):
                 incomplete += 1

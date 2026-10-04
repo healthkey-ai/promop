@@ -554,16 +554,23 @@ def build_writable_field_descriptor():
         for field_name, choices in _field_choice_options().items()
     }
     curated = _curated_writes(choice_options)
+    from omop_core.models import FieldConceptMapping
+    from omop_core.services.genomics import mapping_is_usable
+    genomics_recipes = {m.field_name: m for m in FieldConceptMapping.objects.filter(
+        field_name__startswith='genomics_')}
 
     descriptor = {}
     for field in sorted(PATIENT_RECORD_OMOP_MAPPED_FIELDS - _LIFECYCLE_FIELDS):
         if field.startswith('genomics_'):
-            mapping = curated.get(field, {})
-            writable = (mapping.get('writable', False) and mapping.get('value_kind') == 'json'
-                        and mapping.get('projection', {}).get('omop_table') == 'measurement')
+            # The recipe decides whether a finding can be stored; approval only
+            # decides whether its concept flows forward. So review status is
+            # not consulted here, unlike curated (approved-only) projections.
+            mapping = genomics_recipes.get(field)
+            writable = (mapping_is_usable(mapping, parent=True)
+                        and mapping.value_kind == 'json' and mapping.multiple)
             descriptor[field] = {
                 'kind': KIND_EDITABLE, 'writable': bool(writable), 'target': 'patient_record',
-                'reason': 'Priority findings write through approved Genomics mappings.',
+                'reason': 'Priority findings write through their Genomics field recipes.',
             }
             continue
         if field == 'cytogenetic_markers':

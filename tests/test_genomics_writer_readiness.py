@@ -65,12 +65,13 @@ def test_complete_check_uses_writer_event_identity_and_never_writes(ready, ident
 
 
 @pytest.mark.parametrize('changes', [
-    {'status': 'rejected'}, {'status': 'proposed'}, {'source_value': ''},
+    {'source_value': ''},
     {'source_value': 'x' * 51}, {'omop_table': 'observation'},
     {'omop_table': 'condition_occurrence'},
     {'value_kind': 'string'}, {'multiple': False},
 ])
 def test_invalid_parent_recipe_fails_even_with_complete_components(ready, changes):
+    # Review status is not a recipe property: an unapproved parent still writes.
     FieldConceptMapping.objects.filter(field_name='genomics_palb2').update(**changes)
     assert 'All component domain assignments verified' in audit()
     assert 'genomics_palb2:' in failed_audit()

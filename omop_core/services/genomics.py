@@ -55,22 +55,33 @@ def mapping_is_usable(mapping, *, parent=False):
     """Shared storage gate for the writer, catalog and readiness audit.
 
     A standard concept is optional: source-only parent storage is supported.
-    This checks the recipe, not actor permissions or payload-specific fields.
+    This checks the recipe -- where the fact lives and the source code it is
+    keyed by -- not its approval, actor permissions or payload-specific fields.
     """
     tables = ('measurement',) if parent else ('measurement', 'observation')
-    return bool(mapping is not None and mapping.status == 'approved'
+    return bool(mapping is not None
                 and mapping.omop_table in tables and mapping.source_value
                 and len(mapping.source_value) <= 50)
 
 
-def approved_mapping(field_name):
-    mapping = FieldConceptMapping.objects.filter(field_name=field_name, status='approved').select_related('concept').first()
+def recipe_mapping(field_name):
+    """The field's storage recipe, whatever its review status.
+
+    A genomics field is editable whether or not its concept is approved: the
+    recipe says how to store the fact, and approval only decides whether the
+    mapped concept flows forward with it (see mapped_concept).
+    """
+    mapping = FieldConceptMapping.objects.filter(field_name=field_name).select_related('concept').first()
     if not mapping_is_usable(mapping):
-        raise ValidationError({field_name: 'A complete approved genomics field mapping is required.'})
+        raise ValidationError({field_name: 'A complete genomics field recipe is required.'})
     return mapping
 
 
 def mapped_concept(mapping):
+    # Until the mapping is approved the fact is stored under its source code
+    # alone, as an unmapped (concept 0) row.
+    if mapping.status != 'approved':
+        return 0, None
     if (mapping.concept_id and mapping.concept.standard_concept == 'S'
             and mapping.concept.invalid_reason is None):
         if mapping.concept.domain_id.lower() == mapping.omop_table:
@@ -386,10 +397,10 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_r
                 raise ValidationError({'genomic_feature': 'The feature and its type must match the selected priority marker.'})
         elif data['gene'].upper() != marker['gene'].upper():
             raise ValidationError({'gene': 'The gene must match the selected priority marker.'})
-    parent_mapping = approved_mapping(marker['field_name']) if marker else None
+    parent_mapping = recipe_mapping(marker['field_name']) if marker else None
     if parent_mapping and not mapping_is_usable(parent_mapping, parent=True):
         raise ValidationError({marker['field_name']: 'Variant parents must map to Measurement.'})
-    component_mappings = {key: approved_mapping('genetic_mutations.' + key)
+    component_mappings = {key: recipe_mapping('genetic_mutations.' + key)
         for key in FIELDS if key in payload or (data.get(key) is not None and data.get(key) != '')}
     if payload.get('id') is not None and payload['id'] != variant_id:
         raise ValidationError({'id': 'Use the variant ID in the URL; new IDs are assigned by the server.'})
@@ -487,7 +498,7 @@ def delete_variant(person, variant_id, skip_refresh=False):
     previous = _find(person, variant_id)
     marker = marker_for_variant(previous)
     if marker:
-        approved_mapping(marker['field_name'])
+        recipe_mapping(marker['field_name'])
     for rows in _components(person, variant_id):
         rows.update(is_erroneous=True, erroneous_reason='Removed in Genomics editor')
     Measurement.objects.filter(person=person, pk=variant_id).update(
@@ -530,7 +541,7 @@ def replace_priority_fields(person, values, type_concept_id=32817):
     from omop_core.services.genomics_catalog import canonicalize_fields
     for field, rows in canonicalize_fields(values).items():
         marker = patient_fields()[field]
-        approved_mapping(field)
+        recipe_mapping(field)
         if not isinstance(rows, list):
             raise ValidationError({field: 'Expected a list of findings; [] clears this marker.'})
         before = {v['id']: v for v in list_variants(person) if marker_for_variant(v) == marker}
