@@ -1,3 +1,12 @@
+# Databases
+
+The local `.env` holds two Render databases:
+
+- `DATABASE_URL` is the **production** database (`promop`, `promop-worker`). Read-only: never write to production data; production is loaded from a staging dump, so fix and verify on staging.
+- `STAGING_DATABASE_URL` is the **staging** database (`promop-staging`, `promop-staging-worker`). Use it for migrations, data fixes and investigation.
+
+`settings.py` loads `.env`, so a `manage.py` command without its own `DATABASE_URL` runs against production. Name the database on every command (`DATABASE_URL="$STAGING_DATABASE_URL"` for staging) and never fall back from `STAGING_DATABASE_URL` to `DATABASE_URL`. Tests use local PostgreSQL, never either of these.
+
 # Environment conventions
 
 - Staging always means Render: https://promop-staging.onrender.com.
@@ -6,7 +15,6 @@
 - Render production is `promop` with worker `promop-worker`. The unused legacy Render web service has been retired; do not include it in active readiness work.
 - Cloud Run staging remains managed by `.github/workflows/deploy-staging.yml` and `Dockerfile.gcp`. Preserve its existing service, image, bucket and integration identifiers.
 - `STAGING_DATABASE_URL` identifies Render staging; verify it matches the active Render web and worker configuration before database operations.
-- In the local `.env`, `DATABASE_URL` is Render **production**, not staging. `settings.py` loads `.env`, so a `manage.py` command without its own `DATABASE_URL` runs against production. Name the database on every command, never fall back from `STAGING_DATABASE_URL` to `DATABASE_URL`, and treat production as read-only.
 - See `docs/render-staging-celery.md` for Render staging configuration and verification.
 
 # Pull request reviews

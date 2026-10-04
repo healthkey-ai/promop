@@ -2,6 +2,21 @@
 
 This file tells LLMs (Claude, Copilot, etc.) how to work on this codebase consistently.
 
+## Two databases in `.env`
+
+| `.env` variable | Database | Render services | Use |
+|---|---|---|---|
+| `DATABASE_URL` | **Production** | `promop`, `promop-worker` (branch `main`) | read-only checks and verification |
+| `STAGING_DATABASE_URL` | **Staging** | `promop-staging`, `promop-staging-worker` (branch `dev`) | migrations, data fixes, investigation |
+
+`settings.py` loads `.env`, so a `manage.py` command that does not set its own
+`DATABASE_URL` runs against **production**. Name the database on every command
+(`DATABASE_URL="$STAGING_DATABASE_URL" …` for staging), never write
+`${STAGING_DATABASE_URL:-$DATABASE_URL}`, and never write to production data —
+production is loaded from a staging dump, so fix and verify on staging. Tests use
+local PostgreSQL, never either of these. Details:
+[Database Selection Rule](#database-selection-rule).
+
 ---
 
 ## Project Overview
