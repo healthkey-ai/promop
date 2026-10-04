@@ -1,11 +1,11 @@
 # Databases
 
-The local `.env` holds two Render databases:
+The local `.env` holds two Render databases and deliberately **no `DATABASE_URL`**:
 
-- `DATABASE_URL` is the **production** database (`promop`, `promop-worker`). Read-only: never write to production data; production is loaded from a staging dump, so fix and verify on staging.
+- `PROD_DATABASE_URL` is the **production** database (`promop`, `promop-worker`). Read-only: never write to production data; production is loaded from a staging dump, so fix and verify on staging.
 - `STAGING_DATABASE_URL` is the **staging** database (`promop-staging`, `promop-staging-worker`). Use it for migrations, data fixes and investigation.
 
-`settings.py` loads `.env`, so a `manage.py` command without its own `DATABASE_URL` runs against production. Name the database on every command (`DATABASE_URL="$STAGING_DATABASE_URL"` for staging) and never fall back from `STAGING_DATABASE_URL` to `DATABASE_URL`. Tests use local PostgreSQL, never either of these.
+Django reads only `DATABASE_URL`, so every command sets it: `DATABASE_URL="${STAGING_DATABASE_URL:?}"` for staging, `DATABASE_URL="${PROD_DATABASE_URL:?}"` for production reads. **For local tests, always point `DATABASE_URL` at local PostgreSQL** (`postgresql://postgres@localhost:5433/promop_test`): pytest and `manage.py test` create their test database on whatever server it names, so never run them with it exported at staging or production.
 
 # Environment conventions
 
