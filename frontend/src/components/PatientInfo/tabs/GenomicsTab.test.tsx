@@ -349,7 +349,7 @@ describe('field concept mapping globes', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
-  it('links component attributes in the finding dialog, and only those', async () => {
+  it('links component attributes in the finding details, and only those', async () => {
     renderTab(true);
     fireEvent.click(await screen.findByRole('row', { name: /MYD88/ }));
     const dialog = screen.getByRole('dialog');
@@ -357,11 +357,16 @@ describe('field concept mapping globes', () => {
       .toHaveAttribute('href', '/field-mappings?field=genetic_mutations.origin');
     expect(within(dialog).getByRole('link', { name: 'Field concept mapping for Sample variant allele frequency (VAF)' }))
       .toHaveAttribute('href', '/field-mappings?field=genetic_mutations.allelic_frequency');
-    expect(within(dialog).queryByRole('link', { name: 'Field concept mapping for Genomic feature' })).not.toBeInTheDocument();
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Edit result' }));
-    expect(within(screen.getByRole('dialog')).getByRole('link', { name: 'Field concept mapping for Interpretation' }))
-      .toHaveAttribute('href', '/field-mappings?field=genetic_mutations.interpretation');
-    expect(screen.getByLabelText('Origin')).toBeInTheDocument();
+    expect(within(dialog).queryByRole('link', { name: 'Field concept mapping for Original variant text' })).not.toBeInTheDocument();
+  });
+
+  it('keeps globes out of the edit form, where they would drop an unsaved draft', async () => {
+    renderTab(true);
+    fireEvent.click(await screen.findByRole('row', { name: /MYD88/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit result' }));
+    expect(within(screen.getByRole('dialog')).queryAllByRole('link')).toHaveLength(0);
+    // The input's accessible name stays its label alone.
+    expect(screen.getByRole('combobox', { name: 'Origin' })).toBeInTheDocument();
   });
 
   it('shows no globes to a non-admin', async () => {

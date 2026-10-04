@@ -96,6 +96,8 @@ export default function GenomicsTab({ formData, readOnly = false }: {
   const [variants, setVariants] = useState<Variant[]>([]);
   const [markers, setMarkers] = useState<Marker[]>([]);
   // Finding attributes mapped as genetic_mutations.<key>; others get no globe.
+  // Shown on the read-only details only: in the edit form a link would sit
+  // inside the input's <label> and navigate away from an unsaved draft.
   const [attributes, setAttributes] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -237,7 +239,7 @@ export default function GenomicsTab({ formData, readOnly = false }: {
           const draftMarker = markerFor(draft);
           const aliasList = key === 'variant_name' && draftMarker?.kind === 'abnormality' ? [draftMarker.label, ...draftMarker.aliases] : undefined;
           return <label key={key} className="space-y-1 text-sm">
-            <span className="flex items-center gap-1.5 font-medium">{label}{key === 'genomic_feature' ? ' *' : ''}{attributeLink(key, label)}</span>
+            <span className="block font-medium">{label}{key === 'genomic_feature' ? ' *' : ''}</span>
             {opts ? <select required={key === 'feature_type'} disabled={(key === 'feature_type' && !!draft.marker_key) || draft.status === 'absent' && absentVariantFields.includes(key)} className="w-full rounded-md border bg-background px-3 py-2"
               value={draft[key] ?? (key === 'status' ? 'present' : '')} onChange={e => setDraft(key === 'status' ? changeStatus(draft, e.target.value) : { ...draft, [key]: e.target.value })}>
               {key !== 'status' && <option value="">— Select —</option>}
