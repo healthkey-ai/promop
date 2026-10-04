@@ -3,7 +3,7 @@ from django.core.management import call_command
 from rest_framework.test import APIClient
 
 from omop_core.models import FieldConceptMapping, Measurement, Observation
-from omop_core.services.genomics import list_variants, save_variant
+from omop_core.services.genomics import list_variants, mapped_concept, save_variant
 from omop_core.services.genomics_catalog import markers, patient_fields
 from omop_core.services.patient_record_service import refresh_patient_record
 from tests.test_genomics_crud import setup  # noqa: F401 — shared vocab/patient fixture
@@ -35,7 +35,7 @@ def test_catalog_is_disease_specific_without_patient_facts(setup, disease, expec
 
 
 @pytest.mark.parametrize('changes', [
-    None, {'status': 'rejected'}, {'status': 'proposed'},
+    None,
     {'source_value': ''}, {'source_value': 'x' * 51},
     {'omop_table': 'observation'}, {'omop_table': 'condition_occurrence'},
 ])
@@ -120,15 +120,49 @@ def test_repeated_findings_and_disease_changes_preserve_data(setup):
     assert len(list_variants(person)) == 2
 
 
-@pytest.mark.parametrize('field', ['genomics_brca1', 'genetic_mutations.origin'])
-def test_unapproved_mappings_block_writes_atomically(setup, field):
+@pytest.mark.parametrize('status', ['proposed', 'rejected'])
+def test_unapproved_mappings_stay_editable_without_their_concept(setup, status):
+    """Approval decides whether the concept flows forward, not whether the field is editable."""
     person, _, staff = setup
-    FieldConceptMapping.objects.filter(field_name=field).update(status='rejected')
-    response = client_for(staff).patch(f'/api/v1/patient-records/{person.pk}/', {
+    FieldConceptMapping.objects.filter(
+        field_name__in=['genomics_brca1', 'genetic_mutations.origin'],
+    ).update(status=status)
+    client = client_for(staff)
+    catalog = client.get(f'/api/v1/patient-records/{person.pk}/genomics-catalog/', {'disease': 'BC'})
+    assert next(m for m in catalog.data['markers'] if m['key'] == 'brca1')['writable'] is True
+    from omop_core.services.write_descriptor import build_writable_field_descriptor
+    assert build_writable_field_descriptor()['genomics_brca1']['writable'] is True
+
+    response = client.patch(f'/api/v1/patient-records/{person.pk}/', {
         'genomics_brca1': [{'variant': 'c.123A>G', 'origin': 'germline'}],
     }, format='json')
-    assert response.status_code == 400, response.data
-    assert list_variants(person) == []
+
+    assert response.status_code == 200, response.data
+    [variant] = list_variants(person)
+    assert variant['origin'] == 'germline'
+    parent = Measurement.objects.get(pk=variant['id'])
+    origin = FieldConceptMapping.objects.get(field_name='genetic_mutations.origin')
+    stored = Observation.objects.get(person=person, observation_source_value=origin.source_value)
+    # Stored under the recipe's source code, as unmapped facts.
+    assert parent.measurement_source_value == FieldConceptMapping.objects.get(field_name='genomics_brca1').source_value
+    assert parent.measurement_concept_id == 0
+    assert stored.observation_concept_id == 0
+
+
+def test_approval_lets_the_concept_flow_forward(setup):
+    person, _, _ = setup
+    origin = FieldConceptMapping.objects.get(field_name='genetic_mutations.origin')
+    approved = save_variant(person, {'gene': 'BRCA1', 'variant': 'c.1A>G', 'origin': 'germline'})
+    approved_concept = Observation.objects.get(
+        person=person, observation_event_id=approved['id'], observation_source_value=origin.source_value,
+    ).observation_concept_id
+    FieldConceptMapping.objects.filter(pk=origin.pk).update(status='proposed')
+    proposed = save_variant(person, {'gene': 'BRCA1', 'variant': 'c.2A>G', 'origin': 'germline'})
+    proposed_concept = Observation.objects.get(
+        person=person, observation_event_id=proposed['id'], observation_source_value=origin.source_value,
+    ).observation_concept_id
+    assert approved_concept == mapped_concept(origin)[0]
+    assert proposed_concept == 0
 
 
 def test_seed_is_complete_idempotent_and_preserves_reviewer_decisions(setup):
@@ -165,7 +199,7 @@ def test_curated_source_keys_control_parent_and_component_writes(setup):
     assert result['origin'] == 'germline'
 
 
-def test_withdrawn_mapping_preserves_reads_but_blocks_clear_and_delete(setup):
+def test_withdrawn_mapping_preserves_reads_and_edits(setup):
     person, _, staff = setup
     FieldConceptMapping.objects.filter(field_name='genetic_mutations.origin').update(source_value='reviewed:origin')
     result = save_variant(person, {'gene': 'BRCA1', 'variant': 'c.123A>G', 'origin': 'germline'})
@@ -173,11 +207,11 @@ def test_withdrawn_mapping_preserves_reads_but_blocks_clear_and_delete(setup):
     client = client_for(staff)
     url = f'/api/v1/patient-records/{person.pk}/genomics/{result["id"]}/'
     assert client.get(url).data['origin'] == 'germline'
-    assert client.patch(url, {'origin': ''}, format='json').status_code == 400
-    assert client.get(url).data['origin'] == 'germline'
+    assert client.patch(url, {'origin': ''}, format='json').status_code == 200
+    assert client.get(url).data.get('origin') in (None, '')
     FieldConceptMapping.objects.filter(field_name='genomics_brca1').update(status='rejected')
-    assert client.delete(url).status_code == 400
-    assert client.get(url).status_code == 200
+    assert client.delete(url).status_code in (200, 204)
+    assert client.get(url).status_code == 404
 
 
 def test_component_mappings_are_discoverable_and_curatable(setup):

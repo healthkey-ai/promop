@@ -15,6 +15,8 @@ Coverage is openly reported: every projection field is classified, including
 computed values, aliases and values authored through a dedicated resource.
 """
 
+from django.db.models import Q
+
 from omop_core.models import (
     Concept, ConditionOccurrence, DrugExposure, FieldChoice, Measurement,
     Observation, PatientRecord, ProcedureOccurrence,
@@ -365,7 +367,7 @@ _WRITE_RECIPE_INCOMPLETE = {
     ),
 }
 
-def _curated_writes(choice_options=None):
+def _curated_writes(choice_options=None, genomics_recipes=None):
     """Editable entries built from reviewer-approved concept mappings.
 
     The curation interface records a decision per field; this is what acts on
@@ -383,13 +385,18 @@ def _curated_writes(choice_options=None):
     from omop_core.services.breast_mapping_safety import wrong_breast_field_mappings
 
     entries = {}
-    rows = list(
+    # Genomics recipes ride along in the same read: they are writable whatever
+    # their status, so they are collected into *genomics_recipes* when given.
+    fetched = list(
         FieldConceptMapping.objects
-        .filter(status='approved')
+        .filter(Q(status='approved') | Q(field_name__startswith='genomics_'))
         .exclude(wrong_breast_field_mappings())
         .exclude(omop_table='')
         .select_related('concept')
     )
+    if genomics_recipes is not None:
+        genomics_recipes.update({r.field_name: r for r in fetched if r.field_name.startswith('genomics_')})
+    rows = [r for r in fetched if r.status == 'approved']
     # One read per distinct answer vocabulary, not one per field that uses it.
     # Four eligibility fields sharing a set is one query, the same shape the
     # LOINC and UCUM lookups already have.
@@ -553,17 +560,22 @@ def build_writable_field_descriptor():
         ]
         for field_name, choices in _field_choice_options().items()
     }
-    curated = _curated_writes(choice_options)
+    from omop_core.services.genomics import mapping_is_usable
+    genomics_recipes = {}
+    curated = _curated_writes(choice_options, genomics_recipes)
 
     descriptor = {}
     for field in sorted(PATIENT_RECORD_OMOP_MAPPED_FIELDS - _LIFECYCLE_FIELDS):
         if field.startswith('genomics_'):
-            mapping = curated.get(field, {})
-            writable = (mapping.get('writable', False) and mapping.get('value_kind') == 'json'
-                        and mapping.get('projection', {}).get('omop_table') == 'measurement')
+            # The recipe decides whether a finding can be stored; approval only
+            # decides whether its concept flows forward. So review status is
+            # not consulted here, unlike curated (approved-only) projections.
+            mapping = genomics_recipes.get(field)
+            writable = (mapping_is_usable(mapping, parent=True)
+                        and mapping.value_kind == 'json' and mapping.multiple)
             descriptor[field] = {
                 'kind': KIND_EDITABLE, 'writable': bool(writable), 'target': 'patient_record',
-                'reason': 'Priority findings write through approved Genomics mappings.',
+                'reason': 'Priority findings write through their Genomics field recipes.',
             }
             continue
         if field == 'cytogenetic_markers':
