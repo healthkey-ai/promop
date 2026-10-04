@@ -198,7 +198,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, initialMode =
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [run, setRun] = useState<Run | null>(null);
   const [starting, setStarting] = useState(false);
-  const [ranker, setRanker] = useState('none');
+  const [ranker, setRanker] = useState('jev');
   const [limit, setLimit] = useState(25);
   const [strategies, setStrategies] = useState({ umls: true, lexical: true });
   const [writing, setWriting] = useState(false);
@@ -261,9 +261,11 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, initialMode =
   const pending = editable.filter(row => selected.has(sourceKey(row)));
   const approvable = pending.filter(row => row.mapping_id !== null);
   const validThreshold = Number.isFinite(threshold) && threshold >= 0 && threshold <= 100;
-  const selectConfident = () => setSelected(new Set(editable
-    // Compare the percentage the column shows: 0.55 * 100 is 55.00000000000001.
-    .filter(row => row.confidence != null && Math.round(row.confidence * 100) > threshold).map(sourceKey)));
+  // Compare the percentage the column shows: 0.55 * 100 is 55.00000000000001.
+  const confident = validThreshold
+    ? editable.filter(row => row.confidence != null && Math.round(row.confidence * 100) > threshold)
+    : [];
+  const selectConfident = () => setSelected(new Set(confident.map(sourceKey)));
   const changeOrder = () => {
     setOrder(previous => previous === '-confidence' ? 'confidence' : '-confidence');
     setPage(1); setSelected(new Set());
@@ -336,8 +338,8 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, initialMode =
         <input type="checkbox" checked={strategies[strategy]} disabled={busy} onChange={event => setStrategies(previous => ({ ...previous, [strategy]: event.target.checked }))} />
         {strategy === 'umls' ? 'UMLS' : 'Names and synonyms'}</label>)}
       <select aria-label="Source suggestion ranker" className={input} value={ranker} disabled={busy} onChange={event => setRanker(event.target.value)}>
-        <option value="none">Curator review</option><option value="anthropic">Anthropic assistance</option>
-        <option value="jev">Jev assistance</option><option value="both">Both rankers</option>
+        <option value="jev">Jev assistance</option><option value="anthropic">Anthropic assistance</option>
+        <option value="both">Both rankers</option><option value="none">Curator review</option>
       </select>
       <input type="number" aria-label="Maximum source candidates" className={`${input} w-20`} value={limit} min={1} max={100} disabled={busy} onChange={event => setLimit(Number(event.target.value))} />
       <button className={button} disabled={busy || (!strategies.umls && !strategies.lexical) || !Number.isInteger(limit) || limit < 1 || limit > 100}
@@ -368,7 +370,8 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, initialMode =
         <th className="p-2"><div className="flex flex-wrap items-center gap-2">Source code
           <span className="flex items-center gap-1 whitespace-nowrap font-normal">
             <button type="button" className="rounded border border-slate-300 bg-white px-2 py-0.5 hover:bg-slate-100 disabled:opacity-40"
-              disabled={busy || !editable.length || !validThreshold} onClick={selectConfident}>Select</button>
+              title={confident.length ? `Select ${confident.length} source(s) above ${threshold}% confidence` : `No suggested source is above ${validThreshold ? threshold : '—'}% confidence`}
+              disabled={busy || !confident.length} onClick={selectConfident}>Select</button>
             &gt;<input type="number" aria-label="Select sources with confidence above, percent" className="w-14 rounded border border-slate-300 bg-white px-1 py-0.5"
               min={0} max={100} value={Number.isNaN(threshold) ? '' : threshold} disabled={busy}
               onChange={event => setThreshold(event.target.valueAsNumber)} />% confidence</span></div></th>
