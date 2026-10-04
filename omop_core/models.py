@@ -3961,10 +3961,12 @@ class FieldConceptMapping(models.Model):
         ('approved', 'Approved'),
         ('rejected', 'Rejected'),
     ]
+    # See omop_core.services.field_mapping_provenance: the engine and version
+    # that proposed it, ``curator`` for an unapproved hand edit, or the approver.
     provenance = models.CharField(
-        max_length=20, blank=True, default='', db_default='',
-        choices=[('system_generated', 'System Generated'), ('curator', 'Curator')],
-        help_text='Who supplied the current mapping recipe; blank for unrecorded legacy origins.',
+        max_length=100, blank=True, default='', db_default='',
+        help_text=('Who supplied the mapping in force: the suggest engine and version that '
+                   'proposed it, "curator", or the approving user. Blank for unrecorded legacy origins.'),
     )
     field_name = models.CharField(max_length=100, unique=True, db_index=True)
     concept = models.ForeignKey(

@@ -34,7 +34,8 @@ interface FieldDescriptor {
     unit: string;
     omop_table: string;
     status: string;
-    provenance?: "system_generated" | "curator" | "";
+    /** Suggest engine and version, "curator", or the approving user (#1719). */
+    provenance?: string;
     reviewer: string | null;
     reviewed_at: string | null;
     notes: string;
@@ -108,6 +109,14 @@ const getDisplayCategory = (d: FieldDescriptor): string => {
   if (d.mapping?.status === "approved") return "editable";
   if (d.mapping || d.mappable) return "needs-concept-set";
   return d.category;
+};
+
+/** Stored provenance as written; the two pre-#1719 labels get their old names. */
+const provenanceLabel = (mapping: FieldDescriptor["mapping"]): string => {
+  if (!mapping) return "—";
+  if (mapping.provenance === "system_generated") return "System Generated";
+  if (mapping.provenance === "curator") return "Curator";
+  return mapping.provenance || "Unrecorded";
 };
 
 export default function FieldMappingPage() {
@@ -418,10 +427,8 @@ export default function FieldMappingPage() {
         <tbody className="divide-y divide-gray-100">
           {fields.map((f) => (
             <tr key={f.field_name} className="group hover:bg-gray-50/50">
-              <td className="px-3 py-2 text-xs whitespace-nowrap">
-                {f.mapping?.provenance === "system_generated" ? "System Generated"
-                  : f.mapping?.provenance === "curator" ? "Curator"
-                  : f.mapping ? "Unrecorded" : "—"}
+              <td className="px-3 py-2 text-xs whitespace-nowrap" title={f.mapping?.provenance || undefined}>
+                {provenanceLabel(f.mapping)}
               </td>
               <td className="px-3 py-2 font-mono text-xs">{f.field_name}</td>
               <td className="px-3 py-2">

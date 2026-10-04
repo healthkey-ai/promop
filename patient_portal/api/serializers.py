@@ -1669,28 +1669,40 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
-        validated_data['provenance'] = 'curator'
+        from omop_core.services.field_mapping_provenance import CURATOR_PROVENANCE, user_provenance
+        validated_data['provenance'] = CURATOR_PROVENANCE
         request = self.context.get('request')
         if validated_data.get('status') == 'approved' and request:
             validated_data['reviewer'] = request.user
             validated_data['reviewed_at'] = timezone.now()
+            validated_data['provenance'] = user_provenance(request.user)
         return super().create(validated_data)
 
     def update(self, instance, validated_data):
-        # Approval alone does not change who supplied the recipe. A manual
-        # correction does, even if its author leaves the approval status alone.
+        """Provenance names whoever supplied the mapping in force (#1719).
+
+        As in Code Mapping (#1708): an unapproved hand edit of the recipe is
+        ``curator``; approving, or changing the recipe of an approved mapping,
+        stamps the approver, who now owns it. Un-approving keeps the name.
+        """
+        from omop_core.services.field_mapping_provenance import CURATOR_PROVENANCE, user_provenance
         recipe_fields = {
             'field_name', 'concept', 'vocabulary_id', 'concept_code', 'omop_table',
             'source_value', 'unit', 'value_kind', 'type_concept_id',
             'value_vocabulary', 'multiple',
         }
-        if any(key in validated_data and validated_data[key] != getattr(instance, key)
-               for key in recipe_fields):
-            validated_data['provenance'] = 'curator'
+        recipe_changed = any(key in validated_data and validated_data[key] != getattr(instance, key)
+                             for key in recipe_fields)
         request = self.context.get('request')
-        if validated_data.get('status') == 'approved' and instance.status != 'approved' and request:
+        status_value = validated_data.get('status', instance.status)
+        approving = status_value == 'approved' and instance.status != 'approved'
+        if approving and request:
             validated_data['reviewer'] = request.user
             validated_data['reviewed_at'] = timezone.now()
+        if request and status_value == 'approved' and (approving or recipe_changed):
+            validated_data['provenance'] = user_provenance(request.user)
+        elif recipe_changed:
+            validated_data['provenance'] = CURATOR_PROVENANCE
         return super().update(instance, validated_data)
 
 
@@ -1780,9 +1792,11 @@ class CustomPatientFieldCreateSerializer(serializers.Serializer):
         validated_data.pop('confirm_patient_record')
         formula = validated_data.pop('formula', None)
         field_formula = None
+        from omop_core.services.field_mapping_provenance import user_provenance
         with transaction.atomic():
             mapping = FieldConceptMapping.objects.create(
-                provenance='curator',
+                # Created approved, so it names its approver (#1719).
+                provenance=user_provenance(request.user),
                 field_name=validated_data['field_name'],
                 concept=concept,
                 vocabulary_id=concept.vocabulary_id,

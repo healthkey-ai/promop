@@ -12830,6 +12830,7 @@ def propose_all_mappings(request):
 
     from omop_core.models import FieldConceptMapping, Concept
     from omop_core.mapping.field import get_all_field_descriptors
+    from omop_core.services.field_mapping_provenance import suggestion_provenance
 
     descriptors = get_all_field_descriptors()
     tab_filter = str(request.data.get('tab') or request.query_params.get('tab') or '').strip()
@@ -12883,7 +12884,7 @@ def propose_all_mappings(request):
             continue  # concept not in vocabulary DB — skip
 
         to_create.append(FieldConceptMapping(
-            provenance='system_generated',
+            provenance=suggestion_provenance('propose-all'),
             field_name=p['field_name'],
             concept=concept,
             vocabulary_id=p['vocabulary_id'],

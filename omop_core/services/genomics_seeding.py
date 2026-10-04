@@ -4,6 +4,7 @@ Uses the effective catalog; historical migrations keep their frozen inputs.
 Approval covers storage semantics, not clinical validity of source examples.
 """
 from omop_core.services.genomics_catalog import catalog
+from omop_core.services.field_mapping_provenance import genomics_catalog_provenance
 
 from django.utils import timezone
 
@@ -39,5 +40,6 @@ def seed(apps, schema_editor):
             'source_value': source, 'omop_table': table, 'value_kind': kind,
             'unit': '%' if kind == 'number' else '', 'type_concept_id': 32817,
             'multiple': kind == 'json', 'status': 'approved', 'reviewed_at': timezone.now(),
+            'provenance': genomics_catalog_provenance(data['version']),
             'notes': notes,
         })
