@@ -531,9 +531,9 @@ _GENOMICS_SUGGEST_QUERIES = {
 def _suggest_query(name: str) -> str:
     """Return the concept-search text the mapper's Suggest button seeds.
 
-    The concept search requires every word to appear in a concept name, so
-    the field's own prefix ("genomics", "genetic mutations") would rule out
-    every concept. Search by what follows it: the gene ("BRCA1 gene") or the
+    The concept search matches the whole text or every word of it, so the
+    field's own prefix ("genomics", "genetic mutations"), which no concept
+    name contains, would rule out every concept. Search by what follows it: the gene ("BRCA1 gene") or the
     catalog label ("t(4;14)"), unless the label is overridden above.
     """
     from omop_core.services.genomics_catalog import patient_fields
