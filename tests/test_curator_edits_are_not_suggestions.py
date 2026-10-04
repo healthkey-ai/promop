@@ -113,6 +113,55 @@ def test_approving_a_curated_row_still_records_the_model_outcome(admin_client, c
     assert row.suggestion_outcome == 'overridden', 'accuracy still sees the override'
 
 
+def test_approving_makes_the_curator_the_provenance(admin_client, concepts):
+    model_pick, _ = concepts
+    row = suggested_row(model_pick)
+
+    response = admin_client.patch(f'/api/v1/code-mappings/{row.pk}/', {'status': 'approved'}, format='json')
+
+    assert response.status_code == 200, response.data
+    assert response.data['origin_system'] == 'curator@example.test'
+    row.refresh_from_db()
+    assert row.origin_system == 'curator@example.test'
+    assert row.suggestion_outcome == 'accepted', 'accuracy reads the outcome, not provenance'
+    assert row.suggested_target_concept_id == model_pick.pk
+
+
+def test_unapproving_keeps_the_curator_and_stays_out_of_suggest(admin_client, concepts):
+    model_pick, _ = concepts
+    row = suggested_row(model_pick)
+    admin_client.patch(f'/api/v1/code-mappings/{row.pk}/', {'status': 'approved'}, format='json')
+
+    admin_client.patch(f'/api/v1/code-mappings/{row.pk}/', {'status': 'proposed'}, format='json')
+
+    row.refresh_from_db()
+    assert row.origin_system == 'curator@example.test'
+    assert row.pk not in {m.pk for m in suggestable_mappings('condition', resuggest=True, min_occurrences=1)}
+
+
+def test_a_plain_resave_of_an_approved_row_does_not_restamp(admin_client, concepts):
+    model_pick, _ = concepts
+    row = suggested_row(model_pick, status='approved', origin_system='HT-One')
+
+    admin_client.patch(f'/api/v1/code-mappings/{row.pk}/', {'notes': 'checked'}, format='json')
+
+    row.refresh_from_db()
+    assert row.origin_system == 'HT-One'
+
+
+@pytest.mark.parametrize('origin_system', ['athena', 'athena-standard-self', 'athena-local-maps-to'])
+def test_approving_an_athena_row_keeps_its_provenance(admin_client, concepts, origin_system):
+    model_pick, _ = concepts
+    row = suggested_row(model_pick, origin_system=origin_system, suggestion_model_version='',
+                        suggested_target_concept=None)
+
+    admin_client.patch(f'/api/v1/code-mappings/{row.pk}/', {'status': 'approved'}, format='json')
+
+    row.refresh_from_db()
+    assert row.status == 'approved'
+    assert row.origin_system == origin_system
+
+
 def test_approved_rows_are_never_candidates(concepts):
     model_pick, _ = concepts
     suggested_row(model_pick, status='approved')

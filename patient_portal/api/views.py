@@ -11218,6 +11218,14 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
             # Choosing one of the verified Athena destinations completes the
             # pending choice and moves this mapping to ATHENA-MAPPED.
             values['origin_system'] = 'athena'
+        elif mapping is not None and not mapping.origin_system.startswith('athena'):
+            # The approver now owns the mapping, so provenance names them.
+            # Athena rows keep theirs: it decides the ATHENA-MAPPED section and
+            # how identity rows resolve. Model-quality history does not read
+            # this column -- suggested_target_concept/suggestion_outcome do.
+            values['origin_system'] = (
+                _user_display(user)[:50] or CURATOR_PROVENANCE
+            )
     elif was_approved and status_value != 'approved':
         values['reviewer'] = None
         values['reviewed_at'] = None
