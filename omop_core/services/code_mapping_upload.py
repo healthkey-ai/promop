@@ -354,6 +354,9 @@ def import_upload(*, upload, vocabulary, provenance, actor, can_approve=True):
                     or mapping.domain_id != concept.domain_id
                     or mapping.omop_table != expected_table
                 ):
+                    if mapping.target_concept_id != concept.pk:
+                        # The ranker's score was for the destination it chose.
+                        mapping.suggestion_confidence = None
                     mapping.target_concept = concept
                     mapping.destination_vocabulary_id = concept.vocabulary_id or ''
                     mapping.domain_id = concept.domain_id
@@ -388,7 +391,7 @@ def import_upload(*, upload, vocabulary, provenance, actor, can_approve=True):
                  'last_seen', 'origin_system', 'target_concept',
                  'destination_vocabulary_id', 'domain_id', 'omop_table', 'status',
                  'reviewer', 'reviewed_at', 'pending_repoint_concept_ids',
-                 'updated_by', 'updated_at'],
+                 'suggestion_confidence', 'updated_by', 'updated_at'],
                 batch_size=1_000,
             )
         if approval_repoints:

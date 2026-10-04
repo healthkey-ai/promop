@@ -982,16 +982,17 @@ def rank_candidates(source_value, candidates, source_description='', *, source_c
 def chosen_confidence(chosen, alternatives):
     """The rankers' numeric confidence (0-1) in *chosen*, or None.
 
-    Dual-ranker alternatives hold both rankers' entries; the higher one is the
-    figure the winner was picked on. Display-only, so anything malformed reads
-    as unscored rather than failing the write that records it.
+    The first entry for the chosen concept is its score. Each ranker scores a
+    concept once, and dual ranking lists the winning ranker's entries first, so
+    a losing ranker's opinion of the same concept is never the one stored.
+    Display-only, so anything malformed reads as unscored rather than failing
+    the write that records it.
     """
     if not isinstance(chosen, dict) or not isinstance(alternatives, (list, tuple)):
         return None
-    scores = [a['confidence'] for a in alternatives
-              if isinstance(a, dict) and a.get('concept_id') == chosen.get('concept_id')
-              and isinstance(a.get('confidence'), (int, float))]
-    return max(scores) if scores else None
+    return next((a['confidence'] for a in alternatives
+                 if isinstance(a, dict) and a.get('concept_id') == chosen.get('concept_id')
+                 and isinstance(a.get('confidence'), (int, float))), None)
 
 
 def rank_candidates_jev(source_value, candidates, source_description='', *, source_context=None,
@@ -1246,6 +1247,10 @@ def _rank_both(source_value, candidates, source_description, **kwargs):
         winner, note = j_chosen, j_note
     else:
         winner, note = None, f'Both rankers declined. Anthropic: {a_note} | Jev: {j_note}'
+    # The winner's own ranker first: chosen_confidence reads the first score
+    # for the chosen concept, and a declining Jev still scores every candidate.
+    if winner is not None and winner is j_chosen:
+        combined_alts = list(j_alts or []) + list(a_alts or [])
 
     ranking_timings = {'anthropic_ms': a_ms, 'jev_ms': j_ms}
     return winner, note, combined_alts, ranking_timings

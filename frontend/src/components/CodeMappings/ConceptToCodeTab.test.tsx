@@ -354,6 +354,16 @@ describe('suggestion confidence', () => {
     expect(screen.getByRole('button', { name: 'Approve selected (2)' })).toBeEnabled();
   });
 
+  it('compares the shown percentage, so a row at the threshold is not selected', async () => {
+    await openScored();
+    // 0.55 * 100 is 55.00000000000001 in floating point.
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Select sources with confidence above, percent' }),
+      { target: { value: '55' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Select' }));
+    expect(screen.getByRole('checkbox', { name: 'Select SNOMED HIGH' })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Select SNOMED MID' })).not.toBeChecked();
+  });
+
   it('orders a suggestion preview by confidence without a request', async () => {
     post.mockResolvedValue({ data: { ...run(), activity: [{ concept: { concept_id: 123 }, candidates: [
       { ...source, mapping_id: 11, source_code: 'C-LOW', confidence: 0.25 },

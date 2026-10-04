@@ -18,14 +18,15 @@ pytestmark = pytest.mark.django_db
 BASE = '/api/v1/concept-to-code/'
 
 
-def test_chosen_confidence_takes_the_winners_highest_score():
+def test_chosen_confidence_takes_the_first_score_for_the_winner():
     chosen = {'concept_id': 1}
     alternatives = [
         {'concept_id': 2, 'confidence': 0.99},
         {'concept_id': 1, 'confidence': 0.55, 'ranker': 'anthropic'},
         {'concept_id': 1, 'confidence': 0.72, 'ranker': 'jev'},
     ]
-    assert chosen_confidence(chosen, alternatives) == 0.72
+    # Dual ranking lists the winning ranker first; a later score is the loser's.
+    assert chosen_confidence(chosen, alternatives) == 0.55
     assert chosen_confidence(chosen, [{'concept_id': 2, 'confidence': 0.9}]) is None
     assert chosen_confidence(None, alternatives) is None
     assert chosen_confidence(chosen, None) is None
@@ -116,3 +117,39 @@ def test_detail_orders_by_confidence_with_unscored_rows_last(client, albumin):
     assert codes(order='confidence') == ['LOW', 'MID', 'HIGH', 'NONE']
     assert client.get(url, {'order': 'occurrence_count'}).status_code == 400
     assert client.get(url).data['results'][0]['confidence'] is None
+
+
+def test_dual_ranking_stores_the_winning_rankers_score(monkeypatch):
+    """A declining Jev still scores candidates; that is not the winner's score."""
+    chosen = {'concept_id': 7, 'concept_name': 'X'}
+    monkeypatch.setattr(suggestions, 'rank_candidates', lambda *a, **kw: (
+        chosen, 'low confidence: weak', [{'concept_id': 7, 'confidence': 0.25, 'ranker': 'anthropic'}]))
+    monkeypatch.setattr(suggestions, 'rank_candidates_jev', lambda *a, **kw: (
+        None, 'No suitable concept (Jev ranking).', [{'concept_id': 7, 'confidence': 0.6, 'ranker': 'jev'}]))
+    winner, _note, alternatives, _timings = suggestions.rank_candidates_dispatch(
+        'X1', [chosen], 'X', ranking_model='both')
+    assert winner == chosen
+    assert chosen_confidence(winner, alternatives) == 0.25
+
+    monkeypatch.setattr(suggestions, 'rank_candidates_jev', lambda *a, **kw: (
+        chosen, 'high confidence (Jev 90%)', [{'concept_id': 7, 'confidence': 0.9, 'ranker': 'jev'}]))
+    winner, _note, alternatives, _timings = suggestions.rank_candidates_dispatch(
+        'X1', [chosen], 'X', ranking_model='both')
+    assert chosen_confidence(winner, alternatives) == 0.9
+
+
+def test_an_upload_moving_the_destination_clears_the_confidence(admin_client, concepts):
+    from django.core.files.uploadedfile import SimpleUploadedFile
+    model_pick, curator_pick = concepts
+    moved = suggested_row(model_pick, source_code='MOVED', suggestion_confidence=0.85)
+    kept = suggested_row(model_pick, source_code='KEPT', suggestion_confidence=0.85)
+    body = (f'source code,source description,seen count,destination concept ID\n'
+            f'MOVED,Moved,5,{curator_pick.pk}\nKEPT,Kept,5,{model_pick.pk}\n')
+    response = admin_client.post('/api/v1/code-mappings/upload/', {
+        'file': SimpleUploadedFile('codes.csv', body.encode(), content_type='text/csv'),
+        'source_vocabulary_id': 'ICD10',
+    }, format='multipart')
+    assert response.status_code == 201, response.data
+    moved.refresh_from_db(); kept.refresh_from_db()
+    assert moved.target_concept_id == curator_pick.pk and moved.suggestion_confidence is None
+    assert kept.suggestion_confidence == 0.85

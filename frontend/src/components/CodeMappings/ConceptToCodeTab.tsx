@@ -225,7 +225,8 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting }: {
   const approvable = pending.filter(row => row.mapping_id !== null);
   const validThreshold = Number.isFinite(threshold) && threshold >= 0 && threshold <= 100;
   const selectConfident = () => setSelected(new Set(editable
-    .filter(row => row.confidence != null && row.confidence * 100 > threshold).map(sourceKey)));
+    // Compare the percentage the column shows: 0.55 * 100 is 55.00000000000001.
+    .filter(row => row.confidence != null && Math.round(row.confidence * 100) > threshold).map(sourceKey)));
   const changeOrder = () => {
     setOrder(previous => previous === '-confidence' ? 'confidence' : '-confidence');
     setPage(1); setSelected(new Set());
