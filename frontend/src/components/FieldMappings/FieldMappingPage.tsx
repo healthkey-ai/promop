@@ -1,6 +1,6 @@
 import PageTitle from '@/components/Branding/PageTitle';
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowLeft, ChevronDown, ChevronRight, Search, BookOpen, Check, X, Pencil, Plus, Sparkles } from "lucide-react";
 import api from "@/api/axios";
 import { useAuth } from "@/hooks/useAuth";
@@ -131,13 +131,41 @@ export default function FieldMappingPage() {
   const [formulaEditorField, setFormulaEditorField] = useState<FieldDescriptor | null>(null);
   const [derivationInfoField, setDerivationInfoField] = useState<FieldDescriptor | null>(null);
   const [addFieldDialogOpen, setAddFieldDialogOpen] = useState(false);
+  // ?field=<name>, from a patient-editor field's globe: open that field once,
+  // on the first load. Later reloads (after a save) must not reopen it.
+  const [searchParams] = useSearchParams();
+  const linkedField = useRef(searchParams.get("field"));
 
   const fetchDescriptors = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
       const resp = await api.get("/v1/field-mappings/");
-      setDescriptors(resp.data.filter(isSupportedMapperField));
+      const loaded: FieldDescriptor[] = resp.data.filter(isSupportedMapperField);
+      setDescriptors(loaded);
+      const wanted = linkedField.current;
+      if (wanted) {
+        linkedField.current = null;
+        const field = loaded.find((d) => d.field_name === wanted);
+        if (!field) {
+          setError(`${wanted} has no field concept mapping entry.`);
+        } else {
+          setActiveTab(field.tab);
+          if (field.mappable) {
+            setSelectedField(field);
+            setDialogOpen(true);
+          } else {
+            // Nothing to assign; show the row where it lives. Unmappable rows
+            // are mostly computed, whose section starts collapsed.
+            setSearchQuery(field.field_name);
+            setCollapsedSections((previous) => {
+              const next = new Set(previous);
+              next.delete(getDisplayCategory(field));
+              return next;
+            });
+          }
+        }
+      }
     } catch {
       setError("Failed to load field mappings.");
     } finally {
@@ -744,6 +772,7 @@ export default function FieldMappingPage() {
           fieldName={selectedField.field_name}
           fieldType={selectedField.field_type}
           suggestQuery={selectedField.suggest_query}
+          onShowSourceCodes={(conceptId) => navigate(`/code-mappings?direction=reverse&concept=${conceptId}`)}
           initialConceptCode={selectedField.mapping?.concept_code || selectedField.suggestion?.concept_code}
           initialVocabularyId={selectedField.mapping?.vocabulary_id || (selectedField.suggestion?.vocabulary_id ?? undefined)}
           initialUnit={selectedField.mapping?.unit || (selectedField.suggestion?.unit ?? undefined)}

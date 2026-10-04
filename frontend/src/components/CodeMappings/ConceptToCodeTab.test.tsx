@@ -382,3 +382,41 @@ describe('suggestion confidence', () => {
     expect(sourceGets().length).toBe(before);
   });
 });
+
+describe('opening a linked concept', () => {
+  beforeEach(() => {
+    get.mockImplementation((url: string) => {
+      if (url === '/v1/concept-to-code/') return Promise.resolve({ data: page([concept]) });
+      if (url === '/v1/concept-to-code/999/') return Promise.reject({ response: { status: 404 } });
+      return Promise.resolve({ data: { ...page([source]), concept } });
+    });
+  });
+
+  it('opens the concept\'s source codes ready to find more, by id', async () => {
+    const handled = vi.fn();
+    render(<ConceptToCodeTab canApprove initialConceptId={123} onInitialConceptHandled={handled} />);
+    const dialog = await screen.findByRole('dialog', { name: 'Source codes for Serum albumin' });
+    expect(within(dialog).getByRole('button', { name: 'Find source codes' })).toHaveAttribute('aria-pressed', 'true');
+    expect(get).toHaveBeenCalledWith('/v1/concept-to-code/123/');
+    // Never the list's text search, which matches the digits in names and codes.
+    expect(get).not.toHaveBeenCalledWith('/v1/concept-to-code/', expect.objectContaining({
+      params: expect.objectContaining({ search: '123' }) }));
+    await waitFor(() => expect(get).toHaveBeenCalledWith('/v1/concept-to-code/123/', expect.objectContaining({
+      params: expect.objectContaining({ mode: 'available' }),
+    })));
+    expect(handled).toHaveBeenCalledTimes(1);
+  });
+
+  it('explains a concept with no source-code view', async () => {
+    const handled = vi.fn();
+    render(<ConceptToCodeTab canApprove initialConceptId={999} onInitialConceptHandled={handled} />);
+    expect(await screen.findByText(/Concept 999 is not a current standard concept/)).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(handled).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens a concept clicked in the list on its existing mappings', async () => {
+    await selectConcept();
+    expect(screen.getByRole('button', { name: 'Existing mappings' })).toHaveAttribute('aria-pressed', 'true');
+  });
+});

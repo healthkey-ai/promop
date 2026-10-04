@@ -28,6 +28,8 @@ interface Props {
   fieldType: string;
   /** Search text for Suggest; falls back to the field name. */
   suggestQuery?: string;
+  /** Open Code Mapping's source codes for a concept; no button without it. */
+  onShowSourceCodes?: (conceptId: number) => void;
   onClose: () => void;
   onSaved: () => void;
   initialConceptCode?: string;
@@ -74,7 +76,7 @@ const TIP = {
 } as const;
 
 export function ConceptAssignDialog({
-  fieldName, fieldType, suggestQuery, onClose, onSaved,
+  fieldName, fieldType, suggestQuery, onShowSourceCodes, onClose, onSaved,
   initialConceptCode, initialVocabularyId, initialUnit, initialOmopTable,
   existingMappingId, initialConceptId, initialConceptName, initialStatus, initialNotes, commonUnits,
   choices, onEditChoices, canApprove = true,
@@ -342,6 +344,17 @@ export function ConceptAssignDialog({
                   Selected: <span className="font-mono font-medium">{selected.vocabulary_id}:{selected.concept_code}</span>{" "}
                   {selected.concept_name}
                 </span>
+                {onShowSourceCodes && (
+                  <button
+                    type="button"
+                    onClick={() => onShowSourceCodes(selected.concept_id)}
+                    className="ml-auto rounded border border-slate-300 bg-white px-1.5 py-0.5 font-mono text-xs text-slate-600 hover:bg-slate-100"
+                    aria-label={`Source codes for ${selected.concept_name || selected.concept_code}`}
+                    title="Find source codes that map to this concept"
+                  >
+                    {"{codes}"}
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => setSelected(null)}

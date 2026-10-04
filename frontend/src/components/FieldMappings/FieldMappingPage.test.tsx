@@ -1,6 +1,6 @@
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { vi, describe, it, expect, beforeEach } from "vitest";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import FieldMappingPage from "./FieldMappingPage";
 
 const mockGet = vi.fn();
@@ -219,6 +219,21 @@ const renderPage = () =>
   render(
     <MemoryRouter>
       <FieldMappingPage />
+    </MemoryRouter>
+  );
+
+function CodeMappingsProbe() {
+  const location = useLocation();
+  return <div>code mappings {location.search}</div>;
+}
+
+const renderLinked = (field: string) =>
+  render(
+    <MemoryRouter initialEntries={[`/field-mappings?field=${field}`]}>
+      <Routes>
+        <Route path="/field-mappings" element={<FieldMappingPage />} />
+        <Route path="/code-mappings" element={<CodeMappingsProbe />} />
+      </Routes>
     </MemoryRouter>
   );
 
@@ -686,5 +701,39 @@ describe("FieldMappingPage", () => {
     await screen.findByText("Field Concept Mappings");
     fireEvent.click(screen.getByRole("button", { name: /add field/i }));
     expect(screen.getByTestId("add-custom-field-dialog")).toHaveTextContent("general");
+  });
+
+  describe("FieldMappingPage links", () => {
+    it("opens the field named in ?field= on its own tab", async () => {
+      renderLinked("pack_years");
+      const dialog = await screen.findByRole("dialog");
+      expect(within(dialog).getByRole("heading", { name: "Edit Concept Mapping" })).toBeInTheDocument();
+      // The page switched to the field's tab: a Behavior sibling is listed.
+      expect(screen.getByText("smoking_status")).toBeInTheDocument();
+    });
+
+    it("goes from the selected concept to its source codes in Code Mapping", async () => {
+      renderLinked("pack_years");
+      const dialog = await screen.findByRole("dialog");
+      const codes = within(dialog).getByRole("button", { name: /Source codes for/ });
+      expect(codes).toHaveTextContent("{codes}");
+      fireEvent.click(codes);
+      expect(await screen.findByText("code mappings ?direction=reverse&concept=12345")).toBeInTheDocument();
+    });
+
+    it("expands the collapsed section of a linked computed field", async () => {
+      mockGet.mockImplementation((url: string) => Promise.resolve({ data: url === "/v1/field-mappings/"
+        ? [{ ...MOCK_DESCRIPTORS[0], field_name: "bmi", category: "computed", mappable: false, mapping: null, suggestion: null }]
+        : {} }));
+      renderLinked("bmi");
+      expect(await screen.findByText("bmi")).toBeVisible();
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    it("says so when the linked field is not in the mapper", async () => {
+      renderLinked("not_a_field");
+      expect(await screen.findByText("not_a_field has no field concept mapping entry.")).toBeInTheDocument();
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
   });
 });

@@ -55,13 +55,22 @@ function Pagination({ data, change, disabled = false }: {
   </nav>;
 }
 
-export default function ConceptToCodeTab({ canApprove, onWritingChange }: { canApprove: boolean; onWritingChange?: (value: boolean) => void }) {
+type SourceMode = 'linked' | 'available' | 'candidates';
+
+export default function ConceptToCodeTab({ canApprove, onWritingChange, initialConceptId, onInitialConceptHandled }: {
+  canApprove: boolean; onWritingChange?: (value: boolean) => void;
+  /** Open this concept's source codes on arrival, ready to search for more. */
+  initialConceptId?: number;
+  /** Called once the linked concept is opened or reported, so it is not reopened. */
+  onInitialConceptHandled?: () => void;
+}) {
   const [domain, setDomain] = useState('');
   const [scope, setScope] = useState('fields');
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const [data, setData] = useState<Page<Concept> | null>(null);
   const [selected, setSelected] = useState<Concept | null>(null);
+  const [selectedMode, setSelectedMode] = useState<SourceMode>('linked');
   const selectedTrigger = useRef<HTMLButtonElement | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -84,6 +93,33 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange }: { canA
     }, 250);
     return () => { active = false; controller.abort(); window.clearTimeout(timer); };
   }, [domain, scope, search, page, revision]);
+
+  useEffect(() => {
+    if (!initialConceptId) return;
+    let active = true;
+    (async () => {
+      try {
+        // By id, not the list's text search: that matches the digits in names
+        // and codes too, and the concept could sort past its first page.
+        const { data: found } = await api.get<{ concept: Omit<Concept, 'fields' | 'sccm_counts'> }>(
+          `/v1/concept-to-code/${initialConceptId}/`);
+        if (!active) return;
+        // The dialog shows neither; the list row carries them.
+        setSelectedMode('available');
+        setSelected({ ...found.concept, fields: [], sccm_counts: { approved: 0, proposed: 0, rejected: 0 } });
+      } catch (failure) {
+        if (!active) return;
+        const notFound = (failure as { response?: { status?: number } })?.response?.status === 404;
+        setError(notFound
+          ? `Concept ${initialConceptId} is not a current standard concept in a clinical domain, so it has no source codes to review.`
+          : `Could not open concept ${initialConceptId}. Refresh to retry.`);
+      }
+      if (active) onInitialConceptHandled?.();
+    })();
+    return () => { active = false; };
+    // The callback is a notification; a new identity must not reopen the concept.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialConceptId]);
 
   return <Dialog.Root open={selected !== null} onOpenChange={open => { if (!open && !writing) setSelected(null); }}>
     <section aria-label="Concept to source code" className="space-y-5">
@@ -115,7 +151,7 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange }: { canA
           className={`border-t border-slate-100 ${selected?.concept_id === concept.concept_id ? 'bg-sky-50' : ''}`}>
           <td className="p-3"><button className="text-left font-medium text-slate-950 underline underline-offset-2" disabled={writing}
             aria-haspopup="dialog" aria-expanded={selected?.concept_id === concept.concept_id}
-            onClick={event => { selectedTrigger.current = event.currentTarget; setSelected(concept); }}>{concept.concept_name}</button>
+            onClick={event => { selectedTrigger.current = event.currentTarget; setSelectedMode('linked'); setSelected(concept); }}>{concept.concept_name}</button>
             <div className="mt-1 text-xs text-slate-500">{concept.vocabulary_id}:{concept.concept_code} · OMOP {concept.concept_id} · {concept.domain_id}</div></td>
           <td className="p-3 text-xs text-slate-600">{concept.fields.length
             ? concept.fields.map(field => <div key={field.field_name}>{field.field_name} <span className="text-slate-400">({field.status})</span></div>) : '—'}</td>
@@ -140,17 +176,18 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange }: { canA
           </div>
           <Dialog.Close className={button} disabled={writing}>Close</Dialog.Close>
         </div>
-        <SourceCoverage key={selected.concept_id} concept={selected} canApprove={canApprove}
+        <SourceCoverage key={selected.concept_id} concept={selected} canApprove={canApprove} initialMode={selectedMode}
           onWriting={value => { setWriting(value); onWritingChange?.(value); }} onSaved={() => setRevision(value => value + 1)} />
       </Dialog.Content>
     </Dialog.Portal>}
   </Dialog.Root>;
 }
 
-function SourceCoverage({ concept, canApprove, onSaved, onWriting }: {
+function SourceCoverage({ concept, canApprove, onSaved, onWriting, initialMode = 'linked' }: {
   concept: Concept; canApprove: boolean; onSaved: () => void; onWriting: (value: boolean) => void;
+  initialMode?: SourceMode;
 }) {
-  const [mode, setMode] = useState<'linked' | 'available' | 'candidates'>('linked');
+  const [mode, setMode] = useState<SourceMode>(initialMode);
   const [search, setSearch] = useState('');
   const [seenOnly, setSeenOnly] = useState(true);
   const [page, setPage] = useState(1);
