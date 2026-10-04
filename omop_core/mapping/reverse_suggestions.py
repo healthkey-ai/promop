@@ -120,7 +120,7 @@ def _retrieve(concept, *, strategies, limit, include_zero_seen, evaluate):
 def reverse_rank_candidate(concept, candidate, ranking_model):
     if ranking_model == 'none':
         return {**candidate, 'verdict': 'review', 'note': 'Retrieved candidate; clinical equivalence needs review.'}
-    from omop_core.mapping.suggestions import rank_candidates_dispatch
+    from omop_core.mapping.suggestions import chosen_confidence, rank_candidates_dispatch
 
     chosen, note, alternatives, _timings = rank_candidates_dispatch(
         candidate['source_code'], [concept_payload(concept)],
@@ -132,4 +132,5 @@ def reverse_rank_candidate(concept, candidate, ranking_model):
         },
     )
     return {**candidate, 'verdict': 'supported' if chosen else 'review', 'note': note,
+            'confidence': chosen_confidence(chosen, alternatives),
             'alternatives': alternatives or []}

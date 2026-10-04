@@ -94,6 +94,8 @@ def _write_group_suggestion(mapping_ids, proposal, *, run, actor):
                 mapping.destination_vocabulary_id = concept.vocabulary_id
                 mapping.origin_system = SUGGESTION_PROVENANCE
                 mapping.suggestion_model_version = SUGGESTION_MODEL_VERSION
+                # None for an exact match: no ranker was asked.
+                mapping.suggestion_confidence = proposal.get('confidence')
                 mapping.last_suggest_attempt = f'{SUGGESTION_MODEL_VERSION}-group'
                 mapping.suggest_strategy = proposal['strategy']
                 mapping.suggested_action = ''
@@ -101,7 +103,7 @@ def _write_group_suggestion(mapping_ids, proposal, *, run, actor):
                 mapping.save(update_fields=[
                     'target_concept', 'suggested_target_concept',
                     'destination_vocabulary_id', 'origin_system',
-                    'suggestion_model_version', 'last_suggest_attempt',
+                    'suggestion_model_version', 'suggestion_confidence', 'last_suggest_attempt',
                     'suggest_strategy', 'suggested_action', 'notes', 'updated_at',
                 ])
                 destinations += 1
@@ -178,7 +180,7 @@ def execute_group_run(run_id: str, params: dict) -> None:
                 label = representative.source_code_description
                 proposal = deterministic_proposal(label, representative.domain_id)
                 if proposal is None:
-                    from omop_core.mapping.suggestions import suggest_one_mapping
+                    from omop_core.mapping.suggestions import chosen_confidence, suggest_one_mapping
                     result = suggest_one_mapping(
                         representative.source_code, representative.source_vocabulary_id,
                         representative.omop_table, source_description=label,
@@ -189,6 +191,7 @@ def execute_group_run(run_id: str, params: dict) -> None:
                         'concept': result.get('suggested'),
                         'strategy': result.get('strategy_used') or '',
                         'note': result.get('note') or 'No candidate concept found.',
+                        'confidence': chosen_confidence(result.get('suggested'), result.get('alternatives')),
                     }
                 SuggestRun.objects.filter(pk=run.pk).update(retrieved=run.total)
                 _write_group_suggestion(rows, proposal, run=run, actor=actor)

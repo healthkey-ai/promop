@@ -2,7 +2,7 @@
 from uuid import UUID
 
 from django.db import transaction
-from django.db.models import Count, Q
+from django.db.models import Count, F, Q
 from django.shortcuts import get_object_or_404
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -87,8 +87,16 @@ def concept_to_code_detail(request, concept_id):
                             zero_seen=Count('pk', filter=Q(occurrence_count=0)))
     from omop_core.services.mapping_browse import apply_seen
     rows = apply_seen(rows, request.query_params)
-    page, paging = _paginate(rows.select_related('target_concept').order_by(
-        '-occurrence_count', 'source_vocabulary_id', 'source_code', 'pk'), request.query_params)
+    order = request.query_params.get('order', '')
+    if order not in ('', 'confidence', '-confidence'):
+        raise ValidationError({'order': 'Choose confidence or -confidence.'})
+    ordering = ['-occurrence_count', 'source_vocabulary_id', 'source_code', 'pk']
+    if order:
+        # Rows no ranker scored sort last in either direction.
+        confidence = F('suggestion_confidence')
+        ordering.insert(0, confidence.desc(nulls_last=True) if order == '-confidence'
+                        else confidence.asc(nulls_last=True))
+    page, paging = _paginate(rows.select_related('target_concept').order_by(*ordering), request.query_params)
     return Response({**paging, **counts, 'concept': concept_payload(concept),
                      'results': [source_payload(row) for row in page]})
 
@@ -195,6 +203,11 @@ def concept_to_code_propose(request, concept_id):
         'domain_id': concept.domain_id, 'omop_table': DOMAIN_TO_TABLE[concept.domain_id],
         'status': 'proposed',
     }, request.user)
+    # The preview's ranker judged this source against this concept; without a
+    # ranker the candidate carries no confidence and the row keeps none.
+    if candidate.get('confidence') is not None:
+        row.suggestion_confidence = candidate['confidence']
+        row.save(update_fields=['suggestion_confidence'])
     return Response(source_payload(row), status=201)
 
 
