@@ -628,7 +628,10 @@ export default function CodeMappingPage() {
   // open Concept → Source Code on that concept's source codes.
   const [searchParams] = useSearchParams();
   const linkedConcept = Number(searchParams.get('concept'));
-  const linkedConceptId = Number.isInteger(linkedConcept) && linkedConcept > 0 ? linkedConcept : undefined;
+  // Held in state and cleared once opened: switching direction remounts the
+  // reverse view, which must not reopen the concept each time.
+  const [linkedConceptId, setLinkedConceptId] = useState<number | undefined>(
+    Number.isInteger(linkedConcept) && linkedConcept > 0 ? linkedConcept : undefined);
   const [direction, setDirection] = useState<'forward' | 'reverse'>(
     searchParams.get('direction') === 'reverse' ? 'reverse' : 'forward');
   const [reverseWriting, setReverseWriting] = useState(false);
@@ -1988,7 +1991,8 @@ export default function CodeMappingPage() {
       <PageTitle className="text-2xl font-semibold text-slate-950" meta={releaseMarker}>Code Mapping</PageTitle>
     </div>
     {directionControls}
-    <ConceptToCodeTab canApprove={canApprove} onWritingChange={setReverseWriting} initialConceptId={linkedConceptId} />
+    <ConceptToCodeTab canApprove={canApprove} onWritingChange={setReverseWriting} initialConceptId={linkedConceptId}
+      onInitialConceptHandled={() => setLinkedConceptId(undefined)} />
   </div></div>;
 
   if (loading && rows.length === 0 && !browse) {

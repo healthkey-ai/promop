@@ -2381,14 +2381,27 @@ describe("expanded ICD10 review feedback", () => {
 
 describe("CodeMappingPage links", () => {
   it("opens Concept → Source Code on the concept in the URL", async () => {
-    mockGet.mockImplementation((url: string) => Promise.resolve({ data: url.startsWith("/v1/concept-to-code/")
-      ? { results: [], total: 0, page: 1, page_size: 50, zero_seen: 0 } : {} }));
+    const linked = { concept_id: 4567, concept_name: "Hemoglobin", concept_code: "718-7", vocabulary_id: "LOINC", domain_id: "Measurement" };
+    // The forward view's own mocks, for the direction switch below.
+    renderPage().unmount();
+    const forward = mockGet.getMockImplementation()!;
+    mockGet.mockImplementation((url: string, ...rest: unknown[]) => url.startsWith("/v1/concept-to-code/")
+      ? Promise.resolve({ data: { results: [], total: 0, page: 1, page_size: 50, zero_seen: 0, concept: linked } })
+      : forward(url, ...rest));
     render(
       <MemoryRouter initialEntries={["/code-mappings?direction=reverse&concept=4567"]}>
         <CodeMappingPage />
       </MemoryRouter>,
     );
     expect(await screen.findByRole("button", { name: "Concept → Source Code" })).toHaveAttribute("aria-pressed", "true");
-    await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/concept-to-code/", { params: { scope: "all", search: "4567" } }));
+    const dialog = await screen.findByRole("dialog", { name: "Source codes for Hemoglobin" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    // Switching direction remounts the reverse view; the link was used once.
+    fireEvent.click(screen.getByRole("button", { name: "Source Code → Concept" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Concept → Source Code" }));
+    await screen.findByRole("table", { name: "Standard concept coverage" });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(mockGet.mock.calls.filter(([url]) => url === "/v1/concept-to-code/4567/")).toHaveLength(1);
   });
 });

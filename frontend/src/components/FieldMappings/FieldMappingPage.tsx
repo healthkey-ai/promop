@@ -155,8 +155,14 @@ export default function FieldMappingPage() {
             setSelectedField(field);
             setDialogOpen(true);
           } else {
-            // Nothing to assign; show the row where it lives.
+            // Nothing to assign; show the row where it lives. Unmappable rows
+            // are mostly computed, whose section starts collapsed.
             setSearchQuery(field.field_name);
+            setCollapsedSections((previous) => {
+              const next = new Set(previous);
+              next.delete(getDisplayCategory(field));
+              return next;
+            });
           }
         }
       }

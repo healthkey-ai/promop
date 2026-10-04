@@ -57,10 +57,12 @@ function Pagination({ data, change, disabled = false }: {
 
 type SourceMode = 'linked' | 'available' | 'candidates';
 
-export default function ConceptToCodeTab({ canApprove, onWritingChange, initialConceptId }: {
+export default function ConceptToCodeTab({ canApprove, onWritingChange, initialConceptId, onInitialConceptHandled }: {
   canApprove: boolean; onWritingChange?: (value: boolean) => void;
   /** Open this concept's source codes on arrival, ready to search for more. */
   initialConceptId?: number;
+  /** Called once the linked concept is opened or reported, so it is not reopened. */
+  onInitialConceptHandled?: () => void;
 }) {
   const [domain, setDomain] = useState('');
   const [scope, setScope] = useState('fields');
@@ -97,20 +99,26 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
     let active = true;
     (async () => {
       try {
-        // The id search reaches every current standard destination, not only
-        // those behind a patient field.
-        const { data: found } = await api.get<Page<Concept>>('/v1/concept-to-code/', {
-          params: { scope: 'all', search: String(initialConceptId) },
-        });
-        const concept = found.results.find(item => item.concept_id === initialConceptId);
+        // By id, not the list's text search: that matches the digits in names
+        // and codes too, and the concept could sort past its first page.
+        const { data: found } = await api.get<{ concept: Omit<Concept, 'fields' | 'sccm_counts'> }>(
+          `/v1/concept-to-code/${initialConceptId}/`);
         if (!active) return;
-        if (concept) { setSelectedMode('available'); setSelected(concept); }
-        else setError(`Concept ${initialConceptId} is not a current standard concept in a clinical domain, so it has no source codes to review.`);
-      } catch {
-        if (active) setError(`Could not open concept ${initialConceptId}. Refresh to retry.`);
+        // The dialog shows neither; the list row carries them.
+        setSelectedMode('available');
+        setSelected({ ...found.concept, fields: [], sccm_counts: { approved: 0, proposed: 0, rejected: 0 } });
+      } catch (failure) {
+        if (!active) return;
+        const notFound = (failure as { response?: { status?: number } })?.response?.status === 404;
+        setError(notFound
+          ? `Concept ${initialConceptId} is not a current standard concept in a clinical domain, so it has no source codes to review.`
+          : `Could not open concept ${initialConceptId}. Refresh to retry.`);
       }
+      if (active) onInitialConceptHandled?.();
     })();
     return () => { active = false; };
+    // The callback is a notification; a new identity must not reopen the concept.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialConceptId]);
 
   return <Dialog.Root open={selected !== null} onOpenChange={open => { if (!open && !writing) setSelected(null); }}>

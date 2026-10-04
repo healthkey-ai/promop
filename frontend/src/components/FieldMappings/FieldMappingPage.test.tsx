@@ -721,6 +721,15 @@ describe("FieldMappingPage", () => {
       expect(await screen.findByText("code mappings ?direction=reverse&concept=12345")).toBeInTheDocument();
     });
 
+    it("expands the collapsed section of a linked computed field", async () => {
+      mockGet.mockImplementation((url: string) => Promise.resolve({ data: url === "/v1/field-mappings/"
+        ? [{ ...MOCK_DESCRIPTORS[0], field_name: "bmi", category: "computed", mappable: false, mapping: null, suggestion: null }]
+        : {} }));
+      renderLinked("bmi");
+      expect(await screen.findByText("bmi")).toBeVisible();
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
     it("says so when the linked field is not in the mapper", async () => {
       renderLinked("not_a_field");
       expect(await screen.findByText("not_a_field has no field concept mapping entry.")).toBeInTheDocument();
