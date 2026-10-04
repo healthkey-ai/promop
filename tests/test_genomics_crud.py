@@ -634,3 +634,31 @@ def test_no_asserted_complex_karyotype_returns_empty(setup):
     refresh_patient_record(person)
     record.refresh_from_db()
     assert record.genomics_complex_karyotype == []
+
+
+def test_a_mapping_without_a_source_value_claims_no_linked_facts(setup):
+    """A genetic_mutations.* row with no source_value names no component code.
+
+    Readers take every such mapping regardless of status, so a proposed row
+    saved before its recipe was complete put '' into the code set: an edit then
+    superseded every linked fact with a blank source value.
+    """
+    from omop_core.models import FieldConceptMapping
+
+    person, _, _ = setup
+    FieldConceptMapping.objects.create(
+        field_name='genetic_mutations.not_yet_curated', status='proposed',
+        omop_table='measurement', source_value='',
+    )
+    saved = save_variant(person, {'gene': 'TP53', 'laboratory': 'Correct laboratory'})
+    link = Concept.objects.get(vocabulary_id='CDM', concept_name='measurement.measurement_id')
+    blank = MeasurementFactory(
+        person=person, measurement_event_id=saved['id'], meas_event_field_concept=link,
+        measurement_source_value='', value_as_string='Linked fact without a code',
+    )
+
+    assert 'not_yet_curated' not in list_variants(person)[0]
+    save_variant(person, {'laboratory': 'Updated laboratory'}, saved['id'])
+
+    blank.refresh_from_db()
+    assert not blank.is_erroneous
