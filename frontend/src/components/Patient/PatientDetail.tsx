@@ -25,6 +25,7 @@ import ClinicalSummaryTab from "@/components/PatientInfo/tabs/ClinicalSummaryTab
 import PatientOmopTab from "./PatientOmopTab";
 import { confirmRecord } from "@/api/clinicalFacts";
 import { mayBeUnitedStates } from "@/lib/usZip";
+import { FieldMappingLinksProvider } from "@/components/PatientInfo/fieldMappingLinks";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
@@ -743,6 +744,7 @@ export default function PatientDetail({
   const avatarBg = getAvatarBg(patientName);
 
   return (
+    <FieldMappingLinksProvider value={canViewOmop}>
     <div className="min-h-screen bg-[#f5f7fa]">
       <div className="sticky top-0 z-20 border-b border-border bg-background/90 shadow-[0_1px_3px_rgba(0,0,0,0.05)] backdrop-blur-md">
         <div className={`mx-auto flex min-h-14 max-w-5xl items-center justify-between gap-4 px-6 py-2 ${patientMode ? "flex-wrap sm:flex-nowrap" : ""}`}>
@@ -972,5 +974,6 @@ export default function PatientDetail({
         <ErrorToast message={downloadError} onDismiss={() => setDownloadError(null)} />
       )}
     </div>
+    </FieldMappingLinksProvider>
   );
 }

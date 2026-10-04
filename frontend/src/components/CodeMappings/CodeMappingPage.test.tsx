@@ -2378,3 +2378,17 @@ describe("expanded ICD10 review feedback", () => {
     expect(screen.getByRole("button", { name: `Mapped (${status === "approved" ? 1 : 0})` })).toBeInTheDocument();
   });
 });
+
+describe("CodeMappingPage links", () => {
+  it("opens Concept → Source Code on the concept in the URL", async () => {
+    mockGet.mockImplementation((url: string) => Promise.resolve({ data: url.startsWith("/v1/concept-to-code/")
+      ? { results: [], total: 0, page: 1, page_size: 50, zero_seen: 0 } : {} }));
+    render(
+      <MemoryRouter initialEntries={["/code-mappings?direction=reverse&concept=4567"]}>
+        <CodeMappingPage />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByRole("button", { name: "Concept → Source Code" })).toHaveAttribute("aria-pressed", "true");
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/concept-to-code/", { params: { scope: "all", search: "4567" } }));
+  });
+});

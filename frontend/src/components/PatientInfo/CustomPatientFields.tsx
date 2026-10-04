@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Plus, Search, X } from "lucide-react";
+import FieldMappingLink from "./FieldMappingLink";
 import { clinicalClient, clinicalUrl } from "@/api/clinicalTransport";
 
 type Mode = "editable" | "computed";
@@ -152,7 +153,7 @@ export function CustomPatientFields({ tab, formData, canManage, onEditableValueC
   const values = (formData.custom_fields as Record<string, unknown> | undefined) || {};
   return <section className="mt-8 border-t border-border pt-6" data-testid="custom-patient-fields">
     <div className="mb-4 flex items-center justify-between"><div><h3 className="text-sm font-semibold">Additional fields</h3><p className="text-xs text-muted-foreground">Approved fields configured for this tab.</p></div>{canManage && <button onClick={() => setShowDialog(true)} className="inline-flex items-center gap-1 rounded border px-2.5 py-1.5 text-xs font-medium hover:bg-muted"><Plus size={14} /> Add field</button>}</div>
-    {visible.length > 0 && <div className="grid gap-4 sm:grid-cols-2">{visible.map((field) => <div key={field.id}><div className="flex items-center gap-1 text-xs font-medium text-muted-foreground"><span>{field.display_name}</span><span className="rounded bg-muted px-1.5 py-0.5 capitalize">{field.mode}</span></div>{field.mode === "editable" && onEditableValueChange ? <EditableValue key={`${field.id}:${String(values[field.field_name] ?? "")}`} field={field} value={values[field.field_name]} onSave={(value) => onEditableValueChange(field, value)} /> : <div className="mt-1 min-h-9 rounded border bg-muted/30 px-3 py-2 text-sm">{displayValue(values[field.field_name], field)}</div>}</div>)}</div>}
+    {visible.length > 0 && <div className="grid gap-4 sm:grid-cols-2">{visible.map((field) => <div key={field.id}><div className="flex items-center gap-1 text-xs font-medium text-muted-foreground"><span>{field.display_name}</span><FieldMappingLink name={field.field_name} label={field.display_name} /><span className="rounded bg-muted px-1.5 py-0.5 capitalize">{field.mode}</span></div>{field.mode === "editable" && onEditableValueChange ? <EditableValue key={`${field.id}:${String(values[field.field_name] ?? "")}`} field={field} value={values[field.field_name]} onSave={(value) => onEditableValueChange(field, value)} /> : <div className="mt-1 min-h-9 rounded border bg-muted/30 px-3 py-2 text-sm">{displayValue(values[field.field_name], field)}</div>}</div>)}</div>}
     {visible.length === 0 && <p className="text-sm text-muted-foreground">No additional fields configured.</p>}
     {showDialog && <AddCustomFieldDialog tab={tab} onClose={() => setShowDialog(false)} onCreated={load} />}
   </section>;

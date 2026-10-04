@@ -382,3 +382,26 @@ describe('suggestion confidence', () => {
     expect(sourceGets().length).toBe(before);
   });
 });
+
+describe('opening a linked concept', () => {
+  it('opens the concept\'s source codes ready to find more', async () => {
+    render(<ConceptToCodeTab canApprove initialConceptId={123} />);
+    const dialog = await screen.findByRole('dialog', { name: 'Source codes for Serum albumin' });
+    expect(within(dialog).getByRole('button', { name: 'Find source codes' })).toHaveAttribute('aria-pressed', 'true');
+    expect(get).toHaveBeenCalledWith('/v1/concept-to-code/', { params: { scope: 'all', search: '123' } });
+    await waitFor(() => expect(get).toHaveBeenCalledWith('/v1/concept-to-code/123/', expect.objectContaining({
+      params: expect.objectContaining({ mode: 'available' }),
+    })));
+  });
+
+  it('explains a concept with no source-code view', async () => {
+    render(<ConceptToCodeTab canApprove initialConceptId={999} />);
+    expect(await screen.findByText(/Concept 999 is not a current standard concept/)).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('opens a concept clicked in the list on its existing mappings', async () => {
+    await selectConcept();
+    expect(screen.getByRole('button', { name: 'Existing mappings' })).toHaveAttribute('aria-pressed', 'true');
+  });
+});

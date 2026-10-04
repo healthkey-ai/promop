@@ -8,7 +8,7 @@ import SourceVocabularyLookup from "./SourceVocabularyLookup";
 import { searchDestinationConcepts } from "./destinationSearch";
 import SuggestCandidates, { type CandidateActivity } from "./SuggestCandidates";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowLeft, Check, ChevronDown, ChevronRight, Download, Pencil, Plus, Search, Sparkles, Trash2, Upload, X } from "lucide-react";
 import api from "@/api/axios";
 import MintConceptDialog from "./MintConceptDialog";
@@ -624,7 +624,13 @@ export default function CodeMappingPage() {
   const navigate = useNavigate();
   const { currentUser } = useAuth();
   const canApprove = !!(currentUser?.is_staff || currentUser?.is_org_admin);
-  const [direction, setDirection] = useState<'forward' | 'reverse'>('forward');
+  // ?direction=reverse&concept=<id>, from the field mapper's {codes} button:
+  // open Concept → Source Code on that concept's source codes.
+  const [searchParams] = useSearchParams();
+  const linkedConcept = Number(searchParams.get('concept'));
+  const linkedConceptId = Number.isInteger(linkedConcept) && linkedConcept > 0 ? linkedConcept : undefined;
+  const [direction, setDirection] = useState<'forward' | 'reverse'>(
+    searchParams.get('direction') === 'reverse' ? 'reverse' : 'forward');
   const [reverseWriting, setReverseWriting] = useState(false);
   const [browse, setBrowse] = useState<BrowseResponse | null>(null);
   const [pages, setPages] = useState<Partial<Record<MappingSection, number>>>({});
@@ -1982,7 +1988,7 @@ export default function CodeMappingPage() {
       <PageTitle className="text-2xl font-semibold text-slate-950" meta={releaseMarker}>Code Mapping</PageTitle>
     </div>
     {directionControls}
-    <ConceptToCodeTab canApprove={canApprove} onWritingChange={setReverseWriting} />
+    <ConceptToCodeTab canApprove={canApprove} onWritingChange={setReverseWriting} initialConceptId={linkedConceptId} />
   </div></div>;
 
   if (loading && rows.length === 0 && !browse) {

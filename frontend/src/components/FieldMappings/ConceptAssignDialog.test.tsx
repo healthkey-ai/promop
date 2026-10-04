@@ -31,6 +31,23 @@ beforeEach(() => {
   mockGet.mockResolvedValue({ data: { results: [] } });
 });
 
+describe("{codes}", () => {
+  it("opens the selected concept's source codes", () => {
+    const onShowSourceCodes = vi.fn();
+    render(<ConceptAssignDialog {...editProps} initialConceptName="Allele frequency" onShowSourceCodes={onShowSourceCodes} />);
+    fireEvent.click(screen.getByRole("button", { name: "Source codes for Allele frequency" }));
+    expect(onShowSourceCodes).toHaveBeenCalledWith(123);
+  });
+
+  it("is absent without a handler or a selected concept", () => {
+    const { unmount } = render(<ConceptAssignDialog {...editProps} />);
+    expect(screen.queryByText("{codes}")).not.toBeInTheDocument();
+    unmount();
+    render(<ConceptAssignDialog {...editProps} initialConceptId={null} onShowSourceCodes={vi.fn()} />);
+    expect(screen.queryByText("{codes}")).not.toBeInTheDocument();
+  });
+});
+
 describe("Suggest", () => {
   it("searches with the field's suggest query", async () => {
     render(<ConceptAssignDialog {...editProps} fieldName="genomics_t414" suggestQuery="t(4;14)" />);
