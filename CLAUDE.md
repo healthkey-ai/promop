@@ -657,7 +657,8 @@ DATABASE_URL="${STAGING_DATABASE_URL:-$DATABASE_URL}" \
   python manage.py audit_sct_history
 ```
 
-Production is not reachable from a local `.env`; run the audit there from the Render shell.
+Production's database is not in `.env`; run the audit there as a Render one-off job (see
+[Render API access](#render-api-access)).
 
 The command exits with code 1 if unrecognized values are found. Resolve them before proceeding — either add a mapping to `_OLD_TO_NEW_SCT` in the migration, or accept that the values will be preserved as-is.
 
@@ -783,8 +784,8 @@ To audit whether the DB and model are in sync at any time:
 
 `SECRET_KEY` comes from `.env`, and it must be the key of whatever that `.env`
 points at — staging, per the table below. See
-[above](#secret-key-on-a-shared-database). Production is not reachable locally;
-run this from the Render shell instead.
+[above](#secret-key-on-a-shared-database). Production's database is not in `.env`;
+run this there as a Render one-off job (see [Render API access](#render-api-access)).
 
 ```bash
 DATABASE_URL="$DATABASE_URL" \
@@ -1144,6 +1145,49 @@ retrieval needs all standard concepts embedded, not just the queue's candidates.
 - **Admin credentials**: set via `ADMIN_EMAIL` / `ADMIN_PASSWORD` env vars on Render (no hardcoded default)
 - **Hostnames and connection strings**: do not commit them — this is a public repo. Service URLs and database hostnames live in `.env` and the Render/GCP dashboards.
 
+<a id="render-api-access"></a>
+### Render API access (staging and production)
+
+Both environments are reachable from a local session through the Render REST API, with
+`RENDER_API_KEY` from `.env`. Use it — not the dashboard — to set the environment variables a new
+feature needs, to redeploy, and to run one-off commands. Look services up by name; do not commit
+service IDs, and never print a secret value: pipe it from `.env` into the request body.
+
+| Service | Branch | Gets variables from |
+|---|---|---|
+| `promop-staging` | `dev` | set directly |
+| `promop-staging-worker` | `dev` | `fromService: promop-staging` in `render.yaml`, but the worker holds its own **copy**, refreshed only by a Blueprint sync — set it directly too |
+| `promop` | `main` | set directly |
+| `promop-worker` | `main` | set directly — `render.yaml` does not link prod worker variables to the web service |
+
+A variable a worker needs (anything Celery tasks read, e.g. `ANTHROPIC_API_KEY` for queued
+Suggest runs) must be set on the worker as well as the web service.
+
+```bash
+set -a; . ./.env; set +a
+API=https://api.render.com/v1
+A=(-H "Authorization: Bearer $RENDER_API_KEY" -H "Content-Type: application/json")
+sid() { curl -s "${A[@]}" "$API/services?name=$1&limit=5" | jq -r --arg n "$1" '.[].service | select(.name==$n) | .id'; }
+
+# Set a variable (value read from .env, never echoed). 200 = set.
+jq -n --arg v "$ANTHROPIC_API_KEY" '{value: $v}' |
+  curl -s -o /dev/null -w '%{http_code}\n' -X PUT "${A[@]}" \
+    "$API/services/$(sid promop-worker)/env-vars/ANTHROPIC_API_KEY" --data @-
+
+# Setting a variable does not redeploy. Deploy the branch's current commit. 201 = started.
+curl -s -X POST "${A[@]}" "$API/services/$(sid promop-worker)/deploys" -d '{}' | jq -r '.id + " " + .status'
+
+# Poll a deploy until it is live (or *_failed / canceled).
+curl -s "${A[@]}" "$API/services/$(sid promop-worker)/deploys/<deploy-id>" | jq -r .status
+
+# One-off command against an environment's own database and settings (read-only checks).
+jq -n --arg c "python manage.py audit_sct_history" '{startCommand: $c}' |
+  curl -s -X POST "${A[@]}" "$API/services/$(sid promop)/jobs" --data @-
+```
+
+A redeploy ships the branch's **current** commit, so redeploying `promop`/`promop-worker` releases
+whatever is on `main`. A Blueprint sync is still what applies `render.yaml` infrastructure changes.
+
 ## Database Selection Rule
 
 **Use local PostgreSQL for development and tests. Use Render databases only for migrations and sync checks.**
@@ -1159,8 +1203,10 @@ retrieval needs all standard concepts embedded, not just the queue's candidates.
 rather than nothing. Prefer the explicit one and fall back, as the commands above do — that
 way a future `.env` that separates them keeps working without edits.
 
-Production is **not** in `.env` and is not reachable locally. Run anything that needs it from
-the Render shell, and never write to it.
+Production's **database** is not in `.env`. Production itself is reachable: its services are
+managed through the Render API (see [Render API access](#render-api-access)), and anything that
+needs its database runs there as a one-off job. Never write to production data from here —
+production is loaded from a staging dump, so fix and verify on staging.
 
 Never use remote databases for running tests — use local PostgreSQL to match CI. Never write
 test data into `promop_dev` — use `promop_test` for automated tests.
