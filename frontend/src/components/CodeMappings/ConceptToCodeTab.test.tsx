@@ -221,7 +221,7 @@ describe('concept-first curation', () => {
     await screen.findByText('1 candidates retrieved (limit 25).');
     expect(post).toHaveBeenCalledTimes(1);
     expect(post).toHaveBeenCalledWith('/v1/concept-to-code/suggest/', {
-      concept_ids: [123], strategies: ['umls', 'lexical'], limit: 25, include_zero_seen: false, ranking_model: 'none',
+      concept_ids: [123], strategies: ['umls', 'lexical'], limit: 25, include_zero_seen: false, ranking_model: 'jev',
     });
     expect(screen.getByRole('button', { name: 'Approve selected (0)' })).toBeDisabled();
   });
@@ -352,6 +352,24 @@ describe('suggestion confidence', () => {
     expect(screen.getByRole('checkbox', { name: 'Select SNOMED NONE' })).not.toBeChecked();
     expect(screen.getByRole('checkbox', { name: 'Select SNOMED DONE' })).not.toBeChecked();
     expect(screen.getByRole('button', { name: 'Approve selected (2)' })).toBeEnabled();
+  });
+
+  it('defaults the ranker to Jev', async () => {
+    await openScored();
+    expect(screen.getByRole('combobox', { name: 'Source suggestion ranker' })).toHaveValue('jev');
+  });
+
+  it('enables Select only when a selectable source is above the threshold', async () => {
+    await openScored();
+    const threshold = screen.getByRole('spinbutton', { name: 'Select sources with confidence above, percent' });
+    expect(screen.getByRole('button', { name: 'Select' })).toBeEnabled();
+    // DONE (90%) is approved, so it does not count; HIGH is 85%.
+    fireEvent.change(threshold, { target: { value: '85' } });
+    expect(screen.getByRole('button', { name: 'Select' })).toBeDisabled();
+    fireEvent.change(threshold, { target: { value: '84' } });
+    expect(screen.getByRole('button', { name: 'Select' })).toBeEnabled();
+    fireEvent.change(threshold, { target: { value: '' } });
+    expect(screen.getByRole('button', { name: 'Select' })).toBeDisabled();
   });
 
   it('compares the shown percentage, so a row at the threshold is not selected', async () => {
