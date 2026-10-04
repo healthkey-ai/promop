@@ -26,6 +26,8 @@ interface FieldChoiceInfo {
 interface Props {
   fieldName: string;
   fieldType: string;
+  /** Search text for Suggest; falls back to the field name. */
+  suggestQuery?: string;
   onClose: () => void;
   onSaved: () => void;
   initialConceptCode?: string;
@@ -72,7 +74,7 @@ const TIP = {
 } as const;
 
 export function ConceptAssignDialog({
-  fieldName, fieldType, onClose, onSaved,
+  fieldName, fieldType, suggestQuery, onClose, onSaved,
   initialConceptCode, initialVocabularyId, initialUnit, initialOmopTable,
   existingMappingId, initialConceptId, initialConceptName, initialStatus, initialNotes, commonUnits,
   choices, onEditChoices, canApprove = true,
@@ -152,7 +154,7 @@ export function ConceptAssignDialog({
   }, [vocabFilter]);
 
   const handleSuggest = () => {
-    setSearchQuery(fieldName.replace(/_/g, " "));
+    setSearchQuery(suggestQuery || fieldName.replace(/_/g, " "));
   };
 
   useEffect(() => {

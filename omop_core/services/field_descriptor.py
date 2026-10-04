@@ -512,6 +512,46 @@ def _build_suggestion(name: str, prov_dict: dict | None) -> dict | None:
     return None
 
 
+# Concept-search text for genomics markers whose catalog label is not how the
+# vocabularies name them. Checked against staging's Athena load (#1705):
+# FAM46C is TENT5C in current HGNC, "del(11q)" and "1q21 gain / amplification"
+# match nothing, and an unspecified pair is searched by its first gene.
+_GENOMICS_SUGGEST_QUERIES = {
+    'fam46c': 'TENT5C gene',
+    'gain1q': '1q21',
+    'hyperdiploidy': 'hyperdiploid',
+    'complex_karyotype_excl_t1114': 'complex karyotype',
+    'del11q': '11q deletion',
+    'del13q': '13q deletion',
+    'atm_atr': 'ATM gene',
+    'notch1_notch2': 'NOTCH1 gene',
+}
+
+
+def _suggest_query(name: str) -> str:
+    """Return the concept-search text the mapper's Suggest button seeds.
+
+    The concept search requires every word to appear in a concept name, so
+    the field's own prefix ("genomics", "genetic mutations") would rule out
+    every concept. Search by what follows it: the gene ("BRCA1 gene") or the
+    catalog label ("t(4;14)"), unless the label is overridden above.
+    """
+    from omop_core.services.genomics_catalog import patient_fields
+
+    if name.startswith('genetic_mutations.'):
+        return name.split('.', 1)[1].replace('_', ' ')
+    if name.startswith('genomics_'):
+        marker = patient_fields().get(name)
+        if marker is None:
+            return name.removeprefix('genomics_').replace('_', ' ')
+        if marker['key'] in _GENOMICS_SUGGEST_QUERIES:
+            return _GENOMICS_SUGGEST_QUERIES[marker['key']]
+        if marker['kind'] == 'gene':
+            return f"{marker['gene']} gene"
+        return marker['label']
+    return name.replace('_', ' ')
+
+
 def get_all_field_descriptors() -> list[dict]:
     """Return a descriptor dict for every concrete PatientRecord field.
 
@@ -624,6 +664,7 @@ def get_all_field_descriptors() -> list[dict]:
             'provenance': prov_dict,
             'mapping': mapping_dict,
             'suggestion': suggestion,
+            'suggest_query': _suggest_query(name),
             'unit_options': FIELD_COMMON_UNITS.get(name, STANDARD_UNIT_CHOICES),
             'mappable': _is_mappable(category),
             'locked_table': _get_locked_table(category),
@@ -673,6 +714,7 @@ def get_all_field_descriptors() -> list[dict]:
                 'notes': mapping.notes,
             },
             'suggestion': None,
+            'suggest_query': _suggest_query(custom.field_name),
             'unit_options': STANDARD_UNIT_CHOICES,
             'mappable': True,
             'locked_table': None,
@@ -701,7 +743,8 @@ def get_all_field_descriptors() -> list[dict]:
                 'reviewed_at': mapping.reviewed_at.isoformat() if mapping.reviewed_at else None,
                 'notes': mapping.notes,
             } if mapping else None,
-            'suggestion': None, 'unit_options': STANDARD_UNIT_CHOICES,
+            'suggestion': None, 'suggest_query': _suggest_query(name),
+            'unit_options': STANDARD_UNIT_CHOICES,
             'mappable': True, 'locked_table': None, 'choices': [], 'formula': None,
             'explanation': 'Linked attribute of each Genomics finding; not a patient-level scalar.',
             'derivation_error': None,
