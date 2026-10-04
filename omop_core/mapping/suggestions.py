@@ -879,7 +879,7 @@ def rank_candidates(source_value, candidates, source_description='', *, source_c
         return unavailable('missing_api_key', 'ANTHROPIC_API_KEY is not configured in the process performing ranking.')
 
     try:
-        import anthropic
+        import anthropic  # noqa: F401 - the SDK check; the client is built below
     except ImportError as exc:
         return unavailable('sdk_unavailable', 'The Anthropic SDK is not installed.', error=exc)
 
@@ -891,7 +891,8 @@ def rank_candidates(source_value, candidates, source_description='', *, source_c
     }
 
     try:
-        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        from omop_core.mapping.anthropic_client import anthropic_client
+        client = anthropic_client()
         response = client.messages.create(
             model=RANKING_MODEL,
             # Thinking tokens count against this. At 1024 the response stopped
@@ -930,6 +931,12 @@ def rank_candidates(source_value, candidates, source_description='', *, source_c
                 'insufficient_credit',
                 'The Anthropic API account has insufficient credits. Add API credits in '
                 'Anthropic Plans & Billing or configure a funded API key.',
+            )
+        elif status_code == 400 and isinstance(provider_message, str) and 'not scoped to a workspace' in provider_message.lower():
+            reason, detail = (
+                'workspace_required',
+                'The Anthropic API key is not scoped to a workspace. Set ANTHROPIC_WORKSPACE_ID '
+                'or configure a workspace-scoped key.',
             )
         elif type(exc).__name__ == 'APITimeoutError':
             reason, detail = 'timeout', 'The Anthropic ranking request timed out.'
@@ -1153,6 +1160,23 @@ def rank_candidates_jev(source_value, candidates, source_description='', *, sour
     return chosen, note, alternatives
 
 
+def _anthropic_status(chosen, note, alternatives, confidence):
+    """How Anthropic took part in a dual ranking, for the curator's note.
+
+    A score of 0 used to stand for all of "declined", "failed" and "picked
+    without a score", which hid a misconfigured key behind "Anthropic 0%".
+    """
+    if chosen is not None and alternatives:
+        return f'{confidence:.0%}'
+    note = note or ''
+    if note.startswith('No suitable concept'):
+        return 'declined'
+    if 'unavailable' in note.lower():
+        detail = note.split('Details: ', 1)[1] if 'Details: ' in note else ''
+        return f'unavailable: {detail.rstrip(".")}' if detail else 'unavailable'
+    return 'no pick'
+
+
 def rank_candidates_dispatch(source_value, candidates, source_description='', *,
                              source_context=None, require_model_selection=False,
                              ranking_model=DEFAULT_RANKING_MODEL):
@@ -1237,14 +1261,15 @@ def _rank_both(source_value, candidates, source_description, **kwargs):
 
     a_conf = _best_confidence(a_chosen, a_alts)
     j_conf = _best_confidence(j_chosen, j_alts)
+    a_status = _anthropic_status(a_chosen, a_note, a_alts, a_conf)
 
     if j_chosen is not None and j_conf > a_conf:
-        winner, note = j_chosen, f'Jev wins ({j_conf:.0%} vs Anthropic {a_conf:.0%}). {j_note}'
+        winner, note = j_chosen, f'Jev wins ({j_conf:.0%} vs Anthropic {a_status}). {j_note}'
     elif a_chosen is not None:
         note_suffix = f' (Anthropic {a_conf:.0%} vs Jev {j_conf:.0%})' if j_chosen else ''
         winner, note = a_chosen, f'{a_note}{note_suffix}'
     elif j_chosen is not None:
-        winner, note = j_chosen, j_note
+        winner, note = j_chosen, f'{j_note} (Anthropic {a_status})'
     else:
         winner, note = None, f'Both rankers declined. Anthropic: {a_note} | Jev: {j_note}'
     # The winner's own ranker first: chosen_confidence reads the first score
