@@ -11200,8 +11200,7 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     # they cannot approve (admin-only). From here the row is not a suggestion:
     # Suggest's Replace re-answers only rows with blank or suggest* provenance,
     # so this stamp is what keeps their pick from being overwritten (#1469).
-    # Approved rows are already protected by status and keep the provenance
-    # the accuracy figures read.
+    # Approval stamps the approver as provenance instead (below).
     if (
         mapping is not None and concept is not None
         and concept.concept_id != previous_concept_id
@@ -11218,6 +11217,14 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
             # Choosing one of the verified Athena destinations completes the
             # pending choice and moves this mapping to ATHENA-MAPPED.
             values['origin_system'] = 'athena'
+        elif mapping is not None and not mapping.origin_system.startswith('athena'):
+            # The approver now owns the mapping, so provenance names them.
+            # Athena rows keep theirs: it decides the ATHENA-MAPPED section and
+            # how identity rows resolve. Model-quality history does not read
+            # this column -- suggested_target_concept/suggestion_outcome do.
+            values['origin_system'] = (
+                _user_display(user)[:50] or CURATOR_PROVENANCE
+            )
     elif was_approved and status_value != 'approved':
         values['reviewer'] = None
         values['reviewed_at'] = None

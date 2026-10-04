@@ -25240,6 +25240,7 @@ class CodeMappingReviewerStampTest(TestCase):
         re-point match set when origin == 'import'. Flipping it to 'curator' on
         approve broke exactly that -- an import-proposed mapping approved and
         moved zero rows. reviewer carries the human so origin does not have to.
+        origin_system, the displayed provenance, does name the approver (#1707).
         """
         mapping = SourceCodeConceptMapping.objects.create(
             source_vocabulary_id='', source_code='CHLORIDE',
@@ -25251,7 +25252,7 @@ class CodeMappingReviewerStampTest(TestCase):
         self._approve(mapping.id)
         mapping.refresh_from_db()
         self.assertEqual(mapping.origin, 'import')
-        self.assertEqual(mapping.origin_system, 'fhir-sync')
+        self.assertEqual(mapping.origin_system, 'signoff_curator@t.com')
         self.assertEqual(mapping.reviewer, self.curator)
 
     def test_the_serialized_row_carries_the_sign_off(self):

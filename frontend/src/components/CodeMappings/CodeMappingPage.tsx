@@ -2976,7 +2976,16 @@ export default function CodeMappingPage() {
               )}
             </div>
 
-            <div className="flex items-center justify-between gap-2 border-t border-slate-200 px-5 py-4">
+            <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-3 border-t border-slate-200 px-5 py-4">
+              {/* Who the mapping currently answers to. Approval re-stamps it
+                  with the approving curator, so this is what Status will
+                  change on save. */}
+              <div className="min-w-0 text-sm text-slate-700" data-testid="mapping-provenance">
+                <span className="font-medium">Provenance</span>{" "}
+                <span className="break-words text-slate-600">
+                  {selectedRow?.origin_system || "—"}
+                </span>
+              </div>
               <div className="flex items-center gap-3">
                 <div className="flex items-center gap-2">
                   <label className="text-sm font-medium text-slate-700" htmlFor="status">Status</label>
@@ -3011,7 +3020,7 @@ export default function CodeMappingPage() {
                   </button>
                 )}
               </div>
-              <div className="flex gap-2">
+              <div className="flex justify-end gap-2">
                 <button
                   type="button"
                   onClick={closeDialog}

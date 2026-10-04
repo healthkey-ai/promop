@@ -1359,6 +1359,21 @@ describe("CodeMappingPage", () => {
       expect(screen.queryByText(/Proposed by import/)).not.toBeInTheDocument();
     });
 
+    it("shows the current provenance to the left of Status in the footer", async () => {
+      renderPage();
+      const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      fireEvent.click(cell.closest("tr")!);
+      await screen.findByText("Edit Mapping");
+
+      const provenance = screen.getByTestId("mapping-provenance");
+      expect(provenance).toHaveTextContent("Provenance hk-labs");
+      // Provenance, then Status, then the actions: left, middle, right.
+      const footer = provenance.parentElement!;
+      expect(footer.children[0]).toBe(provenance);
+      expect(within(footer.children[1] as HTMLElement).getByLabelText("Status")).toBeInTheDocument();
+      expect(within(footer.children[2] as HTMLElement).getByRole("button", { name: "Cancel" })).toBeInTheDocument();
+    });
+
     it("locks Status to Proposed on a new mapping", async () => {
       // Approval is the only transition that rewrites patient data, and the
       // server enforces proposed-on-create; offering Approved here would
