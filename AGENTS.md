@@ -6,6 +6,7 @@
 - Render production is `promop` with worker `promop-worker`. The unused legacy Render web service has been retired; do not include it in active readiness work.
 - Cloud Run staging remains managed by `.github/workflows/deploy-staging.yml` and `Dockerfile.gcp`. Preserve its existing service, image, bucket and integration identifiers.
 - `STAGING_DATABASE_URL` identifies Render staging; verify it matches the active Render web and worker configuration before database operations.
+- In the local `.env`, `DATABASE_URL` is Render **production**, not staging. `settings.py` loads `.env`, so a `manage.py` command without its own `DATABASE_URL` runs against production. Name the database on every command, never fall back from `STAGING_DATABASE_URL` to `DATABASE_URL`, and treat production as read-only.
 - See `docs/render-staging-celery.md` for Render staging configuration and verification.
 
 # Pull request reviews
