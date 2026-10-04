@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import LegacyCytogeneticHistory from './LegacyCytogeneticHistory';
+import FieldMappingLink from '../FieldMappingLink';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 import { Button } from '@/components/shadcn/button';
 import { useWritableFields } from '@/hooks/useWritableFields';
@@ -94,6 +95,10 @@ export default function GenomicsTab({ formData, readOnly = false }: {
   const editable = !readOnly && descriptors.genetic_mutations?.writable === true;
   const [variants, setVariants] = useState<Variant[]>([]);
   const [markers, setMarkers] = useState<Marker[]>([]);
+  // Finding attributes mapped as genetic_mutations.<key>; others get no globe.
+  // Shown on the read-only details only: in the edit form a link would sit
+  // inside the input's <label> and navigate away from an unsaved draft.
+  const [attributes, setAttributes] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [reload, setReload] = useState(0);
@@ -106,6 +111,8 @@ export default function GenomicsTab({ formData, readOnly = false }: {
   const url = clinicalUrl(`/v1/patient-records/${personId}/genomics/`);
   const disease = String(formData.disease ?? formData.disease_slug ?? '');
   const markerFor = (v: Variant | null) => v ? markers.find(m => v.marker_key ? m.key === v.marker_key : m.kind === 'gene' && (!v.feature_type || v.feature_type === 'Gene') && m.gene.toUpperCase() === String(v.genomic_feature || v.gene || '').toUpperCase()) : undefined;
+  const attributeLink = (key: string, label: string) => attributes.has(key)
+    ? <FieldMappingLink name={`genetic_mutations.${key}`} label={label} /> : null;
   const rows: Variant[] = markers.flatMap(m => {
     const existing = variants.filter(v => markerFor(v)?.key === m.key);
     return existing.length ? existing : [{ genomic_feature: m.genomic_feature || m.gene, feature_type: m.feature_type || 'Gene', finding_category: m.finding_category || '', marker_key: m.key }];
@@ -124,9 +131,9 @@ export default function GenomicsTab({ formData, readOnly = false }: {
     if (!personId) { setLoading(false); setLoadError(true); return; }
     Promise.all([
       clinicalClient().get<Variant[]>(url),
-      clinicalClient().get<{ markers: Marker[] }>(clinicalUrl(`/v1/patient-records/${personId}/genomics-catalog/`), { params: { disease } }),
+      clinicalClient().get<{ markers: Marker[]; attributes?: string[] }>(clinicalUrl(`/v1/patient-records/${personId}/genomics-catalog/`), { params: { disease } }),
     ]).then(([result, catalog]) => {
-      if (current) { setVariants(result.data); setMarkers(catalog.data.markers); }
+      if (current) { setVariants(result.data); setMarkers(catalog.data.markers); setAttributes(new Set(catalog.data.attributes ?? [])); }
     }).catch(() => { if (current) setLoadError(true); })
       .finally(() => { if (current) setLoading(false); });
     return () => { current = false; };
@@ -189,7 +196,9 @@ export default function GenomicsTab({ formData, readOnly = false }: {
           onClick={() => { if (!busy && !draft) { setViewing(v); setDeleting(null); } }}
           onKeyDown={e => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); setViewing(v); } }}
           className="border-b align-top cursor-pointer hover:bg-muted/50">
-          <td className="p-2 font-medium">{featureLabel(v)}</td>
+          <td className="p-2 font-medium"><span className="inline-flex items-center gap-1.5">{featureLabel(v)}
+            {markerFor(v) && <span onClick={e => e.stopPropagation()}>
+              <FieldMappingLink name={markerFor(v)!.field_name} label={featureLabel(v)} /></span>}</span></td>
           <td className="p-2 break-words max-w-xs">{v.variant_name || v.variant || v.genomic_dna_change || 'Not recorded'}
             {markerFor(v)?.kind === 'abnormality' && <span className="block text-xs text-muted-foreground">{markerFor(v)?.label}</span>}
           </td>
@@ -219,7 +228,7 @@ export default function GenomicsTab({ formData, readOnly = false }: {
     {viewing && <div className="space-y-4">
       {editable && markerFor(viewing)?.writable !== false && <Button onClick={() => { setDraft(editFinding(viewing)); setViewing(null); }}>Edit result</Button>}
       <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4">{[...fields, ['assessment', 'Source result assessment'], ['variant_description', 'Full finding description'], ['variant_category', 'Original variant category'], ['gene', 'Original gene field']].map(([key, label]) => <div key={key}>
-        <dt className="text-sm text-muted-foreground">{label}</dt><dd className="text-sm whitespace-pre-wrap break-words">{key === 'status' ? findingStatus(viewing) : (key === 'genomic_feature' ? featureLabel(viewing) : viewing[key]) ?? '—'}{['allelic_frequency', 'clone_fraction'].includes(key) && viewing[key] != null ? ` ${viewing[`${key}_unit`] === '1' ? '(fraction)' : '%'}` : ''}</dd>
+        <dt className="flex items-center gap-1.5 text-sm text-muted-foreground">{label}{attributeLink(key, label)}</dt><dd className="text-sm whitespace-pre-wrap break-words">{key === 'status' ? findingStatus(viewing) : (key === 'genomic_feature' ? featureLabel(viewing) : viewing[key]) ?? '—'}{['allelic_frequency', 'clone_fraction'].includes(key) && viewing[key] != null ? ` ${viewing[`${key}_unit`] === '1' ? '(fraction)' : '%'}` : ''}</dd>
       </div>)}</dl>
     </div>}
     {draft && <form className="rounded-md border p-4 space-y-4" onSubmit={e => { e.preventDefault(); void save(); }}>

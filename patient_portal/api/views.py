@@ -1109,9 +1109,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         mappings = {m.field_name: m for m in FieldConceptMapping.objects.filter(
             field_name__in=[m['field_name'] for m in selected],
         ).only('field_name', 'status', 'omop_table', 'source_value')}
+        from omop_core.services.genomics_components import components
         return Response({'version': catalog()['version'], 'disease': code,
             'markers': [{**m, **marker_features(m), 'writable': mapping_is_usable(mappings.get(m['field_name']), parent=True)}
-                        for m in selected]})
+                        for m in selected],
+            # Finding attributes the field mapper lists as genetic_mutations.<key>.
+            'attributes': [a['key'] for a in components()]})
 
     @action(detail=True, methods=['get', 'patch', 'delete'], url_path=r'genomics/(?P<variant_id>[0-9]+)', permission_classes=[GenomicsCrudPermission, PatientSelfScopePermission])
     def genomic_variant(self, request, pk=None, variant_id=None):

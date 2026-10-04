@@ -309,3 +309,19 @@ def test_tp53_aggregate_after_positive_evidence_is_cleared(setup, assessment):
     response = client.get(f'/api/patient-info/{person.pk}/')
     assert response.status_code == 200
     assert response.data['patient_info']['tp53_disruption'] is expected
+
+
+def test_catalog_lists_the_attributes_the_field_mapper_holds(setup):
+    """The Genomics tab links each listed attribute to genetic_mutations.<key> (#1717)."""
+    from omop_core.services.field_descriptor import get_all_field_descriptors
+    from omop_core.services.genomics_components import components
+    person, _, staff = setup
+    response = client_for(staff).get(f'/api/v1/patient-records/{person.pk}/genomics-catalog/', {'disease': 'BC'})
+    assert response.status_code == 200, response.data
+    attributes = response.data['attributes']
+    assert attributes == [a['key'] for a in components()]
+    assert {'allelic_frequency', 'origin', 'interpretation', 'status'} <= set(attributes)
+    mapper = {d['field_name'] for d in get_all_field_descriptors()}
+    assert {f'genetic_mutations.{key}' for key in attributes} <= mapper
+    # Every marker the tab can link already names its own mapper field.
+    assert {m['field_name'] for m in response.data['markers']} <= mapper
