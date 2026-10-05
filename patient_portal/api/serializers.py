@@ -1683,9 +1683,13 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
 
         As in Code Mapping (#1708): an unapproved hand edit of the recipe is
         ``curator``; approving, or changing the recipe of an approved mapping,
-        stamps the approver, who now owns it. Un-approving keeps the name.
+        is a sign-off by the approver, who now owns it -- provenance, reviewer
+        and reviewed_at all name them, so the three never disagree. Only someone
+        who may approve signs off; anyone else's recipe edit is ``curator``.
+        Un-approving keeps the name.
         """
         from omop_core.services.field_mapping_provenance import CURATOR_PROVENANCE, user_provenance
+        from patient_portal.api.views import _can_approve_mappings
         recipe_fields = {
             'field_name', 'concept', 'vocabulary_id', 'concept_code', 'omop_table',
             'source_value', 'unit', 'value_kind', 'type_concept_id',
@@ -1696,10 +1700,13 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         status_value = validated_data.get('status', instance.status)
         approving = status_value == 'approved' and instance.status != 'approved'
-        if approving and request:
+        signing_off = (
+            request is not None and status_value == 'approved'
+            and (approving or recipe_changed) and _can_approve_mappings(request.user)
+        )
+        if signing_off:
             validated_data['reviewer'] = request.user
             validated_data['reviewed_at'] = timezone.now()
-        if request and status_value == 'approved' and (approving or recipe_changed):
             validated_data['provenance'] = user_provenance(request.user)
         elif recipe_changed:
             validated_data['provenance'] = CURATOR_PROVENANCE
