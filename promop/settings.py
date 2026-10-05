@@ -468,6 +468,9 @@ service_credentials(SERVICE_AUTH_TOKENS, SERVICE_AUTH_TOKEN, SERVICE_AUTH_SCOPES
 # because a Suggest button that returns nothing when a third party is down is
 # worse than one that returns a guess a curator can correct.
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+# Required only by a key that is not scoped to a workspace (see
+# omop_core/mapping/anthropic_client.py).
+ANTHROPIC_WORKSPACE_ID = os.environ.get("ANTHROPIC_WORKSPACE_ID", "")
 JEV_API_KEY = os.environ.get("JEV_API_KEY", "")
 JEV_API_URL = os.environ.get("JEV_API_URL", "https://api.typesafe.ai/v1/systemone")
 
