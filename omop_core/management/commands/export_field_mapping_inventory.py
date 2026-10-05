@@ -97,6 +97,12 @@ def collect_reference_tables():
                         models.TherapyRegimenComponent, models.TherapyComponentClassLink,
                         models.DiseaseTherapyRegimen, models.TherapyOutcome.diseases.through]
     tables = {m._meta.db_table: read_table(m._meta.db_table, REFERENCE_COLUMNS) for m in reference_models}
+    # An approved mapping's provenance names its approver; that is a reviewer
+    # identifier, so it leaves as "curator" (#1719).
+    from omop_core.services.field_mapping_provenance import portable_provenance
+    for row in tables[models.FieldConceptMapping._meta.db_table]:
+        if 'provenance' in row:
+            row['provenance'] = portable_provenance(row['provenance'])
     return tables, lookup_models
 
 

@@ -7,12 +7,16 @@ def stamp_approvers(apps, schema_editor):
     """An approved mapping with a recorded reviewer names that reviewer (#1719).
 
     Before this, approval left provenance alone, so an approved suggestion still
-    read system_generated. Rows with no reviewer (seeded approvals) and proposed
-    rows keep what they have: which engine proposed them was never recorded.
+    read system_generated. Only those rows, and blank ones, are stamped. A
+    ``curator`` row records a hand edit after approval, which left the reviewer
+    unchanged, so the reviewer may not be its author; naming them would invent
+    an attribution. Rows with no reviewer (seeded approvals) and proposed rows
+    keep what they have: which engine proposed them was never recorded.
     Frozen copy of field_mapping_provenance.user_provenance.
     """
     Mapping = apps.get_model('omop_core', 'FieldConceptMapping')
-    rows = list(Mapping.objects.filter(status='approved', reviewer__isnull=False)
+    rows = list(Mapping.objects.filter(status='approved', reviewer__isnull=False,
+                                       provenance__in=('system_generated', ''))
                 .select_related('reviewer'))
     for row in rows:
         reviewer = row.reviewer

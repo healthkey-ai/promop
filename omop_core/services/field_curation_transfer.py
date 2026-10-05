@@ -46,6 +46,7 @@ from django.db import transaction
 from django.db.models import Case, CharField, F, Value, When
 from django.db.models.functions import Lower, Trim
 
+from omop_core.services.field_mapping_provenance import CURATOR_PROVENANCE, portable_provenance
 from omop_core.models import (
     Concept,
     CustomPatientField,
@@ -158,6 +159,9 @@ def read_payload(
                 'concept_code_resolved': m.concept.concept_code if m.concept else '',
                 'concept_id': m.concept_id,
                 **{name: getattr(m, name) for name in _MAPPING_FIELDS},
+                # Like the reviewer it mirrors, an approver's name does not
+                # travel: on the target it is just "curator" (#1719).
+                'provenance': portable_provenance(m.provenance),
             }
             for m in FieldConceptMapping.objects.using(using)
             .select_related('concept')
@@ -244,6 +248,9 @@ def _code_mapping_row(m: SourceCodeConceptMapping) -> dict[str, object]:
             for c in (getattr(m, fk),)
         },
         **{name: getattr(m, name) for name in _CODE_MAPPING_FIELDS},
+        # Approval stamps the approver's email as origin_system (#1708). Like
+        # the cleared reviewer it names a person on this instance only (#1719).
+        'origin_system': CURATOR_PROVENANCE if '@' in (m.origin_system or '') else m.origin_system,
     }
 
 

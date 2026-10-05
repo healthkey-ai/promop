@@ -25,6 +25,23 @@ def genomics_catalog_provenance(version):
     return f'genomics-catalog v{version}'
 
 
+_MACHINE_PREFIXES = ('field-suggest ', 'genomics-catalog ')
+
+
+def portable_provenance(value):
+    """Provenance fit to leave this database: an approver becomes ``curator``.
+
+    An approver's email names a person, and the inventory export (committed to a
+    public repo) and the curation transfer (where an Identity is a different
+    person) both promise to carry no reviewer identity. Engine labels, legacy
+    labels and blank pass through unchanged.
+    """
+    value = value or ''
+    if value in ('', CURATOR_PROVENANCE, LEGACY_SYSTEM_PROVENANCE) or value.startswith(_MACHINE_PREFIXES):
+        return value
+    return CURATOR_PROVENANCE
+
+
 def user_provenance(user):
     """The approver, as Code Mapping records one: email, else name, else id."""
     label = (getattr(user, 'email', '') or getattr(user, 'name', '')
