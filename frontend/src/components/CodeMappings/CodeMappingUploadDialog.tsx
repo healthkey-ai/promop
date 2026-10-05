@@ -38,7 +38,15 @@ export default function CodeMappingUploadDialog({ defaultProvenance, onClose, on
     body.append("file", file);
     body.append("source_vocabulary_id", vocabulary.trim());
     body.append("provenance", provenance.trim());
-    void api.post<CodeMappingUploadResult>("/v1/code-mappings/upload/", body)
+    // The shared api instance declares 'Content-Type: application/json' as a
+    // default. axios reads that header before deciding how to encode the body,
+    // and for FormData the JSON branch runs: it stringifies the entries and
+    // every File collapses to {}. The file is then absent from the request and
+    // the server answers "CSV file is required." no matter which file was
+    // chosen. Clearing the header for this one request lets the browser set
+    // multipart/form-data with its own boundary.
+    void api.post<CodeMappingUploadResult>("/v1/code-mappings/upload/", body,
+      { headers: { "Content-Type": undefined } })
       .then(({ data }) => onUploaded(data), (caught: unknown) => {
         setError(formatUploadError(caught));
       })
