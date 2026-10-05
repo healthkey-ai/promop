@@ -58,7 +58,16 @@ export default function AdvanceDirectives({ user }: { user: User | null }) {
       formData.append("title", file.name);
       formData.append("file_name", file.name);
       formData.append("file", file);
-      await api.post("/v1/documents/", formData);
+      // The shared api instance declares 'Content-Type: application/json' as a
+      // default. axios reads that header before deciding how to encode the body,
+      // and for FormData it stringifies the entries instead, collapsing the File
+      // to {}. The viewset's FileField then saw no upload and rejected the row,
+      // which surfaced only as "Failed to upload advance directive." Clearing
+      // the header here lets the browser set multipart/form-data with its own
+      // boundary, which is what the endpoint has always expected.
+      await api.post("/v1/documents/", formData, {
+        headers: { "Content-Type": undefined },
+      });
       await fetchDocuments();
     } catch {
       setError("Failed to upload advance directive.");
