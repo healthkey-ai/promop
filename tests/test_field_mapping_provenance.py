@@ -224,3 +224,33 @@ def test_migration_leaves_a_curator_edit_unattributed():
     edited.refresh_from_db(); blank.refresh_from_db()
     assert edited.provenance == 'curator', 'the reviewer may not be who made the later edit'
     assert blank.provenance == 'reviewer@example.org'
+
+
+def test_transfer_drops_any_code_mapping_approver_label():
+    """#1708 stamps email, else issuer|sub, else a name; none may travel."""
+    from omop_core.models import SourceCodeConceptMapping
+    Identity.objects.create(email='', name='Ada Lovelace', issuer='https://idp.example', sub='ada-1')
+    for code, origin in (('A', 'https://idp.example|ada-1'), ('B', 'Ada Lovelace'),
+                         ('C', 'HT-One'), ('D', 'athena')):
+        SourceCodeConceptMapping.objects.create(source_vocabulary_id='LOCAL', source_code=code,
+                                                origin_system=origin)
+    payload = read_payload('default', tables=('code_mappings',))
+    origins = {m['source_code']: m['origin_system'] for m in payload['code_mappings']}
+    assert origins == {'A': 'curator', 'B': 'curator', 'C': 'HT-One', 'D': 'athena'}
+
+
+def test_migration_reverse_folds_back_to_the_two_old_labels():
+    rows = {provenance: FieldConceptMapping.objects.create(field_name=field, provenance=provenance)
+            for field, provenance in (('hemoglobin_g_dl', 'field-suggest v1 (propose-all)'),
+                                      ('platelet_count', 'genomics-catalog v2'),
+                                      ('wbc_count', 'approver@example.org'),
+                                      ('albumin', 'curator'), ('creatinine', 'system_generated'),
+                                      ('calcium', ''))}
+    migration = importlib.import_module('omop_core.migrations.0279_field_mapping_provenance_text')
+    migration.restore_two_labels(apps, None)
+    after = {before: FieldConceptMapping.objects.get(pk=row.pk).provenance for before, row in rows.items()}
+    assert after == {
+        'field-suggest v1 (propose-all)': 'system_generated', 'genomics-catalog v2': 'system_generated',
+        'approver@example.org': 'curator', 'curator': 'curator', 'system_generated': 'system_generated', '': '',
+    }
+    assert all(len(value) <= 20 for value in after.values())

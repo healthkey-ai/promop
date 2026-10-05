@@ -24,6 +24,22 @@ def stamp_approvers(apps, schema_editor):
     Mapping.objects.bulk_update(rows, ['provenance'], batch_size=500)
 
 
+def restore_two_labels(apps, schema_editor):
+    """Fold provenance back into the old two labels before the column narrows.
+
+    The old column was varchar(20) with choices system_generated/curator, so a
+    longer value (an engine version, an approver's email) would make the
+    reverse AlterField fail. Engine labels were machine origins, the rest were
+    people. Lossy: which engine or person is not recoverable after a rollback.
+    """
+    from django.db.models import Q
+    Mapping = apps.get_model('omop_core', 'FieldConceptMapping')
+    legacy = Q(provenance__in=('', 'system_generated', 'curator'))
+    machine = Q(provenance__startswith='field-suggest ') | Q(provenance__startswith='genomics-catalog ')
+    Mapping.objects.exclude(legacy).filter(machine).update(provenance='system_generated')
+    Mapping.objects.exclude(legacy).update(provenance='curator')
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -36,7 +52,8 @@ class Migration(migrations.Migration):
             name='provenance',
             field=models.CharField(blank=True, db_default='', default='', help_text='Who supplied the mapping in force: the suggest engine and version that proposed it, "curator", or the approving user. Blank for unrecorded legacy origins.', max_length=100),
         ),
-        # Irreversible in content: the overwritten value was the uninformative
-        # system_generated/curator label, which the reviewer column supersedes.
-        migrations.RunPython(stamp_approvers, migrations.RunPython.noop),
+        # Reversing runs restore_two_labels first, so the column can narrow.
+        # The stamped approver is not unwound to its earlier label: that was the
+        # uninformative system_generated, which the reviewer column supersedes.
+        migrations.RunPython(stamp_approvers, restore_two_labels),
     ]

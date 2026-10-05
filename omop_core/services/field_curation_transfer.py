@@ -232,8 +232,25 @@ def read_payload(
     return payload
 
 
-def _code_mapping_row(m: SourceCodeConceptMapping) -> dict[str, object]:
+def _person_labels(using: str) -> frozenset[str]:
+    """Every way an approval on ``using`` can have named a person in origin_system.
+
+    Code Mapping approval stamps ``_user_display(user)[:50]`` (#1708): the
+    email, else ``str(identity)``, which is ``issuer|sub``. origin_system is
+    otherwise free text from many importers, so people are recognised by
+    matching this instance's identities rather than by an allowlist.
+    """
+    from patient_portal.models import Identity
+    width = SourceCodeConceptMapping._meta.get_field('origin_system').max_length
+    labels = set()
+    for email, name, issuer, sub in Identity.objects.using(using).values_list('email', 'name', 'issuer', 'sub'):
+        labels.update(value[:width] for value in (email, name, f'{issuer}|{sub}') if value)
+    return frozenset(labels)
+
+
+def _code_mapping_row(m: SourceCodeConceptMapping, people: frozenset[str] = frozenset()) -> dict[str, object]:
     """One source-code mapping as a JSON-safe dict."""
+    origin = m.origin_system or ''
     return {
         'organization_slug': m.organization.slug if m.organization_id else '',
         'source_vocabulary_id': m.source_vocabulary_id,
@@ -248,9 +265,9 @@ def _code_mapping_row(m: SourceCodeConceptMapping) -> dict[str, object]:
             for c in (getattr(m, fk),)
         },
         **{name: getattr(m, name) for name in _CODE_MAPPING_FIELDS},
-        # Approval stamps the approver's email as origin_system (#1708). Like
-        # the cleared reviewer it names a person on this instance only (#1719).
-        'origin_system': CURATOR_PROVENANCE if '@' in (m.origin_system or '') else m.origin_system,
+        # Approval stamps the approver as origin_system (#1708). Like the
+        # cleared reviewer it names a person on this instance only (#1719).
+        'origin_system': CURATOR_PROVENANCE if '@' in origin or origin in people else m.origin_system,
     }
 
 
@@ -279,8 +296,9 @@ def iter_code_mappings(using: str) -> Iterator[dict[str, object]]:
         # Rows for one code stay next to each other, so a chunk rarely splits them.
         .order_by(_canonical_vocabulary(), Lower(Trim('source_code')), 'source_vocabulary_id')
     )
+    people = _person_labels(using)
     for m in queryset.iterator(chunk_size=CODE_MAPPING_CHUNK):
-        yield _code_mapping_row(m)
+        yield _code_mapping_row(m, people)
 
 
 def apply_payload(
