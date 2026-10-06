@@ -533,3 +533,36 @@ class ServiceAccessToken(models.Model):
 
     def __str__(self):
         return f'{self.application.name}: {self.label} (…{self.suffix})'
+
+
+class LabMarker(models.Model):
+    """How the Personal Health Record ranks and groups one lab test.
+
+    The PHR lists labs "most important first" and filters them by panel and by
+    cancer. Those labels belong to HealthTree's clinical admins, not to code, so
+    they live here and are edited in the Django admin. The seeded rows are a
+    starting point until the CureHub observation labels are imported.
+    """
+
+    loinc_code = models.CharField(max_length=20, unique=True)
+    label = models.CharField(
+        max_length=120, blank=True, default='',
+        help_text='Display name; blank uses the LOINC concept name.',
+    )
+    rank = models.PositiveIntegerField(
+        help_text='Lower is more important. Unranked tests sort after ranked ones.',
+    )
+    panels = models.JSONField(
+        default=list, blank=True,
+        help_text='Panels this test belongs to, e.g. ["CBC"] or ["BMP", "CMP"].',
+    )
+    disease_slugs = models.JSONField(
+        default=list, blank=True,
+        help_text='Cancers this test is a disease marker for (PatientRecord.disease_slug values).',
+    )
+
+    class Meta:
+        ordering = ['rank', 'loinc_code']
+
+    def __str__(self):
+        return f'{self.loinc_code} (rank {self.rank})'

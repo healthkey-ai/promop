@@ -227,3 +227,108 @@ def test_status_reports_each_section_ready_or_empty():
         'genetics': 'empty',
         'imaging': 'empty',
     }
+
+
+# ---------------------------------------------------------------- labs
+
+from patient_portal.models import LabMarker  # noqa: E402
+
+
+def loinc(code, name):
+    return ConceptFactory(concept_code=code, concept_name=name)
+
+
+def lab(record, concept, on, value=None, **kwargs):
+    with suppress_patient_record_refresh():
+        return MeasurementFactory(
+            person=record.person, measurement_concept=concept, measurement_date=on,
+            value_as_number=value, **kwargs,
+        )
+
+
+def test_labs_lists_the_latest_result_per_test_ranked_by_the_admin_labels():
+    record = PatientRecordFactory(disease='Multiple myeloma', disease_slug='myeloma')
+    LabMarker.objects.create(loinc_code='48378-4', rank=1, disease_slugs=['myeloma'])
+    LabMarker.objects.create(loinc_code='718-7', rank=11, panels=['CBC'])
+    LabMarker.objects.create(loinc_code='2160-0', rank=30, panels=['BMP', 'CMP'])
+    hgb = loinc('718-7', 'Hemoglobin [Mass/volume] in Blood')
+    ratio = loinc('48378-4', 'Kappa lc.free/Lambda lc.free [Mass Ratio] in Serum')
+    creat = loinc('2160-0', 'Creatinine [Mass/volume] in Serum or Plasma')
+    zinc = loinc('5763-8', 'Zinc [Mass/volume] in Serum or Plasma')
+    weight = loinc('29463-7', 'Body weight')
+    visit = visit_at(record, 'MD Anderson Cancer Center')
+    lab(record, hgb, '2024-01-01', 13.2, range_low=13.5, range_high=17.5)
+    lab(record, hgb, '2024-03-01', 11.0, range_low=13.5, range_high=17.5, unit_source_value='g/dL',
+        visit_occurrence=visit)
+    lab(record, hgb, '2024-04-01', 1.0, is_erroneous=True)
+    lab(record, ratio, '2024-02-01', 2.5, range_low=0.26, range_high=1.65)
+    lab(record, creat, '2024-02-01', 0.9, range_low=0.7, range_high=1.3)
+    lab(record, zinc, '2023-12-01', value_as_string='pending')
+    lab(record, weight, '2024-02-01', 80)
+
+    data = signed_in(record).get('/api/v1/phr/labs/').data
+
+    assert [t['name'] for t in data['tests']] == [
+        'Kappa lc.free/Lambda lc.free', 'Hemoglobin', 'Creatinine', 'Zinc',
+    ]
+    hemoglobin = data['tests'][1]
+    assert hemoglobin == {
+        'id': str(hgb.concept_id),
+        'name': 'Hemoglobin',
+        'specimen': 'Blood',
+        'rank': 11,
+        'panels': ['CBC'],
+        'disease_slugs': [],
+        'count': 2,
+        'latest': {
+            'id': hemoglobin['latest']['id'],
+            'date': '2024-03-01',
+            'value': 11,
+            'unit': 'g/dL',
+            'range': {'low': 13.5, 'high': 17.5},
+            'flag': 'low',
+            'source': {'kind': 'record', 'facility': 'MD Anderson Cancer Center', 'date': '2024-03-01'},
+        },
+    }
+    assert data['tests'][0]['latest']['flag'] == 'high'
+    assert data['tests'][2]['latest']['flag'] == 'normal'
+    assert data['tests'][3]['latest'] == {
+        'id': data['tests'][3]['latest']['id'],
+        'date': '2023-12-01',
+        'value_text': 'pending',
+        'source': {'kind': 'record', 'facility': None, 'date': '2023-12-01'},
+    }
+    assert data['filters'] == {
+        'diagnoses': [{'slug': 'myeloma', 'name': 'Multiple myeloma'}],
+        'panels': ['CBC', 'BMP', 'CMP'],
+    }
+
+
+def test_lab_history_is_newest_first_and_follows_unmapped_source_concepts():
+    record = PatientRecordFactory(disease='')
+    ConceptFactory(concept_id=0, concept_code='No matching concept', concept_name='No matching concept')
+    ldh = loinc('2532-0', 'Lactate dehydrogenase [Enzymatic activity/volume] in Serum or Plasma')
+    lab(record, ldh, '2024-01-01', 200)
+    with suppress_patient_record_refresh():
+        MeasurementFactory(
+            person=record.person, measurement_concept_id=0, measurement_source_concept=ldh,
+            measurement_date='2024-05-01', value_as_number=260, range_high=225,
+        )
+
+    client = signed_in(record)
+    data = client.get(f'/api/v1/phr/labs/{ldh.concept_id}/').data
+
+    assert data['name'] == 'Lactate dehydrogenase'
+    assert [(h['date'], h['value'], h.get('flag')) for h in data['history']] == [
+        ('2024-05-01', 260, 'high'),
+        ('2024-01-01', 200, None),
+    ]
+    assert client.get('/api/v1/phr/labs/123456789/').status_code == 404
+
+
+def test_another_patients_lab_history_is_not_found():
+    mine, theirs = PatientRecordFactory(disease=''), PatientRecordFactory(disease='')
+    hgb = loinc('718-7', 'Hemoglobin [Mass/volume] in Blood')
+    lab(theirs, hgb, '2024-01-01', 12)
+
+    assert signed_in(mine).get(f'/api/v1/phr/labs/{hgb.concept_id}/').status_code == 404

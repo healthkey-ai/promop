@@ -23,6 +23,7 @@ from omop_core.models import (
 )
 from patient_portal.models import PatientUser
 
+from .labs import lab_history, labs
 from .sources import PATIENT, RECORD, row_sources, source
 
 GENETIC_DOC_TYPES = ('FISH', 'GEP', 'NGS', 'CYTOMETRY', 'CYTOGENETICS', 'MRD', 'BONE_MARROW')
@@ -41,9 +42,12 @@ class PhrView(APIView):
             return Response({'detail': 'No record.'}, status=404)
         person = link.person
         record = PatientRecord.objects.filter(person=person).first()
-        return Response(self.build(person, record))
+        data = self.build(person, record)
+        if data is None:
+            return Response({'detail': 'Not found.'}, status=404)
+        return Response(data)
 
-    def build(self, person, record: PatientRecord | None) -> dict[str, Any]:
+    def build(self, person, record: PatientRecord | None) -> dict[str, Any] | None:
         raise NotImplementedError
 
 
@@ -301,3 +305,20 @@ def section_status(person, record: PatientRecord | None) -> dict[str, str]:
 class StatusView(PhrView):
     def build(self, person, record):
         return {'sections': section_status(person, record)}
+
+
+# ---------------------------------------------------------------- Labs
+
+
+class LabsView(PhrView):
+    def build(self, person, record):
+        return labs(person, record)
+
+
+class LabHistoryView(PhrView):
+    def get(self, request, test_id: int):
+        self.test_id = test_id
+        return super().get(request)
+
+    def build(self, person, record):
+        return lab_history(person, self.test_id)
