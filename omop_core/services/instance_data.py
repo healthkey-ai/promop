@@ -104,6 +104,9 @@ PATIENT: frozenset[str] = frozenset({
     'omop_core.ProcedureOccurrence', 'omop_core.ProvenanceRecord', 'omop_core.RecordRevision',
     'omop_core.Specimen', 'omop_core.SupportiveTherapyCourse', 'omop_core.TrialSearchPreferences',
     'omop_core.VisitDetail', 'omop_core.VisitOccurrence', 'omop_core.WearableUpload',
+    # What the patient says about their record (confirmed or stopped
+    # prescriptions, why a line of therapy ended), kept beside it.
+    'patient_portal.PatientStatement',
     # Where care happened. No clinical row on any instance references them yet.
     'omop_core.CareSite', 'omop_core.Provider',
     'omop_oncology.AILineOfTherapySummary', 'omop_oncology.CancerModifier',

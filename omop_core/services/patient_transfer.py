@@ -75,7 +75,7 @@ from omop_oncology.models import (
     Histology,
     StemTable,
 )
-from patient_portal.models import BreakGlassGrant, PatientInvitation, PatientUser
+from patient_portal.models import BreakGlassGrant, PatientInvitation, PatientStatement, PatientUser
 from prolog_surveys.models import (
     MintedParticipant,
     SurveyAnswer,
@@ -151,6 +151,7 @@ PATIENT_TABLES: tuple[PatientTable, ...] = (
     PatientTable(PatientTrialEnrollment, 'person_id'),
     PatientTable(TrialSearchPreferences, 'person_id'),
     PatientTable(PatientRecord, 'person_id'),
+    PatientTable(PatientStatement, 'person_id'),
     PatientTable(RecordRevision, 'patient_record__person_id'),
     PatientTable(SurveyResponse, 'participant_id'),
     PatientTable(SurveyAnswer, 'response__participant_id'),
@@ -442,6 +443,13 @@ class _Copier:
             references.append((attname, row[field_attname], row[attname]))
         if model is RecordRevision and values['changed_by'] != 'system':
             values['changed_by'] = None
+        if model is PatientStatement and row['subject'] == PatientStatement.SUBJECT_THERAPY_LINE:
+            # A line is keyed by its Episode id, and Episodes are renumbered here.
+            episode = self.ids.get(Episode, {}).get(int(row['subject_key'])) if row['subject_key'].isdigit() else None
+            if episode is None:
+                self.stats.skipped[label] += 1
+                return None
+            values['subject_key'] = str(episode)
         if model is ProvenanceRecord and not self._provenance(row, values):
             self.stats.skipped[label] += 1
             return None

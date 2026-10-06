@@ -453,3 +453,27 @@ def test_target_person_id_needs_exactly_one_patient(patient: Person, source_is_t
             'copy_patient', str(SOURCE_ID), '777', '--target-person-id', '9', '--org', 'target-org',
             '--source-url', 'postgresql://u:p@localhost/db',
         )
+
+
+def test_patient_statements_follow_the_patient_and_their_therapy_line(patient: Person):
+    from patient_portal.models import Identity, PatientStatement
+
+    author = Identity.objects.create_user(email='statement-author@example.test')
+    PatientStatement.objects.create(person=patient, subject='medication', subject_key='src-vitamin-d3',
+                                    status='taking', created_by=author)
+    PatientStatement.objects.create(person=patient, subject='therapy_line', subject_key='30',
+                                    status='end_reason', reason='side_effects', note='Neuropathy')
+    PatientStatement.objects.create(person=patient, subject='therapy_line', subject_key='999',
+                                    status='end_reason', reason='finished')
+
+    stats = _copy()
+
+    copied = {s.subject: s for s in PatientStatement.objects.filter(person_id=TARGET_ID)}
+    assert copied['medication'].subject_key == 'src-vitamin-d3'
+    assert copied['medication'].created_by is None  # accounts are not copied
+    line = Episode.objects.get(person_id=TARGET_ID)
+    assert copied['therapy_line'].subject_key == str(line.episode_id) != '30'
+    assert copied['therapy_line'].note == 'Neuropathy'
+    # A statement about a line that is not on the record is not carried over.
+    assert PatientStatement.objects.filter(person_id=TARGET_ID).count() == 2
+    assert stats.skipped['PatientStatement'] == 1
