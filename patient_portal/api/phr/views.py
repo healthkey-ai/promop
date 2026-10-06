@@ -277,8 +277,11 @@ def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
     cancer = []
     slug = (record.disease_slug or '').lower() if record else ''
     primary_family = SLUG_FAMILY.get(slug, slug)
-    primary = primary_cancer(record, _transitions(families.pop(primary_family, []))) if record else None
+    primary_rows = families.pop(primary_family, [])
+    primary = primary_cancer(record, _transitions(primary_rows)) if record else None
     if primary:
+        if 'status' not in primary and primary_rows and all(r.condition_end_date for r in primary_rows):
+            primary['status'] = 'Resolved'
         cancer.append(primary)
     for family_rows in families.values():
         latest = family_rows[-1]
@@ -286,10 +289,13 @@ def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
         if not name:
             continue
         resolved = all(r.condition_end_date for r in family_rows)
+        # Diagnosed when the current diagnosis began (myeloma, not the MGUS
+        # before it); the earlier steps are in the transitions.
+        current_start = next(r for r in family_rows if _condition_name(r) == name).condition_start_date
         entry = {
             'id': f'condition-{latest.pk}',
             'name': name,
-            'date': family_rows[0].condition_start_date.isoformat(),
+            'date': current_start.isoformat(),
             'status': 'Resolved' if resolved else _text(latest.condition_status_source_value),
             'transitions': _transitions(family_rows),
             'source': sources[latest.pk],

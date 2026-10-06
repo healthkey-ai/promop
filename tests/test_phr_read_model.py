@@ -850,3 +850,19 @@ def test_patient_adds_edits_and_removes_a_procedure(adder):
     assert other.delete(f"/api/v1/phr/procedures/{added.data['id']}/").status_code == 403
     assert client.delete(f"/api/v1/phr/procedures/{added.data['id']}/").status_code == 204
     assert client.get('/api/v1/phr/procedures/').data['procedures'] == []
+
+
+
+def test_a_cancer_is_dated_from_its_current_diagnosis_and_a_resolved_primary_says_so():
+    # The derived primary can be a cancer that has resolved (PRomop follows the
+    # most recent diagnosis); the PHR still has to say it is resolved.
+    record = PatientRecordFactory(disease='Prostate cancer', disease_slug='prostate-cancer', diagnosis_date='2025-11-08')
+    condition(record, icd10('D47.2', 'Monoclonal gammopathy'), '2019-06-04')
+    condition(record, icd10('C90.00', 'Multiple myeloma'), '2024-03-12')
+    condition(record, icd10('C61', 'Prostate cancer'), '2025-11-08', condition_end_date='2026-03-06')
+
+    cancer = {c['name']: c for c in signed_in(record).get('/api/v1/phr/diagnoses/').data['cancer']}
+
+    assert cancer['Prostate cancer']['status'] == 'Resolved'
+    assert cancer['Multiple myeloma']['date'] == '2024-03-12'
+    assert [t['date'] for t in cancer['Multiple myeloma']['transitions']] == ['2019-06-04', '2024-03-12']
