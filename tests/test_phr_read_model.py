@@ -466,3 +466,26 @@ def test_genetics_groups_findings_into_tests_and_attaches_matching_documents(mon
         'id': m1.pk, 'name': 'TP53', 'variant': 'del(17p)', 'interpretation': 'pathogenic', 'percent': 38,
         'source': {'kind': 'record', 'facility': None, 'date': '2023-04-02'},
     }
+
+
+def test_unlabelled_findings_join_the_only_genetic_report_from_that_day(monkeypatch):
+    record = PatientRecordFactory(disease='')
+    m1 = lab(record, loinc('81252-9', 'Gene variant'), '2026-08-20')
+    m2 = lab(record, loinc('81252-9', 'Gene variant'), '2026-06-04')
+    monkeypatch.setattr('omop_core.services.genomics.list_variants', lambda person: [
+        {'id': m1.pk, 'gene': 'fgfr3', 'variant': 't(4;14)', 'test_date': '2026-08-20'},
+        {'id': m2.pk, 'gene': 'kras', 'variant': 'Q61H', 'test_date': '2026-06-04'},
+    ])
+    PatientDocument.objects.create(person=record.person, doc_type='FISH', title='FISH panel', effective_date='2026-08-20')
+    PatientDocument.objects.create(person=record.person, doc_type='NGS', title='NGS panel', effective_date='2026-06-04')
+    PatientDocument.objects.create(person=record.person, doc_type='CYTOGENETICS', title='Karyotype', effective_date='2026-06-04')
+
+    tests = signed_in(record).get('/api/v1/phr/genetics/').data['tests']
+
+    assert [(t['type'], t['date'], [f['name'] for f in t['findings']]) for t in tests] == [
+        ('FISH', '2026-08-20', ['FGFR3']),
+        ('Genetic test', '2026-06-04', ['KRAS']),
+        # Two reports that day, so KRAS stays unattached; newer upload first.
+        ('Cytogenetics', '2026-06-04', []),
+        ('NGS', '2026-06-04', []),
+    ]

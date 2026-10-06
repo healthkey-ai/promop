@@ -6,7 +6,7 @@ is a later phase and is stored beside these rows, never over them.
 """
 from __future__ import annotations
 
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from datetime import date
 from typing import Any
 
@@ -152,6 +152,7 @@ def procedures(person, record) -> dict[str, Any]:
 
 # ---------------------------------------------------------------- genetics
 
+UNLABELLED = 'Genetic test'
 GENETIC_DOC_LABELS = {
     'FISH': 'FISH',
     'CYTOGENETICS': 'Cytogenetics',
@@ -192,7 +193,7 @@ def genetics(person, record) -> dict[str, Any]:
     # One test per (method, date): the findings a single report produced.
     tests: OrderedDict[tuple, dict[str, Any]] = OrderedDict()
     for variant in sorted(variants, key=lambda v: v.get('test_date') or '', reverse=True):
-        method = (variant.get('assay_method') or '').strip() or 'Genetic test'
+        method = (variant.get('assay_method') or '').strip() or UNLABELLED
         when = variant.get('test_date')
         test = tests.setdefault((method.lower(), when), {
             'id': f"test-{variant.get('id')}",
@@ -202,9 +203,10 @@ def genetics(person, record) -> dict[str, Any]:
         })
         test['findings'].append(_finding(variant, sources))
 
-    documents = PatientDocument.objects.filter(
+    documents = list(PatientDocument.objects.filter(
         person=person, doc_type__in=GENETIC_DOC_LABELS,
-    ).order_by('-effective_date', '-uploaded_at')
+    ).order_by('-effective_date', '-uploaded_at'))
+    same_day_docs = Counter(doc.effective_date or doc.uploaded_at.date() for doc in documents)
     for doc in documents:
         on = doc.effective_date or doc.uploaded_at.date()
         label = GENETIC_DOC_LABELS[doc.doc_type]
@@ -214,6 +216,12 @@ def genetics(person, record) -> dict[str, Any]:
         if (doc.file_url or '').startswith('https://'):
             document['url'] = doc.file_url
         match = tests.get((label.lower(), on.isoformat()))
+        if match is None and same_day_docs[on] == 1:
+            # Findings recorded without a method (e.g. FISH translocations with
+            # no gene-specific code) belong to the only report from that day.
+            match = tests.get((UNLABELLED.lower(), on.isoformat()))
+            if match is not None:
+                match['type'] = label
         if match is not None:
             match.setdefault('document', document)
             continue
