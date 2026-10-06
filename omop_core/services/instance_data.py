@@ -89,6 +89,9 @@ _REFERENCE_COPIED_EXPLICIT: frozenset[str] = frozenset({
     'omop_core.TherapyOutcome_diseases', 'omop_core.TherapyRegimenComponent',
     # A lookup list, but with integer codes it cannot extend VocabularyLookup.
     'omop_core.ToxicityGrade',
+    # How the Personal Health Record ranks and groups lab tests: clinical
+    # labels curated in the admin, matched on their LOINC code.
+    'patient_portal.LabMarker',
 })
 
 PATIENT: frozenset[str] = frozenset({

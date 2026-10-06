@@ -106,7 +106,15 @@ def copied_tables() -> list[ReferenceTable]:
         ReferenceTable(TherapyComponentClassLink, ('component', 'therapy_class')),
         ReferenceTable(DiseaseTherapyRegimen, ('disease', 'round', 'regimen')),
         ReferenceTable(TherapyOutcome, ('code',)),
+        ReferenceTable(_lab_marker(), ('loinc_code',)),
     ]
+
+
+def _lab_marker() -> type[Model]:
+    # Imported here: patient_portal's models import omop_core's at load time.
+    from patient_portal.models import LabMarker
+
+    return LabMarker
 
 
 # After the code mappings, because each candidate belongs to one.

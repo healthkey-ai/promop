@@ -238,3 +238,21 @@ def test_source_connection_carries_the_defaults_django_applies_at_startup():
         assert set(default['TEST']) <= set(config['TEST'])
     finally:
         connections.databases.pop(alias, None)
+
+
+def test_lab_markers_copy_by_loinc_code():
+    from patient_portal.models import LabMarker
+
+    LabMarker.objects.create(loinc_code='718-7', label='Hemoglobin', rank=11, panels=['CBC'])
+    LabMarker.objects.create(loinc_code='48378-4', rank=1, disease_slugs=['myeloma'])
+    payload = read_reference('default')
+    LabMarker.objects.filter(loinc_code='718-7').update(rank=99, panels=[])
+    LabMarker.objects.filter(loinc_code='48378-4').delete()
+
+    stats = apply_reference(payload)
+
+    assert LabMarker.objects.get(loinc_code='718-7').rank == 11
+    assert LabMarker.objects.get(loinc_code='718-7').panels == ['CBC']
+    assert LabMarker.objects.get(loinc_code='48378-4').disease_slugs == ['myeloma']
+    assert stats.updated['LabMarker'] == 1
+    assert LabMarker.objects.count() == 2
