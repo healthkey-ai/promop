@@ -25,6 +25,7 @@ from patient_portal.models import PatientUser
 
 from .labs import lab_history, labs
 from .records import genetics, medication_detail, medications, procedures
+from .feed import imaging, whats_new
 from .therapy import therapy
 from .sources import PATIENT, RECORD, row_sources, source
 
@@ -371,7 +372,7 @@ class LabHistoryView(PhrView):
         return super().get(request)
 
     def build(self, person, record):
-        return lab_history(person, self.test_id)
+        return lab_history(person, self.test_id, record)
 
 
 # ---------------------------------------------------------------- Medications, procedures, genetics
@@ -404,3 +405,13 @@ class GeneticsView(PhrView):
 class TherapyView(PhrView):
     def build(self, person, record):
         return therapy(person, record)
+
+
+class WhatsNewView(PhrView):
+    def build(self, person, record):
+        return whats_new(person, record)
+
+
+class ImagingView(PhrView):
+    def build(self, person, record):
+        return imaging(person, record)

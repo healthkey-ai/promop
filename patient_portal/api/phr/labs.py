@@ -168,7 +168,7 @@ def labs(person, record) -> dict[str, Any]:
     return {'tests': tests, 'filters': filters}
 
 
-def lab_history(person, concept_id: int) -> dict[str, Any] | None:
+def lab_history(person, concept_id: int, record=None) -> dict[str, Any] | None:
     rows = list(
         _rows(person).filter(
             Q(measurement_concept_id=concept_id)
@@ -178,7 +178,15 @@ def lab_history(person, concept_id: int) -> dict[str, Any] | None:
     if not rows or effective_concept(rows[0]).concept_code in VITALS:
         return None
     sources = row_sources(Measurement, rows, type_attr='measurement_type_concept', date_attr='measurement_date')
+    from .therapy import therapy_lines
+
     return {
         **_test_meta(effective_concept(rows[0]), _markers()),
         'history': [result(row, sources[row.pk]) for row in rows],
+        # Treatment lines, for shading the chart and naming the treatment at
+        # the time of a result.
+        'therapy': [
+            {k: line[k] for k in ('number', 'regimen', 'start', 'end') if k in line}
+            for line in therapy_lines(person, record)
+        ],
     }

@@ -559,3 +559,57 @@ def test_therapy_draws_each_line_with_its_medicines_procedures_and_outcome():
 def test_therapy_is_empty_without_lines():
     record = PatientRecordFactory(disease='Multiple myeloma')
     assert signed_in(record).get('/api/v1/phr/therapy/').data == {'tracks': []}
+
+
+# ---------------------------------------------------------------- what's new, imaging, lab overlay
+
+
+def test_whats_new_groups_the_last_30_days_by_date_section_and_facility():
+    record = PatientRecordFactory(disease='')
+    today = timezone.localdate()
+    recent, older = (today - timedelta(days=3)).isoformat(), (today - timedelta(days=45)).isoformat()
+    visit = visit_at(record, 'MD Anderson Cancer Center')
+    hgb, plt = loinc('718-7', 'Hemoglobin [Mass/volume] in Blood'), loinc('777-3', 'Platelets [#/volume] in Blood')
+    lab(record, hgb, recent, 11, visit_occurrence=visit)
+    lab(record, plt, recent, 150, visit_occurrence=visit)
+    lab(record, loinc('29463-7', 'Body weight'), recent, 80)       # vitals are not labs
+    lab(record, hgb, recent, 1, is_erroneous=True)                  # entered in error
+    lab(record, hgb, older, 12)                                     # outside the window
+    drug(record, ConceptFactory(concept_name='Acyclovir', concept_code='RX-ACY'), recent)
+    PatientDocument.objects.create(person=record.person, doc_type='IMAGING', title='PET-CT')
+
+    data = signed_in(record).get('/api/v1/phr/whats-new/').data
+
+    assert data == {'days': 30, 'groups': [
+        {'date': today.isoformat(), 'items': [{'section': 'imaging', 'count': 1}]},
+        {'date': recent, 'items': [
+            {'section': 'labs', 'count': 2, 'facility': 'MD Anderson Cancer Center'},
+            {'section': 'medications', 'count': 1},
+        ]},
+    ]}
+
+
+def test_imaging_lists_reports_newest_first():
+    record = PatientRecordFactory(disease='')
+    PatientDocument.objects.create(person=record.person, doc_type='IMAGING', title='MRI spine', effective_date='2024-03-05')
+    PatientDocument.objects.create(person=record.person, doc_type='IMAGING', title='PET-CT', effective_date='2026-08-12',
+                                   file_url='https://example.test/pet.pdf')
+    PatientDocument.objects.create(person=record.person, doc_type='FISH', effective_date='2026-08-12')
+
+    studies = signed_in(record).get('/api/v1/phr/imaging/').data['studies']
+
+    assert [(s['name'], s['date'], s['document']) for s in studies] == [
+        ('PET-CT', '2026-08-12', {'title': 'PET-CT', 'url': 'https://example.test/pet.pdf'}),
+        ('MRI spine', '2024-03-05', {'title': 'MRI spine'}),
+    ]
+
+
+def test_lab_history_carries_the_treatment_lines_for_the_chart():
+    record = PatientRecordFactory(disease='Multiple myeloma', first_line_therapy='VRd',
+                                  first_line_start_date='2024-03-12', first_line_end_date='2024-10-14')
+    hgb = loinc('718-7', 'Hemoglobin [Mass/volume] in Blood')
+    lab(record, hgb, '2024-05-01', 10)
+
+    data = signed_in(record).get(f'/api/v1/phr/labs/{hgb.concept_id}/').data
+
+    assert data['therapy'] == [{'number': 1, 'regimen': 'VRd', 'start': '2024-03-12', 'end': '2024-10-14'}]

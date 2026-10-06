@@ -11,6 +11,8 @@ from .views import (
     ProceduresView,
     StatusView,
     TherapyView,
+    ImagingView,
+    WhatsNewView,
 )
 
 urlpatterns = [
@@ -24,4 +26,6 @@ urlpatterns = [
     path('procedures/', ProceduresView.as_view(), name='phr-procedures'),
     path('genetics/', GeneticsView.as_view(), name='phr-genetics'),
     path('therapy/', TherapyView.as_view(), name='phr-therapy'),
+    path('whats-new/', WhatsNewView.as_view(), name='phr-whats-new'),
+    path('imaging/', ImagingView.as_view(), name='phr-imaging'),
 ]
