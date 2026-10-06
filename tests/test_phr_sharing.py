@@ -139,6 +139,15 @@ def test_a_shared_record_is_read_only_and_never_reaches_the_patients_own_endpoin
     assert 'json' not in client.get('/api/v1/phr/shared/whats-new/')['Content-Type']
 
 
+def test_the_browser_may_send_the_token_cross_origin(settings):
+    settings.CORS_ALLOWED_ORIGINS = ['https://one.example']
+    preflight = APIClient().options(
+        '/api/v1/phr/shared/', HTTP_ORIGIN='https://one.example',
+        HTTP_ACCESS_CONTROL_REQUEST_METHOD='GET', HTTP_ACCESS_CONTROL_REQUEST_HEADERS='x-share-token',
+    )
+    assert 'x-share-token' in preflight['Access-Control-Allow-Headers']
+
+
 def test_each_read_is_audited_against_the_share(patient):
     share = grant(patient['client']).data
     holder(share).get('/api/v1/phr/shared/labs/')

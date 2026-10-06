@@ -401,6 +401,10 @@ CORS_ALLOW_HEADERS = (
     *default_headers,
     'x-provenance-source',
     'x-provenance-user-id',
+    # A shared Personal Health Record is read with its link's token in this
+    # header (patient_portal/api/phr/sharing.py), cross-origin from the app
+    # that shows it.
+    'x-share-token',
     # Conditional writes (#1312) are opt-in on the API and unavoidable for
     # EXACT's filter saves: `default_headers` carries neither of these, so the
     # preflight was refused with "Request header field if-match is not allowed
