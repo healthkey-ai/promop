@@ -174,6 +174,22 @@ def test_cancer_conditions_become_dated_transitions_and_other_conditions_are_lis
     ]
 
 
+def test_a_second_cancer_gets_its_own_entry_and_cancers_are_newest_first():
+    record = PatientRecordFactory(disease='Multiple myeloma', disease_slug='myeloma', diagnosis_date='2024-03-12')
+    condition(record, icd10('D47.2', 'Monoclonal gammopathy'), '2019-06-04')
+    condition(record, icd10('C90.00', 'Multiple myeloma'), '2024-03-12')
+    condition(record, icd10('C61', 'Malignant neoplasm of prostate'), '2025-11-08', condition_end_date='2026-03-06')
+
+    cancer = signed_in(record).get('/api/v1/phr/diagnoses/').data['cancer']
+
+    assert [(c['name'], c['date'], c.get('status')) for c in cancer] == [
+        ('Malignant neoplasm of prostate', '2025-11-08', 'Resolved'),
+        ('Multiple myeloma', '2024-03-12', None),
+    ]
+    assert [t['name'] for t in cancer[1]['transitions']] == ['Monoclonal gammopathy', 'Multiple myeloma']
+    assert 'transitions' not in cancer[0]
+
+
 def test_without_a_derived_primary_each_cancer_condition_is_listed():
     record = PatientRecordFactory(disease='')
     condition(record, icd10('C50.911', 'Malignant neoplasm of breast'), '2020-02-02')

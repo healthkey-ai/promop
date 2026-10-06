@@ -133,6 +133,8 @@ def is_cancer_condition(row: ConditionOccurrence) -> bool:
 # with the disease; fields that don't apply are simply absent.
 SOLID_TUMOURS = {'breast-cancer', 'lung-cancer', 'colon-cancer'}
 STAGE_FIELDS = {
+    'myeloma': ('stage', 'Stage & risk group'),
+    'multiple-myeloma': ('stage', 'Stage & risk group'),
     'chronic-lymphocytic-leukemia': ('binet_stage', 'Binet stage'),
     'follicular-lymphoma': ('stage', 'Ann Arbor stage'),
 }
@@ -207,46 +209,93 @@ def _condition_name(row) -> str | None:
     return _text(concept.concept_name if concept else None) or _text(row.condition_source_value)
 
 
+# Cancer families by ICD-10 prefix: conditions in one family are one disease
+# over time (MGUS → smoldering → myeloma); different families are different
+# cancers and get their own entries.
+CANCER_FAMILIES = {
+    'myeloma': ('C90', 'D47.2'),
+    'prostate-cancer': ('C61',),
+    'breast-cancer': ('C50', 'D05'),
+    'lung-cancer': ('C34',),
+    'colon-cancer': ('C18', 'C19', 'C20'),
+    'follicular-lymphoma': ('C82',),
+    'chronic-lymphocytic-leukemia': ('C91.1',),
+}
+SLUG_FAMILY = {'multiple-myeloma': 'myeloma'}
+
+
+def _icd_codes(row) -> list[str]:
+    codes = [(row.condition_source_value or '').strip().upper()]
+    concept = row.condition_concept
+    if concept is not None and (concept.vocabulary_id or '').upper().startswith('ICD10'):
+        codes.append((concept.concept_code or '').strip().upper())
+    return [c for c in codes if c]
+
+
+def cancer_family(row) -> str:
+    codes = _icd_codes(row)
+    for family, prefixes in CANCER_FAMILIES.items():
+        if any(code.startswith(prefix) for code in codes for prefix in prefixes):
+            return family
+    if codes and _ICD10_CANCER.match(codes[0]):
+        return codes[0][:3]
+    return (_condition_name(row) or '').lower()
+
+
+def _transitions(rows) -> list[dict]:
+    """Dated steps when a family holds more than one diagnosis name."""
+    steps, seen = [], set()
+    for row in rows:
+        name = _condition_name(row)
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            steps.append({'name': name, 'date': row.condition_start_date.isoformat()})
+    return steps if len(steps) > 1 else []
+
+
 def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
     rows = _condition_rows(person)
     sources = row_sources(
         ConditionOccurrence, rows, type_attr='condition_type_concept', date_attr='condition_start_date'
     )
-    cancer_rows = [r for r in rows if is_cancer_condition(r)]
-    other_rows = [r for r in rows if not is_cancer_condition(r)]
-
-    # Dated disease transitions, e.g. MGUS → smoldering myeloma → myeloma.
-    transitions, seen = [], set()
-    for row in cancer_rows:
-        name = _condition_name(row)
-        if name and name.lower() not in seen:
-            seen.add(name.lower())
-            transitions.append({'name': name, 'date': row.condition_start_date.isoformat()})
-    if len(transitions) < 2:
-        transitions = []
+    families: dict[str, list] = {}
+    other_rows = []
+    for row in rows:
+        if is_cancer_condition(row):
+            families.setdefault(cancer_family(row), []).append(row)
+        else:
+            other_rows.append(row)
 
     cancer = []
-    primary = primary_cancer(record, transitions) if record else None
+    slug = (record.disease_slug or '').lower() if record else ''
+    primary_family = SLUG_FAMILY.get(slug, slug)
+    primary = primary_cancer(record, _transitions(families.pop(primary_family, []))) if record else None
     if primary:
         cancer.append(primary)
-    else:
-        # No derived primary yet: show each cancer condition as recorded.
-        for row in reversed(cancer_rows):
-            name = _condition_name(row)
-            if name and not any(c['name'].lower() == name.lower() for c in cancer):
-                cancer.append({
-                    'id': f'condition-{row.pk}',
-                    'name': name,
-                    'date': row.condition_start_date.isoformat(),
-                    'source': sources[row.pk],
-                })
+    for family_rows in families.values():
+        latest = family_rows[-1]
+        name = _condition_name(latest)
+        if not name:
+            continue
+        resolved = all(r.condition_end_date for r in family_rows)
+        entry = {
+            'id': f'condition-{latest.pk}',
+            'name': name,
+            'date': family_rows[0].condition_start_date.isoformat(),
+            'status': 'Resolved' if resolved else _text(latest.condition_status_source_value),
+            'transitions': _transitions(family_rows),
+            'source': sources[latest.pk],
+        }
+        cancer.append({k: v for k, v in entry.items() if v not in (None, [])})
+    cancer.sort(key=lambda c: c.get('date') or '', reverse=True)
 
     # Other conditions: one entry per condition, dated from its first record.
-    other, by_name = [], {}
+    other, seen = [], set()
     for row in other_rows:
         name = _condition_name(row)
-        if not name or name.lower() in by_name:
+        if not name or name.lower() in seen:
             continue
+        seen.add(name.lower())
         entry = {
             'id': f'condition-{row.pk}',
             'name': name,
@@ -254,7 +303,6 @@ def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
             'status': 'Resolved' if row.condition_end_date else _text(row.condition_status_source_value),
             'source': sources[row.pk],
         }
-        by_name[name.lower()] = entry
         other.append({k: v for k, v in entry.items() if v is not None})
     other.sort(key=lambda e: e['date'], reverse=True)
 
