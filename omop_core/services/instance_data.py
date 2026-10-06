@@ -27,6 +27,9 @@ SYSTEM: frozenset[str] = frozenset({
     # Tied to a login account, which is system data.
     'patient_portal.PatientConsent', 'patient_portal.PatientInvitation',
     'patient_portal.PatientMessage', 'patient_portal.PatientUser',
+    # Access a patient granted to their record, and who opened it. A link is
+    # derived from this deployment's own key, so it would open nothing elsewhere.
+    'patient_portal.RecordShare', 'patient_portal.ShareScan',
     # Tenancy and access.
     'omop_core.ApplicationOrganization', 'omop_core.GroupAccess',
     'omop_core.InterchangeAgreement', 'omop_core.OrgInvitation', 'omop_core.OrgTrust',
