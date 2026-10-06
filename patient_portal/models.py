@@ -566,3 +566,46 @@ class LabMarker(models.Model):
 
     def __str__(self):
         return f'{self.loinc_code} (rank {self.rank})'
+
+
+class PatientStatement(models.Model):
+    """What a patient says about an item in their record, kept beside it.
+
+    Record data is never changed by the patient: confirming a prescription,
+    saying they stopped it, or giving the reason a line of therapy ended is a
+    statement here, keyed to the item it is about. Deleting the statement is
+    the undo. One statement per item and subject.
+    """
+
+    SUBJECT_MEDICATION = 'medication'
+    SUBJECT_THERAPY_LINE = 'therapy_line'
+    SUBJECTS = [(SUBJECT_MEDICATION, 'Medication'), (SUBJECT_THERAPY_LINE, 'Line of therapy')]
+
+    # Medication answers. taking/not_taking are for a current prescription,
+    # took/not_taken for one that has ended; stopped follows a confirmation.
+    TAKING, NOT_TAKING, TOOK, NOT_TAKEN, STOPPED = 'taking', 'not_taking', 'took', 'not_taken', 'stopped'
+    END_REASON = 'end_reason'
+    STATUSES = [
+        (TAKING, "I'm taking it"), (NOT_TAKING, 'Not taking'), (TOOK, 'I took it'),
+        (NOT_TAKEN, 'Not taken'), (STOPPED, 'I stopped taking this'), (END_REASON, 'Why the line ended'),
+    ]
+
+    person = models.ForeignKey('omop_core.Person', on_delete=models.CASCADE, related_name='patient_statements')
+    subject = models.CharField(max_length=20, choices=SUBJECTS)
+    # The PHR's id for the item: a medication group key, or a therapy line's episode id.
+    subject_key = models.CharField(max_length=120)
+    status = models.CharField(max_length=20, choices=STATUSES)
+    reason = models.CharField(max_length=40, blank=True, default='')
+    note = models.TextField(blank=True, default='')
+    stopped_on = models.DateField(null=True, blank=True)
+    created_by = models.ForeignKey(Identity, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['person', 'subject', 'subject_key'], name='uq_patient_statement_item'),
+        ]
+
+    def __str__(self):
+        return f'{self.person_id} {self.subject}:{self.subject_key} = {self.status}'

@@ -613,3 +613,106 @@ def test_lab_history_carries_the_treatment_lines_for_the_chart():
     data = signed_in(record).get(f'/api/v1/phr/labs/{hgb.concept_id}/').data
 
     assert data['therapy'] == [{'number': 1, 'regimen': 'VRd', 'start': '2024-03-12', 'end': '2024-10-14'}]
+
+
+# ---------------------------------------------------------------- patient statements
+
+from patient_portal.models import PatientStatement  # noqa: E402
+
+
+@pytest.fixture
+def meds_patient():
+    record = PatientRecordFactory(disease='')
+    future = (timezone.localdate() + timedelta(days=30)).isoformat()
+    current = drug(record, ConceptFactory(concept_name='Acyclovir', concept_code='RX-ACY'), '2025-01-01', future)
+    past = drug(record, ConceptFactory(concept_name='Zoledronic acid', concept_code='RX-ZOL'), '2024-01-01', '2024-06-01')
+    self_report = ConceptFactory(concept_id=32865, concept_name='Patient self-report', concept_code='OMOP4976879')
+    own = drug(record, ConceptFactory(concept_name='Vitamin D3', concept_code='RX-VD3'), '2024-04-03', None,
+               drug_type_concept=self_report)
+    return record, signed_in(record), {
+        'current': str(current.drug_concept_id), 'past': str(past.drug_concept_id), 'own': str(own.drug_concept_id),
+    }
+
+
+def med(client, key):
+    return next(m for m in client.get('/api/v1/phr/medications/').data['medications'] if m['id'] == key)
+
+
+def say(client, key, **body):
+    return client.put(f'/api/v1/phr/medications/{key}/statement/', body, format='json')
+
+
+def test_record_prescriptions_wait_for_confirmation_and_answers_can_be_undone(meds_patient):
+    record, client, ids = meds_patient
+    assert med(client, ids['current'])['pending'] is True
+    assert 'pending' not in med(client, ids['own'])  # the patient's own entries need no confirming
+
+    response = say(client, ids['past'], status='not_taken', note='  Never filled it  ')
+    assert response.status_code == 200
+    assert response.data['confirmation'] == {'status': 'not_taken', 'note': 'Never filled it'}
+    assert 'pending' not in med(client, ids['past'])
+
+    assert client.delete(f"/api/v1/phr/medications/{ids['past']}/statement/").status_code == 204
+    assert med(client, ids['past'])['pending'] is True
+    assert not PatientStatement.objects.filter(person=record.person).exists()
+
+
+def test_answers_must_fit_whether_the_prescription_is_current(meds_patient):
+    _, client, ids = meds_patient
+    assert say(client, ids['current'], status='took').status_code == 400
+    assert say(client, ids['past'], status='taking').status_code == 400
+    assert say(client, ids['current'], status='maybe').status_code == 400
+    assert say(client, ids['current'], status='not_taking', note='x' * 501).status_code == 400
+    assert say(client, 'no-such-drug', status='taking').status_code == 404
+
+
+def test_stopping_needs_a_confirmed_medication_and_a_valid_date(meds_patient):
+    _, client, ids = meds_patient
+    today = timezone.localdate()
+    assert say(client, ids['current'], status='stopped', stopped_on=today.isoformat()).status_code == 400  # not confirmed
+    assert say(client, ids['current'], status='taking').status_code == 200
+    assert say(client, ids['current'], status='stopped').status_code == 400  # no date
+    tomorrow = (today + timedelta(days=1)).isoformat()
+    assert say(client, ids['current'], status='stopped', stopped_on=tomorrow).status_code == 400
+    assert say(client, ids['current'], status='stopped', stopped_on='2020-01-01').status_code == 400  # before start
+
+    stopped = say(client, ids['current'], status='stopped', stopped_on=today.isoformat(), note='Side effects')
+    assert stopped.status_code == 200
+    assert stopped.data['status'] == 'past' and stopped.data['ended'] == today.isoformat()
+    assert stopped.data['confirmation'] == {'status': 'stopped', 'note': 'Side effects', 'stopped_on': today.isoformat()}
+    detail = client.get(f"/api/v1/phr/medications/{ids['current']}/").data
+    assert detail['status'] == 'past' and len(detail['history']) == 1  # history kept
+
+    # The patient's own medication can be stopped without confirming it first.
+    assert say(client, ids['own'], status='stopped', stopped_on=today.isoformat()).status_code == 200
+
+
+def test_statements_reach_only_the_callers_own_record(meds_patient):
+    _, _, ids = meds_patient
+    stranger = signed_in(PatientRecordFactory(disease=''))
+    assert say(stranger, ids['current'], status='taking').status_code == 404
+    assert stranger.delete(f"/api/v1/phr/medications/{ids['current']}/statement/").status_code == 404
+    assert APIClient().put(f"/api/v1/phr/medications/{ids['current']}/statement/", {'status': 'taking'},
+                           format='json').status_code in (401, 403)
+
+
+def test_the_patient_can_say_why_an_ended_line_stopped():
+    record = PatientRecordFactory(
+        disease='Multiple myeloma', first_line_therapy='VRd', first_line_start_date='2024-03-12',
+        first_line_end_date='2024-10-14', second_line_therapy='KRd', second_line_start_date='2025-01-08',
+    )
+    therapy_line(record, 1, '2024-03-12', '2024-10-14', [])
+    therapy_line(record, 2, '2025-01-08', None, [])
+    client = signed_in(record)
+
+    assert client.put('/api/v1/phr/therapy/702/reason/', {'reason': 'side_effects'}, format='json').status_code == 400
+    assert client.put('/api/v1/phr/therapy/701/reason/', {'reason': 'bored'}, format='json').status_code == 400
+    saved = client.put('/api/v1/phr/therapy/701/reason/', {'reason': 'side_effects', 'note': 'Neuropathy'}, format='json')
+
+    assert saved.status_code == 200
+    assert saved.data['patient_reason'] == {'reason': 'side_effects', 'label': 'I had too many side effects',
+                                            'note': 'Neuropathy'}
+    lines = client.get('/api/v1/phr/therapy/').data['tracks'][0]['lines']
+    assert lines[0]['patient_reason']['label'] == 'I had too many side effects'
+    assert client.delete('/api/v1/phr/therapy/701/reason/').status_code == 204
+    assert 'patient_reason' not in client.get('/api/v1/phr/therapy/').data['tracks'][0]['lines'][0]

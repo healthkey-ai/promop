@@ -35,16 +35,21 @@ GENETIC_DOC_TYPES = ('FISH', 'GEP', 'NGS', 'CYTOMETRY', 'CYTOGENETICS', 'MRD', '
 class PhrView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def get(self, request):
+    def resolve(self, request):
+        """(person, record, None), or (None, None, a 404) when the caller has no record."""
         link = (
             PatientUser.objects.filter(identity=request.user, is_active=True)
             .select_related('person')
             .first()
         )
         if link is None:
-            return Response({'detail': 'No record.'}, status=404)
-        person = link.person
-        record = PatientRecord.objects.filter(person=person).first()
+            return None, None, Response({'detail': 'No record.'}, status=404)
+        return link.person, PatientRecord.objects.filter(person=link.person).first(), None
+
+    def get(self, request):
+        person, record, error = self.resolve(request)
+        if error:
+            return error
         data = self.build(person, record)
         if data is None:
             return Response({'detail': 'Not found.'}, status=404)

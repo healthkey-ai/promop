@@ -111,6 +111,12 @@ def therapy_lines(person, record) -> list[dict[str, Any]]:
     )
     proc_sources = row_sources(ProcedureOccurrence, procedures, type_attr='procedure_type_concept', date_attr='procedure_date')
 
+    from patient_portal.models import PatientStatement
+
+    reasons = {
+        s.subject_key: s for s in PatientStatement.objects.filter(
+            person=person, subject=PatientStatement.SUBJECT_THERAPY_LINE)
+    }
     lines = []
     for entry in sorted(derived, key=lambda e: e.get('line') or 0):
         start, end = _d(entry.get('start_date')), _d(entry.get('end_date'))
@@ -141,6 +147,13 @@ def therapy_lines(person, record) -> list[dict[str, Any]]:
             'stopped_because': STOP_REASONS.get(reason.lower().replace(' ', '_'), reason) or None,
             'source': source('record', record.facility_name, start),
         }
+        told = reasons.get(line['id'])
+        if told is not None:
+            from .statements import END_REASONS
+
+            line['patient_reason'] = {k: v for k, v in {
+                'reason': told.reason, 'label': END_REASONS.get(told.reason, told.reason), 'note': told.note or None,
+            }.items() if v is not None}
         lines.append({k: v for k, v in line.items() if v is not None and v != []})
     return lines
 
