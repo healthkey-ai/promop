@@ -578,26 +578,39 @@ class PatientStatement(models.Model):
     """
 
     SUBJECT_MEDICATION = 'medication'
+    SUBJECT_MEDICATION_NOTE = 'medication_note'
     SUBJECT_THERAPY_LINE = 'therapy_line'
-    SUBJECTS = [(SUBJECT_MEDICATION, 'Medication'), (SUBJECT_THERAPY_LINE, 'Line of therapy')]
+    SUBJECT_CONDITION = 'condition'
+    SUBJECT_PROCEDURE = 'procedure'
+    SUBJECTS = [
+        (SUBJECT_MEDICATION, 'Medication'), (SUBJECT_MEDICATION_NOTE, 'Note on a medication'),
+        (SUBJECT_THERAPY_LINE, 'Line of therapy'), (SUBJECT_CONDITION, 'Condition the patient added'),
+        (SUBJECT_PROCEDURE, 'Procedure the patient added'),
+    ]
 
     # Medication answers. taking/not_taking are for a current prescription,
     # took/not_taken for one that has ended; stopped follows a confirmation.
     TAKING, NOT_TAKING, TOOK, NOT_TAKEN, STOPPED = 'taking', 'not_taking', 'took', 'not_taken', 'stopped'
     END_REASON = 'end_reason'
+    # The patient's own words about an item, and the form details of an item
+    # they added (an OMOP row has no column for "where it was done").
+    NOTE, ENTRY = 'note', 'entry'
     STATUSES = [
         (TAKING, "I'm taking it"), (NOT_TAKING, 'Not taking'), (TOOK, 'I took it'),
         (NOT_TAKEN, 'Not taken'), (STOPPED, 'I stopped taking this'), (END_REASON, 'Why the line ended'),
+        (NOTE, 'Note'), (ENTRY, 'Added by the patient'),
     ]
 
     person = models.ForeignKey('omop_core.Person', on_delete=models.CASCADE, related_name='patient_statements')
     subject = models.CharField(max_length=20, choices=SUBJECTS)
-    # The PHR's id for the item: a medication group key, or a therapy line's episode id.
+    # The PHR's id for the item: a medication group key, a therapy line's
+    # episode id, or the id of the OMOP row a patient added.
     subject_key = models.CharField(max_length=120)
     status = models.CharField(max_length=20, choices=STATUSES)
     reason = models.CharField(max_length=40, blank=True, default='')
     note = models.TextField(blank=True, default='')
     stopped_on = models.DateField(null=True, blank=True)
+    details = models.JSONField(default=dict, blank=True)
     created_by = models.ForeignKey(Identity, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

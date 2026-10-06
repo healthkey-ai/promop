@@ -74,7 +74,8 @@ def _statements(person, subject: str) -> dict[str, PatientStatement]:
 
 
 def _summary(key: str, rows: list[DrugExposure], sources: dict, today: date,
-             statement: PatientStatement | None = None, with_statements: bool = True) -> dict[str, Any]:
+             statement: PatientStatement | None = None, with_statements: bool = True,
+             note: PatientStatement | None = None) -> dict[str, Any]:
     latest = rows[0]
     current = any(_is_current(r, today) for r in rows)
     ends = [r.drug_exposure_end_date for r in rows if r.drug_exposure_end_date]
@@ -99,6 +100,7 @@ def _summary(key: str, rows: list[DrugExposure], sources: dict, today: date,
         'ended': ended.isoformat() if ended else None,
         'source': source,
         'confirmation': confirmation,
+        'my_note': (note.note or None) if with_statements and note is not None else None,
         # Prescriptions from the record wait for the patient to say whether
         # they took them.
         'pending': True if with_statements and source['kind'] == 'record' and statement is None else None,
@@ -113,17 +115,22 @@ def medication_summary_by_key(person, key: str, with_statements: bool = True) ->
     rows = groups.get(key)
     if not rows:
         return None
-    statement = PatientStatement.objects.filter(
-        person=person, subject=PatientStatement.SUBJECT_MEDICATION, subject_key=key,
-    ).first() if with_statements else None
-    return _summary(key, rows, sources, timezone.localdate(), statement, with_statements)
+    statement = note = None
+    if with_statements:
+        statement = PatientStatement.objects.filter(
+            person=person, subject=PatientStatement.SUBJECT_MEDICATION, subject_key=key).first()
+        note = PatientStatement.objects.filter(
+            person=person, subject=PatientStatement.SUBJECT_MEDICATION_NOTE, subject_key=key).first()
+    return _summary(key, rows, sources, timezone.localdate(), statement, with_statements, note)
 
 
 def medications(person, record) -> dict[str, Any]:
     groups, sources = _medication_groups(person)
     today = timezone.localdate()
     statements = _statements(person, PatientStatement.SUBJECT_MEDICATION)
-    items = [_summary(key, rows, sources, today, statements.get(key)) for key, rows in groups.items()]
+    notes = _statements(person, PatientStatement.SUBJECT_MEDICATION_NOTE)
+    items = [_summary(key, rows, sources, today, statements.get(key), note=notes.get(key))
+             for key, rows in groups.items()]
     # Current first, each group most recently started first (sorts are stable).
     items.sort(key=lambda m: m['started'], reverse=True)
     items.sort(key=lambda m: m['status'] != 'current')
@@ -163,6 +170,7 @@ def procedures(person, record) -> dict[str, Any]:
         .exclude(provider_name__isnull=True)
         .values_list('provider_id', 'provider_name')
     ) if provider_ids else {}
+    entries = _statements(person, PatientStatement.SUBJECT_PROCEDURE)
     items = []
     for row in rows:
         concept = row.procedure_concept
@@ -173,15 +181,20 @@ def procedures(person, record) -> dict[str, Any]:
         )
         if not name:
             continue
+        entry = entries.get(str(row.pk))
+        details = entry.details if entry is not None else {}
+        dated = not details.get('date_unknown')
         item = {
             'id': row.pk,
             'name': name,
-            'date': row.procedure_date.isoformat(),
+            'date': row.procedure_date.isoformat() if dated else None,
+            'where': details.get('where'),
+            'note': (entry.note or None) if entry is not None else None,
             'end_date': row.procedure_end_date.isoformat()
             if row.procedure_end_date and row.procedure_end_date != row.procedure_date
             else None,
             'performed_by': (providers.get(row.provider_id) or '').strip() or None,
-            'source': sources[row.pk],
+            'source': sources[row.pk] if dated else {**sources[row.pk], 'date': None},
         }
         items.append({k: v for k, v in item.items() if v is not None})
     return {'procedures': items}

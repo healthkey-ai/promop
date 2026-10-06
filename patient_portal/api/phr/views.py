@@ -21,7 +21,7 @@ from omop_core.models import (
     PatientRecord,
     ProcedureOccurrence,
 )
-from patient_portal.models import PatientUser
+from patient_portal.models import PatientStatement, PatientUser
 
 from .labs import lab_history, labs
 from .records import genetics, medication_detail, medications, procedures
@@ -212,7 +212,8 @@ def _condition_rows(person):
 
 
 def _condition_name(row) -> str | None:
-    concept = row.condition_concept
+    # Concept 0 is "No matching concept": the source text is the name then.
+    concept = row.condition_concept if row.condition_concept_id else None
     return _text(concept.concept_name if concept else None) or _text(row.condition_source_value)
 
 
@@ -296,6 +297,13 @@ def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
         cancer.append({k: v for k, v in entry.items() if v not in (None, [])})
     cancer.sort(key=lambda c: c.get('date') or '', reverse=True)
 
+    # Patient-added conditions may have no known date (stored as the day added).
+    undated = set(
+        PatientStatement.objects.filter(
+            person=person, subject=PatientStatement.SUBJECT_CONDITION, details__date_unknown=True,
+        ).values_list('subject_key', flat=True)
+    )
+
     # Other conditions: one entry per condition, dated from its first record.
     other, seen = [], set()
     for row in other_rows:
@@ -303,15 +311,16 @@ def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
         if not name or name.lower() in seen:
             continue
         seen.add(name.lower())
+        dated = str(row.pk) not in undated
         entry = {
             'id': f'condition-{row.pk}',
             'name': name,
-            'date': row.condition_start_date.isoformat(),
+            'date': row.condition_start_date.isoformat() if dated else None,
             'status': 'Resolved' if row.condition_end_date else _text(row.condition_status_source_value),
-            'source': sources[row.pk],
+            'source': sources[row.pk] if dated else {**sources[row.pk], 'date': None},
         }
         other.append({k: v for k, v in entry.items() if v is not None})
-    other.sort(key=lambda e: e['date'], reverse=True)
+    other.sort(key=lambda e: e.get('date') or '9999', reverse=True)
 
     return {'cancer': cancer, 'other': other}
 

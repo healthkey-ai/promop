@@ -3,7 +3,7 @@ import pytest
 from django.contrib.contenttypes.models import ContentType
 from rest_framework.test import APIClient
 
-from omop_core.models import CareSite, ConditionOccurrence, ProvenanceRecord, VisitOccurrence
+from omop_core.models import CareSite, ConditionOccurrence, DrugExposure, ProvenanceRecord, VisitOccurrence
 from omop_core.signals import suppress_patient_record_refresh
 from patient_portal.models import Identity, PatientUser
 from tests.factories import (
@@ -737,3 +737,116 @@ def test_lab_names_split_into_analyte_and_specimen_in_linear_time():
     for crafted in ('a ' + ' [' * 20_000, 'a in ' + 'a in a' * 20_000, 'a in a by ' + 'a by ' * 20_000):
         split_name(crafted)
     assert time.perf_counter() - started < 0.5
+
+
+# ---------------------------------------------------------------- what the patient adds
+
+
+@pytest.fixture
+def adder():
+    record = PatientRecordFactory(disease='Multiple myeloma', disease_slug='myeloma')
+    ConceptFactory(concept_id=0, concept_code='No matching concept', concept_name='No matching concept')
+    ConceptFactory(concept_id=32865, concept_name='Patient self-report', concept_code='OMOP4976879')
+    return record, signed_in(record)
+
+
+def test_write_urls_answer_get_with_405_not_500(adder):
+    _, client = adder
+    for path in ('/api/v1/phr/medications/add/', '/api/v1/phr/conditions/', '/api/v1/phr/procedures/add/',
+                 '/api/v1/phr/medications/1/statement/', '/api/v1/phr/therapy/1/reason/'):
+        assert client.get(path).status_code == 405, path
+
+
+def test_patient_adds_a_supplement_changes_its_dose_and_removes_it(adder):
+    record, client = adder
+    added = client.post('/api/v1/phr/medications/add/', {
+        'name': '  Vitamin   D3 ', 'amount': '2000', 'unit': 'IU', 'frequency': 'once daily', 'note': 'For bones',
+    }, format='json')
+    assert added.status_code == 201
+    key = added.data['id']
+    assert key == 'src-vitamin-d3'
+    assert added.data['name'] == 'Vitamin D3' and added.data['dose'] == '2000 IU · once daily'
+    assert added.data['source']['kind'] == 'patient' and added.data['my_note'] == 'For bones'
+    assert 'pending' not in added.data
+    row = DrugExposure.objects.get(person=record.person)
+    assert ProvenanceRecord.objects.filter(object_id=row.pk, source='PATIENT_SELF').exists()
+
+    # A dose change on a later day keeps the old dose as history.
+    DrugExposure.objects.filter(pk=row.pk).update(drug_exposure_start_date=timezone.localdate() - timedelta(days=10))
+    changed = client.patch(f'/api/v1/phr/medications/{key}/own/', {'amount': '4000', 'unit': 'IU',
+                                                                   'frequency': 'once daily'}, format='json')
+    assert changed.status_code == 200 and changed.data['dose'] == '4000 IU · once daily'
+    history = client.get(f'/api/v1/phr/medications/{key}/').data['history']
+    assert [h['dose'] for h in history] == ['4000 IU · once daily', '2000 IU · once daily']
+
+    assert client.post('/api/v1/phr/medications/add/', {'name': 'X', 'unit': 'bucket'}, format='json').status_code == 400
+    assert client.delete(f'/api/v1/phr/medications/{key}/own/').status_code == 204
+    assert not DrugExposure.objects.filter(person=record.person).exists()
+    assert not PatientStatement.objects.filter(person=record.person).exists()
+
+
+def test_record_medications_take_a_note_but_cannot_be_changed_or_removed(adder):
+    record, client = adder
+    drug(record, ConceptFactory(concept_name='Acyclovir', concept_code='RX-ACY'), '2025-01-01')
+    key = client.get('/api/v1/phr/medications/').data['medications'][0]['id']
+
+    assert client.patch(f'/api/v1/phr/medications/{key}/own/', {'amount': '1'}, format='json').status_code == 403
+    assert client.delete(f'/api/v1/phr/medications/{key}/own/').status_code == 403
+    noted = client.put(f'/api/v1/phr/medications/{key}/note/', {'note': ' Take with food '}, format='json')
+    assert noted.status_code == 200 and noted.data['my_note'] == 'Take with food'
+    assert client.put(f'/api/v1/phr/medications/{key}/note/', {'note': ''}, format='json').data.get('my_note') is None
+
+
+def test_patient_adds_conditions_but_not_cancers(adder):
+    record, client = adder
+    refused = client.post('/api/v1/phr/conditions/', {'name': 'Breast cancer'}, format='json')
+    assert refused.status_code == 400
+    assert refused.data['name'] == ['Cancer diagnoses come from your connected records.']
+
+    dated = client.post('/api/v1/phr/conditions/', {'name': 'Gout', 'diagnosed': '2021-05-01'}, format='json')
+    undated = client.post('/api/v1/phr/conditions/', {'name': 'Seasonal allergies'}, format='json')
+    assert dated.status_code == 201 and undated.status_code == 201
+    assert dated.data == {'id': dated.data['id'], 'name': 'Gout', 'date': '2021-05-01',
+                          'source': {'kind': 'patient', 'facility': None, 'date': '2021-05-01'}}
+    assert 'date' not in undated.data and undated.data['source']['date'] is None
+
+    row_id = dated.data['id'].removeprefix('condition-')
+    renamed = client.patch(f'/api/v1/phr/conditions/{row_id}/', {'name': 'Gout, left foot', 'diagnosed': '2021-05-01'},
+                           format='json')
+    assert renamed.status_code == 200 and renamed.data['name'] == 'Gout, left foot'
+    future = (timezone.localdate() + timedelta(days=1)).isoformat()
+    assert client.post('/api/v1/phr/conditions/', {'name': 'Asthma', 'diagnosed': future}, format='json').status_code == 400
+    assert client.delete(f'/api/v1/phr/conditions/{row_id}/').status_code == 204
+    assert [c['name'] for c in client.get('/api/v1/phr/diagnoses/').data['other']] == ['Seasonal allergies']
+
+
+def test_record_conditions_and_procedures_cannot_be_changed_or_removed(adder):
+    record, client = adder
+    row = condition(record, icd10('E11.9', 'Type 2 diabetes'), '2019-01-01')
+    kind = ConceptFactory(concept_name='Procedure type', concept_code='TYPE-PROC')
+    proc = ProcedureOccurrence.objects.create(procedure_occurrence_id=5, person=record.person, procedure_date='2021-01-01',
+                                              procedure_concept=ConceptFactory(concept_name='Biopsy', concept_code='P5'),
+                                              procedure_type_concept=kind)
+    assert client.delete(f'/api/v1/phr/conditions/{row.pk}/').status_code == 403
+    assert client.patch(f'/api/v1/phr/procedures/{proc.pk}/', {'name': 'X'}, format='json').status_code == 403
+    assert client.delete(f'/api/v1/phr/procedures/{proc.pk}/').status_code == 403
+    assert ConditionOccurrence.objects.filter(pk=row.pk).exists() and ProcedureOccurrence.objects.filter(pk=5).exists()
+
+
+def test_patient_adds_edits_and_removes_a_procedure(adder):
+    record, client = adder
+    added = client.post('/api/v1/phr/procedures/add/', {
+        'name': 'Wisdom teeth removal', 'date': '2016-07-06', 'where': 'Downtown Dental', 'note': 'All four',
+    }, format='json')
+    assert added.status_code == 201
+    assert added.data == {'id': added.data['id'], 'name': 'Wisdom teeth removal', 'date': '2016-07-06',
+                          'where': 'Downtown Dental', 'note': 'All four',
+                          'source': {'kind': 'patient', 'facility': None, 'date': '2016-07-06'}}
+    edited = client.patch(f"/api/v1/phr/procedures/{added.data['id']}/", {'name': 'Wisdom teeth removal'},
+                          format='json')
+    assert edited.status_code == 200 and 'date' not in edited.data and 'where' not in edited.data
+
+    other = signed_in(PatientRecordFactory(disease=''))
+    assert other.delete(f"/api/v1/phr/procedures/{added.data['id']}/").status_code == 403
+    assert client.delete(f"/api/v1/phr/procedures/{added.data['id']}/").status_code == 204
+    assert client.get('/api/v1/phr/procedures/').data['procedures'] == []

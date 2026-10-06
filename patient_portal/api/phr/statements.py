@@ -52,6 +52,7 @@ class EndReasonSerializer(serializers.Serializer):
 class _StatementView(PhrView):
     """PUT records or replaces the patient's statement; DELETE undoes it."""
 
+    http_method_names = ['put', 'delete', 'options']
     subject: str
 
     def put(self, request, item_id: str):
