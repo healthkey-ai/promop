@@ -108,9 +108,14 @@ def about_fields(record: PatientRecord | None) -> list[dict[str, Any]]:
     return [f for f in fields if f]
 
 
+def patient_name(person) -> str:
+    return ' '.join(p for p in (person.given_name, person.family_name) if p and p.strip()).strip()
+
+
 class AboutView(PhrView):
     def build(self, person, record):
-        return {'fields': about_fields(record)}
+        data = {'name': patient_name(person) or None, 'fields': about_fields(record)}
+        return {k: v for k, v in data.items() if v is not None}
 
 
 # ---------------------------------------------------------------- Diagnoses
