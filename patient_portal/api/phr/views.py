@@ -24,6 +24,7 @@ from omop_core.models import (
 from patient_portal.models import PatientUser
 
 from .labs import lab_history, labs
+from .records import genetics, medication_detail, medications, procedures
 from .sources import PATIENT, RECORD, row_sources, source
 
 GENETIC_DOC_TYPES = ('FISH', 'GEP', 'NGS', 'CYTOMETRY', 'CYTOGENETICS', 'MRD', 'BONE_MARROW')
@@ -322,3 +323,30 @@ class LabHistoryView(PhrView):
 
     def build(self, person, record):
         return lab_history(person, self.test_id)
+
+
+# ---------------------------------------------------------------- Medications, procedures, genetics
+
+
+class MedicationsView(PhrView):
+    def build(self, person, record):
+        return medications(person, record)
+
+
+class MedicationDetailView(PhrView):
+    def get(self, request, medication_id: str):
+        self.medication_id = medication_id
+        return super().get(request)
+
+    def build(self, person, record):
+        return medication_detail(person, self.medication_id)
+
+
+class ProceduresView(PhrView):
+    def build(self, person, record):
+        return procedures(person, record)
+
+
+class GeneticsView(PhrView):
+    def build(self, person, record):
+        return genetics(person, record)

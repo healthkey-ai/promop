@@ -336,3 +336,117 @@ def test_another_patients_lab_history_is_not_found():
     lab(theirs, hgb, '2024-01-01', 12)
 
     assert signed_in(mine).get(f'/api/v1/phr/labs/{hgb.concept_id}/').status_code == 404
+
+
+# ---------------------------------------------------------------- medications, procedures, genetics
+
+from datetime import timedelta  # noqa: E402
+from django.utils import timezone  # noqa: E402
+
+from omop_core.models import PatientDocument, ProcedureOccurrence, Provider  # noqa: E402
+from tests.factories import DrugExposureFactory  # noqa: E402
+
+
+def drug(record, concept, start, end=None, **kwargs):
+    with suppress_patient_record_refresh():
+        return DrugExposureFactory(
+            person=record.person, drug_concept=concept, drug_exposure_start_date=start,
+            drug_exposure_end_date=end, **kwargs,
+        )
+
+
+def test_medications_group_exposures_per_drug_current_first_with_dose_history():
+    record = PatientRecordFactory(disease='')
+    future = (timezone.localdate() + timedelta(days=30)).isoformat()
+    lenalidomide = ConceptFactory(concept_name='lenalidomide 10 MG Oral Capsule', concept_code='RX-LEN')
+    dex = ConceptFactory(concept_name='dexamethasone 4 MG Oral Tablet', concept_code='RX-DEX')
+    visit = visit_at(record, 'MD Anderson pharmacy')
+    drug(record, lenalidomide, '2023-01-01', '2023-06-30', sig='15 mg daily, days 1–21')
+    drug(record, lenalidomide, '2024-01-01', future, sig='10 mg daily, days 1–21', visit_occurrence=visit)
+    drug(record, dex, '2022-01-01', '2022-12-31', quantity=40, dose_unit_source_value='mg')
+    drug(record, dex, '2021-01-01', '2021-02-01', is_erroneous=True)
+    ConceptFactory(concept_id=0, concept_code='No matching concept', concept_name='No matching concept')
+    with suppress_patient_record_refresh():
+        DrugExposureFactory(person=record.person, drug_concept_id=0, drug_source_value='Vitamin D3 / 2000 IU',
+                            drug_exposure_start_date='2020-05-01', drug_exposure_end_date=None)
+
+    client = signed_in(record)
+    meds = client.get('/api/v1/phr/medications/').data['medications']
+
+    assert [(m['name'], m['status']) for m in meds] == [
+        ('lenalidomide 10 MG Oral Capsule', 'current'),
+        ('Vitamin D3 / 2000 IU', 'current'),
+        ('dexamethasone 4 MG Oral Tablet', 'past'),
+    ]
+    assert meds[0]['dose'] == '10 mg daily, days 1–21'
+    assert meds[0]['started'] == '2023-01-01' and 'ended' not in meds[0]
+    assert meds[2]['dose'] == '40 mg' and meds[2]['ended'] == '2022-12-31'
+    assert meds[1]['id'] == 'src-vitamin-d3-2000-iu'
+
+    detail = client.get(f"/api/v1/phr/medications/{meds[0]['id']}/").data
+    assert [(h['date'], h['dose'], h['source']['facility']) for h in detail['history']] == [
+        ('2024-01-01', '10 mg daily, days 1–21', 'MD Anderson pharmacy'),
+        ('2023-01-01', '15 mg daily, days 1–21', None),
+    ]
+    assert client.get(f"/api/v1/phr/medications/{meds[1]['id']}/").status_code == 200
+    assert client.get('/api/v1/phr/medications/424242/').status_code == 404
+
+
+def test_procedures_are_newest_first_with_who_performed_them():
+    record = PatientRecordFactory(disease='')
+    Provider.objects.create(provider_id=55, provider_name='Dr. Rivera')
+    biopsy = ConceptFactory(concept_name='Bone marrow biopsy', concept_code='PROC-BMB')
+    asct = ConceptFactory(concept_name='Autologous stem cell transplant', concept_code='PROC-ASCT')
+    kind = ConceptFactory(concept_name='Procedure type', concept_code='TYPE-PROC')
+    for pk, concept, day, extra in (
+        (1, biopsy, '2021-01-15', {'provider_id': 55}),
+        (2, asct, '2022-03-01', {'procedure_end_date': '2022-03-05'}),
+        (3, biopsy, '2020-01-01', {'is_erroneous': True}),
+    ):
+        ProcedureOccurrence.objects.create(
+            procedure_occurrence_id=pk, person=record.person, procedure_concept=concept,
+            procedure_date=day, procedure_type_concept=kind, **extra,
+        )
+
+    items = signed_in(record).get('/api/v1/phr/procedures/').data['procedures']
+
+    assert items == [
+        {'id': 2, 'name': 'Autologous stem cell transplant', 'date': '2022-03-01', 'end_date': '2022-03-05',
+         'source': {'kind': 'record', 'facility': None, 'date': '2022-03-01'}},
+        {'id': 1, 'name': 'Bone marrow biopsy', 'date': '2021-01-15', 'performed_by': 'Dr. Rivera',
+         'source': {'kind': 'record', 'facility': None, 'date': '2021-01-15'}},
+    ]
+
+
+def test_genetics_groups_findings_into_tests_and_attaches_matching_documents(monkeypatch):
+    record = PatientRecordFactory(disease='')
+    m1 = lab(record, loinc('81252-9', 'Gene variant'), '2023-04-02')
+    m2 = lab(record, loinc('81252-9', 'Gene variant'), '2023-04-02')
+    m3 = lab(record, loinc('81252-9', 'Gene variant'), '2021-06-01')
+    variants = [
+        {'id': m1.pk, 'gene': 'tp53', 'variant': 'del(17p)', 'test_date': '2023-04-02',
+         'assay_method': 'FISH', 'allelic_frequency': 38, 'interpretation': 'pathogenic'},
+        {'id': m2.pk, 'gene': 'ccnd1', 'genomic_feature': 't(11;14)', 'test_date': '2023-04-02',
+         'assay_method': 'FISH'},
+        {'id': m3.pk, 'gene': 'kras', 'variant': 'G12D', 'test_date': '2021-06-01', 'assay_method': 'NGS',
+         'origin': 'somatic'},
+    ]
+    monkeypatch.setattr('omop_core.services.genomics.list_variants', lambda person: variants)
+    PatientDocument.objects.create(person=record.person, doc_type='FISH', title='FISH panel report',
+                                   file_url='https://example.test/fish.pdf', effective_date='2023-04-02')
+    PatientDocument.objects.create(person=record.person, doc_type='GEP', title='GEP70', effective_date='2022-02-02')
+    PatientDocument.objects.create(person=record.person, doc_type='IMAGING', effective_date='2022-02-02')
+
+    tests = signed_in(record).get('/api/v1/phr/genetics/').data['tests']
+
+    assert [(t['type'], t['date'], [f['name'] for f in t['findings']]) for t in tests] == [
+        ('FISH', '2023-04-02', ['TP53', 't(11;14)']),
+        ('Gene expression profiling', '2022-02-02', []),
+        ('NGS', '2021-06-01', ['KRAS']),
+    ]
+    assert tests[0]['document'] == {'title': 'FISH panel report', 'url': 'https://example.test/fish.pdf'}
+    assert tests[1]['document'] == {'title': 'GEP70'}
+    assert tests[0]['findings'][0] == {
+        'id': m1.pk, 'name': 'TP53', 'variant': 'del(17p)', 'interpretation': 'pathogenic', 'percent': 38,
+        'source': {'kind': 'record', 'facility': None, 'date': '2023-04-02'},
+    }
