@@ -280,6 +280,10 @@ def test_labs_lists_the_latest_result_per_test_ranked_by_the_admin_labels():
         'panels': ['CBC'],
         'disease_slugs': [],
         'count': 2,
+        'recent': [
+            {'date': '2024-03-01', 'value': 11, 'flag': 'low'},
+            {'date': '2024-01-01', 'value': 13.2, 'flag': 'low'},
+        ],
         'latest': {
             'id': hemoglobin['latest']['id'],
             'date': '2024-03-01',

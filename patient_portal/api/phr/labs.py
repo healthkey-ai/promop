@@ -26,6 +26,8 @@ VITALS = frozenset({
     '8310-5', '59408-5', '2708-6', '9279-1', '89247-1', '89243-0',
 })
 HISTORY_LIMIT = 500
+# Results per test in the list's history table; the detail endpoint has them all.
+RECENT_LIMIT = 8
 PANEL_ORDER = ['CBC', 'BMP', 'CMP']
 
 # "Hemoglobin [Mass/volume] in Blood" → ("Hemoglobin", "Blood");
@@ -84,6 +86,16 @@ def result(row: Measurement, source: dict) -> dict[str, Any]:
     return {k: v for k, v in item.items() if v is not None}
 
 
+def _brief(row: Measurement) -> dict[str, Any]:
+    item = {
+        'date': row.measurement_date.isoformat(),
+        'value': _number(row.value_as_number),
+        'value_text': (row.value_as_string or '').strip() or None,
+        'flag': flag(row),
+    }
+    return {k: v for k, v in item.items() if v is not None}
+
+
 def _rows(person):
     return (
         Measurement.objects.filter(person=person, is_erroneous=False)
@@ -136,6 +148,7 @@ def labs(person, record) -> dict[str, Any]:
         tests.append({
             **_test_meta(effective_concept(latest), markers),
             'latest': result(latest, sources[latest.pk]),
+            'recent': [_brief(row) for row in group[:RECENT_LIMIT]],
             'count': len(group),
         })
     tests.sort(key=lambda t: (t.get('rank') is None, t.get('rank') or 0, t['name'].lower()))
