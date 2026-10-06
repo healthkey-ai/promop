@@ -489,3 +489,24 @@ def test_unlabelled_findings_join_the_only_genetic_report_from_that_day(monkeypa
         ('Cytogenetics', '2026-06-04', []),
         ('NGS', '2026-06-04', []),
     ]
+
+
+def test_lab_names_split_into_analyte_and_specimen_in_linear_time():
+    import time
+
+    from patient_portal.api.phr.labs import split_name
+
+    assert split_name('Hemoglobin [Mass/volume] in Blood') == ('Hemoglobin', 'Blood')
+    assert split_name('Creatinine [Mass/volume] in Serum or Plasma by Enzymatic method') == (
+        'Creatinine', 'Serum or Plasma')
+    assert split_name('Kappa lc.free/Lambda lc.free [Mass Ratio] in Serum') == ('Kappa lc.free/Lambda lc.free', 'Serum')
+    assert split_name('Hemoglobin A1c/Hemoglobin.total in Blood') == ('Hemoglobin A1c/Hemoglobin.total', 'Blood')
+    assert split_name('Body weight') == ('Body weight', None)
+    assert split_name('Bilirubin [Mass/volume]') == ('Bilirubin [Mass/volume]', None)
+    assert split_name('') == ('', None)
+
+    # Inputs that made the old regex backtrack polynomially (CodeQL py/polynomial-redos).
+    started = time.perf_counter()
+    for crafted in ('a ' + ' [' * 20_000, 'a in ' + 'a in a' * 20_000, 'a in a by ' + 'a by ' * 20_000):
+        split_name(crafted)
+    assert time.perf_counter() - started < 0.5

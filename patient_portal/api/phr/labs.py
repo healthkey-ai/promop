@@ -8,7 +8,6 @@ are not part of the record's first version.
 """
 from __future__ import annotations
 
-import re
 from collections import defaultdict
 from decimal import Decimal
 from typing import Any
@@ -30,16 +29,28 @@ HISTORY_LIMIT = 500
 RECENT_LIMIT = 8
 PANEL_ORDER = ['CBC', 'BMP', 'CMP']
 
-# "Hemoglobin [Mass/volume] in Blood" → ("Hemoglobin", "Blood");
-# "Creatinine [Mass/volume] in Serum or Plasma by ..." → ("Creatinine", "Serum or Plasma").
-_LOINC_NAME = re.compile(r'^(?P<analyte>.+?)(?: \[[^\]]*\])? in (?P<specimen>.+?)(?: by .+)?$')
-
-
 def split_name(concept_name: str) -> tuple[str, str | None]:
-    match = _LOINC_NAME.match(concept_name or '')
-    if not match:
+    """Analyte and specimen from a LOINC long name.
+
+    "Hemoglobin [Mass/volume] in Blood" → ("Hemoglobin", "Blood");
+    "Creatinine [Mass/volume] in Serum or Plasma by ..." → ("Creatinine", "Serum or Plasma").
+    Names without " in " are returned whole. Plain string scanning, not a
+    regex: concept names come from imported data, and the obvious pattern
+    backtracks polynomially on crafted input (CodeQL py/polynomial-redos).
+    """
+    name = concept_name or ''
+    bracket = name.find(' [')
+    close = name.find(']', bracket) if bracket != -1 else -1
+    analyte_end = bracket if close != -1 else -1
+    marker = name.find(' in ', close + 1 if close != -1 else 0)
+    if marker == -1:
         return concept_name, None
-    return match['analyte'], match['specimen']
+    analyte = name[:analyte_end if analyte_end != -1 else marker].strip()
+    specimen = name[marker + len(' in '):]
+    by = specimen.find(' by ')
+    if by != -1:
+        specimen = specimen[:by]
+    return (analyte or concept_name), (specimen.strip() or None)
 
 
 def effective_concept(row: Measurement):
