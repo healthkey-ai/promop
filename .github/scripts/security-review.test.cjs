@@ -214,6 +214,52 @@ test('auth/identity, settings and credential handling are gated', () => {
   ]) assert.equal(securityPath(filename), true, filename);
 });
 
+test('auth, credential lifecycle and privileged-account paths are gated', () => {
+  // Added after review of #1496 found them outside the gate on dev as well as
+  // on that branch. One path per pattern, file form and directory form, so a
+  // pattern nothing exercises cannot be deleted without a test noticing.
+  for (const filename of [
+    // The viewset that issues service tokens, beside the definitions module of
+    // the same name that was already gated.
+    'patient_portal/api/service_applications.py',
+    'patient_portal/api/service_applications/views.py',
+    // authenticate(), the lockout threshold, the enumeration-resistant timing.
+    'patient_portal/backends.py', 'patient_portal/backends/email.py',
+    // Org-admin authority.
+    'omop_core/services/access.py', 'omop_core/services/access/orgs.py',
+    // The credential lifecycle of a patient account.
+    'patient_portal/api/password_reset.py', 'patient_portal/api/password_reset/views.py',
+    'patient_portal/api/email_verification.py', 'patient_portal/api/email_verification/views.py',
+    'patient_portal/api/patient_signup.py', 'patient_portal/api/patient_signup/views.py',
+    'patient_portal/api/patient_invitations.py', 'patient_portal/api/patient_invitations/accept.py',
+    // The writer of the GroupAccess rows access.py reads, and proxy auth.
+    'patient_portal/api/org_views.py', 'patient_portal/api/org_views/invitations.py',
+    'patient_portal/api/representatives.py', 'patient_portal/api/representatives/views.py',
+    // The audit trail's read API.
+    'patient_portal/api/audit_views.py', 'patient_portal/api/audit_views/filters.py',
+    // Credential-minting commands the *service_token* glob misses on the name.
+    'patient_portal/management/commands/create_service_client.py',
+    'patient_portal/management/commands/create_smart_app.py',
+    // Commands that create standing privilege.
+    'omop_core/management/commands/create_staff_user.py',
+    'omop_core/management/commands/setup_admin.py',
+  ]) assert.equal(securityPath(filename), true, filename);
+  // Shapes that must NOT be swept in. Some of these are real files and some are
+  // near-miss spellings that do not exist; either way the point is the glob,
+  // not the file. Gating by proximity is what #1496 was undoing.
+  for (const filename of [
+    'patient_portal/api/views.py', 'patient_portal/api/serializers.py',
+    'omop_core/services/genomics.py', 'omop_core/services/access_log_export.py',
+    'omop_core/management/commands/setup_admin_docs.py',
+    'patient_portal/api/patient_search.py',
+  ]) assert.equal(securityPath(filename), false, filename);
+  // The test exemption still applies to their tests, as it does everywhere
+  // outside the two project packages.
+  for (const filename of [
+    'patient_portal/tests/test_backends.py', 'tests/test_patient_invitations.py',
+  ]) assert.equal(securityPath(filename), false, filename);
+});
+
 // Deliberately not gated. Shaped as one list of whatever the classifier does
 // gate, rather than as 24 assertions that each path MUST be false. It fails on
 // the same inputs — re-gating render.yaml still turns this red — so the gain is
