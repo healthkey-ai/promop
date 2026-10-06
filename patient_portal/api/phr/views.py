@@ -25,6 +25,7 @@ from patient_portal.models import PatientUser
 
 from .labs import lab_history, labs
 from .records import genetics, medication_detail, medications, procedures
+from .therapy import therapy
 from .sources import PATIENT, RECORD, row_sources, source
 
 GENETIC_DOC_TYPES = ('FISH', 'GEP', 'NGS', 'CYTOMETRY', 'CYTOGENETICS', 'MRD', 'BONE_MARROW')
@@ -398,3 +399,8 @@ class ProceduresView(PhrView):
 class GeneticsView(PhrView):
     def build(self, person, record):
         return genetics(person, record)
+
+
+class TherapyView(PhrView):
+    def build(self, person, record):
+        return therapy(person, record)

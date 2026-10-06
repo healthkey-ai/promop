@@ -10,6 +10,7 @@ from .views import (
     MedicationsView,
     ProceduresView,
     StatusView,
+    TherapyView,
 )
 
 urlpatterns = [
@@ -22,4 +23,5 @@ urlpatterns = [
     path('medications/<str:medication_id>/', MedicationDetailView.as_view(), name='phr-medication'),
     path('procedures/', ProceduresView.as_view(), name='phr-procedures'),
     path('genetics/', GeneticsView.as_view(), name='phr-genetics'),
+    path('therapy/', TherapyView.as_view(), name='phr-therapy'),
 ]

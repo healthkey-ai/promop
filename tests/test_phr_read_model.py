@@ -489,3 +489,73 @@ def test_unlabelled_findings_join_the_only_genetic_report_from_that_day(monkeypa
         ('Cytogenetics', '2026-06-04', []),
         ('NGS', '2026-06-04', []),
     ]
+
+
+# ---------------------------------------------------------------- lines of therapy
+
+from omop_oncology.models import Episode, EpisodeEvent  # noqa: E402
+
+
+@suppress_patient_record_refresh()
+def therapy_line(record, number, start, end, drugs):
+    regimen = ConceptFactory(concept_id=32531, concept_name='Treatment Regimen', concept_code='OMOP4822036')
+    episode = Episode.objects.create(
+        episode_id=700 + number, person=record.person, episode_concept=regimen, episode_number=number,
+        episode_start_date=start, episode_end_date=end, episode_object_concept=regimen,
+        episode_type_concept=regimen,
+    )
+    for name, d_start, d_end in drugs:
+        exposure = drug(record, ConceptFactory(concept_name=name, concept_code=f'RX-{name}'), d_start, d_end)
+        EpisodeEvent.objects.create(episode_id=episode.episode_id, event_id=exposure.pk,
+                                    episode_event_field_concept=regimen)
+    return episode
+
+
+def test_therapy_draws_each_line_with_its_medicines_procedures_and_outcome():
+    future = (timezone.localdate() + timedelta(days=60)).isoformat()
+    record = PatientRecordFactory(
+        disease='Multiple myeloma', disease_slug='myeloma', facility_name='MD Anderson Cancer Center',
+        first_line_therapy='VRd', first_line_start_date='2024-03-12', first_line_end_date='2024-10-14',
+        first_line_outcome='VGPR', first_line_discontinuation_reason='Completion',
+        second_line_therapy='KRd', second_line_start_date='2025-01-08', second_line_end_date=None,
+        second_line_outcome='PR',
+    )
+    therapy_line(record, 1, '2024-03-12', '2024-10-14', [
+        ('Bortezomib', '2024-03-12', '2024-08-26'), ('Lenalidomide', '2024-03-12', '2024-10-14'),
+        ('Melphalan', '2024-10-07', '2024-10-09'),
+    ])
+    therapy_line(record, 2, '2025-01-08', None, [('Carfilzomib', '2025-01-08', future)])
+    kind = ConceptFactory(concept_name='Procedure type', concept_code='TYPE-PROC')
+    for pk, name, day in ((1, 'Autologous stem cell transplant', '2024-10-14'), (2, 'Bone marrow biopsy', '2024-05-01'),
+                          (3, 'Port placement surgery', '2023-12-01')):
+        with suppress_patient_record_refresh():
+            ProcedureOccurrence.objects.create(procedure_occurrence_id=pk, person=record.person, procedure_date=day,
+                                               procedure_concept=ConceptFactory(concept_name=name, concept_code=f'P{pk}'),
+                                               procedure_type_concept=kind)
+
+    data = signed_in(record).get('/api/v1/phr/therapy/').data
+
+    assert [t['diagnosis'] for t in data['tracks']] == [{'name': 'Multiple myeloma', 'slug': 'myeloma'}]
+    first, second = data['tracks'][0]['lines']
+    assert first == {
+        'id': '701', 'number': 1, 'regimen': 'VRd', 'start': '2024-03-12', 'end': '2024-10-14', 'current': False,
+        'medications': [
+            {'name': 'Bortezomib', 'start': '2024-03-12', 'end': '2024-08-26'},
+            {'name': 'Lenalidomide', 'start': '2024-03-12', 'end': '2024-10-14'},
+            {'name': 'Melphalan', 'start': '2024-10-07', 'end': '2024-10-09'},
+        ],
+        'procedures': [{'name': 'Autologous stem cell transplant', 'date': '2024-10-14',
+                        'source': {'kind': 'record', 'facility': None, 'date': '2024-10-14'}}],
+        'outcome': {'code': 'VGPR', 'label': 'Very good partial response',
+                    'explanation': 'The cancer got much smaller, but some could still be found.'},
+        'stopped_because': 'Treatment completed as planned',
+        'source': {'kind': 'record', 'facility': 'MD Anderson Cancer Center', 'date': '2024-03-12'},
+    }
+    assert second['current'] is True and 'end' not in second
+    assert second['medications'] == [{'name': 'Carfilzomib', 'start': '2025-01-08', 'end': future}]
+    assert second['outcome']['label'] == 'Partial response'
+
+
+def test_therapy_is_empty_without_lines():
+    record = PatientRecordFactory(disease='Multiple myeloma')
+    assert signed_in(record).get('/api/v1/phr/therapy/').data == {'tracks': []}
