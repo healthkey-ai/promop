@@ -2016,6 +2016,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         'medication_requests': [],
                         'immunizations': [],
                         'diagnostic_reports': [],
+                        'imaging_studies': [],
                         'allergy_intolerances': [],
                         'encounters': [],
                     }
@@ -2073,6 +2074,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     patient_id = _resolve_patient_ref(patient_ref)
                     if patient_id in patients_data:
                         patients_data[patient_id]['diagnostic_reports'].append(resource)
+                elif resource_type == 'ImagingStudy':
+                    patient_ref = resource.get('subject', {}).get('reference', '')
+                    patient_id = _resolve_patient_ref(patient_ref)
+                    if patient_id in patients_data:
+                        patients_data[patient_id]['imaging_studies'].append(resource)
                 elif resource_type == 'AllergyIntolerance':
                     patient_ref = resource.get('patient', {}).get('reference', '')
                     patient_id = _resolve_patient_ref(patient_ref)
@@ -4110,6 +4116,19 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     logger.info(
                         "TIMING patient=%s phase=diagnostic_reports elapsed=%.1fs count=%d",
                         _timing_hash, _time.monotonic() - _pt_start, len(data.get('diagnostic_reports', [])),
+                    )
+
+                    # --- Radiology reports and ImagingStudy → structured imaging (#1731) ---
+                    from omop_core.services.imaging import import_imaging, index_resources
+                    import_imaging(
+                        person, data.get('diagnostic_reports', []), data.get('imaging_studies', []),
+                        index_resources(entries),
+                        record_provenance=(
+                            (lambda _row: _record_provenance(
+                                _row, prov_source, prov_user_id,
+                                modification_reason=prov_reason, organization=upload_org))
+                            if prov_source else None
+                        ),
                     )
 
                     # --- Write AllergyIntolerance rows into OMOP Observation ---
