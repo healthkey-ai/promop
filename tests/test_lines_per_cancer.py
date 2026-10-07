@@ -145,8 +145,9 @@ def test_the_record_s_flat_therapy_fields_stay_the_primary_cancer_s():
     author_therapy_line(person, line_number=1, drugs=[_drug(drugs, 'bicalutamide')],
                         start_date=date(2019, 6, 1), end_date=date(2019, 12, 1),
                         outcome='Complete Response', disease=PROSTATE)
+    # Ended: a cancer still on a line would be the primary (#1738).
     author_therapy_line(person, line_number=2, drugs=[_drug(drugs, 'bicalutamide')],
-                        start_date=date(2020, 1, 1), disease=PROSTATE)
+                        start_date=date(2020, 1, 1), end_date=date(2020, 6, 1), disease=PROSTATE)
 
     record = refresh_patient_record(person)
 
