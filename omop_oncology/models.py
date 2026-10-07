@@ -22,6 +22,15 @@ class Episode(models.Model):
 
     class Meta:
         db_table = 'episode'
+        constraints = [
+            # One Disease Episode (32528) per person and cancer: two writers
+            # creating the same cancer's first line at once must not split it.
+            models.UniqueConstraint(
+                fields=['person', 'episode_source_value'],
+                condition=models.Q(episode_concept_id=32528),
+                name='uniq_disease_episode_per_cancer',
+            ),
+        ]
 
     def __str__(self):
         return f"Episode {self.episode_id} for Person {self.person_id}"
