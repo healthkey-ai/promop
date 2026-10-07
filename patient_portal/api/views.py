@@ -5542,6 +5542,71 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         )
         return Response(result)
 
+    @action(detail=False, methods=['post'], url_path='bulk-resolve-source-codes',
+            permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+    def bulk_resolve_source_codes(self, request: Request) -> Response:
+        """POST /api/v1/patient-records/bulk-resolve-source-codes/
+
+        Queue a bulk source-code resolution for multiple patients.
+        Returns 202 with a run_id to poll.
+        """
+        if not _is_admin_actor(request):
+            return Response(
+                {'detail': 'Only administrators can resolve source codes.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        from omop_core.services.resolve_jobs import (
+            BULK_RESOLVE_MAX_PERSONS,
+            create_and_dispatch_resolve_run,
+        )
+
+        person_ids = request.data.get('person_ids', [])
+        if not isinstance(person_ids, list) or not person_ids:
+            return Response(
+                {'detail': 'person_ids must be a non-empty list of integers.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if len(person_ids) > BULK_RESOLVE_MAX_PERSONS:
+            return Response(
+                {'detail': f'Maximum {BULK_RESOLVE_MAX_PERSONS} person_ids per request.'},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+
+        run = create_and_dispatch_resolve_run(person_ids, user=request.user)
+        return Response(
+            {'run_id': str(run.id), 'total': run.total},
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def resolve_run_status(request: Request, run_id) -> Response:
+    """GET /api/v1/resolve-runs/{run_id}/ — poll a bulk resolve run."""
+    if not _is_admin_actor(request):
+        return Response(
+            {'detail': 'Only administrators can view resolve run status.'},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    from omop_core.models import SourceCodeResolveRun
+
+    try:
+        run = SourceCodeResolveRun.objects.get(id=run_id)
+    except SourceCodeResolveRun.DoesNotExist:
+        return Response({'detail': 'Run not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    return Response({
+        'run_id': str(run.id),
+        'state': run.state,
+        'total': run.total,
+        'done': run.done,
+        'resolved': run.resolved,
+        'errors': run.errors,
+    })
+
 
 @api_view(['GET'])
 @permission_classes([ScopedTokenPermission])

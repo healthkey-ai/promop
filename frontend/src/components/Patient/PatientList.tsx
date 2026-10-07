@@ -1,9 +1,10 @@
 import PageTitle from '@/components/Branding/PageTitle';
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { Upload, Trash2, LogOut, Settings, Globe } from "lucide-react";
+import { Upload, Trash2, LogOut, Settings, Globe, RefreshCw } from "lucide-react";
 import api from "@/api/axios";
 import { useAuth, type User } from "@/hooks/useAuth";
+import type { ResolveRunStatus } from "@/types/sourceCodes";
 import { PaginationControls } from "@/components/labs/PaginationControls";
 import { useLocalPagination } from "@/lib/pagination";
 
@@ -101,6 +102,8 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   const [selectAllMode, setSelectAllMode] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [resolveDialogOpen, setResolveDialogOpen] = useState(false);
+  const [resolveRun, setResolveRun] = useState<ResolveRunStatus | null>(null);
   const [orgFilter, setOrgFilter] = useState(ALL_FILTER_VALUE);
   const [diseaseFilter, setDiseaseFilter] = useState(ALL_FILTER_VALUE);
   const [stageFilter, setStageFilter] = useState(ALL_FILTER_VALUE);
@@ -214,6 +217,34 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
     }
   };
 
+  const handleResolveConfirm = async () => {
+    const personIds = Array.from(selectedIds);
+    if (personIds.length === 0) return;
+    try {
+      const res = await api.post<{ run_id: string; total: number }>(
+        "/v1/patient-records/bulk_resolve_source_codes/",
+        { person_ids: personIds }
+      );
+      const runId = res.data.run_id;
+      setResolveRun({ run_id: runId, state: "pending", total: res.data.total, done: 0, resolved: 0, errors: 0 });
+
+      const poll = setInterval(async () => {
+        try {
+          const status = await api.get<ResolveRunStatus>(`/v1/resolve-runs/${runId}/`);
+          setResolveRun(status.data);
+          if (status.data.state === "completed" || status.data.state === "failed") {
+            clearInterval(poll);
+          }
+        } catch {
+          clearInterval(poll);
+        }
+      }, 2000);
+    } catch (err) {
+      setError(getErrorMessage(err, "Failed to start bulk resolve"));
+      setResolveDialogOpen(false);
+    }
+  };
+
   const formatDate = (dateString?: string | null) => {
     if (!dateString) return "Not recorded";
     try {
@@ -251,13 +282,24 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
         <PageTitle className="text-2xl font-bold text-foreground">Patients</PageTitle>
         <div className="flex flex-wrap gap-2">
           {(selectedIds.size > 0 || selectAllMode) && (
-            <button
-              onClick={() => setDeleteDialogOpen(true)}
-              className="inline-flex items-center gap-2 rounded-md border border-destructive px-4 py-2 text-sm font-medium text-destructive hover:bg-destructive/10"
-            >
-              <Trash2 size={16} />
-              Delete ({selectAllMode ? `All ${patientCount}` : selectedIds.size})
-            </button>
+            <>
+              <button
+                onClick={() => setDeleteDialogOpen(true)}
+                className="inline-flex items-center gap-2 rounded-md border border-destructive px-4 py-2 text-sm font-medium text-destructive hover:bg-destructive/10"
+              >
+                <Trash2 size={16} />
+                Delete ({selectAllMode ? `All ${patientCount}` : selectedIds.size})
+              </button>
+              {!selectAllMode && !!(currentUser?.is_staff || currentUser?.is_org_admin) && (
+                <button
+                  onClick={() => { setResolveRun(null); setResolveDialogOpen(true); }}
+                  className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-foreground hover:bg-accent"
+                >
+                  <RefreshCw size={16} />
+                  Generate OMOP ({selectedIds.size})
+                </button>
+              )}
+            </>
           )}
           {canManageMappings && (
             <>
@@ -606,6 +648,73 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                 {deleting ? "Deleting..." : "Delete"}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {resolveDialogOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="w-full max-w-md rounded-lg bg-background p-6 shadow-xl">
+            <h2 className="text-lg font-semibold">Generate OMOP</h2>
+            {!resolveRun ? (
+              <>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  Re-resolve source codes for {selectedIds.size} selected patient{selectedIds.size !== 1 ? "s" : ""}?
+                  This will update unmapped clinical rows to approved OMOP concepts.
+                </p>
+                <div className="mt-6 flex justify-end gap-3">
+                  <button
+                    onClick={() => setResolveDialogOpen(false)}
+                    className="rounded-md border border-input px-4 py-2 text-sm font-medium hover:bg-accent"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleResolveConfirm}
+                    className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+                  >
+                    Generate OMOP
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="mt-4 space-y-3">
+                  <div className="flex items-center gap-2 text-sm">
+                    {(resolveRun.state === "pending" || resolveRun.state === "running") && (
+                      <span className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+                    )}
+                    <span className="capitalize">{resolveRun.state}</span>
+                    <span className="text-muted-foreground">
+                      &mdash; {resolveRun.done}/{resolveRun.total} patients
+                    </span>
+                  </div>
+                  {resolveRun.total > 0 && (
+                    <div className="h-2 overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full rounded-full bg-primary transition-all"
+                        style={{ width: `${Math.round((resolveRun.done / resolveRun.total) * 100)}%` }}
+                      />
+                    </div>
+                  )}
+                  {(resolveRun.state === "completed" || resolveRun.state === "failed") && (
+                    <p className="text-sm text-muted-foreground">
+                      Resolved {resolveRun.resolved} source code(s).
+                      {resolveRun.errors > 0 && ` ${resolveRun.errors} error(s).`}
+                    </p>
+                  )}
+                </div>
+                <div className="mt-6 flex justify-end">
+                  <button
+                    onClick={() => { setResolveDialogOpen(false); setResolveRun(null); }}
+                    disabled={resolveRun.state === "pending" || resolveRun.state === "running"}
+                    className="rounded-md border border-input px-4 py-2 text-sm font-medium hover:bg-accent disabled:opacity-50"
+                  >
+                    {resolveRun.state === "completed" || resolveRun.state === "failed" ? "Close" : "Running..."}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
