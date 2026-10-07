@@ -310,7 +310,7 @@ def owned_writable_fields(descriptor=None):
     owned = set(_DEMOGRAPHIC_FIELDS) | set(_LOCATION_COLUMN)
     fields = {
         f for f, e in descriptor.items()
-        if e.get('writable') and (
+        if f != 'genetic_mutations' and e.get('writable') and (
             e.get('kind') == KIND_EDITABLE
             or (e.get('kind') == 'direct' and e.get('projection'))
             or f in owned
