@@ -653,7 +653,7 @@ export default function CodeMappingPage() {
   const [uploadOpen, setUploadOpen] = useState(false);
   const [mintOpen, setMintOpen] = useState(false);
   const [error, setError] = useState("");
-  const [searchQuery, setSearchQuery] = useState(searchParams.get('search') || "");
+  const [searchQuery, setSearchQuery] = useState("");
   // `null` means no choice has been made, so use the work-prioritized default.
   // The empty string is a real vocabulary ID: it represents the Uncoded tab.
   const [activeVocabulary, setActiveVocabulary] = useState<string | null>(null);
