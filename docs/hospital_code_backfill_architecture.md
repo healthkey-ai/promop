@@ -129,3 +129,10 @@ system, normalized UCUM when available, validation verdict/reason, and counts.
 Alex's per-unit percentiles and suppression state are merged onto the matching
 untouched display/code pair. The dialog displays both the original and
 normalized forms and retains the percentile mini-graph.
+
+Migration `0280_corrected_hospital_code_units` queues v2 of the same 691,800-key
+cohort, using Nikita's `fhir_code_inventory_20261005b.csv`. The refresh retains
+the original FHIR unit strings while adding explicit normalization-table
+results for malformed coded units such as `k/uL` to `10*3/uL`. It uses the same
+idempotent importer, so unit evidence is refreshed without changing curator
+destinations or review state.
