@@ -1374,11 +1374,15 @@ def _cancers_with_lines(person, snapshot: OmopSnapshot, today) -> tuple[set, set
     """Disease slugs with a current line of therapy, and with any line (#1738).
 
     A line belongs to the cancer its Disease Episode names (#1739). A line
-    with no Disease Episode belongs to the primary cancer, which here is the
-    one the record held before this refresh: the row is still unsaved.
+    with no Disease Episode, or one whose cancer is no longer on the record,
+    belongs to the primary cancer, which here is the one the record held before
+    this refresh: the row is still unsaved. Slugs are in the stored key form
+    (``disease_key``), as Disease Episodes keep them.
     """
     if 'lines' not in snapshot.cancer_lines:
-        from omop_core.services.disease_episodes import primary_disease_slug, regimen_episodes, slug_of
+        from omop_core.services.disease_episodes import (
+            disease_key, primary_disease_ids, primary_disease_slug, regimen_episodes, slug_of,
+        )
         from omop_oncology.models import Episode
 
         diseases = {
@@ -1386,9 +1390,11 @@ def _cancers_with_lines(person, snapshot: OmopSnapshot, today) -> tuple[set, set
             for e in Episode.objects.filter(person=person, episode_concept_id=CONCEPT_DISEASE_FIRST_OCCURRENCE)
         }
         lines = list(regimen_episodes(person).values_list('episode_parent_id', 'episode_end_date'))
-        unparented_owner = primary_disease_slug(person) if any(p is None for p, _ in lines) else ''
+        stored = primary_disease_slug(person)
+        primary_ids = primary_disease_ids(person, stored) if diseases else set()
+        owner = disease_key(stored)
         snapshot.cancer_lines['lines'] = [
-            (diseases.get(parent, '') if parent is not None else unparented_owner, end)
+            (diseases.get(parent, '') if parent is not None and parent not in primary_ids else owner, end)
             for parent, end in lines
         ]
     lines = snapshot.cancer_lines['lines']
@@ -1418,8 +1424,10 @@ def _primary_cancer_condition(person, snapshot: OmopSnapshot, cancers: list):
     today = timezone.localdate()
     current, treated = _cancers_with_lines(person, snapshot, today)
 
+    from omop_core.services.disease_episodes import disease_key
+
     def rank(condition):
-        slug = _condition_slug(condition)
+        slug = disease_key(_condition_slug(condition))
         return (
             _condition_is_current(condition, today),
             slug in current,

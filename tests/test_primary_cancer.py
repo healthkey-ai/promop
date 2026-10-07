@@ -158,3 +158,18 @@ def test_one_cancer_costs_no_line_queries(monkeypatch):
                         lambda *a: pytest.fail('lines read for a single cancer'))
 
     assert _refreshed(person).disease_slug == MYELOMA_SLUG
+
+
+def test_a_long_named_cancer_on_a_current_line_stays_primary():
+    """Disease Episodes keep a slug's first 42 characters; the ranking must compare in that form."""
+    long_name = 'Diffuse large B-cell lymphoma, unspecified site'
+    assert len(disease_slug(long_name)) > 42
+    drugs = _concepts()
+    person = _person()
+    _condition(person, long_name, ago(400))
+    _condition(person, BCC, ago(20))
+    with suppress_patient_record_refresh():
+        author_therapy_line(person, line_number=1, disease=long_name, drugs=[_drug(drugs, 'lenalidomide')],
+                            start_date=ago(30))
+
+    assert _refreshed(person).disease_slug == disease_slug(long_name)
