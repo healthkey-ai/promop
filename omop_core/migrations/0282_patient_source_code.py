@@ -7,7 +7,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("omop_core", "0281_merge_20261007_1327"),
+        ("omop_core", "0281_merge_corrected_units_and_source_code_resolve"),
     ]
 
     operations = [
