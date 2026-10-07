@@ -102,6 +102,8 @@ def test_each_cancer_has_its_own_line_1_with_its_own_outcome():
     groups = {g['slug']: g for g in lines_by_disease(person)}
     assert groups[disease_slug(MYELOMA)]['primary'] and not groups[disease_slug(PROSTATE)]['primary']
     assert [line['outcome'] for line in groups[disease_slug(PROSTATE)]['lines']] == ['Stable Disease']
+    # A line with no named regimen is named after its drugs, not its LOT-n label.
+    assert [line['regimen'] for line in groups[disease_slug(PROSTATE)]['lines']] == ['bicalutamide']
 
 
 def test_lines_written_before_the_change_belong_to_the_primary_cancer():

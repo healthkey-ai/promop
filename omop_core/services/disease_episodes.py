@@ -187,6 +187,19 @@ def attach_unparented_lines(person) -> int:
     return len(orphans)
 
 
+def _regimen_name(line: Episode, drugs: list[str]) -> str | None:
+    """A line's regimen: its named regimen concept, else its drugs, never the LOT-n label."""
+    regimen = line.episode_object_concept
+    if regimen is not None and regimen.concept_id and regimen.concept_id not in (
+        CONCEPT_EHR_TYPE, CONCEPT_DISEASE_FIRST_OCCURRENCE,
+    ):
+        return regimen.concept_name
+    source = (line.episode_source_value or '').strip()
+    if source and not source.upper().startswith('LOT-'):
+        return source
+    return ' + '.join(drugs) or None
+
+
 def lines_by_disease(person) -> list[dict]:
     """Each cancer's lines of therapy, primary first, read straight from the Episodes.
 
@@ -214,6 +227,24 @@ def lines_by_disease(person) -> list[dict]:
         ).order_by('observation_date', 'observation_id')
     }
 
+    from omop_core.models import DrugExposure
+    from omop_oncology.models import EpisodeEvent
+
+    events = EpisodeEvent.objects.filter(episode_id__in=[line.episode_id for line in lines])
+    exposures = {
+        d.drug_exposure_id: d for d in DrugExposure.objects.filter(
+            person=person, is_erroneous=False, drug_exposure_id__in=[e.event_id for e in events],
+        ).select_related('drug_concept')
+    }
+    drug_names: dict = {}
+    for event in events:
+        exposure = exposures.get(event.event_id)
+        if exposure is None:
+            continue
+        name = (exposure.drug_concept.concept_name if exposure.drug_concept_id else None) or exposure.drug_source_value
+        if name and name not in drug_names.setdefault(event.episode_id, []):
+            drug_names[event.episode_id].append(name)
+
     def owner(line):
         if line.episode_parent_id in diseases:
             return line.episode_parent_id
@@ -229,11 +260,10 @@ def lines_by_disease(person) -> list[dict]:
         legacy = {key[1]: value for key, value in observations.items() if key[0] is None} if (
             owner(line) == (primary.episode_id if primary else None)) else {}
         values = {**legacy, **own}
-        regimen = line.episode_object_concept
         return {
             'episode_id': line.episode_id,
             'line': n,
-            'regimen': regimen.concept_name if regimen and regimen.concept_id else (line.episode_source_value or None),
+            'regimen': _regimen_name(line, drug_names.get(line.episode_id, [])),
             'start_date': line.episode_start_date,
             'end_date': line.episode_end_date,
             'outcome': values.get(f'LOT-{n}-outcome'),
