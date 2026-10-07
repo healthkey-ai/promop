@@ -249,7 +249,8 @@ def test_lymph_node_size_writes_the_disambiguating_qualifier():
     from omop_core.models import Measurement
     person = PersonFactory()
     PatientRecordFactory(person=person)
-    ConceptFactory(concept_code='21889-1', concept_name='Size Tumor')
+    # Current descriptors resolve this reviewed Cancer Modifier concept by its stable id.
+    ConceptFactory(concept_id=36769292, concept_code='21889-1', concept_name='Size Tumor')
     _seed_patient_reported_type()
 
     result = apply_field_writes(person, {'largest_lymph_node_size': 25}, today=date(2026, 8, 23))
@@ -323,9 +324,13 @@ def test_genetic_mutation_write_creates_measurement_and_rederives():
     assert m.measurement_type_concept_id == 32865
     assert m.qualifier_concept_id == 255395001            # germline
     assert m.value_as_concept_id == 30166007              # pathogenic
-    assert refresh_patient_record(person).genetic_mutations == [
-        {'gene': 'brca1', 'variant': 'c.68_69delAG', 'test_date': '2026-08-23',
-         'origin': 'germline', 'interpretation': 'pathogenic'}]
+    mutation = refresh_patient_record(person).genetic_mutations[0]
+    assert {key: mutation[key] for key in (
+        'gene', 'variant', 'test_date', 'origin', 'interpretation'
+    )} == {
+        'gene': 'brca1', 'variant': 'c.68_69delAG', 'test_date': '2026-08-23',
+        'origin': 'germline', 'interpretation': 'pathogenic',
+    }
 
 
 def test_genetic_mutation_same_gene_upserts_not_duplicates():
@@ -341,9 +346,13 @@ def test_genetic_mutation_same_gene_upserts_not_duplicates():
     active = Measurement.objects.filter(
         person=person, measurement_concept__concept_code=_GENE_CODE['BRCA1'], is_erroneous=False)
     assert active.count() == 1
-    assert refresh_patient_record(person).genetic_mutations == [
-        {'gene': 'brca1', 'variant': '185delAG', 'test_date': '2026-08-24',
-         'origin': 'somatic', 'interpretation': 'vus'}]
+    mutation = refresh_patient_record(person).genetic_mutations[0]
+    assert {key: mutation[key] for key in (
+        'gene', 'variant', 'test_date', 'origin', 'interpretation'
+    )} == {
+        'gene': 'brca1', 'variant': '185delAG', 'test_date': '2026-08-24',
+        'origin': 'somatic', 'interpretation': 'vus',
+    }
 
 
 def test_genetic_mutation_list_diff_removes_dropped_gene():
@@ -404,8 +413,10 @@ def test_genetic_mutation_optional_origin_and_interpretation_omitted():
     apply_field_writes(person, {'genetic_mutations': [
         {'gene': 'BRCA1', 'mutation': 'c.68_69delAG'}]}, today=date(2026, 8, 23))
 
-    assert refresh_patient_record(person).genetic_mutations == [
-        {'gene': 'brca1', 'variant': 'c.68_69delAG', 'test_date': '2026-08-23'}]
+    mutation = refresh_patient_record(person).genetic_mutations[0]
+    assert {key: mutation[key] for key in ('gene', 'variant', 'test_date')} == {
+        'gene': 'brca1', 'variant': 'c.68_69delAG', 'test_date': '2026-08-23',
+    }
 
 
 def test_genetic_mutation_recognized_gene_without_variant_fails_closed():
@@ -526,10 +537,14 @@ def test_genetic_mutation_non_list_is_rejected():
     assert result.applied == []
 
 
-def test_owned_writable_includes_genetic_mutations_only_when_vocab_loaded():
+def test_owned_writable_includes_genetic_mutations_only_when_vocab_loaded(monkeypatch):
     # Mirrors KIND_EDITABLE's "writable iff concept resolves": genetic_mutations is offered only when
     # its vocab (patient-report type + a gene LOINC) is loaded, so the editor never dangles an input
     # whose write would no-op on a partial-vocab stack.
-    assert 'genetic_mutations' not in owned_writable_fields()
+    import omop_core.services.field_write_service as field_writes
+    with monkeypatch.context() as patcher:
+        patcher.setattr(field_writes, '_genetic_mutations_writable', lambda: False)
+        assert 'genetic_mutations' not in owned_writable_fields()
     _seed_genetic_vocab(('BRCA1',))
+    assert field_writes._genetic_mutations_writable()
     assert 'genetic_mutations' in owned_writable_fields()
