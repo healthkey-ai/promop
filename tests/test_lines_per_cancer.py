@@ -268,9 +268,15 @@ def test_lines_follow_the_primary_cancer_when_it_changes():
                         start_date=date(2024, 4, 1), end_date=date(2024, 10, 1), outcome='Partial Response')
     assert refresh_patient_record(person).therapy_lines_count == 1
 
+    from omop_core.models import ConditionOccurrence
+
     icd = VocabularyFactory(vocabulary_id='ICD10CM', vocabulary_name='ICD10CM')
     with suppress_patient_record_refresh():
-        ConditionOccurrenceFactory(  # a later oncologic row with another name becomes the primary
+        # The myeloma diagnosis is closed and a later oncologic row with another
+        # name becomes the primary (under any primary-cancer rule).
+        ConditionOccurrence.objects.filter(person=person, condition_concept__concept_name=MYELOMA).update(
+            condition_end_date=date(2025, 1, 15))
+        ConditionOccurrenceFactory(
             person=person, condition_start_date=date(2025, 2, 1),
             condition_concept=ConceptFactory(concept_name='Plasma cell leukemia', concept_code='C90.10', vocabulary=icd),
         )
