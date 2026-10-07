@@ -58,10 +58,12 @@ Notes are linked to the study with the OMOP 5.4 `note_event_id` and
   when the study has exactly one series.
 - **`image_study_uid` is nullable.** A radiology report can arrive without an
   `ImagingStudy`. The study is still recorded, and `has_image` is false.
-- **Two local `*_source_value` columns** (`modality_source_value`,
-  `anatomic_site_source_value`) keep the source's terms when the DICOM or
-  SNOMED vocabularies aren't loaded. This follows OMOP's own source-value
-  convention.
+- **Three local `*_source_value` columns.** `modality_source_value` and
+  `anatomic_site_source_value` keep the source's terms when the DICOM or
+  SNOMED vocabularies aren't loaded, following OMOP's own source-value
+  convention. `image_source_value` keeps the study's identity at the source
+  (its DICOM UID, else the report's or the study's id), so a re-import finds
+  its own row and two studies with the same code on the same day stay two.
 - **`image_feature` is not used yet.** Findings are reported text, not
   algorithm or coded features, so they belong in `note_nlp`. `image_feature`
   is the place for coded or AI-derived features later.
@@ -81,10 +83,18 @@ Both FHIR paths, the upload endpoint and the provider sync, call
   another HL7 v2-0074 imaging code, or LOINC `LP29684-5`) or names an
   `ImagingStudy`.
 - An `ImagingStudy` that no report names becomes a study without a report.
-- A study is keyed like other clinical events, by `(procedure_source_value,
-  procedure_date)`. Re-importing it rewrites its imaging rows in place.
-- An existing procedure row with the same key, from a FHIR `Procedure`, is
-  adopted rather than duplicated.
+- A study is found again by its identity (`image_source_value`), and
+  re-importing it rewrites its imaging rows in place.
+- A new study adopts an existing plain EHR procedure row for the same exam
+  (same `procedure_source_value` and date, from a FHIR `Procedure`) rather than
+  duplicating it, but never a row that is already a study or one the patient
+  entered themselves, and an adopted row's concept is only ever upgraded from 0.
+- A report or study the source withdrew (`entered-in-error`, `cancelled`) is
+  not imported, and marks an earlier import of the same study erroneous.
+- In a multi-patient upload, a report's references only reach resources about
+  the same patient.
+- Facilities come from a performing `Organization` only; a `Practitioner`
+  performer is not a care site.
 - The radiology report also still lands in `observation`, as before, so
   existing consumers of that row are unchanged.
 

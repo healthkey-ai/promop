@@ -236,3 +236,105 @@ def test_modalities_and_radiology_reports():
     assert is_radiology_report({'category': [{'text': 'Radiology'}]})
     assert is_radiology_report({'imagingStudy': [{'reference': 'ImagingStudy/1'}]})
     assert not is_radiology_report(_lab_report())
+
+
+# ---------------------------------------------------------------- review fixes (pass 1)
+
+def test_hostile_study_text_is_matched_in_linear_time():
+    import time
+
+    from omop_core.services.imaging import _strip_html
+
+    started = time.monotonic()
+    contrast(['w w ' * 20_000])
+    _strip_html('<' * 80_000)
+    assert time.monotonic() - started < 1.0
+
+
+def test_a_report_never_takes_another_patients_study_or_findings(concepts):
+    """Multi-patient uploads: references must not cross to another patient's resources."""
+    report, study, others = _pet_ct()
+    other = 'someone-else'
+    study['subject'] = {'reference': f'Patient/{other}'}
+    for res in others:
+        if res['resourceType'] == 'Observation':
+            res['subject'] = {'reference': f'Patient/{other}'}
+    person = Person.objects.create(person_id=731_010)
+    index = index_resources([{'resource': r} for r in (report, study, *others)])
+
+    import_imaging(person, [report], [], index, subject_refs={f'Patient/{PATIENT}', PATIENT})
+
+    (only,) = imaging_studies(person)
+    assert (only['has_image'], only['image_url'], only['body_part'], only['findings']) == (False, None, None, [])
+
+
+def test_a_practitioner_performer_is_not_a_facility_and_does_not_break_the_import(concepts):
+    report, study, others = _pet_ct()
+    report['performer'] = [{'reference': 'Practitioner/dr-smith', 'display': 'Dr Jane Smith'}]
+    practitioner = {'resourceType': 'Practitioner', 'id': 'dr-smith', 'name': [{'family': 'Smith', 'given': ['Jane']}]}
+    person = Person.objects.create(person_id=731_011)
+
+    import_imaging(person, [report], [study], index_resources([{'resource': r} for r in (report, study, practitioner, *others)]))
+
+    (only,) = imaging_studies(person)
+    assert only['procedure'].visit_occurrence_id is None
+    assert not CareSite.objects.filter(care_site_name__icontains='Smith').exists()
+
+
+def test_two_studies_with_the_same_code_on_the_same_day_stay_two(concepts):
+    first, second = _ct_chest_without_study(), _ct_chest_without_study()
+    second['id'], second['conclusion'] = 'rad-3', 'Second read.'
+    person = Person.objects.create(person_id=731_012)
+
+    import_imaging(person, [first, second], [], {})
+    import_imaging(person, [first, second], [], {})  # and re-importing keeps them apart
+
+    assert sorted(s['impression'] for s in imaging_studies(person)) == ['Lungs clear.', 'Second read.']
+
+
+def test_a_patient_entered_procedure_is_never_adopted(concepts):
+    from omop_core.services.mappings import CONCEPT_PATIENT_REPORTED_TYPE
+
+    ConceptFactory(concept_id=CONCEPT_PATIENT_REPORTED_TYPE, concept_name='Patient self-report',
+                   concept_code=str(CONCEPT_PATIENT_REPORTED_TYPE),
+                   vocabulary=Concept.objects.get(concept_id=0).vocabulary)
+    person = Person.objects.create(person_id=731_013)
+    own = ProcedureOccurrence.objects.create(
+        procedure_occurrence_id=731_901, person=person, procedure_date='2026-09-05',
+        procedure_concept_id=0, procedure_type_concept_id=CONCEPT_PATIENT_REPORTED_TYPE,
+        procedure_source_value='CT CHEST WO CONTRAST',
+    )
+
+    import_imaging(person, [_ct_chest_without_study()], [], {})
+
+    (study,) = imaging_studies(person)
+    assert study['procedure_occurrence_id'] != own.pk
+    assert not ImageOccurrence.objects.filter(procedure_occurrence=own).exists()
+
+
+def test_an_entered_in_error_report_is_not_shown_and_retracts_an_earlier_import(concepts):
+    person = Person.objects.create(person_id=731_014)
+    report = _ct_chest_without_study()
+    import_imaging(person, [report], [], {})
+    assert len(imaging_studies(person)) == 1
+
+    import_imaging(person, [{**report, 'status': 'entered-in-error'}], [], {})
+    assert imaging_studies(person) == []
+
+    other = Person.objects.create(person_id=731_015)
+    import_imaging(other, [{**report, 'status': 'cancelled'}], [], {})
+    assert imaging_studies(other) == []
+
+
+def test_an_upload_with_two_patients_keeps_each_patients_imaging_apart(concepts):
+    report, study, others = _pet_ct()
+    other = {'resourceType': 'Patient', 'id': 'other', 'name': [{'family': 'Other', 'given': ['Bo']}],
+             'gender': 'male', 'birthDate': '1950-01-01'}
+    study['subject'] = {'reference': 'Patient/other'}  # the PET/CT study is someone else's
+    bundle = _bundle(report, study, *others)
+    bundle['entry'].append({'resource': other})
+
+    person = _upload(bundle)
+
+    (only,) = imaging_studies(person)
+    assert (only['has_image'], only['image_url'], only['body_part']) == (False, None, None)
