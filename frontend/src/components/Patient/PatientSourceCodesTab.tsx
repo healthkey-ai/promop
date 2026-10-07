@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import api from "../../api/axios";
 import type {
   PatientSourceCode,
@@ -23,6 +24,7 @@ const TABLE_LABELS: Record<string, string> = {
 };
 
 export default function PatientSourceCodesTab({ personId }: Props) {
+  const navigate = useNavigate();
   const [data, setData] = useState<SourceCodesResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -189,7 +191,11 @@ export default function PatientSourceCodesTab({ personId }: Props) {
             </thead>
             <tbody className="divide-y">
               {filtered.map((sc, i) => (
-                <SourceCodeRow key={`${sc.omop_table}-${sc.source_value}-${i}`} sc={sc} />
+                <SourceCodeRow
+                  key={`${sc.omop_table}-${sc.source_value}-${i}`}
+                  sc={sc}
+                  onClick={() => navigate(`/code-mappings?search=${encodeURIComponent(sc.source_value)}`)}
+                />
               ))}
             </tbody>
           </table>
@@ -199,11 +205,11 @@ export default function PatientSourceCodesTab({ personId }: Props) {
   );
 }
 
-function SourceCodeRow({ sc }: { sc: PatientSourceCode }) {
+function SourceCodeRow({ sc, onClick }: { sc: PatientSourceCode; onClick: () => void }) {
   const badge = STATUS_BADGE[sc.mapping_status] || STATUS_BADGE.unmapped;
 
   return (
-    <tr className="hover:bg-muted/30">
+    <tr className="cursor-pointer hover:bg-muted/30" onClick={onClick}>
       <td className="px-3 py-2">
         <div className="font-mono text-xs">{sc.source_value}</div>
         {sc.source_vocabulary_id && (
