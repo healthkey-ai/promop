@@ -349,6 +349,12 @@ SECTIONS = (
 )
 
 
+def _has_lines(person) -> bool:
+    from omop_core.services.disease_episodes import regimen_episodes
+
+    return regimen_episodes(person).filter(episode_number__isnull=False).exists()
+
+
 def section_status(person, record: PatientRecord | None) -> dict[str, str]:
     """``ready`` or ``empty`` per section.
 
@@ -365,7 +371,9 @@ def section_status(person, record: PatientRecord | None) -> dict[str, str]:
         'about': bool(about_fields(record)),
         'diagnoses': bool(record and _text(record.disease))
         or has(ConditionOccurrence.objects.filter(is_erroneous=False)),
-        'therapy': bool(record and (_text(record.first_line_therapy) or record.later_therapies)),
+        # Any cancer's lines (#1739), not only the primary one's.
+        'therapy': bool(record and (_text(record.first_line_therapy) or record.later_therapies))
+        or _has_lines(person),
         'outcomes': False,
         'labs': has(Measurement.objects.filter(is_erroneous=False)),
         'medications': has(DrugExposure.objects.filter(is_erroneous=False)),
