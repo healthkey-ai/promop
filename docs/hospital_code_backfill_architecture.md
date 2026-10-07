@@ -136,3 +136,9 @@ the original FHIR unit strings while adding explicit normalization-table
 results for malformed coded units such as `k/uL` to `10*3/uL`. It uses the same
 idempotent importer, so unit evidence is refreshed without changing curator
 destinations or review state.
+
+The Cloud Run deployment applies database migrations before updating its worker
+pool to the same image. Consequently, a downstream HealthTree GCP instance
+tracking `dev` records the v2 import intent first, then starts a worker that
+knows how to dispatch and safely redeliver it; no operator-only load command is
+required.
