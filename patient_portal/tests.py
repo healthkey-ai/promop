@@ -29313,6 +29313,8 @@ class PatientSourceCodesTest(_SmartBase):
     @classmethod
     def setUpTestData(cls):
         super().setUpTestData()
+        cls.foundation_user.is_staff = True
+        cls.foundation_user.save(update_fields=['is_staff'])
         # Create measurement rows with same source_value to test aggregation.
         cls.m1 = Measurement.objects.create(
             measurement_id=90001,
@@ -29423,6 +29425,8 @@ class ResolvePersonSourceCodesTest(_SmartBase):
     @classmethod
     def setUpTestData(cls):
         super().setUpTestData()
+        cls.foundation_user.is_staff = True
+        cls.foundation_user.save(update_fields=['is_staff'])
         from omop_core.models import Concept
         # Zero concept for unresolved rows.
         cls.zero_concept = Concept.objects.get(concept_id=0)
@@ -29528,6 +29532,8 @@ class BulkResolveSourceCodesTest(_SmartBase):
     @classmethod
     def setUpTestData(cls):
         super().setUpTestData()
+        cls.foundation_user.is_staff = True
+        cls.foundation_user.save(update_fields=['is_staff'])
         # Second person for bulk test.
         cls.person2 = Person.objects.create(
             person_id=92001,
