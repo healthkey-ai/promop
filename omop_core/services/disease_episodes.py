@@ -1,16 +1,19 @@
 """Disease Episodes: the cancer a line of therapy treats (#1739).
 
 A line of therapy is a Treatment Regimen Episode (32531). Following the OMOP
-Oncology convention, each one hangs off a Disease Episode (32528, "Disease
-First Occurrence") through ``episode_parent_id``; the Disease Episode's
-``episode_object_concept`` is the cancer's diagnosis concept. One Disease
-Episode per cancer, keyed by the same disease slug ``PatientRecord`` derives,
-so line numbering is per ``(person, cancer)`` and a second cancer has its own
-line 1.
+Oncology convention, a line written for a named cancer hangs off a Disease
+Episode (32528, "Disease First Occurrence") through ``episode_parent_id``; the
+Disease Episode's ``episode_object_concept`` is the cancer's diagnosis concept.
+One Disease Episode per cancer (a unique constraint), keyed by the same disease
+slug ``PatientRecord`` derives, so line numbering is per ``(person, cancer)``
+and a second cancer has its own line 1.
 
-Lines written before this existed have no parent. They belong to the person's
-primary cancer: the backfill migration attaches them, and any writer that
-reaches one through the primary cancer adopts it on the way.
+A line no writer filed under a cancer (lines written before #1739, by the bulk
+importer or by inference) has no parent, and is the **primary** cancer's,
+whichever that is when it is read. So is a line whose Disease Episode names a
+cancer no longer on the record (a removed or renamed diagnosis). Nothing is
+backfilled: guessing which cancer an old line treated would be wrong exactly
+when the primary changes.
 
 ``PatientRecord``'s flat therapy fields (first/second/later line, line count,
 prior therapy) stay the **primary** cancer's: trial eligibility counts prior
@@ -20,6 +23,7 @@ from __future__ import annotations
 
 import logging
 
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 
 from omop_core.models import ConditionOccurrence, Concept, PatientRecord
@@ -33,6 +37,8 @@ from omop_oncology.models import Episode
 logger = logging.getLogger('audit')
 
 SOURCE_PREFIX = 'disease:'
+# episode_source_value is 50 characters, so a slug is compared on its first 42.
+SLUG_LENGTH = 50 - len(SOURCE_PREFIX)
 
 
 def disease_slug(name: str | None) -> str:
@@ -42,8 +48,13 @@ def disease_slug(name: str | None) -> str:
     return _disease_name_to_slug(_canonicalize_disease(name.strip())) if name and name.strip() else ''
 
 
+def disease_key(slug: str | None) -> str:
+    """A slug as a Disease Episode stores it: compare slugs only in this form."""
+    return (slug or '')[:SLUG_LENGTH]
+
+
 def slug_of(episode: Episode) -> str:
-    """The disease slug a Disease Episode stands for."""
+    """The disease slug a Disease Episode stands for (in its stored, key form)."""
     value = episode.episode_source_value or ''
     return value[len(SOURCE_PREFIX):] if value.startswith(SOURCE_PREFIX) else ''
 
@@ -68,7 +79,7 @@ def _cancer_condition(person, slug: str):
     for row in rows:
         name = (_usable_concept_name(row.condition_concept) if row.condition_concept_id else None) \
             or row.condition_source_value
-        if name and disease_slug(name) == slug:
+        if name and disease_key(disease_slug(name)) == disease_key(slug):
             return row
     return None
 
@@ -79,15 +90,30 @@ def find_disease_episode(person, slug: str) -> Episode | None:
     return Episode.objects.filter(
         person=person,
         episode_concept_id=CONCEPT_DISEASE_FIRST_OCCURRENCE,
-        episode_source_value=f'{SOURCE_PREFIX}{slug}'[:50],
+        episode_source_value=f'{SOURCE_PREFIX}{disease_key(slug)}',
     ).first()
+
+
+def disease_keys_on_record(person) -> set[str]:
+    """The cancers (any diagnosis, in key form) the person's record names."""
+    from omop_core.services.patient_record_service import _usable_concept_name
+
+    keys = set()
+    rows = ConditionOccurrence.objects.filter(person=person, is_erroneous=False).select_related('condition_concept')
+    for row in rows:
+        name = (_usable_concept_name(row.condition_concept) if row.condition_concept_id else None) \
+            or row.condition_source_value
+        if name:
+            keys.add(disease_key(disease_slug(name)))
+    return keys
 
 
 def disease_episode(person, slug: str, *, start_date=None) -> Episode | None:
     """The cancer's Disease Episode, created on first use.
 
     None when there is no slug, or when the Episode vocabulary (32528) is not
-    loaded; callers then fall back to unparented lines (the pre-#1739 shape).
+    loaded. Two writers creating it at once get the same row: the second
+    insert hits the unique constraint and reads the first one back.
     """
     if not slug:
         return None
@@ -112,13 +138,17 @@ def disease_episode(person, slug: str, *, start_date=None) -> Episode | None:
         episode_object_concept=object_concept,
         episode_type_concept=Concept.objects.filter(concept_id=CONCEPT_EHR_TYPE).first() or disease_concept,
         episode_start_date=(condition.condition_start_date if condition else None) or start_date,
-        episode_source_value=f'{SOURCE_PREFIX}{slug}'[:50],
+        episode_source_value=f'{SOURCE_PREFIX}{disease_key(slug)}',
     )
     if episode.episode_start_date is None:
         from django.utils import timezone
 
         episode.episode_start_date = timezone.localdate()
-    episode.save()
+    try:
+        with transaction.atomic():
+            episode.save()
+    except IntegrityError:
+        return find_disease_episode(person, slug)
     return episode
 
 
@@ -132,59 +162,37 @@ def regimen_episodes(person):
     return Episode.objects.filter(person=person).exclude(episode_concept_id=CONCEPT_DISEASE_FIRST_OCCURRENCE)
 
 
-def lines_for(person, parent: Episode | None, *, include_unparented: bool):
-    """The lines of one cancer. Unparented lines count as the primary cancer's."""
-    if parent is None:
-        return regimen_episodes(person).filter(episode_parent_id__isnull=True)
-    scope = Q(episode_parent_id=parent.episode_id)
-    if include_unparented:
-        scope |= Q(episode_parent_id__isnull=True)
-    return regimen_episodes(person).filter(scope)
+def primary_disease_ids(person, slug: str | None = None) -> set[int]:
+    """Disease Episodes whose lines are the primary cancer's: its own, and any
+    naming a cancer no longer on the record (a removed or renamed diagnosis)."""
+    slug = primary_disease_slug(person) if slug is None else slug
+    diseases = list(Episode.objects.filter(person=person, episode_concept_id=CONCEPT_DISEASE_FIRST_OCCURRENCE))
+    if not diseases:
+        return set()
+    on_record = disease_keys_on_record(person)
+    primary = disease_key(slug)
+    return {
+        e.episode_id for e in diseases
+        if (primary and slug_of(e) == primary) or slug_of(e) not in on_record
+    }
 
 
 def primary_lines(person, slug: str | None = None):
-    """The primary cancer's lines: parented to its Disease Episode, or unparented.
+    """The primary cancer's lines: unparented, or filed under its Disease Episode.
 
     ``slug`` is the primary cancer when the caller has just derived it (a
     refresh); otherwise the one PatientRecord last stored.
     """
-    slug = primary_disease_slug(person) if slug is None else slug
-    return lines_for(person, find_disease_episode(person, slug), include_unparented=True)
+    return regimen_episodes(person).filter(
+        Q(episode_parent_id__isnull=True) | Q(episode_parent_id__in=primary_disease_ids(person, slug))
+    )
 
 
 def other_cancer_line_ids(person) -> set[int]:
     """Lines that belong to a cancer other than the primary one."""
-    primary = find_disease_episode(person, primary_disease_slug(person))
-    others = regimen_episodes(person).filter(episode_parent_id__isnull=False)
-    if primary is not None:
-        others = others.exclude(episode_parent_id=primary.episode_id)
+    others = regimen_episodes(person).filter(episode_parent_id__isnull=False).exclude(
+        episode_parent_id__in=primary_disease_ids(person))
     return set(others.values_list('episode_id', flat=True))
-
-
-def attach_unparented_lines(person) -> int:
-    """Attach the person's unparented lines (and their LOT observations) to the primary cancer.
-
-    The backfill for lines written before #1739. Returns how many lines moved;
-    0 when the person has no primary cancer or the vocabulary is not loaded.
-    """
-    from omop_core.models import Observation
-
-    orphans = list(regimen_episodes(person).filter(episode_parent_id__isnull=True))
-    if not orphans:
-        return 0
-    parent = disease_episode(person, primary_disease_slug(person),
-                             start_date=min(e.episode_start_date for e in orphans))
-    if parent is None:
-        return 0
-    for line in orphans:
-        line.episode_parent_id = parent.episode_id
-        line.save(update_fields=['episode_parent_id'])
-        Observation.objects.filter(
-            person=person, observation_event_id__isnull=True,
-            observation_source_value__in=[f'LOT-{line.episode_number}-{s}'
-                                          for s in ('outcome', 'intent', 'discontinuation')],
-        ).update(observation_event_id=line.episode_id)
-    return len(orphans)
 
 
 def _regimen_name(line: Episode, drugs: list[str]) -> str | None:
@@ -215,7 +223,8 @@ def lines_by_disease(person) -> list[dict]:
             person=person, episode_concept_id=CONCEPT_DISEASE_FIRST_OCCURRENCE,
         )
     }
-    primary = next((e for e in diseases.values() if slug_of(e) == primary_slug), None)
+    primary_ids = primary_disease_ids(person, primary_slug)
+    primary = next((e for e in diseases.values() if slug_of(e) == disease_key(primary_slug)), None)
     lines = list(
         regimen_episodes(person).filter(episode_number__isnull=False)
         .select_related('episode_object_concept', 'episode_source_concept').order_by('episode_number')
@@ -246,7 +255,7 @@ def lines_by_disease(person) -> list[dict]:
             drug_names[event.episode_id].append(name)
 
     def owner(line):
-        if line.episode_parent_id in diseases:
+        if line.episode_parent_id in diseases and line.episode_parent_id not in primary_ids:
             return line.episode_parent_id
         return primary.episode_id if primary else None
 
@@ -274,12 +283,26 @@ def lines_by_disease(person) -> list[dict]:
     result = []
     for key, group in groups.items():
         disease = diseases.get(key)
-        slug = slug_of(disease) if disease else primary_slug
+        is_primary = key == (primary.episode_id if primary else None)
         result.append({
-            'slug': slug,
+            'slug': primary_slug if is_primary else slug_of(disease),
             'disease_episode_id': key,
-            'primary': slug == primary_slug,
+            'primary': is_primary,
             'lines': [entry(line) for line in group],
         })
     result.sort(key=lambda g: (not g['primary'], g['slug']))
     return result
+
+
+def cdm_field_concept(field: str) -> Concept | None:
+    """The OMOP CDM field concept named ``table.column`` (e.g. ``episode.episode_id``).
+
+    Athena codes these CDM###, older imports use ``table.column`` as the code;
+    the name is ``table.column`` in both. An ``*_event_id`` column is paired
+    with one so readers (and patient copies) know which table it points at.
+    """
+    return (
+        Concept.objects.filter(vocabulary_id='CDM', invalid_reason__isnull=True)
+        .filter(Q(concept_code=field) | Q(concept_name=field))
+        .order_by('concept_id').first()
+    )

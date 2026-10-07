@@ -140,7 +140,7 @@ def upsert_therapy_line_episode(
     if episode is None:
         episode = _find_line(person, line_number, parent, adopts_unparented)
     if episode is not None and parent is not None and episode.episode_parent_id is None and adopts_unparented:
-        # A line written before #1739 reached through the primary cancer.
+        # An unfiled line that a writer has now named the (primary) cancer for.
         episode.episode_parent_id = parent.episode_id
         episode.save(update_fields=['episode_parent_id'])
     created = episode is None
@@ -231,34 +231,59 @@ def upsert_therapy_line_episode(
 
 
 def _line_parent(person, disease, episode):
-    """The Disease Episode a line hangs off, and whether it adopts unparented lines.
+    """The Disease Episode a line hangs off, and whether it is the primary cancer's.
 
-    Unparented lines (written before #1739) are the primary cancer's, so only a
-    write for the primary cancer may claim them.
+    A line no one names a cancer for stays unparented: it is the primary
+    cancer's, whichever that is when it is read. A line for a named cancer hangs
+    off that cancer's Disease Episode; for a cancer other than the primary one
+    it must be a cancer on the record, and the Episode vocabulary must be
+    loaded, or the line could not be told apart from the primary cancer's.
     """
     from omop_core.services.disease_episodes import (
-        disease_episode, disease_slug, find_disease_episode, primary_disease_slug,
+        disease_episode, disease_key, disease_keys_on_record, disease_slug, primary_disease_ids,
+        primary_disease_slug,
     )
 
-    primary = primary_disease_slug(person)
     if episode is not None:
-        parent = Episode.objects.filter(episode_id=episode.episode_parent_id).first() \
-            if episode.episode_parent_id else None
-        is_primary = parent is None or parent == find_disease_episode(person, primary)
-        return parent, is_primary
-    slug = disease_slug(disease) if disease else primary
-    return disease_episode(person, slug), slug == primary
+        if episode.episode_parent_id is None:
+            return None, True
+        parent = Episode.objects.filter(episode_id=episode.episode_parent_id).first()
+        return parent, parent is None or parent.episode_id in primary_disease_ids(person)
+    if not disease:
+        return None, True
+    slug = disease_slug(disease)
+    if slug and disease_key(slug) == disease_key(primary_disease_slug(person)):
+        return disease_episode(person, slug), True  # None without the vocabulary: stays unparented
+    if not slug or disease_key(slug) not in disease_keys_on_record(person):
+        raise ValueError(f'This record has no diagnosis of {disease!r} to file a line of therapy under.')
+    parent = disease_episode(person, slug)
+    if parent is None:
+        raise ValueError(
+            'A line of therapy for a second cancer needs the Episode vocabulary '
+            '(Disease First Occurrence, 32528) loaded.'
+        )
+    return parent, False
 
 
-def _find_line(person, line_number, parent, adopts_unparented):
-    from omop_core.services.disease_episodes import regimen_episodes
+def _find_line(person, line_number, parent, is_primary):
+    from omop_core.services.disease_episodes import primary_lines, regimen_episodes
 
-    lines = regimen_episodes(person).filter(episode_number=line_number)
+    if not is_primary:
+        return regimen_episodes(person).filter(
+            episode_number=line_number, episode_parent_id=parent.episode_id).first()
+    lines = primary_lines(person).filter(episode_number=line_number)
     if parent is not None:
-        found = lines.filter(episode_parent_id=parent.episode_id).first()
-        if found is not None or not adopts_unparented:
-            return found
-    return lines.filter(episode_parent_id__isnull=True).first()
+        own = lines.filter(episode_parent_id=parent.episode_id).first()
+        if own is not None:
+            return own
+    return lines.order_by('episode_id').first()
+
+
+def _episode_field():
+    """The CDM field concept a LOT observation's observation_event_id points at."""
+    from omop_core.services.disease_episodes import cdm_field_concept
+
+    return cdm_field_concept('episode.episode_id')
 
 
 def _line_observations(person, src_value, line, adopt):
@@ -284,12 +309,15 @@ def _upsert_outcome_observation(person, line_number, outcome, type_concept, no_m
         return
     value = outcome[:60]
 
+    field = _episode_field() if line is not None else None
     existing = _line_observations(person, src_value, line, adopt).first()
     if existing:
-        if line is not None and existing.observation_event_id != line.episode_id:
+        if line is not None and (existing.observation_event_id != line.episode_id
+                                 or existing.obs_event_field_concept_id != (field.concept_id if field else None)):
             existing.observation_event_id = line.episode_id
+            existing.obs_event_field_concept = field
             existing._skip_patient_record_refresh = True
-            existing.save(update_fields=['observation_event_id'])
+            existing.save(update_fields=['observation_event_id', 'obs_event_field_concept'])
         # Keep OMOP authoritative when an outcome is edited (e.g. PR -> CR);
         # a no-op when the value is unchanged (ingest re-runs stay idempotent).
         dirty = []
@@ -316,6 +344,7 @@ def _upsert_outcome_observation(person, line_number, outcome, type_concept, no_m
         value_as_string=value,
         observation_source_value=src_value,
         observation_event_id=line.episode_id if line is not None else None,
+        obs_event_field_concept=field,
     )
     obs._skip_patient_record_refresh = True
     obs.save()
@@ -334,12 +363,16 @@ def _upsert_line_observation(person, line_number, suffix, value, type_concept, n
         return
     text = value[:60]
 
+    field = _episode_field() if line is not None else None
     existing = _line_observations(person, src_value, line, adopt).first()
     if existing:
         dirty = []
         if line is not None and existing.observation_event_id != line.episode_id:
             existing.observation_event_id = line.episode_id
             dirty.append('observation_event_id')
+        if line is not None and existing.obs_event_field_concept_id != (field.concept_id if field else None):
+            existing.obs_event_field_concept = field
+            dirty.append('obs_event_field_concept')
         if existing.value_as_string != text:
             existing.value_as_string = text
             dirty.append('value_as_string')
@@ -360,6 +393,7 @@ def _upsert_line_observation(person, line_number, suffix, value, type_concept, n
         value_as_string=text,
         observation_source_value=src_value,
         observation_event_id=line.episode_id if line is not None else None,
+        obs_event_field_concept=field,
     )
     obs._skip_patient_record_refresh = True
     obs.save()

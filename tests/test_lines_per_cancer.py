@@ -3,12 +3,10 @@ from datetime import date
 
 import pytest
 from django.contrib.auth import get_user_model
-from django.core.management import call_command
 from rest_framework.test import APIClient
 
 from omop_core.models import Observation, PatientRecord
 from omop_core.services.disease_episodes import (
-    attach_unparented_lines,
     disease_slug,
     find_disease_episode,
     lines_by_disease,
@@ -84,8 +82,8 @@ def test_each_cancer_has_its_own_line_1_with_its_own_outcome():
                                    disease=PROSTATE)
 
     assert myeloma.episode.episode_id != prostate.episode.episode_id
-    assert Episode.objects.get(pk=myeloma.episode.pk).episode_parent_id == \
-        find_disease_episode(person, disease_slug(MYELOMA)).episode_id
+    # Not filed under a cancer: the primary cancer's line, so unparented.
+    assert Episode.objects.get(pk=myeloma.episode.pk).episode_parent_id is None
     assert Episode.objects.get(pk=prostate.episode.pk).episode_parent_id == \
         find_disease_episode(person, disease_slug(PROSTATE)).episode_id
     outcomes = dict(Observation.objects.filter(person=person, observation_source_value='LOT-1-outcome')
@@ -128,9 +126,14 @@ def test_lines_written_before_the_change_belong_to_the_primary_cancer():
     assert legacy.episode_parent_id is None
     assert Observation.objects.get(observation_id=900_101).observation_event_id is None
 
-    # The primary cancer's line 1 is the old one, adopted with its outcome.
+    # The primary cancer's line 1 is the old one, which takes its outcome.
     primary = upsert_therapy_line_episode(person, line_number=1, outcome='Stable Disease')
     assert primary.episode.episode_id == legacy.episode_id and not primary.created
+    legacy.refresh_from_db()
+    assert legacy.episode_parent_id is None
+    # Naming the primary cancer files the line under it.
+    named = upsert_therapy_line_episode(person, line_number=1, disease=MYELOMA)
+    assert named.episode.episode_id == legacy.episode_id
     legacy.refresh_from_db()
     assert legacy.episode_parent_id == find_disease_episode(person, disease_slug(MYELOMA)).episode_id
     adopted = Observation.objects.get(observation_id=900_101)
@@ -187,7 +190,7 @@ def test_editing_a_line_by_id_never_touches_another_cancers_line_with_the_same_n
         find_disease_episode(person, disease_slug(PROSTATE)).episode_id
 
 
-def test_backfill_attaches_old_lines_to_the_primary_cancer_and_is_idempotent():
+def test_old_lines_are_the_primary_cancers_without_a_backfill():
     _concepts()
     person = _patient()
     for n in (1, 2):
@@ -201,14 +204,14 @@ def test_backfill_attaches_old_lines_to_the_primary_cancer_and_is_idempotent():
         observation_type_concept_id=CONCEPT_EHR_TYPE, value_as_string='Curative',
         observation_source_value='LOT-2-intent',
     )
+    upsert_therapy_line_episode(person, line_number=1, start_date=date(2019, 6, 1), disease=PROSTATE)
 
-    assert attach_unparented_lines(person) == 2
-    parent = find_disease_episode(person, disease_slug(MYELOMA))
-    assert set(Episode.objects.filter(episode_parent_id=parent.episode_id).values_list('episode_number', flat=True)) == {1, 2}
-    assert Observation.objects.get(observation_id=900_201).observation_event_id == 900_012
-    assert attach_unparented_lines(person) == 0
-    call_command('attach_lines_to_diseases')  # nothing left; must not fail
-    assert Episode.objects.filter(person=person, episode_concept_id=CONCEPT_DISEASE_FIRST_OCCURRENCE).count() == 1
+    assert set(primary_lines(person).values_list('episode_number', flat=True)) == {1, 2}
+    groups = {g['slug']: g for g in lines_by_disease(person)}
+    primary = groups[disease_slug(MYELOMA)]
+    assert primary['primary'] and [line['line'] for line in primary['lines']] == [1, 2]
+    assert primary['lines'][1]['intent'] == 'Curative'
+    assert [line['line'] for line in groups[disease_slug(PROSTATE)]['lines']] == [1]
 
 
 def test_a_disease_episode_alone_does_not_stop_line_inference():
@@ -229,32 +232,102 @@ def test_without_the_disease_episode_concept_lines_stay_unparented_as_before():
     first = upsert_therapy_line_episode(person, line_number=1, start_date=date(2024, 4, 1))
     assert first.episode is not None and first.episode.episode_parent_id is None
     assert upsert_therapy_line_episode(person, line_number=1, start_date=date(2024, 4, 1)).episode.episode_id == first.episode.episode_id
-    assert attach_unparented_lines(person) == 0
+    # Naming the primary cancer is fine without the vocabulary: the line stays unparented.
+    assert upsert_therapy_line_episode(person, line_number=1, disease=MYELOMA).episode.episode_parent_id is None
     assert PatientRecord.objects.filter(person=person).exists()
 
 
-def test_the_migration_backfill_matches_the_service():
-    import importlib
+# ---------------------------------------------------------------- review fixes (pass 1)
 
-    from django.apps import apps
+def test_a_line_for_another_cancer_never_lands_on_the_primary_cancers_line():
+    """Without the Disease Episode concept a second cancer's line cannot be told apart: refuse it."""
+    _concepts(disease_episode=False)
+    person = _patient()
+    primary = upsert_therapy_line_episode(person, line_number=1, start_date=date(2024, 4, 1), outcome='Partial Response')
+
+    with pytest.raises(ValueError):
+        upsert_therapy_line_episode(person, line_number=1, start_date=date(2019, 6, 1), disease=PROSTATE)
+    with pytest.raises(ValueError):
+        upsert_therapy_line_episode(person, line_number=1, start_date=date(2019, 6, 1), disease='---')
+
+    assert Episode.objects.get(pk=primary.episode.pk).episode_start_date == date(2024, 4, 1)
+
+
+def test_a_line_for_a_cancer_the_record_does_not_have_is_refused():
+    _concepts()
+    person = _patient()
+    with pytest.raises(ValueError):
+        upsert_therapy_line_episode(person, line_number=1, start_date=date(2024, 4, 1), disease='Melanoma')
+    assert not Episode.objects.filter(person=person).exists()
+
+
+def test_lines_follow_the_primary_cancer_when_it_changes():
+    """Lines nobody filed under a cancer are the primary cancer's, whichever that is now."""
+    drugs = _concepts()
+    person = _patient()
+    author_therapy_line(person, line_number=1, drugs=[_drug(drugs, 'lenalidomide')],
+                        start_date=date(2024, 4, 1), end_date=date(2024, 10, 1), outcome='Partial Response')
+    assert refresh_patient_record(person).therapy_lines_count == 1
+
+    icd = VocabularyFactory(vocabulary_id='ICD10CM', vocabulary_name='ICD10CM')
+    with suppress_patient_record_refresh():
+        ConditionOccurrenceFactory(  # a later oncologic row with another name becomes the primary
+            person=person, condition_start_date=date(2025, 2, 1),
+            condition_concept=ConceptFactory(concept_name='Plasma cell leukemia', concept_code='C90.10', vocabulary=icd),
+        )
+    record = refresh_patient_record(person)
+    assert record.disease_slug != disease_slug(MYELOMA)
+    assert record.therapy_lines_count == 1 and record.first_line_outcome == 'Partial Response'
+
+
+def test_a_named_cancers_lines_go_to_the_primary_when_that_diagnosis_is_gone():
+    """A Disease Episode whose cancer is no longer on the record (removed, renamed) is the primary's."""
+    drugs = _concepts()
+    person = _patient()
+    line = author_therapy_line(person, line_number=1, drugs=[_drug(drugs, 'lenalidomide')],
+                               start_date=date(2024, 4, 1), disease=MYELOMA)
+    from omop_core.models import ConditionOccurrence
+    with suppress_patient_record_refresh():
+        ConditionOccurrence.objects.filter(person=person, condition_concept__concept_name=MYELOMA).delete()
+    assert refresh_patient_record(person).disease_slug == disease_slug(PROSTATE)
+    assert line.episode.episode_id in set(primary_lines(person).values_list('episode_id', flat=True))
+
+
+def test_a_cancer_gets_one_disease_episode_even_when_two_writers_race(monkeypatch):
+    from django.db import IntegrityError, transaction
+
+    from omop_core.services import disease_episodes
 
     _concepts()
     person = _patient()
-    Episode.objects.create(
-        episode_id=900_031, person=person, episode_concept_id=CONCEPT_TREATMENT_REGIMEN,
-        episode_object_concept_id=0, episode_type_concept_id=CONCEPT_EHR_TYPE,
-        episode_start_date=date(2024, 4, 1), episode_number=1,
-    )
-    Observation.objects.create(
-        observation_id=900_301, person=person, observation_concept_id=0, observation_date=date(2024, 9, 1),
-        observation_type_concept_id=CONCEPT_EHR_TYPE, value_as_string='Partial Response',
-        observation_source_value='LOT-1-outcome',
-    )
+    slug = disease_slug(PROSTATE)
+    first = disease_episodes.disease_episode(person, slug)
+    # A second Disease Episode for the same cancer is refused by the database.
+    with pytest.raises(IntegrityError), transaction.atomic():
+        Episode.objects.create(
+            episode_id=900_999, person=person, episode_concept_id=CONCEPT_DISEASE_FIRST_OCCURRENCE,
+            episode_object_concept_id=0, episode_type_concept_id=CONCEPT_EHR_TYPE,
+            episode_start_date=date(2024, 1, 1), episode_source_value=f'disease:{slug}',
+        )
+    # A writer that looked before the other committed gets the existing row back.
+    real = disease_episodes.find_disease_episode
+    calls = []
 
-    importlib.import_module('omop_oncology.migrations.0007_lines_per_cancer').attach_lines(apps, None)
+    def stale_then_real(*args):
+        calls.append(1)
+        return None if len(calls) == 1 else real(*args)
 
-    parent = find_disease_episode(person, disease_slug(MYELOMA))
-    assert Episode.objects.get(episode_id=900_031).episode_parent_id == parent.episode_id
-    assert Observation.objects.get(observation_id=900_301).observation_event_id == 900_031
-    # And the writer then finds that line through the primary cancer.
-    assert upsert_therapy_line_episode(person, line_number=1, start_date=date(2024, 4, 1)).episode.episode_id == 900_031
+    monkeypatch.setattr(disease_episodes, 'find_disease_episode', stale_then_real)
+    assert disease_episodes.disease_episode(person, slug).episode_id == first.episode_id
+
+
+def test_a_lines_observations_name_the_episode_field_they_point_at():
+    _concepts()
+    field = ConceptFactory(concept_id=1_147_000, concept_name='episode.episode_id', concept_code='episode.episode_id',
+                           vocabulary=VocabularyFactory(vocabulary_id='CDM', vocabulary_name='CDM'))
+    person = _patient()
+    line = upsert_therapy_line_episode(person, line_number=1, start_date=date(2024, 4, 1),
+                                       outcome='Partial Response', intent='Curative')
+    rows = Observation.objects.filter(person=person, observation_event_id=line.episode.episode_id)
+    assert rows.count() == 2
+    assert set(rows.values_list('obs_event_field_concept_id', flat=True)) == {field.concept_id}
