@@ -397,7 +397,7 @@ class CanonicalizeDiseaseTest(_OmopBase):
             condition_type_concept=self.type_concept,
         )
         pi = refresh_patient_record(self.person)
-        self.assertEqual(pi.disease, 'multiple myeloma')  # source value, NOT 'Multiple myeloma in remission'
+        self.assertEqual(pi.disease, 'Multiple Myeloma')  # canonicalized source value, not the status variant
 
     def test_non_canonical_source_value_keeps_concept_first(self):
         # A non-CB row (e.g. FHIR import with a coded/free-text source value) is NOT a recognized

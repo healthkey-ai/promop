@@ -232,9 +232,11 @@ def apply_field_writes(person, changes, today=None, descriptor=None):
             # A LIST field (one Measurement per gene), so it takes the list-diff path rather than the
             # scalar descriptor kinds below. An empty list is a valid "no mutations" (clears our rows),
             # so it is handled here BEFORE the None/'' clear-guard that rejects scalar clears.
-            if isinstance(value, list):
+            if isinstance(value, list) and _genetic_mutations_writable():
                 _write_genetic_mutations(person, value, today)
                 result.applied.append(field)
+            elif isinstance(value, list):
+                result.rejected[field] = 'Required genetic mutation vocabularies are not loaded.'
             else:
                 result.rejected[field] = 'genetic_mutations must be a list of mutations.'
             continue
@@ -251,7 +253,27 @@ def apply_field_writes(person, changes, today=None, descriptor=None):
             result.rejected[field] = 'Clearing a value is not supported yet (#4833).'
             continue
         kind = d.get('kind')
-        if kind == KIND_EDITABLE and d.get('writable'):
+        if d.get('writable') and (
+                kind == KIND_PROFILE or d.get('projection_target') in ('person', 'location')):
+            if _stage_profile_write(person, field, value, person_dirty, location_updates):
+                result.applied.append(field)
+            else:
+                result.profile[field] = value
+            continue
+        projection = d.get('projection')
+        if d.get('writable') and (kind == KIND_EDITABLE or projection):
+            if projection:
+                # Current descriptors classify projected PatientRecord fields as
+                # KIND_DIRECT and nest OMOP metadata under `projection`; older
+                # PROMOP descriptors used KIND_EDITABLE with top-level metadata.
+                d = {
+                    **d,
+                    'concept_id': projection.get('concept_id'),
+                    'unit_concept_id': projection.get('unit_concept_id'),
+                    'source_value': projection.get('source_value'),
+                    'unit': projection.get('unit'),
+                    'target': projection.get('omop_table', 'measurement'),
+                }
             _write_editable_fact(person, field, d, value, today)
             result.applied.append(field)
             continue
@@ -288,7 +310,11 @@ def owned_writable_fields(descriptor=None):
     owned = set(_DEMOGRAPHIC_FIELDS) | set(_LOCATION_COLUMN)
     fields = {
         f for f, e in descriptor.items()
-        if e.get('writable') and (e.get('kind') == KIND_EDITABLE or f in owned)
+        if e.get('writable') and (
+            e.get('kind') == KIND_EDITABLE
+            or (e.get('kind') == 'direct' and e.get('projection'))
+            or f in owned
+        )
     }
     # genetic_mutations is a list field written via the list-diff path (not a descriptor kind), so add
     # it here — but only when its vocab is loaded, mirroring KIND_EDITABLE's "writable iff concept resolves".
@@ -304,8 +330,9 @@ def _genetic_mutations_writable():
     if not Concept.objects.filter(
             concept_id=PATIENT_REPORTED_TYPE_CONCEPT_ID, vocabulary_id='Type Concept').exists():
         return False
+    reviewed_gene_codes = [code for code, gene in _GENETIC_MUTATION_LOINCS.items() if gene]
     return Concept.objects.filter(
-        concept_code__in=list(_GENETIC_MUTATION_LOINCS), vocabulary_id='LOINC').exists()
+        concept_code__in=reviewed_gene_codes, vocabulary_id='LOINC').exists()
 
 
 def _stage_profile_write(person, field, value, person_dirty, location_updates):
@@ -488,7 +515,10 @@ def _write_genetic_mutations(person, mutations, today):
     A mutation whose gene is not one of the reviewed genes, or whose gene LOINC is not loaded, is skipped.
     Returns the genes written."""
     from omop_core.services.patient_record_service import _GENETIC_MUTATION_LOINCS
-    gene_to_code = {gene.upper(): code for code, gene in _GENETIC_MUTATION_LOINCS.items()}
+    gene_to_code = {
+        gene.upper(): code for code, gene in _GENETIC_MUTATION_LOINCS.items()
+        if gene
+    }
     all_gene_codes = set(_GENETIC_MUTATION_LOINCS)
     type_concept = _patient_reported_type()
 
