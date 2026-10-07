@@ -29313,6 +29313,8 @@ class PatientSourceCodesTest(_SmartBase):
     @classmethod
     def setUpTestData(cls):
         super().setUpTestData()
+        cls.foundation_user.is_staff = True
+        cls.foundation_user.save(update_fields=['is_staff'])
         # Create measurement rows with same source_value to test aggregation.
         cls.m1 = Measurement.objects.create(
             measurement_id=90001,
