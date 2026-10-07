@@ -98,6 +98,7 @@ PATIENT: frozenset[str] = frozenset({
     'omop_core.ImageOccurrence', 'omop_core.Location', 'omop_core.Measurement', 'omop_core.MeasurementOwnership',
     'omop_core.Note', 'omop_core.NoteNlp', 'omop_core.Observation',
     'omop_core.ObservationPeriod', 'omop_core.PatientDocument', 'omop_core.PatientRecord',
+    'omop_core.PatientSourceCode',
     'omop_core.PatientTrialEnrollment', 'omop_core.Person', 'omop_core.PersonLanguageSkill',
     'omop_core.ProcedureOccurrence', 'omop_core.ProvenanceRecord', 'omop_core.RecordRevision',
     'omop_core.Specimen', 'omop_core.SupportiveTherapyCourse', 'omop_core.TrialSearchPreferences',
