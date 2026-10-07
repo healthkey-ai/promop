@@ -218,6 +218,17 @@ def test_contrast_is_read_from_the_studys_own_words(texts, expected):
     assert contrast(texts) == expected
 
 
+def test_contrast_is_read_from_the_codes_display_too(concepts):
+    person = Person.objects.create(person_id=731_004)
+    report = {**_ct_chest_without_study(), 'code': {
+        'text': 'Prostate MRI, multiparametric',
+        'coding': [{'system': 'http://loinc.org', 'code': '30787-7', 'display': 'MR Prostate WO and W contrast IV'}]}}
+    import_imaging(person, [report], [], {})
+    (study,) = imaging_studies(person)
+    assert study['name'] == 'Prostate MRI, multiparametric' and study['type'] == 'MRI'
+    assert study['contrast']['status'] == 'with'
+
+
 def test_modalities_and_radiology_reports():
     assert modality_label(['PT', 'CT']) == 'PET/CT'
     assert modality_label(['MR']) == 'MRI'

@@ -308,8 +308,9 @@ def read_study(report: dict | None, studies: list[dict], index: dict) -> Study |
     document = next(({'url': f['url'].strip(), 'title': (f.get('title') or '').strip() or name}
                      for f in forms if (f.get('url') or '').strip()), None)
 
+    # A code's text is often a friendly name while its codings say "W CONTRAST".
     contrast_texts = [name, _text(code), study.get('description') or ''] + [
-        (s.get('description') or '') for s in series]
+        (c.get('display') or '') for c in _codings(code)] + [(s.get('description') or '') for s in series]
     key = study_uid or (f"DiagnosticReport/{report['id']}" if report.get('id') else '') or \
         (f"ImagingStudy/{study['id']}" if study.get('id') else '') or f'{name}|{on.isoformat()}'
     return Study(
