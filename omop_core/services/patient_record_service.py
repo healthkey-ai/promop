@@ -1555,15 +1555,18 @@ def _get_treatment_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     # from DrugExposure rows; ARTEMIS (or another episode producer) owns that
     # transformation and persists it before this read model is refreshed.
     try:
-        from omop_core.services.disease_episodes import primary_lines
-        # The flat therapy fields are the primary cancer's lines (#1739): a
-        # second cancer's line 1 must not stand in for the first line here,
-        # and trial eligibility counts prior lines for the cancer it matches.
-        primary_slug = _get_disease_data(person, snapshot).get('disease_slug') or ''
-        episodes = primary_lines(person, primary_slug).select_related(
-            'episode_source_concept', 'episode_object_concept').order_by('episode_number')
-        if episodes.exists():
-            return _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, snapshot)
+        from omop_core.services.disease_episodes import primary_lines, regimen_episodes
+        # A person with no line at all costs one query, as before #1739; the
+        # primary cancer's Disease Episodes are only looked up when there are lines.
+        if regimen_episodes(person).exists():
+            # The flat therapy fields are the primary cancer's lines (#1739): a
+            # second cancer's line 1 must not stand in for the first line here,
+            # and trial eligibility counts prior lines for the cancer it matches.
+            primary_slug = _get_disease_data(person, snapshot).get('disease_slug') or ''
+            episodes = primary_lines(person, primary_slug).select_related(
+                'episode_source_concept', 'episode_object_concept').order_by('episode_number')
+            if episodes.exists():
+                return _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, snapshot)
     except Exception:
         pass
 
