@@ -43,6 +43,7 @@ class Migration(migrations.Migration):
                 ('image_series_uid', models.CharField(blank=True, max_length=250, null=True)),
                 ('modality_source_value', models.CharField(blank=True, max_length=50, null=True)),
                 ('anatomic_site_source_value', models.CharField(blank=True, max_length=255, null=True)),
+                ('image_source_value', models.CharField(blank=True, db_index=True, max_length=255, null=True)),
             ],
             options={
                 'db_table': 'image_occurrence',

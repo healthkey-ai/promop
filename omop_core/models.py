@@ -1677,6 +1677,10 @@ class ImageOccurrence(models.Model):
     # Local additions (see the class docstring).
     modality_source_value = models.CharField(max_length=50, null=True, blank=True)
     anatomic_site_source_value = models.CharField(max_length=255, null=True, blank=True)
+    # The study's identity at the source (DICOM UID, else the report's or the
+    # study's id): a re-import finds its own row by it, and two studies with the
+    # same code on the same day stay two.
+    image_source_value = models.CharField(max_length=255, null=True, blank=True, db_index=True)
 
     class Meta:
         db_table = 'image_occurrence'

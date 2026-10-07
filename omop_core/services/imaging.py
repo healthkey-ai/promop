@@ -76,7 +76,10 @@ _WITHOUT_CONTRAST = re.compile(
     re.I)
 _WITH_CONTRAST = re.compile(
     r'\b(w/?|with)\s+(iv\s+)?contrast\b|\bcontrast[- ]enhanced\b'
-    r'|\bw\s*(/|and|&)?\s*wo?\b.*contrast|\bwith\s+and\s+without\s+(iv\s+)?contrast\b', re.I)
+    # "W WO CONTRAST", "w/wo contrast": a bounded gap, so hostile text can't backtrack.
+    r'|\bw\s{0,3}(/|and|&)?\s{0,3}wo?\b[^\n]{0,40}?contrast|\bwith\s+and\s+without\s+(iv\s+)?contrast\b', re.I)
+# Study text from a bundle is untrusted: only this much of each piece is read.
+TEXT_LIMIT = 1_000
 _AGENTS = [
     (re.compile(r'gadolinium|\bgad\b|gadobutrol|gadoterate', re.I), 'Gadolinium'),
     (re.compile(r'\bFDG\b|fluorodeoxyglucose', re.I), 'FDG tracer'),
@@ -148,7 +151,7 @@ def _date(value: Any) -> date | None:
 
 def _strip_html(value: str) -> str:
     text = re.sub(r'<br\s*/?>|</p>|</div>', '\n', value, flags=re.I)
-    text = re.sub(r'<[^>]+>', '', text)
+    text = re.sub(r'<[^<>]*>', '', text)  # stops at the next '<': linear on any input
     return html.unescape(text).strip()
 
 
@@ -183,7 +186,7 @@ def modalities_from_text(text: str) -> list[str]:
 
 def contrast(texts: Iterable[str]) -> tuple[str, str | None]:
     """('with' | 'without' | 'unknown', what to show) from the study's own words."""
-    joined = ' · '.join(t for t in texts if t)
+    joined = ' · '.join(t[:TEXT_LIMIT] for t in texts if isinstance(t, str) and t)
     agent = next((label for pattern, label in _AGENTS if pattern.search(joined)), None)
     if _WITHOUT_CONTRAST.search(joined) and not _WITH_CONTRAST.search(joined) and not agent:
         return 'without', 'None'
@@ -237,7 +240,45 @@ class Study:
     key: str
 
 
-def read_study(report: dict | None, studies: list[dict], index: dict) -> Study | None:
+WITHDRAWN = {'entered-in-error', 'cancelled'}
+
+
+def _same_patient(resource: dict | None, subject_refs: set | None) -> bool:
+    """Whether a referenced resource is about the report's own patient.
+
+    ``subject_refs`` is every reference form that names this patient (None when
+    the bundle holds one patient). A multi-patient upload must not let one
+    patient's report pull in another patient's study or findings.
+    """
+    if resource is None or subject_refs is None:
+        return resource is not None
+    subject = resource.get('subject') or resource.get('patient')
+    ref = (subject.get('reference') or '').strip() if isinstance(subject, dict) else ''
+    if not ref:
+        return True
+    return ref in subject_refs or '/'.join(ref.split('/')[-2:]) in subject_refs
+
+
+def study_key(report: dict | None, studies: list[dict]) -> str:
+    """A study's identity across imports: its DICOM UID, else the report's or study's id."""
+    report = report or {}
+    for st in studies:
+        for identifier in st.get('identifier') or []:
+            if not isinstance(identifier, dict):
+                continue
+            value = identifier.get('value')
+            if isinstance(value, str) and value.strip() and (
+                    identifier.get('system') == 'urn:dicom:uid' or value.startswith('urn:oid:')):
+                return value.strip().removeprefix('urn:oid:')[:255]
+    if isinstance(report.get('id'), str) and report['id']:
+        return f"DiagnosticReport/{report['id']}"[:255]
+    first = studies[0] if studies else {}
+    if isinstance(first.get('id'), str) and first['id']:
+        return f"ImagingStudy/{first['id']}"[:255]
+    return ''
+
+
+def read_study(report: dict | None, studies: list[dict], index: dict, subject_refs: set | None = None) -> Study | None:
     """Map a radiology report and the ImagingStudy resources it names to a ``Study``."""
     study = studies[0] if studies else {}
     report = report or {}
@@ -294,14 +335,24 @@ def read_study(report: dict | None, studies: list[dict], index: dict) -> Study |
     impression = impression if isinstance(impression, str) and impression.strip() else None
 
     findings = [f for f in (_finding(o) for o in (
-        _resolve(ref, index, report) for ref in report.get('result') or []) if o) if f]
+        _resolve(ref, index, report) for ref in report.get('result') or []) if _same_patient(o, subject_refs)) if f]
     if not findings:
         findings = [t for t in (_text(c) for c in report.get('conclusionCode') or []) if t]
 
+    # The facility is the performing Organization; a Practitioner (the reading
+    # radiologist) is not a care site.
     facility = None
     for ref in report.get('performer') or []:
+        if not isinstance(ref, dict):
+            continue
         target = _resolve(ref, index, report)
-        facility = ((target or {}).get('name') or ref.get('display') or '').strip() or None
+        if target is not None:
+            org = target.get('name') if target.get('resourceType') == 'Organization' else None
+        elif (ref.get('reference') or '').split('/')[-2:-1] == ['Organization'] or ref.get('type') == 'Organization':
+            org = ref.get('display')
+        else:
+            org = None
+        facility = org.strip()[:255] if isinstance(org, str) and org.strip() else None
         if facility:
             break
 
@@ -311,8 +362,7 @@ def read_study(report: dict | None, studies: list[dict], index: dict) -> Study |
     # A code's text is often a friendly name while its codings say "W CONTRAST".
     contrast_texts = [name, _text(code), study.get('description') or ''] + [
         (c.get('display') or '') for c in _codings(code)] + [(s.get('description') or '') for s in series]
-    key = study_uid or (f"DiagnosticReport/{report['id']}" if report.get('id') else '') or \
-        (f"ImagingStudy/{study['id']}" if study.get('id') else '') or f'{name}|{on.isoformat()}'
+    key = study_key(report, studies) or f'{name}|{on.isoformat()}'[:255]
     return Study(
         date=on, name=name[:255], code=code, modalities=modalities, body_site=body_site,
         study_uid=study_uid, series_uid=series_uid, image_url=image_url, has_images=has_images,
@@ -370,17 +420,52 @@ def _visit(person, study: Study, ehr_type: Concept, no_match: Concept) -> VisitO
     return visit
 
 
+def _adoptable(person, source_value: str, on) -> ProcedureOccurrence | None:
+    """A plain EHR procedure row for this exam (a FHIR Procedure): never another
+    study, never one the patient entered themselves."""
+    from django.contrib.contenttypes.models import ContentType
+
+    from omop_core.models import ProvenanceRecord
+    from omop_core.services.mappings import CONCEPT_PATIENT_REPORTED_TYPE
+
+    rows = (
+        ProcedureOccurrence.objects.filter(
+            person=person, procedure_source_value=source_value, procedure_date=on, is_erroneous=False,
+            image_occurrences__isnull=True,
+        )
+        .exclude(procedure_type_concept_id=CONCEPT_PATIENT_REPORTED_TYPE)
+        .order_by('procedure_occurrence_id')
+    )
+    for row in rows:
+        if not ProvenanceRecord.objects.filter(
+                content_type=ContentType.objects.get_for_model(ProcedureOccurrence),
+                object_id=row.pk, source='PATIENT_SELF').exists():
+            return row
+    return None
+
+
 def _procedure(person, study: Study, ehr_type: Concept, no_match: Concept, visit) -> ProcedureOccurrence:
+    """The study's procedure row: the one this study was imported as before (by
+    its key), else a matching plain EHR procedure, else a new row."""
     concept = _coded_concept(study.code) or no_match
     source_value = ((_codings(study.code)[0].get('code') if _codings(study.code) else '') or study.name)[:50]
-    existing = ProcedureOccurrence.objects.filter(
-        person=person, procedure_source_value=source_value, procedure_date=study.date, is_erroneous=False,
-    ).order_by('procedure_occurrence_id').first()
+    known = ImageOccurrence.objects.filter(person=person, image_source_value=study.key) \
+        .select_related('procedure_occurrence').first()
+    existing = known.procedure_occurrence if known else _adoptable(person, source_value, study.date)
     if existing is not None:
-        existing.procedure_concept = concept
+        fields = ['visit_occurrence']
         existing.visit_occurrence = visit or existing.visit_occurrence
+        if concept.concept_id and existing.procedure_concept_id != concept.concept_id and (
+                known is not None or not existing.procedure_concept_id):
+            # Ours to update; an adopted row's concept is only ever upgraded from 0.
+            existing.procedure_concept = concept
+            fields.append('procedure_concept')
+        if known is not None:
+            existing.procedure_date, existing.procedure_source_value = study.date, source_value
+            existing.is_erroneous, existing.erroneous_reason = False, None
+            fields += ['procedure_date', 'procedure_source_value', 'is_erroneous', 'erroneous_reason']
         existing._skip_patient_record_refresh = True
-        existing.save(update_fields=['procedure_concept', 'visit_occurrence'])
+        existing.save(update_fields=fields)
         return existing
     procedure = ProcedureOccurrence(
         procedure_occurrence_id=next_pk(ProcedureOccurrence, 'procedure_occurrence_id'), person=person,
@@ -391,6 +476,18 @@ def _procedure(person, study: Study, ehr_type: Concept, no_match: Concept, visit
     procedure._skip_patient_record_refresh = True
     procedure.save()
     return procedure
+
+
+def retract_study(person, key: str, reason: str) -> int | None:
+    """Mark a previously imported study entered-in-error (kept, not shown)."""
+    if not key:
+        return None
+    image = ImageOccurrence.objects.filter(person=person, image_source_value=key).first()
+    if image is None:
+        return None
+    ProcedureOccurrence.objects.filter(pk=image.procedure_occurrence_id).update(
+        is_erroneous=True, erroneous_reason=reason[:500])
+    return image.procedure_occurrence_id
 
 
 def _clear(person, procedure_id: int) -> None:
@@ -425,6 +522,7 @@ def write_study(person, study: Study, *, record_provenance: Callable | None = No
         modality_concept=Concept.objects.filter(vocabulary_id='DICOM', concept_code=modality).first()
         if modality else None,
         modality_source_value=','.join(study.modalities)[:50] or None,
+        image_source_value=study.key,
         anatomic_site_concept=_coded_concept(study.body_site, 'SNOMED'),
         anatomic_site_source_value=_text(study.body_site)[:255] or None,
     ))
@@ -475,11 +573,15 @@ def write_study(person, study: Study, *, record_provenance: Callable | None = No
 
 
 def import_imaging(person, reports: Iterable[dict], studies: Iterable[dict], index: dict, *,
-                   record_provenance: Callable | None = None) -> list[int]:
+                   record_provenance: Callable | None = None, subject_refs: set | None = None) -> list[int]:
     """Import a bundle's imaging. Returns the studies' procedure_occurrence_ids.
 
     Each radiology report becomes one study with the ImagingStudy resources it
     names; an ImagingStudy no report names becomes a study without a report.
+    ``subject_refs``: every reference form naming this patient, when the bundle
+    holds several patients; resources about anyone else are ignored. A report or
+    study the source withdrew (entered-in-error, cancelled) is not imported, and
+    retracts the copy an earlier import made.
     """
     studies = [s for s in studies if isinstance(s, dict)]
     pairs, named = [], set()
@@ -487,7 +589,7 @@ def import_imaging(person, reports: Iterable[dict], studies: Iterable[dict], ind
         if not isinstance(report, dict) or not is_radiology_report(report):
             continue
         linked = [s for s in (_resolve(ref, index, report) for ref in report.get('imagingStudy') or [])
-                  if s and s.get('resourceType') == 'ImagingStudy']
+                  if s and s.get('resourceType') == 'ImagingStudy' and _same_patient(s, subject_refs)]
         named.update(id(s) for s in linked)
         pairs.append((report, linked))
     pairs += [(None, [s]) for s in studies if id(s) not in named]
@@ -495,7 +597,11 @@ def import_imaging(person, reports: Iterable[dict], studies: Iterable[dict], ind
     ids = []
     with transaction.atomic(), suppress_patient_record_refresh():
         for report, linked in pairs:
-            study = read_study(report, linked, index)
+            status = ((report or (linked[0] if linked else {})).get('status') or '')
+            if isinstance(status, str) and status.lower() in WITHDRAWN:
+                retract_study(person, study_key(report, linked), f'Source marked the report {status}')
+                continue
+            study = read_study(report, linked, index, subject_refs)
             if study is None:
                 continue
             pid = write_study(person, study, record_provenance=record_provenance)
