@@ -719,3 +719,97 @@ def _collapse_duplicates(model, concept_col, source_col, match,
         ).delete()
         model.objects.filter(**{f'{pk_col}__in': doomed}).delete()
     return len(doomed)
+
+
+# ------------------------------------------------------------------
+# Per-patient source code resolution
+# ------------------------------------------------------------------
+
+def resolve_person_source_codes(person, *, source_values=None, omop_tables=None):
+    """Re-resolve clinical rows for *person* where concept_id is 0 or HK-*.
+
+    Uses the current approved SCCM mappings.  Returns a dict with counts:
+    ``{'resolved': N, 'skipped': N, 'already_resolved': N}``.
+
+    *source_values*: optional list of source strings to limit resolution to.
+    *omop_tables*: optional list of table keys (e.g. ``['measurement']``).
+    """
+    from django.db.models import Count
+
+    resolved = 0
+    skipped = 0
+    already_resolved = 0
+    person_ids_touched: set[int] = set()
+
+    # Concept IDs in quarantine vocabularies (HK-*).
+    quarantine_concept_ids = frozenset(
+        Concept.objects.filter(vocabulary_id__in=_QUARANTINE_VOCABULARIES)
+        .values_list('concept_id', flat=True)
+    ) if _QUARANTINE_VOCABULARIES else frozenset()
+
+    tables = CLINICAL_TABLES
+    if omop_tables:
+        tables = {k: v for k, v in tables.items() if k in omop_tables}
+
+    for table_key, (model, concept_col, source_col) in tables.items():
+        qs = model.objects.filter(person=person).exclude(
+            **{f'{source_col}__isnull': True},
+        ).exclude(**{source_col: ''})
+
+        if source_values:
+            qs = qs.filter(**{f'{source_col}__in': source_values})
+
+        # Group by source_value to avoid per-row mapping lookups.
+        groups = list(
+            qs.values(source_col)
+            .annotate(row_count=Count('pk'))
+            .order_by(source_col)
+        )
+
+        for group in groups:
+            sv = group[source_col]
+
+            # Find an approved mapping for this source value.
+            mapping = approved_mapping_for('', sv)
+            if mapping is None:
+                skipped += group['row_count']
+                continue
+
+            target_concept_id = mapping.target_concept_id
+            if not target_concept_id:
+                skipped += group['row_count']
+                continue
+
+            # Find rows that need updating: concept_id = 0 or in quarantine.
+            # Build a Q filter for "unresolved" concept IDs.
+            unresolved_q = Q(**{concept_col: NO_MATCHING_CONCEPT_ID})
+            if quarantine_concept_ids:
+                unresolved_q |= Q(**{f'{concept_col}__in': quarantine_concept_ids})
+
+            rows_to_update = qs.filter(**{source_col: sv}).filter(unresolved_q)
+
+            count = rows_to_update.count()
+            if count == 0:
+                already_resolved += group['row_count']
+                continue
+
+            with transaction.atomic():
+                with suppress_patient_record_refresh():
+                    rows_to_update.update(**{concept_col: target_concept_id})
+                person_ids_touched.add(person.person_id)
+                resolved += count
+                already_resolved += group['row_count'] - count
+
+    # Mark PatientRecord stale and refresh.
+    if person_ids_touched:
+        PatientRecord.objects.filter(
+            person_id__in=person_ids_touched,
+        ).update(derivation_version=0)
+        from omop_core.services.patient_record_service import refresh_patient_record
+        refresh_patient_record(person)
+
+    return {
+        'resolved': resolved,
+        'skipped': skipped,
+        'already_resolved': already_resolved,
+    }
