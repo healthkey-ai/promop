@@ -29301,3 +29301,322 @@ class CodeMappingLockTest(TestCase):
         self.assertIsNotNone(locked_row)
         self.assertIsNotNone(locked_row['locked_by_username'])
         self.assertIsNotNone(locked_row['locked_at'])
+
+
+# ---------------------------------------------------------------------------
+# Patient Source Codes Endpoint Tests (Issue 1)
+# ---------------------------------------------------------------------------
+
+class PatientSourceCodesTest(_SmartBase):
+    """Tests for GET /api/v1/patient-records/{person_id}/source-codes/."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        # Create measurement rows with same source_value to test aggregation.
+        cls.m1 = Measurement.objects.create(
+            measurement_id=90001,
+            person=cls.person,
+            measurement_concept=cls.condition_concept,  # any concept
+            measurement_date=date(2023, 1, 1),
+            measurement_type_concept=cls.type_concept,
+            measurement_source_value='GLU',
+        )
+        cls.m2 = Measurement.objects.create(
+            measurement_id=90002,
+            person=cls.person,
+            measurement_concept=cls.condition_concept,
+            measurement_date=date(2023, 1, 2),
+            measurement_type_concept=cls.type_concept,
+            measurement_source_value='GLU',
+        )
+        cls.m3 = Measurement.objects.create(
+            measurement_id=90003,
+            person=cls.person,
+            measurement_concept=cls.condition_concept,
+            measurement_date=date(2023, 1, 3),
+            measurement_type_concept=cls.type_concept,
+            measurement_source_value='HGB',
+        )
+        # Create a condition row.
+        cls.c1 = ConditionOccurrence.objects.create(
+            condition_occurrence_id=90010,
+            person=cls.person,
+            condition_concept=cls.condition_concept,
+            condition_start_date=date(2023, 2, 1),
+            condition_type_concept=cls.type_concept,
+            condition_source_value='DIABETES',
+        )
+        # Create a mapping for GLU.
+        cls.glu_mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='GLU',
+            omop_table='measurement',
+            status='approved',
+            target_concept=cls.condition_concept,
+        )
+
+    def _url(self, person_id=None):
+        pid = person_id or self.person.person_id
+        return f'/api/v1/patient-records/{pid}/source-codes/'
+
+    def test_source_codes_returns_correct_aggregation(self):
+        """Multiple rows with same source_value grouped with count."""
+        resp = self.write_client.get(self._url())
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        glu_entries = [sc for sc in data['source_codes'] if sc['source_value'] == 'GLU']
+        self.assertEqual(len(glu_entries), 1)
+        self.assertEqual(glu_entries[0]['row_count'], 2)
+
+    def test_source_codes_joins_mapping_status(self):
+        """Approved mapping shows status=approved; unmapped shows unmapped."""
+        resp = self.write_client.get(self._url())
+        data = resp.json()
+        glu = next(sc for sc in data['source_codes'] if sc['source_value'] == 'GLU')
+        self.assertEqual(glu['mapping_status'], 'approved')
+        self.assertIsNotNone(glu['mapping_id'])
+
+        hgb = next(sc for sc in data['source_codes'] if sc['source_value'] == 'HGB')
+        self.assertEqual(hgb['mapping_status'], 'unmapped')
+
+    def test_source_codes_across_tables(self):
+        """Codes from measurement and condition both appear."""
+        resp = self.write_client.get(self._url())
+        data = resp.json()
+        tables = {sc['omop_table'] for sc in data['source_codes']}
+        self.assertIn('measurement', tables)
+        self.assertIn('condition', tables)
+
+    def test_source_codes_summary(self):
+        """Summary counts are correct."""
+        resp = self.write_client.get(self._url())
+        data = resp.json()
+        self.assertIn('summary', data)
+        self.assertGreater(data['summary']['total'], 0)
+
+    def test_source_codes_empty_patient(self):
+        """Patient with no clinical rows returns empty list."""
+        person2 = Person.objects.create(
+            person_id=90099,
+            given_name='Empty', family_name='Patient',
+            year_of_birth=1990,
+            gender_source_value='male',
+            race_source_value='unknown',
+            ethnicity_source_value='unknown',
+        )
+        PatientRecord.objects.create(person=person2, organization=self.organization)
+        resp = self.write_client.get(f'/api/v1/patient-records/{person2.person_id}/source-codes/')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data['source_codes'], [])
+        self.assertEqual(data['summary']['total'], 0)
+
+
+# ---------------------------------------------------------------------------
+# Per-Patient Resolve Source Codes Tests (Issue 2)
+# ---------------------------------------------------------------------------
+
+class ResolvePersonSourceCodesTest(_SmartBase):
+    """Tests for POST /api/v1/patient-records/{person_id}/resolve-source-codes/."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from omop_core.models import Concept
+        # Zero concept for unresolved rows.
+        cls.zero_concept = Concept.objects.get(concept_id=0)
+
+        # Target concept for approved mapping.
+        cls.target_concept = cls.condition_concept  # Breast cancer, concept_id=4112853
+
+        # Measurement rows with concept_id=0 (unresolved).
+        cls.m_unresolved = Measurement.objects.create(
+            measurement_id=91001,
+            person=cls.person,
+            measurement_concept=cls.zero_concept,
+            measurement_date=date(2023, 3, 1),
+            measurement_type_concept=cls.type_concept,
+            measurement_source_value='TESTCODE',
+        )
+        # Measurement row already resolved.
+        cls.m_resolved = Measurement.objects.create(
+            measurement_id=91002,
+            person=cls.person,
+            measurement_concept=cls.target_concept,
+            measurement_date=date(2023, 3, 2),
+            measurement_type_concept=cls.type_concept,
+            measurement_source_value='TESTCODE',
+        )
+        # Measurement with no mapping available.
+        cls.m_no_mapping = Measurement.objects.create(
+            measurement_id=91003,
+            person=cls.person,
+            measurement_concept=cls.zero_concept,
+            measurement_date=date(2023, 3, 3),
+            measurement_type_concept=cls.type_concept,
+            measurement_source_value='NOMAP',
+        )
+        # Approved mapping for TESTCODE.
+        cls.mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='TESTCODE',
+            omop_table='measurement',
+            status='approved',
+            target_concept=cls.target_concept,
+        )
+
+    def _url(self, person_id=None):
+        pid = person_id or self.person.person_id
+        return f'/api/v1/patient-records/{pid}/resolve-source-codes/'
+
+    def test_resolve_updates_zero_concept(self):
+        """concept_id=0 row updated to approved mapping's target."""
+        resp = self.write_client.post(self._url(), {}, format='json')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertGreater(data['resolved'], 0)
+        self.m_unresolved.refresh_from_db()
+        self.assertEqual(self.m_unresolved.measurement_concept_id, self.target_concept.concept_id)
+
+    def test_resolve_skips_already_resolved(self):
+        """Row with correct approved concept unchanged."""
+        resp = self.write_client.post(self._url(), {}, format='json')
+        data = resp.json()
+        self.assertGreaterEqual(data['already_resolved'], 1)
+
+    def test_resolve_skips_no_mapping(self):
+        """No approved mapping → row left at concept 0."""
+        resp = self.write_client.post(self._url(), {}, format='json')
+        data = resp.json()
+        self.assertGreaterEqual(data['skipped'], 1)
+        self.m_no_mapping.refresh_from_db()
+        self.assertEqual(self.m_no_mapping.measurement_concept_id, 0)
+
+    def test_resolve_idempotent(self):
+        """Calling twice produces same result."""
+        self.write_client.post(self._url(), {}, format='json')
+        resp = self.write_client.post(self._url(), {}, format='json')
+        data = resp.json()
+        self.assertEqual(data['resolved'], 0)  # Already resolved on second call
+
+    def test_resolve_filter_by_source_value(self):
+        """Only specified source_values resolved."""
+        # Reset unresolved to concept 0.
+        Measurement.objects.filter(pk=self.m_unresolved.pk).update(
+            measurement_concept_id=0
+        )
+        resp = self.write_client.post(
+            self._url(),
+            {'source_values': ['NOMAP']},
+            format='json',
+        )
+        data = resp.json()
+        # NOMAP has no mapping, TESTCODE was filtered out.
+        self.assertEqual(data['resolved'], 0)
+        self.m_unresolved.refresh_from_db()
+        self.assertEqual(self.m_unresolved.measurement_concept_id, 0)
+
+
+# ---------------------------------------------------------------------------
+# Bulk Resolve Source Codes Tests (Issue 3)
+# ---------------------------------------------------------------------------
+
+class BulkResolveSourceCodesTest(_SmartBase):
+    """Tests for POST /api/v1/patient-records/bulk-resolve-source-codes/."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        # Second person for bulk test.
+        cls.person2 = Person.objects.create(
+            person_id=92001,
+            given_name='Bob', family_name='Bulk',
+            year_of_birth=1985,
+            gender_source_value='male',
+            race_source_value='unknown',
+            ethnicity_source_value='unknown',
+        )
+        PatientRecord.objects.create(person=cls.person2, organization=cls.organization)
+
+        cls.zero_concept = Concept.objects.get(concept_id=0)
+        cls.target_concept = cls.condition_concept
+
+        # Unresolved rows for both persons.
+        Measurement.objects.create(
+            measurement_id=92010,
+            person=cls.person,
+            measurement_concept=cls.zero_concept,
+            measurement_date=date(2023, 4, 1),
+            measurement_type_concept=cls.type_concept,
+            measurement_source_value='BULKCODE',
+        )
+        Measurement.objects.create(
+            measurement_id=92011,
+            person=cls.person2,
+            measurement_concept=cls.zero_concept,
+            measurement_date=date(2023, 4, 1),
+            measurement_type_concept=cls.type_concept,
+            measurement_source_value='BULKCODE',
+        )
+        # Approved mapping.
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='BULKCODE',
+            omop_table='measurement',
+            status='approved',
+            target_concept=cls.target_concept,
+        )
+
+    def _url(self):
+        return '/api/v1/patient-records/bulk-resolve-source-codes/'
+
+    def test_bulk_resolve_creates_run(self):
+        """Returns 202 with run_id."""
+        resp = self.write_client.post(
+            self._url(),
+            {'person_ids': [self.person.person_id]},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 202)
+        data = resp.json()
+        self.assertIn('run_id', data)
+        self.assertEqual(data['total'], 1)
+
+    def test_bulk_resolve_progress(self):
+        """Poll shows progress."""
+        resp = self.write_client.post(
+            self._url(),
+            {'person_ids': [self.person.person_id]},
+            format='json',
+        )
+        run_id = resp.json()['run_id']
+        poll = self.write_client.get(f'/api/v1/resolve-runs/{run_id}/')
+        self.assertEqual(poll.status_code, 200)
+        data = poll.json()
+        # Inline dispatch: already completed.
+        self.assertEqual(data['state'], 'completed')
+        self.assertEqual(data['done'], 1)
+
+    def test_bulk_resolve_max_limit(self):
+        """>500 ids → 413."""
+        resp = self.write_client.post(
+            self._url(),
+            {'person_ids': list(range(501))},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 413)
+
+    def test_bulk_resolve_resolves_across_patients(self):
+        """Two patients each get resolved."""
+        resp = self.write_client.post(
+            self._url(),
+            {'person_ids': [self.person.person_id, self.person2.person_id]},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 202)
+        run_id = resp.json()['run_id']
+        poll = self.write_client.get(f'/api/v1/resolve-runs/{run_id}/')
+        data = poll.json()
+        self.assertEqual(data['done'], 2)
+        self.assertGreaterEqual(data['resolved'], 2)

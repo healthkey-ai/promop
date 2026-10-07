@@ -4901,6 +4901,47 @@ class SuggestEmbeddingSnapshot(models.Model):
         db_table = 'suggest_embedding_snapshot'
 
 
+class SourceCodeResolveRun(models.Model):
+    """Tracks a bulk source-code resolution run across multiple patients.
+
+    Mirrors SuggestRun: UUID pk, progress counters, state machine.  The bulk
+    endpoint returns 202 with the run_id; the client polls a status endpoint.
+    """
+    PENDING = 'pending'
+    RUNNING = 'running'
+    COMPLETED = 'completed'
+    FAILED = 'failed'
+    STATES = [
+        (PENDING, 'Pending'),
+        (RUNNING, 'Running'),
+        (COMPLETED, 'Completed'),
+        (FAILED, 'Failed'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    state = models.CharField(max_length=10, choices=STATES, default=PENDING)
+    total = models.IntegerField(default=0)
+    done = models.IntegerField(default=0)
+    resolved = models.IntegerField(default=0)
+    errors = models.IntegerField(default=0)
+    error_detail = models.JSONField(default=list, blank=True)
+
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'source_code_resolve_run'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return (f'SourceCodeResolveRun {self.id} ({self.state} '
+                f'{self.done}/{self.total}, {self.resolved} resolved)')
+
+
 class ConceptEmbedding(models.Model):
     """Precomputed sentence-transformer embedding for concept name search.
 

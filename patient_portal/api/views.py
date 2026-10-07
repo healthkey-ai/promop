@@ -78,7 +78,9 @@ from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
 from omop_core.mapping.code_resolution import (
     CLINICAL_TABLES,
     _QUARANTINE_TARGETS,
+    _QUARANTINE_VOCABULARIES,
     NO_MATCHING_CONCEPT_ID,
+    approved_mapping_for,
     normalize_omop_table,
     repoint_clinical_rows,
     resolve_source_code,
@@ -5473,6 +5475,142 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             status=status.HTTP_202_ACCEPTED,
         )
 
+    # ------------------------------------------------------------------
+    # Source codes on a patient
+    # ------------------------------------------------------------------
+
+    @action(detail=True, methods=['get'], url_path='source-codes',
+            permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+    def source_codes(self, request: Request, pk: str | None = None) -> Response:
+        """GET /api/v1/patient-records/{person_id}/source-codes/
+
+        Aggregate distinct source codes from this patient's clinical rows,
+        joined with their mapping status from SourceCodeConceptMapping.
+        Admin only.
+        """
+        person, patient_info, err = self._resolve_patient_with_auth(request, pk)
+        if err:
+            return err
+
+        if not _is_admin_actor(request):
+            return Response(
+                {'detail': 'Only administrators can view source codes.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        source_codes = _aggregate_patient_source_codes(person)
+        summary = {'total': 0, 'unmapped': 0, 'proposed': 0, 'approved': 0}
+        for sc in source_codes:
+            summary['total'] += 1
+            ms = sc.get('mapping_status', 'unmapped')
+            if ms in summary:
+                summary[ms] += 1
+
+        return Response({
+            'person_id': person.person_id,
+            'source_codes': source_codes,
+            'summary': summary,
+        })
+
+    @action(detail=True, methods=['post'], url_path='resolve-source-codes',
+            permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+    def resolve_source_codes(self, request: Request, pk: str | None = None) -> Response:
+        """POST /api/v1/patient-records/{person_id}/resolve-source-codes/
+
+        Re-resolve clinical rows where concept_id is 0 or an HK-* quarantine
+        concept, using current approved SCCM mappings.  Scoped to one person.
+        """
+        person, patient_info, err = self._resolve_patient_with_auth(request, pk)
+        if err:
+            return err
+
+        if not _is_admin_actor(request):
+            return Response(
+                {'detail': 'Only administrators can resolve source codes.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        from omop_core.mapping.code_resolution import resolve_person_source_codes
+
+        source_values = request.data.get('source_values')
+        omop_tables = request.data.get('omop_tables')
+
+        result = resolve_person_source_codes(
+            person,
+            source_values=source_values,
+            omop_tables=omop_tables,
+        )
+        return Response(result)
+
+    @action(detail=False, methods=['post'], url_path='bulk-resolve-source-codes',
+            permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+    def bulk_resolve_source_codes(self, request: Request) -> Response:
+        """POST /api/v1/patient-records/bulk-resolve-source-codes/
+
+        Queue a bulk source-code resolution for multiple patients.
+        Returns 202 with a run_id to poll.
+        """
+        if not _is_admin_actor(request):
+            return Response(
+                {'detail': 'Only administrators can resolve source codes.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        from omop_core.services.resolve_jobs import (
+            BULK_RESOLVE_MAX_PERSONS,
+            create_and_dispatch_resolve_run,
+        )
+
+        person_ids = request.data.get('person_ids', [])
+        if not isinstance(person_ids, list) or not person_ids:
+            return Response(
+                {'detail': 'person_ids must be a non-empty list of integers.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not all(isinstance(pid, int) for pid in person_ids):
+            return Response(
+                {'detail': 'person_ids must contain only integers.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if len(person_ids) > BULK_RESOLVE_MAX_PERSONS:
+            return Response(
+                {'detail': f'Maximum {BULK_RESOLVE_MAX_PERSONS} person_ids per request.'},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+
+        run = create_and_dispatch_resolve_run(person_ids, user=request.user)
+        return Response(
+            {'run_id': str(run.id), 'total': run.total},
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def resolve_run_status(request: Request, run_id) -> Response:
+    """GET /api/v1/resolve-runs/{run_id}/ — poll a bulk resolve run."""
+    if not _is_admin_actor(request):
+        return Response(
+            {'detail': 'Only administrators can view resolve run status.'},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    from omop_core.models import SourceCodeResolveRun
+
+    try:
+        run = SourceCodeResolveRun.objects.get(id=run_id)
+    except SourceCodeResolveRun.DoesNotExist:
+        return Response({'detail': 'Run not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    return Response({
+        'run_id': str(run.id),
+        'state': run.state,
+        'total': run.total,
+        'done': run.done,
+        'resolved': run.resolved,
+        'errors': run.errors,
+    })
 
 
 @api_view(['GET'])
@@ -6574,6 +6712,94 @@ def _is_admin_actor(request: Request) -> bool:
         or bool(getattr(actor, 'is_staff', False))
         or get_admin_orgs(actor).exists()
     )
+
+
+def _aggregate_patient_source_codes(person: Person) -> list[dict]:
+    """Aggregate distinct source codes across all clinical tables for a person.
+
+    For each (source_value, omop_table), count clinical rows and left-join the
+    SourceCodeConceptMapping to get mapping status.  Returns a list sorted by
+    unmapped first, then by row count descending.
+    """
+    results: list[dict] = []
+    concept_ids_to_resolve: set[int] = set()
+
+    for table_key, (model, concept_col, source_col) in CLINICAL_TABLES.items():
+        # Group by source_value only — one row per source code per table.
+        groups = list(
+            model.objects.filter(person=person)
+            .exclude(**{f'{source_col}__isnull': True})
+            .exclude(**{source_col: ''})
+            .values(source_col)
+            .annotate(row_count=Count('pk'))
+            .order_by(source_col)
+        )
+        if not groups:
+            continue
+
+        # Batch-fetch SCCM mappings for all source values in this table (one query).
+        source_values = [g[source_col] for g in groups]
+        mapping_by_sv: dict[str, SourceCodeConceptMapping] = {}
+        for m in (
+            SourceCodeConceptMapping.objects
+            .filter(source_code__in=source_values, omop_table=table_key)
+            .select_related('target_concept')
+        ):
+            key = m.source_code.lower()
+            if key not in mapping_by_sv:
+                mapping_by_sv[key] = m
+
+        for group in groups:
+            source_value = group[source_col]
+            row_count = group['row_count']
+
+            mapping = mapping_by_sv.get(source_value.lower())
+
+            entry: dict = {
+                'source_value': source_value,
+                'omop_table': table_key,
+                'concept_id': 0,
+                'concept_name': None,
+                'row_count': row_count,
+                'mapping_id': None,
+                'mapping_status': 'unmapped',
+                'mapping_target_concept_id': None,
+                'mapping_target_concept_name': None,
+                'source_vocabulary_id': '',
+                'source_code': source_value,
+            }
+
+            if mapping:
+                entry['mapping_id'] = mapping.id
+                entry['mapping_status'] = mapping.status
+                entry['source_vocabulary_id'] = mapping.source_vocabulary_id or ''
+                entry['source_code'] = mapping.source_code
+                if mapping.target_concept_id:
+                    entry['mapping_target_concept_id'] = mapping.target_concept_id
+                    entry['mapping_target_concept_name'] = (
+                        mapping.target_concept.concept_name
+                        if mapping.target_concept else None
+                    )
+                    concept_ids_to_resolve.add(mapping.target_concept_id)
+
+            results.append(entry)
+
+    # Batch-resolve concept names
+    if concept_ids_to_resolve:
+        names = dict(
+            Concept.objects.filter(concept_id__in=concept_ids_to_resolve)
+            .values_list('concept_id', 'concept_name')
+        )
+        for entry in results:
+            cid = entry['concept_id']
+            if cid and cid != NO_MATCHING_CONCEPT_ID:
+                entry['concept_name'] = names.get(cid)
+
+    # Sort: unmapped first, then by row count descending
+    status_order = {'unmapped': 0, 'proposed': 1, 'approved': 2, 'rejected': 3}
+    results.sort(key=lambda e: (status_order.get(e['mapping_status'], 9), -e['row_count']))
+
+    return results
 
 
 def _skip_refresh_requested(request: Request) -> bool:
