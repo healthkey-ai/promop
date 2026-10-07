@@ -23,6 +23,7 @@ import BehaviorTab from "@/components/PatientInfo/tabs/BehaviorTab";
 import WearableTab from "@/components/PatientInfo/tabs/WearableTab";
 import ClinicalSummaryTab from "@/components/PatientInfo/tabs/ClinicalSummaryTab";
 import PatientOmopTab from "./PatientOmopTab";
+import PatientSourceCodesTab from "./PatientSourceCodesTab";
 import { confirmRecord } from "@/api/clinicalFacts";
 import { mayBeUnitedStates } from "@/lib/usZip";
 import { FieldMappingLinksProvider } from "@/components/PatientInfo/fieldMappingLinks";
@@ -709,7 +710,7 @@ export default function PatientDetail({
   const afterLabsTabs = patientMode ? ["Allergies"] : [];
   const trailingTabs = ["Behavior", "Wearables", "History"];
   const surveyTabs = patientMode ? ["Surveys"] : [];
-  const adminTabs = canViewOmop ? ["OMOP"] : [];
+  const adminTabs = canViewOmop ? ["Source Codes", "OMOP"] : [];
   const tabLabels = [...coreTabs, ...afterLabsTabs, ...trailingTabs, ...surveyTabs, ...adminTabs];
 
   // Compute dynamic indices — disease tab shifts everything when absent.
@@ -723,6 +724,7 @@ export default function PatientDetail({
   const wearablesIdx = behaviorIdx + 1;
   const summaryIdx = wearablesIdx + 1;
   const surveysIdx = patientMode ? summaryIdx + 1 : -1;
+  const sourceCodesIdx = canViewOmop ? tabLabels.length - 2 : -1;
   const omopIdx = canViewOmop ? tabLabels.length - 1 : -1;
 
   const tabDescriptions: Record<number, string> = {
@@ -737,6 +739,7 @@ export default function PatientDetail({
     [wearablesIdx]: "30 day summaries derived from synced OMOP data.",
     [summaryIdx]: "Read-only overview of all clinical data grouped by domain.",
     ...(surveysIdx >= 0 ? { [surveysIdx]: "Surveys assigned to you by your care team." } : {}),
+    ...(sourceCodesIdx >= 0 ? { [sourceCodesIdx]: "Source codes from imported data and their OMOP mapping status." } : {}),
     ...(omopIdx >= 0 ? { [omopIdx]: "Raw OMOP rows associated with this patient." } : {}),
   };
 
@@ -931,6 +934,7 @@ export default function PatientDetail({
                 {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} />}
                 {activeTab === summaryIdx && <ClinicalSummaryTab formData={editedInfo} onNavigateToLabs={() => setActiveTab(labsIdx)} />}
                 {surveysIdx >= 0 && activeTab === surveysIdx && <PatientSurveys user={user ?? null} />}
+                {sourceCodesIdx >= 0 && activeTab === sourceCodesIdx && personId && <PatientSourceCodesTab personId={personId} />}
                 {omopIdx >= 0 && activeTab === omopIdx && personId && <PatientOmopTab personId={personId} />}
               </div>
             </div>

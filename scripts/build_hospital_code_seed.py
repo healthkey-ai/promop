@@ -24,7 +24,6 @@ SCHEMA_VERSION = 1
 MEMBER_NAME = 'hospital_source_codes.jsonl'
 SOURCE_CODE_MAX = 100
 SYSTEM_MAX = 255
-PROVENANCE = 'healthtree-hospital-seed-20261002-v1'
 
 PRIMARY_COLUMNS = [
     'resource_type', 'field_path', 'coding_system', 'coding_code',
@@ -266,7 +265,7 @@ def facility_objects(rows):
     } for row in rows]
 
 
-def merged_units(alex_units, rows):
+def merged_units(alex_units, rows, *, unit_source):
     # Alex is the distribution source. Nikita is the authoritative unit
     # parsing/validation source. Match on the two untouched FHIR strings.
     distributions = {
@@ -282,7 +281,7 @@ def merged_units(alex_units, rows):
             'normalized': row[3], 'normalized_source': row[4],
             'verdict': row[5], 'verdict_reason': row[6],
             'count': row[7], 'patients': row[8], 'values': row[9],
-            'source': 'nikita-fhir-code-inventory-20261002b',
+            'source': unit_source,
         }
         alex = distributions.get((display, raw_code))
         if alex:
@@ -300,7 +299,7 @@ def merged_units(alex_units, rows):
     return result
 
 
-def write_jsonl(path, build, connection):
+def write_jsonl(path, build, connection, *, unit_source):
     facilities = GroupLookup(grouped_rows(connection.execute('''
         SELECT system, code, name, facility_id, level, method, confidence,
                reason, alternate_name, alias, parent_name, parent_id, rank,
@@ -318,7 +317,9 @@ def write_jsonl(path, build, connection):
         for key in sorted(build.rows):
             row = build.rows[key]
             facility_list = facility_objects(facilities.get(key))
-            unit_list = merged_units(row.source_unit_evidence, units.get(key))
+            unit_list = merged_units(
+                row.source_unit_evidence, units.get(key), unit_source=unit_source,
+            )
             metadata = dict(row.source_metadata)
             if facility_list:
                 metadata['facilities'] = facility_list
@@ -349,11 +350,14 @@ def main():
     parser.add_argument('--alex-zip', required=True, type=Path)
     parser.add_argument('--nikita-csv', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--artifact-identity', required=True)
     parser.add_argument('--repo', type=Path, default=Path(__file__).resolve().parents[1])
     args = parser.parse_args()
     for source in (args.alex_zip, args.nikita_csv):
         if not source.is_file():
             parser.error(f'file not found: {source}')
+    if len(args.artifact_identity) > 50:
+        parser.error('--artifact-identity must be at most 50 characters')
     configure_django(args.repo)
     from omop_core.management.commands.import_hospital_source_codes import parquet_rows as app_parquet_rows
     from omop_core.services.hospital_code_backfill import build_inventory
@@ -397,11 +401,14 @@ def main():
         print(f'  accepted {nikita_rows:,} Nikita unit rows', flush=True)
 
         jsonl = temp / MEMBER_NAME
-        counts = write_jsonl(jsonl, build, evidence_db)
+        counts = write_jsonl(
+            jsonl, build, evidence_db,
+            unit_source=f'nikita-{args.nikita_csv.stem}',
+        )
         member_sha = sha256_file(jsonl)
         manifest = {
             'schema_version': SCHEMA_VERSION,
-            'artifact_identity': PROVENANCE,
+            'artifact_identity': args.artifact_identity,
             'member': MEMBER_NAME,
             'member_sha256': member_sha,
             'counts': counts,
