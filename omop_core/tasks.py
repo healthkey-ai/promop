@@ -84,11 +84,11 @@ def project_field_to_omop_task(mapping_pk: int) -> dict[str, Any]:
 
 
 @shared_task(name='omop_core.bulk_resolve_source_codes')
-def bulk_resolve_source_codes_task(run_id: str) -> dict[str, Any]:
+def bulk_resolve_source_codes_task(run_id: str, person_ids: list[int] | None = None) -> dict[str, Any]:
     """Run a bulk source-code resolution across multiple patients."""
     from omop_core.services.resolve_jobs import run_bulk_resolve
 
-    run_bulk_resolve(run_id)
+    run_bulk_resolve(run_id, person_ids)
     from omop_core.models import SourceCodeResolveRun
     run = SourceCodeResolveRun.objects.filter(pk=run_id).first()
     if run is None:

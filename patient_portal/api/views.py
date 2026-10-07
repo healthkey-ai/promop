@@ -5567,6 +5567,11 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                 {'detail': 'person_ids must be a non-empty list of integers.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if not all(isinstance(pid, int) for pid in person_ids):
+            return Response(
+                {'detail': 'person_ids must contain only integers.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         if len(person_ids) > BULK_RESOLVE_MAX_PERSONS:
             return Response(
@@ -6717,38 +6722,43 @@ def _aggregate_patient_source_codes(person: Person) -> list[dict]:
     unmapped first, then by row count descending.
     """
     results: list[dict] = []
-    # Collect all concept IDs we see so we can batch-resolve names.
     concept_ids_to_resolve: set[int] = set()
 
     for table_key, (model, concept_col, source_col) in CLINICAL_TABLES.items():
-        groups = (
+        # Group by source_value only — one row per source code per table.
+        groups = list(
             model.objects.filter(person=person)
             .exclude(**{f'{source_col}__isnull': True})
             .exclude(**{source_col: ''})
-            .values(source_col, concept_col)
+            .values(source_col)
             .annotate(row_count=Count('pk'))
             .order_by(source_col)
         )
+        if not groups:
+            continue
+
+        # Batch-fetch SCCM mappings for all source values in this table (one query).
+        source_values = [g[source_col] for g in groups]
+        mapping_by_sv: dict[str, SourceCodeConceptMapping] = {}
+        for m in (
+            SourceCodeConceptMapping.objects
+            .filter(source_code__in=source_values, omop_table=table_key)
+            .select_related('target_concept')
+        ):
+            key = m.source_code.lower()
+            if key not in mapping_by_sv:
+                mapping_by_sv[key] = m
+
         for group in groups:
             source_value = group[source_col]
-            concept_id = group[concept_col] or 0
             row_count = group['row_count']
 
-            if concept_id and concept_id != NO_MATCHING_CONCEPT_ID:
-                concept_ids_to_resolve.add(concept_id)
-
-            # Look up mapping
-            mapping = (
-                SourceCodeConceptMapping.objects
-                .filter(source_code__iexact=source_value, omop_table=table_key)
-                .select_related('target_concept')
-                .first()
-            )
+            mapping = mapping_by_sv.get(source_value.lower())
 
             entry: dict = {
                 'source_value': source_value,
                 'omop_table': table_key,
-                'concept_id': concept_id,
+                'concept_id': 0,
                 'concept_name': None,
                 'row_count': row_count,
                 'mapping_id': None,

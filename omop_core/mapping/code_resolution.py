@@ -770,7 +770,19 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
             sv = group[source_col]
 
             # Find an approved mapping for this source value.
-            mapping = approved_mapping_for('', sv)
+            # Query SCCM directly rather than going through
+            # approved_mapping_for() which requires a vocabulary_id
+            # that clinical rows don't store.
+            mapping = (
+                SourceCodeConceptMapping.objects
+                .filter(
+                    source_code__iexact=sv,
+                    omop_table=table_key,
+                    status='approved',
+                )
+                .select_related('target_concept')
+                .first()
+            )
             if mapping is None:
                 skipped += group['row_count']
                 continue

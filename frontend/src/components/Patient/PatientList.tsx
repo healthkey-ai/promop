@@ -1,5 +1,5 @@
 import PageTitle from '@/components/Branding/PageTitle';
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { Upload, Trash2, LogOut, Settings, Globe, RefreshCw } from "lucide-react";
 import api from "@/api/axios";
@@ -104,6 +104,8 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   const [deleting, setDeleting] = useState(false);
   const [resolveDialogOpen, setResolveDialogOpen] = useState(false);
   const [resolveRun, setResolveRun] = useState<ResolveRunStatus | null>(null);
+  const resolvePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  useEffect(() => () => { if (resolvePollRef.current) clearInterval(resolvePollRef.current); }, []);
   const [orgFilter, setOrgFilter] = useState(ALL_FILTER_VALUE);
   const [diseaseFilter, setDiseaseFilter] = useState(ALL_FILTER_VALUE);
   const [stageFilter, setStageFilter] = useState(ALL_FILTER_VALUE);
@@ -222,21 +224,23 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
     if (personIds.length === 0) return;
     try {
       const res = await api.post<{ run_id: string; total: number }>(
-        "/v1/patient-records/bulk_resolve_source_codes/",
+        "/v1/patient-records/bulk-resolve-source-codes/",
         { person_ids: personIds }
       );
       const runId = res.data.run_id;
       setResolveRun({ run_id: runId, state: "pending", total: res.data.total, done: 0, resolved: 0, errors: 0 });
 
-      const poll = setInterval(async () => {
+      resolvePollRef.current = setInterval(async () => {
         try {
           const status = await api.get<ResolveRunStatus>(`/v1/resolve-runs/${runId}/`);
           setResolveRun(status.data);
           if (status.data.state === "completed" || status.data.state === "failed") {
-            clearInterval(poll);
+            if (resolvePollRef.current) clearInterval(resolvePollRef.current);
+            resolvePollRef.current = null;
           }
         } catch {
-          clearInterval(poll);
+          if (resolvePollRef.current) clearInterval(resolvePollRef.current);
+          resolvePollRef.current = null;
         }
       }, 2000);
     } catch (err) {
