@@ -1555,8 +1555,12 @@ def _get_treatment_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     # from DrugExposure rows; ARTEMIS (or another episode producer) owns that
     # transformation and persists it before this read model is refreshed.
     try:
-        from omop_oncology.models import Episode
-        episodes = Episode.objects.filter(person=person).select_related(
+        from omop_core.services.disease_episodes import primary_lines
+        # The flat therapy fields are the primary cancer's lines (#1739): a
+        # second cancer's line 1 must not stand in for the first line here,
+        # and trial eligibility counts prior lines for the cancer it matches.
+        primary_slug = _get_disease_data(person, snapshot).get('disease_slug') or ''
+        episodes = primary_lines(person, primary_slug).select_related(
             'episode_source_concept', 'episode_object_concept').order_by('episode_number')
         if episodes.exists():
             return _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, snapshot)
@@ -2159,11 +2163,15 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
         '182842009': 'Progressive Disease',
     }
     lot_outcomes: dict = {}
+    # A LOT-N-outcome row is this line's when it is linked to one of these
+    # Episodes, or (written before #1739) linked to none.
+    line_ids = {getattr(e, 'episode_id', None) for e in episodes}
     # Use snapshot observations filtered in Python
     outcome_obs = sorted(
         (o for o in (snapshot.observations if snapshot else [])
          if (o.observation_source_value or '').startswith('LOT-')
-         and (o.observation_source_value or '').endswith('-outcome')),
+         and (o.observation_source_value or '').endswith('-outcome')
+         and _belongs_to_lines(o, line_ids)),
         key=lambda o: o.observation_date or date.min,
     )
     if not outcome_obs and not snapshot:
@@ -2171,6 +2179,7 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
         outcome_obs = (
             Observation.objects
             .filter(
+                Q(observation_event_id__isnull=True) | Q(observation_event_id__in=line_ids),
                 person=person,
                 is_erroneous=False,
                 observation_source_value__startswith='LOT-',
@@ -2213,6 +2222,12 @@ def _treatment_assertion_value(row):
     )
 
 
+def _belongs_to_lines(obs, line_ids) -> bool:
+    """A LOT-N-* Observation is these lines' when linked to one, or (pre-#1739) to none."""
+    event_id = getattr(obs, 'observation_event_id', None)
+    return event_id is None or event_id in line_ids
+
+
 def _apply_treatment_assertions(data, person, episodes, snapshot: OmopSnapshot = None):
     """Project dated intent/discontinuation assertions onto their Episode line.
 
@@ -2240,10 +2255,13 @@ def _apply_treatment_assertions(data, person, episodes, snapshot: OmopSnapshot =
         Observation.objects.filter(person=person, is_erroneous=False)
         .select_related('value_as_concept').order_by('observation_date', 'observation_id')
     )
+    line_ids = {getattr(e, 'episode_id', None) for e in episodes}
     for obs in obs_list:
         match = pattern.match(obs.observation_source_value or '')
         if not match:
             continue
+        if not _belongs_to_lines(obs, line_ids):
+            continue  # another cancer's line (#1739)
         value = _treatment_assertion_value(obs)
         line = int(match.group(1))
         if value and line in bounds:
@@ -3983,8 +4001,12 @@ def _get_dlbcl_transformation(person: Person, observations, snapshot: OmopSnapsh
     if death and death.death_date and death.death_date >= transformation_date:
         data['post_transformation_outcome'] = 'Deceased'
     else:
+        from omop_core.services.disease_episodes import other_cancer_line_ids
+        other_lines = other_cancer_line_ids(person)
         for obs in observations:  # -observation_date: first hit is latest
             src = obs.observation_source_value or ''
+            if getattr(obs, 'observation_event_id', None) in other_lines:
+                continue  # another cancer's line (#1739)
             if (src.startswith('LOT-') and src.endswith('-outcome')
                     and obs.observation_date >= transformation_date
                     and obs.value_as_string):

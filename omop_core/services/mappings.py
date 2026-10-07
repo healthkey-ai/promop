@@ -244,6 +244,7 @@ CONCEPT_LAB_TYPE          = 32856     # Lab (measurement type)
 CONCEPT_PATIENT_REPORTED_TYPE = 32865 # Patient self-report (measurement type)
 CONCEPT_EHR_TYPE          = 32817     # EHR (condition type)
 CONCEPT_TREATMENT_REGIMEN = 32531     # Treatment Regimen (episode concept)
+CONCEPT_DISEASE_FIRST_OCCURRENCE = 32528  # Disease First Occurrence: the cancer a line treats (episode_parent_id)
 CONCEPT_DRUG_EXPOSURE_FIELD = 1147094  # drug_exposure_id field concept (EpisodeEvent)
 
 

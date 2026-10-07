@@ -11,7 +11,9 @@ class Episode(models.Model):
     episode_start_datetime = models.DateTimeField(null=True, blank=True)
     episode_end_date = models.DateField(null=True, blank=True)
     episode_end_datetime = models.DateTimeField(null=True, blank=True)
-    episode_parent_id = models.IntegerField(null=True, blank=True)
+    # The Disease Episode a Treatment Regimen (line of therapy) belongs to
+    # (#1739). BigInteger, like episode_id: ids no longer fit in 32 bits.
+    episode_parent_id = models.BigIntegerField(null=True, blank=True)
     episode_number = models.IntegerField(null=True, blank=True)
     episode_object_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='episode_objects', db_column='episode_object_concept_id')
     episode_type_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='episode_types', db_column='episode_type_concept_id')
