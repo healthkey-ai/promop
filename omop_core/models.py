@@ -5011,6 +5011,38 @@ class SourceCodeResolveRun(models.Model):
                 f'{self.done}/{self.total}, {self.resolved} resolved)')
 
 
+class PatientSourceCode(models.Model):
+    """Per-patient inventory of source codes seen in ETL input.
+
+    Populated by the ETL pipeline via POST to the source-codes endpoint.
+    The Source Codes tab joins these rows with SourceCodeConceptMapping to
+    show mapping status.  Unlike the clinical-table aggregation, this table
+    includes codes that have no OMOP mapping yet and therefore never made it
+    into a clinical table.
+    """
+    person = models.ForeignKey(
+        Person, on_delete=models.CASCADE, related_name='source_codes',
+    )
+    source_value = models.CharField(max_length=255, db_index=True)
+    source_vocabulary_id = models.CharField(max_length=255, blank=True, default='')
+    omop_table = models.CharField(max_length=30, blank=True, default='')
+    occurrence_count = models.IntegerField(default=1)
+    first_seen = models.DateTimeField(auto_now_add=True)
+    last_seen = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'patient_source_code'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['person', 'source_value', 'source_vocabulary_id', 'omop_table'],
+                name='uq_patient_source_code',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.source_value} ({self.omop_table}) — person {self.person_id}'
+
+
 class ConceptEmbedding(models.Model):
     """Precomputed sentence-transformer embedding for concept name search.
 

@@ -28,7 +28,7 @@ def drop_sequences(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('omop_core', '0281_merge_corrected_units_and_source_code_resolve'),
+        ('omop_core', '0282_patient_source_code'),
     ]
 
     operations = [
