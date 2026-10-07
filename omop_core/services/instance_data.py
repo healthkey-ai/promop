@@ -46,6 +46,9 @@ SYSTEM: frozenset[str] = frozenset({
     # Historical model-quality feedback for this instance, not a live mapping.
     'omop_core.CodeMappingUpload', 'omop_core.MappingSuggestionReview',
     # Derived from concept + concept_synonym; rebuilt locally, never copied.
+    # AI explanations are regenerated on demand, and their item ids would not
+    # point at the same rows on another instance.
+    'patient_portal.AiExplanation',
     'omop_core.SuggestSynonymTerm',
     'omop_core.AthenaVocabularySync', 'omop_core.HospitalCodeImport',
     'omop_core.VocabularyRelease',

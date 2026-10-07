@@ -846,6 +846,10 @@ PHR_SHARE_PRODUCT_NAME = os.environ.get('PHR_SHARE_PRODUCT_NAME', 'HealthKey')
 # Where a scan happened is read from headers the edge sets from the client IP
 # (e.g. a load balancer's {client_city}). Only list headers the edge overwrites:
 # a client can send any header. Unset, scans are logged without a place.
+# AI explanations in the PHR are written by ONE's server, which sends this key
+# beside the patient's token; without it a patient's own token could store
+# text shown as "written by HealthTree AI". Unset, writes are refused.
+PHR_EXPLANATION_WRITE_KEY = os.environ.get('PHR_EXPLANATION_WRITE_KEY', '')
 PHR_SHARE_GEO_HEADERS = {
     key: os.environ[f'PHR_SHARE_GEO_{key.upper()}_HEADER']
     for key in ('city', 'region', 'country')

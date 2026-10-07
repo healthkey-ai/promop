@@ -689,3 +689,40 @@ class ShareScan(models.Model):
 
     def __str__(self):
         return f'{self.share_id} @ {self.scanned_at:%Y-%m-%d %H:%M}'
+
+
+class AiExplanation(models.Model):
+    """A plain-language explanation of one item in a patient's record.
+
+    ONE writes it: its admins approve the prompt, it calls the model and stores
+    the text here, so the explanation (PHI) never sits in ONE. PRomop only
+    stores and serves it. ``source_hash`` is what ONE hashed the item, prompt
+    version and model into; a mismatch tells ONE to write a fresh one.
+    """
+    DIAGNOSIS, LAB_TEST, LAB_RESULT, GENETIC_TEST, IMAGING_STUDY = (
+        'diagnosis', 'lab_test', 'lab_result', 'genetic_test', 'imaging_study',
+    )
+    KINDS = [
+        (DIAGNOSIS, 'About your diagnosis'), (LAB_TEST, 'What the test measures'),
+        (LAB_RESULT, 'What your results mean'), (GENETIC_TEST, 'What a genetic result means'),
+        (IMAGING_STUDY, 'What a scan showed'),
+    ]
+
+    person = models.ForeignKey('omop_core.Person', on_delete=models.CASCADE, related_name='ai_explanations')
+    kind = models.CharField(max_length=20, choices=KINDS)
+    # The PHR's id for the item: a diagnosis id, a lab test's concept id, a
+    # genetic test id, an imaging study id.
+    target_key = models.CharField(max_length=120)
+    text = models.TextField()
+    prompt_version = models.CharField(max_length=64)
+    model = models.CharField(max_length=100)
+    source_hash = models.CharField(max_length=64)
+    generated_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['person', 'kind', 'target_key'], name='uq_ai_explanation_item'),
+        ]
+
+    def __str__(self):
+        return f'{self.person_id} {self.kind}:{self.target_key} ({self.model}, {self.prompt_version})'
