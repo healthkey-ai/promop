@@ -4068,8 +4068,10 @@ def _compute_derived_fields(patient_info: PatientRecord, *, apply_formulas=True)
 
     serum_mp = patient_info.monoclonal_protein_serum
     urine_mp = patient_info.monoclonal_protein_urine
-    kappa = patient_info.kappa_flc
-    lam = patient_info.lambda_flc
+    # As floats: a refresh holds a freshly projected value as a float and one
+    # kept from the stored record as the Decimal the database returned.
+    kappa = None if patient_info.kappa_flc is None else float(patient_info.kappa_flc)
+    lam = None if patient_info.lambda_flc is None else float(patient_info.lambda_flc)
 
     if kappa is not None and lam is not None and min(kappa, lam) > 0:
         patient_info.involved_uninvolved_ratio = max(kappa, lam) / min(kappa, lam)
