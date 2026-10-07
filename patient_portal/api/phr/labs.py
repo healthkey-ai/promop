@@ -199,7 +199,8 @@ def lab_history(person, concept_id: int, record=None) -> dict[str, Any] | None:
         # the time of a result: those of the cancer this test marks (a PSA
         # chart shows the prostate cancer's lines), else the primary cancer's.
         'therapy': [
-            {k: line[k] for k in ('number', 'regimen', 'start', 'end') if k in line}
+            # id: a shared chart keeps only the lines the patient shared.
+            {k: line[k] for k in ('id', 'number', 'regimen', 'start', 'end') if k in line}
             for line in lines_for_markers(person, record, meta.get('disease_slugs'))
         ],
     }

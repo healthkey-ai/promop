@@ -612,7 +612,7 @@ def test_lab_history_carries_the_treatment_lines_for_the_chart():
 
     data = signed_in(record).get(f'/api/v1/phr/labs/{hgb.concept_id}/').data
 
-    assert data['therapy'] == [{'number': 1, 'regimen': 'VRd', 'start': '2024-03-12', 'end': '2024-10-14'}]
+    assert data['therapy'] == [{'id': 'line-1', 'number': 1, 'regimen': 'VRd', 'start': '2024-03-12', 'end': '2024-10-14'}]
 
 
 # ---------------------------------------------------------------- patient statements

@@ -98,3 +98,21 @@ def test_status_counts_any_cancer_s_lines():
     upsert_therapy_line_episode(record.person, line_number=1, start_date=date(2026, 1, 5), disease='Prostate cancer')
     status = signed_in(record).get('/api/v1/phr/status/').data['sections']
     assert status['therapy'] == 'ready'
+
+
+def test_a_shared_marker_chart_shows_only_the_lines_the_patient_shared(two_cancers, settings):
+    """Sharing labs and one myeloma line must not reveal the prostate cancer's treatment on the PSA chart."""
+    from tests.test_phr_sharing import grant, holder
+
+    settings.PHR_SHARE_URL = 'https://one.example/r'
+    record, client, myeloma, _ = two_cancers
+    LabMarker.objects.create(loinc_code='2857-1', rank=1, disease_slugs=[disease_slug('Prostate cancer')])
+    psa = loinc('2857-1', 'Prostate specific Ag [Mass/volume] in Serum or Plasma')
+    lab(record, psa, '2026-02-01', 0.02)
+    share = grant(client, selection={'labs': {'all': True}, 'therapy': {'items': [str(myeloma.episode_id)]}}).data
+
+    shared = holder(share).get(f'/api/v1/phr/shared/labs/{psa.concept_id}/')
+    assert shared.status_code == 200
+    assert shared.data['therapy'] == []
+    # The patient's own chart still shows the prostate line.
+    assert [l['start'] for l in client.get(f'/api/v1/phr/labs/{psa.concept_id}/').data['therapy']] == ['2026-01-05']
