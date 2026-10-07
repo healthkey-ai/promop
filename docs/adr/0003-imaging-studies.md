@@ -95,6 +95,11 @@ Both FHIR paths, the upload endpoint and the provider sync, call
 - Contrast is read from the study's own words: codes such as "CT CHEST W
   CONTRAST", series descriptions, and agents such as gadolinium or FDG. It is
   `unknown` when they say nothing.
+- Copying a patient between instances (`patient_transfer`) carries the
+  `image_occurrence`, the report notes (`note_event_id`, resolved through its
+  field concept 1147082, like the other event links) and the document's
+  `procedure_occurrence_id`. Where the CDM field concept isn't loaded, the
+  notes are written without it and the copy can't re-link them.
 - Unmapped study codes keep concept 0 with their source value. They are not
   minted under an HK vocabulary, because the study's identity is its report,
   not a coded fact used for matching.

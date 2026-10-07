@@ -477,3 +477,35 @@ def test_patient_statements_follow_the_patient_and_their_therapy_line(patient: P
     # A statement about a line that is not on the record is not carried over.
     assert PatientStatement.objects.filter(person_id=TARGET_ID).count() == 2
     assert stats.skipped['PatientStatement'] == 1
+
+
+def test_an_imaging_study_keeps_its_report_images_and_document(patient: Person):
+    """#1731: the study's image_occurrence, report notes and document follow the copy."""
+    from omop_core.models import ImageOccurrence, PatientDocument, ProcedureOccurrence
+
+    concept = Concept.objects.get(concept_id=3_000_001)
+    with suppress_patient_record_refresh():
+        study = ProcedureOccurrence.objects.create(
+            procedure_occurrence_id=70, person=patient, procedure_concept=concept, procedure_date='2024-02-01',
+            procedure_type_concept=concept, visit_occurrence_id=10,
+        )
+    ImageOccurrence.objects.create(
+        image_occurrence_id=71, person=patient, procedure_occurrence=study, visit_occurrence_id=10,
+        image_occurrence_date='2024-02-01', image_study_uid='1.2.3', modality_source_value='CT',
+    )
+    Note.objects.create(
+        note_id=72, person=patient, note_date='2024-02-01', note_type_concept=concept, note_text='Impression.',
+        note_source_value='rad-impression', note_event_id=study.pk,
+        note_event_field_concept=_cdm(1_147_082, 'procedure_occurrence.procedure_occurrence_id'),
+    )
+    PatientDocument.objects.create(person=patient, doc_type='IMAGING', title='CT report',
+                                   file_url='https://example.test/ct.pdf', procedure_occurrence_id=study.pk)
+
+    _copy()
+
+    copied = ProcedureOccurrence.objects.get(person_id=TARGET_ID, procedure_date='2024-02-01')
+    assert copied.pk != study.pk
+    image = ImageOccurrence.objects.get(person_id=TARGET_ID)
+    assert (image.procedure_occurrence_id, image.image_study_uid) == (copied.pk, '1.2.3')
+    assert Note.objects.get(person_id=TARGET_ID, note_source_value='rad-impression').note_event_id == copied.pk
+    assert PatientDocument.objects.get(person_id=TARGET_ID).procedure_occurrence_id == copied.pk
