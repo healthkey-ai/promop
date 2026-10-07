@@ -600,8 +600,11 @@ class SharedLabHistoryView(SharedRecordMixin, LabHistoryView):
         if not allowed(self.share.selection, 'labs')(lab_group(data)):
             return None
         if not self.is_shared('therapy'):
-            data = {k: v for k, v in data.items() if k != 'therapy'}
-        return data
+            return {k: v for k, v in data.items() if k != 'therapy'}
+        # Only the lines the patient shared: a marker chart can carry another
+        # cancer's lines (a PSA chart, the prostate cancer's).
+        ok = allowed(self.share.selection, 'therapy')
+        return {**data, 'therapy': [line for line in data.get('therapy', []) if ok(line.get('id'))]}
 
 
 class SharedMedicationsView(SharedRecordMixin, MedicationsView):
