@@ -104,7 +104,7 @@ _REFERENCE_COPIED_EXPLICIT: frozenset[str] = frozenset({
 PATIENT: frozenset[str] = frozenset({
     'omop_core.ConditionEra', 'omop_core.ConditionOccurrence', 'omop_core.Death',
     'omop_core.DoseEra', 'omop_core.DrugEra', 'omop_core.DrugExposure',
-    'omop_core.Location', 'omop_core.Measurement', 'omop_core.MeasurementOwnership',
+    'omop_core.ImageOccurrence', 'omop_core.Location', 'omop_core.Measurement', 'omop_core.MeasurementOwnership',
     'omop_core.Note', 'omop_core.NoteNlp', 'omop_core.Observation',
     'omop_core.ObservationPeriod', 'omop_core.PatientDocument', 'omop_core.PatientRecord',
     'omop_core.PatientTrialEnrollment', 'omop_core.Person', 'omop_core.PersonLanguageSkill',
