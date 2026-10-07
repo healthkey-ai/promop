@@ -63,7 +63,7 @@ class TestPostSourceCodes:
                  'omop_table': 'drug_exposure', 'occurrence_count': 1},
             ],
         }, format='json')
-        assert resp.status_code == 200
+        assert resp.status_code == 201
         data = resp.json()
         assert data['created'] == 2
         assert data['updated'] == 0

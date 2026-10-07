@@ -5552,12 +5552,22 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                     {'detail': f'Entry {i}: source_value is required.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            raw_count = entry.get('occurrence_count', 1)
+            try:
+                occ = int(raw_count if raw_count is not None else 1)
+                if occ < 1:
+                    raise ValueError
+            except (TypeError, ValueError):
+                return Response(
+                    {'detail': f'Entry {i}: occurrence_count must be a positive integer.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             objs.append(PatientSourceCode(
                 person=person,
                 source_value=sv,
                 source_vocabulary_id=(entry.get('source_vocabulary_id') or '').strip(),
                 omop_table=(entry.get('omop_table') or '').strip(),
-                occurrence_count=int(entry.get('occurrence_count', 1)),
+                occurrence_count=occ,
                 last_seen=now,
             ))
 
@@ -5569,6 +5579,8 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             PatientSourceCode.objects.filter(person=person)
             .filter(
                 source_value__in=[k[0] for k in request_keys],
+                source_vocabulary_id__in=[k[1] for k in request_keys],
+                omop_table__in=[k[2] for k in request_keys],
             )
             .values_list('source_value', 'source_vocabulary_id', 'omop_table')
         )
@@ -5583,7 +5595,8 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             update_fields=['occurrence_count', 'last_seen'],
         )
 
-        return Response({'created': created, 'updated': updated})
+        resp_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        return Response({'created': created, 'updated': updated}, status=resp_status)
 
     @action(detail=True, methods=['post'], url_path='resolve-source-codes',
             permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
@@ -6787,53 +6800,41 @@ def _is_admin_actor(request: Request) -> bool:
     )
 
 
-def _get_patient_source_codes(person: Person) -> list[dict]:
-    """Read source codes from PatientSourceCode, falling back to clinical aggregation.
+def _resolve_source_code_mappings(
+    rows_by_table: dict[str, list[dict]],
+) -> list[dict]:
+    """Join source-code rows with SCCM mappings and sort by mapping status.
 
-    If the ETL has populated PatientSourceCode rows for this person, use those.
-    Otherwise fall back to the clinical-table aggregation for backward compat.
+    Shared by both `_get_patient_source_codes` (reads from PatientSourceCode)
+    and `_aggregate_patient_source_codes` (reads from clinical tables).
+
+    Each value in *rows_by_table* is a list of dicts with keys
+    ``source_value``, ``source_vocabulary_id``, ``row_count``.
     """
-    from omop_core.models import PatientSourceCode
-
-    psc_rows = list(
-        PatientSourceCode.objects.filter(person=person)
-        .values('source_value', 'source_vocabulary_id', 'omop_table', 'occurrence_count')
-    )
-    if not psc_rows:
-        return _aggregate_patient_source_codes(person)
-
     results: list[dict] = []
-    concept_ids_to_resolve: set[int] = set()
 
-    # Group by omop_table so we can batch-fetch SCCM mappings per table.
-    from collections import defaultdict
-    by_table: dict[str, list[dict]] = defaultdict(list)
-    for row in psc_rows:
-        by_table[row['omop_table'] or ''].append(row)
-
-    for table_key, rows in by_table.items():
+    for table_key, rows in rows_by_table.items():
         source_values = [r['source_value'] for r in rows]
         mapping_by_sv: dict[str, SourceCodeConceptMapping] = {}
-        if table_key:
-            for m in (
-                SourceCodeConceptMapping.objects
-                .filter(source_code__in=source_values, omop_table=table_key)
-                .select_related('target_concept')
-            ):
-                key = m.source_code.lower()
-                if key not in mapping_by_sv:
-                    mapping_by_sv[key] = m
+        for m in (
+            SourceCodeConceptMapping.objects
+            .filter(source_code__in=source_values, omop_table=table_key)
+            .select_related('target_concept')
+        ):
+            key = m.source_code.lower()
+            if key not in mapping_by_sv:
+                mapping_by_sv[key] = m
 
         for row in rows:
             source_value = row['source_value']
-            mapping = mapping_by_sv.get(source_value.lower()) if table_key else None
+            mapping = mapping_by_sv.get(source_value.lower())
 
             entry: dict = {
                 'source_value': source_value,
                 'omop_table': table_key,
                 'concept_id': 0,
                 'concept_name': None,
-                'row_count': row['occurrence_count'],
+                'row_count': row['row_count'],
                 'mapping_id': None,
                 'mapping_status': 'unmapped',
                 'mapping_target_concept_id': None,
@@ -6853,26 +6854,41 @@ def _get_patient_source_codes(person: Person) -> list[dict]:
                         mapping.target_concept.concept_name
                         if mapping.target_concept else None
                     )
-                    concept_ids_to_resolve.add(mapping.target_concept_id)
 
             results.append(entry)
 
-    # Batch-resolve concept names
-    if concept_ids_to_resolve:
-        names = dict(
-            Concept.objects.filter(concept_id__in=concept_ids_to_resolve)
-            .values_list('concept_id', 'concept_name')
-        )
-        for entry in results:
-            cid = entry['concept_id']
-            if cid and cid != NO_MATCHING_CONCEPT_ID:
-                entry['concept_name'] = names.get(cid)
-
-    # Sort: unmapped first, then by row count descending
+    # Sort: unmapped first, then by row count descending.
     status_order = {'unmapped': 0, 'proposed': 1, 'approved': 2, 'rejected': 3}
     results.sort(key=lambda e: (status_order.get(e['mapping_status'], 9), -e['row_count']))
-
     return results
+
+
+def _get_patient_source_codes(person: Person) -> list[dict]:
+    """Read source codes from PatientSourceCode, falling back to clinical aggregation.
+
+    If the ETL has populated PatientSourceCode rows for this person, use those.
+    Otherwise fall back to the clinical-table aggregation for backward compat.
+    """
+    from collections import defaultdict
+
+    from omop_core.models import PatientSourceCode
+
+    psc_rows = list(
+        PatientSourceCode.objects.filter(person=person)
+        .values('source_value', 'source_vocabulary_id', 'omop_table', 'occurrence_count')
+    )
+    if not psc_rows:
+        return _aggregate_patient_source_codes(person)
+
+    by_table: dict[str, list[dict]] = defaultdict(list)
+    for row in psc_rows:
+        by_table[row['omop_table'] or ''].append({
+            'source_value': row['source_value'],
+            'source_vocabulary_id': row.get('source_vocabulary_id', ''),
+            'row_count': row['occurrence_count'],
+        })
+
+    return _resolve_source_code_mappings(by_table)
 
 
 def _aggregate_patient_source_codes(person: Person) -> list[dict]:
@@ -6882,11 +6898,9 @@ def _aggregate_patient_source_codes(person: Person) -> list[dict]:
     SourceCodeConceptMapping to get mapping status.  Returns a list sorted by
     unmapped first, then by row count descending.
     """
-    results: list[dict] = []
-    concept_ids_to_resolve: set[int] = set()
+    by_table: dict[str, list[dict]] = {}
 
     for table_key, (model, concept_col, source_col) in CLINICAL_TABLES.items():
-        # Group by source_value only — one row per source code per table.
         groups = list(
             model.objects.filter(person=person)
             .exclude(**{f'{source_col}__isnull': True})
@@ -6898,69 +6912,12 @@ def _aggregate_patient_source_codes(person: Person) -> list[dict]:
         if not groups:
             continue
 
-        # Batch-fetch SCCM mappings for all source values in this table (one query).
-        source_values = [g[source_col] for g in groups]
-        mapping_by_sv: dict[str, SourceCodeConceptMapping] = {}
-        for m in (
-            SourceCodeConceptMapping.objects
-            .filter(source_code__in=source_values, omop_table=table_key)
-            .select_related('target_concept')
-        ):
-            key = m.source_code.lower()
-            if key not in mapping_by_sv:
-                mapping_by_sv[key] = m
+        by_table[table_key] = [
+            {'source_value': g[source_col], 'source_vocabulary_id': '', 'row_count': g['row_count']}
+            for g in groups
+        ]
 
-        for group in groups:
-            source_value = group[source_col]
-            row_count = group['row_count']
-
-            mapping = mapping_by_sv.get(source_value.lower())
-
-            entry: dict = {
-                'source_value': source_value,
-                'omop_table': table_key,
-                'concept_id': 0,
-                'concept_name': None,
-                'row_count': row_count,
-                'mapping_id': None,
-                'mapping_status': 'unmapped',
-                'mapping_target_concept_id': None,
-                'mapping_target_concept_name': None,
-                'source_vocabulary_id': '',
-                'source_code': source_value,
-            }
-
-            if mapping:
-                entry['mapping_id'] = mapping.id
-                entry['mapping_status'] = mapping.status
-                entry['source_vocabulary_id'] = mapping.source_vocabulary_id or ''
-                entry['source_code'] = mapping.source_code
-                if mapping.target_concept_id:
-                    entry['mapping_target_concept_id'] = mapping.target_concept_id
-                    entry['mapping_target_concept_name'] = (
-                        mapping.target_concept.concept_name
-                        if mapping.target_concept else None
-                    )
-                    concept_ids_to_resolve.add(mapping.target_concept_id)
-
-            results.append(entry)
-
-    # Batch-resolve concept names
-    if concept_ids_to_resolve:
-        names = dict(
-            Concept.objects.filter(concept_id__in=concept_ids_to_resolve)
-            .values_list('concept_id', 'concept_name')
-        )
-        for entry in results:
-            cid = entry['concept_id']
-            if cid and cid != NO_MATCHING_CONCEPT_ID:
-                entry['concept_name'] = names.get(cid)
-
-    # Sort: unmapped first, then by row count descending
-    status_order = {'unmapped': 0, 'proposed': 1, 'approved': 2, 'rejected': 3}
-    results.sort(key=lambda e: (status_order.get(e['mapping_status'], 9), -e['row_count']))
-
-    return results
+    return _resolve_source_code_mappings(by_table)
 
 
 def _skip_refresh_requested(request: Request) -> bool:
