@@ -239,6 +239,15 @@ def test_a_check_in_is_a_fixed_qr_code_and_logs_where_it_was_scanned(patient, se
     assert '203.0.113.9' not in str(list(ShareScan.objects.values()))
 
 
+def test_an_email_invite_comes_from_the_product_the_patient_uses(patient, settings):
+    # Same address as every PRomop email (its mail domain), but the patient's
+    # product as the name the recipient sees, not PRomop's own.
+    settings.DEFAULT_FROM_EMAIL = 'PROMOP <noreply@healthkey.ai>'
+    settings.PHR_SHARE_PRODUCT_NAME = 'HealthTree'
+    grant(patient['client'], method='email', email='amara.chen@example.org')
+    assert mail.outbox[0].from_email == 'HealthTree <noreply@healthkey.ai>'
+
+
 def test_an_email_invite_carries_the_link_and_can_be_sent_again(patient):
     share = grant(patient['client'], method='email', email='amara.chen@example.org').data
     assert share['email'] == 'amara.chen@example.org'

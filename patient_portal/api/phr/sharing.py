@@ -27,6 +27,7 @@ import hmac
 import logging
 import secrets
 from datetime import timedelta, timezone as dt_timezone
+from email.utils import formataddr, parseaddr
 from typing import Any, Callable
 
 from django.conf import settings
@@ -272,7 +273,9 @@ def _send_invite(share: RecordShare) -> bool:
         f'If you weren’t expecting this, you can ignore this email.\n'
     )
     try:
-        sent = send_mail(subject, body, settings.DEFAULT_FROM_EMAIL, [share.email])
+        # PRomop's sending address (its mail domain), under the patient's product name.
+        sender = formataddr((product, parseaddr(settings.DEFAULT_FROM_EMAIL)[1]))
+        sent = send_mail(subject, body, sender, [share.email])
     except Exception:
         logger.exception('Could not send a record share invite (share %s)', share.public_id)
         return False
