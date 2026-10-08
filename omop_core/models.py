@@ -1588,9 +1588,19 @@ class Note(models.Model):
     )
     visit_detail_id = models.IntegerField(null=True, blank=True)
     note_source_value = models.CharField(max_length=50, null=True, blank=True)
+    # OMOP CDM 5.4: the record this note is about (an imaging study's
+    # procedure_occurrence for a radiology report, #1731).
+    note_event_id = models.BigIntegerField(null=True, blank=True)
+    note_event_field_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='note_event_fields',
+        db_column='note_event_field_concept_id', null=True, blank=True,
+    )
 
     class Meta:
         db_table = 'note'
+        indexes = [
+            models.Index(fields=['person', 'note_event_id'], name='ix_note_person_event'),
+        ]
 
     def __str__(self):
         return f"Note {self.note_id} for Person {self.person_id}"
@@ -1626,6 +1636,60 @@ class NoteNlp(models.Model):
 
     def __str__(self):
         return f"NoteNLP {self.note_nlp_id} for Note {self.note_id}"
+
+
+class ImageOccurrence(models.Model):
+    """OHDSI Medical Imaging CDM extension: IMAGE_OCCURRENCE (#1731, ADR 0003).
+
+    One row per imaging study, linked to the procedure_occurrence that records
+    the study. The radiology report is a ``Note`` on that procedure
+    (``note_event_id``) and its findings are ``NoteNlp`` rows. Two local
+    columns keep the source's modality and body site when they don't map to a
+    concept, as ``*_source_value`` columns do elsewhere in OMOP.
+    """
+    image_occurrence_id = models.BigIntegerField(primary_key=True)
+    person = models.ForeignKey(Person, on_delete=models.CASCADE, db_column='person_id')
+    procedure_occurrence = models.ForeignKey(
+        ProcedureOccurrence, on_delete=models.CASCADE, db_column='procedure_occurrence_id',
+        related_name='image_occurrences',
+    )
+    visit_occurrence = models.ForeignKey(
+        VisitOccurrence, on_delete=models.SET_NULL, db_column='visit_occurrence_id',
+        null=True, blank=True,
+    )
+    anatomic_site_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='image_anatomic_sites',
+        db_column='anatomic_site_concept_id', null=True, blank=True,
+    )
+    # Where the source serves the study's images (DICOMweb WADO-RS or a viewer
+    # URL). PRomop stores the link; it never fetches, copies or proxies images.
+    wadors_uri = models.CharField(max_length=2048, null=True, blank=True)
+    local_path = models.CharField(max_length=2048, null=True, blank=True)
+    image_occurrence_date = models.DateField()
+    # DICOM Study Instance UID. Null when the source reported the study without
+    # identifying its images (a report with no ImagingStudy).
+    image_study_uid = models.CharField(max_length=250, null=True, blank=True)
+    image_series_uid = models.CharField(max_length=250, null=True, blank=True)
+    modality_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='image_modalities',
+        db_column='modality_concept_id', null=True, blank=True,
+    )
+    # Local additions (see the class docstring).
+    modality_source_value = models.CharField(max_length=50, null=True, blank=True)
+    anatomic_site_source_value = models.CharField(max_length=255, null=True, blank=True)
+    # The study's identity at the source (DICOM UID, else the report's or the
+    # study's id): a re-import finds its own row by it, and two studies with the
+    # same code on the same day stay two.
+    image_source_value = models.CharField(max_length=255, null=True, blank=True, db_index=True)
+
+    class Meta:
+        db_table = 'image_occurrence'
+        indexes = [
+            models.Index(fields=['person', 'image_occurrence_date'], name='ix_image_person_date'),
+        ]
+
+    def __str__(self):
+        return f"ImageOccurrence {self.image_occurrence_id} for Person {self.person_id}"
 
 
 class ConditionEra(models.Model):
@@ -4272,6 +4336,11 @@ class PatientDocument(models.Model):
         null=True, blank=True,
         help_text="Date the document takes/took effect (distinct from the upload timestamp)",
     )
+    # The imaging study this document reports (#1731): the PHR's "See document".
+    procedure_occurrence_id = models.BigIntegerField(
+        null=True, blank=True, db_index=True,
+        help_text="procedure_occurrence_id of the imaging study this document reports",
+    )
 
     class Meta:
         db_table = 'patient_document'
@@ -4940,6 +5009,38 @@ class SourceCodeResolveRun(models.Model):
     def __str__(self):
         return (f'SourceCodeResolveRun {self.id} ({self.state} '
                 f'{self.done}/{self.total}, {self.resolved} resolved)')
+
+
+class PatientSourceCode(models.Model):
+    """Per-patient inventory of source codes seen in ETL input.
+
+    Populated by the ETL pipeline via POST to the source-codes endpoint.
+    The Source Codes tab joins these rows with SourceCodeConceptMapping to
+    show mapping status.  Unlike the clinical-table aggregation, this table
+    includes codes that have no OMOP mapping yet and therefore never made it
+    into a clinical table.
+    """
+    person = models.ForeignKey(
+        Person, on_delete=models.CASCADE, related_name='source_codes',
+    )
+    source_value = models.CharField(max_length=255, db_index=True)
+    source_vocabulary_id = models.CharField(max_length=255, blank=True, default='')
+    omop_table = models.CharField(max_length=30, blank=True, default='')
+    occurrence_count = models.IntegerField(default=1)
+    first_seen = models.DateTimeField(auto_now_add=True)
+    last_seen = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'patient_source_code'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['person', 'source_value', 'source_vocabulary_id', 'omop_table'],
+                name='uq_patient_source_code',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.source_value} ({self.omop_table}) — person {self.person_id}'
 
 
 class ConceptEmbedding(models.Model):

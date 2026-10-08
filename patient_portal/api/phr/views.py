@@ -16,6 +16,7 @@ from rest_framework.views import APIView
 from omop_core.models import (
     ConditionOccurrence,
     DrugExposure,
+    ImageOccurrence,
     Measurement,
     PatientDocument,
     PatientRecord,
@@ -377,10 +378,11 @@ def section_status(person, record: PatientRecord | None) -> dict[str, str]:
         'outcomes': False,
         'labs': has(Measurement.objects.filter(is_erroneous=False)),
         'medications': has(DrugExposure.objects.filter(is_erroneous=False)),
-        'procedures': has(ProcedureOccurrence.objects.filter(is_erroneous=False)),
+        'procedures': has(ProcedureOccurrence.objects.filter(is_erroneous=False, image_occurrences__isnull=True)),
         'genetics': docs.filter(doc_type__in=GENETIC_DOC_TYPES).exists()
         or bool(record and (_text(record.cytogenetic_markers) or record.genetic_mutations)),
-        'imaging': docs.filter(doc_type='IMAGING').exists(),
+        'imaging': docs.filter(doc_type='IMAGING').exists()
+        or has(ImageOccurrence.objects.filter(procedure_occurrence__is_erroneous=False)),
     }
     present['whats_new'] = any(present.values())
     return {name: 'ready' if present[name] else 'empty' for name in SECTIONS}
