@@ -32,6 +32,10 @@ vi.mock('@/hooks/useVocabulary', () => ({
   useVocabulary: () => ({ options: [], source: null, loading: false }),
 }));
 
+vi.mock('@/hooks/useLabMeasurements', () => ({
+  useLabMeasurements: vi.fn(() => ({ grouped: new Map(), isLoading: false })),
+}));
+
 import api from '@/api/axios';
 
 const DESCRIPTORS = {

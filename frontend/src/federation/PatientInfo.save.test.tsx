@@ -17,6 +17,10 @@ vi.mock('@/hooks/useVocabulary', () => ({
   useVocabulary: () => ({ options: [], source: null, loading: false }),
 }));
 
+vi.mock('@/hooks/useLabMeasurements', () => ({
+  useLabMeasurements: vi.fn(() => ({ grouped: new Map(), isLoading: false })),
+}));
+
 const DESCRIPTORS = {
   anc_thousand_per_ul: {
     kind: 'direct', writable: true, target: 'patient_record',
