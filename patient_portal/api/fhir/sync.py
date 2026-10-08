@@ -300,7 +300,7 @@ class FhirSyncView(APIView):
         skipped = defaultdict(int)
         observations, conditions, medications = [], [], []
         allergies, immunizations, procedures, diagnostic_reports = [], [], [], []
-        document_references = []
+        document_references, imaging_studies = [], []
         for entry in bundle.get('entry', []) or []:
             res = (entry or {}).get('resource', {}) or {}
             rtype = res.get('resourceType')
@@ -324,6 +324,8 @@ class FhirSyncView(APIView):
                 diagnostic_reports.append(res)
             elif rtype == 'DocumentReference':
                 document_references.append(res)
+            elif rtype == 'ImagingStudy':
+                imaging_studies.append(res)
             else:
                 self._count_skipped(skipped, rtype or 'Unknown',
                                     'unsupported_resource_type')
@@ -355,6 +357,8 @@ class FhirSyncView(APIView):
                 skipped),
             'document_ids': self._ingest_document_references(
                 person, document_references, source_user_id, org, skipped),
+            'imaging_study_ids': self._ingest_imaging(
+                person, bundle, diagnostic_reports, imaging_studies, source_user_id, org),
         }
         result['skipped'] = self._skipped_summary(skipped)
 
@@ -905,6 +909,20 @@ class FhirSyncView(APIView):
         return self._upsert_clinical(
             Observation, 'observation_id', 'observation_concept_id',
             'observation_date', 'observation_source_value', person, rows, source_user_id, org)
+
+    def _ingest_imaging(self, person, bundle, reports, studies, source_user_id, org):
+        """Radiology reports and ImagingStudy resources as structured studies (#1731)."""
+        from omop_core.services.imaging import import_imaging, index_resources
+
+        def record(row):
+            ProvenanceRecord.objects.update_or_create(
+                content_type=ContentType.objects.get_for_model(row), object_id=row.pk,
+                source=self.provenance_source, source_user_id=source_user_id or '',
+                defaults={'target_patient_id': str(person.person_id), 'organization': org},
+            )
+
+        return import_imaging(person, reports, studies, index_resources(bundle.get('entry') or []),
+                              record_provenance=record)
 
     def _document_doc_type(self, doc):
         doc_type = doc.get('type') if isinstance(doc.get('type'), dict) else None

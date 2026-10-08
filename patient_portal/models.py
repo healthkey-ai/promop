@@ -622,3 +622,107 @@ class PatientStatement(models.Model):
 
     def __str__(self):
         return f'{self.person_id} {self.subject}:{self.subject_key} = {self.status}'
+
+
+class RecordShare(models.Model):
+    """View-only access to part of a patient's record, granted by the patient.
+
+    The holder of the link (or QR code) reads the record without an account,
+    so the link itself is the credential: it is never stored. It is derived
+    from ``public_id`` with a server-side key (see
+    ``patient_portal.api.phr.sharing``), which lets the patient see their link
+    again while a copy of the database alone opens nothing.
+    """
+    CHECKIN, DOCTOR, FAMILY, OTHER = 'checkin', 'doctor', 'family', 'other'
+    RECIPIENTS = [
+        (CHECKIN, 'Appointment check-in (care center)'), (DOCTOR, 'Doctor'),
+        (FAMILY, 'Caregiver or family member'), (OTHER, 'Other'),
+    ]
+    EMAIL, LINK, QR = 'email', 'link', 'qr'
+    METHODS = [(EMAIL, 'Email invite'), (LINK, 'Private link'), (QR, 'QR code')]
+
+    person = models.ForeignKey('omop_core.Person', on_delete=models.CASCADE, related_name='record_shares')
+    public_id = models.CharField(max_length=16, unique=True)
+    recipient = models.CharField(max_length=10, choices=RECIPIENTS)
+    name = models.CharField(max_length=100)
+    email = models.EmailField(blank=True, default='')
+    method = models.CharField(max_length=5, choices=METHODS)
+    # {section: {"all": true}} shares the whole section, including records
+    # that arrive later; {section: {"items": [...]}} only the items chosen.
+    selection = models.JSONField(default=dict)
+    created_by = models.ForeignKey(Identity, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    last_sent_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['person', '-created_at'], name='record_share_person_idx')]
+
+    def __str__(self):
+        return f'{self.person_id} → {self.name} ({self.recipient}, {self.method})'
+
+    @property
+    def is_expired(self) -> bool:
+        return self.expires_at <= timezone.now()
+
+    @property
+    def is_active(self) -> bool:
+        return self.revoked_at is None and not self.is_expired
+
+
+class ShareScan(models.Model):
+    """One opening of a shared record: when, and roughly where.
+
+    The place comes from the opener's IP as resolved at the edge; the IP itself
+    is never stored.
+    """
+    share = models.ForeignKey(RecordShare, on_delete=models.CASCADE, related_name='scans')
+    scanned_at = models.DateTimeField(default=timezone.now)
+    city = models.CharField(max_length=100, blank=True, default='')
+    region = models.CharField(max_length=100, blank=True, default='')
+    country = models.CharField(max_length=100, blank=True, default='')
+
+    class Meta:
+        ordering = ['-scanned_at']
+
+    def __str__(self):
+        return f'{self.share_id} @ {self.scanned_at:%Y-%m-%d %H:%M}'
+
+
+class AiExplanation(models.Model):
+    """A plain-language explanation of one item in a patient's record.
+
+    ONE writes it: its admins approve the prompt, it calls the model and stores
+    the text here, so the explanation (PHI) never sits in ONE. PRomop only
+    stores and serves it. ``source_hash`` is what ONE hashed the item, prompt
+    version and model into; a mismatch tells ONE to write a fresh one.
+    """
+    DIAGNOSIS, LAB_TEST, LAB_RESULT, GENETIC_TEST, IMAGING_STUDY = (
+        'diagnosis', 'lab_test', 'lab_result', 'genetic_test', 'imaging_study',
+    )
+    KINDS = [
+        (DIAGNOSIS, 'About your diagnosis'), (LAB_TEST, 'What the test measures'),
+        (LAB_RESULT, 'What your results mean'), (GENETIC_TEST, 'What a genetic result means'),
+        (IMAGING_STUDY, 'What a scan showed'),
+    ]
+
+    person = models.ForeignKey('omop_core.Person', on_delete=models.CASCADE, related_name='ai_explanations')
+    kind = models.CharField(max_length=20, choices=KINDS)
+    # The PHR's id for the item: a diagnosis id, a lab test's concept id, a
+    # genetic test id, an imaging study id.
+    target_key = models.CharField(max_length=120)
+    text = models.TextField()
+    prompt_version = models.CharField(max_length=64)
+    model = models.CharField(max_length=100)
+    source_hash = models.CharField(max_length=64)
+    generated_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['person', 'kind', 'target_key'], name='uq_ai_explanation_item'),
+        ]
+
+    def __str__(self):
+        return f'{self.person_id} {self.kind}:{self.target_key} ({self.model}, {self.prompt_version})'

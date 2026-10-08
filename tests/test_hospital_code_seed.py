@@ -173,3 +173,26 @@ def test_recovery_migration_only_requeues_interrupted_v1(outcome, should_requeue
         assert job.outcome == outcome
         assert job.task_id == 'hospital-code-import-1'
         assert job.stats == {'partial': 860}
+
+
+def test_corrected_unit_migration_records_new_durable_intent():
+    from django.apps import apps
+
+    migration = importlib.import_module(
+        'omop_core.migrations.0280_corrected_hospital_code_units',
+    )
+
+    with patch.object(hospital_code_seed, 'download_seed') as download:
+        migration.queue_corrected_hospital_code_import(apps, None)
+
+    queued = HospitalCodeImport.objects.get(
+        artifact_identity=migration.ARTIFACT_IDENTITY,
+    )
+    assert queued.outcome == 'queued'
+    assert queued.task_id == ''
+    assert queued.expected_rows == 691_800
+    assert queued.artifact_filename == 'healthtree_hospital_codes_20261005_v2.zip'
+    assert queued.artifact_sha256 == (
+        'ad94793ee6f232154db33b9d65debab7d5565299ec382ec39d0923e863635c05'
+    )
+    download.assert_not_called()

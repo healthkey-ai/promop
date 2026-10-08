@@ -78,7 +78,9 @@ from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
 from omop_core.mapping.code_resolution import (
     CLINICAL_TABLES,
     _QUARANTINE_TARGETS,
+    _QUARANTINE_VOCABULARIES,
     NO_MATCHING_CONCEPT_ID,
+    approved_mapping_for,
     normalize_omop_table,
     repoint_clinical_rows,
     resolve_source_code,
@@ -2014,6 +2016,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         'medication_requests': [],
                         'immunizations': [],
                         'diagnostic_reports': [],
+                        'imaging_studies': [],
                         'allergy_intolerances': [],
                         'encounters': [],
                     }
@@ -2071,6 +2074,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     patient_id = _resolve_patient_ref(patient_ref)
                     if patient_id in patients_data:
                         patients_data[patient_id]['diagnostic_reports'].append(resource)
+                elif resource_type == 'ImagingStudy':
+                    patient_ref = resource.get('subject', {}).get('reference', '')
+                    patient_id = _resolve_patient_ref(patient_ref)
+                    if patient_id in patients_data:
+                        patients_data[patient_id]['imaging_studies'].append(resource)
                 elif resource_type == 'AllergyIntolerance':
                     patient_ref = resource.get('patient', {}).get('reference', '')
                     patient_id = _resolve_patient_ref(patient_ref)
@@ -2161,6 +2169,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
             # Process each patient
             import time as _time
+            _imaging_index = None  # the bundle's resources by reference, built once
             for fhir_patient_id, data in patients_data.items():
                 try:
                     _atomic_entered = False
@@ -4110,6 +4119,24 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _timing_hash, _time.monotonic() - _pt_start, len(data.get('diagnostic_reports', [])),
                     )
 
+                    # --- Radiology reports and ImagingStudy → structured imaging (#1731) ---
+                    # References may only reach this patient's own resources:
+                    # the bundle can hold several patients.
+                    from omop_core.services.imaging import import_imaging, index_resources
+                    if _imaging_index is None:
+                        _imaging_index = index_resources(entries)
+                    import_imaging(
+                        person, data.get('diagnostic_reports', []), data.get('imaging_studies', []),
+                        _imaging_index,
+                        subject_refs={ref for ref, pid in patient_ref_aliases.items() if pid == fhir_patient_id},
+                        record_provenance=(
+                            (lambda _row: _record_provenance(
+                                _row, prov_source, prov_user_id,
+                                modification_reason=prov_reason, organization=upload_org))
+                            if prov_source else None
+                        ),
+                    )
+
                     # --- Write AllergyIntolerance rows into OMOP Observation ---
                     # Tagged with qualifier_source_value='ALLERGY' for the allergy
                     # list endpoint (PHR-S FM PH.2.5).
@@ -5473,6 +5500,228 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             status=status.HTTP_202_ACCEPTED,
         )
 
+    # ------------------------------------------------------------------
+    # Source codes on a patient
+    # ------------------------------------------------------------------
+
+    @action(detail=True, methods=['get', 'post'], url_path='source-codes',
+            permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+    def source_codes(self, request: Request, pk: str | None = None) -> Response:
+        """Source codes for a patient.
+
+        GET  — list source codes with mapping status (admin only).
+        POST — upsert source codes from ETL (staff or service token with
+               ``system/etl.write`` scope).
+        """
+        person, patient_info, err = self._resolve_patient_with_auth(request, pk)
+        if err:
+            return err
+
+        if request.method == 'POST':
+            return self._post_source_codes(request, person)
+
+        # --- GET ---
+        if not _is_admin_actor(request):
+            return Response(
+                {'detail': 'Only administrators can view source codes.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        source_codes = _get_patient_source_codes(person)
+        summary = {'total': 0, 'unmapped': 0, 'proposed': 0, 'approved': 0}
+        for sc in source_codes:
+            summary['total'] += 1
+            ms = sc.get('mapping_status', 'unmapped')
+            if ms in summary:
+                summary[ms] += 1
+
+        return Response({
+            'person_id': person.person_id,
+            'source_codes': source_codes,
+            'summary': summary,
+        })
+
+    # ---- POST helper (kept on the viewset for permission context) ----
+
+    _SOURCE_CODES_MAX = 5000
+
+    def _post_source_codes(self, request: Request, person: Person) -> Response:
+        """Upsert PatientSourceCode rows from an ETL payload."""
+        from omop_core.models import PatientSourceCode
+
+        if not _is_admin_actor(request):
+            return Response(
+                {'detail': 'Only administrators or ETL service tokens can post source codes.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        entries = request.data.get('source_codes')
+        if not isinstance(entries, list) or not entries:
+            return Response(
+                {'detail': 'source_codes must be a non-empty list.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(entries) > self._SOURCE_CODES_MAX:
+            return Response(
+                {'detail': f'Maximum {self._SOURCE_CODES_MAX} source codes per request.'},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+
+        # Validate and build model instances.
+        now = timezone.now()
+        objs: list[PatientSourceCode] = []
+        for i, entry in enumerate(entries):
+            sv = entry.get('source_value', '').strip() if isinstance(entry, dict) else ''
+            if not sv:
+                return Response(
+                    {'detail': f'Entry {i}: source_value is required.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            raw_count = entry.get('occurrence_count', 1)
+            try:
+                occ = int(raw_count if raw_count is not None else 1)
+                if occ < 1:
+                    raise ValueError
+            except (TypeError, ValueError):
+                return Response(
+                    {'detail': f'Entry {i}: occurrence_count must be a positive integer.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            objs.append(PatientSourceCode(
+                person=person,
+                source_value=sv,
+                source_vocabulary_id=(entry.get('source_vocabulary_id') or '').strip(),
+                omop_table=(entry.get('omop_table') or '').strip(),
+                occurrence_count=occ,
+                last_seen=now,
+            ))
+
+        # Count existing rows *before* the upsert so we can report created vs updated.
+        request_keys = {
+            (o.source_value, o.source_vocabulary_id, o.omop_table) for o in objs
+        }
+        existing_count = (
+            PatientSourceCode.objects.filter(person=person)
+            .filter(
+                source_value__in=[k[0] for k in request_keys],
+                source_vocabulary_id__in=[k[1] for k in request_keys],
+                omop_table__in=[k[2] for k in request_keys],
+            )
+            .values_list('source_value', 'source_vocabulary_id', 'omop_table')
+        )
+        existing_keys = set(existing_count)
+        updated = len(request_keys & existing_keys)
+        created = len(request_keys) - updated
+
+        PatientSourceCode.objects.bulk_create(
+            objs,
+            update_conflicts=True,
+            unique_fields=['person', 'source_value', 'source_vocabulary_id', 'omop_table'],
+            update_fields=['occurrence_count', 'last_seen'],
+        )
+
+        resp_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        return Response({'created': created, 'updated': updated}, status=resp_status)
+
+    @action(detail=True, methods=['post'], url_path='resolve-source-codes',
+            permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+    def resolve_source_codes(self, request: Request, pk: str | None = None) -> Response:
+        """POST /api/v1/patient-records/{person_id}/resolve-source-codes/
+
+        Re-resolve clinical rows where concept_id is 0 or an HK-* quarantine
+        concept, using current approved SCCM mappings.  Scoped to one person.
+        """
+        person, patient_info, err = self._resolve_patient_with_auth(request, pk)
+        if err:
+            return err
+
+        if not _is_admin_actor(request):
+            return Response(
+                {'detail': 'Only administrators can resolve source codes.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        from omop_core.mapping.code_resolution import resolve_person_source_codes
+
+        source_values = request.data.get('source_values')
+        omop_tables = request.data.get('omop_tables')
+
+        result = resolve_person_source_codes(
+            person,
+            source_values=source_values,
+            omop_tables=omop_tables,
+        )
+        return Response(result)
+
+    @action(detail=False, methods=['post'], url_path='bulk-resolve-source-codes',
+            permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+    def bulk_resolve_source_codes(self, request: Request) -> Response:
+        """POST /api/v1/patient-records/bulk-resolve-source-codes/
+
+        Queue a bulk source-code resolution for multiple patients.
+        Returns 202 with a run_id to poll.
+        """
+        if not _is_admin_actor(request):
+            return Response(
+                {'detail': 'Only administrators can resolve source codes.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        from omop_core.services.resolve_jobs import (
+            BULK_RESOLVE_MAX_PERSONS,
+            create_and_dispatch_resolve_run,
+        )
+
+        person_ids = request.data.get('person_ids', [])
+        if not isinstance(person_ids, list) or not person_ids:
+            return Response(
+                {'detail': 'person_ids must be a non-empty list of integers.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not all(isinstance(pid, int) for pid in person_ids):
+            return Response(
+                {'detail': 'person_ids must contain only integers.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if len(person_ids) > BULK_RESOLVE_MAX_PERSONS:
+            return Response(
+                {'detail': f'Maximum {BULK_RESOLVE_MAX_PERSONS} person_ids per request.'},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+
+        run = create_and_dispatch_resolve_run(person_ids, user=request.user)
+        return Response(
+            {'run_id': str(run.id), 'total': run.total},
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def resolve_run_status(request: Request, run_id) -> Response:
+    """GET /api/v1/resolve-runs/{run_id}/ — poll a bulk resolve run."""
+    if not _is_admin_actor(request):
+        return Response(
+            {'detail': 'Only administrators can view resolve run status.'},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    from omop_core.models import SourceCodeResolveRun
+
+    try:
+        run = SourceCodeResolveRun.objects.get(id=run_id)
+    except SourceCodeResolveRun.DoesNotExist:
+        return Response({'detail': 'Run not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    return Response({
+        'run_id': str(run.id),
+        'state': run.state,
+        'total': run.total,
+        'done': run.done,
+        'resolved': run.resolved,
+        'errors': run.errors,
+    })
 
 
 @api_view(['GET'])
@@ -6574,6 +6823,126 @@ def _is_admin_actor(request: Request) -> bool:
         or bool(getattr(actor, 'is_staff', False))
         or get_admin_orgs(actor).exists()
     )
+
+
+def _resolve_source_code_mappings(
+    rows_by_table: dict[str, list[dict]],
+) -> list[dict]:
+    """Join source-code rows with SCCM mappings and sort by mapping status.
+
+    Shared by both `_get_patient_source_codes` (reads from PatientSourceCode)
+    and `_aggregate_patient_source_codes` (reads from clinical tables).
+
+    Each value in *rows_by_table* is a list of dicts with keys
+    ``source_value``, ``source_vocabulary_id``, ``row_count``.
+    """
+    results: list[dict] = []
+
+    for table_key, rows in rows_by_table.items():
+        source_values = [r['source_value'] for r in rows]
+        mapping_by_sv: dict[str, SourceCodeConceptMapping] = {}
+        for m in (
+            SourceCodeConceptMapping.objects
+            .filter(source_code__in=source_values, omop_table=table_key)
+            .select_related('target_concept')
+        ):
+            key = m.source_code.lower()
+            if key not in mapping_by_sv:
+                mapping_by_sv[key] = m
+
+        for row in rows:
+            source_value = row['source_value']
+            mapping = mapping_by_sv.get(source_value.lower())
+
+            entry: dict = {
+                'source_value': source_value,
+                'omop_table': table_key,
+                'concept_id': 0,
+                'concept_name': None,
+                'row_count': row['row_count'],
+                'mapping_id': None,
+                'mapping_status': 'unmapped',
+                'mapping_target_concept_id': None,
+                'mapping_target_concept_name': None,
+                'source_vocabulary_id': row.get('source_vocabulary_id', ''),
+                'source_code': source_value,
+            }
+
+            if mapping:
+                entry['mapping_id'] = mapping.id
+                entry['mapping_status'] = mapping.status
+                entry['source_vocabulary_id'] = mapping.source_vocabulary_id or ''
+                entry['source_code'] = mapping.source_code
+                if mapping.target_concept_id:
+                    entry['mapping_target_concept_id'] = mapping.target_concept_id
+                    entry['mapping_target_concept_name'] = (
+                        mapping.target_concept.concept_name
+                        if mapping.target_concept else None
+                    )
+
+            results.append(entry)
+
+    # Sort: unmapped first, then by row count descending.
+    status_order = {'unmapped': 0, 'proposed': 1, 'approved': 2, 'rejected': 3}
+    results.sort(key=lambda e: (status_order.get(e['mapping_status'], 9), -e['row_count']))
+    return results
+
+
+def _get_patient_source_codes(person: Person) -> list[dict]:
+    """Read source codes from PatientSourceCode, falling back to clinical aggregation.
+
+    If the ETL has populated PatientSourceCode rows for this person, use those.
+    Otherwise fall back to the clinical-table aggregation for backward compat.
+    """
+    from collections import defaultdict
+
+    from omop_core.models import PatientSourceCode
+
+    psc_rows = list(
+        PatientSourceCode.objects.filter(person=person)
+        .values('source_value', 'source_vocabulary_id', 'omop_table', 'occurrence_count')
+    )
+    if not psc_rows:
+        return _aggregate_patient_source_codes(person)
+
+    by_table: dict[str, list[dict]] = defaultdict(list)
+    for row in psc_rows:
+        by_table[row['omop_table'] or ''].append({
+            'source_value': row['source_value'],
+            'source_vocabulary_id': row.get('source_vocabulary_id', ''),
+            'row_count': row['occurrence_count'],
+        })
+
+    return _resolve_source_code_mappings(by_table)
+
+
+def _aggregate_patient_source_codes(person: Person) -> list[dict]:
+    """Aggregate distinct source codes across all clinical tables for a person.
+
+    For each (source_value, omop_table), count clinical rows and left-join the
+    SourceCodeConceptMapping to get mapping status.  Returns a list sorted by
+    unmapped first, then by row count descending.
+    """
+    by_table: dict[str, list[dict]] = {}
+
+    for table_key, (model, concept_col, source_col) in CLINICAL_TABLES.items():
+        groups = list(
+            model.objects.filter(person=person)
+            .exclude(**{f'{source_col}__isnull': True})
+            .exclude(**{source_col: ''})
+            .values(source_col)
+            .annotate(row_count=Count('pk'))
+            .order_by(source_col)
+        )
+        if not groups:
+            continue
+
+        by_table[table_key] = [
+            {'source_value': g[source_col], 'source_vocabulary_id': '', 'row_count': g['row_count']}
+            for g in groups
+        ]
+
+    return _resolve_source_code_mappings(by_table)
 
 
 def _skip_refresh_requested(request: Request) -> bool:
@@ -13278,6 +13647,7 @@ class TherapyLineViewSet(viewsets.ViewSet):
                         intent=data.get('intent') or None,
                         discontinuation_reason=data.get('discontinuation_reason') or None,
                         source_value=data.get('source_value') or None,
+                        disease=data.get('disease') or None,
                     )
         except ValueError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -13384,6 +13754,9 @@ class TherapyLineViewSet(viewsets.ViewSet):
                         discontinuation_reason=data.get('discontinuation_reason') or None,
                         source_value=data.get('source_value') or None,
                         replace=True,
+                        # This line, by id: another cancer may have a line with
+                        # the same number (#1739).
+                        episode=episode,
                     )
         except ValueError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)

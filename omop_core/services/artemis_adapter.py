@@ -37,6 +37,7 @@ from django.db import transaction
 
 from omop_core.models import Concept, DrugExposure, Person
 from omop_core.services.episode_service import upsert_therapy_line_episode
+from omop_core.services.disease_episodes import primary_lines
 from omop_oncology.models import Episode
 
 
@@ -189,9 +190,9 @@ def materialize_artemis_output(payload: Any) -> ArtemisMaterializationResult:
     created = updated = skipped_manual = 0
     with transaction.atomic():
         for item in episodes:
-            existing = Episode.objects.filter(
-                person=item.person, episode_number=item.line_number,
-            ).first()
+            # ARTEMIS writes the primary cancer's lines (it names no cancer), so
+            # the manual line it must not overwrite is the primary one (#1739).
+            existing = primary_lines(item.person).filter(episode_number=item.line_number).first()
             if existing is not None and _is_manual_episode(existing):
                 skipped_manual += 1
                 continue

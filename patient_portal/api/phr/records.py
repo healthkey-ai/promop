@@ -159,7 +159,8 @@ def medication_detail(person, key: str) -> dict[str, Any] | None:
 
 def procedures(person, record) -> dict[str, Any]:
     rows = list(
-        ProcedureOccurrence.objects.filter(person=person, is_erroneous=False)
+        # Imaging studies are listed under Imaging (promop#1731).
+        ProcedureOccurrence.objects.filter(person=person, is_erroneous=False, image_occurrences__isnull=True)
         .select_related('procedure_concept', 'visit_occurrence')
         .order_by('-procedure_date', '-procedure_occurrence_id')
     )
