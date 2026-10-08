@@ -707,12 +707,12 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             # on attribute assignment). Emit ISO either way, never crash.
             return v.isoformat() if hasattr(v, 'isoformat') else (v or None)
 
+        # The lines here mirror the flat fields above, so they are the primary
+        # cancer's (#1739); another cancer's line 1 must not replace them.
+        from omop_core.services.disease_episodes import primary_lines
         episodes_by_line = {
             e.episode_number: e
-            for e in Episode.objects.filter(
-                person=obj.person,
-                episode_number__isnull=False,
-            )
+            for e in primary_lines(obj.person, obj.disease_slug or '').filter(episode_number__isnull=False)
         }
         episode_ids = [e.episode_id for e in episodes_by_line.values()]
         event_ids_by_episode = {}
@@ -1890,6 +1890,11 @@ class TherapyLineWriteSerializer(serializers.Serializer):
     )
     source_value = serializers.CharField(
         required=False, allow_blank=True, allow_null=True, max_length=50,
+    )
+    # The cancer this line treats, as a disease name or slug. Omitted, the
+    # line is the patient's primary cancer's (every client before #1739).
+    disease = serializers.CharField(
+        required=False, allow_blank=True, allow_null=True, max_length=100,
     )
 
     def validate_start_date(self, value):

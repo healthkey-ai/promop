@@ -40,6 +40,7 @@ from omop_core.models import (
     Measurement,
     MeasurementOwnership,
     Note,
+    ImageOccurrence,
     NoteNlp,
     Observation,
     ObservationPeriod,
@@ -48,6 +49,7 @@ from omop_core.models import (
     PatientDocument,
     PatientGroupMembership,
     PatientRecord,
+    PatientSourceCode,
     PatientTrialEnrollment,
     Person,
     PersonalRepresentative,
@@ -75,7 +77,7 @@ from omop_oncology.models import (
     Histology,
     StemTable,
 )
-from patient_portal.models import BreakGlassGrant, PatientInvitation, PatientUser
+from patient_portal.models import BreakGlassGrant, PatientInvitation, PatientStatement, PatientUser
 from prolog_surveys.models import (
     MintedParticipant,
     SurveyAnswer,
@@ -129,6 +131,7 @@ PATIENT_TABLES: tuple[PatientTable, ...] = (
     PatientTable(ConditionOccurrence, 'person_id'),
     PatientTable(DrugExposure, 'person_id'),
     PatientTable(ProcedureOccurrence, 'person_id'),
+    PatientTable(ImageOccurrence, 'person_id'),
     PatientTable(Measurement, 'person_id'),
     PatientTable(Observation, 'person_id'),
     PatientTable(Death, 'person_id'),
@@ -148,9 +151,11 @@ PATIENT_TABLES: tuple[PatientTable, ...] = (
     PatientTable(SupportiveTherapyCourse, 'person_id'),
     PatientTable(WearableUpload, 'person_id'),
     PatientTable(PatientDocument, 'person_id'),
+    PatientTable(PatientSourceCode, 'person_id'),
     PatientTable(PatientTrialEnrollment, 'person_id'),
     PatientTable(TrialSearchPreferences, 'person_id'),
     PatientTable(PatientRecord, 'person_id'),
+    PatientTable(PatientStatement, 'person_id'),
     PatientTable(RecordRevision, 'patient_record__person_id'),
     PatientTable(SurveyResponse, 'participant_id'),
     PatientTable(SurveyAnswer, 'response__participant_id'),
@@ -173,6 +178,8 @@ _INT_REFS: dict[str, type[Model] | None] = {
     'visit_occurrence_id': VisitOccurrence,
     'provider_id': None,
     'care_site_id': None,
+    # PatientDocument: the imaging study a report documents (#1731).
+    'procedure_occurrence_id': ProcedureOccurrence,
 }
 
 # Polymorphic id column and the column holding its field concept.
@@ -180,6 +187,7 @@ _EVENT_REFS: dict[type[Model], tuple[str, str]] = {
     EpisodeEvent: ('event_id', 'episode_event_field_concept_id'),
     Measurement: ('measurement_event_id', 'meas_event_field_concept_id'),
     Observation: ('observation_event_id', 'obs_event_field_concept_id'),
+    Note: ('note_event_id', 'note_event_field_concept_id'),
 }
 
 # System rows that would be deleted with the person, or that point at it by id.
@@ -442,6 +450,13 @@ class _Copier:
             references.append((attname, row[field_attname], row[attname]))
         if model is RecordRevision and values['changed_by'] != 'system':
             values['changed_by'] = None
+        if model is PatientStatement and row['subject'] == PatientStatement.SUBJECT_THERAPY_LINE:
+            # A line is keyed by its Episode id, and Episodes are renumbered here.
+            episode = self.ids.get(Episode, {}).get(int(row['subject_key'])) if row['subject_key'].isdigit() else None
+            if episode is None:
+                self.stats.skipped[label] += 1
+                return None
+            values['subject_key'] = str(episode)
         if model is ProvenanceRecord and not self._provenance(row, values):
             self.stats.skipped[label] += 1
             return None

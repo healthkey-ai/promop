@@ -16,15 +16,18 @@ from rest_framework.views import APIView
 from omop_core.models import (
     ConditionOccurrence,
     DrugExposure,
+    ImageOccurrence,
     Measurement,
     PatientDocument,
     PatientRecord,
     ProcedureOccurrence,
 )
-from patient_portal.models import PatientUser
+from patient_portal.models import PatientStatement, PatientUser
 
 from .labs import lab_history, labs
 from .records import genetics, medication_detail, medications, procedures
+from .feed import imaging, whats_new
+from .therapy import therapy
 from .sources import PATIENT, RECORD, row_sources, source
 
 GENETIC_DOC_TYPES = ('FISH', 'GEP', 'NGS', 'CYTOMETRY', 'CYTOGENETICS', 'MRD', 'BONE_MARROW')
@@ -33,16 +36,21 @@ GENETIC_DOC_TYPES = ('FISH', 'GEP', 'NGS', 'CYTOMETRY', 'CYTOGENETICS', 'MRD', '
 class PhrView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def get(self, request):
+    def resolve(self, request):
+        """(person, record, None), or (None, None, a 404) when the caller has no record."""
         link = (
             PatientUser.objects.filter(identity=request.user, is_active=True)
             .select_related('person')
             .first()
         )
         if link is None:
-            return Response({'detail': 'No record.'}, status=404)
-        person = link.person
-        record = PatientRecord.objects.filter(person=person).first()
+            return None, None, Response({'detail': 'No record.'}, status=404)
+        return link.person, PatientRecord.objects.filter(person=link.person).first(), None
+
+    def get(self, request):
+        person, record, error = self.resolve(request)
+        if error:
+            return error
         data = self.build(person, record)
         if data is None:
             return Response({'detail': 'Not found.'}, status=404)
@@ -101,9 +109,14 @@ def about_fields(record: PatientRecord | None) -> list[dict[str, Any]]:
     return [f for f in fields if f]
 
 
+def patient_name(person) -> str:
+    return ' '.join(p for p in (person.given_name, person.family_name) if p and p.strip()).strip()
+
+
 class AboutView(PhrView):
     def build(self, person, record):
-        return {'fields': about_fields(record)}
+        data = {'name': patient_name(person) or None, 'fields': about_fields(record)}
+        return {k: v for k, v in data.items() if v is not None}
 
 
 # ---------------------------------------------------------------- Diagnoses
@@ -205,7 +218,8 @@ def _condition_rows(person):
 
 
 def _condition_name(row) -> str | None:
-    concept = row.condition_concept
+    # Concept 0 is "No matching concept": the source text is the name then.
+    concept = row.condition_concept if row.condition_concept_id else None
     return _text(concept.concept_name if concept else None) or _text(row.condition_source_value)
 
 
@@ -269,8 +283,11 @@ def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
     cancer = []
     slug = (record.disease_slug or '').lower() if record else ''
     primary_family = SLUG_FAMILY.get(slug, slug)
-    primary = primary_cancer(record, _transitions(families.pop(primary_family, []))) if record else None
+    primary_rows = families.pop(primary_family, [])
+    primary = primary_cancer(record, _transitions(primary_rows)) if record else None
     if primary:
+        if 'status' not in primary and primary_rows and all(r.condition_end_date for r in primary_rows):
+            primary['status'] = 'Resolved'
         cancer.append(primary)
     for family_rows in families.values():
         latest = family_rows[-1]
@@ -278,16 +295,26 @@ def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
         if not name:
             continue
         resolved = all(r.condition_end_date for r in family_rows)
+        # Diagnosed when the current diagnosis began (myeloma, not the MGUS
+        # before it); the earlier steps are in the transitions.
+        current_start = next(r for r in family_rows if _condition_name(r) == name).condition_start_date
         entry = {
             'id': f'condition-{latest.pk}',
             'name': name,
-            'date': family_rows[0].condition_start_date.isoformat(),
+            'date': current_start.isoformat(),
             'status': 'Resolved' if resolved else _text(latest.condition_status_source_value),
             'transitions': _transitions(family_rows),
             'source': sources[latest.pk],
         }
         cancer.append({k: v for k, v in entry.items() if v not in (None, [])})
     cancer.sort(key=lambda c: c.get('date') or '', reverse=True)
+
+    # Patient-added conditions may have no known date (stored as the day added).
+    undated = set(
+        PatientStatement.objects.filter(
+            person=person, subject=PatientStatement.SUBJECT_CONDITION, details__date_unknown=True,
+        ).values_list('subject_key', flat=True)
+    )
 
     # Other conditions: one entry per condition, dated from its first record.
     other, seen = [], set()
@@ -296,15 +323,16 @@ def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
         if not name or name.lower() in seen:
             continue
         seen.add(name.lower())
+        dated = str(row.pk) not in undated
         entry = {
             'id': f'condition-{row.pk}',
             'name': name,
-            'date': row.condition_start_date.isoformat(),
+            'date': row.condition_start_date.isoformat() if dated else None,
             'status': 'Resolved' if row.condition_end_date else _text(row.condition_status_source_value),
-            'source': sources[row.pk],
+            'source': sources[row.pk] if dated else {**sources[row.pk], 'date': None},
         }
         other.append({k: v for k, v in entry.items() if v is not None})
-    other.sort(key=lambda e: e['date'], reverse=True)
+    other.sort(key=lambda e: e.get('date') or '9999', reverse=True)
 
     return {'cancer': cancer, 'other': other}
 
@@ -320,6 +348,12 @@ SECTIONS = (
     'whats_new', 'about', 'diagnoses', 'therapy', 'outcomes',
     'labs', 'medications', 'procedures', 'genetics', 'imaging',
 )
+
+
+def _has_lines(person) -> bool:
+    from omop_core.services.disease_episodes import regimen_episodes
+
+    return regimen_episodes(person).filter(episode_number__isnull=False).exists()
 
 
 def section_status(person, record: PatientRecord | None) -> dict[str, str]:
@@ -338,14 +372,17 @@ def section_status(person, record: PatientRecord | None) -> dict[str, str]:
         'about': bool(about_fields(record)),
         'diagnoses': bool(record and _text(record.disease))
         or has(ConditionOccurrence.objects.filter(is_erroneous=False)),
-        'therapy': bool(record and (_text(record.first_line_therapy) or record.later_therapies)),
+        # Any cancer's lines (#1739), not only the primary one's.
+        'therapy': bool(record and (_text(record.first_line_therapy) or record.later_therapies))
+        or _has_lines(person),
         'outcomes': False,
         'labs': has(Measurement.objects.filter(is_erroneous=False)),
         'medications': has(DrugExposure.objects.filter(is_erroneous=False)),
-        'procedures': has(ProcedureOccurrence.objects.filter(is_erroneous=False)),
+        'procedures': has(ProcedureOccurrence.objects.filter(is_erroneous=False, image_occurrences__isnull=True)),
         'genetics': docs.filter(doc_type__in=GENETIC_DOC_TYPES).exists()
         or bool(record and (_text(record.cytogenetic_markers) or record.genetic_mutations)),
-        'imaging': docs.filter(doc_type='IMAGING').exists(),
+        'imaging': docs.filter(doc_type='IMAGING').exists()
+        or has(ImageOccurrence.objects.filter(procedure_occurrence__is_erroneous=False)),
     }
     present['whats_new'] = any(present.values())
     return {name: 'ready' if present[name] else 'empty' for name in SECTIONS}
@@ -370,7 +407,7 @@ class LabHistoryView(PhrView):
         return super().get(request)
 
     def build(self, person, record):
-        return lab_history(person, self.test_id)
+        return lab_history(person, self.test_id, record)
 
 
 # ---------------------------------------------------------------- Medications, procedures, genetics
@@ -398,3 +435,18 @@ class ProceduresView(PhrView):
 class GeneticsView(PhrView):
     def build(self, person, record):
         return genetics(person, record)
+
+
+class TherapyView(PhrView):
+    def build(self, person, record):
+        return therapy(person, record)
+
+
+class WhatsNewView(PhrView):
+    def build(self, person, record):
+        return whats_new(person, record)
+
+
+class ImagingView(PhrView):
+    def build(self, person, record):
+        return imaging(person, record)

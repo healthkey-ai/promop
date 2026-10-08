@@ -3,7 +3,7 @@ import pytest
 from django.contrib.contenttypes.models import ContentType
 from rest_framework.test import APIClient
 
-from omop_core.models import CareSite, ConditionOccurrence, ProvenanceRecord, VisitOccurrence
+from omop_core.models import CareSite, ConditionOccurrence, DrugExposure, ProvenanceRecord, VisitOccurrence
 from omop_core.signals import suppress_patient_record_refresh
 from patient_portal.models import Identity, PatientUser
 from tests.factories import (
@@ -491,6 +491,233 @@ def test_unlabelled_findings_join_the_only_genetic_report_from_that_day(monkeypa
     ]
 
 
+# ---------------------------------------------------------------- lines of therapy
+
+from omop_oncology.models import Episode, EpisodeEvent  # noqa: E402
+
+
+@suppress_patient_record_refresh()
+def therapy_line(record, number, start, end, drugs):
+    regimen = ConceptFactory(concept_id=32531, concept_name='Treatment Regimen', concept_code='OMOP4822036')
+    episode = Episode.objects.create(
+        episode_id=700 + number, person=record.person, episode_concept=regimen, episode_number=number,
+        episode_start_date=start, episode_end_date=end, episode_object_concept=regimen,
+        episode_type_concept=regimen,
+    )
+    for name, d_start, d_end in drugs:
+        exposure = drug(record, ConceptFactory(concept_name=name, concept_code=f'RX-{name}'), d_start, d_end)
+        EpisodeEvent.objects.create(episode_id=episode.episode_id, event_id=exposure.pk,
+                                    episode_event_field_concept=regimen)
+    return episode
+
+
+def test_therapy_draws_each_line_with_its_medicines_procedures_and_outcome():
+    future = (timezone.localdate() + timedelta(days=60)).isoformat()
+    record = PatientRecordFactory(
+        disease='Multiple myeloma', disease_slug='myeloma', facility_name='MD Anderson Cancer Center',
+        first_line_therapy='VRd', first_line_start_date='2024-03-12', first_line_end_date='2024-10-14',
+        first_line_outcome='VGPR', first_line_discontinuation_reason='Completion',
+        second_line_therapy='KRd', second_line_start_date='2025-01-08', second_line_end_date=None,
+        second_line_outcome='PR',
+    )
+    therapy_line(record, 1, '2024-03-12', '2024-10-14', [
+        ('Bortezomib', '2024-03-12', '2024-08-26'), ('Lenalidomide', '2024-03-12', '2024-10-14'),
+        ('Melphalan', '2024-10-07', '2024-10-09'),
+    ])
+    therapy_line(record, 2, '2025-01-08', None, [('Carfilzomib', '2025-01-08', future)])
+    kind = ConceptFactory(concept_name='Procedure type', concept_code='TYPE-PROC')
+    for pk, name, day in ((1, 'Autologous stem cell transplant', '2024-10-14'), (2, 'Bone marrow biopsy', '2024-05-01'),
+                          (3, 'Port placement surgery', '2023-12-01')):
+        with suppress_patient_record_refresh():
+            ProcedureOccurrence.objects.create(procedure_occurrence_id=pk, person=record.person, procedure_date=day,
+                                               procedure_concept=ConceptFactory(concept_name=name, concept_code=f'P{pk}'),
+                                               procedure_type_concept=kind)
+
+    data = signed_in(record).get('/api/v1/phr/therapy/').data
+
+    assert [t['diagnosis'] for t in data['tracks']] == [{'name': 'Multiple myeloma', 'slug': 'myeloma'}]
+    first, second = data['tracks'][0]['lines']
+    assert first == {
+        'id': '701', 'number': 1, 'regimen': 'VRd', 'start': '2024-03-12', 'end': '2024-10-14', 'current': False,
+        'medications': [
+            {'name': 'Bortezomib', 'start': '2024-03-12', 'end': '2024-08-26'},
+            {'name': 'Lenalidomide', 'start': '2024-03-12', 'end': '2024-10-14'},
+            {'name': 'Melphalan', 'start': '2024-10-07', 'end': '2024-10-09'},
+        ],
+        'procedures': [{'name': 'Autologous stem cell transplant', 'date': '2024-10-14',
+                        'source': {'kind': 'record', 'facility': None, 'date': '2024-10-14'}}],
+        'outcome': {'code': 'VGPR', 'label': 'Very good partial response',
+                    'explanation': 'The cancer got much smaller, but some could still be found.'},
+        'stopped_because': 'Treatment completed as planned',
+        'source': {'kind': 'record', 'facility': 'MD Anderson Cancer Center', 'date': '2024-03-12'},
+    }
+    assert second['current'] is True and 'end' not in second
+    assert second['medications'] == [{'name': 'Carfilzomib', 'start': '2025-01-08', 'end': future}]
+    assert second['outcome']['label'] == 'Partial response'
+
+
+def test_therapy_is_empty_without_lines():
+    record = PatientRecordFactory(disease='Multiple myeloma')
+    assert signed_in(record).get('/api/v1/phr/therapy/').data == {'tracks': []}
+
+
+# ---------------------------------------------------------------- what's new, imaging, lab overlay
+
+
+def test_whats_new_groups_the_last_30_days_by_date_section_and_facility():
+    record = PatientRecordFactory(disease='')
+    today = timezone.localdate()
+    recent, older = (today - timedelta(days=3)).isoformat(), (today - timedelta(days=45)).isoformat()
+    visit = visit_at(record, 'MD Anderson Cancer Center')
+    hgb, plt = loinc('718-7', 'Hemoglobin [Mass/volume] in Blood'), loinc('777-3', 'Platelets [#/volume] in Blood')
+    lab(record, hgb, recent, 11, visit_occurrence=visit)
+    lab(record, plt, recent, 150, visit_occurrence=visit)
+    lab(record, loinc('29463-7', 'Body weight'), recent, 80)       # vitals are not labs
+    lab(record, hgb, recent, 1, is_erroneous=True)                  # entered in error
+    lab(record, hgb, older, 12)                                     # outside the window
+    drug(record, ConceptFactory(concept_name='Acyclovir', concept_code='RX-ACY'), recent)
+    PatientDocument.objects.create(person=record.person, doc_type='IMAGING', title='PET-CT')
+
+    data = signed_in(record).get('/api/v1/phr/whats-new/').data
+
+    assert data == {'days': 30, 'groups': [
+        {'date': today.isoformat(), 'items': [{'section': 'imaging', 'count': 1}]},
+        {'date': recent, 'items': [
+            {'section': 'labs', 'count': 2, 'facility': 'MD Anderson Cancer Center'},
+            {'section': 'medications', 'count': 1},
+        ]},
+    ]}
+
+
+def test_imaging_lists_reports_newest_first():
+    record = PatientRecordFactory(disease='')
+    PatientDocument.objects.create(person=record.person, doc_type='IMAGING', title='MRI spine', effective_date='2024-03-05')
+    PatientDocument.objects.create(person=record.person, doc_type='IMAGING', title='PET-CT', effective_date='2026-08-12',
+                                   file_url='https://example.test/pet.pdf')
+    PatientDocument.objects.create(person=record.person, doc_type='FISH', effective_date='2026-08-12')
+
+    studies = signed_in(record).get('/api/v1/phr/imaging/').data['studies']
+
+    assert [(s['name'], s['date'], s['document']) for s in studies] == [
+        ('PET-CT', '2026-08-12', {'title': 'PET-CT', 'url': 'https://example.test/pet.pdf'}),
+        ('MRI spine', '2024-03-05', {'title': 'MRI spine'}),
+    ]
+
+
+def test_lab_history_carries_the_treatment_lines_for_the_chart():
+    record = PatientRecordFactory(disease='Multiple myeloma', first_line_therapy='VRd',
+                                  first_line_start_date='2024-03-12', first_line_end_date='2024-10-14')
+    hgb = loinc('718-7', 'Hemoglobin [Mass/volume] in Blood')
+    lab(record, hgb, '2024-05-01', 10)
+
+    data = signed_in(record).get(f'/api/v1/phr/labs/{hgb.concept_id}/').data
+
+    assert data['therapy'] == [{'id': 'line-1', 'number': 1, 'regimen': 'VRd', 'start': '2024-03-12', 'end': '2024-10-14'}]
+
+
+# ---------------------------------------------------------------- patient statements
+
+from patient_portal.models import PatientStatement  # noqa: E402
+
+
+@pytest.fixture
+def meds_patient():
+    record = PatientRecordFactory(disease='')
+    future = (timezone.localdate() + timedelta(days=30)).isoformat()
+    current = drug(record, ConceptFactory(concept_name='Acyclovir', concept_code='RX-ACY'), '2025-01-01', future)
+    past = drug(record, ConceptFactory(concept_name='Zoledronic acid', concept_code='RX-ZOL'), '2024-01-01', '2024-06-01')
+    self_report = ConceptFactory(concept_id=32865, concept_name='Patient self-report', concept_code='OMOP4976879')
+    own = drug(record, ConceptFactory(concept_name='Vitamin D3', concept_code='RX-VD3'), '2024-04-03', None,
+               drug_type_concept=self_report)
+    return record, signed_in(record), {
+        'current': str(current.drug_concept_id), 'past': str(past.drug_concept_id), 'own': str(own.drug_concept_id),
+    }
+
+
+def med(client, key):
+    return next(m for m in client.get('/api/v1/phr/medications/').data['medications'] if m['id'] == key)
+
+
+def say(client, key, **body):
+    return client.put(f'/api/v1/phr/medications/{key}/statement/', body, format='json')
+
+
+def test_record_prescriptions_wait_for_confirmation_and_answers_can_be_undone(meds_patient):
+    record, client, ids = meds_patient
+    assert med(client, ids['current'])['pending'] is True
+    assert 'pending' not in med(client, ids['own'])  # the patient's own entries need no confirming
+
+    response = say(client, ids['past'], status='not_taken', note='  Never filled it  ')
+    assert response.status_code == 200
+    assert response.data['confirmation'] == {'status': 'not_taken', 'note': 'Never filled it'}
+    assert 'pending' not in med(client, ids['past'])
+
+    assert client.delete(f"/api/v1/phr/medications/{ids['past']}/statement/").status_code == 204
+    assert med(client, ids['past'])['pending'] is True
+    assert not PatientStatement.objects.filter(person=record.person).exists()
+
+
+def test_answers_must_fit_whether_the_prescription_is_current(meds_patient):
+    _, client, ids = meds_patient
+    assert say(client, ids['current'], status='took').status_code == 400
+    assert say(client, ids['past'], status='taking').status_code == 400
+    assert say(client, ids['current'], status='maybe').status_code == 400
+    assert say(client, ids['current'], status='not_taking', note='x' * 501).status_code == 400
+    assert say(client, 'no-such-drug', status='taking').status_code == 404
+
+
+def test_stopping_needs_a_confirmed_medication_and_a_valid_date(meds_patient):
+    _, client, ids = meds_patient
+    today = timezone.localdate()
+    assert say(client, ids['current'], status='stopped', stopped_on=today.isoformat()).status_code == 400  # not confirmed
+    assert say(client, ids['current'], status='taking').status_code == 200
+    assert say(client, ids['current'], status='stopped').status_code == 400  # no date
+    tomorrow = (today + timedelta(days=1)).isoformat()
+    assert say(client, ids['current'], status='stopped', stopped_on=tomorrow).status_code == 400
+    assert say(client, ids['current'], status='stopped', stopped_on='2020-01-01').status_code == 400  # before start
+
+    stopped = say(client, ids['current'], status='stopped', stopped_on=today.isoformat(), note='Side effects')
+    assert stopped.status_code == 200
+    assert stopped.data['status'] == 'past' and stopped.data['ended'] == today.isoformat()
+    assert stopped.data['confirmation'] == {'status': 'stopped', 'note': 'Side effects', 'stopped_on': today.isoformat()}
+    detail = client.get(f"/api/v1/phr/medications/{ids['current']}/").data
+    assert detail['status'] == 'past' and len(detail['history']) == 1  # history kept
+
+    # The patient's own medication can be stopped without confirming it first.
+    assert say(client, ids['own'], status='stopped', stopped_on=today.isoformat()).status_code == 200
+
+
+def test_statements_reach_only_the_callers_own_record(meds_patient):
+    _, _, ids = meds_patient
+    stranger = signed_in(PatientRecordFactory(disease=''))
+    assert say(stranger, ids['current'], status='taking').status_code == 404
+    assert stranger.delete(f"/api/v1/phr/medications/{ids['current']}/statement/").status_code == 404
+    assert APIClient().put(f"/api/v1/phr/medications/{ids['current']}/statement/", {'status': 'taking'},
+                           format='json').status_code in (401, 403)
+
+
+def test_the_patient_can_say_why_an_ended_line_stopped():
+    record = PatientRecordFactory(
+        disease='Multiple myeloma', first_line_therapy='VRd', first_line_start_date='2024-03-12',
+        first_line_end_date='2024-10-14', second_line_therapy='KRd', second_line_start_date='2025-01-08',
+    )
+    therapy_line(record, 1, '2024-03-12', '2024-10-14', [])
+    therapy_line(record, 2, '2025-01-08', None, [])
+    client = signed_in(record)
+
+    assert client.put('/api/v1/phr/therapy/702/reason/', {'reason': 'side_effects'}, format='json').status_code == 400
+    assert client.put('/api/v1/phr/therapy/701/reason/', {'reason': 'bored'}, format='json').status_code == 400
+    saved = client.put('/api/v1/phr/therapy/701/reason/', {'reason': 'side_effects', 'note': 'Neuropathy'}, format='json')
+
+    assert saved.status_code == 200
+    assert saved.data['patient_reason'] == {'reason': 'side_effects', 'label': 'I had too many side effects',
+                                            'note': 'Neuropathy'}
+    lines = client.get('/api/v1/phr/therapy/').data['tracks'][0]['lines']
+    assert lines[0]['patient_reason']['label'] == 'I had too many side effects'
+    assert client.delete('/api/v1/phr/therapy/701/reason/').status_code == 204
+    assert 'patient_reason' not in client.get('/api/v1/phr/therapy/').data['tracks'][0]['lines'][0]
+
+
 def test_lab_names_split_into_analyte_and_specimen_in_linear_time():
     import time
 
@@ -510,3 +737,132 @@ def test_lab_names_split_into_analyte_and_specimen_in_linear_time():
     for crafted in ('a ' + ' [' * 20_000, 'a in ' + 'a in a' * 20_000, 'a in a by ' + 'a by ' * 20_000):
         split_name(crafted)
     assert time.perf_counter() - started < 0.5
+
+
+# ---------------------------------------------------------------- what the patient adds
+
+
+@pytest.fixture
+def adder():
+    record = PatientRecordFactory(disease='Multiple myeloma', disease_slug='myeloma')
+    ConceptFactory(concept_id=0, concept_code='No matching concept', concept_name='No matching concept')
+    ConceptFactory(concept_id=32865, concept_name='Patient self-report', concept_code='OMOP4976879')
+    return record, signed_in(record)
+
+
+def test_write_urls_answer_get_with_405_not_500(adder):
+    _, client = adder
+    for path in ('/api/v1/phr/medications/add/', '/api/v1/phr/conditions/', '/api/v1/phr/procedures/add/',
+                 '/api/v1/phr/medications/1/statement/', '/api/v1/phr/therapy/1/reason/'):
+        assert client.get(path).status_code == 405, path
+
+
+def test_patient_adds_a_supplement_changes_its_dose_and_removes_it(adder):
+    record, client = adder
+    added = client.post('/api/v1/phr/medications/add/', {
+        'name': '  Vitamin   D3 ', 'amount': '2000', 'unit': 'IU', 'frequency': 'once daily', 'note': 'For bones',
+    }, format='json')
+    assert added.status_code == 201
+    key = added.data['id']
+    assert key == 'src-vitamin-d3'
+    assert added.data['name'] == 'Vitamin D3' and added.data['dose'] == '2000 IU · once daily'
+    assert added.data['source']['kind'] == 'patient' and added.data['my_note'] == 'For bones'
+    assert 'pending' not in added.data
+    row = DrugExposure.objects.get(person=record.person)
+    assert ProvenanceRecord.objects.filter(object_id=row.pk, source='PATIENT_SELF').exists()
+
+    # A dose change on a later day keeps the old dose as history.
+    DrugExposure.objects.filter(pk=row.pk).update(drug_exposure_start_date=timezone.localdate() - timedelta(days=10))
+    changed = client.patch(f'/api/v1/phr/medications/{key}/own/', {'amount': '4000', 'unit': 'IU',
+                                                                   'frequency': 'once daily'}, format='json')
+    assert changed.status_code == 200 and changed.data['dose'] == '4000 IU · once daily'
+    history = client.get(f'/api/v1/phr/medications/{key}/').data['history']
+    assert [h['dose'] for h in history] == ['4000 IU · once daily', '2000 IU · once daily']
+
+    assert client.post('/api/v1/phr/medications/add/', {'name': 'X', 'unit': 'bucket'}, format='json').status_code == 400
+    assert client.delete(f'/api/v1/phr/medications/{key}/own/').status_code == 204
+    assert not DrugExposure.objects.filter(person=record.person).exists()
+    assert not PatientStatement.objects.filter(person=record.person).exists()
+
+
+def test_record_medications_take_a_note_but_cannot_be_changed_or_removed(adder):
+    record, client = adder
+    drug(record, ConceptFactory(concept_name='Acyclovir', concept_code='RX-ACY'), '2025-01-01')
+    key = client.get('/api/v1/phr/medications/').data['medications'][0]['id']
+
+    assert client.patch(f'/api/v1/phr/medications/{key}/own/', {'amount': '1'}, format='json').status_code == 403
+    assert client.delete(f'/api/v1/phr/medications/{key}/own/').status_code == 403
+    noted = client.put(f'/api/v1/phr/medications/{key}/note/', {'note': ' Take with food '}, format='json')
+    assert noted.status_code == 200 and noted.data['my_note'] == 'Take with food'
+    assert client.put(f'/api/v1/phr/medications/{key}/note/', {'note': ''}, format='json').data.get('my_note') is None
+
+
+def test_patient_adds_conditions_but_not_cancers(adder):
+    record, client = adder
+    refused = client.post('/api/v1/phr/conditions/', {'name': 'Breast cancer'}, format='json')
+    assert refused.status_code == 400
+    assert refused.data['name'] == ['Cancer diagnoses come from your connected records.']
+
+    dated = client.post('/api/v1/phr/conditions/', {'name': 'Gout', 'diagnosed': '2021-05-01'}, format='json')
+    undated = client.post('/api/v1/phr/conditions/', {'name': 'Seasonal allergies'}, format='json')
+    assert dated.status_code == 201 and undated.status_code == 201
+    assert dated.data == {'id': dated.data['id'], 'name': 'Gout', 'date': '2021-05-01',
+                          'source': {'kind': 'patient', 'facility': None, 'date': '2021-05-01'}}
+    assert 'date' not in undated.data and undated.data['source']['date'] is None
+
+    row_id = dated.data['id'].removeprefix('condition-')
+    renamed = client.patch(f'/api/v1/phr/conditions/{row_id}/', {'name': 'Gout, left foot', 'diagnosed': '2021-05-01'},
+                           format='json')
+    assert renamed.status_code == 200 and renamed.data['name'] == 'Gout, left foot'
+    future = (timezone.localdate() + timedelta(days=1)).isoformat()
+    assert client.post('/api/v1/phr/conditions/', {'name': 'Asthma', 'diagnosed': future}, format='json').status_code == 400
+    assert client.delete(f'/api/v1/phr/conditions/{row_id}/').status_code == 204
+    assert [c['name'] for c in client.get('/api/v1/phr/diagnoses/').data['other']] == ['Seasonal allergies']
+
+
+def test_record_conditions_and_procedures_cannot_be_changed_or_removed(adder):
+    record, client = adder
+    row = condition(record, icd10('E11.9', 'Type 2 diabetes'), '2019-01-01')
+    kind = ConceptFactory(concept_name='Procedure type', concept_code='TYPE-PROC')
+    proc = ProcedureOccurrence.objects.create(procedure_occurrence_id=5, person=record.person, procedure_date='2021-01-01',
+                                              procedure_concept=ConceptFactory(concept_name='Biopsy', concept_code='P5'),
+                                              procedure_type_concept=kind)
+    assert client.delete(f'/api/v1/phr/conditions/{row.pk}/').status_code == 403
+    assert client.patch(f'/api/v1/phr/procedures/{proc.pk}/', {'name': 'X'}, format='json').status_code == 403
+    assert client.delete(f'/api/v1/phr/procedures/{proc.pk}/').status_code == 403
+    assert ConditionOccurrence.objects.filter(pk=row.pk).exists() and ProcedureOccurrence.objects.filter(pk=5).exists()
+
+
+def test_patient_adds_edits_and_removes_a_procedure(adder):
+    record, client = adder
+    added = client.post('/api/v1/phr/procedures/add/', {
+        'name': 'Wisdom teeth removal', 'date': '2016-07-06', 'where': 'Downtown Dental', 'note': 'All four',
+    }, format='json')
+    assert added.status_code == 201
+    assert added.data == {'id': added.data['id'], 'name': 'Wisdom teeth removal', 'date': '2016-07-06',
+                          'where': 'Downtown Dental', 'note': 'All four',
+                          'source': {'kind': 'patient', 'facility': None, 'date': '2016-07-06'}}
+    edited = client.patch(f"/api/v1/phr/procedures/{added.data['id']}/", {'name': 'Wisdom teeth removal'},
+                          format='json')
+    assert edited.status_code == 200 and 'date' not in edited.data and 'where' not in edited.data
+
+    other = signed_in(PatientRecordFactory(disease=''))
+    assert other.delete(f"/api/v1/phr/procedures/{added.data['id']}/").status_code == 403
+    assert client.delete(f"/api/v1/phr/procedures/{added.data['id']}/").status_code == 204
+    assert client.get('/api/v1/phr/procedures/').data['procedures'] == []
+
+
+
+def test_a_cancer_is_dated_from_its_current_diagnosis_and_a_resolved_primary_says_so():
+    # The derived primary can be a cancer that has resolved (PRomop follows the
+    # most recent diagnosis); the PHR still has to say it is resolved.
+    record = PatientRecordFactory(disease='Prostate cancer', disease_slug='prostate-cancer', diagnosis_date='2025-11-08')
+    condition(record, icd10('D47.2', 'Monoclonal gammopathy'), '2019-06-04')
+    condition(record, icd10('C90.00', 'Multiple myeloma'), '2024-03-12')
+    condition(record, icd10('C61', 'Prostate cancer'), '2025-11-08', condition_end_date='2026-03-06')
+
+    cancer = {c['name']: c for c in signed_in(record).get('/api/v1/phr/diagnoses/').data['cancer']}
+
+    assert cancer['Prostate cancer']['status'] == 'Resolved'
+    assert cancer['Multiple myeloma']['date'] == '2024-03-12'
+    assert [t['date'] for t in cancer['Multiple myeloma']['transitions']] == ['2019-06-04', '2024-03-12']
