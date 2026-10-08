@@ -1061,6 +1061,18 @@ class RefreshPatientRecordComputedFieldsTest(_OmopBase):
         _compute_derived_fields(pi)
         self.assertIsNone(pi.measurable_disease_imwg)
 
+    def test_flc_derivations_with_one_stored_and_one_projected_value(self):
+        # A refresh re-projects one light chain as a float while the other
+        # keeps the Decimal the database returned; mixing them must not crash.
+        from decimal import Decimal
+        pi = PatientRecord.objects.create(person=self.person, lambda_flc=Decimal('1.00'))
+        pi.refresh_from_db()
+        pi.kappa_flc = 150.0
+        from omop_core.services.patient_record_service import _compute_derived_fields
+        _compute_derived_fields(pi)
+        self.assertAlmostEqual(float(pi.involved_uninvolved_ratio), 150.0, places=3)
+        self.assertTrue(pi.measurable_disease_imwg)  # ratio > 100 and difference >= 10
+
 
 # ===========================================================================
 # TEST-03: Signal integration tests at omop_core level
