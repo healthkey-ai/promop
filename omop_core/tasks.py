@@ -83,6 +83,25 @@ def project_field_to_omop_task(mapping_pk: int) -> dict[str, Any]:
     return {'mapping_pk': mapping_pk}
 
 
+@shared_task(name='omop_core.bulk_resolve_source_codes')
+def bulk_resolve_source_codes_task(run_id: str, person_ids: list[int] | None = None) -> dict[str, Any]:
+    """Run a bulk source-code resolution across multiple patients."""
+    from omop_core.services.resolve_jobs import run_bulk_resolve
+
+    run_bulk_resolve(run_id, person_ids)
+    from omop_core.models import SourceCodeResolveRun
+    run = SourceCodeResolveRun.objects.filter(pk=run_id).first()
+    if run is None:
+        return {'run_id': run_id, 'state': 'missing'}
+    return {
+        'run_id': run_id,
+        'state': run.state,
+        'done': run.done,
+        'total': run.total,
+        'resolved': run.resolved,
+    }
+
+
 @shared_task(bind=True, name='omop_core.suggest_mappings')
 def suggest_mappings_task(self, run_id: str, params: dict[str, Any]) -> dict[str, Any]:
     """Run one queued Code Mapping Suggest job.

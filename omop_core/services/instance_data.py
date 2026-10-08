@@ -42,6 +42,7 @@ SYSTEM: frozenset[str] = frozenset({
     'omop_core.Institution',
     # Bookkeeping and derived caches, rebuilt by their own commands.
     'omop_core.CdmSource', 'omop_core.ConceptEmbedding', 'omop_core.RegimenMappingGap',
+    'omop_core.SourceCodeResolveRun',
     'omop_core.SuggestEmbeddingSnapshot', 'omop_core.SuggestRun',
     # Historical model-quality feedback for this instance, not a live mapping.
     'omop_core.CodeMappingUpload', 'omop_core.MappingSuggestionReview',
@@ -103,9 +104,10 @@ _REFERENCE_COPIED_EXPLICIT: frozenset[str] = frozenset({
 PATIENT: frozenset[str] = frozenset({
     'omop_core.ConditionEra', 'omop_core.ConditionOccurrence', 'omop_core.Death',
     'omop_core.DoseEra', 'omop_core.DrugEra', 'omop_core.DrugExposure',
-    'omop_core.Location', 'omop_core.Measurement', 'omop_core.MeasurementOwnership',
+    'omop_core.ImageOccurrence', 'omop_core.Location', 'omop_core.Measurement', 'omop_core.MeasurementOwnership',
     'omop_core.Note', 'omop_core.NoteNlp', 'omop_core.Observation',
     'omop_core.ObservationPeriod', 'omop_core.PatientDocument', 'omop_core.PatientRecord',
+    'omop_core.PatientSourceCode',
     'omop_core.PatientTrialEnrollment', 'omop_core.Person', 'omop_core.PersonLanguageSkill',
     'omop_core.ProcedureOccurrence', 'omop_core.ProvenanceRecord', 'omop_core.RecordRevision',
     'omop_core.Specimen', 'omop_core.SupportiveTherapyCourse', 'omop_core.TrialSearchPreferences',

@@ -83,13 +83,19 @@ def upsert_therapy_line_episode(
     source_value=None,
     today=None,
     replace_events=False,
+    disease=None,
+    episode=None,
 ):
     """Upsert one line-of-therapy Episode and its links; return the Episode.
 
     Args:
         person: OMOP Person.
-        line_number: LOT number (1, 2, 3…). Becomes episode_number and the
-            (person, line_number) idempotency key.
+        line_number: LOT number (1, 2, 3…). Becomes episode_number; with the
+            cancer it treats, the (person, cancer, line_number) idempotency key.
+        disease: the cancer this line treats, as a disease name or slug. None
+            means the person's primary cancer (every caller before #1739).
+        episode: an existing line to update in place (an edit by episode id);
+            it is never re-found by number, which another cancer may share.
         regimen_concept: resolved regimen Concept (HemOnc/RxNav/local). Used as
             episode_object_concept; falls back to concept 0.
         regimen_source_concept: Concept for episode_source_concept (typically the
@@ -130,7 +136,13 @@ def upsert_therapy_line_episode(
     effective_start = None if start_date is _UNSET else start_date
     effective_end = None if end_date is _UNSET else end_date
 
-    episode = Episode.objects.filter(person=person, episode_number=line_number).first()
+    parent, adopts_unparented = _line_parent(person, disease, episode)
+    if episode is None:
+        episode = _find_line(person, line_number, parent, adopts_unparented)
+    if episode is not None and parent is not None and episode.episode_parent_id is None and adopts_unparented:
+        # An unfiled line that a writer has now named the (primary) cancer for.
+        episode.episode_parent_id = parent.episode_id
+        episode.save(update_fields=['episode_parent_id'])
     created = episode is None
     if episode is None:
         episode = Episode(
@@ -142,6 +154,7 @@ def upsert_therapy_line_episode(
             episode_start_date=effective_start or today,
             episode_end_date=effective_end,
             episode_number=line_number,
+            episode_parent_id=parent.episode_id if parent else None,
             episode_source_value=episode_source_value,
             episode_source_concept=regimen_source_concept,
         )
@@ -194,27 +207,98 @@ def upsert_therapy_line_episode(
 
     if outcome:
         _upsert_outcome_observation(person, line_number, outcome, ehr_type_concept, no_match_concept,
-                                    obs_date=effective_end or effective_start or today)
+                                    obs_date=effective_end or effective_start or today,
+                                    line=episode, adopt=adopts_unparented)
     elif replace_events:
-        _delete_outcome_observation(person, line_number)
+        _delete_outcome_observation(person, line_number, line=episode, adopt=adopts_unparented)
 
     obs_date = effective_end or effective_start or today
     if intent:
         _upsert_line_observation(person, line_number, 'intent', intent,
-                                 ehr_type_concept, no_match_concept, obs_date=obs_date)
+                                 ehr_type_concept, no_match_concept, obs_date=obs_date,
+                                 line=episode, adopt=adopts_unparented)
     elif replace_events:
-        _delete_line_observation(person, line_number, 'intent')
+        _delete_line_observation(person, line_number, 'intent', line=episode, adopt=adopts_unparented)
 
     if discontinuation_reason:
         _upsert_line_observation(person, line_number, 'discontinuation', discontinuation_reason,
-                                 ehr_type_concept, no_match_concept, obs_date=obs_date)
+                                 ehr_type_concept, no_match_concept, obs_date=obs_date,
+                                 line=episode, adopt=adopts_unparented)
     elif replace_events:
-        _delete_line_observation(person, line_number, 'discontinuation')
+        _delete_line_observation(person, line_number, 'discontinuation', line=episode, adopt=adopts_unparented)
 
     return TherapyLineEpisodeResult(episode, created, event_ids)
 
 
-def _upsert_outcome_observation(person, line_number, outcome, type_concept, no_match_concept, obs_date):
+def _line_parent(person, disease, episode):
+    """The Disease Episode a line hangs off, and whether it is the primary cancer's.
+
+    A line no one names a cancer for stays unparented: it is the primary
+    cancer's, whichever that is when it is read. A line for a named cancer hangs
+    off that cancer's Disease Episode; for a cancer other than the primary one
+    it must be a cancer on the record, and the Episode vocabulary must be
+    loaded, or the line could not be told apart from the primary cancer's.
+    """
+    from omop_core.services.disease_episodes import (
+        disease_episode, disease_key, disease_keys_on_record, disease_slug, primary_disease_ids,
+        primary_disease_slug,
+    )
+
+    if episode is not None:
+        if episode.episode_parent_id is None:
+            return None, True
+        parent = Episode.objects.filter(episode_id=episode.episode_parent_id).first()
+        return parent, parent is None or parent.episode_id in primary_disease_ids(person)
+    if not disease:
+        return None, True
+    slug = disease_slug(disease)
+    if slug and disease_key(slug) == disease_key(primary_disease_slug(person)):
+        return disease_episode(person, slug), True  # None without the vocabulary: stays unparented
+    if not slug or disease_key(slug) not in disease_keys_on_record(person):
+        raise ValueError(f'This record has no diagnosis of {disease!r} to file a line of therapy under.')
+    parent = disease_episode(person, slug)
+    if parent is None:
+        raise ValueError(
+            'A line of therapy for a second cancer needs the Episode vocabulary '
+            '(Disease First Occurrence, 32528) loaded.'
+        )
+    return parent, False
+
+
+def _find_line(person, line_number, parent, is_primary):
+    from omop_core.services.disease_episodes import primary_lines, regimen_episodes
+
+    if not is_primary:
+        return regimen_episodes(person).filter(
+            episode_number=line_number, episode_parent_id=parent.episode_id).first()
+    lines = primary_lines(person).filter(episode_number=line_number)
+    if parent is not None:
+        own = lines.filter(episode_parent_id=parent.episode_id).first()
+        if own is not None:
+            return own
+    return lines.order_by('episode_id').first()
+
+
+def _episode_field():
+    """The CDM field concept a LOT observation's observation_event_id points at."""
+    from omop_core.services.disease_episodes import cdm_field_concept
+
+    return cdm_field_concept('episode.episode_id')
+
+
+def _line_observations(person, src_value, line, adopt):
+    """A line's LOT-{n}-* rows: its own, or (for the primary cancer) a pre-#1739 unlinked one."""
+    rows = Observation.objects.filter(person=person, observation_source_value=src_value)
+    if line is None:
+        return rows
+    own = rows.filter(observation_event_id=line.episode_id)
+    if own.exists() or not adopt:
+        return own
+    return rows.filter(observation_event_id__isnull=True)
+
+
+def _upsert_outcome_observation(person, line_number, outcome, type_concept, no_match_concept, obs_date,
+                                line=None, adopt=True):
     src_value = f'LOT-{line_number}-outcome'
     snomed_code = OUTCOME_SNOMED_CODES.get(outcome)
     outcome_concept = (
@@ -225,10 +309,15 @@ def _upsert_outcome_observation(person, line_number, outcome, type_concept, no_m
         return
     value = outcome[:60]
 
-    existing = Observation.objects.filter(
-        person=person, observation_source_value=src_value,
-    ).first()
+    field = _episode_field() if line is not None else None
+    existing = _line_observations(person, src_value, line, adopt).first()
     if existing:
+        if line is not None and (existing.observation_event_id != line.episode_id
+                                 or existing.obs_event_field_concept_id != (field.concept_id if field else None)):
+            existing.observation_event_id = line.episode_id
+            existing.obs_event_field_concept = field
+            existing._skip_patient_record_refresh = True
+            existing.save(update_fields=['observation_event_id', 'obs_event_field_concept'])
         # Keep OMOP authoritative when an outcome is edited (e.g. PR -> CR);
         # a no-op when the value is unchanged (ingest re-runs stay idempotent).
         dirty = []
@@ -254,19 +343,19 @@ def _upsert_outcome_observation(person, line_number, outcome, type_concept, no_m
         observation_type_concept=type_concept,
         value_as_string=value,
         observation_source_value=src_value,
+        observation_event_id=line.episode_id if line is not None else None,
+        obs_event_field_concept=field,
     )
     obs._skip_patient_record_refresh = True
     obs.save()
 
 
-def _delete_outcome_observation(person, line_number):
-    Observation.objects.filter(
-        person=person,
-        observation_source_value=f'LOT-{line_number}-outcome',
-    ).delete()
+def _delete_outcome_observation(person, line_number, line=None, adopt=True):
+    _line_observations(person, f'LOT-{line_number}-outcome', line, adopt).delete()
 
 
-def _upsert_line_observation(person, line_number, suffix, value, type_concept, no_match_concept, obs_date):
+def _upsert_line_observation(person, line_number, suffix, value, type_concept, no_match_concept, obs_date,
+                             line=None, adopt=True):
     """Upsert a LOT-{n}-{suffix} Observation (intent, discontinuation, etc.)."""
     src_value = f'LOT-{line_number}-{suffix}'
     obs_concept = no_match_concept
@@ -274,11 +363,16 @@ def _upsert_line_observation(person, line_number, suffix, value, type_concept, n
         return
     text = value[:60]
 
-    existing = Observation.objects.filter(
-        person=person, observation_source_value=src_value,
-    ).first()
+    field = _episode_field() if line is not None else None
+    existing = _line_observations(person, src_value, line, adopt).first()
     if existing:
         dirty = []
+        if line is not None and existing.observation_event_id != line.episode_id:
+            existing.observation_event_id = line.episode_id
+            dirty.append('observation_event_id')
+        if line is not None and existing.obs_event_field_concept_id != (field.concept_id if field else None):
+            existing.obs_event_field_concept = field
+            dirty.append('obs_event_field_concept')
         if existing.value_as_string != text:
             existing.value_as_string = text
             dirty.append('value_as_string')
@@ -298,16 +392,15 @@ def _upsert_line_observation(person, line_number, suffix, value, type_concept, n
         observation_type_concept=type_concept,
         value_as_string=text,
         observation_source_value=src_value,
+        observation_event_id=line.episode_id if line is not None else None,
+        obs_event_field_concept=field,
     )
     obs._skip_patient_record_refresh = True
     obs.save()
 
 
-def _delete_line_observation(person, line_number, suffix):
-    Observation.objects.filter(
-        person=person,
-        observation_source_value=f'LOT-{line_number}-{suffix}',
-    ).delete()
+def _delete_line_observation(person, line_number, suffix, line=None, adopt=True):
+    _line_observations(person, f'LOT-{line_number}-{suffix}', line, adopt).delete()
 
 
 def author_therapy_line(
@@ -323,6 +416,8 @@ def author_therapy_line(
     discontinuation_reason=None,
     source_value=None,
     replace=False,
+    disease=None,
+    episode=None,
 ):
     """Record a line of therapy: its drug exposures, its Episode, and the links.
 
@@ -339,7 +434,8 @@ def author_therapy_line(
     -- and the CDM tagging stays identical to every other path, because the
     grouping still goes through ``upsert_therapy_line_episode``.
 
-    Idempotent in both halves. The Episode keys on ``(person, line_number)``, and
+    Idempotent in both halves. The Episode keys on ``(person, cancer, line_number)``
+    (the cancer is ``disease``, the primary one when omitted; #1739), and
     a drug exposure keys on ``(drug_source_value, drug_exposure_start_date)`` --
     the same identity the bulk write path and FHIR ingest use, so re-sending a
     line converges instead of stacking duplicates.
@@ -361,6 +457,9 @@ def author_therapy_line(
         replace: when True, the submitted drugs and outcome are the complete
             edited state of the line, so stale EpisodeEvent/outcome rows are
             removed.
+        disease: the cancer the line treats (name or slug); None = primary.
+        episode: the line being edited, updated in place rather than re-found
+            by number (which another cancer's line may share).
 
     Returns a TherapyLineEpisodeResult with two extra attributes attached:
     ``drug_exposure_ids`` and ``drugs_created``.
@@ -381,6 +480,8 @@ def author_therapy_line(
             discontinuation_reason=discontinuation_reason,
             source_value=source_value,
             replace=replace,
+            disease=disease,
+            episode=episode,
         )
 
 
@@ -397,6 +498,8 @@ def _author_therapy_line_inner(
     discontinuation_reason=None,
     source_value=None,
     replace=False,
+    disease=None,
+    episode=None,
 ):
     from omop_core.models import DrugExposure
 
@@ -454,6 +557,8 @@ def _author_therapy_line_inner(
         discontinuation_reason=discontinuation_reason,
         source_value=source_value,
         replace_events=replace,
+        disease=disease,
+        episode=episode,
     )
     result.drug_exposure_ids = exposure_ids
     result.drugs_created = created

@@ -31,9 +31,9 @@ def whats_new(person, record) -> dict[str, Any]:
     since = timezone.localdate() - timedelta(days=WINDOW_DAYS)
     counts: Counter = Counter()
 
-    def tally(model, date_field, section, extra=None):
+    def tally(model, date_field, section, extra=None, **filters):
         rows = list(
-            model.objects.filter(person=person, is_erroneous=False, **{f'{date_field}__gte': since})
+            model.objects.filter(person=person, is_erroneous=False, **{f'{date_field}__gte': since}, **filters)
             .select_related('visit_occurrence', *(extra or []))
         )
         sites = care_site_names(rows)
@@ -48,8 +48,12 @@ def whats_new(person, record) -> dict[str, Any]:
     tally(Measurement, 'measurement_date', 'labs', ['measurement_concept', 'measurement_source_concept'])
     tally(DrugExposure, 'drug_exposure_start_date', 'medications')
     tally(ConditionOccurrence, 'condition_start_date', 'diagnoses')
-    tally(ProcedureOccurrence, 'procedure_date', 'procedures')
-    for doc in PatientDocument.objects.filter(person=person, uploaded_at__date__gte=since):
+    # An imaging study is a procedure row with an image_occurrence (#1731).
+    tally(ProcedureOccurrence, 'procedure_date', 'procedures', image_occurrences__isnull=True)
+    tally(ProcedureOccurrence, 'procedure_date', 'imaging', image_occurrences__isnull=False)
+    # A study's own report file is counted with the study.
+    for doc in PatientDocument.objects.filter(person=person, uploaded_at__date__gte=since,
+                                              procedure_occurrence_id__isnull=True):
         section = 'imaging' if doc.doc_type == 'IMAGING' else 'genetics' if doc.doc_type in GENETIC_DOC_LABELS else None
         if section:
             counts[(timezone.localtime(doc.uploaded_at).date(), section, None)] += 1
@@ -68,20 +72,54 @@ def whats_new(person, record) -> dict[str, Any]:
     return {'days': WINDOW_DAYS, 'groups': groups}
 
 
+def _document(doc: PatientDocument, fallback: str) -> dict[str, Any]:
+    document = {'title': doc.title or fallback}
+    if (doc.file_url or '').startswith('https://'):
+        document['url'] = doc.file_url
+    return document
+
+
 def imaging(person, record) -> dict[str, Any]:
-    """Imaging reports. Structured studies (modality, body part, impression)
-    arrive with promop#1731; until then each report is listed as filed."""
+    """Imaging studies (promop#1731), newest first, then any imaging report
+    filed without a study (an uploaded file) as it was filed."""
+    from omop_core.services.imaging import imaging_studies
+
+    structured = imaging_studies(person)
+    sources = row_sources(
+        ProcedureOccurrence, [s['procedure'] for s in structured],
+        type_attr='procedure_type_concept', date_attr='procedure_date',
+    )
     studies = []
-    for doc in PatientDocument.objects.filter(person=person, doc_type='IMAGING').order_by('-effective_date', '-uploaded_at'):
+    for study in structured:
+        pid = study['procedure_occurrence_id']
+        item = {
+            'id': f'study-{pid}',
+            'type': study['type'],
+            'name': study['name'],
+            'date': study['date'].isoformat(),
+            'body_part': study['body_part'],
+            'contrast': study['contrast'],
+            'impression': study['impression'],
+            'findings': study['findings'],
+            'notes': study['notes'],
+            'has_image': study['has_image'],
+            'image_url': study['image_url'],
+            'document': _document(study['document'], 'Imaging report') if study['document'] else None,
+            'source': sources[pid],
+        }
+        studies.append({k: v for k, v in item.items() if v is not None or k in ('image_url', 'impression')})
+
+    filed = PatientDocument.objects.filter(
+        person=person, doc_type='IMAGING', procedure_occurrence_id__isnull=True,
+    ).order_by('-effective_date', '-uploaded_at')
+    for doc in filed:
         on = doc.effective_date or timezone.localtime(doc.uploaded_at).date()
-        document = {'title': doc.title or 'Imaging report'}
-        if (doc.file_url or '').startswith('https://'):
-            document['url'] = doc.file_url
         studies.append({
             'id': f'doc-{doc.pk}',
             'name': doc.title or 'Imaging report',
             'date': on.isoformat(),
-            'document': document,
+            'document': _document(doc, 'Imaging report'),
             'source': source('record', None, on),
         })
+    studies.sort(key=lambda s: s['date'], reverse=True)
     return {'studies': studies}

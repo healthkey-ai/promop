@@ -16,7 +16,7 @@ from rest_framework.response import Response
 from patient_portal.models import PatientStatement
 
 from .records import medication_summary_by_key
-from .therapy import therapy_lines
+from .therapy import all_lines
 from .views import PhrView
 
 S = PatientStatement
@@ -116,7 +116,8 @@ class TherapyReasonView(_StatementView):
     subject = S.SUBJECT_THERAPY_LINE
 
     def _line(self, person, record, item_id):
-        return next((line for line in therapy_lines(person, record) if line['id'] == item_id), None)
+        # Any cancer's line (#1739), not only the primary one's.
+        return next((line for line in all_lines(person, record) if line['id'] == item_id), None)
 
     def exists(self, person, record, item_id):
         return self._line(person, record, item_id) is not None
