@@ -16,7 +16,6 @@ import PatientMessages from "./PatientMessages";
 import GeneralTab from "@/components/PatientInfo/tabs/GeneralTab";
 import DiseaseTab from "@/components/PatientInfo/tabs/DiseaseTab";
 import TreatmentTab from "@/components/PatientInfo/tabs/TreatmentTab";
-import BloodTab from "@/components/PatientInfo/tabs/BloodTab";
 import LabsTab from "@/components/PatientInfo/tabs/LabsTab";
 import GenomicsTab from "@/components/PatientInfo/tabs/GenomicsTab";
 import BehaviorTab from "@/components/PatientInfo/tabs/BehaviorTab";
@@ -706,7 +705,7 @@ export default function PatientDetail({
   const canViewOmop = !patientMode && !!(user?.is_staff || user?.is_org_admin);
   const diseaseType = getDiseaseType();
   const showDiseaseTab = diseaseType !== "other";
-  const coreTabs = ["General", ...(showDiseaseTab ? [getDiseaseTabLabel()] : []), "Treatment", "Blood", "Labs", "Genomics"];
+  const coreTabs = ["General", ...(showDiseaseTab ? [getDiseaseTabLabel()] : []), "Treatment", "Labs", "Genomics"];
   const afterLabsTabs = patientMode ? ["Allergies"] : [];
   const trailingTabs = ["Behavior", "Wearables", "History"];
   const surveyTabs = patientMode ? ["Surveys"] : [];
@@ -716,8 +715,7 @@ export default function PatientDetail({
   // Compute dynamic indices — disease tab shifts everything when absent.
   const diseaseIdx = showDiseaseTab ? 1 : -1;
   const treatmentIdx = showDiseaseTab ? 2 : 1;
-  const bloodIdx = treatmentIdx + 1;
-  const labsIdx = bloodIdx + 1;
+  const labsIdx = treatmentIdx + 1;
   const genomicsIdx = labsIdx + 1;
   const allergiesIdx = patientMode ? coreTabs.length : -1;
   const behaviorIdx = coreTabs.length + afterLabsTabs.length;
@@ -731,8 +729,7 @@ export default function PatientDetail({
     0: "Keep patient details up to date for accurate personalisation.",
     ...(diseaseIdx >= 0 ? { [diseaseIdx]: "Staging and disease-specific clinical information." } : {}),
     [treatmentIdx]: "Therapy history, treatment lines, and planned therapies.",
-    [bloodIdx]: "Blood counts and differential.",
-    [labsIdx]: "Chemistry, liver function, coagulation, cardiac and tumour markers.",
+    [labsIdx]: "Blood counts, chemistry, liver function, coagulation, cardiac and tumour markers.",
     [genomicsIdx]: "Genes, variants, origins, interpretations, and test details.",
     ...(allergiesIdx >= 0 ? { [allergiesIdx]: "Known allergies and intolerances from your health records." } : {}),
     [behaviorIdx]: "Lifestyle, socioeconomic, and behavioural health factors.",
@@ -926,7 +923,6 @@ export default function PatientDetail({
                     )}
                   </>
                 )}
-                {activeTab === bloodIdx && <BloodTab formData={editedInfo} onChange={handleFieldChange} />}
                 {activeTab === labsIdx && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
                 {activeTab === genomicsIdx && <GenomicsTab formData={editedInfo} />}
                 {allergiesIdx >= 0 && activeTab === allergiesIdx && <AllergyList user={user ?? null} />}

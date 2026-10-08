@@ -22,7 +22,11 @@ interface Props {
 }
 
 /**
- * Lab values, rendered against the server's writable-field descriptor.
+ * Lab values — blood counts, chemistry, liver function, coagulation, cardiac
+ * and tumour markers — rendered against the server's writable-field descriptor.
+ *
+ * Blood counts were previously on a separate "Blood" tab; they are now the
+ * first section here so that every lab analyte lives on one tab (#1758).
  *
  * The field names here are the *canonical* ones. This tab previously showed
  * legacy aliases — `egfr`, `serum_sodium`, `magnesium`, `ldh`,
@@ -31,6 +35,17 @@ interface Props {
  * work: two fields writing one code is the collision #471 removed. The canonical
  * column is the one with a fact behind it, so it is the one shown.
  */
+
+const COUNTS: Array<[string, string]> = [
+  ['Hemoglobin (g/dL)', 'hemoglobin_g_dl'],
+  ['Hematocrit (%)', 'hematocrit_percent'],
+  ['WBC Count (10³/µL)', 'wbc_count_thousand_per_ul'],
+  ['RBC Count (10⁶/µL)', 'rbc_million_per_ul'],
+  ['Platelet Count (10³/µL)', 'platelet_count_thousand_per_ul'],
+  ['ANC (10³/µL)', 'anc_thousand_per_ul'],
+  ['ALC (10³/µL)', 'alc_thousand_per_ul'],
+  ['AMC (10³/µL)', 'amc_thousand_per_ul'],
+];
 
 const CHEMISTRY: Array<[string, string]> = [
   ['Serum Creatinine (mg/dL)', 'serum_creatinine_mg_dl'],
@@ -194,6 +209,7 @@ export default function LabsTab({ formData, onChange }: Props) {
           are read-only.
         </p>
       )}
+      {section('Blood Counts', COUNTS)}
       {section('Chemistry Panel', CHEMISTRY)}
       {section('Liver Function', LIVER)}
       {section('Coagulation', COAGULATION)}
