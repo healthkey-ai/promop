@@ -249,6 +249,21 @@ CONCEPT_DRUG_EXPOSURE_FIELD = 1147094  # drug_exposure_id field concept (Episode
 CONCEPT_PROCEDURE_OCCURRENCE_FIELD = 1147082  # procedure_occurrence_id field concept (note/observation event)
 
 
+# Slice 2a: staging PatientInfo fields written as patient-authored *string* Measurements, keyed by
+# the LOINC the derivation reads back. The staging reader returns value_as_string verbatim, so a CB
+# stage code (e.g. 't1') round-trips unchanged and the matcher compares it to the trial's code list
+# directly — no normalisation or matching-surface reverse-map needed.
+# (Receptor biomarkers her2/er/pr are a SEPARATE follow-up (2a-ii): they must be normalised to
+# Positive/Negative/Equivocal for the hr_status/tnbc_status compute, which then needs a lossy
+# PromopMatchingSurface reverse-map back to the CB enum codes the matcher compares. Not in this change.)
+STAGING_MEAS_FIELDS = {
+    'stage': '21908-9',
+    'tumor_stage': '21905-5',
+    'nodes_stage': '21906-3',
+    'distant_metastasis_stage': '21901-4',
+}
+
+
 # Wearable metric → controlled-vocabulary concept_code.
 #
 # Most entries are LOINC. Four metrics have no LOINC equivalent and are minted
@@ -476,6 +491,13 @@ DERIVED_FIELD_TO_CODE = {
     # about the field the moment the bug was fixed — see
     # test_every_attribution_still_matches_its_extractor.
     'insurance_type':                ('408729009', 'SNOMED', '_get_social_data'),
+    # Assertion booleans — _get_assertion_data. Made writable via their EXISTING LOINC assertion codes
+    # (the same codes _ASSERTION_FIELDS already reads), so a federated edit round-trips through the
+    # existing reader with no second path to clobber it, and the patient's dated edit supersedes an
+    # older FHIR assertion of the same concept. Only the two DIRECT booleans here; the inverse_boolean
+    # no_* fields need write-side inversion, deferred to healthkey-ai/promop#699.
+    'contraceptive_use':             ('8659-8',    'LOINC',  '_get_assertion_data'),
+    'consent_capability':            ('75985-6',   'LOINC',  '_get_assertion_data'),
 }
 
 # Curator-oriented concept suggestions for fields NOT in DERIVED_FIELD_TO_CODE

@@ -10,7 +10,6 @@ import GeneralTab from "@/components/PatientInfo/tabs/GeneralTab";
 import DiseaseTab from "@/components/PatientInfo/tabs/DiseaseTab";
 import GenomicsTab from "@/components/PatientInfo/tabs/GenomicsTab";
 import TreatmentTab from "@/components/PatientInfo/tabs/TreatmentTab";
-import BloodTab from "@/components/PatientInfo/tabs/BloodTab";
 import LabsTab from "@/components/PatientInfo/tabs/LabsTab";
 import BehaviorTab from "@/components/PatientInfo/tabs/BehaviorTab";
 import WearableTab from "@/components/PatientInfo/tabs/WearableTab";
@@ -309,13 +308,12 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
   const tabLabels = [
     "General",
     ...(showDiseaseTab ? [getDiseaseTabLabel()] : []),
-    "Treatment", "Blood", "Labs", "Behavior", "Wearable", "Genomics", "History",
+    "Treatment", "Labs", "Behavior", "Wearable", "Genomics", "History",
   ];
 
   const diseaseIdx = showDiseaseTab ? 1 : -1;
   const treatmentIdx = showDiseaseTab ? 2 : 1;
-  const bloodIdx = treatmentIdx + 1;
-  const labsIdx = bloodIdx + 1;
+  const labsIdx = treatmentIdx + 1;
   const behaviorIdx = labsIdx + 1;
   const wearableIdx = behaviorIdx + 1;
   const genomicsIdx = wearableIdx + 1;
@@ -325,8 +323,7 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
     0: "Keep patient details up to date for accurate personalisation.",
     ...(diseaseIdx >= 0 ? { [diseaseIdx]: "Disease-specific clinical information." } : {}),
     [treatmentIdx]: "Therapy history, treatment lines, and planned therapies.",
-    [bloodIdx]: "Blood counts and differential.",
-    [labsIdx]: "Chemistry, liver function, coagulation, cardiac and tumour markers.",
+    [labsIdx]: "Blood counts, chemistry, liver function, coagulation, cardiac and tumour markers.",
     [behaviorIdx]: "Lifestyle, socioeconomic, and behavioural health factors.",
     [wearableIdx]: "Apple wearable 30-day summaries derived from synced OMOP data.",
     [genomicsIdx]: "Genes, variants, origins, interpretations, and test details.",
@@ -393,7 +390,6 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
               }}
             />
           )}
-          {activeTab === bloodIdx && <BloodTab formData={editedInfo} onChange={handleFieldChange} />}
           {activeTab === labsIdx && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
           {activeTab === behaviorIdx && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} />}
           {activeTab === wearableIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} />}
