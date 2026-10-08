@@ -401,6 +401,10 @@ CORS_ALLOW_HEADERS = (
     *default_headers,
     'x-provenance-source',
     'x-provenance-user-id',
+    # A shared Personal Health Record is read with its link's token in this
+    # header (patient_portal/api/phr/sharing.py), cross-origin from the app
+    # that shows it.
+    'x-share-token',
     # Conditional writes (#1312) are opt-in on the API and unavoidable for
     # EXACT's filter saves: `default_headers` carries neither of these, so the
     # preflight was refused with "Request header field if-match is not allowed
@@ -533,6 +537,11 @@ REST_FRAMEWORK = {
         # abuse-facing ones.
         'run.read': os.environ.get('PROLOG_THROTTLE_READ', '1200/hour'),
         'run.create': os.environ.get('PROLOG_THROTTLE_CREATE', '30/hour'),
+        # Someone opening a record a patient shared with them: no account, so
+        # keyed by IP. One visit reads about a dozen sections.
+        'phr_shared': os.environ.get('PHR_SHARED_THROTTLE_RATE', '120/minute'),
+        # Invites a patient emails from their record, per patient.
+        'phr_share_email': os.environ.get('PHR_SHARE_EMAIL_THROTTLE_RATE', '20/hour'),
         'run.capture': os.environ.get('PROLOG_THROTTLE_CAPTURE', '30/hour'),
         'run.answer': os.environ.get('PROLOG_THROTTLE_ANSWER', '600/hour'),
         'run.write': os.environ.get('PROLOG_THROTTLE_WRITE', '3000/hour'),
@@ -825,4 +834,25 @@ PROLOG_MACHINE_LANGUAGES = [
     lang.strip() for lang in os.environ.get('PROLOG_MACHINE_LANGUAGES', '').split(',') if lang.strip()
 ]
 PROLOG_PUBLIC_URL = os.environ.get('PROLOG_PUBLIC_URL', APP_BASE_URL)
+
+# Sharing a Personal Health Record (patient_portal/api/phr/sharing.py).
+# PHR_SHARE_URL is where the app that shows a shared record lives; the link is
+# PHR_SHARE_URL/<token>. PHR_SHARE_SECRET derives the links, so rotating it
+# closes every open link; it falls back to SECRET_KEY.
+PHR_SHARE_URL = os.environ.get('PHR_SHARE_URL', f'{APP_BASE_URL.rstrip("/")}/r')
+PHR_SHARE_SECRET = os.environ.get('PHR_SHARE_SECRET', '')
+# The product name in the invite email ("<name> shared their <product> record").
+PHR_SHARE_PRODUCT_NAME = os.environ.get('PHR_SHARE_PRODUCT_NAME', 'HealthKey')
+# Where a scan happened is read from headers the edge sets from the client IP
+# (e.g. a load balancer's {client_city}). Only list headers the edge overwrites:
+# a client can send any header. Unset, scans are logged without a place.
+# AI explanations in the PHR are written by ONE's server, which sends this key
+# beside the patient's token; without it a patient's own token could store
+# text shown as "written by HealthTree AI". Unset, writes are refused.
+PHR_EXPLANATION_WRITE_KEY = os.environ.get('PHR_EXPLANATION_WRITE_KEY', '')
+PHR_SHARE_GEO_HEADERS = {
+    key: os.environ[f'PHR_SHARE_GEO_{key.upper()}_HEADER']
+    for key in ('city', 'region', 'country')
+    if os.environ.get(f'PHR_SHARE_GEO_{key.upper()}_HEADER')
+}
 PROLOG_EMAIL_FROM = os.environ.get('PROLOG_EMAIL_FROM', DEFAULT_FROM_EMAIL)

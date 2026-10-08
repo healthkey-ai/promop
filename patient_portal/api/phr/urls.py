@@ -1,5 +1,34 @@
 from django.urls import path
 
+from .entries import (
+    ConditionEntryView,
+    MedicationNoteView,
+    MedicationsCreateView,
+    OwnMedicationView,
+    ProcedureEntryView,
+)
+from .explanations import ExplanationView, SharedExplanationView
+from .sharing import (
+    SharedAboutView,
+    SharedDiagnosesView,
+    SharedGeneticsView,
+    SharedImagingView,
+    SharedLabHistoryView,
+    SharedLabsView,
+    SharedMedicationDetailView,
+    SharedMedicationsView,
+    SharedProceduresView,
+    SharedRecordView,
+    SharedStatusView,
+    SharedTherapyView,
+    ShareOptionsView,
+    ShareRenewView,
+    ShareResendView,
+    SharesView,
+    ShareView,
+)
+from .statements import MedicationStatementView, TherapyReasonView
+
 from .views import (
     AboutView,
     DiagnosesView,
@@ -22,10 +51,42 @@ urlpatterns = [
     path('labs/', LabsView.as_view(), name='phr-labs'),
     path('labs/<int:test_id>/', LabHistoryView.as_view(), name='phr-lab-history'),
     path('medications/', MedicationsView.as_view(), name='phr-medications'),
+    path('medications/add/', MedicationsCreateView.as_view(), name='phr-medication-add'),
     path('medications/<str:medication_id>/', MedicationDetailView.as_view(), name='phr-medication'),
+    path('medications/<str:item_id>/statement/', MedicationStatementView.as_view(), name='phr-medication-statement'),
+    path('medications/<str:item_id>/note/', MedicationNoteView.as_view(), name='phr-medication-note'),
+    path('medications/<str:item_id>/own/', OwnMedicationView.as_view(), name='phr-medication-own'),
+    path('conditions/', ConditionEntryView.as_view(), name='phr-condition-add'),
+    path('conditions/<str:item_id>/', ConditionEntryView.as_view(), name='phr-condition'),
     path('procedures/', ProceduresView.as_view(), name='phr-procedures'),
+    path('procedures/add/', ProcedureEntryView.as_view(), name='phr-procedure-add'),
+    path('procedures/<str:item_id>/', ProcedureEntryView.as_view(), name='phr-procedure'),
     path('genetics/', GeneticsView.as_view(), name='phr-genetics'),
     path('therapy/', TherapyView.as_view(), name='phr-therapy'),
+    path('therapy/<str:item_id>/reason/', TherapyReasonView.as_view(), name='phr-therapy-reason'),
     path('whats-new/', WhatsNewView.as_view(), name='phr-whats-new'),
     path('imaging/', ImagingView.as_view(), name='phr-imaging'),
+    # The patient's shares.
+    path('shares/', SharesView.as_view(), name='phr-shares'),
+    path('shares/options/', ShareOptionsView.as_view(), name='phr-share-options'),
+    path('shares/<str:share_id>/', ShareView.as_view(), name='phr-share'),
+    path('shares/<str:share_id>/renew/', ShareRenewView.as_view(), name='phr-share-renew'),
+    path('shares/<str:share_id>/resend/', ShareResendView.as_view(), name='phr-share-resend'),
+    # A shared record, opened with the X-Share-Token header.
+    path('shared/', SharedRecordView.as_view(), name='phr-shared'),
+    path('shared/status/', SharedStatusView.as_view(), name='phr-shared-status'),
+    path('shared/about/', SharedAboutView.as_view(), name='phr-shared-about'),
+    path('shared/diagnoses/', SharedDiagnosesView.as_view(), name='phr-shared-diagnoses'),
+    path('shared/therapy/', SharedTherapyView.as_view(), name='phr-shared-therapy'),
+    path('shared/labs/', SharedLabsView.as_view(), name='phr-shared-labs'),
+    path('shared/labs/<int:test_id>/', SharedLabHistoryView.as_view(), name='phr-shared-lab-history'),
+    path('shared/medications/', SharedMedicationsView.as_view(), name='phr-shared-medications'),
+    path('shared/medications/<str:medication_id>/', SharedMedicationDetailView.as_view(), name='phr-shared-medication'),
+    path('shared/procedures/', SharedProceduresView.as_view(), name='phr-shared-procedures'),
+    path('shared/genetics/', SharedGeneticsView.as_view(), name='phr-shared-genetics'),
+    path('shared/imaging/', SharedImagingView.as_view(), name='phr-shared-imaging'),
+    path('shared/explanations/<str:kind>/<str:target>/', SharedExplanationView.as_view(),
+         name='phr-shared-explanation'),
+    # AI explanations: read by the patient, written by ONE's server.
+    path('explanations/<str:kind>/<str:target>/', ExplanationView.as_view(), name='phr-explanation'),
 ]

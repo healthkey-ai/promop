@@ -11,7 +11,9 @@ class Episode(models.Model):
     episode_start_datetime = models.DateTimeField(null=True, blank=True)
     episode_end_date = models.DateField(null=True, blank=True)
     episode_end_datetime = models.DateTimeField(null=True, blank=True)
-    episode_parent_id = models.IntegerField(null=True, blank=True)
+    # The Disease Episode a Treatment Regimen (line of therapy) belongs to
+    # (#1739). BigInteger, like episode_id: ids no longer fit in 32 bits.
+    episode_parent_id = models.BigIntegerField(null=True, blank=True)
     episode_number = models.IntegerField(null=True, blank=True)
     episode_object_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='episode_objects', db_column='episode_object_concept_id')
     episode_type_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='episode_types', db_column='episode_type_concept_id')
@@ -20,6 +22,15 @@ class Episode(models.Model):
 
     class Meta:
         db_table = 'episode'
+        constraints = [
+            # One Disease Episode (32528) per person and cancer: two writers
+            # creating the same cancer's first line at once must not split it.
+            models.UniqueConstraint(
+                fields=['person', 'episode_source_value'],
+                condition=models.Q(episode_concept_id=32528),
+                name='uniq_disease_episode_per_cancer',
+            ),
+        ]
 
     def __str__(self):
         return f"Episode {self.episode_id} for Person {self.person_id}"
