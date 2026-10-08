@@ -17,6 +17,10 @@ vi.mock('@/hooks/useVocabulary', () => ({
   useVocabulary: () => ({ options: [], source: null, loading: false }),
 }));
 
+vi.mock('@/hooks/useLabMeasurements', () => ({
+  useLabMeasurements: vi.fn(() => ({ grouped: new Map(), isLoading: false })),
+}));
+
 const DESCRIPTORS = {
   anc_thousand_per_ul: {
     kind: 'direct', writable: true, target: 'patient_record',
@@ -105,11 +109,11 @@ async function renderAndLoad() {
   render(
     <PatientInfo apiClient={client} apiBasePath="/api" queryClient={qc} />,
   );
-  await waitFor(() => expect(screen.getByText('Blood')).toBeInTheDocument());
+  await waitFor(() => expect(screen.getByText('Labs')).toBeInTheDocument());
 }
 
-async function openBloodTab() {
-  fireEvent.click(screen.getByRole('button', { name: 'Blood' }));
+async function openLabsTab() {
+  fireEvent.click(screen.getByRole('button', { name: 'Labs' }));
   await waitFor(() => expect(screen.getByDisplayValue('3.1')).toBeInTheDocument());
 }
 
@@ -122,7 +126,7 @@ async function editAndSave(displayValue: string, next: string) {
 describe('federated PatientInfo save', () => {
   it('fetches the descriptor through the host client, not the app singleton', async () => {
     await renderAndLoad();
-    await openBloodTab();
+    await openLabsTab();
     await waitFor(() =>
       expect(client.get).toHaveBeenCalledWith(
         '/api/v1/patient-records/writable-fields/',
@@ -133,7 +137,7 @@ describe('federated PatientInfo save', () => {
 
   it('writes a clinical edit through the PatientRecord PATCH', async () => {
     await renderAndLoad();
-    await openBloodTab();
+    await openLabsTab();
     await editAndSave('3.1', '5.5');
 
     await waitFor(() =>
@@ -147,7 +151,7 @@ describe('federated PatientInfo save', () => {
 
   it('sends the clinical edit in the PATCH, not to a separate OMOP endpoint', async () => {
     await renderAndLoad();
-    await openBloodTab();
+    await openLabsTab();
     await editAndSave('3.1', '5.5');
 
     await waitFor(() =>
