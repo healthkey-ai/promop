@@ -5505,13 +5505,21 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
     # ------------------------------------------------------------------
 
     @action(detail=True, methods=['get', 'post'], url_path='source-codes',
-            permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+            permission_classes=[EtlWritePermission, PatientSelfScopePermission])
     def source_codes(self, request: Request, pk: str | None = None) -> Response:
         """Source codes for a patient.
 
         GET  — list source codes with mapping status (admin only).
         POST — upsert source codes from ETL (staff or service token with
                ``system/etl.write`` scope).
+
+        EtlWritePermission, not ScopedTokenPermission: the POST documents the
+        ``system/etl.write`` scope, and only this class consults it. Under the
+        base class an ETL token reached `has_scopes`, which accepts nothing but
+        ``patient/*.write``/``user/*.write``, so every ETL POST was 403 before
+        the view ran. Same oversight as /refresh/ (#1170). GET is unaffected:
+        the ETL grant covers POST/PUT/PATCH only, so a read falls through to
+        the base class exactly as before.
         """
         person, patient_info, err = self._resolve_patient_with_auth(request, pk)
         if err:
