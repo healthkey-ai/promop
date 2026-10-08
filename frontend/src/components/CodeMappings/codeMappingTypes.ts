@@ -49,6 +49,10 @@ export interface CodeMappingRow {
   locked_by_username?: string | null;
   locked_at?: string | null;
   source_evidence?: SourceEvidence;
+  source_unit?: string;
+  example_quantity?: string;
+  source_metadata?: Record<string, unknown>;
+  destination_unit_concept_id?: number | null;
 }
 
 export interface ConceptResult {
@@ -137,6 +141,12 @@ export interface MappingForm {
   example_units: string[];
   status: "proposed" | "approved" | "rejected";
   notes: string;
+  source_unit: string;
+  source_metadata_notes: string;
+  destination_unit_concept_id: string;
+  destination_unit_concept_code: string;
+  destination_unit_concept_name: string;
+  unit_match_type: "exact" | "close" | "none" | "";
 }
 
 // ── Constants ───────────────────────────────────────────────────────
@@ -160,6 +170,12 @@ export const emptyForm: MappingForm = {
   example_units: [],
   status: "proposed",
   notes: "",
+  source_unit: "",
+  source_metadata_notes: "",
+  destination_unit_concept_id: "",
+  destination_unit_concept_code: "",
+  destination_unit_concept_name: "",
+  unit_match_type: "",
 };
 
 export const emptyReference: Reference = {
@@ -303,6 +319,14 @@ export function buildEditForm(row: CodeMappingRow, reference: Reference): Mappin
     example_units: row.example_units || [],
     status: row.status === "unmapped" ? "proposed" : row.status,
     notes: row.notes || "",
+    source_unit: row.source_unit || "",
+    source_metadata_notes: row.source_metadata && Object.keys(row.source_metadata).length
+      ? Object.entries(row.source_metadata).map(([k, v]) => `${k}: ${v}`).join("\n")
+      : "",
+    destination_unit_concept_id: row.destination_unit_concept_id ? String(row.destination_unit_concept_id) : "",
+    destination_unit_concept_code: "",
+    destination_unit_concept_name: "",
+    unit_match_type: "",
   };
 }
 

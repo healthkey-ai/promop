@@ -46,6 +46,9 @@ function sourceCodeToRow(sc: PatientSourceCode): CodeMappingRow {
     source_vocabulary_id: sc.source_vocabulary_id || "",
     source_code: sc.source_code || sc.source_value,
     source_code_description: "",
+    source_unit: sc.source_unit || "",
+    example_quantity: sc.example_quantity || "",
+    source_metadata: sc.source_metadata || {},
     destination_concept_id: sc.mapping_target_concept_id || 0,
     destination_concept_name: sc.mapping_target_concept_name || "",
     destination_concept_code: "",
@@ -81,7 +84,7 @@ export default function PatientSourceCodesTab({ personId }: Props) {
   const [dialogMode, setDialogMode] = useState<"new" | "edit">("new");
   const [dialogRow, setDialogRow] = useState<CodeMappingRow | null>(null);
   const [strategies, setStrategies] = useState({ umls: true, lexical: true, vectors: true });
-  const [rankingModel, setRankingModel] = useState<"anthropic" | "jev" | "both">("anthropic");
+  const [rankingModel, setRankingModel] = useState<"anthropic" | "jev" | "both">("jev");
 
   const fetchSourceCodes = useCallback(async () => {
     try {
@@ -291,6 +294,8 @@ export default function PatientSourceCodesTab({ personId }: Props) {
                 <th className="px-3 py-2 text-left font-medium">Source Code</th>
                 <th className="px-3 py-2 text-left font-medium">Domain</th>
                 <th className="px-3 py-2 text-right font-medium">Rows</th>
+                <th className="px-3 py-2 text-left font-medium">Units</th>
+                <th className="px-3 py-2 text-left font-medium">Qty</th>
                 <th className="px-3 py-2 text-left font-medium">Current Concept</th>
                 <th className="px-3 py-2 text-left font-medium">Mapping Status</th>
                 <th className="px-3 py-2 text-left font-medium">Mapping Target</th>
@@ -315,6 +320,12 @@ export default function PatientSourceCodesTab({ personId }: Props) {
                       {TABLE_LABELS[sc.omop_table] || sc.omop_table}
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums">{sc.row_count}</td>
+                    <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
+                      {sc.source_unit || "\u2014"}
+                    </td>
+                    <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
+                      {sc.example_quantity || "\u2014"}
+                    </td>
                     <td className="px-3 py-2 text-xs">
                       {sc.concept_id === 0 ? (
                         <span className="text-muted-foreground">No matching concept</span>

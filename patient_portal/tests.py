@@ -29629,3 +29629,170 @@ class BulkResolveSourceCodesTest(_SmartBase):
         data = poll.json()
         self.assertEqual(data['done'], 2)
         self.assertGreaterEqual(data['resolved'], 2)
+
+
+# ---------------------------------------------------------------------------
+# Source Code Context Fields Tests
+# ---------------------------------------------------------------------------
+
+class SourceCodeContextFieldsTest(_SmartBase):
+    """Tests for source_unit, example_quantity, source_metadata on PatientSourceCode,
+    and the UCUM unit-search endpoint.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.foundation_user.is_staff = True
+        cls.foundation_user.save(update_fields=['is_staff'])
+
+    def _url(self, person_id=None):
+        pid = person_id or self.person.person_id
+        return f'/api/v1/patient-records/{pid}/source-codes/'
+
+    def test_post_source_codes_with_context_fields(self):
+        """POST source-codes accepts and stores source_unit, example_quantity, source_metadata."""
+        resp = self.write_client.post(
+            self._url(),
+            {
+                'source_codes': [
+                    {
+                        'source_value': 'GLUCOSE',
+                        'omop_table': 'measurement',
+                        'occurrence_count': 5,
+                        'source_unit': 'mg/dL',
+                        'example_quantity': '95-120',
+                        'source_metadata': {'reference_range': '70-100', 'category': 'chemistry'},
+                    },
+                ],
+            },
+            format='json',
+        )
+        self.assertIn(resp.status_code, [200, 201])
+        from omop_core.models import PatientSourceCode
+        psc = PatientSourceCode.objects.get(
+            person=self.person, source_value='GLUCOSE', omop_table='measurement',
+        )
+        self.assertEqual(psc.source_unit, 'mg/dL')
+        self.assertEqual(psc.example_quantity, '95-120')
+        self.assertEqual(psc.source_metadata['reference_range'], '70-100')
+
+    def test_get_source_codes_returns_context_fields(self):
+        """GET source-codes includes source_unit, example_quantity, source_metadata."""
+        from omop_core.models import PatientSourceCode
+        PatientSourceCode.objects.create(
+            person=self.person,
+            source_value='HGB_CTX',
+            omop_table='measurement',
+            occurrence_count=3,
+            source_unit='g/dL',
+            example_quantity='12.5',
+            source_metadata={'category': 'hematology'},
+        )
+        resp = self.write_client.get(self._url())
+        self.assertEqual(resp.status_code, 200)
+        codes = resp.json()['source_codes']
+        hgb = next(sc for sc in codes if sc['source_value'] == 'HGB_CTX')
+        self.assertEqual(hgb['source_unit'], 'g/dL')
+        self.assertEqual(hgb['example_quantity'], '12.5')
+        self.assertEqual(hgb['source_metadata']['category'], 'hematology')
+
+    def test_post_upsert_updates_context_fields(self):
+        """Re-posting same source code updates context fields."""
+        from omop_core.models import PatientSourceCode
+        PatientSourceCode.objects.create(
+            person=self.person,
+            source_value='WBC_UP',
+            omop_table='measurement',
+            occurrence_count=1,
+            source_unit='',
+            example_quantity='',
+        )
+        resp = self.write_client.post(
+            self._url(),
+            {
+                'source_codes': [
+                    {
+                        'source_value': 'WBC_UP',
+                        'omop_table': 'measurement',
+                        'occurrence_count': 10,
+                        'source_unit': 'K/uL',
+                        'example_quantity': '5.0-10.0',
+                        'source_metadata': {'flag': 'normal'},
+                    },
+                ],
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        psc = PatientSourceCode.objects.get(
+            person=self.person, source_value='WBC_UP', omop_table='measurement',
+        )
+        self.assertEqual(psc.source_unit, 'K/uL')
+        self.assertEqual(psc.example_quantity, '5.0-10.0')
+        self.assertEqual(psc.source_metadata['flag'], 'normal')
+
+    def test_post_invalid_metadata_becomes_empty_dict(self):
+        """source_metadata that is not a dict becomes {}."""
+        resp = self.write_client.post(
+            self._url(),
+            {
+                'source_codes': [
+                    {
+                        'source_value': 'BAD_META',
+                        'omop_table': 'measurement',
+                        'source_metadata': 'not a dict',
+                    },
+                ],
+            },
+            format='json',
+        )
+        self.assertIn(resp.status_code, [200, 201])
+        from omop_core.models import PatientSourceCode
+        psc = PatientSourceCode.objects.get(
+            person=self.person, source_value='BAD_META',
+        )
+        self.assertEqual(psc.source_metadata, {})
+
+    def test_unit_search_exact_match(self):
+        """Unit search returns exact match when UCUM concept_code matches."""
+        from omop_core.models import Concept, Vocabulary
+        Vocabulary.objects.get_or_create(
+            vocabulary_id='UCUM',
+            defaults={
+                'vocabulary_name': 'UCUM',
+                'vocabulary_reference': 'http://unitsofmeasure.org',
+                'vocabulary_version': '1.0',
+                'vocabulary_concept_id': 0,
+            },
+        )
+        Concept.objects.get_or_create(
+            concept_id=8840,
+            defaults={
+                'concept_name': 'milligram per deciliter',
+                'concept_code': 'mg/dL',
+                'vocabulary_id': 'UCUM',
+                'domain_id': 'Unit',
+                'concept_class_id': 'Unit',
+                'standard_concept': 'S',
+            },
+        )
+        # Use session auth (staff user) since write_client is a service token
+        from django.test import Client
+        client = Client()
+        client.force_login(self.foundation_user)
+        resp = client.get('/api/v1/code-mappings/unit-search/', {'q': 'mg/dL'})
+        self.assertEqual(resp.status_code, 200)
+        results = resp.json()['results']
+        self.assertTrue(len(results) >= 1)
+        self.assertEqual(results[0]['concept_code'], 'mg/dL')
+        self.assertEqual(results[0]['match'], 'exact')
+
+    def test_unit_search_empty_query(self):
+        """Unit search with empty query returns empty results."""
+        from django.test import Client
+        client = Client()
+        client.force_login(self.foundation_user)
+        resp = client.get('/api/v1/code-mappings/unit-search/', {'q': ''})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['results'], [])

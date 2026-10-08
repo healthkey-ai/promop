@@ -5587,12 +5587,20 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                     {'detail': f'Entry {i}: occurrence_count must be a positive integer.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            source_unit = (entry.get('source_unit') or '').strip()[:50]
+            example_quantity = (entry.get('example_quantity') or '').strip()[:100]
+            source_metadata = entry.get('source_metadata')
+            if not isinstance(source_metadata, dict):
+                source_metadata = {}
             objs.append(PatientSourceCode(
                 person=person,
                 source_value=sv,
                 source_vocabulary_id=(entry.get('source_vocabulary_id') or '').strip(),
                 omop_table=(entry.get('omop_table') or '').strip(),
                 occurrence_count=occ,
+                source_unit=source_unit,
+                example_quantity=example_quantity,
+                source_metadata=source_metadata,
                 last_seen=now,
             ))
 
@@ -5617,7 +5625,7 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             objs,
             update_conflicts=True,
             unique_fields=['person', 'source_value', 'source_vocabulary_id', 'omop_table'],
-            update_fields=['occurrence_count', 'last_seen'],
+            update_fields=['occurrence_count', 'source_unit', 'example_quantity', 'source_metadata', 'last_seen'],
         )
 
         resp_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
@@ -6866,6 +6874,9 @@ def _resolve_source_code_mappings(
                 'mapping_target_concept_name': None,
                 'source_vocabulary_id': row.get('source_vocabulary_id', ''),
                 'source_code': source_value,
+                'source_unit': row.get('source_unit', ''),
+                'example_quantity': row.get('example_quantity', ''),
+                'source_metadata': row.get('source_metadata') or {},
             }
 
             if mapping:
@@ -6900,7 +6911,8 @@ def _get_patient_source_codes(person: Person) -> list[dict]:
 
     psc_rows = list(
         PatientSourceCode.objects.filter(person=person)
-        .values('source_value', 'source_vocabulary_id', 'omop_table', 'occurrence_count')
+        .values('source_value', 'source_vocabulary_id', 'omop_table', 'occurrence_count',
+                'source_unit', 'example_quantity', 'source_metadata')
     )
     if not psc_rows:
         return _aggregate_patient_source_codes(person)
@@ -6911,6 +6923,9 @@ def _get_patient_source_codes(person: Person) -> list[dict]:
             'source_value': row['source_value'],
             'source_vocabulary_id': row.get('source_vocabulary_id', ''),
             'row_count': row['occurrence_count'],
+            'source_unit': row.get('source_unit', ''),
+            'example_quantity': row.get('example_quantity', ''),
+            'source_metadata': row.get('source_metadata') or {},
         })
 
     return _resolve_source_code_mappings(by_table)
@@ -11092,6 +11107,7 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
             'concept_vocabulary_id': '',
             'domain': '',
             'concept_class_id': '',
+            'destination_unit_concept_id': mapping.destination_unit_concept_id if mapping else None,
             'locked_by_username': _user_display(mapping.locked_by) if mapping and mapping.locked_by_id else None,
             'locked_at': (mapping.locked_at.isoformat() if mapping and mapping.locked_at else None),
         }
@@ -11165,6 +11181,7 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
         # Unit info for LOINC Measurement concepts — helps curators assess
         # mapping quality without opening a concept search.
         **_concept_unit_fields(concept),
+        'destination_unit_concept_id': mapping.destination_unit_concept_id if mapping else None,
         # Edit lock
         'locked_by_username': _user_display(mapping.locked_by) if mapping and mapping.locked_by_id else None,
         'locked_at': (mapping.locked_at.isoformat() if mapping and mapping.locked_at else None),
@@ -11605,6 +11622,18 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
         values['reviewed_at'] = None
     if 'notes' in data:
         values['notes'] = str(data.get('notes') or '').strip()
+    if 'destination_unit_concept_id' in data:
+        raw_unit_id = data.get('destination_unit_concept_id')
+        if raw_unit_id in (None, '', 0):
+            values['destination_unit_concept'] = None
+        else:
+            try:
+                unit_concept = Concept.objects.get(concept_id=int(raw_unit_id))
+                values['destination_unit_concept'] = unit_concept
+            except (Concept.DoesNotExist, ValueError, TypeError):
+                raise serializers.ValidationError({
+                    'destination_unit_concept_id': 'Unit concept not found.'
+                })
     try:
         if mapping is None:
             if concept is None:
@@ -11958,6 +11987,52 @@ def code_mapping_upload(request):
         serialize_receipt(receipt, duplicate=duplicate),
         status=status.HTTP_200_OK if duplicate else status.HTTP_201_CREATED,
     )
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def code_mapping_unit_search(request):
+    """Search UCUM unit concepts by code or name.
+
+    Returns exact and close (trigram) matches so the mapping dialog can offer
+    a unit picker with match-quality indicators.
+    """
+    q = (request.query_params.get('q') or '').strip()
+    if not q:
+        return Response({'results': []})
+    from django.contrib.postgres.search import TrigramSimilarity
+    base = Concept.objects.filter(
+        vocabulary_id='UCUM', standard_concept='S', invalid_reason__isnull=True,
+    )
+    results = []
+    seen = set()
+    # Exact match on concept_code.
+    exact = base.filter(concept_code__iexact=q).first()
+    if exact:
+        results.append({
+            'concept_id': exact.concept_id,
+            'concept_code': exact.concept_code,
+            'concept_name': exact.concept_name,
+            'match': 'exact',
+        })
+        seen.add(exact.concept_id)
+    # Close matches by trigram similarity on concept_code and concept_name.
+    close = (
+        base.annotate(
+            sim=TrigramSimilarity('concept_code', q) + TrigramSimilarity('concept_name', q),
+        )
+        .filter(sim__gt=0.15)
+        .exclude(concept_id__in=seen)
+        .order_by('-sim')[:10]
+    )
+    for c in close:
+        results.append({
+            'concept_id': c.concept_id,
+            'concept_code': c.concept_code,
+            'concept_name': c.concept_name,
+            'match': 'close',
+        })
+    return Response({'results': results})
 
 
 @api_view(['GET', 'POST'])
