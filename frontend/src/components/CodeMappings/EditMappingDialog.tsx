@@ -166,7 +166,11 @@ export default function EditMappingDialog({
       setIndividualSuggestion(null);
 
       if (mode === "new") {
-        setForm({ ...emptyForm });
+        // When opened from PatientSourceCodesTab, selectedRow carries the
+        // source identity (code, vocabulary, domain, table) even though no
+        // mapping exists yet.  Pre-populate those fields so the curator does
+        // not have to re-type them.
+        setForm(selectedRow ? buildEditForm(selectedRow, reference) : { ...emptyForm });
         setSearchVocabulary("");
         setSearchScope(DEFAULT_SEARCH_SCOPE);
         setConceptSearchQuery("");
