@@ -26,6 +26,7 @@ from omop_core.models import (
 )
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc
 from omop_core.services.mappings import (
+    CONCEPT_DISEASE_FIRST_OCCURRENCE,
     WEARABLE_CONCEPT_CODE, WEARABLE_ARTIFACT_BOUNDS, WEARABLE_MIN_VALID_DAYS,
     WEARABLE_TREND_IMPROVING_PCT, WEARABLE_TREND_DECLINING_PCT,
 )
@@ -65,7 +66,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 10
+DERIVATION_VERSION = 11
 
 # Fields that are entirely derived from OMOP tables and must be reset before
 # each refresh so deletions are reflected (not just additions).
@@ -689,6 +690,9 @@ class OmopSnapshot:
     # Keep clear markers for the corrected breast questions: a source-only
     # clear must also suppress an older vocabulary-resolved result.
     breast_measurements: list | None = None
+    # Per-refresh memo of (disease slug, end date) per line of therapy, read
+    # only when the person has more than one cancer to choose the primary from.
+    cancer_lines: dict = dataclasses.field(default_factory=dict, compare=False)
 
 
 def _first_by_code(snapshot: OmopSnapshot, code: str, table: str = 'measurement'):
@@ -1360,13 +1364,90 @@ def condition_clinical_status(condition):
     return name[:50]
 
 
+def _condition_slug(condition) -> str:
+    concept_name = _usable_concept_name(condition.condition_concept) if condition.condition_concept_id else None
+    name = concept_name or condition.condition_source_value or ''
+    return _disease_name_to_slug(_canonicalize_disease(name)) if name.strip() else ''
+
+
+def _cancers_with_lines(person, snapshot: OmopSnapshot, today) -> tuple[set, set]:
+    """Disease slugs with a current line of therapy, and with any line (#1738).
+
+    A line belongs to the cancer its Disease Episode names (#1739). A line
+    with no Disease Episode, or one whose cancer is no longer on the record,
+    belongs to the primary cancer, which here is the one the record held before
+    this refresh: the row is still unsaved. Slugs are in the stored key form
+    (``disease_key``), as Disease Episodes keep them.
+    """
+    if 'lines' not in snapshot.cancer_lines:
+        from omop_core.services.disease_episodes import (
+            disease_key, primary_disease_ids, primary_disease_slug, regimen_episodes, slug_of,
+        )
+        from omop_oncology.models import Episode
+
+        diseases = {
+            e.episode_id: slug_of(e)
+            for e in Episode.objects.filter(person=person, episode_concept_id=CONCEPT_DISEASE_FIRST_OCCURRENCE)
+        }
+        lines = list(regimen_episodes(person).values_list('episode_parent_id', 'episode_end_date'))
+        stored = primary_disease_slug(person)
+        primary_ids = primary_disease_ids(person, stored) if diseases else set()
+        owner = disease_key(stored)
+        snapshot.cancer_lines['lines'] = [
+            (diseases.get(parent, '') if parent is not None and parent not in primary_ids else owner, end)
+            for parent, end in lines
+        ]
+    lines = snapshot.cancer_lines['lines']
+    treated = {slug for slug, _ in lines if slug}
+    current = {slug for slug, end in lines if slug and (end is None or end >= today)}
+    return current, treated
+
+
+def _primary_cancer_condition(person, snapshot: OmopSnapshot, cancers: list):
+    """The cancer the record is about, among the person's cancer conditions (#1738).
+
+    The most recent diagnosis is not enough: a cancer diagnosed later and since
+    resolved would displace the one still being treated, taking its stage,
+    biomarkers and lines of therapy with it. In order of preference:
+
+    1. a cancer that is not resolved over one that is (ended, or a resolved,
+       inactive, history-of or rule-out status);
+    2. one with a current line of therapy;
+    3. one with any line of therapy;
+    4. one not in remission;
+    5. the most recently diagnosed.
+
+    ``cancers`` is newest first, so a single cancer costs no extra queries.
+    """
+    if len(cancers) < 2:
+        return cancers[0] if cancers else None
+    today = timezone.localdate()
+    current, treated = _cancers_with_lines(person, snapshot, today)
+
+    from omop_core.services.disease_episodes import disease_key
+
+    def rank(condition):
+        slug = disease_key(_condition_slug(condition))
+        return (
+            _condition_is_current(condition, today),
+            slug in current,
+            slug in treated,
+            condition_clinical_status(condition) != 'remission',
+            condition.condition_start_date or date.min,
+            condition.condition_occurrence_id or 0,
+        )
+
+    return max(cancers, key=rank)
+
+
 def _get_disease_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
     snapshot = snapshot or _build_snapshot(person)
 
-    # Most-recent oncologic condition — match common OMOP oncology terms
-    # in either the mapped concept_name OR the original condition_source_value
-    # (concept_id=0 rows store the disease name only in source_value).
+    # The primary cancer among the oncologic conditions — match common OMOP
+    # oncology terms in either the mapped concept_name OR the original
+    # condition_source_value (concept_id=0 rows store the disease name only in
+    # source_value).
     _ONCO_KEYWORDS = [
         'cancer', 'neoplasm', 'malignant', 'lymphoma', 'leukemia',
         'myeloma', 'carcinoma', 'sarcoma', 'tumor',
@@ -1380,8 +1461,9 @@ def _get_disease_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             return False
         return any(kw in cname or kw in src for kw in _ONCO_KEYWORDS)
 
-    # snapshot.conditions is already ordered -condition_start_date
-    cancer_condition = next((c for c in snapshot.conditions if _is_oncologic(c)), None)
+    # snapshot.conditions is ordered -condition_start_date (newest first).
+    cancers = [c for c in snapshot.conditions if _is_oncologic(c)]
+    cancer_condition = _primary_cancer_condition(person, snapshot, cancers)
 
     if cancer_condition:
         # Prefer source_value when concept is unmapped (id=0 / sentinel)
@@ -1403,7 +1485,9 @@ def _get_disease_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     # snapshot.conditions is -start_date ordered, so first is most recent
     most_recent_condition = snapshot.conditions[0] if snapshot.conditions else None
 
-    status = condition_clinical_status(most_recent_condition)
+    # With a cancer, its own status: a later, unrelated condition (a resolved
+    # infection, say) says nothing about it.
+    status = condition_clinical_status(cancer_condition or most_recent_condition)
     if not status:
         rows = snapshot.obs_by_source.get(SAMPLE_DISEASE_STATUS_SOURCE_VALUE, ())
         status = next((o.value_as_string for o in rows if meaningful_disease_status(o.value_as_string)), None)
