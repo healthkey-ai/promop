@@ -3,6 +3,7 @@ from datetime import timedelta
 
 import pytest
 from django.core import mail
+from django.urls import resolve
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -135,8 +136,10 @@ def test_a_shared_record_is_read_only_and_never_reaches_the_patients_own_endpoin
     assert client.post('/api/v1/phr/shared/medications/', {}, format='json').status_code == 405
     assert client.get('/api/v1/phr/about/').status_code in (401, 403)
     assert client.get('/api/v1/phr/shares/').status_code in (401, 403)
-    # The feed summarises every section, so it has no shared twin.
-    assert 'json' not in client.get('/api/v1/phr/shared/whats-new/')['Content-Type']
+    # The feed summarises every section, so it has no shared twin: the path falls
+    # through to the frontend's catch-all. Checked by route, not by rendering it,
+    # which needs a built frontend (index.html) the backend suite doesn't have.
+    assert resolve('/api/v1/phr/shared/whats-new/').url_name == 'home'
 
 
 def test_the_browser_may_send_the_token_cross_origin(settings):
