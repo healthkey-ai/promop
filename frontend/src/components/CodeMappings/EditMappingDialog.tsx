@@ -1171,7 +1171,7 @@ function DestinationUnitPicker({
   sourceUnit, selectedConceptId, selectedConceptCode, selectedConceptName,
   matchType, onSelect, onMintUnit,
 }: DestinationUnitPickerProps) {
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(sourceUnit);
   const [results, setResults] = useState<UnitResult[]>([]);
   const [searching, setSearching] = useState(false);
   const [searched, setSearched] = useState(false);
@@ -1201,7 +1201,6 @@ function DestinationUnitPicker({
   // Auto-search on sourceUnit when dialog opens
   useEffect(() => {
     if (sourceUnit && !searched && !selectedConceptId) {
-      setQuery(sourceUnit);
       (async () => { await doSearch(sourceUnit); })();
     }
   }, [sourceUnit, searched, selectedConceptId, doSearch]);
