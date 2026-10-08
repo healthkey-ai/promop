@@ -40,6 +40,7 @@ from omop_core.models import (
     Measurement,
     MeasurementOwnership,
     Note,
+    ImageOccurrence,
     NoteNlp,
     Observation,
     ObservationPeriod,
@@ -48,6 +49,7 @@ from omop_core.models import (
     PatientDocument,
     PatientGroupMembership,
     PatientRecord,
+    PatientSourceCode,
     PatientTrialEnrollment,
     Person,
     PersonalRepresentative,
@@ -129,6 +131,7 @@ PATIENT_TABLES: tuple[PatientTable, ...] = (
     PatientTable(ConditionOccurrence, 'person_id'),
     PatientTable(DrugExposure, 'person_id'),
     PatientTable(ProcedureOccurrence, 'person_id'),
+    PatientTable(ImageOccurrence, 'person_id'),
     PatientTable(Measurement, 'person_id'),
     PatientTable(Observation, 'person_id'),
     PatientTable(Death, 'person_id'),
@@ -148,6 +151,7 @@ PATIENT_TABLES: tuple[PatientTable, ...] = (
     PatientTable(SupportiveTherapyCourse, 'person_id'),
     PatientTable(WearableUpload, 'person_id'),
     PatientTable(PatientDocument, 'person_id'),
+    PatientTable(PatientSourceCode, 'person_id'),
     PatientTable(PatientTrialEnrollment, 'person_id'),
     PatientTable(TrialSearchPreferences, 'person_id'),
     PatientTable(PatientRecord, 'person_id'),
@@ -173,6 +177,8 @@ _INT_REFS: dict[str, type[Model] | None] = {
     'visit_occurrence_id': VisitOccurrence,
     'provider_id': None,
     'care_site_id': None,
+    # PatientDocument: the imaging study a report documents (#1731).
+    'procedure_occurrence_id': ProcedureOccurrence,
 }
 
 # Polymorphic id column and the column holding its field concept.
@@ -180,6 +186,7 @@ _EVENT_REFS: dict[type[Model], tuple[str, str]] = {
     EpisodeEvent: ('event_id', 'episode_event_field_concept_id'),
     Measurement: ('measurement_event_id', 'meas_event_field_concept_id'),
     Observation: ('observation_event_id', 'obs_event_field_concept_id'),
+    Note: ('note_event_id', 'note_event_field_concept_id'),
 }
 
 # System rows that would be deleted with the person, or that point at it by id.

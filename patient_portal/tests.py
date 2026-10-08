@@ -10710,6 +10710,50 @@ class ServiceTokenOmopAccessTest(TestCase):
         SERVICE_AUTH_TOKEN='test-service-secret',
         SERVICE_AUTH_SCOPES='patient/*.read system/etl.write',
     )
+    def test_etl_grant_can_post_source_codes(self):
+        """The scope the POST documents must actually reach the view."""
+        from omop_core.models import PatientSourceCode
+
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION='Bearer test-service-secret')
+        response = client.post(
+            f'/api/v1/patient-records/{self.person_a.person_id}/source-codes/',
+            {'source_codes': [{
+                'source_value': 'HGB',
+                'source_vocabulary_id': 'LOINC',
+                'omop_table': 'measurement',
+                'occurrence_count': 3,
+            }]},
+            format='json',
+        )
+        # 201: the upsert inserted this code rather than refreshing one.
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data, {'created': 1, 'updated': 0})
+        self.assertTrue(PatientSourceCode.objects.filter(
+            person=self.person_a, source_value='HGB').exists())
+
+    @override_settings(
+        SERVICE_AUTH_TOKEN='test-service-secret',
+        SERVICE_AUTH_SCOPES='patient/*.read',
+    )
+    def test_read_only_token_still_cannot_post_source_codes(self):
+        """Widening the class must not let a read-only token write."""
+        from omop_core.models import PatientSourceCode
+
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION='Bearer test-service-secret')
+        response = client.post(
+            f'/api/v1/patient-records/{self.person_a.person_id}/source-codes/',
+            {'source_codes': [{'source_value': 'HGB'}]}, format='json',
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(PatientSourceCode.objects.filter(
+            person=self.person_a).exists())
+
+    @override_settings(
+        SERVICE_AUTH_TOKEN='test-service-secret',
+        SERVICE_AUTH_SCOPES='patient/*.read system/etl.write',
+    )
     def test_etl_capability_is_not_a_general_write_grant(self):
         client = APIClient()
         client.credentials(HTTP_AUTHORIZATION='Bearer test-service-secret')
@@ -29313,6 +29357,7 @@ class PatientSourceCodesTest(_SmartBase):
     @classmethod
     def setUpTestData(cls):
         super().setUpTestData()
+        # source-codes requires _is_admin_actor — make foundation_user staff.
         cls.foundation_user.is_staff = True
         cls.foundation_user.save(update_fields=['is_staff'])
         # Create measurement rows with same source_value to test aggregation.
@@ -29425,6 +29470,7 @@ class ResolvePersonSourceCodesTest(_SmartBase):
     @classmethod
     def setUpTestData(cls):
         super().setUpTestData()
+        # resolve-source-codes requires _is_admin_actor — make foundation_user staff.
         cls.foundation_user.is_staff = True
         cls.foundation_user.save(update_fields=['is_staff'])
         from omop_core.models import Concept
@@ -29532,6 +29578,7 @@ class BulkResolveSourceCodesTest(_SmartBase):
     @classmethod
     def setUpTestData(cls):
         super().setUpTestData()
+        # bulk-resolve requires _is_admin_actor — make foundation_user staff.
         cls.foundation_user.is_staff = True
         cls.foundation_user.save(update_fields=['is_staff'])
         # Second person for bulk test.

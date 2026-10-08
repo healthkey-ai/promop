@@ -125,11 +125,16 @@ function Stat({ label, value, detail }: { label: string; value: string; detail?:
   </div>;
 }
 
+import { useState } from "react";
+
+const FACILITIES_COLLAPSED_LIMIT = 3;
+
 export default function SourceEvidencePanel({ evidence, loading, error }: {
   evidence: SourceEvidence | null;
   loading: boolean;
   error?: string;
 }) {
+  const [facilitiesExpanded, setFacilitiesExpanded] = useState(false);
   const metadata = evidence?.metadata || {};
   const units = evidence?.units || [];
   const facilities = evidence?.facilities || [];
@@ -161,46 +166,64 @@ export default function SourceEvidencePanel({ evidence, loading, error }: {
           detail="Deduplicated records across codes with this description" />}
       </dl>
 
-      {facilities.length > 0 && <div className="mt-4">
-        <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-600">Observed hospitals / facilities</h4>
-        <p className="mt-1 text-xs text-slate-500">
-          Context from source connections; the scope and confidence distinguish an individual site from an Epic tenant, brand, attached facility, or patient-entered alias.
-        </p>
-        <div className="mt-2 overflow-x-auto">
-          <table aria-label="Observed source facilities" className="w-full text-left text-xs">
-            <thead className="text-slate-500"><tr>
-              <th className="pb-2 pr-3 font-semibold">Hospital / facility</th>
-              <th className="pb-2 pr-3 font-semibold">Scope</th>
-              <th className="pb-2 pr-3 font-semibold">Confidence</th>
-              <th className="pb-2 text-right font-semibold">Records</th>
-            </tr></thead>
-            <tbody className="divide-y divide-slate-200">
-              {facilities.map((facility, index) => <tr key={`${facility.id || facility.name}|${facility.level || ""}|${index}`}>
-                <td className="py-2 pr-3 text-slate-900">
-                  <span className="font-medium">{facility.name}</span>
-                  {facility.parent_name && facility.parent_name !== facility.name && <span className="block text-[10px] text-slate-500">
-                    Parent: {facility.parent_name}
-                  </span>}
-                  {facility.alternate_name && facility.alternate_name !== facility.name && <span className="block text-[10px] text-slate-500">
-                    Also supplied as: {facility.alternate_name}
-                  </span>}
-                </td>
-                <td className="py-2 pr-3 text-slate-700">{facility.level || "unspecified"}</td>
-                <td className="py-2 pr-3 text-slate-700">
-                  {facility.confidence || "unspecified"}
-                  {facility.low_confidence_reason && <span className="block text-[10px] text-amber-700">
-                    {facility.low_confidence_reason.replace(/_/g, " ")}
-                  </span>}
-                </td>
-                <td className="py-2 text-right text-slate-700">
-                  {number(facility.records)}
-                  {facility.patients != null && <span className="block text-[10px] text-slate-500">{number(facility.patients)} patients</span>}
-                </td>
-              </tr>)}
-            </tbody>
-          </table>
-        </div>
-      </div>}
+      {facilities.length > 0 && (() => {
+        const collapsible = facilities.length > FACILITIES_COLLAPSED_LIMIT;
+        const visibleFacilities = collapsible && !facilitiesExpanded
+          ? facilities.slice(0, FACILITIES_COLLAPSED_LIMIT)
+          : facilities;
+        const hiddenCount = facilities.length - FACILITIES_COLLAPSED_LIMIT;
+        return <div className="mt-4">
+          <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-600">Observed hospitals / facilities</h4>
+          <p className="mt-1 text-xs text-slate-500">
+            Context from source connections; the scope and confidence distinguish an individual site from an Epic tenant, brand, attached facility, or patient-entered alias.
+          </p>
+          <div className="mt-2 overflow-x-auto">
+            <table aria-label="Observed source facilities" className="w-full text-left text-xs">
+              <thead className="text-slate-500"><tr>
+                <th className="pb-2 pr-3 font-semibold">Hospital / facility</th>
+                <th className="pb-2 pr-3 font-semibold">Scope</th>
+                <th className="pb-2 pr-3 font-semibold">Confidence</th>
+                <th className="pb-2 text-right font-semibold">Records</th>
+              </tr></thead>
+              <tbody className="divide-y divide-slate-200">
+                {visibleFacilities.map((facility, index) => <tr key={`${facility.id || facility.name}|${facility.level || ""}|${index}`}>
+                  <td className="py-2 pr-3 text-slate-900">
+                    <span className="font-medium">{facility.name}</span>
+                    {facility.parent_name && facility.parent_name !== facility.name && <span className="block text-[10px] text-slate-500">
+                      Parent: {facility.parent_name}
+                    </span>}
+                    {facility.alternate_name && facility.alternate_name !== facility.name && <span className="block text-[10px] text-slate-500">
+                      Also supplied as: {facility.alternate_name}
+                    </span>}
+                  </td>
+                  <td className="py-2 pr-3 text-slate-700">{facility.level || "unspecified"}</td>
+                  <td className="py-2 pr-3 text-slate-700">
+                    {facility.confidence || "unspecified"}
+                    {facility.low_confidence_reason && <span className="block text-[10px] text-amber-700">
+                      {facility.low_confidence_reason.replace(/_/g, " ")}
+                    </span>}
+                  </td>
+                  <td className="py-2 text-right text-slate-700">
+                    {number(facility.records)}
+                    {facility.patients != null && <span className="block text-[10px] text-slate-500">{number(facility.patients)} patients</span>}
+                  </td>
+                </tr>)}
+              </tbody>
+            </table>
+          </div>
+          {collapsible && (
+            <button
+              type="button"
+              onClick={() => setFacilitiesExpanded((prev) => !prev)}
+              className="mt-1 text-xs font-medium text-sky-700 hover:text-sky-900"
+            >
+              {facilitiesExpanded
+                ? "Show fewer"
+                : `Show ${hiddenCount} more`}
+            </button>
+          )}
+        </div>;
+      })()}
 
       {units.length > 0 && <div className="mt-4 overflow-x-auto">
         <table aria-label="Observed source units" className="w-full text-left text-xs">

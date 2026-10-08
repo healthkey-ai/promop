@@ -5,6 +5,13 @@ import type {
   SourceCodesResponse,
   ResolveResult,
 } from "../../types/sourceCodes";
+import EditMappingDialog from "../CodeMappings/EditMappingDialog";
+import {
+  type CodeMappingRow,
+  type Reference,
+  type RepointResult,
+  emptyReference,
+} from "../CodeMappings/codeMappingTypes";
 
 type Props = { personId: string };
 
@@ -22,6 +29,43 @@ const TABLE_LABELS: Record<string, string> = {
   procedure: "Procedure",
 };
 
+const TABLE_TO_DOMAIN: Record<string, string> = {
+  measurement: "Measurement",
+  observation: "Observation",
+  condition: "Condition",
+  drug_exposure: "Drug",
+  procedure: "Procedure",
+};
+
+/** Build a CodeMappingRow stub from a PatientSourceCode for the edit dialog. */
+function sourceCodeToRow(sc: PatientSourceCode): CodeMappingRow {
+  const domain = TABLE_TO_DOMAIN[sc.omop_table] || "";
+  return {
+    mapping_id: sc.mapping_id,
+    domain_id: domain,
+    source_vocabulary_id: sc.source_vocabulary_id || "",
+    source_code: sc.source_code || sc.source_value,
+    source_code_description: "",
+    destination_concept_id: sc.mapping_target_concept_id || 0,
+    destination_concept_name: sc.mapping_target_concept_name || "",
+    destination_concept_code: "",
+    destination_vocabulary_id: "",
+    destination_concept_class_id: "",
+    destination_omop_table: sc.omop_table,
+    destination_domain_id: domain,
+    status: sc.mapping_status,
+    notes: "",
+    origin: "",
+    origin_system: "",
+    suggest_strategy: "",
+    umls_cui: "",
+    created_by: "",
+    occurrence_count: sc.row_count,
+    destination_count: 0,
+    has_mapping: sc.mapping_id !== null,
+  };
+}
+
 export default function PatientSourceCodesTab({ personId }: Props) {
   const [data, setData] = useState<SourceCodesResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -29,6 +73,15 @@ export default function PatientSourceCodesTab({ personId }: Props) {
   const [resolving, setResolving] = useState(false);
   const [resolveResult, setResolveResult] = useState<ResolveResult | null>(null);
   const [filter, setFilter] = useState<"all" | "unmapped">("all");
+  const [reference, setReference] = useState<Reference>(emptyReference);
+  const [banner, setBanner] = useState<string | null>(null);
+
+  // Dialog state
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [dialogMode, setDialogMode] = useState<"new" | "edit">("new");
+  const [dialogRow, setDialogRow] = useState<CodeMappingRow | null>(null);
+  const [strategies, setStrategies] = useState({ umls: true, lexical: true, vectors: true });
+  const [rankingModel, setRankingModel] = useState<"anthropic" | "jev" | "both">("anthropic");
 
   const fetchSourceCodes = useCallback(async () => {
     try {
@@ -61,6 +114,21 @@ export default function PatientSourceCodesTab({ personId }: Props) {
     };
   }, [fetchSourceCodes]);
 
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.get<Reference>("/v1/code-mappings/reference/");
+        if (!cancelled) setReference({ ...emptyReference, ...(res.data || {}) });
+      } catch {
+        // Non-fatal: dialog works with empty reference for basic mapping
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const handleResolve = async () => {
     setResolving(true);
     setResolveResult(null);
@@ -81,6 +149,40 @@ export default function PatientSourceCodesTab({ personId }: Props) {
     } finally {
       setResolving(false);
     }
+  };
+
+  const handleRowClick = (sc: PatientSourceCode) => {
+    setBanner(null);
+    const row = sourceCodeToRow(sc);
+    setDialogRow(row);
+    setDialogMode(sc.mapping_id ? "edit" : "new");
+    setDialogOpen(true);
+  };
+
+  const handleDialogClose = () => {
+    setDialogOpen(false);
+    setDialogRow(null);
+  };
+
+  const handleDialogSaved = (_saved: CodeMappingRow, repoint: RepointResult | null) => {
+    handleDialogClose();
+    if (repoint && repoint.rows_updated) {
+      setBanner(
+        `Updated ${repoint.rows_updated} row(s) across `
+        + `${repoint.persons_marked_stale} patient(s)`
+        + (repoint.rows_collapsed ? `, ${repoint.rows_collapsed} duplicate(s) collapsed` : "")
+        + ". Patient records queued for re-derivation.",
+      );
+    } else {
+      setBanner("Mapping saved.");
+    }
+    void fetchSourceCodes();
+  };
+
+  const handleDialogDeleted = () => {
+    handleDialogClose();
+    setBanner("Mapping deleted.");
+    void fetchSourceCodes();
   };
 
   if (loading) {
@@ -145,6 +247,13 @@ export default function PatientSourceCodesTab({ personId }: Props) {
         </div>
       )}
 
+      {/* Save banner */}
+      {banner && (
+        <div className="rounded-md border border-sky-200 bg-sky-50 p-3 text-sm text-sky-800">
+          {banner}
+        </div>
+      )}
+
       {/* Filter toggles */}
       <div className="flex gap-2">
         <button
@@ -188,61 +297,76 @@ export default function PatientSourceCodesTab({ personId }: Props) {
               </tr>
             </thead>
             <tbody className="divide-y">
-              {filtered.map((sc, i) => (
-                <SourceCodeRow key={`${sc.omop_table}-${sc.source_value}-${i}`} sc={sc} />
-              ))}
+              {filtered.map((sc, i) => {
+                const badge = STATUS_BADGE[sc.mapping_status] || STATUS_BADGE.unmapped;
+                return (
+                  <tr
+                    key={`${sc.omop_table}-${sc.source_value}-${i}`}
+                    className="cursor-pointer hover:bg-muted/30"
+                    onClick={() => handleRowClick(sc)}
+                  >
+                    <td className="px-3 py-2">
+                      <div className="font-mono text-xs">{sc.source_value}</div>
+                      {sc.source_vocabulary_id && (
+                        <div className="text-xs text-muted-foreground">{sc.source_vocabulary_id}</div>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-xs text-muted-foreground">
+                      {TABLE_LABELS[sc.omop_table] || sc.omop_table}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums">{sc.row_count}</td>
+                    <td className="px-3 py-2 text-xs">
+                      {sc.concept_id === 0 ? (
+                        <span className="text-muted-foreground">No matching concept</span>
+                      ) : (
+                        <span>
+                          {sc.concept_name || `Concept ${sc.concept_id}`}
+                          <span className="ml-1 text-muted-foreground">({sc.concept_id})</span>
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2">
+                      <span
+                        className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${badge.bg} ${badge.text}`}
+                      >
+                        {badge.label}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 text-xs">
+                      {sc.mapping_target_concept_id ? (
+                        <span>
+                          {sc.mapping_target_concept_name || `Concept ${sc.mapping_target_concept_id}`}
+                          <span className="ml-1 text-muted-foreground">
+                            ({sc.mapping_target_concept_id})
+                          </span>
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">&mdash;</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
       )}
+
+      <EditMappingDialog
+        open={dialogOpen}
+        onClose={handleDialogClose}
+        mode={dialogMode}
+        row={dialogRow}
+        reference={reference}
+        canApprove={false}
+        strategies={strategies}
+        rankingModel={rankingModel}
+        onStrategiesChange={setStrategies}
+        onRankingModelChange={setRankingModel}
+        onSaved={handleDialogSaved}
+        onDeleted={handleDialogDeleted}
+        onBanner={setBanner}
+      />
     </div>
-  );
-}
-
-function SourceCodeRow({ sc }: { sc: PatientSourceCode }) {
-  const badge = STATUS_BADGE[sc.mapping_status] || STATUS_BADGE.unmapped;
-
-  return (
-    <tr className="hover:bg-muted/30">
-      <td className="px-3 py-2">
-        <div className="font-mono text-xs">{sc.source_value}</div>
-        {sc.source_vocabulary_id && (
-          <div className="text-xs text-muted-foreground">{sc.source_vocabulary_id}</div>
-        )}
-      </td>
-      <td className="px-3 py-2 text-xs text-muted-foreground">
-        {TABLE_LABELS[sc.omop_table] || sc.omop_table}
-      </td>
-      <td className="px-3 py-2 text-right tabular-nums">{sc.row_count}</td>
-      <td className="px-3 py-2 text-xs">
-        {sc.concept_id === 0 ? (
-          <span className="text-muted-foreground">No matching concept</span>
-        ) : (
-          <span>
-            {sc.concept_name || `Concept ${sc.concept_id}`}
-            <span className="ml-1 text-muted-foreground">({sc.concept_id})</span>
-          </span>
-        )}
-      </td>
-      <td className="px-3 py-2">
-        <span
-          className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${badge.bg} ${badge.text}`}
-        >
-          {badge.label}
-        </span>
-      </td>
-      <td className="px-3 py-2 text-xs">
-        {sc.mapping_target_concept_id ? (
-          <span>
-            {sc.mapping_target_concept_name || `Concept ${sc.mapping_target_concept_id}`}
-            <span className="ml-1 text-muted-foreground">
-              ({sc.mapping_target_concept_id})
-            </span>
-          </span>
-        ) : (
-          <span className="text-muted-foreground">&mdash;</span>
-        )}
-      </td>
-    </tr>
   );
 }

@@ -1362,6 +1362,21 @@ def condition_clinical_status(condition):
     if 'active' in name:
         return 'active'
     return name[:50]
+# EXACT's canonical trial disease vocabulary (lowercased). These are the SUBMITTED values
+# CB stores in PatientInfo.disease and in trials_trial.disease (the matcher compares them
+# with disease__iexact) — i.e. the keys of CB's disease_utils.DISEASE_TITLE_TO_CODE, NOT the
+# display labels ("Multiple Myeloma"). The CB profile-write path stores that value verbatim in
+# condition_source_value. When a source value canonicalizes into this set it is a CB-authored
+# disease and is preferred over the mapped concept_name in `_get_disease_data`, because a
+# standard Condition concept can be a status/subtype variant (e.g. "Multiple myeloma in
+# remission") that would not match the trial strings. FHIR-imported rows (source value = a code
+# / free text) are not in this set and keep the existing concept-first behavior. Kept in sync
+# with CB's disease vocabulary by hand (omop_core cannot import CB). [CB #625a, preserved
+# through the dev back-merge]
+_CANONICAL_DISEASES = frozenset({
+    'multiple myeloma', 'follicular lymphoma', 'breast cancer',
+    'chronic lymphocytic leukemia', 'mantle cell lymphoma',
+})
 
 
 def _condition_slug(condition) -> str:
@@ -1466,9 +1481,19 @@ def _get_disease_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     cancer_condition = _primary_cancer_condition(person, snapshot, cancers)
 
     if cancer_condition:
-        # Prefer source_value when concept is unmapped (id=0 / sentinel)
+        # Prefer source_value when concept is unmapped (id=0 / sentinel). [dev's helper]
         concept_name = _usable_concept_name(cancer_condition.condition_concept) if cancer_condition.condition_concept_id else None
-        raw_name = concept_name or cancer_condition.condition_source_value or ''
+        # CB #625a (preserved through the dev back-merge): a CB-authored profile edit stores the
+        # canonical disease title verbatim in condition_source_value. The mapped concept_name can
+        # be a status/subtype variant ("Multiple myeloma in remission") that does not match
+        # EXACT's trial disease vocabulary, so when the source value IS a recognized canonical
+        # disease, prefer it over the concept name. Non-CB rows (FHIR imports: source value is a
+        # code or free text) are not recognized and keep the concept-first behavior.
+        src = (cancer_condition.condition_source_value or '').strip()
+        if src and _canonicalize_disease(src).lower() in _CANONICAL_DISEASES:
+            raw_name = src
+        else:
+            raw_name = concept_name or src or ''
         if raw_name:
             data['disease'] = _canonicalize_disease(raw_name)
         if cancer_condition.condition_start_date:
@@ -4177,8 +4202,10 @@ def _compute_derived_fields(patient_info: PatientRecord, *, apply_formulas=True)
 
     serum_mp = patient_info.monoclonal_protein_serum
     urine_mp = patient_info.monoclonal_protein_urine
-    kappa = patient_info.kappa_flc
-    lam = patient_info.lambda_flc
+    # As floats: a refresh holds a freshly projected value as a float and one
+    # kept from the stored record as the Decimal the database returned.
+    kappa = None if patient_info.kappa_flc is None else float(patient_info.kappa_flc)
+    lam = None if patient_info.lambda_flc is None else float(patient_info.lambda_flc)
 
     if kappa is not None and lam is not None and min(kappa, lam) > 0:
         patient_info.involved_uninvolved_ratio = max(kappa, lam) / min(kappa, lam)
