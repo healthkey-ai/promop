@@ -7,6 +7,7 @@ from .entries import (
     OwnMedicationView,
     ProcedureEntryView,
 )
+from .explanations import ExplanationView, SharedExplanationView
 from .sharing import (
     SharedAboutView,
     SharedDiagnosesView,
@@ -84,4 +85,8 @@ urlpatterns = [
     path('shared/procedures/', SharedProceduresView.as_view(), name='phr-shared-procedures'),
     path('shared/genetics/', SharedGeneticsView.as_view(), name='phr-shared-genetics'),
     path('shared/imaging/', SharedImagingView.as_view(), name='phr-shared-imaging'),
+    path('shared/explanations/<str:kind>/<str:target>/', SharedExplanationView.as_view(),
+         name='phr-shared-explanation'),
+    # AI explanations: read by the patient, written by ONE's server.
+    path('explanations/<str:kind>/<str:target>/', ExplanationView.as_view(), name='phr-explanation'),
 ]
