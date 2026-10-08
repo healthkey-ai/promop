@@ -57,6 +57,9 @@ _PK_SEQUENCES = [
     ('person', 'person_id'),
     ('episode', 'episode_id'),
     ('note', 'note_id'),
+    # omop_core/migrations/0283_imaging_studies.py
+    ('image_occurrence', 'image_occurrence_id'),
+    ('note_nlp', 'note_nlp_id'),
 ]
 
 
