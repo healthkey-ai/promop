@@ -29756,7 +29756,7 @@ class SourceCodeContextFieldsTest(_SmartBase):
 
     def test_unit_search_exact_match(self):
         """Unit search returns exact match when UCUM concept_code matches."""
-        from omop_core.models import Concept, Vocabulary
+        from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
         Vocabulary.objects.get_or_create(
             vocabulary_id='UCUM',
             defaults={
@@ -29765,6 +29765,14 @@ class SourceCodeContextFieldsTest(_SmartBase):
                 'vocabulary_version': '1.0',
                 'vocabulary_concept_id': 0,
             },
+        )
+        Domain.objects.get_or_create(
+            domain_id='Unit',
+            defaults={'domain_name': 'Unit', 'domain_concept_id': 0},
+        )
+        ConceptClass.objects.get_or_create(
+            concept_class_id='Unit',
+            defaults={'concept_class_name': 'Unit', 'concept_class_concept_id': 0},
         )
         Concept.objects.get_or_create(
             concept_id=8840,
@@ -29775,6 +29783,8 @@ class SourceCodeContextFieldsTest(_SmartBase):
                 'domain_id': 'Unit',
                 'concept_class_id': 'Unit',
                 'standard_concept': 'S',
+                'valid_start_date': date(2020, 1, 1),
+                'valid_end_date': date(2099, 12, 31),
             },
         )
         # Use session auth (staff user) since write_client is a service token

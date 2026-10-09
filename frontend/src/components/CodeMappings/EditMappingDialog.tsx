@@ -1128,7 +1128,7 @@ export default function EditMappingDialog({
       )}
       {mintUnitOpen && (
         <MintConceptDialog
-          vocabularies={[{ vocabulary_id: "HK-Units", vocabulary_name: "HealthKey Units", is_local: true }]}
+          vocabularies={[{ vocabulary_id: "HK-Units", vocabulary_name: "HealthKey Units" }]}
           domains={[{ domain_id: "Unit", label: "Unit" }]}
           initialDomain="Unit"
           initialName={form.source_unit}
@@ -1221,22 +1221,24 @@ function DestinationUnitPicker({
 
   return (
     <div className="mt-3 rounded border border-slate-200 bg-slate-50 p-3">
-      <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-        Destination Unit
-      </label>
       {selectedConceptId ? (
-        <div className="flex items-center gap-2 text-sm">
-          <span className="font-mono">{selectedConceptCode}</span>
-          <span className="text-slate-500">{selectedConceptName}</span>
-          {matchIndicator}
-          <button type="button" onClick={() => onSelect(null)}
-            className="ml-auto text-xs text-slate-500 hover:text-red-600">Clear</button>
-        </div>
-      ) : (
         <>
+          <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Destination Unit</span>
+          <div className="flex items-center gap-2 text-sm">
+            <span className="font-mono">{selectedConceptCode}</span>
+            <span className="text-slate-500">{selectedConceptName}</span>
+            {matchIndicator}
+            <button type="button" onClick={() => onSelect(null)}
+              className="ml-auto text-xs text-slate-500 hover:text-red-600">Clear</button>
+          </div>
+        </>
+      ) : (
+        <Field id="destination_unit_search" label="Destination Unit" tip="UCUM concept linked to this mapping. Used for unit conversion during ETL.">
           <div className="flex items-center gap-2">
             <input
+              id="destination_unit_search"
               type="text"
+              aria-label="Search UCUM units"
               value={query}
               onChange={(e) => handleQueryChange(e.target.value)}
               placeholder="Search UCUM units..."
@@ -1268,7 +1270,7 @@ function DestinationUnitPicker({
               ))}
             </ul>
           )}
-        </>
+        </Field>
       )}
     </div>
   );
