@@ -26632,6 +26632,228 @@ class CodeMappingLookupTest(TestCase):
         self.assertIn(resp.status_code, [401, 403])
 
 
+class CodeMappingLookupUnitConversionTest(TestCase):
+    """Tests for unit_conversion in POST /api/v1/code-mappings/lookup/."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        Vocabulary.objects.get_or_create(
+            vocabulary_id='LOINC',
+            defaults={'vocabulary_name': 'LOINC', 'vocabulary_concept_id': 0},
+        )
+        Vocabulary.objects.get_or_create(
+            vocabulary_id='UCUM',
+            defaults={'vocabulary_name': 'UCUM', 'vocabulary_concept_id': 0},
+        )
+        Domain.objects.get_or_create(
+            domain_id='Unit',
+            defaults={'domain_name': 'Unit', 'domain_concept_id': 0},
+        )
+        ConceptClass.objects.get_or_create(
+            concept_class_id='Unit',
+            defaults={'concept_class_name': 'Unit', 'concept_class_concept_id': 0},
+        )
+        ConceptClass.objects.get_or_create(
+            concept_class_id='Lab Test',
+            defaults={'concept_class_name': 'Lab Test', 'concept_class_concept_id': 0},
+        )
+        cls.admin = Identity.objects.create_superuser(
+            email='unit-lookup@test.com', password='testpass'
+        )
+        # Target LOINC concept for glucose
+        cls.glucose_concept = Concept.objects.create(
+            concept_id=3004410,
+            concept_name='Glucose [Mass/volume] in Serum or Plasma',
+            domain_id='Measurement',
+            vocabulary_id='LOINC',
+            concept_class_id='Lab Test',
+            concept_code='2345-7',
+            standard_concept='S',
+            valid_start_date='1970-01-01',
+            valid_end_date='2099-12-31',
+        )
+        # UCUM unit concept for mmol/L
+        cls.mmol_concept = Concept.objects.create(
+            concept_id=8753,
+            concept_name='millimole per liter',
+            domain_id='Unit',
+            vocabulary_id='UCUM',
+            concept_class_id='Unit',
+            concept_code='mmol/L',
+            standard_concept='S',
+            valid_start_date='1970-01-01',
+            valid_end_date='2099-12-31',
+        )
+        # Approved mapping WITH destination_unit_concept
+        cls.mapping_with_unit = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='LOINC',
+            source_code='2345-7',
+            source_code_description='Glucose',
+            target_concept=cls.glucose_concept,
+            destination_vocabulary_id='LOINC',
+            domain_id='Measurement',
+            omop_table='measurement',
+            status='approved',
+            origin='import',
+            destination_unit_concept=cls.mmol_concept,
+        )
+        # A non-LOINC concept for testing property fallback
+        cls.procedure_concept = Concept.objects.create(
+            concept_id=990101,
+            concept_name='Test Procedure X',
+            domain_id='Procedure',
+            vocabulary_id='SNOMED',
+            concept_class_id='Clinical Finding',
+            concept_code='PROC-1',
+            standard_concept='S',
+            valid_start_date='1970-01-01',
+            valid_end_date='2099-12-31',
+        )
+        cls.mapping_no_unit = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='CPT4',
+            source_code='99999',
+            source_code_description='Procedure test',
+            target_concept=cls.procedure_concept,
+            destination_vocabulary_id='SNOMED',
+            domain_id='Procedure',
+            omop_table='procedure',
+            status='approved',
+            origin='import',
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+        self.url = '/api/v1/code-mappings/lookup/'
+
+    def test_no_unit_fields_backward_compat(self):
+        """Response is unchanged when no unit fields are provided."""
+        resp = self.client.post(self.url, {
+            'codes': [{'source_vocabulary_id': 'LOINC', 'source_code': '2345-7', 'omop_table': 'measurement'}],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        hit = resp.json()['mappings']['LOINC|2345-7']
+        self.assertTrue(hit['resolved'])
+        self.assertNotIn('unit_conversion', hit)
+
+    def test_exact_match_same_unit(self):
+        """When source_unit equals destination_unit, match_type is exact."""
+        resp = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': 'LOINC', 'source_code': '2345-7',
+                'omop_table': 'measurement',
+                'source_unit': 'mmol/L', 'quantity': 5.5,
+            }],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        conv = resp.json()['mappings']['LOINC|2345-7']['unit_conversion']
+        self.assertEqual(conv['match_type'], 'exact')
+        self.assertEqual(conv['source_unit'], 'mmol/L')
+        self.assertEqual(conv['destination_unit'], 'mmol/L')
+        self.assertEqual(conv['destination_unit_source'], 'mapping')
+        self.assertEqual(conv['destination_unit_concept_id'], self.mmol_concept.concept_id)
+        # quantity unchanged for exact match
+        self.assertIsNotNone(conv['converted_quantity'])
+
+    def test_convertible_units(self):
+        """mg/dL → mmol/L conversion via mapping destination_unit_concept."""
+        resp = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': 'LOINC', 'source_code': '2345-7',
+                'omop_table': 'measurement',
+                'source_unit': 'mol/L', 'quantity': 0.001,
+            }],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        conv = resp.json()['mappings']['LOINC|2345-7']['unit_conversion']
+        self.assertEqual(conv['match_type'], 'convertible')
+        self.assertIsNotNone(conv['converted_quantity'])
+        # 0.001 mol/L = 1 mmol/L
+        from decimal import Decimal
+        self.assertEqual(Decimal(conv['converted_quantity']), Decimal('1'))
+
+    def test_incompatible_units(self):
+        """Units from different property groups yield match_type incompatible."""
+        resp = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': 'LOINC', 'source_code': '2345-7',
+                'omop_table': 'measurement',
+                'source_unit': 'kg', 'quantity': 100,
+            }],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        conv = resp.json()['mappings']['LOINC|2345-7']['unit_conversion']
+        self.assertEqual(conv['match_type'], 'incompatible')
+        self.assertIsNone(conv['converted_quantity'])
+
+    def test_source_unit_without_quantity(self):
+        """source_unit without quantity returns match_type but no converted_quantity."""
+        resp = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': 'LOINC', 'source_code': '2345-7',
+                'omop_table': 'measurement',
+                'source_unit': 'mmol/L',
+            }],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        conv = resp.json()['mappings']['LOINC|2345-7']['unit_conversion']
+        self.assertEqual(conv['match_type'], 'exact')
+        self.assertIsNone(conv['converted_quantity'])
+
+    def test_quantity_without_source_unit_no_conversion(self):
+        """quantity without source_unit yields no unit_conversion key."""
+        resp = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': 'LOINC', 'source_code': '2345-7',
+                'omop_table': 'measurement',
+                'quantity': 100,
+            }],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        hit = resp.json()['mappings']['LOINC|2345-7']
+        self.assertNotIn('unit_conversion', hit)
+
+    def test_destination_unit_from_mapping(self):
+        """destination_unit_source is 'mapping' when destination_unit_concept is set."""
+        resp = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': 'LOINC', 'source_code': '2345-7',
+                'omop_table': 'measurement',
+                'source_unit': 'mmol/L',
+            }],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        conv = resp.json()['mappings']['LOINC|2345-7']['unit_conversion']
+        self.assertEqual(conv['destination_unit_source'], 'mapping')
+        self.assertEqual(conv['destination_unit_concept_id'], self.mmol_concept.concept_id)
+
+    def test_invalid_quantity(self):
+        """Non-numeric quantity returns 400."""
+        resp = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': 'LOINC', 'source_code': '2345-7',
+                'omop_table': 'measurement',
+                'source_unit': 'mg/dL', 'quantity': 'not-a-number',
+            }],
+        }, format='json')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_unresolved_code_no_conversion(self):
+        """Unresolved codes do not get unit_conversion even with source_unit."""
+        resp = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': 'LOINC', 'source_code': 'NONEXISTENT',
+                'omop_table': 'measurement',
+                'source_unit': 'mg/dL', 'quantity': 100,
+            }],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        hit = resp.json()['mappings']['LOINC|NONEXISTENT']
+        self.assertFalse(hit['resolved'])
+        self.assertNotIn('unit_conversion', hit)
+
+
 class PrologSurveyParticipantTest(TestCase):
     """The host primitives the PROlog survey runner binds responses to.
 
@@ -29673,3 +29895,180 @@ class BulkResolveSourceCodesTest(_SmartBase):
         data = poll.json()
         self.assertEqual(data['done'], 2)
         self.assertGreaterEqual(data['resolved'], 2)
+
+
+# ---------------------------------------------------------------------------
+# Source Code Context Fields Tests
+# ---------------------------------------------------------------------------
+
+class SourceCodeContextFieldsTest(_SmartBase):
+    """Tests for source_unit, example_quantity, source_metadata on PatientSourceCode,
+    and the UCUM unit-search endpoint.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.foundation_user.is_staff = True
+        cls.foundation_user.save(update_fields=['is_staff'])
+
+    def _url(self, person_id=None):
+        pid = person_id or self.person.person_id
+        return f'/api/v1/patient-records/{pid}/source-codes/'
+
+    def test_post_source_codes_with_context_fields(self):
+        """POST source-codes accepts and stores source_unit, example_quantity, source_metadata."""
+        resp = self.write_client.post(
+            self._url(),
+            {
+                'source_codes': [
+                    {
+                        'source_value': 'GLUCOSE',
+                        'omop_table': 'measurement',
+                        'occurrence_count': 5,
+                        'source_unit': 'mg/dL',
+                        'example_quantity': '95-120',
+                        'source_metadata': {'reference_range': '70-100', 'category': 'chemistry'},
+                    },
+                ],
+            },
+            format='json',
+        )
+        self.assertIn(resp.status_code, [200, 201])
+        from omop_core.models import PatientSourceCode
+        psc = PatientSourceCode.objects.get(
+            person=self.person, source_value='GLUCOSE', omop_table='measurement',
+        )
+        self.assertEqual(psc.source_unit, 'mg/dL')
+        self.assertEqual(psc.example_quantity, '95-120')
+        self.assertEqual(psc.source_metadata['reference_range'], '70-100')
+
+    def test_get_source_codes_returns_context_fields(self):
+        """GET source-codes includes source_unit, example_quantity, source_metadata."""
+        from omop_core.models import PatientSourceCode
+        PatientSourceCode.objects.create(
+            person=self.person,
+            source_value='HGB_CTX',
+            omop_table='measurement',
+            occurrence_count=3,
+            source_unit='g/dL',
+            example_quantity='12.5',
+            source_metadata={'category': 'hematology'},
+        )
+        resp = self.write_client.get(self._url())
+        self.assertEqual(resp.status_code, 200)
+        codes = resp.json()['source_codes']
+        hgb = next(sc for sc in codes if sc['source_value'] == 'HGB_CTX')
+        self.assertEqual(hgb['source_unit'], 'g/dL')
+        self.assertEqual(hgb['example_quantity'], '12.5')
+        self.assertEqual(hgb['source_metadata']['category'], 'hematology')
+
+    def test_post_upsert_updates_context_fields(self):
+        """Re-posting same source code updates context fields."""
+        from omop_core.models import PatientSourceCode
+        PatientSourceCode.objects.create(
+            person=self.person,
+            source_value='WBC_UP',
+            omop_table='measurement',
+            occurrence_count=1,
+            source_unit='',
+            example_quantity='',
+        )
+        resp = self.write_client.post(
+            self._url(),
+            {
+                'source_codes': [
+                    {
+                        'source_value': 'WBC_UP',
+                        'omop_table': 'measurement',
+                        'occurrence_count': 10,
+                        'source_unit': 'K/uL',
+                        'example_quantity': '5.0-10.0',
+                        'source_metadata': {'flag': 'normal'},
+                    },
+                ],
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        psc = PatientSourceCode.objects.get(
+            person=self.person, source_value='WBC_UP', omop_table='measurement',
+        )
+        self.assertEqual(psc.source_unit, 'K/uL')
+        self.assertEqual(psc.example_quantity, '5.0-10.0')
+        self.assertEqual(psc.source_metadata['flag'], 'normal')
+
+    def test_post_invalid_metadata_becomes_empty_dict(self):
+        """source_metadata that is not a dict becomes {}."""
+        resp = self.write_client.post(
+            self._url(),
+            {
+                'source_codes': [
+                    {
+                        'source_value': 'BAD_META',
+                        'omop_table': 'measurement',
+                        'source_metadata': 'not a dict',
+                    },
+                ],
+            },
+            format='json',
+        )
+        self.assertIn(resp.status_code, [200, 201])
+        from omop_core.models import PatientSourceCode
+        psc = PatientSourceCode.objects.get(
+            person=self.person, source_value='BAD_META',
+        )
+        self.assertEqual(psc.source_metadata, {})
+
+    def test_unit_search_exact_match(self):
+        """Unit search returns exact match when UCUM concept_code matches."""
+        from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
+        Vocabulary.objects.get_or_create(
+            vocabulary_id='UCUM',
+            defaults={
+                'vocabulary_name': 'UCUM',
+                'vocabulary_reference': 'http://unitsofmeasure.org',
+                'vocabulary_version': '1.0',
+                'vocabulary_concept_id': 0,
+            },
+        )
+        Domain.objects.get_or_create(
+            domain_id='Unit',
+            defaults={'domain_name': 'Unit', 'domain_concept_id': 0},
+        )
+        ConceptClass.objects.get_or_create(
+            concept_class_id='Unit',
+            defaults={'concept_class_name': 'Unit', 'concept_class_concept_id': 0},
+        )
+        Concept.objects.get_or_create(
+            concept_id=8840,
+            defaults={
+                'concept_name': 'milligram per deciliter',
+                'concept_code': 'mg/dL',
+                'vocabulary_id': 'UCUM',
+                'domain_id': 'Unit',
+                'concept_class_id': 'Unit',
+                'standard_concept': 'S',
+                'valid_start_date': date(2020, 1, 1),
+                'valid_end_date': date(2099, 12, 31),
+            },
+        )
+        # Use session auth (staff user) since write_client is a service token
+        from django.test import Client
+        client = Client()
+        client.force_login(self.foundation_user)
+        resp = client.get('/api/v1/code-mappings/unit-search/', {'q': 'mg/dL'})
+        self.assertEqual(resp.status_code, 200)
+        results = resp.json()['results']
+        self.assertTrue(len(results) >= 1)
+        self.assertEqual(results[0]['concept_code'], 'mg/dL')
+        self.assertEqual(results[0]['match'], 'exact')
+
+    def test_unit_search_empty_query(self):
+        """Unit search with empty query returns empty results."""
+        from django.test import Client
+        client = Client()
+        client.force_login(self.foundation_user)
+        resp = client.get('/api/v1/code-mappings/unit-search/', {'q': ''})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['results'], [])

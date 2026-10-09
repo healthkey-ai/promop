@@ -10,6 +10,9 @@ export interface PatientSourceCode {
   mapping_target_concept_name: string | null;
   source_vocabulary_id: string;
   source_code: string;
+  source_unit: string;
+  example_quantity: string;
+  source_metadata: Record<string, unknown>;
 }
 
 export interface SourceCodesSummary {

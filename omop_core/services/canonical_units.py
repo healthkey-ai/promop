@@ -203,6 +203,89 @@ def normalize(preference, value, source_unit, low=None, high=None):
     return result
 
 
+def _base_unit(property_code):
+    """Return the base unit (factor '1') for a property group, or None."""
+    for unit, factor in UNIT_GROUPS.get(property_code, {}).items():
+        if factor == '1':
+            return unit
+    return None
+
+
+def _find_property(src, dst):
+    """Return the property code whose group contains both units, or ''."""
+    for prop, units in UNIT_GROUPS.items():
+        if src in units and dst in units:
+            return prop
+    return ''
+
+
+def resolve_mapping_conversion(concept, destination_unit_concept=None,
+                               source_unit='', quantity=None):
+    """Compute unit conversion info for a resolved code mapping.
+
+    Returns a dict with: source_unit, destination_unit, destination_unit_concept_id,
+    destination_unit_source, source_quantity, converted_quantity, property_code, match_type.
+    """
+    src = unit_code(source_unit)
+    result = {
+        'source_unit': src or None,
+        'destination_unit': None,
+        'destination_unit_concept_id': None,
+        'destination_unit_source': None,
+        'source_quantity': quantity,
+        'converted_quantity': None,
+        'property_code': None,
+        'match_type': None,
+    }
+
+    # Determine destination unit
+    if destination_unit_concept is not None:
+        dst = unit_code(destination_unit_concept.concept_code)
+        result['destination_unit'] = dst
+        result['destination_unit_concept_id'] = destination_unit_concept.concept_id
+        result['destination_unit_source'] = 'mapping'
+    else:
+        axes = loinc_axes_for_concepts([concept])
+        prop = property_for(concept, axes=axes.get(concept.pk))
+        if prop:
+            dst = _base_unit(prop)
+            result['destination_unit'] = dst
+            result['destination_unit_source'] = 'property'
+            result['property_code'] = prop
+        else:
+            dst = None
+
+    if not src or not dst:
+        return result
+
+    # Determine match type and convert
+    src_norm = unit_code(src)
+    dst_norm = unit_code(dst)
+
+    if src_norm == dst_norm:
+        result['match_type'] = 'exact'
+        if quantity is not None:
+            result['converted_quantity'] = str(Decimal(str(quantity)))
+        prop = _find_property(src_norm, dst_norm) if not result['property_code'] else result['property_code']
+        result['property_code'] = prop or result['property_code']
+        return result
+
+    prop = _find_property(src_norm, dst_norm)
+    if prop:
+        result['match_type'] = 'convertible'
+        result['property_code'] = prop
+        if quantity is not None:
+            try:
+                converted = convert(quantity, src_norm, dst_norm, prop)
+                result['converted_quantity'] = str(converted)
+            except ValueError:
+                result['match_type'] = 'incompatible'
+    else:
+        result['match_type'] = 'incompatible'
+
+    return result
+
+
 def measurement_normalized(measurement, preferences):
     unit = measurement.unit_source_value
     if not unit or not unit.strip():
