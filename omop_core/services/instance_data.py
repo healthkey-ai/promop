@@ -27,6 +27,9 @@ SYSTEM: frozenset[str] = frozenset({
     # Tied to a login account, which is system data.
     'patient_portal.PatientConsent', 'patient_portal.PatientInvitation',
     'patient_portal.PatientMessage', 'patient_portal.PatientUser',
+    # Access a patient granted to their record, and who opened it. A link is
+    # derived from this deployment's own key, so it would open nothing elsewhere.
+    'patient_portal.RecordShare', 'patient_portal.ShareScan',
     # Tenancy and access.
     'omop_core.ApplicationOrganization', 'omop_core.GroupAccess',
     'omop_core.InterchangeAgreement', 'omop_core.OrgInvitation', 'omop_core.OrgTrust',
@@ -44,6 +47,9 @@ SYSTEM: frozenset[str] = frozenset({
     # Historical model-quality feedback for this instance, not a live mapping.
     'omop_core.CodeMappingUpload', 'omop_core.MappingSuggestionReview',
     # Derived from concept + concept_synonym; rebuilt locally, never copied.
+    # AI explanations are regenerated on demand, and their item ids would not
+    # point at the same rows on another instance.
+    'patient_portal.AiExplanation',
     'omop_core.SuggestSynonymTerm',
     'omop_core.AthenaVocabularySync', 'omop_core.HospitalCodeImport',
     'omop_core.VocabularyRelease',
@@ -90,6 +96,9 @@ _REFERENCE_COPIED_EXPLICIT: frozenset[str] = frozenset({
     'omop_core.TherapyOutcome_diseases', 'omop_core.TherapyRegimenComponent',
     # A lookup list, but with integer codes it cannot extend VocabularyLookup.
     'omop_core.ToxicityGrade',
+    # How the Personal Health Record ranks and groups lab tests: clinical
+    # labels curated in the admin, matched on their LOINC code.
+    'patient_portal.LabMarker',
 })
 
 PATIENT: frozenset[str] = frozenset({
@@ -103,6 +112,9 @@ PATIENT: frozenset[str] = frozenset({
     'omop_core.ProcedureOccurrence', 'omop_core.ProvenanceRecord', 'omop_core.RecordRevision',
     'omop_core.Specimen', 'omop_core.SupportiveTherapyCourse', 'omop_core.TrialSearchPreferences',
     'omop_core.VisitDetail', 'omop_core.VisitOccurrence', 'omop_core.WearableUpload',
+    # What the patient says about their record (confirmed or stopped
+    # prescriptions, why a line of therapy ended), kept beside it.
+    'patient_portal.PatientStatement',
     # Where care happened. No clinical row on any instance references them yet.
     'omop_core.CareSite', 'omop_core.Provider',
     'omop_oncology.AILineOfTherapySummary', 'omop_oncology.CancerModifier',

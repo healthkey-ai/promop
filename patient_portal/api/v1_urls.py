@@ -111,6 +111,7 @@ router.register(r'survey-responses', PatientSurveyResponseViewSet, basename='v1-
 
 urlpatterns = [
     path('therapy-outcomes/', therapy_outcomes, name='v1-therapy-outcomes'),
+    path('phr/', include('patient_portal.api.phr.urls')),
     # The surveys the PROlog runner serves, for the portal's Surveys tab.
     path('prolog-surveys/', PrologSurveyListView.as_view(), name='v1-prolog-surveys'),
     path('', include(router.urls)),
