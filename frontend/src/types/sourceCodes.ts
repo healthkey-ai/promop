@@ -13,6 +13,11 @@ export interface PatientSourceCode {
   source_unit: string;
   example_quantity: string;
   source_metadata: Record<string, unknown>;
+  mapping_origin?: string;
+  mapping_origin_system?: string;
+  mapping_created_by?: string;
+  mapping_destination_concept_code?: string;
+  mapping_destination_vocabulary_id?: string;
 }
 
 export interface SourceCodesSummary {
