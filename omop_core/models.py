@@ -2156,6 +2156,14 @@ class SourceCodeConceptMapping(models.Model):
         max_length=30, blank=True, default='',
         help_text='Clinical table the fact lands in (measurement, condition, ...).',
     )
+    destination_unit_concept = models.ForeignKey(
+        Concept, on_delete=models.DO_NOTHING, null=True, blank=True,
+        related_name='sccm_destination_units', db_constraint=False,
+        help_text=(
+            'UCUM or HK-Units concept for the destination unit. '
+            'Per-mapping, not per-destination-concept.'
+        ),
+    )
 
     source = models.CharField(max_length=50, blank=True, default='HealthKey', db_index=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='proposed')
@@ -5027,6 +5035,18 @@ class PatientSourceCode(models.Model):
     source_vocabulary_id = models.CharField(max_length=255, blank=True, default='')
     omop_table = models.CharField(max_length=30, blank=True, default='')
     occurrence_count = models.IntegerField(default=1)
+    source_unit = models.CharField(
+        max_length=50, blank=True, default='',
+        help_text='Unit string as it arrived from the source (e.g. "mg/dL").',
+    )
+    example_quantity = models.CharField(
+        max_length=100, blank=True, default='',
+        help_text='Representative quantity value(s) from source (e.g. "7.5", "120-140").',
+    )
+    source_metadata = models.JSONField(
+        default=dict, blank=True,
+        help_text='Unparsed metadata from ETL (reference ranges, category, etc.).',
+    )
     first_seen = models.DateTimeField(auto_now_add=True)
     last_seen = models.DateTimeField(auto_now=True)
 

@@ -45,6 +45,7 @@ import {
   omopTableFor,
   retirementDetail,
   approvalNote,
+  dominantSourceUnit,
   strategyLabel,
   DEFAULT_SEARCH_SCOPE,
   CONCEPT_SEARCH_DEBOUNCE_MS,
@@ -118,6 +119,8 @@ export default function EditMappingDialog({
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [mintOpen, setMintOpen] = useState(false);
+  const [mintUnitOpen, setMintUnitOpen] = useState(false);
+  const [unitAutoPopulated, setUnitAutoPopulated] = useState(false);
 
   const evidenceFacilities = sourceEvidence?.facilities || [];
 
@@ -164,6 +167,7 @@ export default function EditMappingDialog({
       setSaving(false);
       setMintOpen(false);
       setIndividualSuggestion(null);
+      setUnitAutoPopulated(false);
 
       if (mode === "new") {
         // When opened from PatientSourceCodesTab, selectedRow carries the
@@ -226,7 +230,18 @@ export default function EditMappingDialog({
         );
         if (!active) return;
         setDestinationOptions(data.destination_options || []);
-        setSourceEvidence(data.source_evidence || null);
+        const evidence = data.source_evidence || null;
+        setSourceEvidence(evidence);
+        // Auto-populate source_unit from evidence when the form has none
+        // (e.g. opened from Code Mapping browse, where the list omits units).
+        const dominant = dominantSourceUnit(evidence?.units);
+        if (dominant) {
+          setForm((prev) => {
+            if (prev.source_unit) return prev;
+            setUnitAutoPopulated(true);
+            return { ...prev, source_unit: dominant };
+          });
+        }
       } catch {
         if (!active) return;
         setDestinationError("Could not load imported destinations. Close and reopen this mapping to retry.");
@@ -452,6 +467,8 @@ export default function EditMappingDialog({
         ...form,
         destination_concept_id: Number(form.destination_concept_id),
         target_concept_id: Number(form.destination_concept_id),
+        destination_unit_concept_id: form.destination_unit_concept_id
+          ? Number(form.destination_unit_concept_id) : null,
       };
       let resp;
       try {
@@ -629,6 +646,10 @@ export default function EditMappingDialog({
                   />
                 </Field>
 
+                <ReadOnlyField id="source_quantity_display" label="Source Quantity" tip="Representative quantity value(s) from the source data." value={selectedRow?.example_quantity || "\u2014"} testId="source-quantity" />
+
+                <ReadOnlyField id="source_unit_display" label="Source Unit" tip="Unit string as reported by the ETL source." value={form.source_unit || "\u2014"} testId="source-unit-context" />
+
                 {(reference.source_catalog_vocabularies || []).includes(form.source_vocabulary_id) && (
                   <SourceVocabularyLookup
                     vocabularyId={form.source_vocabulary_id}
@@ -640,8 +661,8 @@ export default function EditMappingDialog({
                     }}
                   />
                 )}
-
               </div>
+              <SourceMetadataBlock metadata={selectedRow?.source_metadata} />
             </fieldset>
 
             {mode === "edit" && selectedRow?.mapping_id && (
@@ -932,7 +953,24 @@ export default function EditMappingDialog({
               </div>
               {form.destination_concept_id && form.destination_vocabulary_id === "LOINC" && form.omop_table === "measurement" &&
                 <CanonicalUnitEditor key={form.destination_concept_id} conceptId={Number(form.destination_concept_id)} />}
-              <div className="mt-3 flex justify-end">
+              {(form.omop_table === "measurement" || form.source_unit) && (
+                <DestinationUnitPicker
+                  sourceUnit={form.source_unit}
+                  selectedConceptId={form.destination_unit_concept_id}
+                  selectedConceptCode={form.destination_unit_concept_code}
+                  selectedConceptName={form.destination_unit_concept_name}
+                  matchType={form.unit_match_type}
+                  autoPopulated={unitAutoPopulated}
+                  onSelect={(unit) => {
+                    setField("destination_unit_concept_id", unit ? String(unit.concept_id) : "");
+                    setField("destination_unit_concept_code", unit?.concept_code || "");
+                    setField("destination_unit_concept_name", unit?.concept_name || "");
+                    setField("unit_match_type", unit?.match || "");
+                  }}
+                  onMintUnit={() => setMintUnitOpen(true)}
+                />
+              )}
+              <div className="mt-3 flex justify-end gap-2">
                 <button type="button" onClick={() => setMintOpen(true)} className="rounded border border-sky-300 px-3 py-2 text-sm text-sky-700">Mint new concept</button>
               </div>
               {form.destination_invalid_reason && (
@@ -1093,6 +1131,182 @@ export default function EditMappingDialog({
           onSelect={concept => { applyConcept(concept as ConceptResult); setMintOpen(false); }}
         />
       )}
+      {mintUnitOpen && (
+        <MintConceptDialog
+          vocabularies={[{ vocabulary_id: "HK-Units", vocabulary_name: "HealthKey Units" }]}
+          domains={[{ domain_id: "Unit", label: "Unit" }]}
+          initialDomain="Unit"
+          initialName={form.source_unit}
+          sourceCode={form.source_unit}
+          sourceVocabulary=""
+          onClose={() => setMintUnitOpen(false)}
+          onSelect={(concept) => {
+            setField("destination_unit_concept_id", String(concept.concept_id));
+            setField("destination_unit_concept_code", concept.concept_code || "");
+            setField("destination_unit_concept_name", concept.concept_name || "");
+            setField("unit_match_type", "");
+            setMintUnitOpen(false);
+          }}
+        />
+      )}
     </>
+  );
+}
+
+// ── Source Metadata Block ──────────────────────────────────────────
+
+function SourceMetadataBlock({ metadata }: { metadata?: Record<string, unknown> }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!metadata || Object.keys(metadata).length === 0) return null;
+  return (
+    <div className="mt-3">
+      <button type="button" onClick={() => setExpanded((p) => !p)}
+        className="mb-1 flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-slate-900">
+        <span className={`inline-block transition-transform ${expanded ? "rotate-90" : ""}`}>{"\u25B6"}</span>
+        Source Metadata
+      </button>
+      {expanded && (
+        <pre className="max-h-60 overflow-auto whitespace-pre-wrap rounded border bg-slate-50 px-3 py-2 font-mono text-xs text-slate-700">
+          {JSON.stringify(metadata, null, 2)}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+// ── Destination Unit Picker ─────────────────────────────────────────
+
+interface UnitResult {
+  concept_id: number;
+  concept_code: string;
+  concept_name: string;
+  match: "exact" | "close";
+}
+
+interface DestinationUnitPickerProps {
+  sourceUnit: string;
+  selectedConceptId: string;
+  selectedConceptCode: string;
+  selectedConceptName: string;
+  matchType: "exact" | "close" | "none" | "";
+  autoPopulated?: boolean;
+  onSelect: (unit: UnitResult | null) => void;
+  onMintUnit: () => void;
+}
+
+function DestinationUnitPicker({
+  sourceUnit, selectedConceptId, selectedConceptCode, selectedConceptName,
+  matchType, autoPopulated, onSelect, onMintUnit,
+}: DestinationUnitPickerProps) {
+  const [query, setQuery] = useState(sourceUnit);
+  const [results, setResults] = useState<UnitResult[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [searched, setSearched] = useState(false);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const doSearch = useCallback(async (q: string) => {
+    if (!q.trim()) { setResults([]); setSearched(false); return; }
+    setSearching(true);
+    try {
+      const { data } = await api.get<{ results: UnitResult[] }>("/v1/code-mappings/unit-search/", { params: { q } });
+      setResults(data.results);
+      setSearched(true);
+      // Auto-select exact match
+      if (!selectedConceptId && data.results.length > 0 && data.results[0].match === "exact") {
+        onSelect(data.results[0]);
+      } else if (data.results.length === 0) {
+        onSelect(null);
+      }
+    } catch {
+      setResults([]);
+      setSearched(true);
+    } finally {
+      setSearching(false);
+    }
+  }, [selectedConceptId, onSelect]);
+
+  // Auto-search on sourceUnit when dialog opens
+  useEffect(() => {
+    if (sourceUnit && !searched && !selectedConceptId) {
+      (async () => { await doSearch(sourceUnit); })();
+    }
+  }, [sourceUnit, searched, selectedConceptId, doSearch]);
+
+  const handleQueryChange = (value: string) => {
+    setQuery(value);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => { void doSearch(value); }, 300);
+  };
+
+  const matchIndicator = matchType === "exact" && autoPopulated
+    ? <span className="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700" title="Auto-matched from source evidence">Auto-matched &#10003;</span>
+    : matchType === "exact"
+      ? <span className="text-green-600" title="Exact UCUM match">&#10003; Exact</span>
+      : matchType === "close"
+        ? <span className="text-amber-600" title="Close UCUM match">&#126; Close</span>
+        : matchType === "none"
+          ? <span className="text-red-600" title="No UCUM match">&#10007; No match</span>
+          : null;
+
+  return (
+    <div className="mt-3 rounded border border-slate-200 bg-slate-50 p-3">
+      {selectedConceptId ? (
+        <>
+          <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Destination Unit</span>
+          <div className="flex items-center gap-2 text-sm">
+            <span className="font-mono">{selectedConceptCode}</span>
+            <span className="text-slate-500">{selectedConceptName}</span>
+            {matchIndicator}
+            <button type="button" onClick={() => onSelect(null)}
+              className="ml-auto text-xs text-slate-500 hover:text-red-600">Clear</button>
+          </div>
+        </>
+      ) : (
+        <Field id="destination_unit_search" label="Destination Unit" tip="UCUM concept linked to this mapping. Used for unit conversion during ETL.">
+          <div className="flex items-center gap-2">
+            <input
+              id="destination_unit_search"
+              type="text"
+              aria-label="Search UCUM units"
+              value={query}
+              onChange={(e) => handleQueryChange(e.target.value)}
+              placeholder="Search UCUM units..."
+              className={`${INPUT_CLASS} flex-1`}
+            />
+            {searching && <span className="text-xs text-slate-400">Searching...</span>}
+          </div>
+          {searched && results.length === 0 && !searching && (
+            <div className="mt-2 flex items-center gap-2 text-xs text-red-600">
+              <span>&#10007; No UCUM match found</span>
+              <button type="button" onClick={onMintUnit}
+                className="rounded border border-sky-300 px-2 py-1 text-sky-700 hover:bg-sky-50">
+                Mint Unit
+              </button>
+            </div>
+          )}
+          {results.length > 0 && (() => {
+            const allClose = results.every((r) => r.match !== "exact");
+            return (
+              <ul className="mt-1 max-h-40 overflow-y-auto rounded border bg-white text-xs">
+                {results.map((r, i) => {
+                  const isSuggested = allClose && i === 0;
+                  return (
+                    <li key={r.concept_id}
+                      className={`flex cursor-pointer items-center gap-2 px-2 py-1.5 hover:bg-sky-50${isSuggested ? " border-l-2 border-amber-400 bg-amber-50" : ""}`}
+                      onClick={() => onSelect(r)}>
+                      <span className="font-mono font-medium">{r.concept_code}</span>
+                      <span className="text-slate-500">{r.concept_name}</span>
+                      <span className={r.match === "exact" ? "ml-auto text-green-600" : "ml-auto text-amber-500"}>
+                        {r.match === "exact" ? "exact" : isSuggested ? "Suggested \u2014 click to accept" : "close"}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            );
+          })()}
+        </Field>
+      )}
+    </div>
   );
 }
