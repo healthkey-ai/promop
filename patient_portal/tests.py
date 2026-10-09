@@ -30215,3 +30215,34 @@ class SourceCodeReplaceTest(_SmartBase):
         )
         self.assertIn(resp.status_code, [200, 201])
         self.assertIn('deleted', resp.json())
+
+    def test_replace_empty_source_codes_returns_400(self):
+        """replace=true with empty source_codes must not delete all rows."""
+        from omop_core.models import PatientSourceCode
+        self._seed([
+            {'source_value': 'MUST_SURVIVE', 'omop_table': 'measurement', 'occurrence_count': 1},
+        ])
+        resp = self.write_client.post(
+            self._url(),
+            {'replace': True, 'source_codes': []},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertTrue(PatientSourceCode.objects.filter(person=self.person).exists())
+
+    def test_replace_empty_existing_set(self):
+        """replace=true on a person with no existing source codes reports deleted=0."""
+        from omop_core.models import PatientSourceCode
+        PatientSourceCode.objects.filter(person=self.person).delete()
+        resp = self.write_client.post(
+            self._url(),
+            {
+                'replace': True,
+                'source_codes': [
+                    {'source_value': 'FRESH', 'omop_table': 'measurement', 'occurrence_count': 1},
+                ],
+            },
+            format='json',
+        )
+        self.assertIn(resp.status_code, [200, 201])
+        self.assertEqual(resp.json()['deleted'], 0)

@@ -5612,28 +5612,18 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                 last_seen=now,
             ))
 
-        replace = request.data.get('replace', False) is True
+        replace = request.data.get('replace') is True
 
-        # Count existing rows *before* the upsert so we can report created vs updated.
         request_keys = {
             (o.source_value, o.source_vocabulary_id, o.omop_table) for o in objs
         }
-        existing_count = (
-            PatientSourceCode.objects.filter(person=person)
-            .filter(
-                source_value__in=[k[0] for k in request_keys],
-                source_vocabulary_id__in=[k[1] for k in request_keys],
-                omop_table__in=[k[2] for k in request_keys],
-            )
-            .values_list('source_value', 'source_vocabulary_id', 'omop_table')
-        )
-        existing_keys = set(existing_count)
-        updated = len(request_keys & existing_keys)
-        created = len(request_keys) - updated
 
         with transaction.atomic():
             deleted = 0
-            if replace:
+            if replace and request_keys:
+                # Lock this person's rows for the duration of the transaction
+                # to prevent a concurrent replace from interleaving deletes.
+                PatientSourceCode.objects.filter(person=person).select_for_update().exists()
                 # Delete rows for this person that are absent from the payload.
                 # The upsert below will re-create or update every row in the
                 # payload, so afterwards the person's set equals exactly what
@@ -5647,6 +5637,20 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                     .exclude(keep)
                     .delete()
                 )
+
+            # Count existing rows inside the transaction (after delete if
+            # replace) so created/updated counts reflect actual DB state.
+            match_q = Q()
+            for sv, svid, ot in request_keys:
+                match_q |= Q(source_value=sv, source_vocabulary_id=svid,
+                             omop_table=ot)
+            existing_keys = set(
+                PatientSourceCode.objects.filter(person=person)
+                .filter(match_q)
+                .values_list('source_value', 'source_vocabulary_id', 'omop_table')
+            )
+            updated = len(request_keys & existing_keys)
+            created = len(request_keys) - updated
 
             PatientSourceCode.objects.bulk_create(
                 objs,
