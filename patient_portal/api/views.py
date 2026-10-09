@@ -18,8 +18,8 @@ from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
 from django.db import IntegrityError, models, transaction
-from django.db.models import Case, Count, F, IntegerField, Prefetch, Q, When
-from django.db.models.functions import Length
+from django.db.models import Case, CharField, Count, F, IntegerField, Prefetch, Q, Value, When
+from django.db.models.functions import Concat, Length
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
@@ -923,16 +923,24 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         search = self._normalize_all_param(params.get('search'))
         if search:
+            from omop_core.services.patient_list_context import visible_demographics
+            queryset = queryset.annotate(_search_name=Concat(
+                'person__given_name', Value(' '), 'person__family_name',
+                output_field=CharField(),
+            ))
             name_query = (
                 Q(person__given_name__icontains=search) |
                 Q(person__family_name__icontains=search) |
-                Q(email__icontains=search)
+                Q(_search_name__icontains=search) |
+                Q(email__icontains=search) |
+                Q(person__portal_user__identity__email__icontains=search)
             )
+            search_query = name_query & visible_demographics(self.request.user)
             try:
-                name_query |= Q(person__person_id=int(search))
+                search_query |= Q(person__person_id=int(search))
             except (TypeError, ValueError):
                 pass
-            queryset = queryset.filter(name_query)
+            queryset = queryset.filter(search_query)
 
         from omop_core.services.patient_list_context import filter_context
         return filter_context(queryset, params, self.request.user)

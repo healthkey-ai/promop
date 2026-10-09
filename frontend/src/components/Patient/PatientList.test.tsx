@@ -91,6 +91,31 @@ it('applies text searches across the server cohort and resets the page', async (
   await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({ params: expect.objectContaining({ page: 1, biomarker: 'HER2' }) })));
 });
 
+it('searches names or email and keeps Org All when selecting unassigned patients', async () => {
+  vi.mocked(api.get).mockResolvedValue({ data: { ...cohort, filter_options: {
+    orgs: [{ value: 'example', label: 'Example' }, { value: '__unassigned__', label: 'Unassigned' }],
+    diseases: [], stages: [],
+  } } });
+  vi.mocked(api.delete).mockResolvedValue({ data: {} });
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
+  await screen.findByText('Recorded regimen');
+  expect(screen.getByLabelText('Org')).toHaveValue('all');
+  expect(screen.getByRole('option', { name: 'All (including unassigned)' })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: /next/i }));
+  const search = await screen.findByLabelText('Name or email');
+  fireEvent.change(search, { target: { value: 'ada@example.test' } });
+  fireEvent.blur(search);
+  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({
+    params: expect.objectContaining({ page: 1, org: 'all', search: 'ada@example.test' }),
+  })));
+  fireEvent.click(screen.getAllByRole('checkbox')[0]);
+  fireEvent.click(screen.getByRole('button', { name: 'Delete (All 30)' }));
+  fireEvent.click(screen.getByRole('button', { name: /^Delete$/ }));
+  await waitFor(() => expect(api.delete).toHaveBeenCalledWith('/patient-info/bulk_delete_filtered/', expect.objectContaining({
+    params: expect.objectContaining({ org: 'all', search: 'ada@example.test' }),
+  })));
+});
+
 it('uses the same clinical filters when deleting all matching patients', async () => {
   vi.mocked(api.get).mockResolvedValue({ data: cohort });
   vi.mocked(api.delete).mockResolvedValue({ data: {} });

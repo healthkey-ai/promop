@@ -107,6 +107,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   const resolvePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   useEffect(() => () => { if (resolvePollRef.current) clearInterval(resolvePollRef.current); }, []);
   const [orgFilter, setOrgFilter] = useState(ALL_FILTER_VALUE);
+  const [search, setSearch] = useState("");
   const [diseaseFilter, setDiseaseFilter] = useState(ALL_FILTER_VALUE);
   const [stageFilter, setStageFilter] = useState(ALL_FILTER_VALUE);
   const [dateFilter, setDateFilter] = useState(ALL_FILTER_VALUE);
@@ -120,6 +121,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
           page,
           page_size: pageSize,
           org: orgFilter,
+          search,
           disease: diseaseFilter,
           stage: stageFilter,
           date: dateFilter,
@@ -142,7 +144,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
     } finally {
       setLoading(false);
     }
-  }, [page, pageSize, orgFilter, diseaseFilter, stageFilter, dateFilter, reviewFilters, ordering]);
+  }, [page, pageSize, orgFilter, search, diseaseFilter, stageFilter, dateFilter, reviewFilters, ordering]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount
@@ -199,7 +201,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
       setDeleting(true);
       if (selectAllMode) {
         await api.delete("/patient-info/bulk_delete_filtered/", {
-          params: { org: orgFilter, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters },
+          params: { org: orgFilter, search, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters },
         });
       } else {
         await api.delete("/patient-info/bulk_delete/", {
@@ -382,7 +384,21 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
       </div>
 
       <div className="mb-4 rounded-lg border border-border bg-background p-4 shadow-sm">
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+          <label className="flex flex-col gap-1.5 text-sm font-medium text-foreground">
+            Name or email
+            <input
+              type="search"
+              defaultValue={search}
+              placeholder="Search, then press Enter"
+              onBlur={(event) => {
+                const value = event.target.value.trim();
+                if (value !== search) { resetToFirstPage(); setSearch(value); }
+              }}
+              onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }}
+              className="h-10 rounded-md border border-input bg-background px-3 text-sm font-normal text-foreground"
+            />
+          </label>
           <label className="flex flex-col gap-1.5 text-sm font-medium text-foreground">
             Org
             <select
@@ -393,7 +409,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
               }}
               className="h-10 rounded-md border border-input bg-background px-3 text-sm font-normal text-foreground"
             >
-              <option value={ALL_FILTER_VALUE}>All</option>
+              <option value={ALL_FILTER_VALUE}>{currentUser?.is_staff ? 'All (including unassigned)' : 'All accessible'}</option>
               {filterOptions.orgs.map((org) => (
                 <option key={org.value} value={org.value}>
                   {org.label}
@@ -535,6 +551,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                     ? "Unable to load patients."
                     : patientCount === 0 &&
                   orgFilter === ALL_FILTER_VALUE &&
+                  !search &&
                   diseaseFilter === ALL_FILTER_VALUE &&
                   stageFilter === ALL_FILTER_VALUE &&
                   dateFilter === ALL_FILTER_VALUE &&
