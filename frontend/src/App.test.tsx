@@ -11,19 +11,22 @@ vi.mock("@/hooks/useAuth", () => ({ useAuth: () => mockUseAuth() }));
 vi.mock("@/components/Patient/PatientList", () => ({ default: () => <div>PROVIDER_LIST</div> }));
 vi.mock("@/components/Patient/PatientHome", () => ({ default: () => <div>PATIENT_HOME</div> }));
 vi.mock("@/components/Patient/PatientDetail", () => ({
-  default: (props: { user?: { id?: number } | null }) => (
+  PatientDetailRoute: (props: { user?: { id?: number } | null }) => (
     <div>{`PATIENT_DETAIL:${props.user?.id ?? "none"}`}</div>
   ),
 }));
 vi.mock("@/components/Patient/UploadFHIR", () => ({ default: () => <div>UPLOAD_FHIR</div> }));
 vi.mock("@/components/Patient/UploadCSV", () => ({ default: () => <div>UPLOAD_CSV</div> }));
 vi.mock("@/components/OrgAdmin/OrgAdminPage", () => ({ default: () => <div>ORG_ADMIN</div> }));
+vi.mock("@/components/FieldMappings/FieldMappingPage", () => ({ default: () => <div>FIELD_MAPPINGS</div> }));
+vi.mock("@/components/CodeMappings/CodeMappingPage", () => ({ default: () => <div>CODE_MAPPINGS</div> }));
 vi.mock("@/components/User/UserProfilePage", () => ({ default: () => <div>USER_PROFILE</div> }));
 vi.mock("@/components/Auth/Login", () => ({ Login: () => <div>LOGIN</div> }));
-vi.mock("@/components/Auth/AuthCallback", () => ({ AuthCallback: () => <div>AUTH_CALLBACK</div> }));
 vi.mock("@/components/Auth/AcceptInvite", () => ({ default: () => <div>ACCEPT_INVITE</div> }));
 vi.mock("@/components/Auth/AcceptPatientInvite", () => ({ default: () => <div>ACCEPT_PATIENT_INVITE</div> }));
 vi.mock("@/components/Auth/ResetPassword", () => ({ default: () => <div>RESET_PASSWORD</div> }));
+vi.mock("@/components/Auth/VerifyEmail", () => ({ default: () => <div>VERIFY_EMAIL</div> }));
+vi.mock("@/components/Auth/VerifyEmailBanner", () => ({ default: () => <div>VERIFY_BANNER</div> }));
 vi.mock("@/components/Auth/ChangePassword", () => ({ default: () => <div>CHANGE_PASSWORD</div> }));
 vi.mock("@/components/Auth/OrgLogin", () => ({ default: () => <div>ORG_LOGIN</div> }));
 vi.mock("@/components/Auth/OrgSignup", () => ({ default: () => <div>ORG_SIGNUP</div> }));
@@ -87,6 +90,18 @@ describe("App role-gated routing", () => {
     mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, is_org_admin: true } });
     renderAt("/org-admin");
     expect(screen.getByText("ORG_ADMIN")).toBeInTheDocument();
+  });
+
+  it("allows an organization admin to access field mappings", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, is_org_admin: true } });
+    renderAt("/field-mappings");
+    expect(screen.getByText("FIELD_MAPPINGS")).toBeInTheDocument();
+  });
+
+  it("allows an organization admin to access code mappings", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, is_org_admin: true } });
+    renderAt("/code-mappings");
+    expect(screen.getByText("CODE_MAPPINGS")).toBeInTheDocument();
   });
 });
 
@@ -203,5 +218,76 @@ describe("App force-password-change gate (TI.1.1#09)", () => {
     renderAt("/reset-password");
     expect(screen.getByText("RESET_PASSWORD")).toBeInTheDocument();
     expect(screen.queryByText("CHANGE_PASSWORD")).not.toBeInTheDocument();
+  });
+});
+
+describe("unverified email banner", () => {
+  it("prompts a signed-in user whose address is not confirmed, without blocking the page", () => {
+    mockUseAuth.mockReturnValue({
+      ...baseAuth,
+      currentUser: { id: 1, is_patient: true, person_id: 5, email_verified: false },
+    });
+    renderAt("/");
+    expect(screen.getByText("VERIFY_BANNER")).toBeInTheDocument();
+    expect(screen.getByText("PATIENT_HOME")).toBeInTheDocument();
+  });
+
+  it.each([{ email_verified: true }, {}])("stays out of the way otherwise: %j", (flags) => {
+    // `{}` is a backend that predates the field: no banner rather than a false alarm.
+    mockUseAuth.mockReturnValue({
+      ...baseAuth,
+      currentUser: { id: 1, is_patient: true, person_id: 5, ...flags },
+    });
+    renderAt("/");
+    expect(screen.queryByText("VERIFY_BANNER")).not.toBeInTheDocument();
+  });
+
+  it("serves the verification page to a logged-out visitor", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: null });
+    renderAt("/verify-email");
+    expect(screen.getByText("VERIFY_EMAIL")).toBeInTheDocument();
+  });
+});
+
+describe('organization administration routes', () => {
+  for (const [path, marker] of [['/org-admin', 'ORG_ADMIN'], ['/upload-fhir', 'UPLOAD_FHIR'], ['/upload-csv', 'UPLOAD_CSV']]) {
+    it.each([{ is_staff: true }, { is_org_admin: true }])(`allows admins at ${path}: %j`, role => {
+      mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, ...role } });
+      renderAt(path);
+      expect(screen.getByText(marker)).toBeInTheDocument();
+    });
+    it.each([{ is_patient: true }, { org_accesses: [{ role: 'doctor' }] }, { org_accesses: [{ role: 'analyst' }] }])(`blocks other roles at ${path}: %j`, role => {
+      mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, ...role } });
+      renderAt(path);
+      expect(screen.queryByText(marker)).not.toBeInTheDocument();
+    });
+  }
+  it('offers both upload formats', () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, is_staff: true } });
+    renderAt('/upload');
+    expect(screen.getByRole('link', { name: /^FHIR/ })).toHaveAttribute('href', '/upload-fhir');
+    expect(screen.getByRole('link', { name: /^CSV/ })).toHaveAttribute('href', '/upload-csv');
+  });
+});
+
+
+it('uses the inline profile heading without a second masthead for patient users', () => {
+  mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 1, is_patient: true, person_id: 5 } });
+  renderAt('/profile');
+  expect(screen.getByText('USER_PROFILE')).toBeInTheDocument();
+  expect(screen.queryByRole('banner')).not.toBeInTheDocument();
+});
+
+describe("retired OAuth callback", () => {
+  it("requires session login instead of exchanging a code", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: null });
+    renderAt("/auth/callback?code=old-code&state=old-state");
+    expect(screen.getByText("LOGIN")).toBeInTheDocument();
+  });
+
+  it("uses an existing session at the old callback URL", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, is_org_admin: true } });
+    renderAt("/auth/callback?code=old-code&state=old-state");
+    expect(screen.getByText("PROVIDER_LIST")).toBeInTheDocument();
   });
 });

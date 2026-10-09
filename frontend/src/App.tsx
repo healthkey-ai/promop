@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import {
   Routes,
   Route,
@@ -7,21 +7,29 @@ import {
   useParams,
 } from "react-router-dom";
 import { Login } from "@/components/Auth/Login";
-import { AuthCallback } from "@/components/Auth/AuthCallback";
 import AcceptInvite from "@/components/Auth/AcceptInvite";
 import AcceptPatientInvite from "@/components/Auth/AcceptPatientInvite";
 import ResetPassword from "@/components/Auth/ResetPassword";
 import ChangePassword from "@/components/Auth/ChangePassword";
 import PatientList from "@/components/Patient/PatientList";
-import PatientDetail from "@/components/Patient/PatientDetail";
+import { PatientDetailRoute } from "@/components/Patient/PatientDetail";
 import PatientHome from "@/components/Patient/PatientHome";
+import UploadPage from "@/components/Patient/UploadPage";
 import UploadFHIR from "@/components/Patient/UploadFHIR";
 import UploadCSV from "@/components/Patient/UploadCSV";
 import OrgAdminPage from "@/components/OrgAdmin/OrgAdminPage";
+import ServiceApplicationsPage from "@/components/OrgAdmin/ServiceApplicationsPage";
 import FieldMappingPage from "@/components/FieldMappings/FieldMappingPage";
+import CodeMappingPage from "@/components/CodeMappings/CodeMappingPage";
+import SuggestRunLogPage from "@/components/CodeMappings/SuggestRunLogPage";
+import CodeMappingAccuracyPage from "@/components/CodeMappings/CodeMappingAccuracyPage";
+import MappingHubPage from "@/components/MappingHub/MappingHubPage";
+import TherapyMappingPage from "@/components/TherapyMappings/TherapyMappingPage";
 import OrgLogin from "@/components/Auth/OrgLogin";
 import OrgSignup from "@/components/Auth/OrgSignup";
 import ForgotPassword from "@/components/Auth/ForgotPassword";
+import VerifyEmail from "@/components/Auth/VerifyEmail";
+import VerifyEmailBanner from "@/components/Auth/VerifyEmailBanner";
 import UserProfilePage from "@/components/User/UserProfilePage";
 import { useAuth } from "@/hooks/useAuth";
 
@@ -58,15 +66,7 @@ function AppRoutes() {
   const { currentUser, loading: authLoading, refresh, logout } = useAuth();
   const location = useLocation();
 
-  useEffect(() => {
-    if (location.pathname === "/auth/callback") {
-      setTimeout(() => {
-        refresh();
-      }, 500);
-    }
-  }, [location.pathname, refresh]);
-
-  const publicPaths = ['/accept-invite', '/accept-patient-invite', '/reset-password', '/forgot-password', '/login', '/auth/callback'];
+  const publicPaths = ['/accept-invite', '/accept-patient-invite', '/reset-password', '/forgot-password', '/verify-email', '/login', '/auth/callback'];
   const isPublicPath = (path: string) =>
     publicPaths.includes(path) || /^\/org\/[^/]+\/(login|signup|forgot-password|accept-invite)$/.test(path);
   if (authLoading && !isPublicPath(location.pathname)) {
@@ -82,7 +82,7 @@ function AppRoutes() {
   // backend independently refuses every other /api/ request meanwhile, so this
   // is a UX affordance over a server-enforced rule. Public auth pages (reset
   // link, invite acceptance) are exempt so those flows can still complete.
-  const forceChangeExemptPaths = ['/reset-password', '/forgot-password', '/accept-invite', '/accept-patient-invite'];
+  const forceChangeExemptPaths = ['/reset-password', '/forgot-password', '/verify-email', '/accept-invite', '/accept-patient-invite'];
   const isForceChangeExempt = (path: string) =>
     forceChangeExemptPaths.includes(path) || /^\/org\/[^/]+\/(login|signup|forgot-password|accept-invite)$/.test(path);
   if (
@@ -102,17 +102,33 @@ function AppRoutes() {
     return element;
   };
 
-  // Staff-only routes: require a signed-in staff user.
-  const staffRoute = (element: ReactNode) => {
+  // Mapping curation is available to any professional role (staff, org_admin,
+  // doctor, analyst).  Doctors and analysts can propose; only staff and
+  // org_admin can approve.  The API independently enforces the same policy.
+  const hasProfessionalRole = currentUser?.is_staff || currentUser?.is_org_admin
+    || currentUser?.org_accesses?.some(a => ['org_admin', 'doctor', 'analyst'].includes(a.role ?? ''));
+  const mappingAdminRoute = (element: ReactNode) => {
     if (!currentUser) return <Navigate to="/login" replace />;
-    if (!currentUser.is_staff) return <Navigate to="/" replace />;
+    if (!hasProfessionalRole) return <Navigate to="/" replace />;
     return element;
   };
 
+  const orgAdminRoute = (element: ReactNode) => {
+    if (!currentUser) return <Navigate to="/login" replace />;
+    if (!(currentUser.is_staff || currentUser.is_org_admin)) return <Navigate to="/" replace />;
+    return element;
+  };
+
+  // A prompt, not a gate: the account works, only address-derived access waits.
+  // Strictly `=== false` so a backend that predates the field shows nothing.
+  const showVerifyBanner = currentUser?.email_verified === false && !isPublicPath(location.pathname);
+
   return (
+    <>
+    {showVerifyBanner && <VerifyEmailBanner email={currentUser?.email} />}
     <Routes>
       <Route path="/login" element={<Login />} />
-      <Route path="/auth/callback" element={<AuthCallback />} />
+      <Route path="/auth/callback" element={<Navigate to="/" replace />} />
       <Route path="/accept-invite" element={<AcceptInvite />} />
       {/* Alias for invitation emails sent before the link was un-nested — the
           token in the query string carries everything; the slug is cosmetic. */}
@@ -120,6 +136,7 @@ function AppRoutes() {
       <Route path="/accept-patient-invite" element={<AcceptPatientInvite />} />
       <Route path="/reset-password" element={<ResetPassword />} />
       <Route path="/forgot-password" element={<ForgotPassword />} />
+      <Route path="/verify-email" element={<VerifyEmail />} />
 
       <Route path="/org/:slug/login" element={<OrgLogin />} />
       <Route path="/org/:slug/signup" element={<OrgSignup />} />
@@ -140,12 +157,19 @@ function AppRoutes() {
           )
         }
       />
-      <Route path="/patient/:personId" element={providerRoute(<PatientDetail user={currentUser} />)} />
-      <Route path="/upload-fhir" element={providerRoute(<UploadFHIR />)} />
-      <Route path="/upload-csv" element={providerRoute(<UploadCSV />)} />
+      <Route path="/patient/:personId" element={providerRoute(<PatientDetailRoute user={currentUser} />)} />
+      <Route path="/upload" element={orgAdminRoute(<UploadPage />)} />
+      <Route path="/upload-fhir" element={orgAdminRoute(<UploadFHIR />)} />
+      <Route path="/upload-csv" element={orgAdminRoute(<UploadCSV />)} />
       <Route path="/stats" element={<Navigate to="/org-admin" replace />} />
-      <Route path="/org-admin" element={providerRoute(<OrgAdminPage />)} />
-      <Route path="/field-mappings" element={staffRoute(<FieldMappingPage />)} />
+      <Route path="/service-applications" element={currentUser?.is_staff ? <ServiceApplicationsPage /> : <Navigate to={currentUser ? "/" : "/login"} replace />} />
+      <Route path="/org-admin" element={orgAdminRoute(<OrgAdminPage />)} />
+      <Route path="/mappings" element={mappingAdminRoute(<MappingHubPage />)} />
+      <Route path="/field-mappings" element={mappingAdminRoute(<FieldMappingPage />)} />
+      <Route path="/code-mappings" element={mappingAdminRoute(<CodeMappingPage />)} />
+      <Route path="/code-mappings/suggest-runs/:runId" element={mappingAdminRoute(<SuggestRunLogPage />)} />
+      <Route path="/code-mappings/accuracy" element={mappingAdminRoute(<CodeMappingAccuracyPage />)} />
+      <Route path="/therapy-mappings" element={mappingAdminRoute(<TherapyMappingPage />)} />
       <Route
         path="/profile"
         element={
@@ -155,9 +179,16 @@ function AppRoutes() {
 
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+    </>
   );
 }
 
 export default function App() {
-  return <AppRoutes />;
+  return (
+    <div className="min-h-dvh">
+      <div className="app-page-content">
+        <AppRoutes />
+      </div>
+    </div>
+  );
 }

@@ -6,10 +6,12 @@ from omop_core.models import Concept, Measurement, Person
 from omop_core.services.patient_record_service import (
     _get_laboratory_data,
     _get_mm_specific_data,
+    refresh_patient_record,
 )
 from tests.factories import (
     ConceptFactory,
     MeasurementFactory,
+    PatientRecordFactory,
     PersonFactory,
     VocabularyFactory,
 )
@@ -80,11 +82,22 @@ def test_seeded_kappa_and_real_lambda_codes_are_not_confused():
 
 
 @pytest.mark.parametrize('code', ['48378-4', '80517-6', '104546-7'])
-def test_free_light_chain_ratio_codes_project(code):
+def test_kappa_lambda_ratio_codes_project(code):
     person = PersonFactory()
     _measure(person, code, 2.034)
 
-    assert float(_get_laboratory_data(person)['free_light_chain_ratio']) == pytest.approx(2.034)
+    assert float(_get_laboratory_data(person)['kappa_lambda_ratio']) == pytest.approx(2.034)
+
+
+def test_involved_uninvolved_ratio_is_computed_from_light_chains():
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    _measure(person, '36916-5', 2.0)
+    _measure(person, '33944-0', 10.0)
+
+    record = refresh_patient_record(person)
+
+    assert float(record.involved_uninvolved_ratio) == pytest.approx(5.0)
 
 
 def test_marrow_plasma_cells_use_the_real_marrow_code():
@@ -295,21 +308,21 @@ def test_mm_measurement_lookups_use_shared_prefetch():
 # Derived-field contract
 # ---------------------------------------------------------------------------
 
-def test_free_light_chain_ratio_is_registered_as_omop_derived():
+def test_kappa_lambda_ratio_is_registered_as_omop_derived():
     """Otherwise it never clears on delete and stays writable through the API."""
     from omop_core.services.patient_record_service import (
         PATIENT_RECORD_OMOP_MAPPED_FIELDS,
         _OMOP_DERIVED_FIELDS,
     )
 
-    assert 'free_light_chain_ratio' in _OMOP_DERIVED_FIELDS
-    assert 'free_light_chain_ratio' in PATIENT_RECORD_OMOP_MAPPED_FIELDS
+    assert 'kappa_lambda_ratio' in _OMOP_DERIVED_FIELDS
+    assert 'kappa_lambda_ratio' in PATIENT_RECORD_OMOP_MAPPED_FIELDS
 
 
-def test_free_light_chain_ratio_has_provenance():
+def test_kappa_lambda_ratio_has_provenance():
     from omop_core.services.provenance_registry import get_registry
 
-    entry = get_registry()['free_light_chain_ratio']
+    entry = get_registry()['kappa_lambda_ratio']
 
     assert entry.omop_table == 'Measurement'
     assert '48378-4' in entry.concept_codes

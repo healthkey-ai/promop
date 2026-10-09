@@ -295,11 +295,10 @@ _BC_LABS = [
 ]
 
 _BC_BIOMARKERS = [
-    ('85337-4', 'Ki-67 [Interpretation] in Tissue', None),
     ('16112-5', 'Estrogen receptor [Interpretation] in Tissue', 'positive'),
     ('16113-3', 'Progesterone receptor [Interpretation] in Tissue', 'positive'),
     ('48676-1', 'HER2 [Interpretation] in Tissue', 'negative'),
-    ('85319-2', 'Ki-67 Ag [Presence] in Tissue by Immune stain', None),
+    ('29593-1', 'Cells.Ki-67 nuclear Ag/cells in Tissue by Immune stain', None),
     ('85336-6', 'PD-L1 immune cells [#/area] in Tissue by Immune stain', None),
     ('96893-3', 'PD-L1 combined positive score', None),
     ('44648-4', 'Biopsy grade', None),
@@ -780,8 +779,7 @@ def _enrich_patient_bundle(bundle: dict, index: int) -> None:
             })
 
     biomarker_values = {
-        '85337-4': (rng.randint(5, 95), '%'),
-        '85319-2': (rng.randint(5, 75), '%'),
+        '29593-1': (rng.randint(5, 75), '%'),
         '85336-6': (rng.randint(1, 30), '%'),
         '96893-3': (rng.randint(1, 50), None),
         '44648-4': (rng.choice([1, 2, 3]), None),
@@ -1292,6 +1290,8 @@ class Command(BaseCommand):
         selected = [copy.deepcopy(b) for b in (bc_alive[:n_alive_target] + bc_deceased[:n_deceased_target])]
         for idx, bundle in enumerate(selected, start=1):
             _enrich_patient_bundle(bundle, idx)
+            from omop_core.services.sample_disease_profiles import complete_demo_fhir_bundle
+            complete_demo_fhir_bundle(bundle, 'BC')
         all_entries = []
         for bundle in selected:
             all_entries.extend(bundle.get('entry', []))

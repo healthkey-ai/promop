@@ -1,11 +1,22 @@
+import { useState } from 'react';
 import Field from './Field';
+import { today } from '@/api/clinicalFacts';
+import type { VocabSource } from '@/hooks/useVocabulary';
 import type { FieldDescriptor } from '@/hooks/useWritableFields';
 
 interface Props {
   label: string;
   name: string;
-  type: 'text' | 'number' | 'date' | 'boolean';
+  type: 'text' | 'number' | 'date' | 'boolean' | 'select' | 'multiselect' | 'email';
   value: unknown;
+  /** Choices for a select. The descriptor's own `options` win when it has them:
+   *  those are the curated set the server resolves a concept from, so a local
+   *  list could offer a value the write would then fail to code. */
+  options?: string[];
+  vocabSource?: VocabSource | null;
+  /** Mark a control the API has no field for at all — distinct from one it
+   *  refuses to write. See #646. */
+  unknownField?: boolean;
   descriptor?: FieldDescriptor;
   onChange: (name: string, value: unknown) => void;
   /** Event date for this edit, shared across the tab. */
@@ -37,23 +48,47 @@ export default function ClinicalField({
   value,
   descriptor,
   onChange,
+  options,
+  vocabSource,
+  unknownField,
   date,
   onDateChange,
   showReason = true,
 }: Props) {
   const writable = !!descriptor?.writable;
+  // A tab that shares one date across its fields passes it in — a blood panel is
+  // drawn once. A tab whose results come from different specimens, as a pathology
+  // report's do, can leave it out and get a date per field rather than one date
+  // pretending to cover all of them.
+  const [ownDate, setOwnDate] = useState(today());
+  // `absent` is stronger than "not writable": the server has no such field.
+  const absent = !!unknownField;
+  const curated = descriptor?.options?.map((o) => o.value);
+  const choices = curated ?? options;
+  // `multiple` is the descriptor saying several answers are stored at once,
+  // comma-joined — SCT history is "autologous SCT,tandem SCT". Rendering that as
+  // a single select would silently discard every answer but one.
+  const control = choices?.length
+    ? (descriptor?.multiple ? 'multiselect' : 'select')
+    : type;
 
   if (!writable) {
     const reason =
-      descriptor?.reason ??
-      'Derived from OMOP data; not editable here.';
+      descriptor?.reason
+      ?? (absent
+        // Not a PatientRecord column at all: the API neither returns it nor
+        // accepts it, so the box could never show a value and never save one.
+        // Saying "derived" here would be wrong in the other direction (#646).
+        ? 'Not stored on the patient record yet.'
+        : 'Derived from OMOP data; not editable here.');
     return (
       <div>
         <Field
           label={label}
           name={name}
-          type={type}
+          type={control}
           value={value}
+          options={choices}
           onChange={onChange}
           readOnly
         />
@@ -68,8 +103,16 @@ export default function ClinicalField({
 
   return (
     <div>
-      <Field label={label} name={name} type={type} value={value} onChange={onChange} />
-      {onDateChange && (
+      <Field
+        label={label}
+        name={name}
+        type={control}
+        value={value}
+        options={choices}
+        vocabSource={vocabSource}
+        onChange={onChange}
+      />
+      {(onDateChange || descriptor?.projection?.omop_table === 'measurement') && (
         <div className="mt-1 flex items-center gap-2">
           <label
             htmlFor={`${name}-date`}
@@ -80,8 +123,8 @@ export default function ClinicalField({
           <input
             id={`${name}-date`}
             type="date"
-            value={date ?? ''}
-            onChange={(e) => onDateChange(e.target.value)}
+            value={date ?? ownDate}
+            onChange={(e) => (onDateChange ?? setOwnDate)(e.target.value)}
             className="rounded-md border border-input px-2 py-1 text-xs"
           />
         </div>

@@ -47,4 +47,5 @@ class FirebaseTokenProvider(TokenProvider):
             email=decoded.get("email", ""),
             name=decoded.get("name"),
             raw=decoded,
+            email_verified=bool(decoded.get("email_verified", False)),
         )

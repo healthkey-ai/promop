@@ -36,9 +36,12 @@ beforeEach(() => {
 describe("usePatchPatientInfo — cache update strategy (issue #113)", () => {
   it("updates the cache with the PATCH response instead of invalidating the query", async () => {
     const client = createMockClient();
-    const patchResponse = { disease: "Follicular Lymphoma", id: 1 };
+    // The /me/ PATCH response wraps the record under patient_info, same as GET.
     (client.patch as ReturnType<typeof vi.fn>).mockResolvedValue({
-      data: patchResponse,
+      data: {
+        patient_info: { disease: "Follicular Lymphoma", id: 1 },
+        patient_name: "Test Patient",
+      },
     });
 
     // Seed existing cache data so setQueryData has something to merge into
@@ -75,7 +78,10 @@ describe("usePatchPatientInfo — cache update strategy (issue #113)", () => {
   it("merges PATCH response fields into the existing patient_info cache entry", async () => {
     const client = createMockClient();
     (client.patch as ReturnType<typeof vi.fn>).mockResolvedValue({
-      data: { disease: "Follicular Lymphoma", stage: "II", id: 1 },
+      data: {
+        patient_info: { disease: "Follicular Lymphoma", stage: "II", id: 1 },
+        patient_name: "Test Patient",
+      },
     });
 
     const initial = {
@@ -104,10 +110,13 @@ describe("usePatchPatientInfo — cache update strategy (issue #113)", () => {
 
   it("does not include previous_values in the merged patient_info", async () => {
     const client = createMockClient();
+    // previous_values lives at the top level of the response (alongside
+    // patient_info), not inside it.  The onSuccess handler must not leak it
+    // into the cached patient_info object.
     (client.patch as ReturnType<typeof vi.fn>).mockResolvedValue({
       data: {
-        disease: "Multiple Myeloma",
-        id: 1,
+        patient_info: { disease: "Multiple Myeloma", id: 1 },
+        patient_name: "",
         previous_values: { disease: null },
       },
     });

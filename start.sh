@@ -1,22 +1,22 @@
 #!/bin/bash
 set -e
 
-echo "Running migrations..."
-python manage.py migrate --noinput
-
-# Concepts that clinical FKs point at — gender, type concepts, the OMOP "no
-# matching concept" sentinel. No migration seeds them, so this path relied on
-# someone having run the seeder by hand; a deployment without them writes null
-# concepts and derivation silently reads nothing.
+# Render's web entrypoint. The preparation sequence lives in
+# scripts/prepare-deployment.sh so that Cloud Run's release job can run the same
+# steps instead of its own copy — see #1625. Render prepares during web boot;
+# Cloud Run prepares in a job gated ahead of the traffic shift.
 #
-# Safe under `set -e`: idempotent via get_or_create, and where a concept_id would
-# collide with a real Athena row already holding that (vocabulary, code) it skips
-# with a warning rather than raising.
-echo "Seeding OMOP concepts..."
-python manage.py seed_omop_concepts
+# Render production and staging both use this entrypoint. Staging is the
+# promop-staging service on dev; its database comes from Render DATABASE_URL.
+# Local staging access uses STAGING_DATABASE_URL in .env, not GCP.
+# Invoked through bash, not as ./scripts/..., so a lost exec bit cannot stop the
+# web service booting. render.yaml chmods start.sh and only start.sh -- that
+# chmod exists because the mode is not trusted to survive, and a second file
+# would get none of that protection.
+bash scripts/prepare-deployment.sh
 
-echo "Creating/resetting admin user..."
-python manage.py setup_admin
-
+# No --bind: gunicorn defaults to 0.0.0.0:$PORT when PORT is set, which Render
+# sets, and --workers likewise follows WEB_CONCURRENCY. Passing them here would
+# override what the platform chose.
 echo "Starting gunicorn..."
-exec gunicorn ctomop.wsgi:application
+exec gunicorn promop.wsgi:application

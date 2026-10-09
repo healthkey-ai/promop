@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import { VocabSource } from '@/hooks/useVocabulary';
 import { VocabularyTooltip } from '../UI/VocabularyTooltip';
+import FieldMappingLink from './FieldMappingLink';
 import SelectControl from './controls/SelectControl';
 import BooleanControl from './controls/BooleanControl';
 import MultiSelectControl from './controls/MultiSelectControl';
@@ -138,6 +139,7 @@ export default function Field({
           {label}
           {readOnly && <span className="ml-1 text-xs font-normal text-portal-text-secondary">(computed)</span>}
         </label>
+        <FieldMappingLink name={name} label={label} />
         {vocabSource && <VocabularyTooltip name={vocabSource.name} url={vocabSource.url} />}
       </div>
       {control}

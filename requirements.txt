@@ -1,39 +1,58 @@
+anthropic==1.2.0
 asgiref==3.8.1
 google-cloud-bigquery==3.25.0
 google-cloud-storage>=3.1.1
-gdown==5.2.0
+gdown==5.2.2
 certifi==2024.8.30
-cffi==1.16.0
+cffi==2.1.1
 charset-normalizer==3.3.2
-cryptography==43.0.0
+cryptography==50.0.1
 defusedxml==0.7.1
 dj-database-url==2.2.0
-Django==5.2.6
+Django==5.2.17
 django-cors-headers==4.4.0
-djangorestframework==3.15.2
+djangorestframework==3.17.2
 firebase-admin==7.4.0
 gunicorn==23.0.0
-idna==3.10
-oauthlib==3.3.1
+idna==3.19
+oauthlib==4.0.0
 django-oauth-toolkit==3.2.0
 packaging==24.1
 psycopg[binary]==3.3.3
 pycparser==2.23
 PyJWT>=2.10.1
 python-decouple==3.8
-python-dotenv==1.0.1
+python-dotenv==1.2.2
 python3-openid==3.2.0
-requests==2.32.3
+requests==2.34.2
 requests-oauthlib==2.0.0
-sqlparse==0.5.1
-urllib3==2.2.3
+stream-unzip==0.0.99
+sqlparse==0.6.0
+urllib3==2.8.0
 whitenoise==6.7.0
 django-anymail[mailgun]==12.0
 drf-spectacular==0.28.0
+celery[redis]==5.5.3
+sentry-sdk[django]==2.69.1
+redis==5.2.1
 
 python-fitparse>=2.0.0
 
+# Vector similarity search for code-mapping suggest
+pgvector>=0.3.6
+sentence-transformers>=3.0.0
+
 # Testing
-pytest==8.4.2
+pytest==9.0.3
 pytest-django==4.11.1
+pytest-xdist==3.5.0
 factory-boy==3.3.3
+
+# PROlog survey runner, installed as a Django app (prolog_surveys). Public repo,
+# pinned by commit, which is the release tagged v0.4.8. A tag is mutable — a
+# force-push moves it and the next rebuild installs different code, including
+# different migrations, with no diff here to show for it; the app contributes
+# migrations to this database and start.sh migrates on every deploy, so that is
+# not a risk worth carrying for readability. Bump both together.
+# See docs/prolog-surveys.md.
+prolog @ git+https://github.com/healthkey-ai/prolog@32ef08058eb8998f0213ebf71465b3677bad1f67#subdirectory=backend  # v0.4.8

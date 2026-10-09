@@ -52,7 +52,7 @@ pip install -r requirements.txt
 ## 4. Apply migrations
 
 ```bash
-DATABASE_URL="postgresql://postgres:postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres:postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py migrate
 ```
 
@@ -62,7 +62,7 @@ DATABASE_URL="postgresql://postgres:postgres@localhost:5432/promop_dev" \
 
 ```bash
 ADMIN_PASSWORD=yourpassword \
-DATABASE_URL="postgresql://postgres:postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres:postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py setup_admin
 ```
 
@@ -95,7 +95,7 @@ The UI is available at `http://localhost:5173`.
 ## Running tests
 
 ```bash
-DATABASE_URL="postgresql://postgres:postgres@localhost:5432/promop_test" \
+DATABASE_URL="postgresql://postgres:postgres@localhost:5432/promop_test" DEBUG=True \
   .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput
 ```
 

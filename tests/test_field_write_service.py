@@ -36,13 +36,16 @@ def _seed_patient_reported_type():
 def test_owned_writable_fields_are_what_the_applier_persists():
     # The editor gates on this set, so it must include the labs + demographic/location this applier
     # writes and EXCLUDE the descriptor-writable-but-deferred identity fields (email/phone).
-    from omop_core.services.write_descriptor import build_writable_field_descriptor, KIND_PROFILE
+    from omop_core.services.write_descriptor import build_writable_field_descriptor, KIND_DIRECT, KIND_PROFILE
     ConceptFactory(concept_code='718-7', concept_name='Hemoglobin')  # make a LOINC field resolvable
     owned = owned_writable_fields()
     assert {'gender', 'race', 'ethnicity', 'city', 'region'} <= owned
     # email is _PROFILE_REPLACEABLE — descriptor-writable but bucketed by the applier → not owned.
     desc = build_writable_field_descriptor()
-    if desc.get('email', {}).get('kind') == KIND_PROFILE and desc['email'].get('writable'):
+    email = desc.get('email', {})
+    if email.get('writable') and (
+            email.get('kind') == KIND_PROFILE
+            or (email.get('kind') == KIND_DIRECT and email.get('projection_target') == 'person')):
         assert 'email' not in owned
 
 
@@ -100,12 +103,14 @@ def test_replaceable_identity_field_is_bucketed_not_written():
     # An identity/admin KIND_PROFILE field this applier does not own (email/phone/validated/…) is
     # handed back in `profile`, never silently written here. Pick one from the live descriptor so the
     # test tracks the real contract rather than a guessed field name.
-    from omop_core.services.write_descriptor import build_writable_field_descriptor, KIND_PROFILE
+    from omop_core.services.write_descriptor import build_writable_field_descriptor, KIND_DIRECT, KIND_PROFILE
     desc = build_writable_field_descriptor()
     owned = set(('gender', 'race', 'ethnicity', 'city', 'region', 'postal_code', 'country',
                  'latitude', 'longitude'))
     replaceable = [f for f, e in desc.items()
-                   if e.get('kind') == KIND_PROFILE and e.get('writable') and f not in owned]
+                   if e.get('writable') and f not in owned
+                   and (e.get('kind') == KIND_PROFILE
+                        or (e.get('kind') == KIND_DIRECT and e.get('projection_target') == 'person'))]
     if not replaceable:
         pytest.skip('no replaceable KIND_PROFILE field in this descriptor')
     person = _person_with_loinc('718-7', 'Hemoglobin [Mass/volume] in Blood')
@@ -126,6 +131,112 @@ def test_computed_field_is_rejected_with_the_descriptor_reason():
     assert 'bmi' in result.rejected
     assert result.applied == []
     assert Measurement.objects.filter(person=person).count() == 0
+
+
+def test_patient_record_direct_field_without_projection_is_not_owned_by_federation_writer():
+    # Dev's direct-write capability does not imply that this CB endpoint can
+    # persist it: that endpoint only owns supported OMOP facts and Person/Location.
+    descriptor = {
+        'employment_status': {
+            'kind': 'direct', 'writable': True, 'target': 'patient_record',
+            'reason': 'Written directly to PatientRecord. No OMOP mapping yet.',
+        },
+    }
+    assert 'employment_status' not in owned_writable_fields(descriptor)
+
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    result = apply_field_writes(person, {'employment_status': 'Employed'}, descriptor=descriptor)
+
+    assert result.applied == []
+    assert 'employment_status' in result.rejected
+
+
+def test_unsupported_occurrence_projection_is_not_advertised_or_written():
+    # The CB scalar applier only knows Measurement and Observation. It must not
+    # silently route a condition recipe through its Measurement fallback.
+    descriptor = {
+        'disease': {
+            'kind': 'direct', 'writable': True, 'target': 'patient_record',
+            'projection': {
+                'omop_table': 'condition', 'concept_id': 123,
+                'source_value': 'disease',
+            },
+        },
+    }
+    assert 'disease' not in owned_writable_fields(descriptor)
+
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    result = apply_field_writes(person, {'disease': 'test'}, descriptor=descriptor)
+    assert result.applied == []
+    assert 'disease' in result.rejected
+
+
+def test_scalar_projection_upsert_is_scoped_by_source_value():
+    # Several curated fields can share a concept while derivation distinguishes
+    # them by source_value (the SCT fields are one production example).
+    from omop_core.models import Observation
+
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    concept = ConceptFactory(concept_id=32817, concept_name='Patient attribute')
+    _seed_patient_reported_type()
+    descriptor = {
+        field: {
+            'kind': 'direct', 'writable': True, 'target': 'patient_record',
+            'value_kind': 'string',
+            'projection': {
+                'omop_table': 'observation', 'concept_id': concept.concept_id,
+                'source_value': source,
+            },
+        }
+        for field, source in (
+            ('sct_date', 'mm-sct-date'),
+            ('another_sct_field', 'mm-sct-eligibility'),
+        )
+    }
+
+    first = apply_field_writes(
+        person, {'sct_date': '2026-10-07', 'another_sct_field': 'Eligible'},
+        today=date(2026, 10, 7), descriptor=descriptor,
+    )
+    assert set(first.applied) == {'sct_date', 'another_sct_field'}
+    assert Observation.objects.filter(person=person).count() == 2
+    assert set(Observation.objects.filter(person=person).values_list(
+        'observation_source_value', flat=True,
+    )) == {'mm-sct-date', 'mm-sct-eligibility'}
+
+    apply_field_writes(
+        person, {'sct_date': '2026-10-08'},
+        today=date(2026, 10, 7), descriptor=descriptor,
+    )
+    assert Observation.objects.filter(person=person).count() == 2
+    assert Observation.objects.get(
+        person=person, observation_source_value='mm-sct-date',
+    ).value_as_string == '2026-10-08'
+
+
+def test_multiple_projection_is_not_advertised_or_stringified_by_scalar_writer():
+    descriptor = {
+        'sct_eligibility': {
+            'kind': 'direct', 'writable': True, 'target': 'patient_record',
+            'value_kind': 'string', 'multiple': True,
+            'projection': {
+                'omop_table': 'observation', 'concept_id': 32817,
+                'source_value': 'mm-sct-eligibility',
+            },
+        },
+    }
+    assert 'sct_eligibility' not in owned_writable_fields(descriptor)
+
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    result = apply_field_writes(
+        person, {'sct_eligibility': ['Eligible']}, descriptor=descriptor,
+    )
+    assert result.applied == []
+    assert 'sct_eligibility' in result.rejected
 
 
 def test_unknown_field_is_rejected():
@@ -250,12 +361,14 @@ def test_lymph_node_size_writes_the_disambiguating_qualifier():
     person = PersonFactory()
     PatientRecordFactory(person=person)
     ConceptFactory(concept_code='21889-1', concept_name='Size Tumor')
+    ConceptFactory(concept_id=36769292, concept_code='36769292',
+                   concept_name='Dimension of Largest Lymph Node')
     _seed_patient_reported_type()
 
     result = apply_field_writes(person, {'largest_lymph_node_size': 25}, today=date(2026, 8, 23))
 
     assert 'largest_lymph_node_size' in result.applied
-    m = Measurement.objects.get(person=person, measurement_concept__concept_code='21889-1')
+    m = Measurement.objects.get(person=person, measurement_concept_id=36769292)
     assert m.qualifier_source_value == 'lymph-node'
     assert float(m.value_as_number) == 25
 
@@ -291,7 +404,10 @@ def test_assertion_boolean_field_writes_and_rederives_true_and_false():
 # anchors the write to the SAME derivation the read path uses.
 from omop_core.services.patient_record_service import _GENETIC_MUTATION_LOINCS  # noqa: E402
 
-_GENE_CODE = {g: c for c, g in _GENETIC_MUTATION_LOINCS.items()}
+_GENE_CODE = {}
+for _code, _gene in _GENETIC_MUTATION_LOINCS.items():
+    if _gene:
+        _GENE_CODE[_gene] = _code
 _MUT_SNOMED_IDS = (255395001, 255461003, 30166007, 10828004, 42425007)  # germline/somatic + path/benign/vus
 
 
@@ -323,9 +439,10 @@ def test_genetic_mutation_write_creates_measurement_and_rederives():
     assert m.measurement_type_concept_id == 32865
     assert m.qualifier_concept_id == 255395001            # germline
     assert m.value_as_concept_id == 30166007              # pathogenic
-    assert refresh_patient_record(person).genetic_mutations == [
-        {'gene': 'brca1', 'variant': 'c.68_69delAG', 'test_date': '2026-08-23',
-         'origin': 'germline', 'interpretation': 'pathogenic'}]
+    mutation = refresh_patient_record(person).genetic_mutations[0]
+    assert {k: mutation[k] for k in ('gene', 'variant', 'test_date', 'origin', 'interpretation')} == {
+        'gene': 'brca1', 'variant': 'c.68_69delAG', 'test_date': '2026-08-23',
+        'origin': 'germline', 'interpretation': 'pathogenic'}
 
 
 def test_genetic_mutation_same_gene_upserts_not_duplicates():
@@ -341,9 +458,10 @@ def test_genetic_mutation_same_gene_upserts_not_duplicates():
     active = Measurement.objects.filter(
         person=person, measurement_concept__concept_code=_GENE_CODE['BRCA1'], is_erroneous=False)
     assert active.count() == 1
-    assert refresh_patient_record(person).genetic_mutations == [
-        {'gene': 'brca1', 'variant': '185delAG', 'test_date': '2026-08-24',
-         'origin': 'somatic', 'interpretation': 'vus'}]
+    mutation = refresh_patient_record(person).genetic_mutations[0]
+    assert {k: mutation[k] for k in ('gene', 'variant', 'test_date', 'origin', 'interpretation')} == {
+        'gene': 'brca1', 'variant': '185delAG', 'test_date': '2026-08-24',
+        'origin': 'somatic', 'interpretation': 'vus'}
 
 
 def test_genetic_mutation_list_diff_removes_dropped_gene():
@@ -396,6 +514,30 @@ def test_genetic_mutation_reconcile_does_not_touch_imported_row():
     assert imported.value_as_string == 'IMPORTED-VARIANT'
 
 
+def test_generic_mutation_question_survives_named_gene_list_clear():
+    # Generic LOINCs carry their gene in qualifier_source_value. They remain in
+    # the shared read-side map, but the legacy named-gene writer must not retire
+    # them when reconciling its own gene-specific list.
+    from tests.factories import MeasurementFactory
+    from omop_core.models import Concept
+    from omop_core.services.field_write_service import _GENETIC_MUTATION_SOURCE
+
+    person = _person_with_genetic_vocab(('BRCA1',))
+    generic = ConceptFactory(concept_code='36908-2', concept_name='Genetic analysis study')
+    tc = Concept.objects.get(concept_id=32865)
+    generic_row = MeasurementFactory(
+        person=person, measurement_concept=generic, measurement_type_concept=tc,
+        measurement_date=date(2026, 8, 23), measurement_source_value=_GENETIC_MUTATION_SOURCE,
+        qualifier_source_value='BRCA1', value_as_string='c.68_69delAG', is_erroneous=False,
+    )
+
+    apply_field_writes(person, {'genetic_mutations': []}, today=date(2026, 8, 24))
+
+    generic_row.refresh_from_db()
+    assert generic_row.is_erroneous is False
+    assert generic_row.value_as_string == 'c.68_69delAG'
+
+
 def test_genetic_mutation_optional_origin_and_interpretation_omitted():
     # origin/interpretation are optional: a gene+variant with neither round-trips (the derivation just
     # omits those keys), and the write does not fail.
@@ -404,8 +546,9 @@ def test_genetic_mutation_optional_origin_and_interpretation_omitted():
     apply_field_writes(person, {'genetic_mutations': [
         {'gene': 'BRCA1', 'mutation': 'c.68_69delAG'}]}, today=date(2026, 8, 23))
 
-    assert refresh_patient_record(person).genetic_mutations == [
-        {'gene': 'brca1', 'variant': 'c.68_69delAG', 'test_date': '2026-08-23'}]
+    mutation = refresh_patient_record(person).genetic_mutations[0]
+    assert {k: mutation[k] for k in ('gene', 'variant', 'test_date')} == {
+        'gene': 'brca1', 'variant': 'c.68_69delAG', 'test_date': '2026-08-23'}
 
 
 def test_genetic_mutation_recognized_gene_without_variant_fails_closed():
@@ -533,3 +676,13 @@ def test_owned_writable_includes_genetic_mutations_only_when_vocab_loaded():
     assert 'genetic_mutations' not in owned_writable_fields()
     _seed_genetic_vocab(('BRCA1',))
     assert 'genetic_mutations' in owned_writable_fields()
+
+
+def test_generic_mutation_questions_do_not_enable_named_gene_list_writer():
+    # Generic questions have no fixed gene name; loading them alone is not enough
+    # for the CB list writer to advertise an input it cannot route safely.
+    _seed_patient_reported_type()
+    ConceptFactory(concept_code='36908-2', concept_name='Genetic analysis study')
+    ConceptFactory(concept_code='81252-9', concept_name='Genetic variant assessment')
+
+    assert 'genetic_mutations' not in owned_writable_fields()

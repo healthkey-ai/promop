@@ -3,12 +3,32 @@
 This tutorial walks you through generating synthetic FHIR patients, importing them into PRomop,
 and querying the resulting `PatientRecord` projections via the API.
 
-**Prerequisites:** local setup complete — database created, migrations applied, and
-superuser created. See the [README](../README.md) if you haven't done that yet.
+**Prerequisites:** local setup complete — database created and the full Athena
+vocabulary loaded. The order is required: migrate `omop_core` through `0200`,
+load the full Athena release, then apply the remaining migrations. Migration
+`0201` seeds HK-Labs-to-LOINC mappings and cannot safely run before its LOINC
+concepts exist. See the [README](../README.md) and
+[vocabulary guide](vocabularies.md) for the exact commands.
 
 ---
 
-## 1. Start the backend
+## 1. Load the full Athena vocabulary, then finish migrations
+
+For a fresh clinical or production database, use this order. Do not substitute
+the retired `seed_omop_concepts` development fixture for a full Athena load.
+
+```bash
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
+  .venv/bin/python manage.py migrate omop_core 0200 --noinput
+
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
+  .venv/bin/python manage.py load_athena_vocabularies --gdrive
+
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
+  .venv/bin/python manage.py migrate --noinput
+```
+
+## 2. Start the backend
 
 ```bash
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
@@ -21,29 +41,13 @@ The API is now available at `http://localhost:8000/api/v1/`.
 
 ---
 
-## 2. Load the Athena vocabulary
-
-PRomop needs the Athena vocabulary tables before FHIR imports can reliably
-resolve clinical codes. The easiest path uses the prepared vocabulary zip in
-the shared Google Drive folder:
-
-```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
-  .venv/bin/python manage.py load_athena_vocabularies --gdrive
-```
-
-See [vocabularies.md](vocabularies.md) for the supplied Google Drive link,
-the OHDSI Athena download workflow, and GCS/S3 loading options.
-
----
-
 ## 3. Generate a synthetic FHIR bundle
 
 PRomop ships a generator that produces realistic FHIR R4 Bundles for multiple disease types.
 Start with 10 multiple myeloma patients:
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py generate_fhir_bundle \
     --disease mm \
     --count 10 \
@@ -102,7 +106,7 @@ Expected output for 10 patients:
 Specify an organization slug — it is created automatically if it does not exist:
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py import_fhir_bundle /tmp/mm_bundle.json \
     --org demo-org \
     --batch-size 5 \
@@ -205,11 +209,11 @@ Repeat steps 2–4 with a different disease type and a different org slug to see
 cohorts side by side:
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py generate_fhir_bundle \
     --disease fl --count 10 --seed 42 --output /tmp/fl_bundle.json
 
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py import_fhir_bundle /tmp/fl_bundle.json \
     --org demo-org --batch-size 5
 
@@ -249,8 +253,8 @@ search that requires 27–39 joins over raw OMOP runs as a flat predicate over a
 
 ## Next steps
 
-- **Full API reference:** [API_SURFACE.md](../API_SURFACE.md)
+- **Full API reference:** [API_SURFACE.md](API_SURFACE.md)
 - **LOINC / SNOMED / HemOnc concept mapping:** [docs/concept-mapping.md](concept-mapping.md)
-- **Synthetic data options:** [SYNTHETIC_PATIENT_GENERATION.md](../SYNTHETIC_PATIENT_GENERATION.md)
+- **Synthetic data options:** [SYNTHETIC_PATIENT_GENERATION.md](SYNTHETIC_PATIENT_GENERATION.md)
 - **Research background:** [paper.md](../paper.md)
 - **Deployment to Render:** [README.md § Deployment](../README.md#deployment-render)

@@ -5,13 +5,23 @@ in PARTNER_AUTH_PROVIDERS.  Each provider first gets a lightweight
 can_handle() check (unverified JWT payload inspection — no secrets,
 no external calls) before the real verify() is invoked.
 
-Verified tokens are cached for up to 60 seconds so repeated requests
-with the same Bearer token skip provider.verify() and DB lookups.
+Verified tokens are cached for up to AUTH_TOKEN_CACHE_TTL seconds (default 60)
+so repeated requests with the same Bearer token skip provider.verify() and DB
+lookups.  A cache hit honours the token's own ``exp`` where the provider gives
+one, and such an entry never outlives the token it came from — see issue #759 /
+audit finding F21.  The TTL bounds the window in which a provider-side
+revocation is not yet visible; that window cannot be closed without a round-trip
+to the provider.
+
+Where a provider returns no ``exp`` the cache falls back to the TTL alone, and
+F21 is mitigated rather than closed for those tokens.  RFC 7662 makes ``exp``
+optional in an introspection response, so the PHR non-RS256 path can land here.
 """
 from __future__ import annotations
 
 import hashlib
 import logging
+import time
 
 from django.conf import settings
 from django.core.cache import cache as django_cache
@@ -20,7 +30,7 @@ from rest_framework.exceptions import AuthenticationFailed
 
 from patient_portal.models import Identity
 
-from .permissions import SERVICE_TOKEN
+from patient_portal.service_tokens import service_credentials
 from .providers import get_providers
 from .providers.base import TokenClaims, decode_jwt_unverified
 
@@ -79,21 +89,62 @@ class PartnerAuthentication(BaseAuthentication):
         return None
 
     @staticmethod
-    def _from_cache(token: str):
+    def _token_expiry(claims_raw) -> int | None:
+        """Return the token's ``exp`` as a unix timestamp, or None if absent.
+
+        Providers hand back the decoded claim set as ``raw``. JWT issuers carry
+        ``exp`` there, but an RFC 7662 introspection response need not — ``exp``
+        is optional in that spec — so this returns None for those and the caller
+        falls back to the cache TTL alone.
+        """
+        if not isinstance(claims_raw, dict):
+            return None
+        exp = claims_raw.get("exp")
+        if isinstance(exp, bool) or not isinstance(exp, (int, float)):
+            return None
+        return int(exp)
+
+    @classmethod
+    def _from_cache(cls, token: str):
         data = django_cache.get(_token_cache_key(token))
         if data is None:
             return None
+
+        claim_data = dict(data["claims"])
+        claim_data.setdefault("email_verified", False)
+
+        # A cache hit is not a licence to skip expiry (audit finding F21, #759).
+        # Verification happened when the entry was written; the token has been
+        # ageing since. Without this an expired — or provider-revoked — token
+        # keeps authenticating for the rest of the TTL window.
+        expiry = cls._token_expiry(claim_data.get("raw"))
+        if expiry is not None and time.time() >= expiry:
+            django_cache.delete(_token_cache_key(token))
+            return None
+
         try:
             identity = Identity.objects.get(pk=data["pk"])
         except Identity.DoesNotExist:
             return None
         if not identity.is_active:
             raise AuthenticationFailed("Account is disabled.")
-        claims = TokenClaims(**data["claims"])
+        claims = TokenClaims(**claim_data)
         return (identity, claims)
 
-    @staticmethod
-    def _to_cache(token: str, identity_pk: int, claims: TokenClaims):
+    @classmethod
+    def _to_cache(cls, token: str, identity_pk: int, claims: TokenClaims):
+        # Never let the entry outlive the token. The configured TTL bounds the
+        # revocation window — which cannot be closed without asking the provider
+        # — but a token expiring sooner than that must take its cache entry with
+        # it, so the two windows cannot compound.
+        timeout = settings.AUTH_TOKEN_CACHE_TTL
+        expiry = cls._token_expiry(claims.raw)
+        if expiry is not None:
+            remaining = expiry - int(time.time())
+            if remaining <= 0:
+                return
+            timeout = min(timeout, remaining)
+
         django_cache.set(
             _token_cache_key(token),
             {
@@ -104,9 +155,10 @@ class PartnerAuthentication(BaseAuthentication):
                     "email": claims.email,
                     "name": claims.name,
                     "raw": claims.raw,
+                    "email_verified": claims.email_verified,
                 },
             },
-            timeout=settings.AUTH_TOKEN_CACHE_TTL,
+            timeout=timeout,
         )
 
     def authenticate_header(self, request):
@@ -116,30 +168,33 @@ class PartnerAuthentication(BaseAuthentication):
     def _get_or_create_identity(claims: TokenClaims) -> Identity:
         identity, created = Identity.objects.get_or_create_from_claims(claims)
         if created:
-            if claims.email:
+            if claims.email and claims.email_verified:
                 identity.email = claims.email
             if claims.name:
                 identity.name = claims.name
             identity.set_unusable_password()
             identity.save(update_fields=["email", "name", "password"])
-            _claim_placeholder_access(identity, claims.email)
+            _claim_placeholder_access(identity, claims.email, claims.email_verified)
             logger.info(
                 "partner_auth: provisioned identity %d (%s|%s)",
                 identity.pk, claims.issuer, claims.sub,
             )
-        elif claims.email and not identity.email:
+        elif claims.email and claims.email_verified and not identity.email:
             identity.email = claims.email
             if claims.name and identity.name != claims.name:
                 identity.name = claims.name
                 identity.save(update_fields=["email", "name"])
             else:
                 identity.save(update_fields=["email"])
-            _claim_placeholder_access(identity, claims.email)
-        elif claims.email:
-            _claim_placeholder_access(identity, claims.email)
+            _claim_placeholder_access(identity, claims.email, claims.email_verified)
+        elif claims.email and claims.email_verified:
+            _claim_placeholder_access(identity, claims.email, claims.email_verified)
             if claims.name and identity.name != claims.name:
                 identity.name = claims.name
                 identity.save(update_fields=["name"])
+        if (claims.email and claims.email_verified
+                and identity.email.lower() == claims.email.lower()):
+            identity.mark_email_verified()
         return identity
 
 
@@ -150,15 +205,23 @@ def _ensure_person(identity, claims=None):
     email = ""
     if claims:
         email = claims.email or ""
+        email_verified = claims.email_verified
     elif identity.email:
         email = identity.email
+        email_verified = identity.has_verified_email
+    else:
+        email_verified = False
 
-    resolve_or_create_person(identity, email=email)
+    resolve_or_create_person(identity, email=email, email_verified=email_verified)
 
 
-def _claim_placeholder_access(identity: Identity, email: str | None) -> None:
+def _claim_placeholder_access(
+    identity: Identity,
+    email: str | None,
+    email_verified: bool = False,
+) -> None:
     """Move invite grants from an unusable local placeholder to a real login identity."""
-    if not email or identity.issuer == "urn:local":
+    if not email or not email_verified or identity.issuer == "urn:local":
         return
 
     from omop_core.models import GroupAccess
@@ -195,30 +258,50 @@ def _claim_placeholder_access(identity: Identity, email: str | None) -> None:
 
 
 class ServiceTokenAuthentication(BaseAuthentication):
-    """Authenticate service-to-service calls via a pre-shared Bearer token."""
+    """Resolve a configured Bearer credential to its own scoped service principal."""
 
     def authenticate(self, request):
         import hmac
-
-        secret = getattr(settings, "SERVICE_AUTH_TOKEN", "").strip()
-        if not secret:
-            return None
 
         header = request.META.get("HTTP_AUTHORIZATION", "")
         if not header.startswith("Bearer "):
             return None
 
-        if not hmac.compare_digest(header[7:], secret):
+        credentials = service_credentials(
+            settings.SERVICE_AUTH_TOKENS, settings.SERVICE_AUTH_TOKEN,
+            settings.SERVICE_AUTH_SCOPES,
+        )
+        from patient_portal.service_applications import stored_credential, check_environment_fallback
+        matched = stored_credential(header[7:])
+        if matched is None:
+            for secret, credential in credentials:
+                if hmac.compare_digest(header[7:].encode(), secret.encode()):
+                    matched = credential
+            if matched is not None:
+                check_environment_fallback(matched)
+        if matched is None:
             return None
 
         identity, created = Identity.objects.get_or_create(
-            issuer='urn:service', sub='hk-labs-sync',
+            issuer='urn:service', sub=matched.service_id,
         )
         if created:
             identity.set_unusable_password()
             identity.save(update_fields=['password'])
+        if identity.is_staff or identity.is_superuser:
+            # A service bearer is a scoped credential, never a
+            # Django administrator. Repair the unsafe state proposed in #1144
+            # so IsAdminUser and inline staff checks cannot bypass its grant.
+            Identity.objects.filter(pk=identity.pk).update(
+                is_staff=False, is_superuser=False,
+            )
+            identity.is_staff = False
+            identity.is_superuser = False
+            logger.warning("Removed staff flags from service identity %s", identity.pk)
 
-        return (identity, SERVICE_TOKEN)
+        if not identity.is_active:
+            raise AuthenticationFailed("Account is disabled.")
+        return (identity, matched)
 
     def authenticate_header(self, request):
         return "Bearer"

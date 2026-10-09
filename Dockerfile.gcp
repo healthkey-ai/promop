@@ -3,7 +3,7 @@ FROM python:3.12-slim AS backend
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential libpq-dev curl && \
+    build-essential libpq-dev curl git && \
     rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
@@ -11,6 +11,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+
+RUN python scripts/verify_source_catalog_snapshots.py
 
 RUN python manage.py collectstatic --noinput --clear || true
 
@@ -39,7 +41,7 @@ ENV WHITENOISE_ROOT=/app/frontend/dist/remote
 
 EXPOSE 8080
 
-CMD ["gunicorn", "ctomop.wsgi:application", \
+CMD ["gunicorn", "promop.wsgi:application", \
      "--bind", "0.0.0.0:8080", \
      "--workers", "2", \
      "--threads", "2", \

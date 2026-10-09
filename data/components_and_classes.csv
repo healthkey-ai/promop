@@ -1,0 +1,491 @@
+component_code,component_title,component_concept_id,class_code,class_title,class_concept_id
+orelabrutinib_ICP022,Orelabrutinib (ICP-022),,btk_inhibitors,BTK Inhibitors,35807208
+orelabrutinib_ICP022,Orelabrutinib (ICP-022),,covalent_btk_inhibitors,Covalent BTK Inhibitors,
+orelabrutinib_ICP022,Orelabrutinib (ICP-022),,kinase_inhibitors,Kinase Inhibitors,35807197
+orelabrutinib_ICP022,Orelabrutinib (ICP-022),,targeted_therapy,Targeted Therapy,912163
+orelabrutinib_ICP022,Orelabrutinib (ICP-022),,tyrosine_kinase_inhibitors_(tkis),Tyrosine Kinase Inhibitors (TKIs),
+splenectomy,Splenectomy,4125482,surgery,Surgery,45888085
+chemoimmunotherapy_regimen,Chemoimmunotherapy Regimen,619763,chemoimmunotherapy,Chemoimmunotherapy,35803403
+methotrexate,Methotrexate,1305058,chemotherapy,Chemotherapy,4273629
+methotrexate,Methotrexate,1305058,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+hyperfractionated_cyclophosphamide,Hyperfractionated Cyclophosphamide,,chemotherapy,Chemotherapy,4273629
+hyperfractionated_cyclophosphamide,Hyperfractionated Cyclophosphamide,,chemotherapy_(alkylating_agent),Chemotherapy (Alkylating Agent),35807238
+hyperfractionated_cyclophosphamide,Hyperfractionated Cyclophosphamide,,immunomodulatory_drugs_(imids),Immunomodulatory Drugs (IMiDs),35807403
+cytarabine,Cytarabine,1311078,chemotherapy,Chemotherapy,4273629
+cytarabine,Cytarabine,1311078,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+trimethoprim,Trimethoprim,1705674,cyp2c8_inhibitors,CYP2C8 inhibitors,19403357
+trimethoprim,Trimethoprim,1705674,cyp450_modulators,CYP450 Modulators,
+trimethoprim,Trimethoprim,1705674,pjp_prophylaxis,PJP/PCP prophylaxis,3655482
+sulfamethoxazole,Sulfamethoxazole,1836430,cyp2c9_inhibitors,CYP2C9 inhibitors,19403358
+sulfamethoxazole,Sulfamethoxazole,1836430,cyp450_modulators,CYP450 Modulators,
+sulfamethoxazole,Sulfamethoxazole,1836430,pjp_prophylaxis,PJP/PCP prophylaxis,3655482
+allopurinol,Allopurinol,1167322,antiviral_prophylaxis,Antiviral Prophylaxis,619308
+allopurinol,Allopurinol,1167322,antivirals,Antivirals,35804586
+acyclovir,Acyclovir,1703687,antiviral_prophylaxis,Antiviral Prophylaxis,619308
+acyclovir,Acyclovir,1703687,antivirals,Antivirals,35804586
+valacyclovir,Valacyclovir,1717704,antiviral_prophylaxis,Antiviral Prophylaxis,619308
+valacyclovir,Valacyclovir,1717704,antivirals,Antivirals,35804586
+lamivudine,Lamivudine,1704183,antiviral_prophylaxis,Antiviral Prophylaxis,619308
+lamivudine,Lamivudine,1704183,antivirals,Antivirals,35804586
+lamivudine,Lamivudine,1704183,hbv_prophylaxis,HBV Prophylaxis,
+entecavir,Entecavir,1711246,antiviral_prophylaxis,Antiviral Prophylaxis,619308
+entecavir,Entecavir,1711246,antivirals,Antivirals,35804586
+entecavir,Entecavir,1711246,hbv_prophylaxis,HBV Prophylaxis,
+tenofovir,Tenofovir,19011093,antiviral_prophylaxis,Antiviral Prophylaxis,619308
+tenofovir,Tenofovir,19011093,antivirals,Antivirals,35804586
+tenofovir,Tenofovir,19011093,hbv_prophylaxis,HBV Prophylaxis,
+chlorambucil,Chlorambucil,1390051,chemotherapy,Chemotherapy,4273629
+chlorambucil,Chlorambucil,1390051,chemotherapy_(alkylating_agent),Chemotherapy (Alkylating Agent),35807238
+chlorambucil,Chlorambucil,1390051,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+methylprednisolone,Methylprednisolone,1506270,corticosteroids,Corticosteroids,35803578
+methylprednisolone,Methylprednisolone,1506270,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+pirtobrutinib,Pirtobrutinib,1301683,btk_inhibitors,BTK Inhibitors,35807208
+pirtobrutinib,Pirtobrutinib,1301683,kinase_inhibitors,Kinase Inhibitors,35807197
+pirtobrutinib,Pirtobrutinib,1301683,non_covalent_btk_inhibitors,Non-covalent BTK Inhibitors,
+pirtobrutinib,Pirtobrutinib,1301683,targeted_therapy,Targeted Therapy,912163
+pirtobrutinib,Pirtobrutinib,1301683,tyrosine_kinase_inhibitors_(tkis),Tyrosine Kinase Inhibitors (TKIs),
+alemtuzumab,Alemtuzumab,1312706,anti_cd52_monoclonal_antibodies,Anti-CD52 Monoclonal Antibodies,35807231
+alemtuzumab,Alemtuzumab,1312706,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+alemtuzumab,Alemtuzumab,1312706,immunotherapy,Immunotherapy,35807189
+alemtuzumab,Alemtuzumab,1312706,monoclonal_antibodies,Monoclonal Antibodies,21603754
+fludarabine,Fludarabine,1395557,chemotherapy,Chemotherapy,4273629
+fludarabine,Fludarabine,1395557,chemotherapy_(alkylating_agent),Chemotherapy (Alkylating Agent),35807238
+fludarabine,Fludarabine,1395557,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+zanubrutinib,Zanubrutinib,37497691,btk_inhibitors,BTK Inhibitors,35807208
+zanubrutinib,Zanubrutinib,37497691,covalent_btk_inhibitors,Covalent BTK Inhibitors,
+zanubrutinib,Zanubrutinib,37497691,kinase_inhibitors,Kinase Inhibitors,35807197
+zanubrutinib,Zanubrutinib,37497691,targeted_therapy,Targeted Therapy,912163
+zanubrutinib,Zanubrutinib,37497691,tyrosine_kinase_inhibitors_(tkis),Tyrosine Kinase Inhibitors (TKIs),
+ibrutinib,Ibrutinib,44507848,btk_inhibitors,BTK Inhibitors,35807208
+ibrutinib,Ibrutinib,44507848,covalent_btk_inhibitors,Covalent BTK Inhibitors,
+ibrutinib,Ibrutinib,44507848,kinase_inhibitors,Kinase Inhibitors,35807197
+ibrutinib,Ibrutinib,44507848,targeted_therapy,Targeted Therapy,912163
+ibrutinib,Ibrutinib,44507848,tyrosine_kinase_inhibitors_(tkis),Tyrosine Kinase Inhibitors (TKIs),
+acalabrutinib,Acalabrutinib,792764,btk_inhibitors,BTK Inhibitors,35807208
+acalabrutinib,Acalabrutinib,792764,covalent_btk_inhibitors,Covalent BTK Inhibitors,
+acalabrutinib,Acalabrutinib,792764,kinase_inhibitors,Kinase Inhibitors,35807197
+acalabrutinib,Acalabrutinib,792764,targeted_therapy,Targeted Therapy,912163
+acalabrutinib,Acalabrutinib,792764,tyrosine_kinase_inhibitors_(tkis),Tyrosine Kinase Inhibitors (TKIs),
+induction_therapy,Induction Therapy,,induction_therapy,Induction Therapy,35803433
+high_dose_melphalan,High Dose Melphalan (140-200),,chemotherapy,Chemotherapy,4273629
+high_dose_melphalan,High Dose Melphalan (140-200),,chemotherapy_(alkylating_agent),Chemotherapy (Alkylating Agent),35807238
+high_dose_melphalan,High Dose Melphalan (140-200),,high_dose_chemotherapy,High Dose Chemotherapy,
+vrd_lite_triplet,VRd-lite triplet,,induction_therapy,Induction Therapy,35803433
+rd_doublet,Rd doublet,,induction_therapy,Induction Therapy,35803433
+kd_doublet,Kd doublet,,induction_therapy,Induction Therapy,35803433
+dara_rd_triplet,Dara-Rd triplet,,induction_therapy,Induction Therapy,35803433
+vmp_triplet,VMP triplet,,induction_therapy,Induction Therapy,35803433
+vcd_triplet,VCD triplet,,induction_therapy,Induction Therapy,35803433
+krd_triplet,KRd triplet,,induction_therapy,Induction Therapy,35803433
+vtd_triplet,VTd triplet,,induction_therapy,Induction Therapy,35803433
+vrd_triplet,VRd triplet,,induction_therapy,Induction Therapy,35803433
+isa_krd quadruplet,Isa-KRd quadruplet,,induction_therapy,Induction Therapy,35803433
+dara_vmp quadruplet,Dara-VMP quadruplet,,induction_therapy,Induction Therapy,35803433
+isa_vrd_quadruplet,Isa_VRd quadruplet,,induction_therapy,Induction Therapy,35803433
+dara_vrd_quadruplet,Dara-VRd quadruplet,,induction_therapy,Induction Therapy,35803433
+high_risk-smoldering_mm_treatment,High-Risk Smoldering MM Treatment,,treatment_for_high_risk_smoldering_multiple_myeloma,Treatment for High-Risk Smoldering Multiple Myeloma,
+investigational_agent,Investigational Agent,35807195,,,
+diclofenac_potassium,Diclofenac Potassium,19132917,nsaids,NSAIDs,35807487
+diclofenac_sodium,Diclofenac Sodium,19026850,nsaids,NSAIDs,35807487
+naproxen_sodium,Naproxen Sodium,1115008,nsaids,NSAIDs,35807487
+ibuprofen,Ibuprofen,1177480,nsaids,NSAIDs,35807487
+herbal_supplement,Herbal Supplement,4167042,herbal_supplements,Herbal Supplements,4167042
+hiv_antiretroviral,HIV Antiretroviral,37017291,antiretroviral_therapy,Antiretroviral Therapy,45876157
+analgesic_opioid_agent,Analgesic Opioid Agent,21604200,opioid_therapies,Opioid Therapies,21604200
+Aspirin,Aspirin,1112807,nsaids,NSAIDs,35807487
+antiviral,Antiviral,35625639,antivirals,Antivirals,35804586
+intranasal_corticosteroid,Intranasal corticosteroid,37154565,corticosteroids,Corticosteroids,35803578
+intranasal_corticosteroid,Intranasal corticosteroid,37154565,supportive_therapy,Supportive Therapy,35803413
+topical_corticosteroid,Topical corticosteroid,723738,corticosteroids,Corticosteroids,35803578
+topical_corticosteroid,Topical corticosteroid,723738,supportive_therapy,Supportive Therapy,35803413
+inhaled_corticosteroid,Inhaled corticosteroid,46272454,corticosteroids,Corticosteroids,35803578
+inhaled_corticosteroid,Inhaled corticosteroid,46272454,supportive_therapy,Supportive Therapy,35803413
+mineralocorticoid,Mineralocorticoid,4304112,corticosteroids,Corticosteroids,35803578
+mineralocorticoid,Mineralocorticoid,4304112,hormonal_therapy,Hormonal Therapy,21603812
+immunosuppressant,Immunosuppressant,4158265,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+systemic_corticosteroid,Systemic Corticosteroid,723814,corticosteroids,Corticosteroids,35803578
+systemic_corticosteroid,Systemic Corticosteroid,723814,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+systemic_corticosteroid,Systemic Corticosteroid,723814,supportive_therapy,Supportive Therapy,35803413
+involved_field_radiotherapy_(ifrt),Involved Field Radiotherapy (IFRT),35803489,radiotherapy,Radiotherapy,35807298
+low_dose_radiotherapy,Low Dose Radiotherapy,1242725,radiotherapy,Radiotherapy,35807298
+palliative_radiotherapy,Palliative Radiotherapy,1447493,radiotherapy,Radiotherapy,35807298
+lhrh_gnrh_agonist,LHRH/GnRH agonist,21603823,hormonal_therapy,Hormonal Therapy,21603812
+ivig,IVIG (intravenous immunoglobulin),35805783,immunoglobulin_replacement_therapy,Immunoglobulin Replacement Therapy,
+ivig,IVIG (intravenous immunoglobulin),35805783,immunotherapy,Immunotherapy,35807189
+neoadjuvant_hormonal_therapy,Neoadjuvant Hormonal Therapy,,hormonal_therapy,Hormonal Therapy,21603812
+adjuvant_hormonal_therapy,Adjuvant Hormonal Therapy,,hormonal_therapy,Hormonal Therapy,21603812
+neoadjuvant_chemotherapy,Neoadjuvant Chemotherapy,,chemotherapy,Chemotherapy,4273629
+adjuvant_chemotherapy,Adjuvant Chemotherapy,,chemotherapy,Chemotherapy,4273629
+adjuvant_radiotherapy,Adjuvant Radiotherapy,,radiotherapy,Radiotherapy,35807298
+ipsilateral-breast-radiation,Ipsilateral Breast Radiation,4177684,radiotherapy,Radiotherapy,35807298
+warfarin,Warfarin,1310149,anticoagulants,Anticoagulants,35101524
+heparin,Heparin,1367571,anticoagulants,Anticoagulants,35101524
+axillary_lymph_node_dissection_(alnd),Axillary Lymph Node Dissection (ALND),4120961,surgery,Surgery,45888085
+sentinel_lymph_node-biopsy_(slnb),Sentinel Lymph Node Biopsy (SLNB),4071443,diagnostic_tool,Diagnostic Tool,
+sentinel_lymph_node-biopsy_(slnb),Sentinel Lymph Node Biopsy (SLNB),4071443,surgery,Surgery,45888085
+ibritumomab_tiuxetan,Ibritumomab tiuxetan,19068830,anti_cd20_monoclonal_antibodies,Anti-CD20 Monoclonal Antibodies,35807389
+ibritumomab_tiuxetan,Ibritumomab tiuxetan,19068830,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+ibritumomab_tiuxetan,Ibritumomab tiuxetan,19068830,immunotherapy,Immunotherapy,35807189
+ibritumomab_tiuxetan,Ibritumomab tiuxetan,19068830,monoclonal_antibodies,Monoclonal Antibodies,21603754
+ibritumomab_tiuxetan,Ibritumomab tiuxetan,19068830,radioimmunotherapy_(rit),Radioimmunotherapy (RIT),4043010
+ibritumomab_tiuxetan,Ibritumomab tiuxetan,19068830,radiotherapy,Radiotherapy,35807298
+ibritumomab_tiuxetan,Ibritumomab tiuxetan,19068830,targeted_therapy,Targeted Therapy,912163
+estrogen,Estrogen,19049228,hormonal_therapy,Hormonal Therapy,21603812
+abemaciclib,Abemaciclib,792649,cdk4_6_inhibitors,CDK4/6 inhibitors,37557727
+abemaciclib,Abemaciclib,792649,kinase_inhibitors,Kinase Inhibitors,35807197
+abemaciclib,Abemaciclib,792649,targeted_therapy,Targeted Therapy,912163
+ribociclib,Ribociclib,1592911,cdk4_6_inhibitors,CDK4/6 inhibitors,37557727
+ribociclib,Ribociclib,1592911,kinase_inhibitors,Kinase Inhibitors,35807197
+ribociclib,Ribociclib,1592911,targeted_therapy,Targeted Therapy,912163
+palbociclib,Palbociclib,45892075,cdk4_6_inhibitors,CDK4/6 inhibitors,37557727
+palbociclib,Palbociclib,45892075,kinase_inhibitors,Kinase Inhibitors,35807197
+palbociclib,Palbociclib,45892075,targeted_therapy,Targeted Therapy,912163
+growth_factor,Growth Factor,4077015,supportive_therapy,Supportive Therapy,35803413
+grapefruit-juice,Grapefruit juice,43533099,cyp3a4_inhibitors,CYP3A4 Inhibitors,19403362
+grapefruit-juice,Grapefruit juice,43533099,cyp450_modulators,CYP450 Modulators,
+st_johns_wort,St. John’s Wort,1398039,cyp3a4_inducers,CYP3A4 Inducers,19403370
+st_johns_wort,St. John’s Wort,1398039,cyp450_modulators,CYP450 Modulators,
+topiramate,Topiramate,742267,anti_seizure_meds,Anti-seizure meds,37362234
+topiramate,Topiramate,742267,cyp3a4_inducers,CYP3A4 Inducers,19403370
+topiramate,Topiramate,742267,cyp450_modulators,CYP450 Modulators,
+phenobarbital,Phenobarbital,734275,anti_seizure_meds,Anti-seizure meds,37362234
+phenobarbital,Phenobarbital,734275,cyp3a4_inducers,CYP3A4 Inducers,19403370
+phenobarbital,Phenobarbital,734275,cyp450_modulators,CYP450 Modulators,
+phenytoin,Phenytoin,740910,anti_seizure_meds,Anti-seizure meds,37362234
+phenytoin,Phenytoin,740910,cyp3a4_inducers,CYP3A4 Inducers,19403370
+phenytoin,Phenytoin,740910,cyp450_modulators,CYP450 Modulators,
+carbamazepine,Carbamazepine,740275,anti_seizure_meds,Anti-seizure meds,37362234
+carbamazepine,Carbamazepine,740275,cyp3a4_inducers,CYP3A4 Inducers,19403370
+carbamazepine,Carbamazepine,740275,cyp450_modulators,CYP450 Modulators,
+bupropion,Bupropion,750982,antidepressants,Antidepressants,21604686
+bupropion,Bupropion,750982,cyp3a4_inhibitors,CYP3A4 Inhibitors,19403362
+bupropion,Bupropion,750982,cyp450_modulators,CYP450 Modulators,
+sertraline,Sertraline,739138,antidepressants,Antidepressants,21604686
+sertraline,Sertraline,739138,cyp3a4_inhibitors,CYP3A4 Inhibitors,19403362
+sertraline,Sertraline,739138,cyp450_modulators,CYP450 Modulators,
+fluvoxamine,Fluvoxamine,751412,antidepressants,Antidepressants,21604686
+fluvoxamine,Fluvoxamine,751412,cyp3a4_inhibitors,CYP3A4 Inhibitors,19403362
+fluvoxamine,Fluvoxamine,751412,cyp450_modulators,CYP450 Modulators,
+paroxetine,Paroxetine,722031,antidepressants,Antidepressants,21604686
+paroxetine,Paroxetine,722031,cyp3a4_inhibitors,CYP3A4 Inhibitors,19403362
+paroxetine,Paroxetine,722031,cyp450_modulators,CYP450 Modulators,
+fluoxetine,Fluoxetine,755695,antidepressants,Antidepressants,21604686
+fluoxetine,Fluoxetine,755695,cyp3a4_inhibitors,CYP3A4 Inhibitors,19403362
+fluoxetine,Fluoxetine,755695,cyp450_modulators,CYP450 Modulators,
+posaconazole,Posaconazole,1704139,antifungals,Antifungals,35807319
+posaconazole,Posaconazole,1704139,cyp3a4_inhibitors,CYP3A4 Inhibitors,19403362
+posaconazole,Posaconazole,1704139,cyp450_modulators,CYP450 Modulators,
+voriconazole,Voriconazole,1714277,antifungals,Antifungals,35807319
+voriconazole,Voriconazole,1714277,cyp3a4_inhibitors,CYP3A4 Inhibitors,19403362
+voriconazole,Voriconazole,1714277,cyp450_modulators,CYP450 Modulators,
+fluconazole,Fluconazole,1754994,antifungals,Antifungals,35807319
+fluconazole,Fluconazole,1754994,cyp3a4_inhibitors,CYP3A4 Inhibitors,19403362
+fluconazole,Fluconazole,1754994,cyp450_modulators,CYP450 Modulators,
+ketoconazole,Ketoconazole,985708,antifungals,Antifungals,35807319
+ketoconazole,Ketoconazole,985708,cyp3a4_inhibitors,CYP3A4 Inhibitors,19403362
+ketoconazole,Ketoconazole,985708,cyp450_modulators,CYP450 Modulators,
+itraconazole,Itraconazole,1703653,antifungals,Antifungals,35807319
+itraconazole,Itraconazole,1703653,cyp3a4_inhibitors,CYP3A4 Inhibitors,19403362
+itraconazole,Itraconazole,1703653,cyp450_modulators,CYP450 Modulators,
+rifabutin,Rifabutin,1777417,antibiotics,Antibiotics,35807476
+rifabutin,Rifabutin,1777417,cyp3a4_inducers,CYP3A4 Inducers,19403370
+rifabutin,Rifabutin,1777417,cyp450_modulators,CYP450 Modulators,
+rifampin,Rifampin,1763204,antibiotics,Antibiotics,35807476
+rifampin,Rifampin,1763204,cyp3a4_inducers,CYP3A4 Inducers,19403370
+rifampin,Rifampin,1763204,cyp450_modulators,CYP450 Modulators,
+ciprofloxacin,Ciprofloxacin,1797513,antibiotics,Antibiotics,35807476
+ciprofloxacin,Ciprofloxacin,1797513,cyp3a4_inhibitors,CYP3A4 Inhibitors,19403362
+ciprofloxacin,Ciprofloxacin,1797513,cyp450_modulators,CYP450 Modulators,
+erythromycin,Erythromycin,1746940,antibiotics,Antibiotics,35807476
+erythromycin,Erythromycin,1746940,cyp3a4_inhibitors,CYP3A4 Inhibitors,19403362
+erythromycin,Erythromycin,1746940,cyp450_modulators,CYP450 Modulators,
+clarithromycin,Clarithromycin,1750500,antibiotics,Antibiotics,35807476
+clarithromycin,Clarithromycin,1750500,cyp3a4_inhibitors,CYP3A4 Inhibitors,19403362
+clarithromycin,Clarithromycin,1750500,cyp450_modulators,CYP450 Modulators,
+ublituximab,Ublituximab,1301397,anti_cd20_monoclonal_antibodies,Anti-CD20 Monoclonal Antibodies,35807389
+ublituximab,Ublituximab,1301397,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+ublituximab,Ublituximab,1301397,immunotherapy,Immunotherapy,35807189
+ublituximab,Ublituximab,1301397,monoclonal_antibodies,Monoclonal Antibodies,21603754
+ublituximab,Ublituximab,1301397,targeted_therapy,Targeted Therapy,912163
+anastrozole,Anastrozole,1348265,aromatase_inhibitors,Aromatase Inhibitors,35807245
+anastrozole,Anastrozole,1348265,hormonal_therapy,Hormonal Therapy,21603812
+letrozole,Letrozole,1315946,aromatase_inhibitors,Aromatase Inhibitors,35807245
+letrozole,Letrozole,1315946,hormonal_therapy,Hormonal Therapy,21603812
+plasmapheresis,Plasmapheresis,4049372,supportive_therapy,Supportive Therapy,35803413
+esa,Erythropoiesis-Stimulating Agent (ESA),43009086,supportive_therapy,Supportive Therapy,35803413
+denosumab,Denosumab,40222444,bone_modifying_agents,Bone-Modifying Agents,21604147
+denosumab,Denosumab,40222444,rankl_inhibitors_supportive_therapy,RANKL Inhibitors Supportive Therapy,35807351
+denosumab,Denosumab,40222444,supportive_therapy,Supportive Therapy,35803413
+pamidronate,Pamidronate,1511646,bisphosphonates_supportive_therapy,Bisphosphonates Supportive Therapy,35807233
+pamidronate,Pamidronate,1511646,bone_modifying_agents,Bone-Modifying Agents,21604147
+pamidronate,Pamidronate,1511646,supportive_therapy,Supportive Therapy,35803413
+zoledronic_acid,Zoledronic Acid,1524674,bisphosphonates_supportive_therapy,Bisphosphonates Supportive Therapy,35807233
+zoledronic_acid,Zoledronic Acid,1524674,bone_modifying_agents,Bone-Modifying Agents,21604147
+zoledronic_acid,Zoledronic Acid,1524674,supportive_therapy,Supportive Therapy,35803413
+agsct,Allogeneic Stem Cell Transplant,42542298,stem_cell_transplant,Stem Cell Transplant,4120445
+asct,Autologous Stem Cell Transplant (ASCT),37560622,stem_cell_transplant,Stem Cell Transplant,4120445
+panobinostat,Panobinostat (Farydak),46221435,hdac_inhibitors,HDAC Inhibitors,947794
+panobinostat,Panobinostat (Farydak),46221435,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+panobinostat,Panobinostat (Farydak),46221435,targeted_therapy,Targeted Therapy,912163
+talquetamab,Talquetamab,746340,anti_gprc5d_anti_cd3_bites,Anti-GPRC5D /Anti-CD3 BiTEs,37557087
+talquetamab,Talquetamab,746340,bispecific_antibodies,Bispecific Antibodies,35807364
+talquetamab,Talquetamab,746340,bispecific_t_cell_engagers_(bites),Bispecific T-Cell Engagers (BiTEs),
+talquetamab,Talquetamab,746340,immunotherapy,Immunotherapy,35807189
+talquetamab,Talquetamab,746340,targeted_therapy,Targeted Therapy,912163
+elranatamab,Elranatamab,746391,anti_bcma_anti_cd3_bites,Anti-BCMA / Anti-CD3 BiTEs,37557347
+elranatamab,Elranatamab,746391,bispecific_antibodies,Bispecific Antibodies,35807364
+elranatamab,Elranatamab,746391,bispecific_t_cell_engagers_(bites),Bispecific T-Cell Engagers (BiTEs),
+elranatamab,Elranatamab,746391,immunotherapy,Immunotherapy,35807189
+elranatamab,Elranatamab,746391,targeted_therapy,Targeted Therapy,912163
+ixazomib,Ixazomib,35606214,proteasome_inhibitors,Proteasome Inhibitors,35807295
+ixazomib,Ixazomib,35606214,targeted_therapy,Targeted Therapy,912163
+thalidomide,Thalidomide,19137042,immunomodulatory_drugs_(imids),Immunomodulatory Drugs (IMiDs),35807403
+thalidomide,Thalidomide,19137042,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+thalidomide,Thalidomide,19137042,immunotherapy,Immunotherapy,35807189
+entrectinib,Entrectinib,37496447,kinase_inhibitors,Kinase Inhibitors,35807197
+entrectinib,Entrectinib,37496447,targeted_therapy,Targeted Therapy,912163
+entrectinib,Entrectinib,37496447,tyrosine_kinase_inhibitors_(tkis),Tyrosine Kinase Inhibitors (TKIs),
+larotrectinib,Larotrectinib,1355705,kinase_inhibitors,Kinase Inhibitors,35807197
+larotrectinib,Larotrectinib,1355705,targeted_therapy,Targeted Therapy,912163
+larotrectinib,Larotrectinib,1355705,tyrosine_kinase_inhibitors_(tkis),Tyrosine Kinase Inhibitors (TKIs),
+cisplatin,Cisplatin,1397599,chemotherapy,Chemotherapy,4273629
+cisplatin,Cisplatin,1397599,chemotherapy_(alkylating_agent),Chemotherapy (Alkylating Agent),35807238
+cisplatin,Cisplatin,1397599,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+cisplatin,Cisplatin,1397599,platinum_based_chemotherapy,Platinum-Based Chemotherapy,21603747
+carboplatin,Carboplatin,1344905,chemotherapy,Chemotherapy,4273629
+carboplatin,Carboplatin,1344905,chemotherapy_(alkylating_agent),Chemotherapy (Alkylating Agent),35807238
+carboplatin,Carboplatin,1344905,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+carboplatin,Carboplatin,1344905,platinum_based_chemotherapy,Platinum-Based Chemotherapy,21603747
+talazoparib,Talazoparib,35201068,parp_inhibitors,PARP Inhibitors,35807419
+talazoparib,Talazoparib,35201068,targeted_therapy,Targeted Therapy,912163
+olaparib,Olaparib,45892579,parp_inhibitors,PARP Inhibitors,35807419
+olaparib,Olaparib,45892579,targeted_therapy,Targeted Therapy,912163
+pembrolizumab,Pembrolizumab,45775965,immune_checkpoint_inhibitors,Immune Checkpoint Inhibitors,3661702
+pembrolizumab,Pembrolizumab,45775965,immunotherapy,Immunotherapy,35807189
+pembrolizumab,Pembrolizumab,45775965,monoclonal_antibodies,Monoclonal Antibodies,21603754
+pembrolizumab,Pembrolizumab,45775965,pd_1_nhibitors,PD-1 Inhibitors,36683612
+nab_paclitaxel,Nab-Paclitaxel,902729,chemotherapy,Chemotherapy,4273629
+nab_paclitaxel,Nab-Paclitaxel,902729,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+trastuzumab_emtansine,Trastuzumab Emtansine,902726,anti_her2_adcs,Anti-HER2 ADCs,37557362
+trastuzumab_emtansine,Trastuzumab Emtansine,902726,antibody_drug_conjugate_(adcs),Antibody-Drug Conjugate (ADCs),35807221
+trastuzumab_emtansine,Trastuzumab Emtansine,902726,her2_targeted_therapy,HER2 Targeted Therapy,35807415
+trastuzumab_emtansine,Trastuzumab Emtansine,902726,immunotherapy,Immunotherapy,35807189
+trastuzumab_emtansine,Trastuzumab Emtansine,902726,targeted_therapy,Targeted Therapy,912163
+margetuximab,Margetuximab,739518,anti_her2_monoclonal_antibodies,Anti-HER2 Monoclonal Antibodies,35807222
+margetuximab,Margetuximab,739518,her2_Inhibitors,HER2 Inhibitors,955013
+margetuximab,Margetuximab,739518,her2_targeted_therapy,HER2 Targeted Therapy,35807415
+margetuximab,Margetuximab,739518,immunotherapy,Immunotherapy,35807189
+margetuximab,Margetuximab,739518,monoclonal_antibodies,Monoclonal Antibodies,21603754
+margetuximab,Margetuximab,739518,targeted_therapy,Targeted Therapy,912163
+neratinib,Neratinib,793846,her2_Inhibitors,HER2 Inhibitors,955013
+neratinib,Neratinib,793846,her2_targeted_therapy,HER2 Targeted Therapy,35807415
+neratinib,Neratinib,793846,her2_tyrosine_kinase_inhibitors,HER2 Tyrosine Kinase Inhibitors,
+neratinib,Neratinib,793846,kinase_inhibitors,Kinase Inhibitors,35807197
+neratinib,Neratinib,793846,targeted_therapy,Targeted Therapy,912163
+neratinib,Neratinib,793846,tyrosine_kinase_inhibitors_(tkis),Tyrosine Kinase Inhibitors (TKIs),
+lapatinib,Lapatinib,1359548,her2_Inhibitors,HER2 Inhibitors,955013
+lapatinib,Lapatinib,1359548,her2_targeted_therapy,HER2 Targeted Therapy,35807415
+lapatinib,Lapatinib,1359548,her2_tyrosine_kinase_inhibitors,HER2 Tyrosine Kinase Inhibitors,
+lapatinib,Lapatinib,1359548,kinase_inhibitors,Kinase Inhibitors,35807197
+lapatinib,Lapatinib,1359548,targeted_therapy,Targeted Therapy,912163
+lapatinib,Lapatinib,1359548,tyrosine_kinase_inhibitors_(tkis),Tyrosine Kinase Inhibitors (TKIs),
+tucatinib,Tucatinib,1145571,her2_Inhibitors,HER2 Inhibitors,955013
+tucatinib,Tucatinib,1145571,her2_targeted_therapy,HER2 Targeted Therapy,35807415
+tucatinib,Tucatinib,1145571,her2_tyrosine_kinase_inhibitors,HER2 Tyrosine Kinase Inhibitors,
+tucatinib,Tucatinib,1145571,kinase_inhibitors,Kinase Inhibitors,35807197
+tucatinib,Tucatinib,1145571,targeted_therapy,Targeted Therapy,912163
+tucatinib,Tucatinib,1145571,tyrosine_kinase_inhibitors_(tkis),Tyrosine Kinase Inhibitors (TKIs),
+trastuzumab_deruxtecan,Trastuzumab Deruxtecan,902724,anti_her2_adcs,Anti-HER2 ADCs,37557362
+trastuzumab_deruxtecan,Trastuzumab Deruxtecan,902724,antibody_drug_conjugate_(adcs),Antibody-Drug Conjugate (ADCs),35807221
+trastuzumab_deruxtecan,Trastuzumab Deruxtecan,902724,her2_targeted_therapy,HER2 Targeted Therapy,35807415
+trastuzumab_deruxtecan,Trastuzumab Deruxtecan,902724,immunotherapy,Immunotherapy,35807189
+trastuzumab_deruxtecan,Trastuzumab Deruxtecan,902724,targeted_therapy,Targeted Therapy,912163
+docetaxel,Docetaxel,1315942,chemotherapy,Chemotherapy,4273629
+docetaxel,Docetaxel,1315942,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+paclitaxel,Paclitaxel,1378382,chemotherapy,Chemotherapy,4273629
+paclitaxel,Paclitaxel,1378382,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+gemcitabine,Gemcitabine,1314924,chemotherapy,Chemotherapy,4273629
+gemcitabine,Gemcitabine,1314924,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+vinorelbine,Vinorelbine,1343346,chemotherapy,Chemotherapy,4273629
+eribulin,Eribulin,40230712,chemotherapy,Chemotherapy,4273629
+capecitabine,Capecitabine,1337620,chemotherapy,Chemotherapy,4273629
+megestrol_acetate,Megestrol acetate,19072024,hormonal_therapy,Hormonal Therapy,21603812
+megestrol_acetate,Megestrol acetate,19072024,progestins,Progestins,37557498
+tamoxifen,Tamoxifen,1436678,hormonal_therapy,Hormonal Therapy,21603812
+tamoxifen,Tamoxifen,1436678,selective_estrogen_receptor_modulators (serms),Selective Estrogen Receptor Modulators (SERMs),35807432
+elacestrant,Elacestrant,1301646,hormonal_therapy,Hormonal Therapy,21603812
+elacestrant,Elacestrant,1301646,selective_estrogen_receptor_degraders_serds,Selective Estrogen Receptor Degraders (SERDs),
+capivasertib,Capivasertib,747200,akt_inhibitors,AKT Inhibitors,35807198
+capivasertib,Capivasertib,747200,kinase_inhibitors,Kinase Inhibitors,35807197
+capivasertib,Capivasertib,747200,targeted_therapy,Targeted Therapy,912163
+other_chemotherapy,Other Chemotherapy,,chemotherapy,Chemotherapy,4273629
+sacituzumab_govitecan,Sacituzumab Govitecan,1145484,antibody_drug_conjugate_(adcs),Antibody-Drug Conjugate (ADCs),35807221
+sacituzumab_govitecan,Sacituzumab Govitecan,1145484,immunotherapy,Immunotherapy,35807189
+sacituzumab_govitecan,Sacituzumab Govitecan,1145484,targeted_therapy,Targeted Therapy,912163
+atezolizumab,Atezolizumab,42629079,anti_pd_l1_monoclonal_antibodies,Anti–PD-L1 Monoclonal Antibodies,35807270
+atezolizumab,Atezolizumab,42629079,immune_checkpoint_inhibitors,Immune Checkpoint Inhibitors,3661702
+atezolizumab,Atezolizumab,42629079,immunotherapy,Immunotherapy,35807189
+atezolizumab,Atezolizumab,42629079,monoclonal_antibodies,Monoclonal Antibodies,21603754
+atezolizumab,Atezolizumab,42629079,targeted_therapy,Targeted Therapy,912163
+everolimus,Everolimus,19011440,kinase_inhibitors,Kinase Inhibitors,35807197
+everolimus,Everolimus,19011440,targeted_therapy,Targeted Therapy,912163
+everolimus,Everolimus,19011440,mtor_inhibitors,mTOR Inhibitors,35807369
+exemestane,Exemestane,1398399,aromatase_inhibitors,Aromatase Inhibitors,35807245
+exemestane,Exemestane,1398399,hormonal_therapy,Hormonal Therapy,21603812
+fulvestrant,Fulvestrant,1304044,hormonal_therapy,Hormonal Therapy,21603812
+fulvestrant,Fulvestrant,1304044,selective_estrogen_receptor_degraders_serds,Selective Estrogen Receptor Degraders (SERDs),
+genomic_testing,Genomic Testing,40758336,diagnostic_tool,Diagnostic Tool,
+pertuzumab,Pertuzumab,42801287,anti_her2_monoclonal_antibodies,Anti-HER2 Monoclonal Antibodies,35807222
+pertuzumab,Pertuzumab,42801287,her2_Inhibitors,HER2 Inhibitors,955013
+pertuzumab,Pertuzumab,42801287,her2_targeted_therapy,HER2 Targeted Therapy,35807415
+pertuzumab,Pertuzumab,42801287,immunotherapy,Immunotherapy,35807189
+pertuzumab,Pertuzumab,42801287,monoclonal_antibodies,Monoclonal Antibodies,21603754
+pertuzumab,Pertuzumab,42801287,targeted_therapy,Targeted Therapy,912163
+trastuzumab,Trastuzumab,1387104,anti_her2_monoclonal_antibodies,Anti-HER2 Monoclonal Antibodies,35807222
+trastuzumab,Trastuzumab,1387104,her2_Inhibitors,HER2 Inhibitors,955013
+trastuzumab,Trastuzumab,1387104,her2_targeted_therapy,HER2 Targeted Therapy,35807415
+trastuzumab,Trastuzumab,1387104,immunotherapy,Immunotherapy,35807189
+trastuzumab,Trastuzumab,1387104,monoclonal_antibodies,Monoclonal Antibodies,21603754
+trastuzumab,Trastuzumab,1387104,targeted_therapy,Targeted Therapy,912163
+mastectomy,Mastectomy,4133358,surgery,Surgery,45888085
+lumpectomy,Lumpectomy,4275911,surgery,Surgery,45888085
+belantamab_mafodotin,Belantamab Mafodotin,37002419,antibody_drug_conjugate_(adcs),Antibody-Drug Conjugate (ADCs),35807221
+belantamab_mafodotin,Belantamab Mafodotin,37002419,anti_bcma_adcs,Anti–BCMA ADCs,37557346
+belantamab_mafodotin,Belantamab Mafodotin,37002419,immunotherapy,Immunotherapy,35807189
+belantamab_mafodotin,Belantamab Mafodotin,37002419,targeted_therapy,Targeted Therapy,912163
+ciltacabtagene_autoleucel,Ciltacabtagene autoleucel,779144,anti_bcma_car_t,Anti-BCMA CAR-T,1524998
+ciltacabtagene_autoleucel,Ciltacabtagene autoleucel,779144,car_t_cell_therapy,CAR-T Cell Therapy,35807448
+ciltacabtagene_autoleucel,Ciltacabtagene autoleucel,779144,immunotherapy,Immunotherapy,35807189
+axicabtagene_ciloleucel,Axicabtagene Ciloleucel,792844,anti_cd19_car-t,Anti-CD19 CAR-T,1525000
+axicabtagene_ciloleucel,Axicabtagene Ciloleucel,792844,car_t_cell_therapy,CAR-T Cell Therapy,35807448
+axicabtagene_ciloleucel,Axicabtagene Ciloleucel,792844,immunotherapy,Immunotherapy,35807189
+tisagenlecleucel,Tisagenlecleucel,792737,anti_cd19_car-t,Anti-CD19 CAR-T,1525000
+tisagenlecleucel,Tisagenlecleucel,792737,car_t_cell_therapy,CAR-T Cell Therapy,35807448
+tisagenlecleucel,Tisagenlecleucel,792737,immunotherapy,Immunotherapy,35807189
+idecabtagene_vicleucel,Idecabtagene vicleucel,36026868,anti_bcma_car_t,Anti-BCMA CAR-T,1524998
+idecabtagene_vicleucel,Idecabtagene vicleucel,36026868,car_t_cell_therapy,CAR-T Cell Therapy,35807448
+idecabtagene_vicleucel,Idecabtagene vicleucel,36026868,immunotherapy,Immunotherapy,35807189
+selinexor,Selinexor,1361191,targeted_therapy,Targeted Therapy,912163
+selinexor,Selinexor,1361191,xpo1_inhibitors_(targeted_therapy),XPO1 Inhibitors (Targeted Therapy),35807438
+melphalan,Melphalan,1301267,chemotherapy,Chemotherapy,4273629
+melphalan,Melphalan,1301267,chemotherapy_(alkylating_agent),Chemotherapy (Alkylating Agent),35807238
+melphalan,Melphalan,1301267,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+polatuzumab_vedotin,Polatuzumab Vedotin,1396729,antibody_drug_conjugate_(adcs),Antibody-Drug Conjugate (ADCs),35807221
+polatuzumab_vedotin,Polatuzumab Vedotin,1396729,immunotherapy,Immunotherapy,35807189
+polatuzumab_vedotin,Polatuzumab Vedotin,1396729,targeted_therapy,Targeted Therapy,912163
+venetoclax,Venetoclax,35604205,bcl_2_inhibitors,BCL-2 Inhibitors,35807456
+venetoclax,Venetoclax,35604205,targeted_therapy,Targeted Therapy,912163
+elotuzumab,Elotuzumab,35604032,anti_slamf7_monoclonal_antibodies,Anti-SLAMF7 Monoclonal Antibodies,35807363
+elotuzumab,Elotuzumab,35604032,immunotherapy,Immunotherapy,35807189
+elotuzumab,Elotuzumab,35604032,monoclonal_antibodies,Monoclonal Antibodies,21603754
+isatuximab,Isatuximab,37498969,anti_cd38_monoclonal_antibodies,Anti-CD38 Monoclonal Antibodies,35807345
+isatuximab,Isatuximab,37498969,immunotherapy,Immunotherapy,35807189
+isatuximab,Isatuximab,37498969,monoclonal_antibodies,Monoclonal Antibodies,21603754
+isatuximab,Isatuximab,37498969,targeted_therapy,Targeted Therapy,912163
+pomalidomide,Pomalidomide,43014237,immunomodulatory_drugs_(imids),Immunomodulatory Drugs (IMiDs),35807403
+pomalidomide,Pomalidomide,43014237,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+pomalidomide,Pomalidomide,43014237,immunotherapy,Immunotherapy,35807189
+pomalidomide,Pomalidomide,43014237,thalidomide_analogs,Thalidomide Analogs,
+carfilzomib,Carfilzomib,42873638,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+carfilzomib,Carfilzomib,42873638,proteasome_inhibitors,Proteasome Inhibitors,35807295
+carfilzomib,Carfilzomib,42873638,targeted_therapy,Targeted Therapy,912163
+brexucabtagene_autoleucel,Brexucabtagene autoleucel,37002369,anti_cd19_car-t,Anti-CD19 CAR-T,1525000
+brexucabtagene_autoleucel,Brexucabtagene autoleucel,37002369,car_t_cell_therapy,CAR-T Cell Therapy,35807448
+brexucabtagene_autoleucel,Brexucabtagene autoleucel,37002369,immunotherapy,Immunotherapy,35807189
+lisocabtagene_maraleucel,lisocabtagene maraleucel,739856,anti_cd19_car-t,Anti-CD19 CAR-T,1525000
+lisocabtagene_maraleucel,lisocabtagene maraleucel,739856,car_t_cell_therapy,CAR-T Cell Therapy,35807448
+lisocabtagene_maraleucel,lisocabtagene maraleucel,739856,immunotherapy,Immunotherapy,35807189
+tazemetostat,Tazemetostat,37498602,ezh2_inhibitors,EZH2 Inhibitors,42542425
+tazemetostat,Tazemetostat,37498602,targeted_therapy,Targeted Therapy,912163
+alpelisib,Alpelisib,1396423,kinase_inhibitors,Kinase Inhibitors,35807197
+alpelisib,Alpelisib,1396423,pi3k_inhibitors,PI3K Inhibitors,35807303
+alpelisib,Alpelisib,1396423,targeted_therapy,Targeted Therapy,912163
+duvelisib,Duvelisib,35200763,kinase_inhibitors,Kinase Inhibitors,35807197
+duvelisib,Duvelisib,35200763,pi3k_inhibitors,PI3K Inhibitors,35807303
+duvelisib,Duvelisib,35200763,targeted_therapy,Targeted Therapy,912163
+umbralisib,Umbralisib,739804,kinase_inhibitors,Kinase Inhibitors,35807197
+umbralisib,Umbralisib,739804,pi3k_inhibitors,PI3K Inhibitors,35807303
+umbralisib,Umbralisib,739804,targeted_therapy,Targeted Therapy,912163
+idelalisib,Idelalisib,45776944,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+idelalisib,Idelalisib,45776944,kinase_inhibitors,Kinase Inhibitors,35807197
+idelalisib,Idelalisib,45776944,pi3k_inhibitors,PI3K Inhibitors,35807303
+idelalisib,Idelalisib,45776944,targeted_therapy,Targeted Therapy,912163
+copanlisib,Copanlisib,792499,kinase_inhibitors,Kinase Inhibitors,35807197
+copanlisib,Copanlisib,792499,pi3k_inhibitors,PI3K Inhibitors,35807303
+copanlisib,Copanlisib,792499,targeted_therapy,Targeted Therapy,912163
+obinutuzumab,Obinutuzumab,44507676,anti_cd20_monoclonal_antibodies,Anti-CD20 Monoclonal Antibodies,35807389
+obinutuzumab,Obinutuzumab,44507676,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+obinutuzumab,Obinutuzumab,44507676,immunotherapy,Immunotherapy,35807189
+obinutuzumab,Obinutuzumab,44507676,monoclonal_antibodies,Monoclonal Antibodies,21603754
+obinutuzumab,Obinutuzumab,44507676,obinutuzumab_based_regimens,Obinutuzumab-Based Regimens,
+bendamustine,Bendamustine,19015523,chemotherapy,Chemotherapy,4273629
+bendamustine,Bendamustine,19015523,chemotherapy_(alkylating_agent),Chemotherapy (Alkylating Agent),35807238
+bendamustine,Bendamustine,19015523,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+prednisone,Prednisone,1551099,corticosteroids,Corticosteroids,35803578
+prednisone,Prednisone,1551099,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+prednisone,Prednisone,1551099,supportive_therapy,Supportive Therapy,35803413
+vincristine,Vincristine,1308290,chemotherapy,Chemotherapy,4273629
+vincristine,Vincristine,1308290,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+doxorubicin,Doxorubicin,1338512,chemotherapy,Chemotherapy,4273629
+doxorubicin,Doxorubicin,1338512,chemotherapy_(anthracycline),Chemotherapy (Anthracycline),35807214
+doxorubicin,Doxorubicin,1338512,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+rituximab,Rituximab,1314273,anti_cd20_monoclonal_antibodies,Anti-CD20 Monoclonal Antibodies,35807389
+rituximab,Rituximab,1314273,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+rituximab,Rituximab,1314273,immunotherapy,Immunotherapy,35807189
+rituximab,Rituximab,1314273,monoclonal_antibodies,Monoclonal Antibodies,21603754
+rituximab,Rituximab,1314273,targeted_therapy,Targeted Therapy,912163
+glofitamab,Glofitamab,1201501,anti_cd20_anti_cd3_bites,Anti-CD20 / Anti-CD3 BiTEs,1525001
+glofitamab,Glofitamab,1201501,bispecific_antibodies,Bispecific Antibodies,35807364
+glofitamab,Glofitamab,1201501,immunotherapy,Immunotherapy,35807189
+glofitamab,Glofitamab,1201501,monoclonal_antibodies,Monoclonal Antibodies,21603754
+glofitamab,Glofitamab,1201501,targeted_therapy,Targeted Therapy,912163
+cadonilimab,Cadonilimab,37561559,anti_pd_1_anti_ctla_4_bispecific_antibodies,Anti–PD-1 / Anti–CTLA-4 Bispecific Antibodies,37561464
+cadonilimab,Cadonilimab,37561559,bispecific_antibodies,Bispecific Antibodies,35807364
+cadonilimab,Cadonilimab,37561559,immune_checkpoint_inhibitors,Immune Checkpoint Inhibitors,3661702
+cadonilimab,Cadonilimab,37561559,immunotherapy,Immunotherapy,35807189
+cadonilimab,Cadonilimab,37561559,monoclonal_antibodies,Monoclonal Antibodies,21603754
+cadonilimab,Cadonilimab,37561559,targeted_therapy,Targeted Therapy,912163
+amivantamab,Amivantamab,1536935,bispecific_antibodies,Bispecific Antibodies,35807364
+amivantamab,Amivantamab,1536935,immunotherapy,Immunotherapy,35807189
+amivantamab,Amivantamab,1536935,monoclonal_antibodies,Monoclonal Antibodies,21603754
+amivantamab,Amivantamab,1536935,targeted_therapy,Targeted Therapy,912163
+teclistamab,Teclistamab,741578,anti_bcma_anti_cd3_bites,Anti-BCMA / Anti-CD3 BiTEs,37557347
+teclistamab,Teclistamab,741578,bispecific_antibodies,Bispecific Antibodies,35807364
+teclistamab,Teclistamab,741578,bispecific_t_cell_engagers_(bites),Bispecific T-Cell Engagers (BiTEs),
+teclistamab,Teclistamab,741578,immunotherapy,Immunotherapy,35807189
+teclistamab,Teclistamab,741578,targeted_therapy,Targeted Therapy,912163
+tebentafusp,Tebentafusp,1758886,immunotherapy,Immunotherapy,35807189
+mosunetuzumab,Mosunetuzumab,1301307,anti_cd20_anti_cd3_bites,Anti-CD20 / Anti-CD3 BiTEs,1525001
+mosunetuzumab,Mosunetuzumab,1301307,bispecific_antibodies,Bispecific Antibodies,35807364
+mosunetuzumab,Mosunetuzumab,1301307,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+mosunetuzumab,Mosunetuzumab,1301307,immunotherapy,Immunotherapy,35807189
+mosunetuzumab,Mosunetuzumab,1301307,monoclonal_antibodies,Monoclonal Antibodies,21603754
+mosunetuzumab,Mosunetuzumab,1301307,targeted_therapy,Targeted Therapy,912163
+blinatumomab,Blinatumomab,45892531,anti_cd19_anti_cd3_bites,Anti-CD19 / Anti-CD3 BiTEs,
+blinatumomab,Blinatumomab,45892531,bispecific_antibodies,Bispecific Antibodies,35807364
+blinatumomab,Blinatumomab,45892531,bispecific_t_cell_engagers_(bites),Bispecific T-Cell Engagers (BiTEs),
+blinatumomab,Blinatumomab,45892531,immunomodulatory_drugs_(imids),Immunomodulatory Drugs (IMiDs),35807403
+blinatumomab,Blinatumomab,45892531,immunotherapy,Immunotherapy,35807189
+blinatumomab,Blinatumomab,45892531,targeted_therapy,Targeted Therapy,912163
+catumaxomab,Catumaxomab,35802946,anti_epcam_anti_cd3_bites,Anti-EpCAM / Anti-CD3 BiTEs,37557360
+catumaxomab,Catumaxomab,35802946,bispecific_antibodies,Bispecific Antibodies,35807364
+catumaxomab,Catumaxomab,35802946,immunotherapy,Immunotherapy,35807189
+catumaxomab,Catumaxomab,35802946,monoclonal_antibodies,Monoclonal Antibodies,21603754
+catumaxomab,Catumaxomab,35802946,targeted_therapy,Targeted Therapy,912163
+cyclophosphamide,Cyclophosphamide,1310317,chemotherapy,Chemotherapy,4273629
+cyclophosphamide,Cyclophosphamide,1310317,chemotherapy_(alkylating_agent),Chemotherapy (Alkylating Agent),35807238
+cyclophosphamide,Cyclophosphamide,1310317,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+daratumumab,Daratumumab,35605744,anti_cd38_monoclonal_antibodies,Anti-CD38 Monoclonal Antibodies,35807345
+daratumumab,Daratumumab,35605744,immunotherapy,Immunotherapy,35807189
+daratumumab,Daratumumab,35605744,monoclonal_antibodies,Monoclonal Antibodies,21603754
+daratumumab,Daratumumab,35605744,targeted_therapy,Targeted Therapy,912163
+dexamethasone,Dexamethasone,1518254,corticosteroids,Corticosteroids,35803578
+dexamethasone,Dexamethasone,1518254,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+lenalidomide,Lenalidomide (Revlimid),19026972,immunomodulatory_drugs_(imids),Immunomodulatory Drugs (IMiDs),35807403
+lenalidomide,Lenalidomide (Revlimid),19026972,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+lenalidomide,Lenalidomide (Revlimid),19026972,immunotherapy,Immunotherapy,35807189
+lenalidomide,Lenalidomide (Revlimid),19026972,lenalidomide_based_regimens,Lenalidomide-Based Regimens,37557971
+lenalidomide,Lenalidomide (Revlimid),19026972,thalidomide_analogs,Thalidomide Analogs,
+bortezomib_(velcade),Bortezomib (Velcade),1336825,immunosuppressive_drugs,Immunosuppressive Drugs,35803409
+bortezomib_(velcade),Bortezomib (Velcade),1336825,proteasome_inhibitors,Proteasome Inhibitors,35807295
+bortezomib_(velcade),Bortezomib (Velcade),1336825,targeted_therapy,Targeted Therapy,912163

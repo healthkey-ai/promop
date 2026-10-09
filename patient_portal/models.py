@@ -1,9 +1,13 @@
 import uuid
 
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
+from django.core.exceptions import ValidationError
+from django.core.validators import RegexValidator
 from django.db import models
 from django.db.models import Q
 from django.utils import timezone
+
+from patient_portal.service_tokens import validate_service_scopes
 
 
 class IdentityManager(BaseUserManager):
@@ -22,6 +26,11 @@ class IdentityManager(BaseUserManager):
             raise ValueError("Email is required")
         email = self.normalize_email(email)
         extra_fields.pop("sub", None)
+        # A staff account is made by an operator at a shell, who vouches for the
+        # address. Everyone else proves theirs by following an emailed link.
+        if extra_fields.get("is_staff") and "email_verified_at" not in extra_fields:
+            from django.utils import timezone
+            extra_fields["email_verified_at"] = timezone.now()
         identity = self.model(
             issuer="urn:local",
             sub=str(uuid.uuid4()),
@@ -66,6 +75,16 @@ class Identity(AbstractBaseUser, PermissionsMixin):
     must_change_password = models.BooleanField(
         default=False, help_text="Force a password change on next successful login (e.g. after an admin reset).",
     )
+    email_verified_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text=(
+            "When this account proved it receives mail at `email`: by following an "
+            "emailed verification, invitation or password-reset link. Null for a "
+            "local account that only typed the address in. Anything that grants "
+            "access because of the address (a domain trust, a pending invitation, "
+            "matching a person by email) must go through `has_verified_email`."
+        ),
+    )
     failed_login_count = models.PositiveIntegerField(default=0)
     locked_until = models.DateTimeField(
         null=True, blank=True, help_text="If set and in the future, local logins are refused (lockout).",
@@ -91,6 +110,13 @@ class Identity(AbstractBaseUser, PermissionsMixin):
         ]
 
     def save(self, *args, **kwargs):
+        fields = kwargs.get('update_fields')
+        if self.pk and self.email_verified_at is not None and (fields is None or 'email' in fields):
+            previous_email = type(self).objects.filter(pk=self.pk).values_list('email', flat=True).first()
+            if previous_email is not None and previous_email.lower() != self.email.lower():
+                self.email_verified_at = None
+                if fields is not None:
+                    kwargs['update_fields'] = list(fields) + ['email_verified_at']
         self.uid = f"{self.issuer}:{self.sub}"
         if kwargs.get("update_fields") is not None and "uid" not in kwargs["update_fields"]:
             kwargs["update_fields"] = list(kwargs["update_fields"]) + ["uid"]
@@ -99,6 +125,29 @@ class Identity(AbstractBaseUser, PermissionsMixin):
     @property
     def is_local(self) -> bool:
         return self.issuer == "urn:local"
+
+    @property
+    def has_verified_email(self) -> bool:
+        """Whether `email` may be used to decide what this account can reach.
+
+        Federated logins record the provider's verified claim explicitly too;
+        a stored address alone is never evidence of mailbox ownership.
+        """
+        return bool(self.email) and self.email_verified_at is not None
+
+    @property
+    def verified_email_domain(self) -> str:
+        """The lowercased domain of a verified email, else ''."""
+        if not self.has_verified_email:
+            return ''
+        return self.email.rpartition('@')[2].lower()
+
+    def mark_email_verified(self, save=True):
+        if self.email_verified_at is None:
+            from django.utils import timezone
+            self.email_verified_at = timezone.now()
+            if save:
+                self.save(update_fields=['email_verified_at'])
 
     @property
     def username(self):
@@ -413,3 +462,74 @@ class BreakGlassGrant(models.Model):
 
     def __str__(self):
         return f"BreakGlass({self.identity_id} -> Person {self.person_id})"
+
+
+class ServiceApplication(models.Model):
+    """An editable application record with a stable service principal."""
+    name = models.CharField(max_length=160)
+    service_id = models.CharField(max_length=128, unique=True, validators=[
+        RegexValidator(
+            r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$', 'Use letters, numbers, dots, underscores, or hyphens.',
+        ),
+    ])
+    description = models.TextField(blank=True)
+    owner_contact = models.CharField(max_length=255, blank=True)
+    scopes = models.CharField(max_length=512, default='patient/*.read', blank=True,
+                              validators=[validate_service_scopes])
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name', 'pk']
+
+    SCOPES_IN_USE = ('Clearing scopes would leave this application\'s live tokens '
+                     'granting nothing. Revoke them first, or choose scopes.')
+
+    def live_tokens(self):
+        """Tokens that can still authenticate: not revoked, not past their expiry.
+
+        An expired token is refused by stored_credential already, so counting it
+        would make an operator revoke credentials that are dead anyway.
+        """
+        return self.tokens.filter(revoked_at__isnull=True).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()))
+
+    def clean(self):
+        """Blank scopes are storable, but not while a live token depends on them.
+
+        The field validator cannot express this — it sees a value, not the row —
+        and the serializer's copy of the rule does not reach Django admin, which
+        edits `scopes` as free text for any staff user. That is the same gap the
+        scope cap fell through before it moved onto the field.
+        """
+        super().clean()
+        if (self.scopes or '').split() or not self.pk:
+            return
+        if self.live_tokens().exists():
+            raise ValidationError({'scopes': [self.SCOPES_IN_USE]})
+
+    def __str__(self):
+        return self.name
+
+
+class ServiceAccessToken(models.Model):
+    """Only the SHA-256 digest of a high-entropy bearer secret is persisted."""
+    application = models.ForeignKey(ServiceApplication, on_delete=models.PROTECT, related_name='tokens')
+    label = models.CharField(max_length=160)
+    digest = models.CharField(max_length=64, unique=True, editable=False)
+    suffix = models.CharField(max_length=4, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(Identity, null=True, blank=True, on_delete=models.SET_NULL,
+                                   related_name='issued_service_tokens')
+    expires_at = models.DateTimeField(null=True, blank=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_by = models.ForeignKey(Identity, null=True, blank=True, on_delete=models.SET_NULL,
+                                   related_name='revoked_service_tokens')
+
+    class Meta:
+        ordering = ['-created_at', '-pk']
+
+    def __str__(self):
+        return f'{self.application.name}: {self.label} (…{self.suffix})'

@@ -1,16 +1,5 @@
-"""
-WSGI config for ctomop project.
+"""Compatibility alias for :mod:`promop.wsgi`."""
+import sys
+from importlib import import_module
 
-It exposes the WSGI callable as a module-level variable named ``application``.
-
-For more information on this file, see
-https://docs.djangoproject.com/en/5.2/howto/deployment/wsgi/
-"""
-
-import os
-
-from django.core.wsgi import get_wsgi_application
-
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'ctomop.settings')
-
-application = get_wsgi_application()
+sys.modules[__name__] = import_module('promop.wsgi')

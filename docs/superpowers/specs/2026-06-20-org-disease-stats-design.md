@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-20
 **Branch:** feature/org-disease-stats
-**Status:** Draft
+**Status:** As-built design
 
 ---
 

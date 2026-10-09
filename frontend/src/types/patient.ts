@@ -10,6 +10,9 @@ export interface User {
 export interface PatientInfo {
   id?: number;
   person?: number;
+  /** The Person this record derives from. Present in every API response; the
+   *  therapy-line write needs it. */
+  person_id?: number;
   email?: string;
   
   // General
@@ -20,6 +23,19 @@ export interface PatientInfo {
   bmi?: number;
   race?: string | null;
   ethnicity?: string | null;
+
+  // Flattened language capabilities, derived from PersonLanguageSkill (#827).
+  // Three-valued: undefined/null means nobody asked about that language, false
+  // means the patient was asked and does not have the capability. Collapsing
+  // the two would make every unasked patient look incapable to a trial filter.
+  english_speak?: boolean | null;
+  english_read?: boolean | null;
+  english_write?: boolean | null;
+  english_understand?: boolean | null;
+  spanish_speak?: boolean | null;
+  spanish_read?: boolean | null;
+  spanish_write?: boolean | null;
+  spanish_understand?: boolean | null;
   systolic_bp?: number;
   diastolic_bp?: number;
   location?: string;
@@ -43,7 +59,7 @@ export interface PatientInfo {
   post_transformation_outcome?: string;
   
   // Multiple Myeloma specific
-  cytogenic_markers?: string;
+  cytogenetic_markers?: string;
   molecular_markers?: string;
   plasma_cell_leukemia?: boolean;
   progression?: string;
@@ -122,6 +138,9 @@ export interface PatientInfo {
   
   // Planned Therapies
   planned_therapies?: string;
+
+  // Remission
+  remission_duration?: string;
   
   // Blood Markers
   hemoglobin_g_dl?: number;
@@ -292,6 +311,9 @@ export interface PatientInfo {
   active_energy_per_day_30d?: string | number;
   basal_energy_per_day_30d?: string | number;
   body_mass_avg_30d?: string | number;
+
+  // Genomic aggregates (computed, read-only)
+  tp53_disruption?: boolean | null;
 
   // Myeloma diagnostic criteria (computed, read-only)
   meets_crab?: boolean | null;

@@ -59,8 +59,14 @@ PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U postgres -d postgres \
 
 ### 3. Apply migrations
 
+> `SECRET_KEY` rather than `DEBUG=True`, deliberately. Either satisfies the
+> settings guard, but `DEBUG` wraps every cursor in `CursorDebugWrapper`,
+> which records and re-renders each query — measured at ~3 µs per query. The
+> paths compared here differ by an order of magnitude in query count, so that
+> overhead would land asymmetrically and flatter the ratio.
+
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" SECRET_KEY=dev-only-secret \
   python manage.py migrate --noinput
 ```
 
@@ -78,7 +84,7 @@ There are two, and Step 1 covers both:
 **Route A** is the one to use when checking the paper's figures: it is the exact cohort those
 numbers came from. **Route B** needs no download and no citation, and is the better choice for
 adapting the benchmark to a different disease or cohort size. For Route B, see
-[sample-patient-data.md](sample-patient-data.md) for obtaining
+[Synthetic patient generation](SYNTHETIC_PATIENT_GENERATION.md) for obtaining
 `synthea-with-dependencies.jar`; pass its location with `--jar-path` if it is not on the
 default search path.
 
@@ -91,7 +97,7 @@ default search path.
 Download `synthea_bc_1000.json` from the Zenodo record above, then:
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" SECRET_KEY=dev-only-secret \
   python manage.py import_org_patients --input synthea_bc_1000.json
 ```
 
@@ -139,7 +145,7 @@ breast-cancer enrichment pass so `PatientRecord` can derive its fields from the 
 OMOP rows.
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" SECRET_KEY=dev-only-secret \
   python manage.py generate_import_enrich_synthea_bc \
     --count 100 \
     --output /tmp/synthea_bc_100.json \
@@ -183,7 +189,7 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
 ## Step 2 — Verify the cohort
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" SECRET_KEY=dev-only-secret \
   python manage.py shell -c "
 from omop_core.models import PatientRecord
 qs = PatientRecord.objects.filter(organization__slug='synthea-bc')
@@ -202,7 +208,7 @@ All four counts should be 100.
 ## Step 3 — Trial-eligibility benchmark
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" SECRET_KEY=dev-only-secret \
   python manage.py benchmark_trial_eligibility \
     --org-slugs synthea-bc \
     --repeat 3 \
@@ -286,7 +292,7 @@ The JSON output (`trial-eligibility-results.json`) has this shape:
 ## Step 4 — Full PatientRecord benchmark
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" SECRET_KEY=dev-only-secret \
   python manage.py benchmark_patient_record \
     --org-slugs synthea-bc \
     --disease-filter "" \
@@ -574,8 +580,11 @@ categorical fields, `value_as_number` for numeric.
 
 Result is a JSON array: `[{gene, origin, interpretation}, …]`
 
-`_compute_derived_fields` adds `tp53_disruption` (boolean) derived from
-`genetic_mutations` without further DB queries.
+`_compute_derived_fields` adds `tp53_disruption` (nullable boolean) derived from
+`genetic_mutations` without further DB queries. It is true for a qualifying
+present pathogenic TP53 finding under the existing assessment/status rule,
+and null otherwise. Null is unknown, not a negative result; del(17p) is not
+aggregated. See the [consumer contract](genomics_architecture.md#genomic-features-and-finding-terminology).
 
 ### Wearable / device data — `_get_wearable_data`
 
@@ -680,7 +689,7 @@ Metrics require ≥ 7 valid days (`WEARABLE_MIN_VALID_DAYS`) to be emitted.
 | PatientRecord field | Source |
 |---------------------|--------|
 | `bmi` | Derived from `weight` (kg) and `height` (cm): weight / (height/100)² |
-| `tp53_disruption` | Boolean: true if `genetic_mutations` contains a TP53 entry |
+| `tp53_disruption` | Nullable boolean: true for qualifying present pathogenic TP53; null otherwise (unknown, not negative) |
 
 ---
 
@@ -691,10 +700,11 @@ import a bundle you already have, for instance:
 
 ```bash
 # Generate only
-python manage.py generate_synthea_bc --count 100 --output /tmp/synthea_bc_100.json
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" SECRET_KEY=dev-only-secret \
+  python manage.py generate_synthea_bc --count 100 --output /tmp/synthea_bc_100.json
 
 # Import an existing FHIR Bundle into OMOP under an org (creates the org if needed)
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" SECRET_KEY=dev-only-secret \
   python manage.py import_fhir_bundle \
     --file /tmp/synthea_bc_100.json \
     --org synthea-bc \
@@ -710,7 +720,8 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
 
 **`No matching patients found` from a benchmark command** — verify the import:
 ```bash
-DATABASE_URL="..." python manage.py shell -c "
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" SECRET_KEY=dev-only-secret \
+  python manage.py shell -c "
 from omop_core.models import PatientRecord
 print(PatientRecord.objects.filter(organization__slug='synthea-bc').count())
 "

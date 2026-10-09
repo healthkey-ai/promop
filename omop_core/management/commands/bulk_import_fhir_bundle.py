@@ -966,7 +966,7 @@ class Command(BaseCommand):
             # ── Cytogenetics + SCT extension mapping (documentation) ───
             # These are derived by refresh_patient_record via _get_sct_cytogenetic_data
             _EXT_OBS = {
-                'cytogenic_markers': 'mm-cytogenetic-markers',
+                'cytogenetic_markers': 'mm-cytogenetic-markers',
                 'sct_date_str': 'mm-sct-date',
                 'sct_history_str': 'mm-sct-history',
                 'sct_eligibility_str': 'mm-sct-eligibility',
@@ -1038,7 +1038,7 @@ class Command(BaseCommand):
         Returns a dict with keys matching PatientRecord fields where possible:
         race, ethnicity, weight, height, systolic_blood_pressure,
         diastolic_blood_pressure, heartrate, ecog_performance_status,
-        cytogenic_markers, measurable_disease_imwg, sct_date, sct_history,
+        cytogenetic_markers, measurable_disease_imwg, sct_date, sct_history,
         sct_eligibility.
         """
         data = {}
@@ -1050,7 +1050,7 @@ class Command(BaseCommand):
             f'{base}diastolic-bp': ('diastolic_blood_pressure', lambda e: e.get('valueQuantity', {}).get('value')),
             f'{base}heartRate': ('heartrate', lambda e: e.get('valueQuantity', {}).get('value')),
             f'{base}ecog-performance-status': ('ecog_performance_status', lambda e: e.get('valueInteger')),
-            f'{base}mm-cytogenetic-markers': ('cytogenic_markers', lambda e: e.get('valueString')),
+            f'{base}mm-cytogenetic-markers': ('cytogenetic_markers', lambda e: e.get('valueString')),
             f'{base}mm-measurable-disease-imwg': ('measurable_disease_imwg', lambda e: e.get('valueBoolean')),
             f'{base}mm-sct-date': ('sct_date_str', lambda e: e.get('valueString')),
             f'{base}mm-sct-history': ('sct_history_str', lambda e: e.get('valueString')),

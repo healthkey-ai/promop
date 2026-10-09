@@ -1,3 +1,4 @@
+from omop_core.services.canonical_units import policies, normalize, measurement_normalized
 from collections import defaultdict
 from django.contrib.contenttypes.models import ContentType
 from django.db import connection, transaction
@@ -16,6 +17,7 @@ from patient_portal.api.permissions import (
     LabSyncPermission,
     ScopedTokenPermission,
     get_request_org,
+    is_service_token,
 )
 
 from .serializers import LabResultCardSerializer, LabValueSerializer, MeasurementUpdateSerializer
@@ -299,7 +301,7 @@ class ResultsSummaryView(APIView):
     )
     SELECT r.*,
            tc.concept_name AS type_concept_name,
-           uc.concept_code AS unit_concept_code
+           uc.concept_code AS unit_concept_code, uc.vocabulary_id AS unit_vocabulary_id
     FROM ranked r
     LEFT JOIN concept tc ON tc.concept_id = r.measurement_type_concept_id
     LEFT JOIN concept uc ON uc.concept_id = r.unit_concept_id
@@ -330,6 +332,7 @@ class ResultsSummaryView(APIView):
                 visit_ids.add(row['visit_occurrence_id'])
         provenance = _load_visit_provenance(visit_ids)
 
+        preferences = policies()
         cards = []
         for summary in page_summaries:
             cid = summary['effective_concept_id']
@@ -358,6 +361,10 @@ class ResultsSummaryView(APIView):
                         report_filename = prov.get('report_filename')
 
                 values.append({
+                    'normalized': normalize(preferences.get(cid), row['value_as_number'],
+                        row['unit_source_value'] if (row['unit_source_value'] or '').strip() else
+                        (row['unit_concept_code'] if row['unit_vocabulary_id'] == 'UCUM' else None),
+                        row['range_low'], row['range_high']),
                     'measurement_id': row['measurement_id'],
                     'value': row['value_as_number'],
                     'value_string': row['value_as_string'],
@@ -449,6 +456,7 @@ class ValuesView(APIView):
 
         provenance = self._load_provenance(page)
         ownership_map = self._load_ownership(page, provenance)
+        preferences = policies()
         values = []
         for m in page:
             unit_str = m.unit_source_value
@@ -464,6 +472,7 @@ class ValuesView(APIView):
             prov = provenance.get(m.visit_occurrence_id, {})
             uploads = ownership_map.get(m.measurement_id, [])
             values.append({
+                'normalized': measurement_normalized(m, preferences),
                 'measurement_id': m.measurement_id,
                 'value': m.value_as_number,
                 'value_string': m.value_as_string,
@@ -568,7 +577,26 @@ class MeasurementDetailView(APIView):
                 pass
             if m.person_id != own_pid and not can_access_patient(request.user, m.person_id):
                 return None
+        elif not is_service_token(request):
+            return None
         return m
+
+    @staticmethod
+    def _can_write_person(request, person_id):
+        if is_service_token(request):
+            return True
+
+        org = get_request_org(request)
+        if org is not None:
+            return PatientRecord.objects.filter(
+                person_id=person_id, organization=org,
+            ).exists()
+
+        if not (request.user and request.user.is_authenticated):
+            return False
+
+        from omop_core.authorization import can_write_patient
+        return can_write_patient(request.user, person_id)
 
     def get(self, request, measurement_id):
         m = self.get_object(measurement_id, request)
@@ -589,6 +617,7 @@ class MeasurementDetailView(APIView):
                 type_label = m.measurement_type_concept.concept_name
 
         data = {
+            'normalized': measurement_normalized(m, policies()),
             'measurement_id': m.measurement_id,
             'value': m.value_as_number,
             'value_string': m.value_as_string,
@@ -610,6 +639,11 @@ class MeasurementDetailView(APIView):
             return Response(
                 {'detail': 'Measurement not found.'},
                 status=status.HTTP_404_NOT_FOUND,
+            )
+        if not self._can_write_person(request, m.person_id):
+            return Response(
+                {'detail': 'Write access denied.'},
+                status=status.HTTP_403_FORBIDDEN,
             )
 
         serializer = MeasurementUpdateSerializer(data=request.data)
@@ -662,6 +696,11 @@ class MeasurementDetailView(APIView):
                 {'detail': 'Measurement not found.'},
                 status=status.HTTP_404_NOT_FOUND,
             )
+        if not self._can_write_person(request, m.person_id):
+            return Response(
+                {'detail': 'Write access denied.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         person_id = m.person_id
         source = self._provenance_source(request, person_id)
         with transaction.atomic():
@@ -694,7 +733,7 @@ class VisitDeleteView(APIView):
     permission_classes = [LabSyncPermission]
 
     def delete(self, request, visit_id):
-        from omop_core.authorization import can_access_patient
+        from omop_core.authorization import can_access_patient, can_write_patient
 
         try:
             visit = VisitOccurrence.objects.get(visit_occurrence_id=visit_id)
@@ -704,8 +743,7 @@ class VisitDeleteView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        is_service = getattr(request.user, 'issuer', '') == 'urn:service'
-        if not is_service:
+        if not is_service_token(request):
             org = get_request_org(request)
             if org is not None:
                 from omop_core.models import PatientRecord
@@ -717,17 +755,21 @@ class VisitDeleteView(APIView):
                         status=status.HTTP_404_NOT_FOUND,
                     )
             elif request.user and request.user.is_authenticated:
-                from patient_portal.models import PatientUser
-                own_pid = None
-                try:
-                    own_pid = PatientUser.objects.get(identity=request.user).person_id
-                except PatientUser.DoesNotExist:
-                    pass
-                if visit.person_id != own_pid and not can_access_patient(request.user, visit.person_id):
+                if not can_access_patient(request.user, visit.person_id):
                     return Response(
                         {'detail': 'Visit not found.'},
                         status=status.HTTP_404_NOT_FOUND,
                     )
+                if not can_write_patient(request.user, visit.person_id):
+                    return Response(
+                        {'detail': 'Write access denied.'},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+            else:
+                return Response(
+                    {'detail': 'Visit not found.'},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
 
         with transaction.atomic():
             ProvenanceRecord.objects.create(

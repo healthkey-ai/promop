@@ -1,3 +1,4 @@
+import PageTitle from '@/components/Branding/PageTitle';
 import { useState } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { publicApi } from '@/api/publicAxios';
@@ -53,7 +54,7 @@ export default function ResetPassword() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-8 max-w-md w-full space-y-6">
-        <h1 className="text-2xl font-semibold text-gray-900">Reset your password</h1>
+        <PageTitle className="text-2xl font-semibold text-gray-900">Reset your password</PageTitle>
 
         {state === 'ready' && (
           <form className="space-y-4" onSubmit={handleSubmit}>

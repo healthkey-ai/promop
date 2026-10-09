@@ -5,18 +5,53 @@ on:
     branches: [dev, main]
   workflow_call:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  backend:
-    name: Backend tests
+  changes:
+    name: Detect CI changes
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      async_e2e: ${{ steps.filter.outputs.async_e2e }}
+      docs_only: ${{ steps.filter.outputs.docs_only }}
+      backend: ${{ steps.filter.outputs.backend }}
+      browser_runtime: ${{ steps.filter.outputs.browser_runtime }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history supports PR merge-base and deployment push diffs.
+          # The detector only reads filenames; no LFS download is needed.
+          fetch-depth: 0
+          lfs: false
+      - id: filter
+        run: python3 .github/scripts/async_e2e_changes.py
+
+  backend_suites:
+    name: Backend suite (${{ matrix.suite }})
+    needs: changes
+    # A skipped job satisfies its required check. Detection errors run full CI.
+    if: >-
+      !cancelled() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.backend != 'false')
+    runs-on: ubuntu-latest
+    # A backend leg normally completes within 16 minutes. Bound genuine hangs
+    # without making ordinary runner variance look like a failure.
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [django, pytest]
 
     services:
       postgres:
-        image: postgres:16
+        image: pgvector/pgvector:0.8.6-pg18
         env:
           POSTGRES_DB: promop_test
           POSTGRES_USER: postgres
@@ -36,14 +71,24 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Mapping and publisher catalog artifacts are in Git LFS. Fetch them so
+          # packaging/runtime checks exercise the same asset as production.
+          lfs: true
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: pip
+
+      - name: Set up cached uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.12.20'
+          enable-cache: true
+          cache-dependency-glob: requirements.txt
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: uv pip install --system -r requirements.txt
 
       # pytest runs with --no-migrations, so the test DB is built by reflecting
       # model state. That recreates concept's GIN trigram index during CREATE
@@ -51,28 +96,197 @@ jobs:
       # fixture override could enable the extension. Enabling it on template1
       # instead means every database cloned from it already has pg_trgm, which
       # is what conftest.py prescribes as the required environment setup.
-      - name: Enable pg_trgm on template1 (required by the pytest suite)
+      - name: Enable database extensions on template1 (required by the pytest suite)
         env:
           PGPASSWORD: postgres
-        run: psql -h localhost -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
+        run: |
+          psql -h localhost -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
+          psql -h localhost -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS vector"
 
-      - name: Run migrations
-        run: python manage.py migrate --noinput
+      - name: Run production deploy checks
+        env:
+          DEBUG: 'False'
+          SECRET_KEY: ci-deploy-check-secret-key-not-for-runtime-4f942b6e9d714aca
+          ALLOWED_HOSTS: promop.example.invalid
+          CORS_ALLOWED_ORIGINS: https://promop.example.invalid
+          AUDIT_HMAC_KEY: ci-audit-hmac-key-not-for-runtime
+          EXPORT_SIGNING_KEY: ci-export-signing-key-not-for-runtime
+        run: python manage.py check --deploy --fail-level ERROR
 
       - name: Run tests (Django runner)
-        run: python manage.py test omop_core patient_portal --verbosity=2 --noinput
+        if: matrix.suite == 'django'
+        # DiscoverRunner creates its test database by applying the complete
+        # migration graph. Do not run `manage.py migrate` first: that loads the
+        # large publisher catalogs into a database the tests never use.
+        run: >-
+          python manage.py test omop_core patient_portal
+          --parallel auto --timing --verbosity=2 --noinput
 
-      # The tests/ package is pytest-based (pytest.ini sets testpaths = tests,
-      # conftest.py does session-level DB setup that --no-migrations skips).
-      # Django's runner does not discover it, so these 166 tests ran in CI for
-      # the first time here — they had been green-by-omission, and were in fact
-      # 14-of-15 red in tests/test_enrich_breast_cancer_omop_data.py after #413
-      # expanded WEARABLE_CONCEPT_CODE without anyone noticing.
+      # These suites discover different tests. Separate runners give each its
+      # own PostgreSQL/test database while retaining migrations and deploy checks.
       - name: Run tests (pytest)
-        run: pytest -q
+        if: matrix.suite == 'pytest'
+        # CI measured worksteal at 6m46s versus loadfile's 5m47s baseline for
+        # this database-heavy suite. Keep the faster scheduler and its timing
+        # report so any future sharding decision remains evidence-led.
+        run: pytest -n auto --dist loadfile -q --durations=20
+
+  athena_browser:
+    name: Athena browser runtime
+    needs: changes
+    # Unit tests fake Playwright. Pay for a real Chromium install and launch
+    # only when browser/deployment packaging changes or detection is uncertain.
+    if: >-
+      !cancelled() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.browser_runtime == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up cached uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.12.20'
+          enable-cache: true
+          cache-dependency-glob: requirements-athena-scrape.txt
+
+      - name: Install Playwright
+        run: uv pip install --system -r requirements-athena-scrape.txt
+
+      - name: Install and launch Athena Chromium
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: '0'
+        run: python scripts/install_athena_browser.py --with-deps --require-package
+
+
+  backend:
+    name: Backend tests
+    needs: [changes, backend_suites, athena_browser]
+    # Keep the existing required check. Never turn a failed/cancelled matrix
+    # into a skipped green gate; only a recognized frontend/docs diff skips it.
+    if: >-
+      always() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.backend != 'false')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require both backend suites to pass
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          BACKEND_RESULT: ${{ needs.backend_suites.result }}
+          BROWSER_REQUIRED: ${{ needs.changes.outputs.browser_runtime }}
+          BROWSER_RESULT: ${{ needs.athena_browser.result }}
+        run: |
+          set -e
+          test "$BACKEND_RESULT" = success
+          if [ "$CHANGES_RESULT" != success ] || [ "$BROWSER_REQUIRED" = true ]; then
+            test "$BROWSER_RESULT" = success
+          else
+            test "$BROWSER_RESULT" = skipped
+          fi
+
+  application_ci:
+    name: Application CI
+    needs: [changes, backend, frontend]
+    # This is the ruleset gate. Documentation-only PRs need no application
+    # suite results; code changes must satisfy the suites selected above.
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enforce application checks for the detected scope
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          BACKEND_REQUIRED: ${{ needs.changes.outputs.backend }}
+          BACKEND_RESULT: ${{ needs.backend.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+        run: python3 .github/scripts/application_ci_gate.py
+
+  e2e:
+    name: Async derivation e2e
+    needs: changes
+    # If detection fails, run the tests rather than silently losing coverage.
+    # Deployment callers use their push diff, so frontend-only merges skip too.
+    if: >-
+      !cancelled() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.async_e2e == 'true')
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg18
+        env:
+          POSTGRES_DB: promop_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/promop_test
+      CELERY_BROKER_URL: redis://localhost:6379/0
+      SECRET_KEY: ci-secret-key
+      DEBUG: 'True'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up cached uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.12.20'
+          enable-cache: true
+          cache-dependency-glob: requirements.txt
+
+      - name: Install dependencies
+        run: uv pip install --system -r requirements.txt
+
+      - name: Enable database extensions on template1 (required by the pytest suite)
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
+          psql -h localhost -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS vector"
+
+      # Its own job rather than a step in `backend`: both suites there build a
+      # database called test_promop_test, so a third suite sharing the runner
+      # would collide with whichever is running.
+      - name: Run e2e tests (real broker, real worker)
+        run: pytest -m e2e -q
 
   frontend:
     name: Frontend lint & build
+    needs: changes
+    # A skipped job satisfies its required check. Detection errors run full CI.
+    if: >-
+      !cancelled() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true')
     runs-on: ubuntu-latest
 
     steps:
@@ -99,3 +313,108 @@ jobs:
 
       - name: Type check & build
         run: cd frontend && npm run build
+
+  security:
+    name: Security gates
+    needs: changes
+    # A skipped job satisfies its required check. Detection errors run full CI.
+    if: >-
+      !cancelled() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true')
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Scan only the working tree, not full history. A secret committed
+          # and then removed is no longer in the tree and poses no runtime
+          # risk; GitHub's push protection catches it at push time. Full
+          # history scans are too slow and flag false positives in old commits
+          # that cannot be rewritten in a public repo.
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # The version the application actually runs on, as the other jobs use.
+          # pip-audit resolves requirements.txt in a throwaway environment, so a
+          # dependency that declares a floor above this one cannot be audited at
+          # all — it fails to install before any advisory is checked.
+          python-version: '3.12'
+
+      # Pinned: the bandit baseline matches findings by issue TEXT, so a release
+      # that rewords a message invalidates every baseline entry at once and turns
+      # an unrelated PR red.
+      - name: Install security tooling
+        run: pip install 'pip-audit==2.9.0' 'bandit==1.9.4'
+
+      # Dependency CVEs. Blocking on purpose: Dependabot raises advisory PRs but
+      # does not stop a merge, and the SOC2 gap analysis notes those PRs going
+      # unmerged. If this fails, upgrade the dependency — reach for
+      # --ignore-vuln only when there is no fixed version, and say why.
+      - name: Dependency audit (pip-audit)
+        run: pip-audit -r requirements.txt --progress-spinner off
+
+      # Python SAST. Baselined: the codebase carries ~57 MEDIUM findings that are
+      # false positives for its shape (SQL built by string concatenation in
+      # vocabulary loading, temp-directory paths).
+      #
+      # Know what the baseline does and does not give you. Bandit matches a
+      # finding on (text, severity, cwe, confidence, filename, test, test_id) —
+      # line number is deliberately excluded — so a NEW finding whose message is
+      # identical to a baselined one in the SAME file is suppressed. For B608
+      # that message is generic, so a new f-string query in an already-baselined
+      # file will not be caught here. CodeQL covers that case; this gate is the
+      # cheap first pass, not the only one.
+      #
+      # Regenerate deliberately, never to silence a real finding:
+      #   bandit -q -r <apps> -ll -x '*/tests.py,*/tests/*,*/migrations/*' \
+      #     -f json -o .bandit-baseline.json
+      # bandit's own exit code does not reflect baseline-filtered results — it
+      # reports the new finding and still exits 0 — so the gate reads the JSON
+      # and fails explicitly. Verified by planting a finding and watching this
+      # step go red.
+      - name: Python SAST (bandit)
+        run: |
+          bandit -q -r omop_core patient_portal promop ctomop omop_oncology omop_genomics \
+            -ll -x '*/tests.py,*/tests/*,*/migrations/*' \
+            -b .bandit-baseline.json -f json -o bandit-new.json || true
+          python - <<'CHECK'
+          import json, sys
+          results = json.load(open('bandit-new.json'))['results']
+          for r in results:
+              print(f"{r['issue_severity']} {r['test_id']} "
+                    f"{r['filename']}:{r['line_number']}  {r['issue_text']}")
+          print(f"{len(results)} finding(s) not in the baseline")
+          sys.exit(1 if results else 0)
+          CHECK
+
+      # -ll sets the floor at MEDIUM, which silently disables every LOW test —
+      # including B105/B106/B107, the hardcoded-credential checks. Those matter
+      # more than most MEDIUM findings, so they get their own pass at LOW with a
+      # small dedicated baseline (4 known false positives: a TTL, the
+      # service-token sentinel, a test-only string, an empty PKCE secret).
+      - name: Hardcoded credential scan (bandit)
+        run: |
+          bandit -q -r omop_core patient_portal promop ctomop omop_oncology omop_genomics \
+            -t B105,B106,B107 -x '*/tests.py,*/tests/*,*/migrations/*' \
+            -b .bandit-credentials-baseline.json -f json -o bandit-creds.json || true
+          python - <<'CHECK'
+          import json, sys
+          results = json.load(open('bandit-creds.json'))['results']
+          for r in results:
+              print(f"{r['test_id']} {r['filename']}:{r['line_number']}  {r['issue_text']}")
+          print(f"{len(results)} hardcoded-credential finding(s) not in the baseline")
+          sys.exit(1 if results else 0)
+          CHECK
+
+      # Committed credentials. Config at .gitleaks.toml allowlists narrowly;
+      # a real secret is rotated, not allowlisted. 8.30+ is required for the
+      # targetRules allowlist scoping the config relies on.
+      - name: Secret scan (gitleaks)
+        run: |
+          GITLEAKS_VERSION=8.30.1
+          curl -sSfL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks detect --source . --config .gitleaks.toml --redact --verbose --no-git

@@ -1,0 +1,55 @@
+# Code owners for healthkey-ai/promop.
+#
+# Purpose is SOC2 CC8.1 change management: declare who should review changes to
+# security-relevant code. The Security review status requires approval of
+# security-related changes from a writer other than the PR's author once rollout is
+# complete. Paths below are ordered least- to
+# most-specific; the LAST matching pattern wins, so the security paths at the
+# bottom override the catch-all at the top.
+#
+# This file routes review; it does not itself enforce approval. The target
+# branch's copy is authoritative, and authors cannot approve their own PRs.
+# Security review scope and evidence: docs/soc2/change-management.md.
+
+# Default owner for everything not matched below.
+*                                   @adamblum
+
+# ── Authorization and identity ────────────────────────────────────────────────
+# Every P0 finding in the security audit lived in one of these paths.
+/omop_core/authorization.py         @larsburgess
+/patient_portal/api/permissions.py  @larsburgess
+/patient_portal/api/authentication.py  @larsburgess
+/patient_portal/api/providers/      @larsburgess
+/patient_portal/services.py         @larsburgess
+/patient_portal/api/break_glass.py  @larsburgess
+
+# ── Deployment, configuration and secrets ─────────────────────────────────────
+# Changes here alter what runs in production or what guards it.
+/promop/settings.py                 @larsburgess
+/ctomop/settings.py                 @larsburgess
+/patient_portal/checks.py           @larsburgess
+/start.sh                           @larsburgess
+/Dockerfile                         @larsburgess
+/Dockerfile.gcp                     @larsburgess
+/requirements.txt                   @larsburgess
+
+# ── Security and privileged GitHub controls ───────────────────────────────────
+# Ordinary CI/test orchestration stays with the default owner. Changes to the
+# security policy, deployment/publishing workflows, dependency automation, or a
+# reusable action can alter privileged execution and route to Lars.
+/.github/dependabot.yml             @larsburgess
+/.github/actions/                   @larsburgess
+/.github/workflows/*security*.yml   @larsburgess
+/.github/workflows/*codeql*.yml     @larsburgess
+/.github/workflows/*deploy*.yml     @larsburgess
+/.github/workflows/*release*.yml    @larsburgess
+/.github/workflows/*publish*.yml    @larsburgess
+/.github/scripts/*security*         @larsburgess
+/.gitleaks.toml                     @larsburgess
+/.bandit-baseline.json              @larsburgess
+
+# ── Ownership, Render infrastructure, and change-management evidence ──────────
+/CODEOWNERS                         @larsburgess
+/render.yaml                        @larsburgess
+/docs/soc2/                         @larsburgess
+/scripts/capture_change_management_evidence.py  @larsburgess

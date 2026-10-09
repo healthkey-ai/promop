@@ -169,7 +169,9 @@ def patient_login(request):
                 patient_user.save()
                 return redirect('patient_portal:dashboard')
             except PatientUser.DoesNotExist:
-                messages.error(request, 'You do not have access to the patient portal. Please contact administrator.')
+                # Keep valid credentials for non-portal accounts
+                # indistinguishable from an invalid login attempt.
+                messages.error(request, 'Invalid username or password')
         else:
             messages.error(request, 'Invalid username or password')
     

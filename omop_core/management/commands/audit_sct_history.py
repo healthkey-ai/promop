@@ -12,6 +12,10 @@ Usage:
 
     # Production DB (read-only check — no writes)
     DATABASE_URL="postgresql://..." python manage.py audit_sct_history
+
+Settings also need SECRET_KEY. It comes from .env; against a shared database it
+has to be that deployment's key, not a placeholder, because AUDIT_HMAC_KEY and
+EXPORT_SIGNING_KEY fall back to it.
 """
 from collections import Counter
 

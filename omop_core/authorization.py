@@ -5,7 +5,8 @@ Three access paths checked in order:
 1. Self-access (Identity → PatientUser → person_id matches target)
 2. Personal representative (Identity → PersonalRepresentative → person_id, verified only)
 3. Professional access (Identity → GroupAccess → group ∩ patient's groups
-   OR org holding patient's record, non-expired, role-filtered)
+   OR org holding patient's record, non-expired, role-filtered), including
+   the same scoped organization-admin trusts used by the patient list.
 """
 from django.db import models
 from django.utils import timezone
@@ -17,6 +18,14 @@ from .models import (
 
 _READ_ROLES = frozenset({'org_admin', 'doctor', 'analyst'})
 _WRITE_ROLES = frozenset({'org_admin', 'doctor'})
+
+
+def _administers_patient(actor_identity, target_person_id: int) -> bool:
+    from .services.access import get_admin_orgs
+
+    return get_admin_orgs(actor_identity).filter(
+        patients__person_id=target_person_id,
+    ).exists()
 
 
 def _professional_grants(actor_identity, target_person_id: int, roles):
@@ -67,13 +76,14 @@ def can_access_patient(actor_identity, target_person_id: int) -> bool:
     # GroupAccess(role='patient') never grants org-wide visibility.
     return _professional_grants(
         actor_identity, target_person_id, _READ_ROLES,
-    ).exists()
+    ).exists() or _administers_patient(actor_identity, target_person_id)
 
 
 def can_write_patient(actor_identity, target_person_id: int) -> bool:
     """Return True if the actor may write (create/update/delete) patient data.
 
-    Analysts have read-only access; only doctors and org_admins may write.
+    Analysts have read-only access unless separately granted admin authority.
+    Doctors and org_admins, including scoped trust admins, may write.
     Self-access and personal representatives can always write their own data.
     """
     from patient_portal.models import PatientUser
@@ -103,7 +113,7 @@ def can_write_patient(actor_identity, target_person_id: int) -> bool:
     # Professional access: only doctor / org_admin roles may write
     return _professional_grants(
         actor_identity, target_person_id, _WRITE_ROLES,
-    ).exists()
+    ).exists() or _administers_patient(actor_identity, target_person_id)
 
 
 def get_actor_role(actor_identity, target_person_id: int) -> str | None:
@@ -130,6 +140,10 @@ def get_actor_role(actor_identity, target_person_id: int) -> str | None:
         verification_status='VERIFIED',
     ).exists():
         return 'representative'
+
+    if (not getattr(actor_identity, 'is_staff', False)
+            and _administers_patient(actor_identity, target_person_id)):
+        return 'org_admin'
 
     grant = _professional_grants(
         actor_identity, target_person_id, _READ_ROLES,

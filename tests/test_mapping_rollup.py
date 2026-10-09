@@ -1,0 +1,490 @@
+"""Grouping the review queue by label instead of by vendor code."""
+import pytest
+
+from omop_core.models import SourceCodeConceptMapping
+from omop_core.services.mapping_rollup import count_groups, group_entries, group_members
+
+pytestmark = pytest.mark.django_db
+
+
+def row(code, description='', seen=0, **kwargs):
+    return SourceCodeConceptMapping.objects.create(
+        source_code=code, source_code_description=description, occurrence_count=seen,
+        **{'source_vocabulary_id': 'EPIC', 'status': 'proposed', **kwargs})
+
+
+def entries(page=1, page_size=100, order='-occurrence_count'):
+    qs = SourceCodeConceptMapping.objects.all()
+    return group_entries(qs, page, page_size, order=order), count_groups(qs)
+
+
+def test_codes_sharing_a_label_become_one_entry_carrying_their_summed_seen():
+    """The point of the whole thing: albumin arrives under 2,557 codes, and its
+    largest single row carries 1.6% of the label's real weight."""
+    for i, spelling in enumerate(['Albumin', 'ALBUMIN', 'albumin ']):
+        row(f'EPIC#{i}', spelling, seen=100)
+    found, total = entries()
+    assert total == 1
+    assert found[0]['label'] == 'albumin'
+    assert found[0]['members'] == 3
+    assert found[0]['seen'] == 300
+    # No single row stands for the group, so there is no id to act on.
+    assert found[0]['mapping_id'] is None
+
+
+def test_extract_group_count_deduplicates_sibling_codings_on_the_same_records():
+    """Several Epic codings can coexist on every Observation. Their individual
+    Seen counts stay truthful, while the extract-provided label count prevents
+    grouped review from multiplying the same records."""
+    for code in ['10627', '200128', '2011827', 'MONOCL']:
+        row(code, 'Monoclonal protein', seen=12398,
+            source_group_occurrence_count=13032)
+    found, _ = entries()
+    assert found[0]['seen'] == 13032
+
+
+def test_group_count_falls_back_to_sum_without_extract_evidence():
+    row('A', 'Albumin', seen=4)
+    row('B', 'Albumin', seen=6)
+    found, _ = entries()
+    assert found[0]['seen'] == 10
+
+
+def test_a_lone_code_is_an_entry_that_still_names_its_row():
+    row('SOLO', 'Ferritin', seen=7)
+    found, _ = entries()
+    assert found[0]['members'] == 1
+    assert found[0]['mapping_id'] == SourceCodeConceptMapping.objects.get(source_code='SOLO').pk
+
+
+def test_entries_are_ordered_by_summed_seen_not_by_the_largest_member():
+    """A per-code queue puts the one big code first. Albumin's 3 codes of 100
+    outrank it once they are added up -- which is the ordering bug."""
+    row('BIG', 'Hourly Rounding Bundle', seen=250)
+    for i in range(3):
+        row(f'ALB{i}', 'Albumin', seen=100)
+    found, _ = entries()
+    assert [(e['label'], e['seen']) for e in found] == [('albumin', 300), ('hourlyroundingbundle', 250)]
+
+
+@pytest.mark.parametrize('order, expected', [
+    ('source_code_description', ['Albumin', 'Ferritin', 'Zinc']),
+    ('-source_code_description', ['Zinc', 'Ferritin', 'Albumin']),
+    ('occurrence_count', ['Ferritin', 'Zinc', 'Albumin']),
+])
+def test_entries_can_sort_by_description_or_seen(order, expected):
+    row('Z', 'zinc', seen=2)
+    row('A', 'Albumin', seen=3)
+    row('F', 'Ferritin', seen=1)
+    found, _ = entries(order=order)
+    assert [entry['description'].title() for entry in found] == expected
+
+
+def test_rows_with_no_label_stay_separate_instead_of_becoming_one_group():
+    """1,929 staging rows carry no description. SQL groups NULLs, so without a
+    synthetic key they would form a single entry standing for 1,929 unrelated
+    codes -- mappable in one click."""
+    for i, blank in enumerate(['', '   ', '--', '()']):
+        row(f'BLANK{i}', blank, seen=5)
+    found, total = entries()
+    assert total == 4
+    assert all(e['members'] == 1 and e['label'] is None for e in found)
+    assert len({e['mapping_id'] for e in found}) == 4
+
+
+def test_a_synthetic_key_cannot_collide_with_a_real_label():
+    """':' is outside the [a-z0-9%#] set a real key is built from."""
+    row('HASHY', '# Neutrophils', seen=1)
+    row('NOLABEL', '', seen=1)
+    found, _ = entries()
+    labels = {e['label'] for e in found}
+    assert '#neutrophils' in labels and None in labels
+
+
+def test_a_group_reports_a_destination_only_when_every_member_agrees(concept_pair):
+    one, two = concept_pair
+    row('A', 'Albumin', seen=1, target_concept=one)
+    row('B', 'ALBUMIN', seen=1, target_concept=one)
+    found, _ = entries()
+    assert found[0]['destination_concept_id'] == one.concept_id
+    assert found[0]['destination_concept_name'] == one.concept_name
+    assert found[0]['mixed_destinations'] is False
+
+    row('C', 'albumin', seen=1, target_concept=two)
+    found, _ = entries()
+    assert found[0]['destination_concept_id'] is None
+    # The name goes too: naming one side of a disagreement is worse than
+    # naming neither.
+    assert found[0]['destination_concept_name'] is None
+    assert found[0]['mixed_destinations'] is True
+
+
+def test_an_unanswered_member_is_a_disagreement_not_an_absence(concept_pair):
+    """Count(distinct) skips NULL, so a group of "one concept + two blanks"
+    would otherwise read as unanimous."""
+    one, _ = concept_pair
+    row('A', 'Albumin', seen=1, target_concept=one)
+    row('B', 'ALBUMIN', seen=1)
+    found, _ = entries()
+    assert found[0]['mixed_destinations'] is True
+    assert found[0]['destination_concept_id'] is None
+
+
+def test_a_group_reports_how_many_members_a_write_may_touch():
+    """An approved or rejected member is somebody's decision, not a gap."""
+    row('A', 'Albumin', seen=1)
+    row('B', 'ALBUMIN', seen=1, status='approved')
+    row('C', 'albumin', seen=1, status='rejected')
+    found, _ = entries()
+    assert found[0]['members'] == 3
+    assert found[0]['proposed'] == 1
+    assert found[0]['mixed_statuses'] is True
+    assert found[0]['status'] is None
+
+
+def test_a_group_surfaces_one_machine_proposed_action():
+    row('A', 'Comment', suggested_action='reject')
+    row('B', 'COMMENT', suggested_action='reject')
+    found, _ = entries()
+    assert found[0]['suggested_action'] == 'reject'
+
+
+def test_pagination_counts_groups_not_rows():
+    for i in range(250):
+        row(f'C{i:03}', f'Analyte {i}', seen=1000 - i)
+    for i in range(50):
+        row(f'DUP{i}', 'Albumin', seen=1)
+    first, total = entries(page=1, page_size=100)
+    assert total == 251
+    assert len(first) == 100
+    second, _ = entries(page=2, page_size=100)
+    assert not {e['label'] for e in first} & {e['label'] for e in second}
+
+
+def test_members_returns_the_rows_behind_an_entry():
+    for i, spelling in enumerate(['Albumin', 'ALBUMIN', 'albumin ']):
+        row(f'EPIC#{i}', spelling)
+    row('OTHER', 'Ferritin')
+    members = group_members(SourceCodeConceptMapping.objects.all(), 'albumin')
+    assert sorted(members.values_list('source_code', flat=True)) == ['EPIC#0', 'EPIC#1', 'EPIC#2']
+
+
+def test_members_of_a_synthetic_key_is_the_one_row():
+    blank = row('BLANK', '')
+    row('OTHER', '')
+    members = group_members(SourceCodeConceptMapping.objects.all(), f':{blank.pk}')
+    assert list(members.values_list('pk', flat=True)) == [blank.pk]
+
+
+@pytest.mark.parametrize('bad', [':notanumber', ':', ':999999999', ':0', ':-4',
+                                 ':99999999999999999999'])
+def test_a_malformed_or_unknown_key_returns_nothing_rather_than_raising(bad):
+    """An id past bigint reaches Postgres as an out-of-range comparison and
+    raises DataError -- a 500 for what is only an unknown group."""
+    row('A', 'Albumin')
+    assert not group_members(SourceCodeConceptMapping.objects.all(), bad).exists()
+
+
+@pytest.fixture
+def concept_pair():
+    from tests.factories import ConceptFactory
+    return ConceptFactory(concept_id=1001), ConceptFactory(concept_id=1002)
+
+
+# --- through the API --------------------------------------------------------
+
+@pytest.fixture
+def api():
+    from rest_framework.test import APIRequestFactory, force_authenticate
+    from patient_portal.api.views import code_mapping_group, code_mapping_list
+    from patient_portal.models import Identity
+    user = Identity.objects.create_user(email='rollup@example.test', is_staff=True)
+
+    def call(view, path, **params):
+        request = APIRequestFactory().get(path, params)
+        force_authenticate(request, user=user)
+        return view(request)
+    return lambda **p: call(code_mapping_list, '/api/v1/code-mappings/', browse='1', **p), \
+        lambda **p: call(code_mapping_group, '/api/v1/code-mappings/group/', **p)
+
+
+def test_the_flat_queue_is_still_the_default(api):
+    browse, _ = api
+    for i in range(3):
+        row(f'A{i}', 'Albumin', seen=10)
+    flat = browse().data
+    assert flat['rollup'] is False
+    assert flat['groups'] == {}
+    assert len(flat['results']) == 3
+    assert flat['pages']['Unmapped']['total'] == 3
+
+
+def test_rollup_returns_one_entry_per_label_and_pages_by_group(api):
+    browse, _ = api
+    for i in range(3):
+        row(f'A{i}', 'Albumin', seen=10)
+    row('F', 'Ferritin', seen=5)
+    rolled = browse(rollup='1').data
+    assert rolled['rollup'] is True
+    unmapped = rolled['groups']['Unmapped']
+    assert [(e['label'], e['members'], e['seen']) for e in unmapped] == [
+        ('albumin', 3, 30), ('ferritin', 1, 5)]
+    assert rolled['pages']['Unmapped']['total'] == 2
+
+
+def test_rollup_api_applies_description_order_before_pagination(api):
+    browse, _ = api
+    row('Z', 'Zinc', seen=20)
+    row('A', 'Albumin', seen=10)
+    row('F', 'Ferritin', seen=30)
+    rolled = browse(rollup='1', order_0='source_code_description').data
+    assert [entry['description'] for entry in rolled['groups']['Unmapped']] == [
+        'Albumin', 'Ferritin', 'Zinc',
+    ]
+
+
+def test_rollup_api_rejects_row_only_sort_fields(api):
+    browse, _ = api
+    row('A', 'Albumin', seen=10)
+    response = browse(rollup='1', order_0='source_code')
+    assert response.status_code == 400
+    assert response.data['order'] == 'Grouped queues can only sort by Seen or Source description.'
+
+
+def test_expanding_an_entry_returns_its_codes_newest_volume_first(api):
+    _, members = api
+    row('LOW', 'Albumin', seen=1)
+    row('HIGH', 'ALBUMIN', seen=99)
+    row('ELSEWHERE', 'Ferritin', seen=50)
+    data = members(label='albumin').data
+    assert [r['source_code'] for r in data['results']] == ['HIGH', 'LOW']
+    assert data['truncated'] is False
+
+
+def test_seen_filter_applies_to_group_members_and_all_counts_sources(api):
+    browse, members = api
+    row('A', 'Albumin', seen=2)
+    row('B', 'Albumin', seen=3)
+    row('ZERO', 'Albumin')
+    row('OTHER-ZERO', 'Ferritin')
+    data = browse(rollup='1', seen_only='1').data
+    assert data['total'] == 2  # sources, not the single group
+    assert data['pages']['Unmapped']['total'] == 1
+    assert data['groups']['Unmapped'][0]['members'] == 2
+    assert [r['source_code'] for r in members(label='albumin', seen_only='1').data['results']] == ['B', 'A']
+    all_codes = browse(rollup='1', seen_only='0').data
+    assert all_codes['total'] == 4
+    assert all_codes['pages']['Unmapped']['total'] == 2
+    assert len(members(label='albumin', seen_only='0').data['results']) == 3
+
+
+def test_expanding_is_scoped_to_the_section_the_entry_came_from(api):
+    """A label split across sections is two entries; expanding one must not
+    show the other's rows."""
+    _, members = api
+    row('PROP', 'Albumin', seen=1)
+    row('DONE', 'ALBUMIN', seen=1, status='approved')
+    assert [r['source_code'] for r in members(label='albumin', section='Unmapped').data['results']] == ['PROP']
+    assert [r['source_code'] for r in members(label='albumin', section='Mapped').data['results']] == ['DONE']
+
+
+def test_expanding_a_single_unlabelled_row_uses_its_synthetic_key(api):
+    _, members = api
+    blank = row('BLANK', '', seen=1)
+    row('OTHER', '', seen=1)
+    data = members(label=f':{blank.pk}').data
+    assert [r['source_code'] for r in data['results']] == ['BLANK']
+
+
+def test_a_very_large_group_is_cut_and_says_so(api, settings):
+    from patient_portal.api import views
+    _, members = api
+    original = views.MAX_GROUP_MEMBERS
+    views.MAX_GROUP_MEMBERS = 3
+    try:
+        for i in range(5):
+            row(f'A{i}', 'Albumin', seen=i)
+        data = members(label='albumin').data
+        assert len(data['results']) == 3
+        assert data['truncated'] is True
+    finally:
+        views.MAX_GROUP_MEMBERS = original
+
+
+def test_the_members_endpoint_validates_its_inputs(api):
+    _, members = api
+    assert members().status_code == 400
+    assert members(label='albumin', section='Nonsense').status_code == 400
+
+
+def test_expanding_honours_the_filters_the_entry_was_counted_under(api):
+    """An entry's members/seen describe the filtered set. Expanding one that
+    says "1 code" under a provenance filter must not open into all of them."""
+    _, members = api
+    row('KEEP', 'Albumin', seen=1, origin_system='curator')
+    row('HIDDEN', 'ALBUMIN', seen=1, origin_system='hk-labs')
+    assert len(members(label='albumin').data['results']) == 2
+    filtered = members(label='albumin', provenance='curator').data['results']
+    assert [r['source_code'] for r in filtered] == ['KEEP']
+
+
+def test_expanding_follows_a_search_across_tabs_the_way_browse_does(api):
+    """browse searches every tab; the members endpoint must not quietly
+    restrict to the active one, or an entry expands into fewer rows than it
+    counted."""
+    _, members = api
+    row('HIT-ICD', 'Albumin', seen=1, source_vocabulary_id='ICD10')
+    row('HIT-RX', 'ALBUMIN', seen=1, source_vocabulary_id='RxNorm')
+    both = members(label='albumin', source='ICD10', search='HIT-').data['results']
+    assert sorted(r['source_code'] for r in both) == ['HIT-ICD', 'HIT-RX']
+    # Without a search it stays on the tab.
+    assert [r['source_code'] for r in members(label='albumin', source='ICD10').data['results']] == ['HIT-ICD']
+
+
+# --- one decision for the complete eligible group --------------------------
+
+@pytest.fixture
+def group_post_api():
+    from rest_framework.test import APIRequestFactory, force_authenticate
+    from patient_portal.api.views import code_mapping_group_action, code_mapping_group_suggest
+    from patient_portal.models import Identity
+    user = Identity.objects.create_user(email='group-action@example.test', is_staff=True)
+
+    def call(view, payload):
+        request = APIRequestFactory().post('/api/v1/code-mappings/group/action/', payload, format='json')
+        force_authenticate(request, user=user)
+        return view(request)
+
+    return user, lambda **p: call(code_mapping_group_action, p), lambda **p: call(code_mapping_group_suggest, p)
+
+
+def test_group_reject_is_queued_and_touches_only_proposed_members(group_post_api):
+    from omop_core.services.suggest_jobs import InlineDispatcher, use_dispatcher
+    _user, act, _suggest = group_post_api
+    proposed = row('A', 'Comment')
+    already_decided = row('B', 'COMMENT', status='approved')
+    with use_dispatcher(InlineDispatcher()):
+        response = act(label='comment', source='EPIC', seen_only='0', action='reject')
+    assert response.status_code == 202
+    assert response.data['state'] == 'success', response.data
+    proposed.refresh_from_db()
+    already_decided.refresh_from_db()
+    assert proposed.status == 'rejected'
+    assert already_decided.status == 'approved'
+
+
+def test_group_action_accepts_the_uncoded_tab(group_post_api):
+    from omop_core.services.suggest_jobs import InlineDispatcher, use_dispatcher
+    _user, act, _suggest = group_post_api
+    mapping = row('FREE TEXT', 'Narrative note', source_vocabulary_id='')
+    with use_dispatcher(InlineDispatcher()):
+        response = act(label='narrativenote', source='', seen_only='0', action='reject')
+    assert response.status_code == 202
+    mapping.refresh_from_db()
+    assert mapping.status == 'rejected'
+
+
+def test_group_approve_applies_one_destination_to_every_proposed_member(
+    group_post_api, concept_pair,
+):
+    from omop_core.services.suggest_jobs import InlineDispatcher, use_dispatcher
+    _user, act, _suggest = group_post_api
+    destination, _ = concept_pair
+    rows = [
+        row('A', 'Ferritin', domain_id=destination.domain_id, omop_table='measurement'),
+        row('B', 'FERRITIN', domain_id=destination.domain_id, omop_table='measurement'),
+    ]
+    with use_dispatcher(InlineDispatcher()):
+        response = act(
+            label='ferritin', source='EPIC', seen_only='0', action='approve',
+            destination_concept_id=destination.pk,
+        )
+    assert response.status_code == 202
+    assert response.data['state'] == 'success', response.data
+    for mapping in rows:
+        mapping.refresh_from_db()
+        assert mapping.status == 'approved'
+        assert mapping.target_concept_id == destination.pk
+
+
+def test_group_preflight_locks_every_member_or_writes_nothing(group_post_api, django_user_model):
+    from django.utils import timezone
+    from omop_core.services.suggest_jobs import FakeDispatcher, use_dispatcher
+    _user, act, _suggest = group_post_api
+    first = row('A', 'Albumin')
+    second = row('B', 'ALBUMIN')
+    other = django_user_model.objects.create_user(email='other-lock@example.test')
+    second.locked_by = other
+    second.locked_at = timezone.now()
+    second.save(update_fields=['locked_by', 'locked_at'])
+    with use_dispatcher(FakeDispatcher()):
+        response = act(label='albumin', source='EPIC', seen_only='0', action='reject')
+    assert response.status_code == 409
+    first.refresh_from_db()
+    assert first.locked_by_id is None
+    assert first.status == 'proposed'
+
+
+def test_group_dispatch_failure_releases_the_preflight_locks(group_post_api):
+    from omop_core.services.suggest_jobs import use_dispatcher
+    _user, act, _suggest = group_post_api
+    mapping = row('A', 'Albumin')
+
+    class BrokenDispatcher:
+        max_codes = 100
+
+        def dispatch(self, run, params):
+            raise RuntimeError('broker unavailable')
+
+    with use_dispatcher(BrokenDispatcher()):
+        response = act(label='albumin', source='EPIC', seen_only='0', action='reject')
+    assert response.status_code == 503
+    mapping.refresh_from_db()
+    assert mapping.locked_by_id is None
+    assert mapping.status == 'proposed'
+
+
+def test_group_action_refuses_a_hospital_the_curator_does_not_administer(django_user_model):
+    from omop_core.models import GroupAccess, Organization
+    from patient_portal.api.views import code_mapping_group_action
+    from rest_framework.test import APIRequestFactory, force_authenticate
+    owner = Organization.objects.create(name='Owner Hospital', slug='owner-hospital')
+    outsider_org = Organization.objects.create(name='Other Hospital', slug='other-hospital')
+    outsider = django_user_model.objects.create_user(email='group-outsider@example.test')
+    GroupAccess.objects.create(identity=outsider, org=outsider_org, role='org_admin')
+    mapping = row('A', 'Albumin', organization=owner)
+    request = APIRequestFactory().post('/api/v1/code-mappings/group/action/', {
+        'label': 'albumin', 'source': 'EPIC', 'seen_only': '0', 'action': 'reject',
+    }, format='json')
+    force_authenticate(request, user=outsider)
+    response = code_mapping_group_action(request)
+    assert response.status_code == 403
+    mapping.refresh_from_db()
+    assert mapping.status == 'proposed'
+    assert mapping.locked_by_id is None
+
+
+def test_noise_is_proposed_for_rejection_not_silently_rejected(group_post_api):
+    from omop_core.services.suggest_jobs import InlineDispatcher, use_dispatcher
+    _user, _act, suggest = group_post_api
+    rows = [row('A', 'Please note'), row('B', 'PLEASE NOTE')]
+    with use_dispatcher(InlineDispatcher()):
+        response = suggest(label='pleasenote', source='EPIC', seen_only='0')
+    assert response.status_code == 202
+    assert response.data['state'] == 'success'
+    for mapping in rows:
+        mapping.refresh_from_db()
+        assert mapping.status == 'proposed'
+        assert mapping.suggested_action == 'reject'
+        assert mapping.target_concept_id is None
+
+
+def test_deterministic_exact_match_avoids_the_ranker(monkeypatch):
+    from omop_core.services.group_mapping_jobs import deterministic_proposal
+    candidate = {
+        'concept_id': 123, 'concept_name': 'Ferritin', 'concept_code': '2276-4',
+        'vocabulary_id': 'LOINC', 'domain_id': 'Measurement',
+        'standard_concept': 'S', 'lexical_score': 1.0, 'retrieval': 'lexical',
+    }
+    monkeypatch.setattr('omop_core.mapping.suggestions.lexical_candidates', lambda *a, **k: [candidate])
+    assert deterministic_proposal('Ferritin', 'Measurement')['concept']['concept_id'] == 123

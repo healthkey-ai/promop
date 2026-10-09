@@ -14,6 +14,8 @@ nationality-style entries (`Afghan`, `Albanian`), which is not the question a
 clinical form asks. Whatever is sent is still preserved verbatim in the source
 value, so curation narrows the coded answer without discarding what was recorded.
 """
+from datetime import date, timedelta
+
 import pytest
 from rest_framework.test import APIClient
 
@@ -68,7 +70,7 @@ def person():
 
 def _patch(client, person, payload):
     return client.patch(
-        f'/api/v1/persons/{person.person_id}/', payload, format='json'
+        f'/api/patient-info/{person.person_id}/', payload, format='json'
     )
 
 
@@ -111,6 +113,64 @@ class TestResolver:
 
 
 class TestWriting:
+    def test_an_existing_date_of_birth_is_replaced_everywhere(self, staff_client, person):
+        person.year_of_birth = 1970
+        person.month_of_birth = 1
+        person.day_of_birth = 2
+        person.save(update_fields=['year_of_birth', 'month_of_birth', 'day_of_birth'])
+        record = PatientRecord.objects.get(person=person)
+        record.date_of_birth = date(1970, 1, 2)
+        record.save(update_fields=['date_of_birth'])
+
+        resp = _patch(staff_client, person, {'date_of_birth': '1985-03-15'})
+
+        assert resp.status_code == 200
+        person.refresh_from_db()
+        record.refresh_from_db()
+        assert record.date_of_birth == date(1985, 3, 15)
+        assert record.patient_age == (
+            date.today().year - 1985
+            - ((date.today().month, date.today().day) < (3, 15))
+        )
+        assert (person.year_of_birth, person.month_of_birth, person.day_of_birth) == (
+            1985, 3, 15,
+        )
+        assert person.birth_datetime.date() == date(1985, 3, 15)
+
+    def test_date_of_birth_can_be_cleared_everywhere(self, staff_client, person):
+        _patch(staff_client, person, {'date_of_birth': '1985-03-15'})
+
+        resp = _patch(staff_client, person, {'date_of_birth': None})
+
+        assert resp.status_code == 200
+        person.refresh_from_db()
+        record = PatientRecord.objects.get(person=person)
+        assert record.date_of_birth is None
+        assert record.patient_age is None
+        assert person.year_of_birth is None
+        assert person.month_of_birth is None
+        assert person.day_of_birth is None
+        assert person.birth_datetime is None
+
+    def test_date_of_birth_cannot_be_in_the_future(self, staff_client, person):
+        future = date.today() + timedelta(days=1)
+
+        resp = _patch(staff_client, person, {'date_of_birth': future.isoformat()})
+
+        assert resp.status_code == 400
+        assert 'future' in str(resp.data['date_of_birth'][0]).lower()
+
+    def test_date_of_birth_cannot_move_after_death_date(self, staff_client, person):
+        record = PatientRecord.objects.get(person=person)
+        record.date_of_birth = date(1970, 1, 1)
+        record.death_date = date(2020, 1, 1)
+        record.save(update_fields=['date_of_birth', 'death_date'])
+
+        resp = _patch(staff_client, person, {'date_of_birth': '2021-01-01'})
+
+        assert resp.status_code == 400
+        assert 'precede date of birth' in str(resp.data['death_date'][0]).lower()
+
     def test_a_correction_writes_both_concept_and_source_value(self, staff_client, person):
         resp = _patch(staff_client, person, {'race': 'White'})
 
@@ -195,8 +255,10 @@ class TestDescriptor:
 
         d = build_writable_field_descriptor()
         for field, count in (('gender', 3), ('race', 5), ('ethnicity', 2)):
-            assert d[field]['kind'] == 'profile', field
+            assert d[field]['kind'] == 'direct', field
             assert d[field]['writable'] is True, field
+            assert d[field]['target'] == 'patient_record', field
+            assert d[field]['projection_target'] == 'person', field
             assert len(d[field]['options']) == count, field
             assert 'fill_if_empty' not in d[field], field
 
@@ -209,13 +271,15 @@ class TestDescriptor:
             'Hispanic or Latino', 'Not Hispanic or Latino',
         ]
 
-    def test_date_of_birth_remains_fill_if_empty(self):
-        """Not swept along: overwriting a recorded birth date is a separate call."""
+    def test_date_of_birth_is_replaceable(self):
         from omop_core.services.write_descriptor import build_writable_field_descriptor
 
         entry = build_writable_field_descriptor()['date_of_birth']
-        assert entry['writable'] is False
-        assert entry['fill_if_empty'] is True
+        assert entry['kind'] == 'direct'
+        assert entry['writable'] is True
+        assert entry['target'] == 'patient_record'
+        assert entry['projection_target'] == 'person'
+        assert 'fill_if_empty' not in entry
 
 
 class TestGetGenderConceptDelegation:

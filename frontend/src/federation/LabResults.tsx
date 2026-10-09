@@ -123,7 +123,9 @@ function ResultDetail({
             <ul className="divide-y divide-border">
               {values.map((r) => (
                 <li key={r.measurement_id} className="flex items-center gap-3 px-4 py-3">
+                  {r.normalized?.error && <span role="status" className="text-xs text-amber-700">Unit conversion unavailable: {r.normalized.error}</span>}
                   <div className="min-w-0 flex-1">
+                    {r.original && <p className="text-xs text-muted-foreground">Original: {formatValue(r.original)} {r.original.unit || "(unit missing)"}</p>}
                     <div className="flex items-baseline gap-2">
                       <span className="font-mono text-sm text-foreground">
                         {formatValue(r)}
@@ -232,7 +234,8 @@ function LabResultsInner({
   onNavigateToDetail,
   onBack,
   onResultDeleted,
-}: Pick<LabResultsProps, "selectedTest" | "onNavigateToDetail" | "onBack" | "onResultDeleted">) {
+  showHeading = true,
+}: Pick<LabResultsProps, "selectedTest" | "onNavigateToDetail" | "onBack" | "onResultDeleted" | "showHeading">) {
   const { page, pageSize, setPage, setPageSize } = useLocalPagination(50);
   const [selectedTest, setSelectedTest] = useState<string | null>(null);
 
@@ -252,6 +255,7 @@ function LabResultsInner({
     <SummaryList
       page={page}
       pageSize={pageSize}
+      showHeading={showHeading}
       onPageChange={setPage}
       onPageSizeChange={setPageSize}
       onNavigate={(conceptCode) => {
@@ -271,12 +275,14 @@ function SummaryList({
   onPageChange,
   onPageSizeChange,
   onNavigate,
+  showHeading,
 }: {
   page: number;
   pageSize: PageSize;
   onPageChange: (p: number) => void;
   onPageSizeChange: (s: PageSize) => void;
   onNavigate: (conceptCode: string) => void;
+  showHeading: boolean;
 }) {
   const { data, isLoading, isError } = useLabResultsSummary({ page, pageSize });
   const totalCount = data?.count ?? 0;
@@ -335,7 +341,7 @@ function SummaryList({
 
   return (
     <div className="space-y-6">
-      <h2 className="text-lg font-medium text-foreground/70">Lab Results</h2>
+      {showHeading && <h2 className="text-lg font-medium text-foreground/70">Lab Results</h2>}
       {categoryGroups.map(([category, groupCards]) => (
         <div key={category}>
           <h3 className="mb-2 text-sm font-medium text-foreground/70">
@@ -375,6 +381,7 @@ export function LabResults({
   onNavigateToDetail,
   onBack,
   onResultDeleted,
+  showHeading,
 }: LabResultsProps) {
   return (
     <LabsProvider
@@ -389,6 +396,7 @@ export function LabResults({
         onNavigateToDetail={onNavigateToDetail}
         onBack={onBack}
         onResultDeleted={onResultDeleted}
+        showHeading={showHeading}
       />
     </LabsProvider>
   );

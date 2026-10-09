@@ -1,7 +1,7 @@
 # Athena Vocabulary Loading + Full ARTEMIS LOT Inference — Design Spec
 
 **Date:** 2026-05-17
-**Status:** Draft
+**Status:** As-built design
 **Related issues:** #67 (LOT inference), #31 (OMOP write-through)
 **Depends on:** Athena account + TSV download (manual prerequisite)
 

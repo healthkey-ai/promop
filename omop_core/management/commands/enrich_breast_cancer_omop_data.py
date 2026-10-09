@@ -41,12 +41,15 @@ import time
 from datetime import date, timedelta
 
 from django.core.management.base import BaseCommand, CommandError
+from omop_core.services.sample_patient_stage import ensure_sample_patient_stage
+from omop_core.services.sample_patient_disease_status import ensure_sample_patient_disease_status
 from django.db import close_old_connections, transaction
+from django.db.models import Exists, OuterRef, Q
 from django.db.utils import InterfaceError, OperationalError
 
 from omop_core.models import (
     Person, PatientRecord, Measurement, Observation, Concept,
-    Domain, ConceptClass, DrugExposure,
+    Domain, ConceptClass, DrugExposure, ConditionOccurrence,
 )
 from omop_core.services.mappings import (
     WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB, WEARABLE_MIN_VALID_DAYS,
@@ -55,7 +58,7 @@ from omop_core.services.mappings import (
 from omop_core.services.pk import next_pk, next_pk_batch
 from omop_core.services.patient_record_service import refresh_patient_record
 from omop_core.services.lot_regimens import REGIMEN_CONCEPT_IDS, get_regimen_name
-from omop_core.services.regimen_resolution import (
+from omop_core.mapping.therapy import (
     match_hemonc_regimen_by_name,
     get_or_create_quarantine_regimen,
 )
@@ -78,11 +81,12 @@ logger = logging.getLogger(__name__)
 # KNOWN DEFECT, deliberately not fixed here: the four response codes are
 # semantically wrong. SNOMED 182840001-182843004 mean "Drug treatment stopped -
 # medical advice / ineffective / side effect / inconvenient", not Complete /
-# Partial / Progressive / Stable response. They are left in place because six
+# Partial / Progressive / Stable response. They are left in place because five
 # consumers read them (views.py, episode_service, patient_record_service,
-# bulk_import_fhir_bundle, fill_org_analytics_gaps, OMOP2PatientInfo.md) and
+# bulk_import_fhir_bundle, fill_org_analytics_gaps) and
 # because the correct fix is per-disease outcome value sets, not a like-for-like
-# swap: of the five diseases supported here only breast cancer uses RECIST.
+# swap (tracked in field_concept_mapping_plan.md): of the five diseases
+# supported here only breast cancer uses RECIST.
 # Lymphoma uses Lugano, myeloma IMWG, CLL iwCLL — and IMWG's VGPR/sCR and
 # iwCLL's CRi/PR-L have no RECIST equivalent, so one four-value set cannot
 # express them. Tracked separately; see the hemonc roadmap's P5.
@@ -326,7 +330,7 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument(
-            '--org-slugs', default='abc-foundation,bbc-foundation',
+            '--org-slugs', default='synthea-bc,abc-foundation,bbc-foundation',
             help='Comma-separated organization slugs to scope the cohort to.',
         )
         parser.add_argument(
@@ -368,7 +372,7 @@ class Command(BaseCommand):
             action='store_true',
             help=(
                 'With --refresh-only and --org-slugs, refresh all PatientRecords in the '
-                'selected orgs instead of only records still matching disease__icontains=breast.'
+                'selected orgs instead of only breast-cancer records identified by disease or OMOP diagnosis.'
             ),
         )
 
@@ -446,11 +450,30 @@ class Command(BaseCommand):
             self._write_progress(
                 f'Selecting breast-cancer cohort for org slug(s): {", ".join(org_slugs)}...'
             )
-            org_qs = (
-                PatientRecord.objects
-                .filter(organization__slug__in=org_slugs)
+            if not org_slugs:
+                raise CommandError('Select at least one organization with --org-slugs.')
+            org_scope = Q()
+            for slug in org_slugs:
+                org_scope |= Q(organization__slug__iexact=slug)
+            org_qs = PatientRecord.objects.filter(org_scope)
+            # PatientRecord.disease is a projection and can be blank/stale after
+            # imports. Also recognize an actual breast-cancer diagnosis in OMOP.
+            # Keep the organization boundary even when using this fallback.
+            breast_diagnoses = ConditionOccurrence.objects.filter(
+                person_id=OuterRef('person_id'), is_erroneous=False,
+            ).filter(
+                (Q(condition_concept__concept_name__icontains='breast') &
+                 (Q(condition_concept__concept_name__icontains='cancer') |
+                  Q(condition_concept__concept_name__icontains='carcinoma') |
+                  Q(condition_concept__concept_name__icontains='malignant')))
+                | Q(condition_concept__vocabulary_id='SNOMED', condition_concept__concept_code='254837009')
+                | (Q(condition_concept__vocabulary_id__in=['ICD10', 'ICD10CM']) &
+                   (Q(condition_concept__concept_code__startswith='C50') |
+                    Q(condition_concept__concept_code__startswith='D05')))
             )
-            qs = org_qs.filter(disease__icontains='breast')
+            qs = org_qs.alias(_has_bc_diagnosis=Exists(breast_diagnoses)).filter(
+                Q(disease__icontains='breast') | Q(disease__iexact='BC') | Q(_has_bc_diagnosis=True)
+            )
             refresh_base_qs = org_qs if refresh_only and refresh_all_org_patients else qs
             refresh_qs = refresh_base_qs.order_by('person_id').values_list('person_id', flat=True)
             refresh_person_ids = list(refresh_qs[:options['limit']]) if options['limit'] else list(refresh_qs)
@@ -463,7 +486,11 @@ class Command(BaseCommand):
             person_ids = []
 
         if not person_ids and not refresh_person_ids:
-            raise CommandError('No matching patients found for the given cohort.')
+            raise CommandError(
+                'No matching breast-cancer patients found in the selected organizations. '
+                'Use --org-slugs to select the sample cohort (for example synthea-bc), '
+                'or --person-ids to select patients explicitly.'
+            )
 
         total = len(person_ids)
         self._write_progress(
@@ -581,6 +608,9 @@ class Command(BaseCommand):
 
                 def enrich_person():
                     with transaction.atomic():
+                        if record:
+                            record.stage, _ = ensure_sample_patient_stage(record, disease='BC', dry_run=dry_run)
+                            ensure_sample_patient_disease_status(record, dry_run=dry_run)
                         perf_backfilled = self._backfill_performance_and_stage(
                             person, record, dry_run,
                         )
@@ -682,6 +712,13 @@ class Command(BaseCommand):
                 f'\n  Phase 2 complete: {self._fmt_elapsed(phase2_elapsed)} elapsed, '
                 f'{counts["refreshed"]} records refreshed.'
             )
+
+        if not dry_run and processed_persons:
+            from django.core.management import call_command
+            sample_slugs = list(PatientRecord.objects.filter(person_id__in=processed_persons).exclude(organization=None).values_list('organization__slug', flat=True).distinct())
+            if sample_slugs:
+                call_command('backfill_sample_disease_profiles', org_slugs=','.join(sample_slugs), disease='BC',
+                             person_ids=','.join(str(person.pk) for person in processed_persons), confirm=True)
 
         total_elapsed = time.monotonic() - job_start
         self._write_progress(self.style.SUCCESS(
@@ -893,9 +930,9 @@ class Command(BaseCommand):
             histology = _BC_HISTOLOGY_TYPES[person.person_id % len(_BC_HISTOLOGY_TYPES)]
             _queue_measurement('59847-4', value_as_string=histology)
 
-        has_numeric_ki67 = any(value_num is not None for value_num, _ in existing_by_code.get('85319-2', []))
+        has_numeric_ki67 = any(value_num is not None for value_num, _ in existing_by_code.get('29593-1', []))
         if not has_numeric_ki67:
-            _queue_measurement('85319-2', value_as_number=rng.randint(5, 75))
+            _queue_measurement('29593-1', value_as_number=rng.randint(5, 75))
 
         has_mutation = any(existing_by_code.get(code) for code, _gene in _BC_MUTATION_LOINCS)
         if not has_mutation:

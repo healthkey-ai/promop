@@ -29,6 +29,12 @@ from omop_oncology.models import Episode, EpisodeEvent
 
 logger = logging.getLogger('audit')
 
+# Sentinel distinguishing "caller did not supply a value" from "caller
+# explicitly passed None (= clear the field)."  Default arguments use this
+# so that ``end_date=None`` means "clear", while omitting the argument
+# entirely means "leave as stored."
+_UNSET = object()
+
 
 class TherapyLineEpisodeResult:
     """Outcome of upsert_therapy_line_episode.
@@ -38,7 +44,10 @@ class TherapyLineEpisodeResult:
     event_ids   — EpisodeEvent pks touched (created or pre-existing links)
     """
 
-    __slots__ = ('episode', 'created', 'event_ids')
+    __slots__ = ('episode', 'created', 'event_ids',
+                 # Attached by author_therapy_line, which also writes the
+                 # exposures the episode groups.
+                 'drug_exposure_ids', 'drugs_created')
 
     def __init__(self, episode, created, event_ids):
         self.episode = episode
@@ -65,14 +74,17 @@ def upsert_therapy_line_episode(
     line_number,
     regimen_concept=None,
     regimen_source_concept=None,
-    start_date=None,
-    end_date=None,
+    start_date=_UNSET,
+    end_date=_UNSET,
     drug_exposure_ids=(),
     outcome=None,
+    intent=None,
+    discontinuation_reason=None,
     source_value=None,
     today=None,
     preserve_end_date_when_none=False,
     overwrite_source_concept=False,
+    replace_events=False,
 ):
     """Upsert one line-of-therapy Episode and its links; return the Episode.
 
@@ -84,17 +96,28 @@ def upsert_therapy_line_episode(
             episode_object_concept; falls back to concept 0.
         regimen_source_concept: Concept for episode_source_concept (typically the
             same HemOnc concept when it came from the source), else None.
+        preserve_end_date_when_none: when True, a None end_date means "omitted" and the
+            stored value is kept (CB's profile-write path, which has no therapy end_date
+            field of its own). Default False keeps the original behaviour (None clears)
+            for callers where None legitimately means an ongoing line, e.g.
+            `lot_inference_service._persist_lots` recomputing the last line as open-ended.
         overwrite_source_concept: when True, a provided regimen_source_concept replaces an
             existing episode_source_concept (the CB reverse-sync, authoritative for its own
             patients); default False keeps "fill only if empty" so import paths never clobber
             an asserted source concept. A None concept never clears either way.
-        start_date / end_date: date objects (already parsed) or None.
+        replace_events: rewrite this line's EpisodeEvent rows to match drug_exposure_ids
+            instead of only adding the newly named ones (dev).
+        start_date / end_date: date objects, or ``_UNSET`` (= leave as stored). An explicit
+            None is a real value: it clears end_date, unless preserve_end_date_when_none
+            says otherwise. The required start_date is retained when None is supplied.
         drug_exposure_ids: iterable of drug_exposure_id to link via EpisodeEvent.
         outcome: optional outcome string → LOT-{n}-outcome Observation.
         source_value: episode_source_value to store. Defaults to 'LOT-{n}'.
             Callers that record a human name or phase-labelled regimen
             (reverse sync, inference) pass their own value.
         today: fallback for episode_start_date when start_date is None.
+        replace_events: when True, the supplied drug_exposure_ids are the full
+            membership of the episode and stale EpisodeEvent links are removed.
 
     Returns a TherapyLineEpisodeResult; result.episode is None if the required
     Treatment Regimen concept is absent.
@@ -116,6 +139,10 @@ def upsert_therapy_line_episode(
 
     episode_source_value = (source_value or f'LOT-{line_number}')[:50]
 
+    # Resolve sentinels for the create path: _UNSET → None (no date known yet).
+    effective_start = None if start_date is _UNSET else start_date
+    effective_end = None if end_date is _UNSET else end_date
+
     episode = Episode.objects.filter(person=person, episode_number=line_number).first()
     created = episode is None
     if episode is None:
@@ -125,15 +152,16 @@ def upsert_therapy_line_episode(
             episode_concept=tx_regimen_concept,
             episode_object_concept=object_concept,
             episode_type_concept=ehr_type_concept,
-            episode_start_date=start_date or today,
-            episode_end_date=end_date,
+            episode_start_date=effective_start or today,
+            episode_end_date=effective_end,
             episode_number=line_number,
             episode_source_value=episode_source_value,
             episode_source_concept=regimen_source_concept,
         )
         episode.save()
     else:
-        # Fill in fields that may have been unknown at first write.
+        # Update fields the caller explicitly supplied (including None = clear).
+        # _UNSET means "not supplied" and leaves the stored value untouched.
         dirty = []
         if episode.episode_source_value != episode_source_value:
             episode.episode_source_value = episode_source_value
@@ -155,24 +183,44 @@ def upsert_therapy_line_episode(
                 and episode.episode_source_concept_id != regimen_source_concept.concept_id):
             episode.episode_source_concept = regimen_source_concept
             dirty.append('episode_source_concept')
-        if start_date is not None and episode.episode_start_date != start_date:
-            episode.episode_start_date = start_date
+        if effective_start is not None and episode.episode_start_date != effective_start:
+            episode.episode_start_date = effective_start
             dirty.append('episode_start_date')
-        # `preserve_end_date_when_none=True` treats a None end_date as "not provided, keep what's there"
-        # (mirroring start_date's `is not None` guard above). CB's profile-write therapy-line path sets it
-        # because CB has no therapy end_date field, so its None always means "omitted", never "clear" — and
-        # without it a partial edit would NULL an imported episode's episode_end_date, destroying treatment
-        # timing that washout matching relies on. The DEFAULT keeps the original behaviour (None clears) for
-        # callers where None legitimately means an ongoing line, e.g. `lot_inference_service._persist_lots`
-        # recomputing the last line as open-ended under force re-inference.
-        if (end_date is not None or not preserve_end_date_when_none) and episode.episode_end_date != end_date:
-            episode.episode_end_date = end_date
+        # Two independent reasons not to touch the stored end_date, from two branches:
+        #
+        # 1. dev: ``_UNSET`` means "not supplied" and leaves the stored value untouched.
+        # 2. CB: ``preserve_end_date_when_none=True`` treats a None end_date as "not
+        #    provided, keep what's there", mirroring start_date's `is not None` guard above.
+        #    CB's profile-write therapy-line path sets it because CB has no therapy end_date
+        #    field, so its None always means "omitted", never "clear" -- and without it a
+        #    partial edit would NULL an imported episode's episode_end_date, destroying
+        #    treatment timing that washout matching relies on. The DEFAULT keeps the original
+        #    behaviour (None clears) for callers where None legitimately means an ongoing
+        #    line, e.g. `lot_inference_service._persist_lots` recomputing the last line as
+        #    open-ended under force re-inference.
+        #
+        # Both are honoured; satisfying only one would silently regress the other branch.
+        skip_end = (end_date is _UNSET) or (end_date is None and preserve_end_date_when_none)
+        if not skip_end and episode.episode_end_date != effective_end:
+            episode.episode_end_date = effective_end
             dirty.append('episode_end_date')
         if dirty:
             episode.save(update_fields=dirty)
 
     field_concept = _concept(CONCEPT_DRUG_EXPOSURE_FIELD) or tx_regimen_concept
     event_ids = []
+    desired_exposure_ids = {de_id for de_id in drug_exposure_ids if de_id is not None}
+    if replace_events:
+        stale = (
+            EpisodeEvent.objects
+            .filter(
+                episode_id=episode.episode_id,
+                episode_event_field_concept=field_concept,
+            )
+            .exclude(event_id__in=desired_exposure_ids)
+        )
+        stale.delete()
+
     for de_id in drug_exposure_ids:
         if de_id is None:
             continue
@@ -185,7 +233,22 @@ def upsert_therapy_line_episode(
 
     if outcome:
         _upsert_outcome_observation(person, line_number, outcome, ehr_type_concept, no_match_concept,
-                                    obs_date=end_date or start_date or today)
+                                    obs_date=effective_end or effective_start or today)
+    elif replace_events:
+        _delete_outcome_observation(person, line_number)
+
+    obs_date = effective_end or effective_start or today
+    if intent:
+        _upsert_line_observation(person, line_number, 'intent', intent,
+                                 ehr_type_concept, no_match_concept, obs_date=obs_date)
+    elif replace_events:
+        _delete_line_observation(person, line_number, 'intent')
+
+    if discontinuation_reason:
+        _upsert_line_observation(person, line_number, 'discontinuation', discontinuation_reason,
+                                 ehr_type_concept, no_match_concept, obs_date=obs_date)
+    elif replace_events:
+        _delete_line_observation(person, line_number, 'discontinuation')
 
     return TherapyLineEpisodeResult(episode, created, event_ids)
 
@@ -233,3 +296,207 @@ def _upsert_outcome_observation(person, line_number, outcome, type_concept, no_m
     )
     obs._skip_patient_record_refresh = True
     obs.save()
+
+
+def _delete_outcome_observation(person, line_number):
+    Observation.objects.filter(
+        person=person,
+        observation_source_value=f'LOT-{line_number}-outcome',
+    ).delete()
+
+
+def _upsert_line_observation(person, line_number, suffix, value, type_concept, no_match_concept, obs_date):
+    """Upsert a LOT-{n}-{suffix} Observation (intent, discontinuation, etc.)."""
+    src_value = f'LOT-{line_number}-{suffix}'
+    obs_concept = no_match_concept
+    if obs_concept is None or type_concept is None:
+        return
+    text = value[:60]
+
+    existing = Observation.objects.filter(
+        person=person, observation_source_value=src_value,
+    ).first()
+    if existing:
+        dirty = []
+        if existing.value_as_string != text:
+            existing.value_as_string = text
+            dirty.append('value_as_string')
+        if obs_date and existing.observation_date != obs_date:
+            existing.observation_date = obs_date
+            dirty.append('observation_date')
+        if dirty:
+            existing._skip_patient_record_refresh = True
+            existing.save(update_fields=dirty)
+        return
+
+    obs = Observation(
+        observation_id=next_pk(Observation, 'observation_id'),
+        person=person,
+        observation_concept=obs_concept,
+        observation_date=obs_date,
+        observation_type_concept=type_concept,
+        value_as_string=text,
+        observation_source_value=src_value,
+    )
+    obs._skip_patient_record_refresh = True
+    obs.save()
+
+
+def _delete_line_observation(person, line_number, suffix):
+    Observation.objects.filter(
+        person=person,
+        observation_source_value=f'LOT-{line_number}-{suffix}',
+    ).delete()
+
+
+def author_therapy_line(
+    person,
+    *,
+    line_number,
+    drugs=(),
+    start_date=None,
+    end_date=None,
+    regimen_concept_id=None,
+    outcome=None,
+    intent=None,
+    discontinuation_reason=None,
+    source_value=None,
+    replace=False,
+):
+    """Record a line of therapy: its drug exposures, its Episode, and the links.
+
+    A line of therapy is not one row. It is a set of DrugExposures grouped by an
+    Episode through EpisodeEvent, and every therapy field on ``PatientRecord`` --
+    ``first_line_therapy``, ``therapy_lines_count``, the intents, the outcomes,
+    ``treatment_refractory_status`` -- is read back out of that grouping by
+    regimen inference. There is no column to write.
+
+    That is three POSTs with concept ids a browser has no business knowing, and
+    ``Episode`` additionally needs a client-supplied primary key,
+    ``episode_object_concept`` and ``episode_type_concept``. Doing it here means
+    a caller sends what a clinician knows -- which line, which drugs, which dates
+    -- and the CDM tagging stays identical to every other path, because the
+    grouping still goes through ``upsert_therapy_line_episode``.
+
+    Idempotent in both halves. The Episode keys on ``(person, line_number)``, and
+    a drug exposure keys on ``(drug_source_value, drug_exposure_start_date)`` --
+    the same identity the bulk write path and FHIR ingest use, so re-sending a
+    line converges instead of stacking duplicates.
+
+    Signal suppression is internalised: every DrugExposure save and Observation
+    delete fires post_save/post_delete, each of which would trigger a full
+    PatientRecord refresh. The suppression defers that to the single
+    refresh_patient_record call the caller makes after this returns.
+
+    Args:
+        person: OMOP Person.
+        line_number: LOT number (1, 2, 3…).
+        drugs: iterable of ``{'concept_id': int, 'source_value': str|None}``.
+        start_date / end_date: ``date`` objects or None.
+        regimen_concept_id: resolved regimen concept, used as
+            ``episode_object_concept`` and asserted via ``episode_source_concept``.
+        outcome: optional outcome string → ``LOT-{n}-outcome`` Observation.
+        source_value: ``episode_source_value``; defaults to ``LOT-{n}``.
+        replace: when True, the submitted drugs and outcome are the complete
+            edited state of the line, so stale EpisodeEvent/outcome rows are
+            removed.
+
+    Returns a TherapyLineEpisodeResult with two extra attributes attached:
+    ``drug_exposure_ids`` and ``drugs_created``.
+    """
+    from omop_core.models import DrugExposure
+    from omop_core.signals import suppress_patient_record_refresh
+
+    with suppress_patient_record_refresh():
+        return _author_therapy_line_inner(
+            person,
+            line_number=line_number,
+            drugs=drugs,
+            start_date=start_date,
+            end_date=end_date,
+            regimen_concept_id=regimen_concept_id,
+            outcome=outcome,
+            intent=intent,
+            discontinuation_reason=discontinuation_reason,
+            source_value=source_value,
+            replace=replace,
+        )
+
+
+def _author_therapy_line_inner(
+    person,
+    *,
+    line_number,
+    drugs=(),
+    start_date=None,
+    end_date=None,
+    regimen_concept_id=None,
+    outcome=None,
+    intent=None,
+    discontinuation_reason=None,
+    source_value=None,
+    replace=False,
+):
+    from omop_core.models import DrugExposure
+
+    ehr_type = _concept(CONCEPT_EHR_TYPE)
+    exposure_ids = []
+    created = 0
+
+    for drug in drugs:
+        concept_id = drug.get('concept_id') if isinstance(drug, dict) else drug
+        concept = _concept(concept_id)
+        if concept is None:
+            # A drug whose concept is not loaded cannot be written, and silently
+            # dropping it would produce a line that looks complete and infers the
+            # wrong regimen. Refuse the whole line instead.
+            raise ValueError(f'Unknown drug concept_id {concept_id}')
+
+        raw = (drug.get('source_value') if isinstance(drug, dict) else None)
+        raw = (raw or concept.concept_name or '')[:50]
+
+        existing = DrugExposure.objects.filter(
+            person=person,
+            drug_source_value=raw,
+            drug_exposure_start_date=start_date,
+        ).order_by('drug_exposure_id').first()
+        if existing is not None:
+            exposure_ids.append(existing.drug_exposure_id)
+            continue
+
+        exposure = DrugExposure(
+            drug_exposure_id=next_pk(DrugExposure, 'drug_exposure_id'),
+            person=person,
+            drug_concept=concept,
+            drug_exposure_start_date=start_date,
+            drug_exposure_end_date=end_date,
+            drug_type_concept=ehr_type,
+            drug_source_value=raw,
+        )
+        exposure.save()
+        exposure_ids.append(exposure.drug_exposure_id)
+        created += 1
+
+    regimen_concept = _concept(regimen_concept_id) if regimen_concept_id else None
+    result = upsert_therapy_line_episode(
+        person,
+        line_number=line_number,
+        regimen_concept=regimen_concept,
+        # Asserted, not inferred: the caller named this regimen, and derivation
+        # reads episode_source_concept to decide which of the two it is.
+        regimen_source_concept=regimen_concept,
+        start_date=start_date,
+        end_date=end_date,
+        drug_exposure_ids=exposure_ids,
+        outcome=outcome,
+        intent=intent,
+        discontinuation_reason=discontinuation_reason,
+        source_value=source_value,
+        # A clinician explicitly selected this regimen; unlike import/inference
+        # paths, that selection must replace a previously asserted regimen.
+        overwrite_source_concept=True,
+        replace_events=replace,
+    )
+    result.drug_exposure_ids = exposure_ids
+    result.drugs_created = created
+    return result

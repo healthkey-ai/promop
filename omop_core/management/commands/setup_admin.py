@@ -17,11 +17,21 @@ class Command(BaseCommand):
                 'Set it in the Render environment before deploying.'
             )
 
-        if Identity.objects.filter(email=email).exists():
-            user = Identity.objects.get(email=email)
-            user.set_password(password)
-            user.save()
-            self.stdout.write(self.style.SUCCESS(f'Updated password for "{email}"'))
-        else:
+        # Email is not an identity key: a local account can share it with OIDC
+        # or service identities. Match the same scope as EmailBackend and never
+        # assign a local password to an external identity.
+        try:
+            user = Identity.objects.get(issuer='urn:local', email__iexact=email)
+        except Identity.DoesNotExist:
             Identity.objects.create_superuser(email=email, password=password)
             self.stdout.write(self.style.SUCCESS(f'Created superuser "{email}"'))
+        except Identity.MultipleObjectsReturned:
+            raise CommandError(
+                'ADMIN_EMAIL matches multiple local identities. '
+                'Resolve the local-account ambiguity before resetting a password; '
+                'no accounts were changed.'
+            )
+        else:
+            user.set_password(password)
+            user.save(update_fields=['password'])
+            self.stdout.write(self.style.SUCCESS(f'Updated password for "{email}"'))

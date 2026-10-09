@@ -1,4 +1,4 @@
-"""Location fields are writable at the persons endpoint.
+"""Location fields are writable through the PatientRecord PATCH.
 
 `city`, `region`, `postal_code`, `country`, `latitude` and `longitude` are
 projected from the OMOP `Location` row identified by `Person.location_id` — a
@@ -6,6 +6,9 @@ plain IntegerField, not a ForeignKey, so the link is by id and there is nothing 
 follow. The `Location` model already existed; only the API surface was missing, so
 six fields sat read-only for want of a write path rather than for want of a
 concept.
+
+Profile fields now write through `PATCH /api/patient-info/{person_id}/`
+(PatientRecord), and `_project_profile_fields` projects them to Location.
 
 Replaceable rather than fill-if-empty: a patient who moves needs the new address
 to win, which is the opposite of the rule that protects a recorded birth date.
@@ -49,7 +52,7 @@ def person():
 
 def _patch(client, person, payload):
     return client.patch(
-        f'/api/v1/persons/{person.person_id}/', payload, format='json'
+        f'/api/patient-info/{person.person_id}/', payload, format='json'
     )
 
 
@@ -104,6 +107,46 @@ class TestWritingLocation:
         assert pr.latitude == pytest.approx(42.3601)
         assert pr.longitude == pytest.approx(-71.0589)
 
+    def test_a_later_write_rederives_without_being_asked(self, staff_client, person):
+        """The endpoint must derive, not merely store.
+
+        The first address write creates the Location row, and creating it puts
+        'location_id' on Person — which is what used to trigger the refresh. A
+        later write only updates the Location, so nothing landed on Person and
+        the refresh never fired: the row said one city and the projection kept
+        another, under a 200 reporting no change.
+
+        The existing projection test does not catch this because it calls
+        refresh_patient_record itself, and because a single write is always the
+        creating one.
+        """
+        _patch(staff_client, person, {'city': 'Boston'})
+
+        _patch(staff_client, person, {'city': 'Cambridge'})
+
+        # No manual refresh: the point is that the endpoint did it.
+        pr = PatientRecord.objects.get(person=person)
+        assert pr.city == 'Cambridge'
+
+    def test_a_later_write_reports_what_it_changed(self, staff_client, person):
+        _patch(staff_client, person, {'city': 'Boston'})
+
+        resp = _patch(staff_client, person, {'city': 'Cambridge', 'country': 'USA'})
+
+        assert resp.status_code == 200
+        body = resp.json()
+        # The PatientRecord PATCH returns previous_values for changed fields.
+        assert 'city' in body.get('previous_values', {})
+
+    def test_a_write_that_changes_nothing_still_succeeds(self, staff_client, person):
+        _patch(staff_client, person, {'city': 'Boston'})
+
+        resp = _patch(staff_client, person, {'city': 'Boston'})
+
+        assert resp.status_code == 200
+        # The city value is unchanged.
+        assert resp.json()['city'] == 'Boston'
+
     def test_a_field_not_sent_is_left_alone(self, staff_client, person):
         _patch(staff_client, person, {'city': 'Boston', 'country': 'USA'})
 
@@ -141,7 +184,6 @@ class TestValidation:
         resp = _patch(staff_client, person, {'latitude': 'north'})
 
         assert resp.status_code == 400
-        assert 'must be a number' in resp.data['detail']
 
     @pytest.mark.parametrize('field,value', [
         ('latitude', 91), ('latitude', -91),
@@ -160,6 +202,17 @@ class TestValidation:
         person.refresh_from_db()
         assert _loc(person).latitude == Decimal('90')
 
+    def test_cannot_clear_only_one_coordinate(self, staff_client, person):
+        _patch(staff_client, person, {'latitude': 42.36, 'longitude': -71.06})
+
+        resp = _patch(staff_client, person, {'latitude': None})
+
+        assert resp.status_code == 400
+        assert 'requires both coordinates or neither' in resp.data['detail']
+        person.refresh_from_db()
+        assert _loc(person).latitude == Decimal('42.36')
+        assert _loc(person).longitude == Decimal('-71.06')
+
     def test_a_rejected_write_leaves_person_fields_untouched(self, staff_client, person):
         """Validation runs before anything is saved."""
         resp = _patch(staff_client, person, {'email': 'a@b.com', 'region': 'Massachusetts'})
@@ -170,15 +223,16 @@ class TestValidation:
 
 
 class TestDescriptor:
-    def test_the_six_fields_report_as_writable_profile(self):
+    def test_the_six_fields_report_as_writable_direct(self):
         from omop_core.services.write_descriptor import build_writable_field_descriptor
 
         d = build_writable_field_descriptor()
         for field in ('city', 'region', 'postal_code', 'country',
                       'latitude', 'longitude'):
-            assert d[field]['kind'] == 'profile', field
+            assert d[field]['kind'] == 'direct', field
             assert d[field]['writable'] is True, field
-            assert d[field]['person_field'].startswith('Location.'), field
+            assert d[field]['target'] == 'patient_record', field
+            assert d[field]['projection_target'] == 'location', field
 
     def test_no_field_is_still_grouped_as_location(self):
         """The group existed only because these had no write path."""
