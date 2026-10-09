@@ -45,6 +45,7 @@ import {
   omopTableFor,
   retirementDetail,
   approvalNote,
+  dominantSourceUnit,
   strategyLabel,
   DEFAULT_SEARCH_SCOPE,
   CONCEPT_SEARCH_DEBOUNCE_MS,
@@ -119,6 +120,7 @@ export default function EditMappingDialog({
   const [saving, setSaving] = useState(false);
   const [mintOpen, setMintOpen] = useState(false);
   const [mintUnitOpen, setMintUnitOpen] = useState(false);
+  const [unitAutoPopulated, setUnitAutoPopulated] = useState(false);
 
   const evidenceFacilities = sourceEvidence?.facilities || [];
 
@@ -165,6 +167,7 @@ export default function EditMappingDialog({
       setSaving(false);
       setMintOpen(false);
       setIndividualSuggestion(null);
+      setUnitAutoPopulated(false);
 
       if (mode === "new") {
         // When opened from PatientSourceCodesTab, selectedRow carries the
@@ -227,7 +230,18 @@ export default function EditMappingDialog({
         );
         if (!active) return;
         setDestinationOptions(data.destination_options || []);
-        setSourceEvidence(data.source_evidence || null);
+        const evidence = data.source_evidence || null;
+        setSourceEvidence(evidence);
+        // Auto-populate source_unit from evidence when the form has none
+        // (e.g. opened from Code Mapping browse, where the list omits units).
+        const dominant = dominantSourceUnit(evidence?.units);
+        if (dominant) {
+          setForm((prev) => {
+            if (prev.source_unit) return prev;
+            setUnitAutoPopulated(true);
+            return { ...prev, source_unit: dominant };
+          });
+        }
       } catch {
         if (!active) return;
         setDestinationError("Could not load imported destinations. Close and reopen this mapping to retry.");
@@ -956,6 +970,7 @@ export default function EditMappingDialog({
                   selectedConceptCode={form.destination_unit_concept_code}
                   selectedConceptName={form.destination_unit_concept_name}
                   matchType={form.unit_match_type}
+                  autoPopulated={unitAutoPopulated}
                   onSelect={(unit) => {
                     setField("destination_unit_concept_id", unit ? String(unit.concept_id) : "");
                     setField("destination_unit_concept_code", unit?.concept_code || "");
@@ -1163,13 +1178,14 @@ interface DestinationUnitPickerProps {
   selectedConceptCode: string;
   selectedConceptName: string;
   matchType: "exact" | "close" | "none" | "";
+  autoPopulated?: boolean;
   onSelect: (unit: UnitResult | null) => void;
   onMintUnit: () => void;
 }
 
 function DestinationUnitPicker({
   sourceUnit, selectedConceptId, selectedConceptCode, selectedConceptName,
-  matchType, onSelect, onMintUnit,
+  matchType, autoPopulated, onSelect, onMintUnit,
 }: DestinationUnitPickerProps) {
   const [query, setQuery] = useState(sourceUnit);
   const [results, setResults] = useState<UnitResult[]>([]);
@@ -1211,13 +1227,15 @@ function DestinationUnitPicker({
     debounceRef.current = setTimeout(() => { void doSearch(value); }, 300);
   };
 
-  const matchIndicator = matchType === "exact"
-    ? <span className="text-green-600" title="Exact UCUM match">&#10003; Exact</span>
-    : matchType === "close"
-      ? <span className="text-amber-600" title="Close UCUM match">&#126; Close</span>
-      : matchType === "none"
-        ? <span className="text-red-600" title="No UCUM match">&#10007; No match</span>
-        : null;
+  const matchIndicator = matchType === "exact" && autoPopulated
+    ? <span className="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700" title="Auto-matched from source evidence">Auto-matched &#10003;</span>
+    : matchType === "exact"
+      ? <span className="text-green-600" title="Exact UCUM match">&#10003; Exact</span>
+      : matchType === "close"
+        ? <span className="text-amber-600" title="Close UCUM match">&#126; Close</span>
+        : matchType === "none"
+          ? <span className="text-red-600" title="No UCUM match">&#10007; No match</span>
+          : null;
 
   return (
     <div className="mt-3 rounded border border-slate-200 bg-slate-50 p-3">
@@ -1255,21 +1273,27 @@ function DestinationUnitPicker({
               </button>
             </div>
           )}
-          {results.length > 0 && (
-            <ul className="mt-1 max-h-40 overflow-y-auto rounded border bg-white text-xs">
-              {results.map((r) => (
-                <li key={r.concept_id}
-                  className="flex cursor-pointer items-center gap-2 px-2 py-1.5 hover:bg-sky-50"
-                  onClick={() => onSelect(r)}>
-                  <span className="font-mono font-medium">{r.concept_code}</span>
-                  <span className="text-slate-500">{r.concept_name}</span>
-                  <span className={r.match === "exact" ? "ml-auto text-green-600" : "ml-auto text-amber-500"}>
-                    {r.match === "exact" ? "exact" : "close"}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
+          {results.length > 0 && (() => {
+            const allClose = results.every((r) => r.match !== "exact");
+            return (
+              <ul className="mt-1 max-h-40 overflow-y-auto rounded border bg-white text-xs">
+                {results.map((r, i) => {
+                  const isSuggested = allClose && i === 0;
+                  return (
+                    <li key={r.concept_id}
+                      className={`flex cursor-pointer items-center gap-2 px-2 py-1.5 hover:bg-sky-50${isSuggested ? " border-l-2 border-amber-400 bg-amber-50" : ""}`}
+                      onClick={() => onSelect(r)}>
+                      <span className="font-mono font-medium">{r.concept_code}</span>
+                      <span className="text-slate-500">{r.concept_name}</span>
+                      <span className={r.match === "exact" ? "ml-auto text-green-600" : "ml-auto text-amber-500"}>
+                        {r.match === "exact" ? "exact" : isSuggested ? "Suggested \u2014 click to accept" : "close"}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            );
+          })()}
         </Field>
       )}
     </div>

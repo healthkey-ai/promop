@@ -3,7 +3,7 @@
  * EditMappingDialog. Extracted to avoid circular imports and duplication.
  */
 
-import type { SourceEvidence } from "./SourceEvidencePanel";
+import type { SourceEvidence, SourceUnitEvidence } from "./SourceEvidencePanel";
 
 // ── Row & form types ────────────────────────────────────────────────
 
@@ -347,6 +347,20 @@ export type SuggestRunProgress = {
   error: string;
   ranking_model?: string;
 };
+
+/**
+ * Extract the best usable UCUM unit string from source evidence units.
+ * Picks the highest-count non-suppressed unit, preferring normalized > code > display.
+ * Returns "" when no usable unit exists.
+ */
+export function dominantSourceUnit(units: SourceUnitEvidence[] | undefined): string {
+  if (!units || units.length === 0) return "";
+  const eligible = units.filter((u) => !u.suppressed);
+  if (eligible.length === 0) return "";
+  // Already sorted by count descending from the backend, but be explicit.
+  const best = eligible.reduce((a, b) => (b.count > a.count ? b : a));
+  return best.normalized || best.code || best.display || "";
+}
 
 // Re-export the CandidateActivity type from SuggestCandidates for convenience.
 import type { CandidateActivity } from "./SuggestCandidates";
