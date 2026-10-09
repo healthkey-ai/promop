@@ -812,13 +812,16 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
                 resolved += count
                 already_resolved += group['row_count'] - count
 
-    # Mark PatientRecord stale and refresh.
+    # Mark PatientRecord stale and dispatch derivation asynchronously.
+    # The mapping updates above are fast; the derivation (12-32s on bulk-loaded
+    # patients) runs on Celery when a broker is configured, or inline with a
+    # statement_timeout otherwise — either way, outside this request.
     if person_ids_touched:
         PatientRecord.objects.filter(
             person_id__in=person_ids_touched,
         ).update(derivation_version=0)
-        from omop_core.services.patient_record_service import refresh_patient_record
-        refresh_patient_record(person)
+        from omop_core.services.derivation_jobs import get_dispatcher
+        get_dispatcher().dispatch(person)
 
     return {
         'resolved': resolved,
