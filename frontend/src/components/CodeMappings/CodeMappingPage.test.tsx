@@ -868,6 +868,8 @@ describe("CodeMappingPage", () => {
         "Source Code System",
         "Source Code Value",
         "Source Description",
+        "Source Quantity",
+        "Source Unit",
       ]);
       expect((screen.getByLabelText("Domain") as HTMLSelectElement).value).toBe("Measurement");
     });
