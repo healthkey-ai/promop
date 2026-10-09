@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import api from "../../api/axios";
+import { useAuth } from "../../hooks/useAuth";
 import type {
   PatientSourceCode,
   SourceCodesResponse,
@@ -70,6 +71,8 @@ function sourceCodeToRow(sc: PatientSourceCode): CodeMappingRow {
 }
 
 export default function PatientSourceCodesTab({ personId }: Props) {
+  const { currentUser } = useAuth();
+  const canApprove = !!(currentUser?.is_staff || currentUser?.is_org_admin);
   const [data, setData] = useState<SourceCodesResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -369,7 +372,7 @@ export default function PatientSourceCodesTab({ personId }: Props) {
         mode={dialogMode}
         row={dialogRow}
         reference={reference}
-        canApprove={false}
+        canApprove={canApprove}
         strategies={strategies}
         rankingModel={rankingModel}
         onStrategiesChange={setStrategies}
