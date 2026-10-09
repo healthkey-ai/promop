@@ -646,6 +646,10 @@ export default function EditMappingDialog({
                   />
                 </Field>
 
+                <ReadOnlyField id="source_quantity_display" label="Source Quantity" tip="Representative quantity value(s) from the source data." value={selectedRow?.example_quantity || "\u2014"} testId="source-quantity" />
+
+                <ReadOnlyField id="source_unit_display" label="Source Unit" tip="Unit string as reported by the ETL source." value={form.source_unit || "\u2014"} testId="source-unit-context" />
+
                 {(reference.source_catalog_vocabularies || []).includes(form.source_vocabulary_id) && (
                   <SourceVocabularyLookup
                     vocabularyId={form.source_vocabulary_id}
@@ -657,22 +661,8 @@ export default function EditMappingDialog({
                     }}
                   />
                 )}
-
-                {form.source_unit && (
-                  <ReadOnlyField id="source_unit_display" label="Source Unit" tip="Unit string as reported by the ETL source." value={form.source_unit} />
-                )}
-                {selectedRow?.example_quantity && (
-                  <ReadOnlyField id="example_quantity_display" label="Example Qty" tip="Representative quantity value(s) from the source data." value={selectedRow.example_quantity} />
-                )}
               </div>
-              {form.source_metadata_notes && (
-                <div className="mt-3">
-                  <label className="mb-1 block text-xs font-medium text-slate-600">Source Notes</label>
-                  <pre className="whitespace-pre-wrap rounded border bg-slate-50 px-3 py-2 text-xs text-slate-700">
-                    {form.source_metadata_notes}
-                  </pre>
-                </div>
-              )}
+              <SourceMetadataBlock metadata={selectedRow?.source_metadata} />
             </fieldset>
 
             {mode === "edit" && selectedRow?.mapping_id && (
@@ -1160,6 +1150,27 @@ export default function EditMappingDialog({
         />
       )}
     </>
+  );
+}
+
+// ── Source Metadata Block ──────────────────────────────────────────
+
+function SourceMetadataBlock({ metadata }: { metadata?: Record<string, unknown> }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!metadata || Object.keys(metadata).length === 0) return null;
+  return (
+    <div className="mt-3">
+      <button type="button" onClick={() => setExpanded((p) => !p)}
+        className="mb-1 flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-slate-900">
+        <span className={`inline-block transition-transform ${expanded ? "rotate-90" : ""}`}>{"\u25B6"}</span>
+        Source Metadata
+      </button>
+      {expanded && (
+        <pre className="max-h-60 overflow-auto whitespace-pre-wrap rounded border bg-slate-50 px-3 py-2 font-mono text-xs text-slate-700">
+          {JSON.stringify(metadata, null, 2)}
+        </pre>
+      )}
+    </div>
   );
 }
 
