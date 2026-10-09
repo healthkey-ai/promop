@@ -114,6 +114,7 @@ _CONCEPT_CLASSES = [
     dict(concept_class_id='Qualifier Value',     concept_class_name='Qualifier Value',      concept_class_concept_id=0),
     dict(concept_class_id='Field',               concept_class_name='Field',                concept_class_concept_id=0),
     dict(concept_class_id='Treatment',           concept_class_name='Treatment',            concept_class_concept_id=0),
+    dict(concept_class_id='Disease Episode',     concept_class_name='Disease Episode',      concept_class_concept_id=0),
     dict(concept_class_id='Gender',              concept_class_name='Gender',               concept_class_concept_id=0),
     dict(concept_class_id='Regimen',             concept_class_name='Regimen',              concept_class_concept_id=0),
     dict(concept_class_id='Undefined',           concept_class_name='Undefined',            concept_class_concept_id=0),
@@ -207,6 +208,11 @@ _CONCEPTS = [
     _c(32865, 'Patient self-report', 'Type Concept', 'Type Concept', 'Type Concept', 'S', 'OMOP4976938'),
     _c(32869, 'Pharmacy claim',    'Type Concept', 'Type Concept', 'Type Concept', 'S', 'OMOP4976942'),
     _c(32531, 'Treatment Regimen', 'Episode',       'Episode',       'Treatment',    'S', 'OMOP4822256'),
+    # The cancer a line of therapy treats: Treatment Regimens hang off it via
+    # episode_parent_id (#1739). Tests key on the id; the concept_code is not
+    # verified against Athena (deployments load the real row, 'Episode' is in
+    # VOCAB_SCOPE).
+    _c(32528, 'Disease First Occurrence', 'Episode', 'Episode',   'Disease Episode', 'S', 'OMOP4822253'),
 
     # CDM metadata concept used in DrugExposure FK lookups
     _c(1147094, 'drug_exposure.drug_exposure_id', 'Metadata', 'CDM', 'Field', 'S', 'CDM150'),

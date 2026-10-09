@@ -13655,6 +13655,7 @@ class TherapyLineViewSet(viewsets.ViewSet):
                         intent=data.get('intent') or None,
                         discontinuation_reason=data.get('discontinuation_reason') or None,
                         source_value=data.get('source_value') or None,
+                        disease=data.get('disease') or None,
                     )
         except ValueError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -13761,6 +13762,9 @@ class TherapyLineViewSet(viewsets.ViewSet):
                         discontinuation_reason=data.get('discontinuation_reason') or None,
                         source_value=data.get('source_value') or None,
                         replace=True,
+                        # This line, by id: another cancer may have a line with
+                        # the same number (#1739).
+                        episode=episode,
                     )
         except ValueError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
