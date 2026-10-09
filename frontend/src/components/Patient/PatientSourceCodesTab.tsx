@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import api from "../../api/axios";
 import { useAuth } from "../../hooks/useAuth";
 import type {
@@ -52,22 +53,118 @@ function sourceCodeToRow(sc: PatientSourceCode): CodeMappingRow {
     source_metadata: sc.source_metadata || {},
     destination_concept_id: sc.mapping_target_concept_id || 0,
     destination_concept_name: sc.mapping_target_concept_name || "",
-    destination_concept_code: "",
-    destination_vocabulary_id: "",
+    destination_concept_code: sc.mapping_destination_concept_code || "",
+    destination_vocabulary_id: sc.mapping_destination_vocabulary_id || "",
     destination_concept_class_id: "",
     destination_omop_table: sc.omop_table,
     destination_domain_id: domain,
     status: sc.mapping_status,
     notes: "",
-    origin: "",
-    origin_system: "",
+    origin: sc.mapping_origin || "",
+    origin_system: sc.mapping_origin_system || "",
     suggest_strategy: "",
     umls_cui: "",
-    created_by: "",
+    created_by: sc.mapping_created_by || "",
     occurrence_count: sc.row_count,
     destination_count: 0,
     has_mapping: sc.mapping_id !== null,
   };
+}
+
+type SectionKey = "unmapped" | "proposed" | "approved";
+
+const SECTIONS: { key: SectionKey; label: string; defaultOpen: boolean }[] = [
+  { key: "unmapped", label: "Unmapped", defaultOpen: true },
+  { key: "proposed", label: "Proposed", defaultOpen: true },
+  { key: "approved", label: "Approved", defaultOpen: false },
+];
+
+function SourceCodeTable({
+  rows,
+  onRowClick,
+}: {
+  rows: PatientSourceCode[];
+  onRowClick: (sc: PatientSourceCode) => void;
+}) {
+  return (
+    <div className="overflow-x-auto rounded-md border">
+      <table className="w-full text-sm">
+        <thead className="border-b bg-muted/50">
+          <tr>
+            <th className="px-3 py-2 text-left font-medium">Source Code</th>
+            <th className="px-3 py-2 text-left font-medium">Domain</th>
+            <th className="px-3 py-2 text-right font-medium">Rows</th>
+            <th className="px-3 py-2 text-left font-medium">Units</th>
+            <th className="px-3 py-2 text-left font-medium">Qty</th>
+            <th className="px-3 py-2 text-left font-medium">Current Concept</th>
+            <th className="px-3 py-2 text-left font-medium">Mapping Target</th>
+            <th className="px-3 py-2 text-left font-medium">Provenance</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y">
+          {rows.map((sc, i) => (
+            <tr
+              key={`${sc.omop_table}-${sc.source_value}-${i}`}
+              className="cursor-pointer hover:bg-muted/30"
+              onClick={() => onRowClick(sc)}
+            >
+              <td className="px-3 py-2">
+                <div className="font-mono text-xs">{sc.source_value}</div>
+                {sc.source_vocabulary_id && (
+                  <div className="text-xs text-muted-foreground">{sc.source_vocabulary_id}</div>
+                )}
+              </td>
+              <td className="px-3 py-2 text-xs text-muted-foreground">
+                {TABLE_LABELS[sc.omop_table] || sc.omop_table}
+              </td>
+              <td className="px-3 py-2 text-right tabular-nums">{sc.row_count}</td>
+              <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
+                {sc.source_unit || "\u2014"}
+              </td>
+              <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
+                {sc.example_quantity || "\u2014"}
+              </td>
+              <td className="px-3 py-2 text-xs">
+                {sc.concept_id === 0 ? (
+                  <span className="text-muted-foreground">No matching concept</span>
+                ) : (
+                  <span>
+                    {sc.concept_name || `Concept ${sc.concept_id}`}
+                    <span className="ml-1 text-muted-foreground">({sc.concept_id})</span>
+                  </span>
+                )}
+              </td>
+              <td className="px-3 py-2 text-xs">
+                {sc.mapping_target_concept_id ? (
+                  <div>
+                    <div>
+                      {sc.mapping_target_concept_name || `Concept ${sc.mapping_target_concept_id}`}
+                      <span className="ml-1 text-muted-foreground">
+                        ({sc.mapping_target_concept_id})
+                      </span>
+                    </div>
+                    {(sc.mapping_destination_concept_code || sc.mapping_destination_vocabulary_id) && (
+                      <div className="text-muted-foreground">
+                        {sc.mapping_destination_concept_code}
+                        {sc.mapping_destination_vocabulary_id && (
+                          <span className="ml-1">({sc.mapping_destination_vocabulary_id})</span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <span className="text-muted-foreground">&mdash;</span>
+                )}
+              </td>
+              <td className="px-3 py-2 text-xs text-muted-foreground">
+                {sc.mapping_origin_system || sc.mapping_origin || "\u2014"}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 export default function PatientSourceCodesTab({ personId }: Props) {
@@ -78,9 +175,13 @@ export default function PatientSourceCodesTab({ personId }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [resolving, setResolving] = useState(false);
   const [resolveResult, setResolveResult] = useState<ResolveResult | null>(null);
-  const [filter, setFilter] = useState<"all" | "unmapped">("all");
   const [reference, setReference] = useState<Reference>(emptyReference);
   const [banner, setBanner] = useState<string | null>(null);
+  const [collapsed, setCollapsed] = useState<Record<SectionKey, boolean>>({
+    unmapped: false,
+    proposed: false,
+    approved: true,
+  });
 
   // Dialog state
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -191,6 +292,10 @@ export default function PatientSourceCodesTab({ personId }: Props) {
     void fetchSourceCodes();
   };
 
+  const toggleSection = (key: SectionKey) => {
+    setCollapsed((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
   if (loading) {
     return (
       <div className="space-y-4 p-6">
@@ -211,12 +316,12 @@ export default function PatientSourceCodesTab({ personId }: Props) {
   if (!data) return null;
 
   const { source_codes, summary } = data;
-  const filtered =
-    filter === "unmapped"
-      ? source_codes.filter(
-          (sc) => sc.mapping_status === "unmapped" || sc.concept_id === 0
-        )
-      : source_codes;
+
+  const grouped: Record<SectionKey, PatientSourceCode[]> = {
+    unmapped: source_codes.filter((sc) => sc.mapping_status === "unmapped"),
+    proposed: source_codes.filter((sc) => sc.mapping_status === "proposed"),
+    approved: source_codes.filter((sc) => sc.mapping_status === "approved"),
+  };
 
   return (
     <div className="space-y-4 p-6">
@@ -260,110 +365,37 @@ export default function PatientSourceCodesTab({ personId }: Props) {
         </div>
       )}
 
-      {/* Filter toggles */}
-      <div className="flex gap-2">
-        <button
-          onClick={() => setFilter("all")}
-          className={`rounded-md px-3 py-1 text-sm ${
-            filter === "all"
-              ? "bg-primary text-primary-foreground"
-              : "bg-muted text-muted-foreground hover:bg-muted/80"
-          }`}
-        >
-          All ({summary.total})
-        </button>
-        <button
-          onClick={() => setFilter("unmapped")}
-          className={`rounded-md px-3 py-1 text-sm ${
-            filter === "unmapped"
-              ? "bg-primary text-primary-foreground"
-              : "bg-muted text-muted-foreground hover:bg-muted/80"
-          }`}
-        >
-          Unmapped ({summary.unmapped})
-        </button>
-      </div>
+      {/* Collapsible status sections */}
+      {SECTIONS.map(({ key, label }) => {
+        const rows = grouped[key];
+        if (rows.length === 0) return null;
+        const badge = STATUS_BADGE[key];
+        const isCollapsed = collapsed[key];
+        return (
+          <section key={key}>
+            <button
+              onClick={() => toggleSection(key)}
+              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm font-medium hover:bg-muted/50"
+            >
+              {isCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+              <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${badge.bg} ${badge.text}`}>
+                {label}
+              </span>
+              <span className="text-muted-foreground">({rows.length})</span>
+            </button>
+            {!isCollapsed && (
+              <div className="mt-1">
+                <SourceCodeTable rows={rows} onRowClick={handleRowClick} />
+              </div>
+            )}
+          </section>
+        );
+      })}
 
-      {/* Table */}
-      {filtered.length === 0 ? (
+      {source_codes.length === 0 && (
         <p className="py-8 text-center text-sm text-muted-foreground">
-          No source codes{filter === "unmapped" ? " need mapping" : " found"}.
+          No source codes found.
         </p>
-      ) : (
-        <div className="overflow-x-auto rounded-md border">
-          <table className="w-full text-sm">
-            <thead className="border-b bg-muted/50">
-              <tr>
-                <th className="px-3 py-2 text-left font-medium">Source Code</th>
-                <th className="px-3 py-2 text-left font-medium">Domain</th>
-                <th className="px-3 py-2 text-right font-medium">Rows</th>
-                <th className="px-3 py-2 text-left font-medium">Units</th>
-                <th className="px-3 py-2 text-left font-medium">Qty</th>
-                <th className="px-3 py-2 text-left font-medium">Current Concept</th>
-                <th className="px-3 py-2 text-left font-medium">Mapping Status</th>
-                <th className="px-3 py-2 text-left font-medium">Mapping Target</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y">
-              {filtered.map((sc, i) => {
-                const badge = STATUS_BADGE[sc.mapping_status] || STATUS_BADGE.unmapped;
-                return (
-                  <tr
-                    key={`${sc.omop_table}-${sc.source_value}-${i}`}
-                    className="cursor-pointer hover:bg-muted/30"
-                    onClick={() => handleRowClick(sc)}
-                  >
-                    <td className="px-3 py-2">
-                      <div className="font-mono text-xs">{sc.source_value}</div>
-                      {sc.source_vocabulary_id && (
-                        <div className="text-xs text-muted-foreground">{sc.source_vocabulary_id}</div>
-                      )}
-                    </td>
-                    <td className="px-3 py-2 text-xs text-muted-foreground">
-                      {TABLE_LABELS[sc.omop_table] || sc.omop_table}
-                    </td>
-                    <td className="px-3 py-2 text-right tabular-nums">{sc.row_count}</td>
-                    <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
-                      {sc.source_unit || "\u2014"}
-                    </td>
-                    <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
-                      {sc.example_quantity || "\u2014"}
-                    </td>
-                    <td className="px-3 py-2 text-xs">
-                      {sc.concept_id === 0 ? (
-                        <span className="text-muted-foreground">No matching concept</span>
-                      ) : (
-                        <span>
-                          {sc.concept_name || `Concept ${sc.concept_id}`}
-                          <span className="ml-1 text-muted-foreground">({sc.concept_id})</span>
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-3 py-2">
-                      <span
-                        className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${badge.bg} ${badge.text}`}
-                      >
-                        {badge.label}
-                      </span>
-                    </td>
-                    <td className="px-3 py-2 text-xs">
-                      {sc.mapping_target_concept_id ? (
-                        <span>
-                          {sc.mapping_target_concept_name || `Concept ${sc.mapping_target_concept_id}`}
-                          <span className="ml-1 text-muted-foreground">
-                            ({sc.mapping_target_concept_id})
-                          </span>
-                        </span>
-                      ) : (
-                        <span className="text-muted-foreground">&mdash;</span>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
       )}
 
       <EditMappingDialog

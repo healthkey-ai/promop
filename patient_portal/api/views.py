@@ -6860,7 +6860,7 @@ def _resolve_source_code_mappings(
         for m in (
             SourceCodeConceptMapping.objects
             .filter(source_code__in=source_values, omop_table=table_key)
-            .select_related('target_concept')
+            .select_related('target_concept', 'created_by')
         ):
             key = m.source_code.lower()
             if key not in mapping_by_sv:
@@ -6892,11 +6892,25 @@ def _resolve_source_code_mappings(
                 entry['mapping_status'] = mapping.status
                 entry['source_vocabulary_id'] = mapping.source_vocabulary_id or ''
                 entry['source_code'] = mapping.source_code
+                entry['mapping_origin'] = mapping.origin or ''
+                entry['mapping_origin_system'] = mapping.origin_system or ''
+                entry['mapping_created_by'] = (
+                    mapping.created_by.email if mapping.created_by_id else ''
+                )
                 if mapping.target_concept_id:
                     entry['mapping_target_concept_id'] = mapping.target_concept_id
                     entry['mapping_target_concept_name'] = (
                         mapping.target_concept.concept_name
                         if mapping.target_concept else None
+                    )
+                    entry['mapping_destination_concept_code'] = (
+                        mapping.target_concept.concept_code
+                        if mapping.target_concept else ''
+                    )
+                    entry['mapping_destination_vocabulary_id'] = (
+                        mapping.destination_vocabulary_id
+                        or (mapping.target_concept.vocabulary_id
+                            if mapping.target_concept else '')
                     )
 
             results.append(entry)
