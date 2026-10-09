@@ -5612,32 +5612,58 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                 last_seen=now,
             ))
 
-        # Count existing rows *before* the upsert so we can report created vs updated.
+        replace = request.data.get('replace') is True
+
         request_keys = {
             (o.source_value, o.source_vocabulary_id, o.omop_table) for o in objs
         }
-        existing_count = (
-            PatientSourceCode.objects.filter(person=person)
-            .filter(
-                source_value__in=[k[0] for k in request_keys],
-                source_vocabulary_id__in=[k[1] for k in request_keys],
-                omop_table__in=[k[2] for k in request_keys],
+
+        with transaction.atomic():
+            deleted = 0
+            if replace and request_keys:
+                # Lock this person's rows for the duration of the transaction
+                # to prevent a concurrent replace from interleaving deletes.
+                PatientSourceCode.objects.filter(person=person).select_for_update().exists()
+                # Delete rows for this person that are absent from the payload.
+                # The upsert below will re-create or update every row in the
+                # payload, so afterwards the person's set equals exactly what
+                # the caller sent.
+                keep = Q()
+                for sv, svid, ot in request_keys:
+                    keep |= Q(source_value=sv, source_vocabulary_id=svid,
+                              omop_table=ot)
+                deleted, _ = (
+                    PatientSourceCode.objects.filter(person=person)
+                    .exclude(keep)
+                    .delete()
+                )
+
+            # Count existing rows inside the transaction (after delete if
+            # replace) so created/updated counts reflect actual DB state.
+            match_q = Q()
+            for sv, svid, ot in request_keys:
+                match_q |= Q(source_value=sv, source_vocabulary_id=svid,
+                             omop_table=ot)
+            existing_keys = set(
+                PatientSourceCode.objects.filter(person=person)
+                .filter(match_q)
+                .values_list('source_value', 'source_vocabulary_id', 'omop_table')
             )
-            .values_list('source_value', 'source_vocabulary_id', 'omop_table')
-        )
-        existing_keys = set(existing_count)
-        updated = len(request_keys & existing_keys)
-        created = len(request_keys) - updated
+            updated = len(request_keys & existing_keys)
+            created = len(request_keys) - updated
 
-        PatientSourceCode.objects.bulk_create(
-            objs,
-            update_conflicts=True,
-            unique_fields=['person', 'source_value', 'source_vocabulary_id', 'omop_table'],
-            update_fields=['occurrence_count', 'source_unit', 'example_quantity', 'source_metadata', 'last_seen'],
-        )
+            PatientSourceCode.objects.bulk_create(
+                objs,
+                update_conflicts=True,
+                unique_fields=['person', 'source_value', 'source_vocabulary_id', 'omop_table'],
+                update_fields=['occurrence_count', 'source_unit', 'example_quantity', 'source_metadata', 'last_seen'],
+            )
 
+        result: dict = {'created': created, 'updated': updated}
+        if replace:
+            result['deleted'] = deleted
         resp_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
-        return Response({'created': created, 'updated': updated}, status=resp_status)
+        return Response(result, status=resp_status)
 
     @action(detail=True, methods=['post'], url_path='resolve-source-codes',
             permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])

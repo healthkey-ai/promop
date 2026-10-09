@@ -30072,3 +30072,177 @@ class SourceCodeContextFieldsTest(_SmartBase):
         resp = client.get('/api/v1/code-mappings/unit-search/', {'q': ''})
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()['results'], [])
+
+
+# ---------------------------------------------------------------------------
+# Source Codes Replace Tests (Issue #1774)
+# ---------------------------------------------------------------------------
+
+class SourceCodeReplaceTest(_SmartBase):
+    """Tests for POST /api/v1/patient-records/{pid}/source-codes/ with replace=true."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.foundation_user.is_staff = True
+        cls.foundation_user.save(update_fields=['is_staff'])
+
+    def _url(self, person_id=None):
+        pid = person_id or self.person.person_id
+        return f'/api/v1/patient-records/{pid}/source-codes/'
+
+    def _seed(self, codes):
+        """Seed PatientSourceCode rows for self.person."""
+        from omop_core.models import PatientSourceCode
+        for c in codes:
+            PatientSourceCode.objects.create(person=self.person, **c)
+
+    def test_replace_deletes_absent_rows(self):
+        """replace=true removes rows not in the payload."""
+        from omop_core.models import PatientSourceCode
+        self._seed([
+            {'source_value': 'OLD_CODE', 'omop_table': 'measurement', 'occurrence_count': 1},
+            {'source_value': 'KEEP_CODE', 'omop_table': 'measurement', 'occurrence_count': 2},
+        ])
+        resp = self.write_client.post(
+            self._url(),
+            {
+                'replace': True,
+                'source_codes': [
+                    {'source_value': 'KEEP_CODE', 'omop_table': 'measurement', 'occurrence_count': 5},
+                    {'source_value': 'NEW_CODE', 'omop_table': 'measurement', 'occurrence_count': 1},
+                ],
+            },
+            format='json',
+        )
+        self.assertIn(resp.status_code, [200, 201])
+        data = resp.json()
+        self.assertEqual(data['deleted'], 1)
+        remaining = set(
+            PatientSourceCode.objects.filter(person=self.person)
+            .values_list('source_value', flat=True)
+        )
+        self.assertEqual(remaining, {'KEEP_CODE', 'NEW_CODE'})
+
+    def test_replace_false_keeps_old_rows(self):
+        """Without replace (default), old rows survive."""
+        from omop_core.models import PatientSourceCode
+        self._seed([
+            {'source_value': 'EXISTING', 'omop_table': 'measurement', 'occurrence_count': 1},
+        ])
+        resp = self.write_client.post(
+            self._url(),
+            {
+                'source_codes': [
+                    {'source_value': 'BRAND_NEW', 'omop_table': 'measurement', 'occurrence_count': 1},
+                ],
+            },
+            format='json',
+        )
+        self.assertIn(resp.status_code, [200, 201])
+        self.assertNotIn('deleted', resp.json())
+        remaining = set(
+            PatientSourceCode.objects.filter(person=self.person)
+            .values_list('source_value', flat=True)
+        )
+        self.assertIn('EXISTING', remaining)
+        self.assertIn('BRAND_NEW', remaining)
+
+    def test_replace_updates_existing_rows(self):
+        """replace=true still upserts rows that match existing keys."""
+        from omop_core.models import PatientSourceCode
+        self._seed([
+            {'source_value': 'GLU', 'omop_table': 'measurement', 'occurrence_count': 3},
+        ])
+        resp = self.write_client.post(
+            self._url(),
+            {
+                'replace': True,
+                'source_codes': [
+                    {'source_value': 'GLU', 'omop_table': 'measurement', 'occurrence_count': 10},
+                ],
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data['updated'], 1)
+        self.assertEqual(data['created'], 0)
+        self.assertEqual(data['deleted'], 0)
+        psc = PatientSourceCode.objects.get(
+            person=self.person, source_value='GLU', omop_table='measurement',
+        )
+        self.assertEqual(psc.occurrence_count, 10)
+
+    def test_replace_different_vocabulary_deletes_old(self):
+        """Changing source_vocabulary_id with replace=true drops the old row."""
+        from omop_core.models import PatientSourceCode
+        self._seed([
+            {'source_value': 'ABC', 'source_vocabulary_id': 'OLD_VOCAB',
+             'omop_table': 'measurement', 'occurrence_count': 1},
+        ])
+        resp = self.write_client.post(
+            self._url(),
+            {
+                'replace': True,
+                'source_codes': [
+                    {'source_value': 'ABC', 'source_vocabulary_id': 'NEW_VOCAB',
+                     'omop_table': 'measurement', 'occurrence_count': 1},
+                ],
+            },
+            format='json',
+        )
+        self.assertIn(resp.status_code, [200, 201])
+        data = resp.json()
+        self.assertEqual(data['deleted'], 1)
+        remaining = list(
+            PatientSourceCode.objects.filter(person=self.person)
+            .values_list('source_vocabulary_id', flat=True)
+        )
+        self.assertEqual(remaining, ['NEW_VOCAB'])
+
+    def test_replace_response_includes_deleted_count(self):
+        """replace=true response has a deleted key; replace=false does not."""
+        resp = self.write_client.post(
+            self._url(),
+            {
+                'replace': True,
+                'source_codes': [
+                    {'source_value': 'X', 'omop_table': 'measurement', 'occurrence_count': 1},
+                ],
+            },
+            format='json',
+        )
+        self.assertIn(resp.status_code, [200, 201])
+        self.assertIn('deleted', resp.json())
+
+    def test_replace_empty_source_codes_returns_400(self):
+        """replace=true with empty source_codes must not delete all rows."""
+        from omop_core.models import PatientSourceCode
+        self._seed([
+            {'source_value': 'MUST_SURVIVE', 'omop_table': 'measurement', 'occurrence_count': 1},
+        ])
+        resp = self.write_client.post(
+            self._url(),
+            {'replace': True, 'source_codes': []},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertTrue(PatientSourceCode.objects.filter(person=self.person).exists())
+
+    def test_replace_empty_existing_set(self):
+        """replace=true on a person with no existing source codes reports deleted=0."""
+        from omop_core.models import PatientSourceCode
+        PatientSourceCode.objects.filter(person=self.person).delete()
+        resp = self.write_client.post(
+            self._url(),
+            {
+                'replace': True,
+                'source_codes': [
+                    {'source_value': 'FRESH', 'omop_table': 'measurement', 'occurrence_count': 1},
+                ],
+            },
+            format='json',
+        )
+        self.assertIn(resp.status_code, [200, 201])
+        self.assertEqual(resp.json()['deleted'], 0)
