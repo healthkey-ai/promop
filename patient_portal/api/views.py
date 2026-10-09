@@ -13090,11 +13090,33 @@ def code_mapping_lookup(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    # Parse optional unit/quantity fields per entry (parallel to lookup_entries).
+    unit_inputs = []
+    for entry in codes:
+        src_unit = str(entry.get('source_unit') or '').strip()
+        raw_qty = entry.get('quantity')
+        qty = None
+        if raw_qty is not None:
+            if isinstance(raw_qty, bool):
+                return Response(
+                    {'detail': 'quantity must be a number.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                qty = float(raw_qty)
+            except (TypeError, ValueError):
+                return Response(
+                    {'detail': 'quantity must be a number.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        unit_inputs.append((src_unit, qty))
+
     # Build response preserving request order.
     result = {}
+    resolved_entries = {}   # key -> (concept, mapping)
     resolved = 0
     unresolved = 0
-    for vocab, code, table, source_text in lookup_entries:
+    for idx, (vocab, code, table, source_text) in enumerate(lookup_entries):
         key = f'{vocab}|{code}'
         concept, mapping = resolve_source_code(
             source_vocabulary_id=vocab,
@@ -13117,6 +13139,7 @@ def code_mapping_lookup(request):
                 'mapping_id': mapping.id if mapping else None,
                 'organization_id': mapping.organization_id if mapping else None,
             }
+            resolved_entries[key] = (concept, mapping)
             resolved += 1
         else:
             result[key] = {
@@ -13140,6 +13163,42 @@ def code_mapping_lookup(request):
                     unresolved_reason='destination_domain_or_validity_mismatch',
                 )
             unresolved += 1
+
+    # ── Unit conversion (only when at least one entry carried source_unit) ──
+    has_unit_request = any(src_unit for src_unit, _ in unit_inputs)
+    if has_unit_request and resolved_entries:
+        from omop_core.services.canonical_units import resolve_mapping_conversion
+
+        # Batch-fetch destination_unit_concept for resolved mappings
+        mapping_ids = [
+            m.id for _c, m in resolved_entries.values() if m is not None
+        ]
+        unit_concepts = {}
+        if mapping_ids:
+            for sccm in (
+                SourceCodeConceptMapping.objects
+                .filter(id__in=mapping_ids, destination_unit_concept__isnull=False)
+                .select_related('destination_unit_concept')
+            ):
+                unit_concepts[sccm.id] = sccm.destination_unit_concept
+
+        for idx, (vocab, code, _table, _source_text) in enumerate(lookup_entries):
+            key = f'{vocab}|{code}'
+            src_unit, qty = unit_inputs[idx]
+            if not src_unit:
+                continue
+            if key not in resolved_entries:
+                continue
+            concept, mapping = resolved_entries[key]
+            dest_unit_concept = unit_concepts.get(mapping.id) if mapping else None
+            conversion = resolve_mapping_conversion(
+                concept,
+                destination_unit_concept=dest_unit_concept,
+                source_unit=src_unit,
+                quantity=qty,
+            )
+            result[key]['unit_conversion'] = conversion
+
     response = Response({
         'mappings': result,
         'resolved': resolved,

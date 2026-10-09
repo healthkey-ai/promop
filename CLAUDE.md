@@ -1163,6 +1163,50 @@ retrieval needs all standard concepts embedded, not just the queue's candidates.
 
 ---
 
+## Code Mapping Lookup — Unit Conversion
+
+`POST /api/v1/code-mappings/lookup/` accepts optional unit fields per code entry
+and returns a `unit_conversion` block on resolved mappings when `source_unit` is
+provided.
+
+### Request fields (per entry in `codes`)
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `source_unit` | string | no | UCUM unit code from the source system |
+| `quantity` | number | no | Representative quantity value to convert |
+
+### Response: `unit_conversion` (nested in each resolved mapping)
+
+```json
+{
+  "source_unit": "mg/dL",
+  "destination_unit": "mmol/L",
+  "destination_unit_concept_id": 8753,
+  "destination_unit_source": "mapping",
+  "source_quantity": 100.0,
+  "converted_quantity": "5.551",
+  "property_code": "SCnc",
+  "match_type": "convertible"
+}
+```
+
+| Field | Values |
+|---|---|
+| `destination_unit_source` | `"mapping"` (from `destination_unit_concept` on the SCCM row) or `"property"` (LOINC property fallback to base unit) |
+| `match_type` | `"exact"` (same unit), `"convertible"` (same property group), `"incompatible"` (different groups), `null` (no destination unit) |
+
+The key is backward compatible: callers that omit `source_unit` and `quantity` see
+no `unit_conversion` key in the response. Unresolved codes never get the block.
+
+### Implementation
+
+- `omop_core/services/canonical_units.py` — `resolve_mapping_conversion()` computes the conversion using existing `convert()` and `UNIT_GROUPS`
+- `patient_portal/api/views.py` — `code_mapping_lookup()` batch-fetches `destination_unit_concept` and attaches the block
+- Tests: `patient_portal.tests.CodeMappingLookupUnitConversionTest` (9 cases)
+
+---
+
 ## Deployment
 
 - **`start.sh`** runs `scripts/prepare-deployment.sh` on every deploy, which migrates — so migrations pushed to `main` are auto-applied on next Render deploy. Cloud Run runs the same script as a release-phase job (#1628).

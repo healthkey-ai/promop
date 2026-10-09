@@ -26588,6 +26588,228 @@ class CodeMappingLookupTest(TestCase):
         self.assertIn(resp.status_code, [401, 403])
 
 
+class CodeMappingLookupUnitConversionTest(TestCase):
+    """Tests for unit_conversion in POST /api/v1/code-mappings/lookup/."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        Vocabulary.objects.get_or_create(
+            vocabulary_id='LOINC',
+            defaults={'vocabulary_name': 'LOINC', 'vocabulary_concept_id': 0},
+        )
+        Vocabulary.objects.get_or_create(
+            vocabulary_id='UCUM',
+            defaults={'vocabulary_name': 'UCUM', 'vocabulary_concept_id': 0},
+        )
+        Domain.objects.get_or_create(
+            domain_id='Unit',
+            defaults={'domain_name': 'Unit', 'domain_concept_id': 0},
+        )
+        ConceptClass.objects.get_or_create(
+            concept_class_id='Unit',
+            defaults={'concept_class_name': 'Unit', 'concept_class_concept_id': 0},
+        )
+        ConceptClass.objects.get_or_create(
+            concept_class_id='Lab Test',
+            defaults={'concept_class_name': 'Lab Test', 'concept_class_concept_id': 0},
+        )
+        cls.admin = Identity.objects.create_superuser(
+            email='unit-lookup@test.com', password='testpass'
+        )
+        # Target LOINC concept for glucose
+        cls.glucose_concept = Concept.objects.create(
+            concept_id=3004410,
+            concept_name='Glucose [Mass/volume] in Serum or Plasma',
+            domain_id='Measurement',
+            vocabulary_id='LOINC',
+            concept_class_id='Lab Test',
+            concept_code='2345-7',
+            standard_concept='S',
+            valid_start_date='1970-01-01',
+            valid_end_date='2099-12-31',
+        )
+        # UCUM unit concept for mmol/L
+        cls.mmol_concept = Concept.objects.create(
+            concept_id=8753,
+            concept_name='millimole per liter',
+            domain_id='Unit',
+            vocabulary_id='UCUM',
+            concept_class_id='Unit',
+            concept_code='mmol/L',
+            standard_concept='S',
+            valid_start_date='1970-01-01',
+            valid_end_date='2099-12-31',
+        )
+        # Approved mapping WITH destination_unit_concept
+        cls.mapping_with_unit = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='LOINC',
+            source_code='2345-7',
+            source_code_description='Glucose',
+            target_concept=cls.glucose_concept,
+            destination_vocabulary_id='LOINC',
+            domain_id='Measurement',
+            omop_table='measurement',
+            status='approved',
+            origin='import',
+            destination_unit_concept=cls.mmol_concept,
+        )
+        # A non-LOINC concept for testing property fallback
+        cls.procedure_concept = Concept.objects.create(
+            concept_id=990101,
+            concept_name='Test Procedure X',
+            domain_id='Procedure',
+            vocabulary_id='SNOMED',
+            concept_class_id='Clinical Finding',
+            concept_code='PROC-1',
+            standard_concept='S',
+            valid_start_date='1970-01-01',
+            valid_end_date='2099-12-31',
+        )
+        cls.mapping_no_unit = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='CPT4',
+            source_code='99999',
+            source_code_description='Procedure test',
+            target_concept=cls.procedure_concept,
+            destination_vocabulary_id='SNOMED',
+            domain_id='Procedure',
+            omop_table='procedure',
+            status='approved',
+            origin='import',
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+        self.url = '/api/v1/code-mappings/lookup/'
+
+    def test_no_unit_fields_backward_compat(self):
+        """Response is unchanged when no unit fields are provided."""
+        resp = self.client.post(self.url, {
+            'codes': [{'source_vocabulary_id': 'LOINC', 'source_code': '2345-7', 'omop_table': 'measurement'}],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        hit = resp.json()['mappings']['LOINC|2345-7']
+        self.assertTrue(hit['resolved'])
+        self.assertNotIn('unit_conversion', hit)
+
+    def test_exact_match_same_unit(self):
+        """When source_unit equals destination_unit, match_type is exact."""
+        resp = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': 'LOINC', 'source_code': '2345-7',
+                'omop_table': 'measurement',
+                'source_unit': 'mmol/L', 'quantity': 5.5,
+            }],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        conv = resp.json()['mappings']['LOINC|2345-7']['unit_conversion']
+        self.assertEqual(conv['match_type'], 'exact')
+        self.assertEqual(conv['source_unit'], 'mmol/L')
+        self.assertEqual(conv['destination_unit'], 'mmol/L')
+        self.assertEqual(conv['destination_unit_source'], 'mapping')
+        self.assertEqual(conv['destination_unit_concept_id'], self.mmol_concept.concept_id)
+        # quantity unchanged for exact match
+        self.assertIsNotNone(conv['converted_quantity'])
+
+    def test_convertible_units(self):
+        """mg/dL → mmol/L conversion via mapping destination_unit_concept."""
+        resp = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': 'LOINC', 'source_code': '2345-7',
+                'omop_table': 'measurement',
+                'source_unit': 'mol/L', 'quantity': 0.001,
+            }],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        conv = resp.json()['mappings']['LOINC|2345-7']['unit_conversion']
+        self.assertEqual(conv['match_type'], 'convertible')
+        self.assertIsNotNone(conv['converted_quantity'])
+        # 0.001 mol/L = 1 mmol/L
+        from decimal import Decimal
+        self.assertEqual(Decimal(conv['converted_quantity']), Decimal('1'))
+
+    def test_incompatible_units(self):
+        """Units from different property groups yield match_type incompatible."""
+        resp = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': 'LOINC', 'source_code': '2345-7',
+                'omop_table': 'measurement',
+                'source_unit': 'kg', 'quantity': 100,
+            }],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        conv = resp.json()['mappings']['LOINC|2345-7']['unit_conversion']
+        self.assertEqual(conv['match_type'], 'incompatible')
+        self.assertIsNone(conv['converted_quantity'])
+
+    def test_source_unit_without_quantity(self):
+        """source_unit without quantity returns match_type but no converted_quantity."""
+        resp = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': 'LOINC', 'source_code': '2345-7',
+                'omop_table': 'measurement',
+                'source_unit': 'mmol/L',
+            }],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        conv = resp.json()['mappings']['LOINC|2345-7']['unit_conversion']
+        self.assertEqual(conv['match_type'], 'exact')
+        self.assertIsNone(conv['converted_quantity'])
+
+    def test_quantity_without_source_unit_no_conversion(self):
+        """quantity without source_unit yields no unit_conversion key."""
+        resp = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': 'LOINC', 'source_code': '2345-7',
+                'omop_table': 'measurement',
+                'quantity': 100,
+            }],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        hit = resp.json()['mappings']['LOINC|2345-7']
+        self.assertNotIn('unit_conversion', hit)
+
+    def test_destination_unit_from_mapping(self):
+        """destination_unit_source is 'mapping' when destination_unit_concept is set."""
+        resp = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': 'LOINC', 'source_code': '2345-7',
+                'omop_table': 'measurement',
+                'source_unit': 'mmol/L',
+            }],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        conv = resp.json()['mappings']['LOINC|2345-7']['unit_conversion']
+        self.assertEqual(conv['destination_unit_source'], 'mapping')
+        self.assertEqual(conv['destination_unit_concept_id'], self.mmol_concept.concept_id)
+
+    def test_invalid_quantity(self):
+        """Non-numeric quantity returns 400."""
+        resp = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': 'LOINC', 'source_code': '2345-7',
+                'omop_table': 'measurement',
+                'source_unit': 'mg/dL', 'quantity': 'not-a-number',
+            }],
+        }, format='json')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_unresolved_code_no_conversion(self):
+        """Unresolved codes do not get unit_conversion even with source_unit."""
+        resp = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': 'LOINC', 'source_code': 'NONEXISTENT',
+                'omop_table': 'measurement',
+                'source_unit': 'mg/dL', 'quantity': 100,
+            }],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        hit = resp.json()['mappings']['LOINC|NONEXISTENT']
+        self.assertFalse(hit['resolved'])
+        self.assertNotIn('unit_conversion', hit)
+
+
 class PrologSurveyParticipantTest(TestCase):
     """The host primitives the PROlog survey runner binds responses to.
 
