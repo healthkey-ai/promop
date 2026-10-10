@@ -1340,19 +1340,11 @@ def retrieval_pool(*, source_code, source_vocabulary_id, source_text, domain_id,
         report(STRATEGY_UMLS, umls_hits)
 
     metadata_summary = metadata_summary or {}
-    # Names the description may have missed: "Respirations" behind an Epic
+    # The name the description may have missed: "Respirations" behind an Epic
     # "Vital signs" (#1782). Searched by the same enabled strategies.
     extra_texts = source_metadata.search_texts(
         metadata_summary, description=source_text, source_code=source_code,
     )
-    if metadata_summary.get('codings'):
-        seen = {c['concept_id'] for c in candidates}
-        coded_hits = source_metadata.coded_candidates(
-            metadata_summary, domain_id,
-            source_vocabulary_id=source_vocabulary_id, source_code=source_code,
-        )
-        report(source_metadata.STRATEGY_METADATA, coded_hits)
-        candidates += [hit for hit in coded_hits if hit['concept_id'] not in seen]
 
     if STRATEGY_LEXICAL in strategies:
         seen = {c['concept_id'] for c in candidates}
@@ -1362,7 +1354,7 @@ def retrieval_pool(*, source_code, source_vocabulary_id, source_text, domain_id,
         lexical_hits = lexical_candidates(source_text or source_code, domain_id, limit=lexical_limit)
         for text in extra_texts:
             lexical_hits += lexical_candidates(
-                text, domain_id, limit=min(lexical_limit, CANDIDATE_LIMIT),
+                text, domain_id, limit=source_metadata.EXTRA_SEARCH_LIMIT,
             )
         report(STRATEGY_LEXICAL, lexical_hits)
         for hit in lexical_hits:
@@ -1377,7 +1369,9 @@ def retrieval_pool(*, source_code, source_vocabulary_id, source_text, domain_id,
         by_id = {c['concept_id']: c for c in candidates}
         semantic_hits = semantic_candidates(source_text or source_code, domain_id)
         for text in extra_texts:
-            semantic_hits += semantic_candidates(text, domain_id)
+            semantic_hits += semantic_candidates(
+                text, domain_id, limit=source_metadata.EXTRA_SEARCH_LIMIT,
+            )
         report(STRATEGY_VECTORS, semantic_hits)
         for hit in semantic_hits:
             existing = by_id.get(hit['concept_id'])
@@ -1388,6 +1382,24 @@ def retrieval_pool(*, source_code, source_vocabulary_id, source_text, domain_id,
             else:
                 candidates.append(hit)
                 by_id[hit['concept_id']] = hit
+
+    # Codings on the resource, a code-based lookup like the UMLS bridge and
+    # enabled with it. Last, so a ranker outage falls back to a scored
+    # retrieval hit rather than whichever coding has the lowest concept id
+    # -- possibly the generic panel the metadata is here to see past.
+    if STRATEGY_UMLS in strategies and metadata_summary.get('codings'):
+        by_id = {c['concept_id']: c for c in candidates}
+        coded_hits = source_metadata.coded_candidates(
+            metadata_summary, domain_id,
+            source_vocabulary_id=source_vocabulary_id, source_code=source_code,
+        )
+        report(source_metadata.STRATEGY_METADATA, coded_hits)
+        for hit in coded_hits:
+            existing = by_id.get(hit['concept_id'])
+            if existing is not None:
+                existing['metadata_coding'] = hit['metadata_coding']
+            else:
+                candidates.append(hit)
 
     return candidates, umls_cui, definitive
 

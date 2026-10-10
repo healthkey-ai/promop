@@ -11,8 +11,13 @@ This module gathers that metadata and reduces it to three things Suggest
 uses:
 
 - :func:`summarize`: a bounded summary the ranker sees beside the description.
-- :func:`search_texts`: the names in it, searched in addition to the description.
+- :func:`search_texts`: the one name it gives, searched beside the description.
 - :func:`coded_candidates`: standard concepts named by codings on the resource.
+
+The summary goes to third-party rankers, so it is built from named fields only:
+the names and codings of the code, its category and unit, and the aggregate
+evidence keys in ``_OTHER_KEYS``. A resource's subject, dates, identifiers,
+notes and values never leave this module.
 
 The metadata is gathered across occurrences of the code, and possibly across
 patients, so it can name several different things. The summary keeps them all.
@@ -34,14 +39,19 @@ STRATEGY_METADATA = 'metadata'
 MAX_METADATA_ROWS = 5
 MAX_NAMES = 8
 MAX_CODINGS = 12
-MAX_SEARCH_TEXTS = 3
 MAX_OTHER_JSON = 2000
+#: Extra search results per strategy. The description's own search keeps its
+#: full limit; this one only has to surface the specific concept.
+EXTRA_SEARCH_LIMIT = 5
 
-# Keys read explicitly below. Everything else goes into ``other``.
-_NAME_KEYS = ('text', 'display')
 _RESOURCE_KEYS = ('resource', 'resources', 'fhir')
-# Curation bookkeeping, not a description of the code.
-_SKIP_KEYS = {'facilities'}
+# Aggregate evidence about the code, never about a patient: what the curation
+# import stores (hospital_code_backfill._source_metadata) and what the ETL was
+# asked for in etl#30. An allowlist, because the rest goes to a third party.
+_OTHER_KEYS = (
+    'category', 'value_types', 'valueType', 'reference_range', 'referenceRange',
+    'unit_coverage',
+)
 
 _STANDARD_VOCABULARIES = set(FHIR_SYSTEM_VOCABULARIES.values())
 
@@ -62,11 +72,13 @@ def gather(*, source_code, source_vocabulary_id, omop_table, mapping_metadata=No
 
     def add(metadata):
         if not isinstance(metadata, dict) or not metadata:
-            return
+            return False
         key = json.dumps(metadata, sort_keys=True, default=str)
-        if key not in seen:
-            seen.add(key)
-            found.append(metadata)
+        if key in seen:
+            return False
+        seen.add(key)
+        found.append(metadata)
+        return True
 
     add(mapping_metadata)
     if source_code:
@@ -79,10 +91,11 @@ def gather(*, source_code, source_vocabulary_id, omop_table, mapping_metadata=No
             .order_by('-last_seen')
             .values_list('source_metadata', flat=True)[:MAX_METADATA_ROWS * 4]
         )
+        patient_rows = 0
         for metadata in rows:
-            if len(found) > MAX_METADATA_ROWS:
+            if patient_rows >= MAX_METADATA_ROWS:
                 break
-            add(metadata)
+            patient_rows += add(metadata)
     return found
 
 
@@ -163,11 +176,11 @@ def summarize(metadatas):
             quantity = resource.get('valueQuantity')
             if isinstance(quantity, dict):
                 units.extend(_strings(quantity.get('unit')))
-        for key, value in metadata.items():
-            if key in _NAME_KEYS or key in _RESOURCE_KEYS or key in _SKIP_KEYS \
-                    or key == 'resourceType' or key in other:
-                continue
-            other[key] = _prune(value)
+        if metadata.get('resourceType'):
+            continue    # a bare resource: only what _codeable read above
+        for key in _OTHER_KEYS:
+            if key in metadata and key not in other:
+                other[key] = _prune(metadata[key])
 
     seen_codings, distinct_codings = set(), []
     for coding in codings:
@@ -189,15 +202,18 @@ def summarize(metadatas):
 
 
 def search_texts(summary, *, description='', source_code=''):
-    """Names from the metadata worth searching, beyond what is already searched."""
+    """The metadata's own name for the code, when it gives exactly one.
+
+    One text is what the sender called this thing: "Respirations". Several
+    mean the code covers several things, and searching any one of them would
+    steer the pool toward it. The codings are covered by
+    :func:`coded_candidates`, without a text search.
+    """
+    texts = summary.get('texts', [])
+    if len(texts) != 1:
+        return []
     already = {(description or '').strip().casefold(), (source_code or '').strip().casefold()}
-    pool = [
-        *summary.get('texts', []),
-        *(c['display'] for c in summary.get('codings', []) if c.get('display')),
-        *summary.get('displays', []),
-    ]
-    return [text for text in _distinct(pool, len(pool)) if text.casefold() not in already
-            ][:MAX_SEARCH_TEXTS]
+    return [] if texts[0].casefold() in already else [texts[0]]
 
 
 def coded_candidates(summary, domain_id, *, source_vocabulary_id='', source_code=''):

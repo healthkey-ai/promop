@@ -4,6 +4,7 @@ The motivating case: Epic adds LOINC 8716-3 "Vital signs" to every vital sign,
 so a respirations Observation reaches Suggest described as "Vital signs". Its
 metadata says "Respirations" and carries LOINC 9279-1 "Respiratory rate".
 """
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -90,21 +91,56 @@ class TestSummarize:
 
     def test_oversized_other_is_dropped(self):
         summary = source_metadata.summarize([
-            {'text': ['X'], **{f'k{i}': 'y' * 200 for i in range(20)}},
+            {'text': ['X'], 'category': {f'k{i}': 'y' * 200 for i in range(20)}},
         ])
         assert summary == {'texts': ['X']}
 
+    def test_curation_import_evidence(self):
+        summary = source_metadata.summarize([{
+            'records': 40, 'patients': 12, 'codings': 3,
+            'category': {'top': 'vital-signs', 'mix': 'vital-signs:100'},
+            'value_types': {'quantity': 100.0},
+        }])
+        assert summary == {'other': {
+            'category': {'top': 'vital-signs', 'mix': 'vital-signs:100'},
+            'value_types': {'quantity': 100.0},
+        }}
+
+    @pytest.mark.parametrize('wrap', [
+        lambda r: r, lambda r: {'resource': r}, lambda r: {'fhir': r},
+    ])
+    def test_nothing_about_the_patient_reaches_the_summary(self, wrap):
+        """The summary goes to third-party rankers."""
+        resource = {
+            **RESPIRATIONS['fhir'],
+            'id': 'obs-secret-id',
+            'subject': {'reference': 'Patient/secret-patient'},
+            'encounter': {'reference': 'Encounter/secret-encounter'},
+            'effectiveDateTime': '2026-01-02T03:04:05Z',
+            'performer': [{'display': 'Dr Secret'}],
+            'note': [{'text': 'secret note'}],
+            'identifier': [{'value': 'secret-mrn'}],
+        }
+        dumped = json.dumps(source_metadata.summarize([wrap(resource)]))
+        for secret in ('secret', '2026-01-02', '"16"', ': 16'):
+            assert secret not in dumped
+        assert 'Respirations' in dumped
+
 
 class TestSearchTexts:
-    def test_names_beyond_the_description(self):
+    def test_the_one_name(self):
         summary = source_metadata.summarize([RESPIRATIONS])
         assert source_metadata.search_texts(
             summary, description='Vital signs', source_code='9',
-        ) == ['Respirations', 'Respiratory rate']
+        ) == ['Respirations']
 
-    def test_capped(self):
-        summary = {'texts': [f'T{i}' for i in range(10)]}
-        assert len(source_metadata.search_texts(summary)) == source_metadata.MAX_SEARCH_TEXTS
+    def test_several_names_search_none(self):
+        """Searching one of several would steer the pool toward it."""
+        assert source_metadata.search_texts({'texts': ['Blood Pressure', 'Respirations']}) == []
+
+    def test_already_the_description(self):
+        assert source_metadata.search_texts(
+            {'texts': ['Respirations']}, description='respirations') == []
 
 
 class TestGather:
@@ -126,6 +162,16 @@ class TestGather:
         )
         # Identical patient rows collapse; another vocabulary's code "9" is not this one.
         assert found == [{'patients': 12}, {'text': ['Respirations']}]
+
+    def test_at_most_five_patient_rows(self):
+        for i in range(8):
+            PatientSourceCode.objects.create(
+                person=PersonFactory(), source_value='9', source_vocabulary_id=EPIC,
+                omop_table='measurement', source_metadata={'text': [f'T{i}']},
+            )
+        found = source_metadata.gather(
+            source_code='9', source_vocabulary_id=EPIC, omop_table='measurement')
+        assert len(found) == source_metadata.MAX_METADATA_ROWS
 
     def test_table_aliases(self):
         PatientSourceCode.objects.create(
@@ -221,7 +267,7 @@ def test_dialog_suggest_uses_patient_metadata(loinc, monkeypatch):
     result = suggest_one_mapping('9', EPIC, 'measurement', source_description='Vital signs')
 
     assert ('lexical', 'Respirations') in searched
-    assert ('vectors', 'Respiratory rate') in searched
+    assert ('vectors', 'Respirations') in searched
     assert ranked['context']['original_description'] == 'Vital signs'
     assert ranked['context']['source_metadata']['texts'] == ['Respirations']
     assert result['suggested']['concept_id'] == 3024171
@@ -232,7 +278,7 @@ def test_batch_suggest_uses_queue_and_patient_metadata(loinc, monkeypatch):
     mapping = SourceCodeConceptMapping.objects.create(
         source_code='9', source_vocabulary_id=EPIC, omop_table='measurement',
         domain_id='Measurement', status='proposed', source_code_description='Vital signs',
-        occurrence_count=10, source_metadata={'patients': 3},
+        occurrence_count=10, source_metadata={'patients': 3, 'value_types': {'quantity': 100.0}},
     )
     PatientSourceCode.objects.create(
         person=PersonFactory(), source_value='9', source_vocabulary_id=EPIC,
@@ -248,7 +294,7 @@ def test_batch_suggest_uses_queue_and_patient_metadata(loinc, monkeypatch):
     monkeypatch.setattr('omop_core.mapping.suggestions.rank_candidates', rank)
     suggest_mappings('measurement', min_occurrences=1)
 
-    assert contexts[0]['source_metadata']['other'] == {'patients': 3}
+    assert contexts[0]['source_metadata']['other'] == {'value_types': {'quantity': 100.0}}
     assert contexts[0]['source_metadata']['texts'] == ['Respirations']
     mapping.refresh_from_db()
     assert mapping.target_concept_id == 3024171
@@ -277,3 +323,41 @@ def test_jev_state_names_the_metadata(settings):
     assert 'Vital signs' in state
     assert 'Respirations' in state
     assert '9279-1 Respiratory rate' in state
+
+
+class TestPoolOrder:
+    def _pool(self, monkeypatch, strategies, lexical_hits=()):
+        from omop_core.mapping.suggestions import retrieval_pool
+
+        monkeypatch.setattr('omop_core.mapping.suggestions.lexical_candidates',
+                            lambda *a, **k: [dict(h) for h in lexical_hits])
+        monkeypatch.setattr('omop_core.mapping.suggestions.semantic_candidates', lambda *a, **k: [])
+        monkeypatch.setattr('omop_core.mapping.suggestions.umls_candidates', lambda *a: ([], None))
+        candidates, _, _ = retrieval_pool(
+            source_code='9', source_vocabulary_id=EPIC, source_text='Vital signs',
+            domain_id='Measurement', strategies=strategies,
+            metadata_summary=source_metadata.summarize([RESPIRATIONS]),
+        )
+        return candidates
+
+    def test_codings_go_last(self, loinc, monkeypatch):
+        """A ranker outage falls back to candidates[0]; it must not be a coding."""
+        lexical = {'concept_id': 1, 'concept_name': 'Vital signs panel', 'concept_code': 'X',
+                   'vocabulary_id': 'LOINC', 'concept_class_id': 'Panel',
+                   'retrieval': 'lexical', 'lexical_score': 0.9}
+        pool = self._pool(monkeypatch, ['umls', 'lexical'], [lexical])
+        assert pool[0]['concept_id'] == 1
+        assert {c['concept_id'] for c in pool[1:]} == {3024171, 3036277}
+
+    def test_a_coding_already_in_the_pool_is_annotated(self, loinc, monkeypatch):
+        lexical = {'concept_id': 3024171, 'concept_name': 'Respiratory rate',
+                   'concept_code': '9279-1', 'vocabulary_id': 'LOINC',
+                   'concept_class_id': 'Clinical Observation', 'retrieval': 'lexical'}
+        pool = self._pool(monkeypatch, ['umls', 'lexical'], [lexical])
+        rr = [c for c in pool if c['concept_id'] == 3024171]
+        assert len(rr) == 1
+        assert rr[0]['retrieval'] == 'lexical'
+        assert rr[0]['metadata_coding']['code'] == '9279-1'
+
+    def test_codings_need_umls_enabled(self, loinc, monkeypatch):
+        assert self._pool(monkeypatch, ['lexical', 'vectors']) == []

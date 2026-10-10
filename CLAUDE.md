@@ -1026,12 +1026,17 @@ to every vital sign, so respirations can arrive described as "Vital signs".
 `PatientSourceCode` rows for the same code, vocabulary and table — and Suggest
 uses it three ways (#1782):
 
-- up to three of its names (`code.text`, coding displays) are searched by the
-  enabled lexical and vector strategies alongside the description;
-- standard-vocabulary codings on the resource (LOINC, SNOMED, RxNorm, …) become
-  candidates directly, retrieval `metadata`, following `Maps to` when retired;
+- its name (`code.text`), when it gives exactly one, is searched by the enabled
+  lexical and vector strategies beside the description, 5 results each;
+- with UMLS enabled, standard-vocabulary codings on the resource (LOINC, SNOMED,
+  RxNorm, …) become candidates, retrieval `metadata`, following `Maps to` when
+  retired. They go last, so a ranker outage never falls back to one;
 - a bounded summary goes to both rankers as `source_metadata`. Several different
   texts mean the code covers several things, and the ranker is told so.
+
+The summary is sent to third parties, so it is built from named fields only —
+names, codings, category, unit and an allowlist of aggregate keys. A resource's
+subject, dates, identifiers, notes and values are never included.
 
 Where the time goes, per code:
 
