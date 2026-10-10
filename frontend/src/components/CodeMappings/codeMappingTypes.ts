@@ -198,6 +198,7 @@ export const strategyLabel: Record<string, string> = {
   vectors: "Vectors",
   lexical: "Lexical",
   semantic: "Vectors",  // legacy alias
+  metadata: "Source metadata",  // legacy: rows suggested between #1783 and #1787
 };
 
 /** Pipeline order, which is also the order the checkboxes read in. */

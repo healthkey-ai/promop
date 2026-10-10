@@ -245,6 +245,23 @@ class TestSuggestOneEndpoint:
         assert self._post().status_code == 200
         assert self.contexts[0]['source_metadata']['texts'] == ['Respirations']
 
+    def test_fallback_is_this_tables_mapping(self):
+        SourceCodeConceptMapping.objects.create(
+            source_code='9', source_vocabulary_id=EPIC, omop_table='observation',
+            status='proposed', source_metadata={'text': ['Wrong table']},
+        )
+        assert self._post().status_code == 200
+        assert 'source_metadata' not in self.contexts[0]
+
+    def test_fallback_finds_a_truncated_long_code(self):
+        long_code = 'X' * 150
+        SourceCodeConceptMapping.objects.create(
+            source_code=long_code[:100], source_vocabulary_id=EPIC, omop_table='measurement',
+            status='proposed', source_metadata={'text': ['Long one']},
+        )
+        assert self._post(source_code=long_code).status_code == 200
+        assert self.contexts[0]['source_metadata']['texts'] == ['Long one']
+
     def test_async_activity_does_not_store_the_metadata(self):
         from omop_core.models import SuggestRun
         from omop_core.services.suggest_jobs import (
