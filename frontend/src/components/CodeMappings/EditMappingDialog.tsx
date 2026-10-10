@@ -135,7 +135,7 @@ export default function EditMappingDialog({
     mode === "edit"
     && form.status === "approved"
     && selectedRow !== null
-    && String(selectedRow.destination_concept_id) !== form.destination_concept_id;
+    && String(selectedRow.destination_concept_id || "") !== form.destination_concept_id;
 
   const hasRetrieval = strategies.umls || strategies.lexical || strategies.vectors;
 
@@ -461,15 +461,16 @@ export default function EditMappingDialog({
     setError("");
     if (willRepoint && selectedRow) {
       setRepointing({
-        from: String(selectedRow.destination_concept_id),
+        from: String(selectedRow.destination_concept_id || ""),
         to: form.destination_concept_id,
       });
     }
     try {
       const payload = {
         ...form,
-        destination_concept_id: Number(form.destination_concept_id),
-        target_concept_id: Number(form.destination_concept_id),
+        // Empty stays empty: never send concept 0 as a destination.
+        destination_concept_id: form.destination_concept_id ? Number(form.destination_concept_id) : null,
+        target_concept_id: form.destination_concept_id ? Number(form.destination_concept_id) : null,
         destination_unit_concept_id: form.destination_unit_concept_id
           ? Number(form.destination_unit_concept_id) : null,
       };
@@ -889,7 +890,10 @@ export default function EditMappingDialog({
                     value={form.destination_concept_id}
                     onChange={(e) => setField("destination_concept_id", e.target.value)}
                     onBlur={(e) => void resolveConceptId(e.target.value)}
-                    required
+                    min={1}
+                    // Optional only while the row has no destination: clearing an
+                    // existing one is not a way to remove it, so it stays required.
+                    required={isNewMapping || Boolean(selectedRow?.destination_concept_id)}
                     className={`${INPUT_CLASS} font-mono`}
                   />
                 </Field>
