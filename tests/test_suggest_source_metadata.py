@@ -38,8 +38,32 @@ RESPIRATIONS = {
         },
         'category': [{'coding': [{'code': 'vital-signs', 'display': 'Vital Signs'}]}],
         'valueQuantity': {'value': 16, 'unit': '/min'},
+        'method': {'text': 'Counted'},
+        # Everything below identifies the patient and must never leave promop.
+        'id': 'eWvDtOEf3J7JjLLUP4x8O260-secret-id',
+        'meta': {'versionId': '1', 'lastUpdated': '2026-01-02T03:04:05Z'},
+        'text': {'status': 'generated', 'div': '<div>Jane Secret, 16/min</div>'},
+        'identifier': [{'system': 'urn:mrn', 'value': 'secret-mrn'}],
+        'subject': {'reference': 'Patient/secret-patient', 'display': 'Jane Secret'},
+        'encounter': {'reference': 'Encounter/secret-encounter'},
+        'performer': [{'reference': 'Practitioner/secret-doc', 'display': 'Dr Secret'}],
+        'effectiveDateTime': '2026-01-02T03:04:05Z',
+        'issued': '2026-01-02T04:00:00Z',
+        'note': [{'text': 'secret note about Jane'}],
+        'specimen': {'reference': 'Specimen/secret-specimen', 'display': 'Arterial blood'},
+        'component': [{
+            'code': {'text': 'Breath sounds'},
+            'valueString': 'secret free text',
+            'effectivePeriod': {'start': '2026-01-02', 'end': '2026-01-03'},
+        }],
     },
 }
+
+SECRETS = ('secret', 'Jane', '2026-01-0')
+
+
+def _code_text(metadata):
+    return metadata['fhir']['code']['text']
 
 
 @pytest.fixture()
@@ -59,73 +83,113 @@ def loinc():
             'vocabulary': vocabulary, 'domain': domain, 'class': lab}
 
 
-class TestSummarize:
-    def test_fhir_resource(self):
-        summary = source_metadata.summarize([RESPIRATIONS])
-        assert summary['texts'] == ['Respirations']
-        assert summary['displays'] == ['Respirations', 'Vital signs', 'Respiratory rate']
-        assert {'system': 'http://loinc.org', 'code': '9279-1',
-                'display': 'Respiratory rate'} in summary['codings']
-        assert len(summary['codings']) == 5
-        assert summary['categories'] == ['Vital Signs']
-        assert summary['units'] == ['/min']
+class TestDeidentify:
+    def test_the_code_survives_in_full(self):
+        cleaned = source_metadata.deidentify(RESPIRATIONS)['fhir']
+        assert cleaned['code'] == RESPIRATIONS['fhir']['code']
+        assert cleaned['category'] == RESPIRATIONS['fhir']['category']
+        assert cleaned['method'] == {'text': 'Counted'}
+        assert cleaned['valueQuantity'] == {'value': 16, 'unit': '/min'}
+        # A Reference goes whole: its display can as easily be a person's name.
+        assert 'specimen' not in cleaned
+        assert cleaned['component'] == [{'code': {'text': 'Breath sounds'}}]
 
-    def test_etl_lists_and_other_fields(self):
-        summary = source_metadata.summarize([
-            {'display': ['Vital signs'], 'text': ['Blood Pressure'],
-             'category': 'vital-signs', 'facilities': [{'name': 'A'}]},
-            {'display': ['Vital signs'], 'text': ['Respirations', 'blood pressure']},
-        ])
-        assert summary['texts'] == ['Blood Pressure', 'Respirations']
-        assert summary['displays'] == ['Vital signs']
-        assert summary['other'] == {'category': 'vital-signs'}
-
-    def test_resource_list_key(self):
-        summary = source_metadata.summarize([{'resources': [RESPIRATIONS['fhir']]}])
-        assert summary['texts'] == ['Respirations']
-
-    def test_nothing_useful_is_empty(self):
-        assert source_metadata.summarize([{}, {'text': [None, '  ']}, 'junk']) == {}
-
-    def test_oversized_other_is_dropped(self):
-        summary = source_metadata.summarize([
-            {'text': ['X'], 'category': {f'k{i}': 'y' * 200 for i in range(20)}},
-        ])
-        assert summary == {'texts': ['X']}
-
-    def test_curation_import_evidence(self):
-        summary = source_metadata.summarize([{
-            'records': 40, 'patients': 12, 'codings': 3,
-            'category': {'top': 'vital-signs', 'mix': 'vital-signs:100'},
-            'value_types': {'quantity': 100.0},
-        }])
-        assert summary == {'other': {
-            'category': {'top': 'vital-signs', 'mix': 'vital-signs:100'},
-            'value_types': {'quantity': 100.0},
-        }}
+    def test_nothing_identifying_survives(self):
+        dumped = json.dumps(source_metadata.deidentify(RESPIRATIONS))
+        for secret in SECRETS:
+            assert secret not in dumped, secret
+        for key in ('subject', 'encounter', 'performer', 'identifier', 'meta', 'note',
+                    'effectiveDateTime', 'issued', 'div', 'reference', '"id"'):
+            assert key not in dumped, key
 
     @pytest.mark.parametrize('wrap', [
-        lambda r: r, lambda r: {'resource': r}, lambda r: {'fhir': r},
+        lambda r: r, lambda r: {'resource': r}, lambda r: {'resources': [r]},
+        lambda r: {'nested': {'deeper': r}},
     ])
-    def test_nothing_about_the_patient_reaches_the_summary(self, wrap):
-        """The summary goes to third-party rankers."""
-        resource = {
-            **RESPIRATIONS['fhir'],
-            'id': 'obs-secret-id',
-            'subject': {'reference': 'Patient/secret-patient'},
-            'encounter': {'reference': 'Encounter/secret-encounter'},
-            'effectiveDateTime': '2026-01-02T03:04:05Z',
-            'performer': [{'display': 'Dr Secret'}],
-            'note': [{'text': 'secret note'}],
-            'identifier': [{'value': 'secret-mrn'}],
+    def test_any_shape(self, wrap):
+        dumped = json.dumps(source_metadata.deidentify(wrap(RESPIRATIONS['fhir'])))
+        assert 'Respiratory rate' in dumped
+        assert not any(secret in dumped for secret in SECRETS)
+
+    def test_etl_lists_and_aggregate_evidence_stay(self):
+        metadata = {'display': ['Vital signs'], 'text': ['Blood Pressure'],
+                    'category': 'vital-signs', 'records': 40, 'patients': 12,
+                    'value_types': {'quantity': 100.0},
+                    'facilities': [{'id': 'f1', 'name': 'Hospital'}]}
+        assert source_metadata.deidentify(metadata) == {
+            'display': ['Vital signs'], 'text': ['Blood Pressure'],
+            'category': 'vital-signs', 'records': 40, 'patients': 12,
+            'value_types': {'quantity': 100.0},
         }
-        dumped = json.dumps(source_metadata.summarize([wrap(resource)]))
-        for secret in ('secret', '2026-01-02', '"16"', ': 16'):
-            assert secret not in dumped
-        assert 'Respirations' in dumped
+
+    def test_demographics_in_a_patient_resource(self):
+        patient = {'resourceType': 'Patient', 'name': [{'family': 'Secret'}],
+                   'birthDate': '1950-01-01', 'address': [{'city': 'Secretville'}],
+                   'telecom': [{'value': '555'}], 'gender': 'female'}
+        assert source_metadata.deidentify(patient) == {}
+
+    def test_empty_and_junk(self):
+        assert source_metadata.deidentify({}) == {}
+        assert source_metadata.deidentify(None) == {}
+        assert source_metadata.deidentify('junk') == {}
+        assert source_metadata.deidentify({'subject': {'reference': 'Patient/1'}}) == {}
+
+    @pytest.mark.parametrize('leak', [
+        {'extension': [{'url': 'http://x/mrn',
+                        'valueIdentifier': {'system': 'urn:mrn', 'value': 'MRN123'}}]},
+        {'extension': [{'url': 'http://x/n', 'valueHumanName': {'family': 'Doe'}}]},
+        {'extension': [{'url': 'http://x/a', 'valueAddress': {'city': 'Doeville'}}]},
+        {'extension': [{'url': 'http://x/t', 'valueContactPoint': {'system': 'phone', 'value': '555-0100'}}]},
+        {'extension': [{'url': 'http://x/m', 'valueMarkdown': 'Doe said'}]},
+        {'valueReference': {'display': 'Jane Doe'}},
+        {'resultsInterpreter': [{'display': 'Dr Doe'}]},
+        {'collector': {'display': 'Nurse Doe'}},
+        {'anything': {'reference': 'Practitioner/1', 'display': 'Dr Doe'}},
+        {'anything': {'identifier': {'value': 'X'}, 'display': 'Dr Doe'}},
+        {'anything': {'family': 'Doe', 'given': ['Jane']}},
+        {'anything': {'line': ['1 Doe St'], 'city': 'Doeville'}},
+        {'valueAnnotation': {'authorString': 'Jane Doe', 'time': '2026-01-02', 'text': 'Doe'}},
+        {'anything': {'text': 'Doe said', 'time': '2026-01-02'}},
+        {'anything': {'system': 'urn:mrn', 'value': 'MRN-Doe'}},
+        {'anything': {'contentType': 'text/plain', 'data': 'RG9l'}},
+        {'time': '2026-01-02', 'CollectedDATETIME': '2026-01-02'},
+        {'fullUrl': 'https://ehr.example/Observation/Doe-1'},
+        {'entry': [{'resource': {'resourceType': 'Patient', 'gender': 'female',
+                                 'extension': [{'url': 'http://x/race', 'valueCoding': {'code': 'Doe'}}]}}]},
+    ])
+    def test_identity_under_any_key_or_shape(self, leak):
+        resource = {'resourceType': 'Observation', 'code': {'text': 'Respirations'}, **leak}
+        cleaned = source_metadata.deidentify(resource)
+        dumped = json.dumps(cleaned)
+        for secret in ('Doe', 'MRN', '555', '2026'):
+            assert secret not in dumped, (secret, cleaned)
+        assert cleaned['code'] == {'text': 'Respirations'}
+
+    def test_codes_and_quantities_are_not_mistaken_for_identity(self):
+        resource = {'resourceType': 'Observation', 'code': {'text': 'Respirations'},
+                    'valueQuantity': {'value': 16, 'unit': '/min', 'system': 'http://unitsofmeasure.org'},
+                    'extension': [{'url': 'http://x/flowsheet', 'valueCode': 'RR'}],
+                    'referenceRange': [{'low': {'value': 12}, 'high': {'value': 20}, 'text': '12-20'}]}
+        assert source_metadata.deidentify(resource) == resource
+
+    def test_oversized_keeps_the_code(self):
+        resource = {'fhir': {'code': {'text': 'Respirations',
+                                      'coding': [{'system': 'http://loinc.org', 'code': '9279-1'}]},
+                             **{f'f{i}': 'x' * 1000 for i in range(25)}}}
+        cleaned = source_metadata.deidentify(resource)
+        assert len(json.dumps(cleaned)) <= source_metadata.MAX_JSON
+        assert cleaned['fhir']['code']['text'] == 'Respirations'
+        assert cleaned['fhir']['code']['coding'][0]['code'] == '9279-1'
+
+    def test_bounded(self):
+        big = {'fhir': {'code': {'text': 'Respirations'},
+                        'component': [{'code': {'text': 'x' * 900}} for _ in range(200)]}}
+        cleaned = source_metadata.deidentify(big)
+        assert len(json.dumps(cleaned)) <= source_metadata.MAX_JSON
+        assert cleaned['fhir']['code']['text'] == 'Respirations'
 
 
-def test_context_carries_the_summary_only_when_there_is_one():
+def test_context_carries_the_metadata_only_when_there_is_some():
     args = dict(source_code='9', vocabulary_id=EPIC, description='Vital signs',
                 source_concept=None, umls_name='', domain_id='Measurement',
                 omop_table='measurement')
@@ -169,9 +233,8 @@ def test_dialog_metadata_reaches_the_ranker_and_retrieval_is_unchanged(loinc, mo
     # Retrieval searches the description only, once per strategy (#1786).
     assert searched == [('lexical', 'Vital signs'), ('vectors', 'Vital signs')]
     assert contexts[0]['original_description'] == 'Vital signs'
-    assert contexts[0]['source_metadata']['texts'] == ['Respirations']
-    assert {'system': 'http://loinc.org', 'code': '9279-1', 'display': 'Respiratory rate'} \
-        in contexts[0]['source_metadata']['codings']
+    assert contexts[0]['source_metadata'] == source_metadata.deidentify(RESPIRATIONS)
+    assert not any(secret in json.dumps(contexts[0]) for secret in SECRETS)
     assert result['strategy_used'] == 'lexical'
 
 
@@ -210,8 +273,9 @@ def test_batch_uses_the_rows_own_metadata(loinc, monkeypatch):
     _no_text_retrieval(monkeypatch, [])
     _ranker(monkeypatch, contexts)
     suggest_mappings('measurement', min_occurrences=1)
-    assert contexts[0]['source_metadata']['texts'] == ['Respirations']
-    assert contexts[0]['source_metadata']['other'] == {'value_types': {'quantity': 100.0}}
+    assert _code_text(contexts[0]['source_metadata']) == 'Respirations'
+    assert contexts[0]['source_metadata']['value_types'] == {'quantity': 100.0}
+    assert not any(secret in json.dumps(contexts[0]) for secret in SECRETS)
 
 
 class TestSuggestOneEndpoint:
@@ -235,7 +299,7 @@ class TestSuggestOneEndpoint:
 
     def test_the_dialogs_metadata_is_used(self):
         assert self._post(source_metadata=RESPIRATIONS).status_code == 200
-        assert self.contexts[0]['source_metadata']['texts'] == ['Respirations']
+        assert _code_text(self.contexts[0]['source_metadata']) == 'Respirations'
 
     def test_falls_back_to_the_mappings_own(self):
         SourceCodeConceptMapping.objects.create(
@@ -243,7 +307,7 @@ class TestSuggestOneEndpoint:
             status='proposed', source_metadata={'text': ['Respirations']},
         )
         assert self._post().status_code == 200
-        assert self.contexts[0]['source_metadata']['texts'] == ['Respirations']
+        assert self.contexts[0]['source_metadata']['text'] == ['Respirations']
 
     def test_fallback_is_this_tables_mapping(self):
         SourceCodeConceptMapping.objects.create(
@@ -260,7 +324,7 @@ class TestSuggestOneEndpoint:
             status='proposed', source_metadata={'text': ['Long one']},
         )
         assert self._post(source_code=long_code).status_code == 200
-        assert self.contexts[0]['source_metadata']['texts'] == ['Long one']
+        assert self.contexts[0]['source_metadata'] == {'text': ['Long one']}
 
     def test_async_activity_does_not_store_the_metadata(self):
         from omop_core.models import SuggestRun
@@ -272,7 +336,7 @@ class TestSuggestOneEndpoint:
         assert response.status_code == 202
         run = SuggestRun.objects.get(pk=response.data['run_id'])
         assert 'Patient/' not in str(run.activity) and 'row_metadata' not in str(run.activity)
-        assert self.contexts[0]['source_metadata']['texts'] == ['Respirations']
+        assert _code_text(self.contexts[0]['source_metadata']) == 'Respirations'
 
 
 def test_jev_state_names_the_metadata(settings):
@@ -289,11 +353,12 @@ def test_jev_state_names_the_metadata(settings):
     context = build_source_context(
         source_code='9', vocabulary_id=EPIC, description='Vital signs', source_concept=None,
         umls_name='', domain_id='Measurement', omop_table='measurement',
-        source_metadata=source_metadata.summarize([RESPIRATIONS]),
+        source_metadata=source_metadata.deidentify(RESPIRATIONS),
     )
     with patch('requests.post', post):
         rank_candidates_jev('9', [candidate], 'Vital signs', source_context=context)
     state = post.call_args.kwargs['json']['state']
     assert 'Vital signs' in state
     assert 'Respirations' in state
-    assert '9279-1 Respiratory rate' in state
+    assert 'Respiratory rate' in state and '9279-1' in state and 'Counted' in state
+    assert not any(secret in state for secret in SECRETS)

@@ -1019,18 +1019,24 @@ queue for the next run.
 
 ### Source Metadata is ranker context, nothing more
 
-A description can be missing or generic: Epic adds LOINC `8716-3` "Vital signs"
-to every vital sign. The Source Metadata the mapping dialog shows (often FHIR
-JSON) says what the code really is, so both rankers get a bounded summary of it
-as `source_metadata` beside the description (#1782, #1786). The dialog sends its
-row's metadata with suggest-one, falling back to the mapping's own; batch runs
-use each queue row's own. Retrieval never reads it and no other patient's data
-is consulted, so it costs nothing per code.
+A description is often missing or generic: the ETL may send "Vitals" for a code
+that is clearly specific, and Epic adds LOINC `8716-3` "Vital signs" to every
+vital sign. The Source Metadata the mapping dialog shows (usually the FHIR
+resource that carried the code) says what it really is, so both rankers get
+that JSON **in full, de-identified**, as `source_metadata` beside the
+description (#1782, #1786, #1791). The dialog sends its row's metadata with
+suggest-one, falling back to this table's SCCM row; batch runs use each queue
+row's own. Retrieval never reads it and no other patient's data is consulted.
 
-The summary goes to third parties, so `omop_core/mapping/source_metadata.py`
-builds it from named fields only — names, codings, category, unit and an
-allowlist of aggregate keys. A resource's subject, dates, identifiers, notes and
-values are never included.
+`omop_core/mapping/source_metadata.py::deidentify` removes, at any depth, by
+key *and* by shape — FHIR carries identity under many names, such as an
+extension's `valueIdentifier` or a `collector` reference: every Reference,
+Identifier, HumanName, Address, ContactPoint, Annotation and Attachment, any
+Patient/Practitioner/RelatedPerson resource, `id`, `meta`, `fullUrl`, the
+narrative, `valueString`/`valueMarkdown`, and every date or time field
+(case-insensitively). `code.text`, coding displays, Quantity and CodeableConcept
+values stay — they are the point. Over 20,000 characters it trims lists and
+strings, then keeps only the coded fields; it never drops the code.
 
 Where the time goes, per code:
 
