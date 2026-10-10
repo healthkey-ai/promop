@@ -866,3 +866,22 @@ def test_a_cancer_is_dated_from_its_current_diagnosis_and_a_resolved_primary_say
     assert cancer['Prostate cancer']['status'] == 'Resolved'
     assert cancer['Multiple myeloma']['date'] == '2024-03-12'
     assert [t['date'] for t in cancer['Multiple myeloma']['transitions']] == ['2019-06-04', '2024-03-12']
+
+
+def test_lab_markers_gain_m_protein_and_readable_names_without_overwriting_admin_edits():
+    import importlib
+
+    from django.apps import apps
+
+    fill = importlib.import_module('patient_portal.migrations.0026_lab_marker_m_protein_and_labels').fill
+    LabMarker.objects.all().delete()
+    LabMarker.objects.create(loinc_code='48378-4', rank=1, disease_slugs=['myeloma'])
+    LabMarker.objects.create(loinc_code='718-7', rank=11, panels=['CBC'], label='Hgb (admin)')
+
+    fill(apps, None)
+    fill(apps, None)  # running twice changes nothing
+
+    labels = dict(LabMarker.objects.values_list('loinc_code', 'label'))
+    assert labels == {'33358-3': 'M-protein', '48378-4': 'Kappa/lambda ratio', '718-7': 'Hgb (admin)'}
+    m_protein = LabMarker.objects.get(loinc_code='33358-3')
+    assert (m_protein.rank, m_protein.disease_slugs) == (1, ['myeloma', 'multiple-myeloma'])
