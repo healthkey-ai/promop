@@ -5128,6 +5128,86 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             logger.exception("bulk_delete_filtered: unexpected error")
             return Response({'error': 'Delete operation failed.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+    # Each record costs ~8 queries (therapy lines, supportive courses) and this
+    # runs inside the request under gunicorn's 30s timeout.
+    EXPORT_CSV_MAX_ROWS = 500
+
+    @action(detail=False, methods=['get'], url_path='export-csv')
+    def export_csv(self, request):
+        """Download the full PatientRecord of the selected patients as CSV.
+
+        ``?person_ids=1,2,3`` exports those patients; without it the patient
+        list filters (org, search, disease, stage, date, review filters) pick
+        the rows, so "select all" exports what the list is showing. Either way
+        the rows come from ``get_queryset()``, so an id the caller cannot see
+        is silently absent rather than an error — the endpoint is not an
+        existence oracle. Columns are the ``PatientRecordSerializer`` output,
+        demographic redaction included.
+        """
+        from omop_core.services.patient_list_context import order_context
+
+        queryset = self.get_queryset()
+        raw_ids = request.query_params.get('person_ids')
+        if raw_ids is not None:
+            try:
+                person_ids = {int(v) for v in raw_ids.split(',') if v.strip()}
+            except ValueError:
+                return Response({'error': 'person_ids must be a comma-separated list of integers.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            if not person_ids:
+                return Response({'error': 'No person_ids provided.'}, status=status.HTTP_400_BAD_REQUEST)
+            if len(person_ids) > self.EXPORT_CSV_MAX_ROWS:
+                return Response({'error': f'At most {self.EXPORT_CSV_MAX_ROWS} patients per export.'},
+                                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+            queryset = queryset.filter(person__person_id__in=person_ids).order_by('person__person_id')
+        else:
+            queryset = order_context(self._apply_patient_list_filters(queryset),
+                                     request.query_params.get('ordering', '-updated'), request.user)
+            if queryset.count() > self.EXPORT_CSV_MAX_ROWS:
+                return Response({'error': f'At most {self.EXPORT_CSV_MAX_ROWS} patients per export; '
+                                          'narrow the filters.'},
+                                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+
+        rows = PatientRecordSerializer(queryset, many=True, context={'request': request}).data
+        columns = list(rows[0].keys()) if rows else ['person_id']
+
+        buffer = StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(columns)
+        for row in rows:
+            writer.writerow([_csv_cell(row.get(column)) for column in columns])
+
+        from django.http import HttpResponse
+        response = HttpResponse(buffer.getvalue(), content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = (
+            f'attachment; filename="patients_{localdate().isoformat()}.csv"'
+        )
+        response['Cache-Control'] = 'no-store'
+        return response
+
+
+def _csv_cell(value):
+    """One exported value as CSV text.
+
+    Nested values (therapy lines, biomarker lists) are written as JSON so they
+    survive a round trip. Text that a spreadsheet would read as a formula is
+    prefixed with an apostrophe (OWASP CSV injection guidance): patient data
+    comes from uploads and free-text edits, so it is not trusted.
+    """
+    if value is None:
+        return ''
+    if isinstance(value, (dict, list)):
+        value = json.dumps(value, default=str)
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    if isinstance(value, str) and value[:1] in ('=', '+', '-', '@', '\t', '\r'):
+        # DRF renders DecimalField as a string, so "-1.50" is a number, not a formula.
+        try:
+            float(value)
+        except ValueError:
+            return "'" + value
+    return value
+
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
