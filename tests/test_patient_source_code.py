@@ -242,6 +242,22 @@ class TestSourceDescriptionDefault:
         self._code(smart_env, 'LC', {'display': ['Lab comment'], 'text': ['  ']})
         assert _description(smart_env, 'LC') == 'Lab comment'
 
+    def test_several_texts_fall_back_to_display(self, smart_env):
+        """The mapping is shared: one patient's first vital is not 8716-3's name."""
+        self._code(smart_env, '8716-3', {
+            'display': ['Vital signs', 'Vital signs'],
+            'text': ['Blood Pressure', 'Heart Rate', 'Blood Pressure'],
+        })
+        assert _description(smart_env, '8716-3') == 'Vital signs'
+
+    def test_repeated_text_counts_once(self, smart_env):
+        self._code(smart_env, 'BP', {'text': ['Blood Pressure', ' Blood Pressure ']})
+        assert _description(smart_env, 'BP') == 'Blood Pressure'
+
+    def test_ambiguous_everywhere_is_empty(self, smart_env):
+        self._code(smart_env, 'MIX', {'text': ['A', 'B'], 'display': ['C', 'D']})
+        assert _description(smart_env, 'MIX') == ''
+
     def test_empty_without_metadata(self, smart_env):
         self._code(smart_env, '301070', {})
         assert _description(smart_env, '301070') == ''

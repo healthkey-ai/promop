@@ -6900,7 +6900,10 @@ def _source_metadata_description(metadata) -> str:
 
     ``text`` (CodeableConcept.text) before ``display``: Epic files every vital
     sign under LOINC 8716-3, whose display is "Vital signs" on all of them,
-    while the text names the measurement (#1778). Both arrive as lists.
+    while the text names the measurement (#1778). Both arrive as lists, gathered
+    over every observation carrying the code, and the description lands on a
+    mapping shared by every patient -- so a key counts only when it names one
+    thing. Several texts for 8716-3 fall back to its single display.
     """
     if not isinstance(metadata, dict):
         return ''
@@ -6910,10 +6913,10 @@ def _source_metadata_description(metadata) -> str:
             values = [values]
         if not isinstance(values, list):
             continue
-        for value in values:
-            if isinstance(value, str) and value.strip():
-                # SourceCodeConceptMapping.source_code_description is 255 chars.
-                return value.strip()[:255]
+        names = {v.strip() for v in values if isinstance(v, str) and v.strip()}
+        if len(names) == 1:
+            # SourceCodeConceptMapping.source_code_description is 255 chars.
+            return names.pop()[:255]
     return ''
 
 
