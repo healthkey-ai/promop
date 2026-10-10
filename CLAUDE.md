@@ -1019,18 +1019,21 @@ queue for the next run.
 
 ### Source Metadata is ranker context, nothing more
 
-A description can be missing or generic: Epic adds LOINC `8716-3` "Vital signs"
-to every vital sign. The Source Metadata the mapping dialog shows (often FHIR
-JSON) says what the code really is, so both rankers get a bounded summary of it
-as `source_metadata` beside the description (#1782, #1786). The dialog sends its
-row's metadata with suggest-one, falling back to the mapping's own; batch runs
-use each queue row's own. Retrieval never reads it and no other patient's data
-is consulted, so it costs nothing per code.
+A description is often missing or generic: the ETL may send "Vitals" for a code
+that is clearly specific, and Epic adds LOINC `8716-3` "Vital signs" to every
+vital sign. The Source Metadata the mapping dialog shows (usually the FHIR
+resource that carried the code) says what it really is, so both rankers get
+that JSON **in full, de-identified**, as `source_metadata` beside the
+description (#1782, #1786, #1791). The dialog sends its row's metadata with
+suggest-one, falling back to this table's SCCM row; batch runs use each queue
+row's own. Retrieval never reads it and no other patient's data is consulted.
 
-The summary goes to third parties, so `omop_core/mapping/source_metadata.py`
-builds it from named fields only — names, codings, category, unit and an
-allowlist of aggregate keys. A resource's subject, dates, identifiers, notes and
-values are never included.
+`omop_core/mapping/source_metadata.py::deidentify` removes, at any depth,
+references and identity (`subject`, `patient`, `encounter`, participants, `id`,
+`identifier`, `meta`, any `reference`), free text that can name a person
+(narrative, `note`, `comment`, `valueString`), demographics and every date or
+time field, and caps the result at 20,000 characters. `code.text` and coding
+displays stay — they are the point.
 
 Where the time goes, per code:
 
