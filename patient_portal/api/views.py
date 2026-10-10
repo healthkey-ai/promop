@@ -5559,6 +5559,8 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
 
     # ---- POST helper (kept on the viewset for permission context) ----
 
+    # DATA_UPLOAD_MAX_MEMORY_SIZE usually binds first: with a FHIR resource in
+    # source_metadata, 2.5 MB is ~1,200 entries. That is a 413 with max_bytes.
     _SOURCE_CODES_MAX = 5000
 
     def _post_source_codes(self, request: Request, person: Person) -> Response:
@@ -5608,6 +5610,26 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             source_metadata = entry.get('source_metadata')
             if not isinstance(source_metadata, dict):
                 source_metadata = {}
+            # PostgreSQL stores NUL in neither text nor jsonb, so the insert
+            # would fail below DRF as a bare 500 (#1778).
+            nul_fields = [
+                name for name, value in (
+                    ('source_value', sv),
+                    ('source_vocabulary_id', entry.get('source_vocabulary_id')),
+                    ('omop_table', entry.get('omop_table')),
+                    ('source_unit', source_unit),
+                    ('example_quantity', example_quantity),
+                    ('source_metadata', source_metadata),
+                ) if _contains_nul(value)
+            ]
+            if nul_fields:
+                return Response(
+                    {'detail': (
+                        f'Entry {i}: {", ".join(nul_fields)} contains a NUL '
+                        f'character (\\u0000), which cannot be stored.'
+                    )},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             objs.append(PatientSourceCode(
                 person=person,
                 source_value=sv,
@@ -6388,13 +6410,11 @@ class _OmopFilterMixin(_ListQueryParamsMixin):
 #: the limit rather than a timeout — callers chunk to this number.
 OMOP_BULK_MAX_ROWS = int(os.environ.get('OMOP_BULK_MAX_ROWS', 1000))
 
-#: Byte ceiling for a bulk body, checked against CONTENT_LENGTH *before* parsing.
-#: The row cap cannot serve as a memory guard: DRF's JSONParser reads the WSGI
-#: stream directly (Request._load_stream sets _stream to the raw HttpRequest),
-#: so it never touches HttpRequest.body — the only place Django enforces
-#: DATA_UPLOAD_MAX_MEMORY_SIZE. A 500 MB array would therefore be fully parsed
-#: into memory before the row count could reject it. 1,000 measurement rows is
-#: ~250 KB, so this leaves ample headroom.
+#: Byte ceiling for a bulk body, checked against CONTENT_LENGTH *before* parsing,
+#: so a huge array is refused without being read. Since DRF 3.17 parses JSON
+#: through HttpRequest.body, DATA_UPLOAD_MAX_MEMORY_SIZE (2.5 MB by default) binds
+#: first when it is the lower of the two; this still guards a deployment that
+#: raises or disables that setting. 1,000 measurement rows is ~250 KB.
 OMOP_BULK_MAX_BYTES = int(os.environ.get('OMOP_BULK_MAX_BYTES', 8 * 1024 * 1024))
 
 #: Maximum ids accepted by a bulk delete. Higher than the row cap because an id is
@@ -6875,6 +6895,39 @@ def _is_admin_actor(request: Request) -> bool:
     )
 
 
+def _source_metadata_description(metadata) -> str:
+    """The source's own name for a code, from what the ETL sent alongside it.
+
+    ``text`` (CodeableConcept.text) before ``display``: Epic files every vital
+    sign under LOINC 8716-3, whose display is "Vital signs" on all of them,
+    while the text names the measurement (#1778). Both arrive as lists.
+    """
+    if not isinstance(metadata, dict):
+        return ''
+    for key in ('text', 'display'):
+        values = metadata.get(key)
+        if isinstance(values, str):
+            values = [values]
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            if isinstance(value, str) and value.strip():
+                # SourceCodeConceptMapping.source_code_description is 255 chars.
+                return value.strip()[:255]
+    return ''
+
+
+def _contains_nul(value) -> bool:
+    """Whether a JSON value holds a NUL anywhere, keys included."""
+    if isinstance(value, str):
+        return '\x00' in value
+    if isinstance(value, dict):
+        return any(_contains_nul(k) or _contains_nul(v) for k, v in value.items())
+    if isinstance(value, list):
+        return any(_contains_nul(v) for v in value)
+    return False
+
+
 def _resolve_source_code_mappings(
     rows_by_table: dict[str, list[dict]],
 ) -> list[dict]:
@@ -6919,6 +6972,12 @@ def _resolve_source_code_mappings(
                 'source_unit': row.get('source_unit', ''),
                 'example_quantity': row.get('example_quantity', ''),
                 'source_metadata': row.get('source_metadata') or {},
+                # The starting value for the edit dialog: the curator's own
+                # description when the mapping has one, else the source's.
+                'source_code_description': (
+                    (mapping.source_code_description if mapping else '')
+                    or _source_metadata_description(row.get('source_metadata'))
+                ),
             }
 
             if mapping:

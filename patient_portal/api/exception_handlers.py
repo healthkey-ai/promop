@@ -5,12 +5,31 @@ from __future__ import annotations
 from typing import Any
 
 import sentry_sdk
+from django.conf import settings
+from django.core.exceptions import RequestDataTooBig
+from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import exception_handler as drf_exception_handler
 
 
 def sentry_exception_handler(exc: Exception, context: dict[str, Any]) -> Response | None:
     """Answer through DRF, reporting anything DRF turns into a 5xx."""
+    if isinstance(exc, RequestDataTooBig):
+        # DRF parses JSON through HttpRequest.body, which raises this past
+        # DATA_UPLOAD_MAX_MEMORY_SIZE. Left to Django it is a SuspiciousOperation
+        # and a bare HTML 400, before the view could apply its own limits (#1778).
+        limit = settings.DATA_UPLOAD_MAX_MEMORY_SIZE
+        return Response(
+            {
+                'detail': (
+                    f'Request body exceeds the {limit}-byte limit. '
+                    'Split it into smaller requests.'
+                ),
+                'max_bytes': limit,
+            },
+            status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+        )
+
     response: Response | None = drf_exception_handler(exc, context)
 
     # None means DRF did not recognise it, so Django reports it instead.
