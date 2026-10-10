@@ -174,7 +174,7 @@ def test_cancer_conditions_become_dated_transitions_and_other_conditions_are_lis
     ]
 
 
-def test_a_second_cancer_gets_its_own_entry_and_cancers_are_newest_first():
+def test_a_second_cancer_gets_its_own_entry_after_the_primary():
     record = PatientRecordFactory(disease='Multiple myeloma', disease_slug='myeloma', diagnosis_date='2024-03-12')
     condition(record, icd10('D47.2', 'Monoclonal gammopathy'), '2019-06-04')
     condition(record, icd10('C90.00', 'Multiple myeloma'), '2024-03-12')
@@ -182,12 +182,13 @@ def test_a_second_cancer_gets_its_own_entry_and_cancers_are_newest_first():
 
     cancer = signed_in(record).get('/api/v1/phr/diagnoses/').data['cancer']
 
+    # The primary cancer first, though the prostate cancer is newer.
     assert [(c['name'], c['date'], c.get('status')) for c in cancer] == [
-        ('Malignant neoplasm of prostate', '2025-11-08', 'Resolved'),
         ('Multiple myeloma', '2024-03-12', None),
+        ('Malignant neoplasm of prostate', '2025-11-08', 'Resolved'),
     ]
-    assert [t['name'] for t in cancer[1]['transitions']] == ['Monoclonal gammopathy', 'Multiple myeloma']
-    assert 'transitions' not in cancer[0]
+    assert [t['name'] for t in cancer[0]['transitions']] == ['Monoclonal gammopathy', 'Multiple myeloma']
+    assert 'transitions' not in cancer[1]
 
 
 def test_without_a_derived_primary_each_cancer_condition_is_listed():
@@ -457,7 +458,7 @@ def test_genetics_groups_findings_into_tests_and_attaches_matching_documents(mon
 
     assert [(t['type'], t['date'], [f['name'] for f in t['findings']]) for t in tests] == [
         ('FISH', '2023-04-02', ['TP53', 't(11;14)']),
-        ('Gene expression profiling', '2022-02-02', []),
+        ('GEP', '2022-02-02', []),
         ('NGS', '2021-06-01', ['KRAS']),
     ]
     assert tests[0]['document'] == {'title': 'FISH panel report', 'url': 'https://example.test/fish.pdf'}
@@ -866,3 +867,71 @@ def test_a_cancer_is_dated_from_its_current_diagnosis_and_a_resolved_primary_say
     assert cancer['Prostate cancer']['status'] == 'Resolved'
     assert cancer['Multiple myeloma']['date'] == '2024-03-12'
     assert [t['date'] for t in cancer['Multiple myeloma']['transitions']] == ['2019-06-04', '2024-03-12']
+
+
+# ---------------------------------------------------------------- design gaps (Phase 7)
+
+
+def test_labs_leave_out_genetic_findings_and_offer_each_cancers_markers():
+    record = PatientRecordFactory(disease='Multiple myeloma', disease_slug='myeloma', diagnosis_date='2024-03-12')
+    condition(record, icd10('C90.00', 'Multiple myeloma'), '2024-03-12')
+    condition(record, icd10('C61', 'Malignant neoplasm of prostate'), '2025-11-08')
+    from omop_core.services.disease_episodes import disease_slug
+    prostate = disease_slug('Malignant neoplasm of prostate')
+    LabMarker.objects.create(loinc_code='48378-4', rank=1, disease_slugs=['myeloma'])
+    LabMarker.objects.create(loinc_code='2857-1', rank=2, disease_slugs=[prostate])
+    lab(record, loinc('48378-4', 'Kappa lc.free/Lambda lc.free [Mass Ratio] in Serum'), '2024-02-01', 2.5)
+    lab(record, loinc('2857-1', 'Prostate specific Ag [Mass/volume] in Serum or Plasma'), '2026-07-30', 0.02)
+    # A genetic finding: the variant's parent row and a component pointing back to it.
+    parent = lab(record, loinc('81252-9', 'Discrete genetic variant'), '2025-11-08', value_as_string='Not detected')
+    lab(record, loinc('21636-6', 'BRCA1 gene mutations found'), '2025-11-08', value_as_string='Negative',
+        measurement_event_id=parent.pk)
+
+    data = signed_in(record).get('/api/v1/phr/labs/').data
+
+    assert [t['name'] for t in data['tests']] == ['Kappa lc.free/Lambda lc.free', 'Prostate specific Ag']
+    assert data['filters']['diagnoses'] == [
+        {'slug': 'myeloma', 'name': 'Multiple myeloma'},
+        {'slug': prostate, 'name': 'Malignant neoplasm of prostate'},
+    ]
+
+
+def test_a_line_of_therapys_medicines_are_not_prescriptions_to_confirm():
+    record = PatientRecordFactory(disease='Multiple myeloma', disease_slug='myeloma',
+                                  first_line_therapy='VRd', first_line_start_date='2024-03-12',
+                                  first_line_end_date='2024-10-14')
+    therapy_line(record, 1, '2024-03-12', '2024-10-14', [('Bortezomib', '2024-03-12', '2024-08-26')])
+    prescription = drug(record, ConceptFactory(concept_name='Acyclovir', concept_code='RX-ACY'), '2024-03-18', None)
+
+    meds = {m['name']: m for m in signed_in(record).get('/api/v1/phr/medications/').data['medications']}
+
+    assert 'pending' not in meds['Bortezomib']
+    assert meds['Acyclovir']['pending'] is True
+    assert meds['Acyclovir']['id'] == str(prescription.drug_concept_id)
+
+
+def test_a_line_is_sourced_to_where_its_medicines_were_given():
+    record = PatientRecordFactory(disease='Prostate cancer', disease_slug='prostate-cancer',
+                                  facility_name='MD Anderson Cancer Center',
+                                  first_line_therapy='Bicalutamide', first_line_start_date='2026-01-14',
+                                  first_line_end_date='2026-03-06')
+    episode = therapy_line(record, 1, '2026-01-14', '2026-03-06', [('Bicalutamide', '2026-01-14', '2026-03-06')])
+    visit = visit_at(record, 'Houston Methodist urology')
+    exposure_id = EpisodeEvent.objects.get(episode_id=episode.episode_id).event_id
+    DrugExposure.objects.filter(pk=exposure_id).update(visit_occurrence=visit)
+
+    line = signed_in(record).get('/api/v1/phr/therapy/').data['tracks'][0]['lines'][0]
+
+    assert line['source'] == {'kind': 'record', 'facility': 'Houston Methodist urology', 'date': '2026-01-14'}
+
+
+def test_a_named_genetic_result_keeps_its_case(monkeypatch):
+    record = PatientRecordFactory(disease='')
+    m1 = lab(record, loinc('81252-9', 'Gene variant'), '2024-10-02')
+    monkeypatch.setattr('omop_core.services.genomics.list_variants', lambda person: [
+        {'id': m1.pk, 'gene': 'GEP70 risk score', 'test_date': '2024-10-02', 'assay_method': 'GEP'},
+    ])
+
+    tests = signed_in(record).get('/api/v1/phr/genetics/').data['tests']
+
+    assert [f['name'] for f in tests[0]['findings']] == ['GEP70 risk score']
