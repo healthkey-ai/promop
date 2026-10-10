@@ -496,12 +496,12 @@ if ENABLE_BASIC_AUTH:
         'rest_framework.authentication.BasicAuthentication',
     ]
 
-# Pinned rather than inherited so the value is visible. It bounds every body
-# read via HttpRequest.body, and since DRF 3.17 that includes JSON: JSONParser is
-# handed io.BytesIO(request.body), so this is the effective ceiling on every API
-# JSON body and binds before any per-view limit (OMOP_BULK_MAX_BYTES, the
-# source-codes entry cap). Past it the API answers 413 with this number as
-# `max_bytes` — see patient_portal/api/exception_handlers.py.
+# Pinned rather than inherited so the value is visible, but note the scope:
+# this bounds form/multipart bodies and anything read via HttpRequest.body. It
+# does NOT bound DRF JSON bodies — Request._load_stream hands JSONParser the raw
+# WSGI stream, bypassing HttpRequest.body entirely, which is the only place
+# Django enforces this. The bulk OMOP write endpoint therefore does its own
+# pre-parse CONTENT_LENGTH check (OMOP_BULK_MAX_BYTES in patient_portal/api/views.py).
 DATA_UPLOAD_MAX_MEMORY_SIZE = int(
     os.environ.get('DATA_UPLOAD_MAX_MEMORY_SIZE', 2621440)
 )
