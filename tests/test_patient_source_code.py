@@ -209,6 +209,65 @@ class TestGetSourceCodes:
         assert summary['approved'] >= 1
         assert summary['unmapped'] >= 1
 
+    def test_mapping_fields_come_from_the_lowest_id_mapping(self, smart_env):
+        """A code matches one mapping per org; one row is shown, deterministically (#1789)."""
+        from omop_core.models import Organization
+        person = smart_env['person']
+        concept = smart_env['condition_concept']
+        PatientSourceCode.objects.create(
+            person=person, source_value='HGB', source_vocabulary_id='LOINC',
+            omop_table='measurement', occurrence_count=3,
+        )
+        first = SourceCodeConceptMapping.objects.create(
+            source_code='HGB', omop_table='measurement', source_vocabulary_id='LOINC',
+            status='approved', target_concept=concept, origin='manual',
+            origin_system='HT-One', created_by=smart_env['user'],
+            source_code_description='Hemoglobin',
+        )
+        SourceCodeConceptMapping.objects.create(
+            source_code='HGB', omop_table='measurement', source_vocabulary_id='LOINC',
+            status='proposed', organization=Organization.objects.create(name='Other', slug='psc-other'),
+        )
+
+        rows = [sc for sc in smart_env['client'].get(_url(person.person_id)).json()['source_codes']
+                if sc['source_value'] == 'HGB']
+        assert len(rows) == 1
+        hgb = rows[0]
+        assert hgb['mapping_id'] == first.id
+        assert hgb['mapping_status'] == 'approved'
+        assert hgb['mapping_target_concept_id'] == concept.concept_id
+        assert hgb['mapping_target_concept_name'] == concept.concept_name
+        assert hgb['mapping_destination_concept_code'] == concept.concept_code
+        assert hgb['mapping_destination_vocabulary_id'] == concept.vocabulary_id
+        assert hgb['mapping_created_by'] == smart_env['user'].email
+        assert hgb['mapping_origin'] == 'manual'
+        assert hgb['mapping_origin_system'] == 'HT-One'
+        assert hgb['source_code_description'] == 'Hemoglobin'
+
+    def test_query_count_is_flat_in_code_count(self, smart_env):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        person = smart_env['person']
+        client = smart_env['client']
+
+        def add(n, start):
+            for i in range(start, start + n):
+                PatientSourceCode.objects.create(
+                    person=person, source_value=f'C{i}', omop_table='measurement', occurrence_count=1,
+                )
+                SourceCodeConceptMapping.objects.create(
+                    source_code=f'C{i}', omop_table='measurement', status='approved',
+                    target_concept=smart_env['condition_concept'], created_by=smart_env['user'],
+                )
+
+        add(2, 0)
+        with CaptureQueriesContext(connection) as small:
+            assert client.get(_url(person.person_id)).status_code == 200
+        add(30, 2)
+        with CaptureQueriesContext(connection) as large:
+            assert client.get(_url(person.person_id)).status_code == 200
+        assert len(large) == len(small)
+
 
 # ---------------------------------------------------------------------------
 # #1778: description default, NUL bytes, oversized bodies

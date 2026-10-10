@@ -73,6 +73,9 @@ function sourceCodeToRow(sc: PatientSourceCode): CodeMappingRow {
 
 type SectionKey = "unmapped" | "proposed" | "approved";
 
+/** Rows rendered per section before "Show all": thousands of rows render slowly. */
+export const SECTION_ROW_LIMIT = 200;
+
 const SECTIONS: { key: SectionKey; label: string; defaultOpen: boolean }[] = [
   { key: "unmapped", label: "Unmapped", defaultOpen: true },
   { key: "proposed", label: "Proposed", defaultOpen: true },
@@ -180,6 +183,11 @@ export default function PatientSourceCodesTab({ personId }: Props) {
   const [resolveResult, setResolveResult] = useState<ResolveResult | null>(null);
   const [reference, setReference] = useState<Reference>(emptyReference);
   const [banner, setBanner] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<Record<SectionKey, boolean>>({
+    unmapped: false,
+    proposed: false,
+    approved: false,
+  });
   const [collapsed, setCollapsed] = useState<Record<SectionKey, boolean>>({
     unmapped: false,
     proposed: false,
@@ -299,10 +307,14 @@ export default function PatientSourceCodesTab({ personId }: Props) {
     setCollapsed((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
-  if (loading) {
+  // A refetch after a save keeps the table on screen; only the first load blanks it.
+  if (loading && !data) {
     return (
-      <div className="space-y-4 p-6">
-        <div className="h-6 w-64 animate-pulse rounded bg-muted" />
+      <div className="space-y-4 p-6" role="status" aria-live="polite">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+          Loading source codes…
+        </div>
         <div className="h-48 animate-pulse rounded bg-muted" />
       </div>
     );
@@ -336,6 +348,12 @@ export default function PatientSourceCodesTab({ personId }: Props) {
           <span className="text-red-600">{summary.unmapped} unmapped</span>,{" "}
           <span className="text-yellow-600">{summary.proposed} proposed</span>,{" "}
           <span className="text-green-600">{summary.approved} approved</span>
+          {loading && (
+            <span className="ml-2 inline-flex items-center gap-1" role="status">
+              <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
+              Refreshing…
+            </span>
+          )}
         </div>
         <button
           onClick={handleResolve}
@@ -388,7 +406,18 @@ export default function PatientSourceCodesTab({ personId }: Props) {
             </button>
             {!isCollapsed && (
               <div className="mt-1">
-                <SourceCodeTable rows={rows} onRowClick={handleRowClick} />
+                <SourceCodeTable
+                  rows={expanded[key] ? rows : rows.slice(0, SECTION_ROW_LIMIT)}
+                  onRowClick={handleRowClick}
+                />
+                {!expanded[key] && rows.length > SECTION_ROW_LIMIT && (
+                  <button
+                    onClick={() => setExpanded((prev) => ({ ...prev, [key]: true }))}
+                    className="mt-2 text-sm font-medium text-primary hover:underline"
+                  >
+                    Show all {rows.length} ({rows.length - SECTION_ROW_LIMIT} more)
+                  </button>
+                )}
               </div>
             )}
           </section>
