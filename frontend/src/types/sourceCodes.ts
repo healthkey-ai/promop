@@ -13,6 +13,8 @@ export interface PatientSourceCode {
   source_unit: string;
   example_quantity: string;
   source_metadata: Record<string, unknown>;
+  /** The mapping's description, else the source's own name from source_metadata. */
+  source_code_description?: string;
   mapping_origin?: string;
   mapping_origin_system?: string;
   mapping_created_by?: string;

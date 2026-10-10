@@ -47,7 +47,7 @@ function sourceCodeToRow(sc: PatientSourceCode): CodeMappingRow {
     domain_id: domain,
     source_vocabulary_id: sc.source_vocabulary_id || "",
     source_code: sc.source_code || sc.source_value,
-    source_code_description: "",
+    source_code_description: sc.source_code_description || "",
     source_unit: sc.source_unit || "",
     example_quantity: sc.example_quantity || "",
     source_metadata: sc.source_metadata || {},
@@ -110,6 +110,9 @@ function SourceCodeTable({
             >
               <td className="px-3 py-2">
                 <div className="font-mono text-xs">{sc.source_value}</div>
+                {sc.source_code_description && (
+                  <div className="text-xs">{sc.source_code_description}</div>
+                )}
                 {sc.source_vocabulary_id && (
                   <div className="text-xs text-muted-foreground">{sc.source_vocabulary_id}</div>
                 )}

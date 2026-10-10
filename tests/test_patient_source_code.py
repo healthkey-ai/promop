@@ -208,3 +208,125 @@ class TestGetSourceCodes:
         assert summary['total'] == 2
         assert summary['approved'] >= 1
         assert summary['unmapped'] >= 1
+
+
+# ---------------------------------------------------------------------------
+# #1778: description default, NUL bytes, oversized bodies
+# ---------------------------------------------------------------------------
+
+def _description(smart_env, source_value, omop_table='measurement'):
+    resp = smart_env['client'].get(_url(smart_env['person'].person_id))
+    assert resp.status_code == 200
+    row = next(
+        sc for sc in resp.json()['source_codes']
+        if sc['source_value'] == source_value and sc['omop_table'] == omop_table
+    )
+    return row['source_code_description']
+
+
+class TestSourceDescriptionDefault:
+    def _code(self, smart_env, source_value, metadata):
+        PatientSourceCode.objects.create(
+            person=smart_env['person'], source_value=source_value,
+            source_vocabulary_id='LOINC', omop_table='measurement',
+            occurrence_count=1, source_metadata=metadata,
+        )
+
+    def test_unmapped_code_defaults_to_text(self, smart_env):
+        """Epic's 8716-3 displays as "Vital signs"; the text names the measurement."""
+        self._code(smart_env, '8716-3',
+                   {'display': ['Vital signs'], 'text': ['Blood Pressure']})
+        assert _description(smart_env, '8716-3') == 'Blood Pressure'
+
+    def test_falls_back_to_display(self, smart_env):
+        self._code(smart_env, 'LC', {'display': ['Lab comment'], 'text': ['  ']})
+        assert _description(smart_env, 'LC') == 'Lab comment'
+
+    def test_several_texts_fall_back_to_display(self, smart_env):
+        """The mapping is shared: one patient's first vital is not 8716-3's name."""
+        self._code(smart_env, '8716-3', {
+            'display': ['Vital signs', 'Vital signs'],
+            'text': ['Blood Pressure', 'Heart Rate', 'Blood Pressure'],
+        })
+        assert _description(smart_env, '8716-3') == 'Vital signs'
+
+    def test_repeated_text_counts_once(self, smart_env):
+        self._code(smart_env, 'BP', {'text': ['Blood Pressure', ' Blood Pressure ']})
+        assert _description(smart_env, 'BP') == 'Blood Pressure'
+
+    def test_ambiguous_everywhere_is_empty(self, smart_env):
+        self._code(smart_env, 'MIX', {'text': ['A', 'B'], 'display': ['C', 'D']})
+        assert _description(smart_env, 'MIX') == ''
+
+    def test_empty_without_metadata(self, smart_env):
+        self._code(smart_env, '301070', {})
+        assert _description(smart_env, '301070') == ''
+
+    def test_malformed_metadata_is_ignored(self, smart_env):
+        self._code(smart_env, 'ODD', {'text': [None, 7], 'display': {'x': 1}})
+        assert _description(smart_env, 'ODD') == ''
+
+    def test_truncated_to_the_mapping_column(self, smart_env):
+        self._code(smart_env, 'LONG', {'text': ['x' * 400]})
+        assert _description(smart_env, 'LONG') == 'x' * 255
+
+    def test_mapping_description_wins(self, smart_env):
+        self._code(smart_env, 'GLU', {'text': ['Glucose [Mass/volume]']})
+        SourceCodeConceptMapping.objects.create(
+            source_code='GLU', omop_table='measurement', source_vocabulary_id='LOINC',
+            status='proposed', source_code_description='Curated glucose',
+        )
+        assert _description(smart_env, 'GLU') == 'Curated glucose'
+
+    def test_blank_mapping_description_falls_back(self, smart_env):
+        """A queue row created at ingest has no description; the source's name
+        is the better starting value, and the dialog would otherwise save ''."""
+        self._code(smart_env, 'GLU', {'text': ['Glucose [Mass/volume]']})
+        SourceCodeConceptMapping.objects.create(
+            source_code='GLU', omop_table='measurement', source_vocabulary_id='LOINC',
+            status='proposed', source_code_description='',
+        )
+        assert _description(smart_env, 'GLU') == 'Glucose [Mass/volume]'
+
+
+class TestPostSourceCodesRejections:
+    def test_nul_in_metadata_is_a_400(self, smart_env):
+        resp = smart_env['client'].post(_url(smart_env['person'].person_id), {
+            'source_codes': [
+                {'source_value': 'OK'},
+                {'source_value': 'NOTE', 'source_metadata': {'text': ['Cerner note\x00']}},
+            ],
+        }, format='json')
+        assert resp.status_code == 400
+        detail = resp.json()['detail']
+        assert detail.startswith('Entry 1:')
+        assert 'source_metadata' in detail
+        assert not PatientSourceCode.objects.filter(person=smart_env['person']).exists()
+
+    def test_nul_in_metadata_key_is_a_400(self, smart_env):
+        resp = smart_env['client'].post(_url(smart_env['person'].person_id), {
+            'source_codes': [{'source_value': 'X', 'source_metadata': {'a\x00': 'b'}}],
+        }, format='json')
+        assert resp.status_code == 400
+
+    def test_nul_in_source_value_is_a_400(self, smart_env):
+        resp = smart_env['client'].post(_url(smart_env['person'].person_id), {
+            'source_codes': [{'source_value': 'A\x00B', 'source_unit': 'mg\x00'}],
+        }, format='json')
+        assert resp.status_code == 400
+        assert 'source_value, source_unit' in resp.json()['detail']
+
+    def test_body_over_upload_limit_is_a_json_413(self, smart_env, settings):
+        settings.DATA_UPLOAD_MAX_MEMORY_SIZE = 10_000
+        entries = [
+            {'source_value': f'C{i}', 'source_metadata': {'resource': 'x' * 500}}
+            for i in range(50)
+        ]
+        resp = smart_env['client'].post(
+            _url(smart_env['person'].person_id), {'source_codes': entries}, format='json',
+        )
+        assert resp.status_code == 413
+        assert resp['Content-Type'].startswith('application/json')
+        body = resp.json()
+        assert body['max_bytes'] == 10_000
+        assert '10000-byte' in body['detail']
