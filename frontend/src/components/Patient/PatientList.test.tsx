@@ -195,7 +195,7 @@ it('downloads the selected patients as CSV', async () => {
 
 it('downloads every matching patient with the list filters when all are selected', async () => {
   vi.mocked(api.get).mockImplementation(async (url: string) => (url === '/v1/patient-records/export-csv/'
-    ? Promise.reject({ response: { data: new Blob([JSON.stringify({ error: 'At most 1000 patients per export; narrow the filters.' })]) } })
+    ? Promise.reject({ response: { data: new Blob([JSON.stringify({ error: 'At most 500 patients per export; narrow the filters.' })]) } })
     : { data: cohort }));
   render(<MemoryRouter><PatientList /></MemoryRouter>);
   await screen.findByText('Recorded regimen');
@@ -206,5 +206,5 @@ it('downloads every matching patient with the list filters when all are selected
   await waitFor(() => expect(api.get).toHaveBeenCalledWith('/v1/patient-records/export-csv/', expect.objectContaining({
     params: expect.objectContaining({ ecog: '0', org: 'all' }), responseType: 'blob',
   })));
-  expect(await screen.findByText(/At most 1000 patients per export/)).toBeInTheDocument();
+  expect(await screen.findByText(/At most 500 patients per export/)).toBeInTheDocument();
 });

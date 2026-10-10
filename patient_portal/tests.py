@@ -30342,7 +30342,7 @@ class PatientExportCsvTest(TestCase):
     def test_too_many_ids_rejected(self):
         client = APIClient()
         client.force_authenticate(user=self.staff)
-        ids = ','.join(str(i) for i in range(1, 1003))
+        ids = ','.join(str(i) for i in range(1, 503))
         self.assertEqual(client.get(self.URL, {'person_ids': ids}).status_code, 413)
 
     def test_unauthenticated_rejected(self):

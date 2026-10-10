@@ -5128,7 +5128,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             logger.exception("bulk_delete_filtered: unexpected error")
             return Response({'error': 'Delete operation failed.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    EXPORT_CSV_MAX_ROWS = 1000
+    # Each record costs ~8 queries (therapy lines, supportive courses) and this
+    # runs inside the request under gunicorn's 30s timeout.
+    EXPORT_CSV_MAX_ROWS = 500
 
     @action(detail=False, methods=['get'], url_path='export-csv')
     def export_csv(self, request):
