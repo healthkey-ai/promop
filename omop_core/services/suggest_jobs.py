@@ -176,7 +176,8 @@ def execute_preview(run_id: str, params: dict) -> None:
         preview_params = dict(params['preview'])
         preview_params['ranking_model'] = params.get('ranking_model', 'anthropic')
         result = suggest_one_mapping(**preview_params, activity=activity)
-        activity({'stage': 'result', **params['preview'], **result, 'dry_run': True, 'updated': False})
+        preview = {k: v for k, v in params['preview'].items() if k != 'row_metadata'}
+        activity({'stage': 'result', **preview, **result, 'dry_run': True, 'updated': False})
         runs.update(state=SuggestRun.SUCCESS, done=1, retrieved=1, finished_at=timezone.now())
     except Exception as exc:  # noqa: BLE001 - retain partial candidates on failure
         activity({'stage': 'failure', 'note': str(exc)[:2000]})

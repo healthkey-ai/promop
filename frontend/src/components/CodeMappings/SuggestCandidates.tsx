@@ -306,7 +306,7 @@ export default function SuggestCandidates({ activity, finished, onSaved, canAppr
           {candidates.length > 0 && <table className="mt-2 w-full text-left text-sm">
             <thead><tr className="border-b text-xs text-slate-500">
               <th className="pb-1 pr-2 font-medium">Candidate</th>
-              <th className="pb-1 px-2 font-medium" title="Retrieval strategies: U=UMLS, L=Lexical, V=Vectors, M=Source metadata coding">Found by</th>
+              <th className="pb-1 px-2 font-medium" title="Retrieval strategies: U=UMLS, L=Lexical, V=Vectors">Found by</th>
               <th className="pb-1 px-2 font-medium">Confidence</th>
               <th className="pb-1 pl-2 font-medium">Action</th>
             </tr></thead>

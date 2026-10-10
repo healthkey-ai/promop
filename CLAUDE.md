@@ -1017,26 +1017,20 @@ with a qualitative confidence level (high / medium / low, mapped to numeric
 values) and either picks a winner or declines. A declined code stays in the
 queue for the next run.
 
-### Source metadata widens both retrieval and ranking
+### Source Metadata is ranker context, nothing more
 
-A description can be generic or wrong: Epic adds LOINC `8716-3` "Vital signs"
-to every vital sign, so respirations can arrive described as "Vital signs".
-`omop_core/mapping/source_metadata.py` gathers what the sending system attached
-— the queue row's `source_metadata` plus up to five recent distinct
-`PatientSourceCode` rows for the same code, vocabulary and table — and Suggest
-uses it three ways (#1782):
+A description can be missing or generic: Epic adds LOINC `8716-3` "Vital signs"
+to every vital sign. The Source Metadata the mapping dialog shows (often FHIR
+JSON) says what the code really is, so both rankers get a bounded summary of it
+as `source_metadata` beside the description (#1782, #1786). The dialog sends its
+row's metadata with suggest-one, falling back to the mapping's own; batch runs
+use each queue row's own. Retrieval never reads it and no other patient's data
+is consulted, so it costs nothing per code.
 
-- its name (`code.text`), when it gives exactly one, is searched by the enabled
-  lexical and vector strategies beside the description, 5 results each;
-- with UMLS enabled, standard-vocabulary codings on the resource (LOINC, SNOMED,
-  RxNorm, …) become candidates, retrieval `metadata`, following `Maps to` when
-  retired. They go last, so a ranker outage never falls back to one;
-- a bounded summary goes to both rankers as `source_metadata`. Several different
-  texts mean the code covers several things, and the ranker is told so.
-
-The summary is sent to third parties, so it is built from named fields only —
-names, codings, category, unit and an allowlist of aggregate keys. A resource's
-subject, dates, identifiers, notes and values are never included.
+The summary goes to third parties, so `omop_core/mapping/source_metadata.py`
+builds it from named fields only — names, codings, category, unit and an
+allowlist of aggregate keys. A resource's subject, dates, identifiers, notes and
+values are never included.
 
 Where the time goes, per code:
 
