@@ -20,7 +20,8 @@ export interface CodeMappingRow {
   source_retired?: boolean | null;
   source_retirement_evidence?: string[];
   umls_source_name?: string;
-  destination_concept_id: number;
+  /** Null while the row has no destination; never 0. */
+  destination_concept_id: number | null;
   destination_concept_name: string;
   destination_concept_code: string;
   destination_vocabulary_id: string;
@@ -307,7 +308,8 @@ export function buildEditForm(row: CodeMappingRow, reference: Reference): Mappin
     source_code: row.source_code,
     source_code_description: row.source_code_description || "",
     source_concept_id: row.source_concept_id ? String(row.source_concept_id) : "",
-    destination_concept_id: String(row.destination_concept_id),
+    // Concept 0 is "No matching concept": a missing destination, shown empty.
+    destination_concept_id: row.destination_concept_id ? String(row.destination_concept_id) : "",
     destination_concept_name: row.destination_concept_name,
     destination_concept_code: row.destination_concept_code || "",
     destination_vocabulary_id: row.destination_vocabulary_id,

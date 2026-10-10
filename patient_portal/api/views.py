@@ -11407,6 +11407,15 @@ def _parse_destination_concept_id(data):
     # pre-#834 spellings, kept so existing callers keep working.
     raw = (data.get('destination_concept_id') or data.get('target_concept_id')
            or data.get('concept_id'))
+    if str(raw).strip() == '0' or any(
+        str(data.get(key)).strip() == '0'
+        for key in ('destination_concept_id', 'target_concept_id', 'concept_id')
+    ):
+        # Concept 0 is OMOP's "No matching concept": not a destination.
+        raise serializers.ValidationError({'target_concept_id': (
+            'Concept 0 means "No matching concept" and cannot be a destination. '
+            'Leave the destination empty to keep the code unmapped.'
+        )})
     try:
         concept_id = int(raw)
     except (TypeError, ValueError):

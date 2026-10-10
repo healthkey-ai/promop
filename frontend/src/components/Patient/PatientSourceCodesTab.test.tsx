@@ -8,7 +8,7 @@ vi.mock("../../hooks/useAuth", () => ({
 
 const sourceCodes = {
   person_id: 48095,
-  summary: { total: 1, unmapped: 1, proposed: 0, approved: 0 },
+  summary: { total: 2, unmapped: 1, proposed: 1, approved: 0 },
   source_codes: [{
     source_value: "8716-3",
     omop_table: "measurement",
@@ -25,6 +25,23 @@ const sourceCodes = {
     example_quantity: "",
     source_metadata: { display: ["Vital signs"], text: ["Blood Pressure"] },
     source_code_description: "Blood Pressure",
+  }, {
+    // Proposed by ingest, no destination yet.
+    source_value: "9279-1",
+    omop_table: "measurement",
+    concept_id: 0,
+    concept_name: null,
+    row_count: 2,
+    mapping_id: 77,
+    mapping_status: "proposed",
+    mapping_target_concept_id: null,
+    mapping_target_concept_name: null,
+    source_vocabulary_id: "LOINC",
+    source_code: "9279-1",
+    source_unit: "",
+    example_quantity: "",
+    source_metadata: {},
+    source_code_description: "Respirations",
   }],
 };
 
@@ -49,5 +66,17 @@ describe("PatientSourceCodesTab source description (#1778)", () => {
     render(<PatientSourceCodesTab personId="48095" />);
     fireEvent.click(await screen.findByText("Blood Pressure"));
     expect(await screen.findByLabelText(/Source Description/)).toHaveValue("Blood Pressure");
+  });
+});
+
+describe("PatientSourceCodesTab missing destination", () => {
+  it("opens a proposed row with no destination empty, never 0", async () => {
+    render(<PatientSourceCodesTab personId="48095" />);
+    fireEvent.click(await screen.findByText("Respirations"));
+    const field = await screen.findByLabelText(/Destination Concept ID/);
+    expect(field).toHaveValue(null);
+    expect(field).not.toHaveValue(0);
+    // Saving notes or a rejection must not demand a destination.
+    expect(field).not.toBeRequired();
   });
 });

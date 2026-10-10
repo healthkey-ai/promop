@@ -51,7 +51,8 @@ function sourceCodeToRow(sc: PatientSourceCode): CodeMappingRow {
     source_unit: sc.source_unit || "",
     example_quantity: sc.example_quantity || "",
     source_metadata: sc.source_metadata || {},
-    destination_concept_id: sc.mapping_target_concept_id || 0,
+    // No destination is no destination, never concept 0 ("No matching concept").
+    destination_concept_id: sc.mapping_target_concept_id || null,
     destination_concept_name: sc.mapping_target_concept_name || "",
     destination_concept_code: sc.mapping_destination_concept_code || "",
     destination_vocabulary_id: sc.mapping_destination_vocabulary_id || "",

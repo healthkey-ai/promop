@@ -1361,6 +1361,9 @@ def retrieval_pool(*, source_code, source_vocabulary_id, source_text, domain_id,
                 candidates.append(hit)
                 by_id[hit['concept_id']] = hit
 
+    # Concept 0 is OMOP's "No matching concept". It is never a destination:
+    # a code nothing fits stays unmapped rather than mapped to 0.
+    candidates = [c for c in candidates if c.get('concept_id')]
     return candidates, umls_cui, definitive
 
 
