@@ -5819,6 +5819,76 @@ def derivation_status(request: Request, task_id: str) -> Response:
 
 
 
+def _resolve_provision_org(request):
+    """Return ``(organization, error_response)`` for a provisioning call.
+
+    The rule ``PatientSignupView._resolve_org`` applies: the caller's own
+    organization wins, otherwise it may name a slug. One difference, the slug is
+    optional here. Every ETL caller provisions without one today, and no
+    organization is still a valid answer.
+
+    There is no check that the caller may assign an organization at all, because
+    ``EtlProvisionPermission`` has already narrowed this endpoint to the legacy
+    ETL grant and staff, and both may. The credential's own organization is
+    checked even though it is always ``None`` here for exactly those two: a
+    legacy token carries no organization and staff are unscoped. That is the
+    binding #1764 proposes adding, and the day it lands this endpoint must not
+    start accepting a slug naming somebody else's tenant.
+    """
+    token_org = get_request_org(request)
+    raw = request.data.get('organization')
+    if raw is not None and not isinstance(raw, str):
+        # A JSON body can carry any type here, and normalizing a number or a
+        # list would raise AttributeError, answering bad input with a 500.
+        return None, Response(
+            {'detail': "'organization' must be an organization slug."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    slug = (raw or '').strip()
+    if not slug:
+        return token_org, None
+    if token_org is not None:
+        if token_org.slug != slug:
+            return None, Response(
+                {'detail': 'The organization must match the service credential.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return token_org, None
+    org = Organization.objects.filter(slug=slug).first()
+    if org is None:
+        # 400, not a silent fall back to no organization: a slug nobody owns is
+        # a caller mistake, and accepting it would mint exactly the orphaned
+        # records this parameter exists to stop.
+        return None, Response(
+            {'detail': f"Unknown organization '{slug}'."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return org, None
+
+
+def _fill_record_org(record, org):
+    """Fill an empty organization and return the slug of the one now in force.
+
+    Fill-if-empty, as CSV ingest and `import_org_patients` both do it: a
+    patient another organization already owns is not moved by an import that
+    names a different one. The effective slug goes back in the response so the
+    caller can see that happened, rather than reading a success and then
+    finding the patient absent from its own org-scoped queries.
+
+    The row is re-read under a lock, because "empty" has to still be true at the
+    moment of the write. Two retries of one patient naming different
+    organizations would otherwise both find it empty, and the second would move
+    the patient while both responses claimed their own.
+    """
+    if org is not None:
+        with transaction.atomic():
+            record = PatientRecord.objects.select_for_update().get(pk=record.pk)
+            if record.organization_id is None:
+                record.organization = org
+                record.save(update_fields=['organization', 'updated_at'])
+    return record.organization.slug if record.organization_id else None
+
+
 class PersonViewSet(viewsets.GenericViewSet):
     """
     Endpoints:
@@ -5926,8 +5996,19 @@ class PersonViewSet(viewsets.GenericViewSet):
     def provision(self, request):
         """
         POST /api/persons/provision/
-        Body: { "email": "..." }  (optional)
-        Response 200/201: { "person_id": 1234, "created": true }
+        Body: { "email": "...", "organization": "<slug>" }  (both optional)
+        Response 200/201: { "person_id": 1234, "created": true,
+                            "organization": "<slug>" }
+
+        ``organization`` names the tenant the new patient belongs to. Without
+        it the record carries none, and a patient with no organization is
+        missing from every org-scoped query, which is what an importer that had
+        no way to say this used to produce (#1764). It is per request, because
+        one import run can legitimately span organizations.
+
+        The stamp is fill-if-empty, so a re-run cannot move a patient another
+        organization already owns. ``organization`` in the response is the one
+        actually in force, which is how a caller detects that case.
 
         Mints a person who is not anyone yet, for an importer that holds a
         source id we cannot verify. No actor claims, so nothing here asserts
@@ -5945,6 +6026,10 @@ class PersonViewSet(viewsets.GenericViewSet):
             request.data.get('actor_iss', ''),
             request.data.get('actor_sub', ''),
         )
+
+        org, org_error = _resolve_provision_org(request)
+        if org_error is not None:
+            return org_error
 
         email = (request.data.get('email') or '').strip() or None
         if email is not None:
@@ -5965,20 +6050,28 @@ class PersonViewSet(viewsets.GenericViewSet):
             if len(existing) == 1 and not PatientUser.objects.filter(
                 person=existing[0],
             ).exists():
-                PatientRecord.objects.get_or_create(person=existing[0])
+                record, _ = PatientRecord.objects.get_or_create(person=existing[0])
                 return Response(
-                    {'person_id': existing[0].person_id, 'created': False},
+                    {
+                        'person_id': existing[0].person_id,
+                        'created': False,
+                        'organization': _fill_record_org(record, org),
+                    },
                     status=status.HTTP_200_OK,
                 )
 
         from patient_portal.services import create_unidentified_person
         with transaction.atomic():
-            person = create_unidentified_person(source='etl-provision')
+            person = create_unidentified_person(source='etl-provision', organization=org)
             if email is not None:
                 person.email = email
                 person.save(update_fields=['email'])
         return Response(
-            {'person_id': person.person_id, 'created': True},
+            {
+                'person_id': person.person_id,
+                'created': True,
+                'organization': org.slug if org is not None else None,
+            },
             status=status.HTTP_201_CREATED,
         )
 
