@@ -90,8 +90,8 @@ class TestDeidentify:
         assert cleaned['category'] == RESPIRATIONS['fhir']['category']
         assert cleaned['method'] == {'text': 'Counted'}
         assert cleaned['valueQuantity'] == {'value': 16, 'unit': '/min'}
-        # The reference goes; the specimen's kind stays.
-        assert cleaned['specimen'] == {'display': 'Arterial blood'}
+        # A Reference goes whole: its display can as easily be a person's name.
+        assert 'specimen' not in cleaned
         assert cleaned['component'] == [{'code': {'text': 'Breath sounds'}}]
 
     def test_nothing_identifying_survives(self):
@@ -126,13 +126,60 @@ class TestDeidentify:
         patient = {'resourceType': 'Patient', 'name': [{'family': 'Secret'}],
                    'birthDate': '1950-01-01', 'address': [{'city': 'Secretville'}],
                    'telecom': [{'value': '555'}], 'gender': 'female'}
-        assert source_metadata.deidentify(patient) == {'resourceType': 'Patient'}
+        assert source_metadata.deidentify(patient) == {}
 
     def test_empty_and_junk(self):
         assert source_metadata.deidentify({}) == {}
         assert source_metadata.deidentify(None) == {}
         assert source_metadata.deidentify('junk') == {}
         assert source_metadata.deidentify({'subject': {'reference': 'Patient/1'}}) == {}
+
+    @pytest.mark.parametrize('leak', [
+        {'extension': [{'url': 'http://x/mrn',
+                        'valueIdentifier': {'system': 'urn:mrn', 'value': 'MRN123'}}]},
+        {'extension': [{'url': 'http://x/n', 'valueHumanName': {'family': 'Doe'}}]},
+        {'extension': [{'url': 'http://x/a', 'valueAddress': {'city': 'Doeville'}}]},
+        {'extension': [{'url': 'http://x/t', 'valueContactPoint': {'system': 'phone', 'value': '555-0100'}}]},
+        {'extension': [{'url': 'http://x/m', 'valueMarkdown': 'Doe said'}]},
+        {'valueReference': {'display': 'Jane Doe'}},
+        {'resultsInterpreter': [{'display': 'Dr Doe'}]},
+        {'collector': {'display': 'Nurse Doe'}},
+        {'anything': {'reference': 'Practitioner/1', 'display': 'Dr Doe'}},
+        {'anything': {'identifier': {'value': 'X'}, 'display': 'Dr Doe'}},
+        {'anything': {'family': 'Doe', 'given': ['Jane']}},
+        {'anything': {'line': ['1 Doe St'], 'city': 'Doeville'}},
+        {'valueAnnotation': {'authorString': 'Jane Doe', 'time': '2026-01-02', 'text': 'Doe'}},
+        {'anything': {'text': 'Doe said', 'time': '2026-01-02'}},
+        {'anything': {'system': 'urn:mrn', 'value': 'MRN-Doe'}},
+        {'anything': {'contentType': 'text/plain', 'data': 'RG9l'}},
+        {'time': '2026-01-02', 'CollectedDATETIME': '2026-01-02'},
+        {'fullUrl': 'https://ehr.example/Observation/Doe-1'},
+        {'entry': [{'resource': {'resourceType': 'Patient', 'gender': 'female',
+                                 'extension': [{'url': 'http://x/race', 'valueCoding': {'code': 'Doe'}}]}}]},
+    ])
+    def test_identity_under_any_key_or_shape(self, leak):
+        resource = {'resourceType': 'Observation', 'code': {'text': 'Respirations'}, **leak}
+        cleaned = source_metadata.deidentify(resource)
+        dumped = json.dumps(cleaned)
+        for secret in ('Doe', 'MRN', '555', '2026'):
+            assert secret not in dumped, (secret, cleaned)
+        assert cleaned['code'] == {'text': 'Respirations'}
+
+    def test_codes_and_quantities_are_not_mistaken_for_identity(self):
+        resource = {'resourceType': 'Observation', 'code': {'text': 'Respirations'},
+                    'valueQuantity': {'value': 16, 'unit': '/min', 'system': 'http://unitsofmeasure.org'},
+                    'extension': [{'url': 'http://x/flowsheet', 'valueCode': 'RR'}],
+                    'referenceRange': [{'low': {'value': 12}, 'high': {'value': 20}, 'text': '12-20'}]}
+        assert source_metadata.deidentify(resource) == resource
+
+    def test_oversized_keeps_the_code(self):
+        resource = {'fhir': {'code': {'text': 'Respirations',
+                                      'coding': [{'system': 'http://loinc.org', 'code': '9279-1'}]},
+                             **{f'f{i}': 'x' * 1000 for i in range(25)}}}
+        cleaned = source_metadata.deidentify(resource)
+        assert len(json.dumps(cleaned)) <= source_metadata.MAX_JSON
+        assert cleaned['fhir']['code']['text'] == 'Respirations'
+        assert cleaned['fhir']['code']['coding'][0]['code'] == '9279-1'
 
     def test_bounded(self):
         big = {'fhir': {'code': {'text': 'Respirations'},

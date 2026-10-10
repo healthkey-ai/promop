@@ -1028,12 +1028,15 @@ description (#1782, #1786, #1791). The dialog sends its row's metadata with
 suggest-one, falling back to this table's SCCM row; batch runs use each queue
 row's own. Retrieval never reads it and no other patient's data is consulted.
 
-`omop_core/mapping/source_metadata.py::deidentify` removes, at any depth,
-references and identity (`subject`, `patient`, `encounter`, participants, `id`,
-`identifier`, `meta`, any `reference`), free text that can name a person
-(narrative, `note`, `comment`, `valueString`), demographics and every date or
-time field, and caps the result at 20,000 characters. `code.text` and coding
-displays stay — they are the point.
+`omop_core/mapping/source_metadata.py::deidentify` removes, at any depth, by
+key *and* by shape — FHIR carries identity under many names, such as an
+extension's `valueIdentifier` or a `collector` reference: every Reference,
+Identifier, HumanName, Address, ContactPoint, Annotation and Attachment, any
+Patient/Practitioner/RelatedPerson resource, `id`, `meta`, `fullUrl`, the
+narrative, `valueString`/`valueMarkdown`, and every date or time field
+(case-insensitively). `code.text`, coding displays, Quantity and CodeableConcept
+values stay — they are the point. Over 20,000 characters it trims lists and
+strings, then keeps only the coded fields; it never drops the code.
 
 Where the time goes, per code:
 
