@@ -1,4 +1,4 @@
-"""Suggest reads source_metadata, not only the description (#1782).
+"""Suggest gives the rankers the row's Source Metadata as context (#1782, #1786).
 
 The motivating case: Epic adds LOINC 8716-3 "Vital signs" to every vital sign,
 so a respirations Observation reaches Suggest described as "Vital signs". Its
@@ -10,10 +10,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from omop_core.mapping import source_metadata
-from omop_core.mapping.suggestion_context import build_source_context, candidate_context
-from omop_core.models import (
-    ConceptRelationship, PatientSourceCode, Relationship, SourceCodeConceptMapping,
-)
+from omop_core.mapping.suggestion_context import build_source_context
+from omop_core.models import PatientSourceCode, SourceCodeConceptMapping
 from omop_core.services.mapping_suggestions import suggest_mappings, suggest_one_mapping
 from tests.factories import (
     ConceptClassFactory, ConceptFactory, DomainFactory, PersonFactory, VocabularyFactory,
@@ -127,107 +125,6 @@ class TestSummarize:
         assert 'Respirations' in dumped
 
 
-class TestSearchTexts:
-    def test_the_one_name(self):
-        summary = source_metadata.summarize([RESPIRATIONS])
-        assert source_metadata.search_texts(
-            summary, description='Vital signs', source_code='9',
-        ) == ['Respirations']
-
-    def test_several_names_search_none(self):
-        """Searching one of several would steer the pool toward it."""
-        assert source_metadata.search_texts({'texts': ['Blood Pressure', 'Respirations']}) == []
-
-    def test_already_the_description(self):
-        assert source_metadata.search_texts(
-            {'texts': ['Respirations']}, description='respirations') == []
-
-
-class TestGather:
-    def test_mapping_then_patient_rows(self):
-        person_a, person_b = PersonFactory(), PersonFactory()
-        for person, text in ((person_a, 'Respirations'), (person_b, 'Respirations')):
-            PatientSourceCode.objects.create(
-                person=person, source_value='9', source_vocabulary_id=EPIC,
-                omop_table='measurement', source_metadata={'text': [text]},
-            )
-        other = PersonFactory()
-        PatientSourceCode.objects.create(
-            person=other, source_value='9', source_vocabulary_id='OTHER',
-            omop_table='measurement', source_metadata={'text': ['Something else']},
-        )
-        found = source_metadata.gather(
-            source_code='9', source_vocabulary_id=EPIC, omop_table='measurement',
-            mapping_metadata={'patients': 12},
-        )
-        # Identical patient rows collapse; another vocabulary's code "9" is not this one.
-        assert found == [{'patients': 12}, {'text': ['Respirations']}]
-
-    def test_at_most_five_patient_rows(self):
-        for i in range(8):
-            PatientSourceCode.objects.create(
-                person=PersonFactory(), source_value='9', source_vocabulary_id=EPIC,
-                omop_table='measurement', source_metadata={'text': [f'T{i}']},
-            )
-        found = source_metadata.gather(
-            source_code='9', source_vocabulary_id=EPIC, omop_table='measurement')
-        assert len(found) == source_metadata.MAX_METADATA_ROWS
-
-    def test_table_aliases(self):
-        PatientSourceCode.objects.create(
-            person=PersonFactory(), source_value='I10', source_vocabulary_id='ICD10CM',
-            omop_table='condition_occurrence', source_metadata={'text': ['Hypertension']},
-        )
-        assert source_metadata.gather(
-            source_code='I10', source_vocabulary_id='ICD10CM', omop_table='condition',
-        ) == [{'text': ['Hypertension']}]
-
-
-class TestCodedCandidates:
-    def test_standard_coding_is_a_candidate(self, loinc):
-        summary = source_metadata.summarize([RESPIRATIONS])
-        hits = source_metadata.coded_candidates(
-            summary, 'Measurement', source_vocabulary_id=EPIC, source_code='9',
-        )
-        by_id = {hit['concept_id']: hit for hit in hits}
-        # Both LOINC codings on the resource; the Epic and Finnish OIDs are not
-        # vocabularies we hold.
-        assert set(by_id) == {3024171, 3036277}
-        assert by_id[3024171]['retrieval'] == 'metadata'
-        assert by_id[3024171]['metadata_coding']['display'] == 'Respiratory rate'
-        assert candidate_context(by_id[3024171])['source_metadata_coding']['code'] == '9279-1'
-
-    def test_own_code_is_skipped(self, loinc):
-        summary = source_metadata.summarize([RESPIRATIONS])
-        hits = source_metadata.coded_candidates(
-            summary, 'Measurement', source_vocabulary_id='LOINC', source_code='8716-3',
-        )
-        assert [hit['concept_id'] for hit in hits] == [3024171]
-
-    def test_domain_is_respected(self, loinc):
-        summary = source_metadata.summarize([RESPIRATIONS])
-        assert source_metadata.coded_candidates(summary, 'Condition') == []
-
-    def test_nonstandard_code_follows_maps_to(self, loinc):
-        retired = ConceptFactory(
-            concept_id=40000001, concept_name='Old respirations', concept_code='OLD-1',
-            vocabulary=loinc['vocabulary'], domain=loinc['domain'],
-            concept_class=loinc['class'], standard_concept='',
-        )
-        maps_to = Relationship.objects.create(
-            relationship_id='Maps to', relationship_name='Maps to', is_hierarchical=0,
-            defines_ancestry=0, reverse_relationship_id='Mapped from', relationship_concept_id=0,
-        )
-        ConceptRelationship.objects.create(
-            concept_1=retired, concept_2=loinc['respiratory_rate'], relationship=maps_to,
-            valid_start_date='2000-01-01', valid_end_date='2099-12-31',
-        )
-        summary = {'codings': [{'system': 'http://loinc.org', 'code': 'OLD-1', 'display': ''}]}
-        hits = source_metadata.coded_candidates(summary, 'Measurement')
-        assert [hit['concept_id'] for hit in hits] == [3024171]
-        assert hits[0]['metadata_coding']['code'] == 'OLD-1'
-
-
 def test_context_carries_the_summary_only_when_there_is_one():
     args = dict(source_code='9', vocabulary_id=EPIC, description='Vital signs',
                 source_concept=None, umls_name='', domain_id='Measurement',
@@ -240,7 +137,10 @@ def test_context_carries_the_summary_only_when_there_is_one():
 def _no_text_retrieval(monkeypatch, searched):
     def lexical(text, domain_id, limit=None):
         searched.append(('lexical', text))
-        return []
+        return [{'concept_id': 3024171, 'concept_name': 'Respiratory rate',
+                 'concept_code': '9279-1', 'vocabulary_id': 'LOINC',
+                 'concept_class_id': 'Clinical Observation', 'domain_id': 'Measurement',
+                 'retrieval': 'lexical', 'lexical_score': 0.4}]
 
     def semantic(text, domain_id, limit=None):
         searched.append(('vectors', text))
@@ -251,54 +151,111 @@ def _no_text_retrieval(monkeypatch, searched):
     monkeypatch.setattr('omop_core.mapping.suggestions.umls_candidates', lambda *a: ([], None))
 
 
-def test_dialog_suggest_uses_patient_metadata(loinc, monkeypatch):
-    PatientSourceCode.objects.create(
-        person=PersonFactory(), source_value='9', source_vocabulary_id=EPIC,
-        omop_table='measurement', source_metadata=RESPIRATIONS,
-    )
-    searched, ranked = [], {}
-    _no_text_retrieval(monkeypatch, searched)
-
-    def rank(source_value, candidates, source_description='', **kwargs):
-        ranked.update(candidates=candidates, context=kwargs['source_context'])
-        return next(c for c in candidates if c['concept_id'] == 3024171), 'high confidence: rr', []
-
-    monkeypatch.setattr('omop_core.mapping.suggestions.rank_candidates', rank)
-    result = suggest_one_mapping('9', EPIC, 'measurement', source_description='Vital signs')
-
-    assert ('lexical', 'Respirations') in searched
-    assert ('vectors', 'Respirations') in searched
-    assert ranked['context']['original_description'] == 'Vital signs'
-    assert ranked['context']['source_metadata']['texts'] == ['Respirations']
-    assert result['suggested']['concept_id'] == 3024171
-    assert result['strategy_used'] == 'metadata'
-
-
-def test_batch_suggest_uses_queue_and_patient_metadata(loinc, monkeypatch):
-    mapping = SourceCodeConceptMapping.objects.create(
-        source_code='9', source_vocabulary_id=EPIC, omop_table='measurement',
-        domain_id='Measurement', status='proposed', source_code_description='Vital signs',
-        occurrence_count=10, source_metadata={'patients': 3, 'value_types': {'quantity': 100.0}},
-    )
-    PatientSourceCode.objects.create(
-        person=PersonFactory(), source_value='9', source_vocabulary_id=EPIC,
-        omop_table='measurement', source_metadata=RESPIRATIONS,
-    )
-    searched, contexts = [], []
-    _no_text_retrieval(monkeypatch, searched)
-
+def _ranker(monkeypatch, contexts):
     def rank(source_value, candidates, source_description='', **kwargs):
         contexts.append(kwargs['source_context'])
-        return next(c for c in candidates if c['concept_id'] == 3024171), 'high confidence: rr', []
+        return candidates[0], 'high confidence: rr', []
 
     monkeypatch.setattr('omop_core.mapping.suggestions.rank_candidates', rank)
-    suggest_mappings('measurement', min_occurrences=1)
 
-    assert contexts[0]['source_metadata']['other'] == {'value_types': {'quantity': 100.0}}
+
+def test_dialog_metadata_reaches_the_ranker_and_retrieval_is_unchanged(loinc, monkeypatch):
+    searched, contexts = [], []
+    _no_text_retrieval(monkeypatch, searched)
+    _ranker(monkeypatch, contexts)
+    result = suggest_one_mapping('9', EPIC, 'measurement', source_description='Vital signs',
+                                 row_metadata=RESPIRATIONS)
+
+    # Retrieval searches the description only, once per strategy (#1786).
+    assert searched == [('lexical', 'Vital signs'), ('vectors', 'Vital signs')]
+    assert contexts[0]['original_description'] == 'Vital signs'
     assert contexts[0]['source_metadata']['texts'] == ['Respirations']
-    mapping.refresh_from_db()
-    assert mapping.target_concept_id == 3024171
-    assert mapping.suggest_strategy == 'metadata'
+    assert {'system': 'http://loinc.org', 'code': '9279-1', 'display': 'Respiratory rate'} \
+        in contexts[0]['source_metadata']['codings']
+    assert result['strategy_used'] == 'lexical'
+
+
+def test_no_metadata_no_context_key(loinc, monkeypatch):
+    contexts = []
+    _no_text_retrieval(monkeypatch, [])
+    _ranker(monkeypatch, contexts)
+    suggest_one_mapping('9', EPIC, 'measurement', source_description='Vital signs')
+    assert 'source_metadata' not in contexts[0]
+
+
+def test_other_patients_are_never_read(loinc, monkeypatch, django_assert_max_num_queries):
+    """Only the row's own metadata: no patient_source_code lookup (#1786)."""
+    PatientSourceCode.objects.create(
+        person=PersonFactory(), source_value='9', source_vocabulary_id=EPIC,
+        omop_table='measurement', source_metadata=RESPIRATIONS,
+    )
+    contexts = []
+    _no_text_retrieval(monkeypatch, [])
+    _ranker(monkeypatch, contexts)
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+    with CaptureQueriesContext(connection) as queries:
+        suggest_one_mapping('9', EPIC, 'measurement', source_description='Vital signs')
+    assert not any('patient_source_code' in q['sql'] for q in queries.captured_queries)
+    assert 'source_metadata' not in contexts[0]
+
+
+def test_batch_uses_the_rows_own_metadata(loinc, monkeypatch):
+    SourceCodeConceptMapping.objects.create(
+        source_code='9', source_vocabulary_id=EPIC, omop_table='measurement',
+        domain_id='Measurement', status='proposed', source_code_description='Vital signs',
+        occurrence_count=10, source_metadata={**RESPIRATIONS, 'value_types': {'quantity': 100.0}},
+    )
+    contexts = []
+    _no_text_retrieval(monkeypatch, [])
+    _ranker(monkeypatch, contexts)
+    suggest_mappings('measurement', min_occurrences=1)
+    assert contexts[0]['source_metadata']['texts'] == ['Respirations']
+    assert contexts[0]['source_metadata']['other'] == {'value_types': {'quantity': 100.0}}
+
+
+class TestSuggestOneEndpoint:
+    @pytest.fixture(autouse=True)
+    def _client(self, loinc, monkeypatch):
+        from patient_portal.models import Identity
+        from rest_framework.test import APIClient
+
+        self.client = APIClient()
+        self.client.force_authenticate(Identity.objects.create_user(
+            email='meta@test.com', password='pass', is_staff=True))
+        self.contexts = []
+        _no_text_retrieval(monkeypatch, [])
+        _ranker(monkeypatch, self.contexts)
+
+    def _post(self, **extra):
+        return self.client.post('/api/v1/code-mappings/suggest-one/', {
+            'source_code': '9', 'source_vocabulary_id': EPIC, 'omop_table': 'measurement',
+            'source_code_description': 'Vital signs', **extra,
+        }, format='json')
+
+    def test_the_dialogs_metadata_is_used(self):
+        assert self._post(source_metadata=RESPIRATIONS).status_code == 200
+        assert self.contexts[0]['source_metadata']['texts'] == ['Respirations']
+
+    def test_falls_back_to_the_mappings_own(self):
+        SourceCodeConceptMapping.objects.create(
+            source_code='9', source_vocabulary_id=EPIC, omop_table='measurement',
+            status='proposed', source_metadata={'text': ['Respirations']},
+        )
+        assert self._post().status_code == 200
+        assert self.contexts[0]['source_metadata']['texts'] == ['Respirations']
+
+    def test_async_activity_does_not_store_the_metadata(self):
+        from omop_core.models import SuggestRun
+        from omop_core.services.suggest_jobs import (
+            InlineDispatcher, use_dispatcher,
+        )
+        with use_dispatcher(InlineDispatcher()):
+            response = self._post(source_metadata=RESPIRATIONS, **{'async': True})
+        assert response.status_code == 202
+        run = SuggestRun.objects.get(pk=response.data['run_id'])
+        assert 'Patient/' not in str(run.activity) and 'row_metadata' not in str(run.activity)
+        assert self.contexts[0]['source_metadata']['texts'] == ['Respirations']
 
 
 def test_jev_state_names_the_metadata(settings):
@@ -323,41 +280,3 @@ def test_jev_state_names_the_metadata(settings):
     assert 'Vital signs' in state
     assert 'Respirations' in state
     assert '9279-1 Respiratory rate' in state
-
-
-class TestPoolOrder:
-    def _pool(self, monkeypatch, strategies, lexical_hits=()):
-        from omop_core.mapping.suggestions import retrieval_pool
-
-        monkeypatch.setattr('omop_core.mapping.suggestions.lexical_candidates',
-                            lambda *a, **k: [dict(h) for h in lexical_hits])
-        monkeypatch.setattr('omop_core.mapping.suggestions.semantic_candidates', lambda *a, **k: [])
-        monkeypatch.setattr('omop_core.mapping.suggestions.umls_candidates', lambda *a: ([], None))
-        candidates, _, _ = retrieval_pool(
-            source_code='9', source_vocabulary_id=EPIC, source_text='Vital signs',
-            domain_id='Measurement', strategies=strategies,
-            metadata_summary=source_metadata.summarize([RESPIRATIONS]),
-        )
-        return candidates
-
-    def test_codings_go_last(self, loinc, monkeypatch):
-        """A ranker outage falls back to candidates[0]; it must not be a coding."""
-        lexical = {'concept_id': 1, 'concept_name': 'Vital signs panel', 'concept_code': 'X',
-                   'vocabulary_id': 'LOINC', 'concept_class_id': 'Panel',
-                   'retrieval': 'lexical', 'lexical_score': 0.9}
-        pool = self._pool(monkeypatch, ['umls', 'lexical'], [lexical])
-        assert pool[0]['concept_id'] == 1
-        assert {c['concept_id'] for c in pool[1:]} == {3024171, 3036277}
-
-    def test_a_coding_already_in_the_pool_is_annotated(self, loinc, monkeypatch):
-        lexical = {'concept_id': 3024171, 'concept_name': 'Respiratory rate',
-                   'concept_code': '9279-1', 'vocabulary_id': 'LOINC',
-                   'concept_class_id': 'Clinical Observation', 'retrieval': 'lexical'}
-        pool = self._pool(monkeypatch, ['umls', 'lexical'], [lexical])
-        rr = [c for c in pool if c['concept_id'] == 3024171]
-        assert len(rr) == 1
-        assert rr[0]['retrieval'] == 'lexical'
-        assert rr[0]['metadata_coding']['code'] == '9279-1'
-
-    def test_codings_need_umls_enabled(self, loinc, monkeypatch):
-        assert self._pool(monkeypatch, ['lexical', 'vectors']) == []

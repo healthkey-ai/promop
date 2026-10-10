@@ -409,6 +409,8 @@ export default function EditMappingDialog({
       const { data: started } = await api.post<SuggestRunProgress>("/v1/code-mappings/suggest-one/", {
         source_code: form.source_code, source_vocabulary_id: form.source_vocabulary_id,
         source_code_description: form.source_code_description, omop_table: form.omop_table,
+        // The Source Metadata shown below the description: context for the rankers.
+        source_metadata: selectedRow?.source_metadata || undefined,
         strategies: enabled, ranking_model: rankingModel, async: true,
       });
       let current = started;
@@ -450,7 +452,7 @@ export default function EditMappingDialog({
         setIndividualSuggestion(cur => cur?.request === request ? { ...cur, running: false } : cur);
       }
     }
-  }, [strategies, rankingModel, form.source_code, form.source_vocabulary_id, form.source_code_description, form.omop_table, applyConcept]);
+  }, [strategies, rankingModel, form.source_code, form.source_vocabulary_id, form.source_code_description, form.omop_table, selectedRow?.source_metadata, applyConcept]);
 
   const submitForm = useCallback(async (event: React.FormEvent) => {
     event.preventDefault();

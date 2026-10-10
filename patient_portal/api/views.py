@@ -12795,6 +12795,13 @@ def code_mapping_suggest_one(request):
         'source_vocabulary_id': source_vocabulary_id,
         'omop_table': omop_table,
         'source_description': str(request.data.get('source_code_description') or ''),
+        # The dialog's Source Metadata, else the mapping's own: ranker context only.
+        'row_metadata': (
+            request.data.get('source_metadata')
+            if isinstance(request.data.get('source_metadata'), dict)
+            and request.data.get('source_metadata')
+            else (existing.source_metadata if existing else None)
+        ),
         'strategies': strategies,
         'lexical_limit': lexical_limit,
         'ranking_model': ranking_model,

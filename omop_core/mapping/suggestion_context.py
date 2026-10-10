@@ -126,5 +126,4 @@ def candidate_context(candidate):
         'shared_umls_cuis': candidate.get('umls_cuis', [])[:MAX_EVIDENCE_ITEMS],
         'source_relationships': candidate.get('source_relationships', [])[:MAX_EVIDENCE_ITEMS],
         'generated_search_query': candidate.get('generated_search_query'),
-        'source_metadata_coding': candidate.get('metadata_coding'),
     }
