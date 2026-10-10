@@ -891,7 +891,9 @@ export default function EditMappingDialog({
                     onChange={(e) => setField("destination_concept_id", e.target.value)}
                     onBlur={(e) => void resolveConceptId(e.target.value)}
                     min={1}
-                    required={isNewMapping}
+                    // Optional only while the row has no destination: clearing an
+                    // existing one is not a way to remove it, so it stays required.
+                    required={isNewMapping || Boolean(selectedRow?.destination_concept_id)}
                     className={`${INPUT_CLASS} font-mono`}
                   />
                 </Field>

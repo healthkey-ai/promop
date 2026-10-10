@@ -38,11 +38,16 @@ def test_retrieval_never_offers_concept_zero(monkeypatch):
                         lambda *a, **k: [_hit(0, 'No matching concept'), _hit(3024171, 'Respiratory rate')])
     monkeypatch.setattr('omop_core.mapping.suggestions.semantic_candidates',
                         lambda *a, **k: [{**_hit(0, 'No matching concept'), 'semantic_score': 0.8}])
+    reported = []
     candidates, _, _ = retrieval_pool(
         source_code='RR', source_vocabulary_id='', source_text='respirations',
         domain_id='Measurement', strategies=['umls', 'lexical', 'vectors'],
+        on_candidates=lambda strategy, hits: reported.extend(h['concept_id'] for h in hits),
     )
     assert [c['concept_id'] for c in candidates] == [3024171]
+    # The streamed candidate table never offers it either.
+    assert 0 not in reported
+    assert reported == [3024171]
 
 
 def test_batch_suggest_leaves_the_code_unmapped_when_only_zero_fits(concepts, monkeypatch):
@@ -73,7 +78,7 @@ class TestApi:
         self.client.force_authenticate(Identity.objects.create_user(email='zero@test.com', is_staff=True))
 
     @pytest.mark.parametrize('key', ['destination_concept_id', 'target_concept_id', 'concept_id'])
-    @pytest.mark.parametrize('zero', [0, '0'])
+    @pytest.mark.parametrize('zero', [0, '0', '00', ' 0 '])
     def test_creating_with_zero_is_refused(self, key, zero):
         response = self.client.post('/api/v1/code-mappings/', {
             'source_vocabulary_id': 'LOINC', 'source_code': '9279-1', 'domain_id': 'Measurement',
@@ -95,3 +100,18 @@ class TestApi:
         mapping.refresh_from_db()
         assert mapping.target_concept_id is None
         assert mapping.notes == 'needs a curator'
+
+    @pytest.mark.parametrize('zero', [0, '0', '00'])
+    def test_patching_to_zero_is_refused_not_silently_ignored(self, concepts, zero):
+        _, rr = concepts
+        mapping = SourceCodeConceptMapping.objects.create(
+            source_code='RR', source_vocabulary_id='', omop_table='measurement',
+            domain_id='Measurement', status='proposed', target_concept=rr,
+        )
+        response = self.client.patch(f'/api/v1/code-mappings/{mapping.pk}/', {
+            'destination_concept_id': zero,
+        }, format='json')
+        assert response.status_code == 400
+        assert 'No matching concept' in str(response.data)
+        mapping.refresh_from_db()
+        assert mapping.target_concept_id == rr.pk

@@ -11402,20 +11402,33 @@ def _clean_required(data, field_name):
     return value
 
 
+def _refuse_no_match_destination(data):
+    """400 when any destination key names concept 0 ("No matching concept").
+
+    By value, so "00" counts, and on PATCH as well as POST: a PATCH reads 0 as
+    falsy and would otherwise keep the old destination and report success.
+    """
+    for key in ('destination_concept_id', 'target_concept_id', 'concept_id'):
+        value = data.get(key)
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            is_zero = int(str(value).strip()) == 0
+        except ValueError:
+            continue
+        if is_zero:
+            raise serializers.ValidationError({'target_concept_id': (
+                'Concept 0 means "No matching concept" and cannot be a destination. '
+                'Leave the destination empty to keep the code unmapped.'
+            )})
+
+
 def _parse_destination_concept_id(data):
     # destination_concept_id is the current name; the other two are the
     # pre-#834 spellings, kept so existing callers keep working.
     raw = (data.get('destination_concept_id') or data.get('target_concept_id')
            or data.get('concept_id'))
-    if str(raw).strip() == '0' or any(
-        str(data.get(key)).strip() == '0'
-        for key in ('destination_concept_id', 'target_concept_id', 'concept_id')
-    ):
-        # Concept 0 is OMOP's "No matching concept": not a destination.
-        raise serializers.ValidationError({'target_concept_id': (
-            'Concept 0 means "No matching concept" and cannot be a destination. '
-            'Leave the destination empty to keep the code unmapped.'
-        )})
+    _refuse_no_match_destination(data)
     try:
         concept_id = int(raw)
     except (TypeError, ValueError):
@@ -12416,6 +12429,7 @@ def code_mapping_detail(request, mapping_id):
     except MappingLocked as exc:
         return exc.as_response()
     data = request.data
+    _refuse_no_match_destination(data)
     concept = (
         _get_destination_concept(data)
         if (data.get('destination_concept_id') or data.get('target_concept_id') or data.get('concept_id'))

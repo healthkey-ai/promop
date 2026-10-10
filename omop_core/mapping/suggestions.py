@@ -1298,6 +1298,15 @@ def _rank_both(source_value, candidates, source_description, **kwargs):
     return winner, note, combined_alts, ranking_timings
 
 
+def _without_no_match(hits):
+    """Drop concept 0, OMOP's "No matching concept": never a destination.
+
+    Applied to each search's hits before they are reported, so the curator's
+    candidate table never offers it either. A code nothing fits stays unmapped.
+    """
+    return [hit for hit in hits if hit.get('concept_id')]
+
+
 def retrieval_pool(*, source_code, source_vocabulary_id, source_text, domain_id,
                    strategies, lexical_limit=CANDIDATE_LIMIT, on_candidates=None):  # noqa: C901
     """Candidates for one source code, in the order the ranker should see them.
@@ -1331,6 +1340,7 @@ def retrieval_pool(*, source_code, source_vocabulary_id, source_text, domain_id,
 
     if STRATEGY_UMLS in strategies:
         umls_hits, umls_cui = umls_candidates(source_code, source_vocabulary_id, domain_id)
+        umls_hits = _without_no_match(umls_hits)
         definitive = len(umls_hits) == 1
         candidates = list(umls_hits)
         report(STRATEGY_UMLS, umls_hits)
@@ -1340,7 +1350,8 @@ def retrieval_pool(*, source_code, source_vocabulary_id, source_text, domain_id,
         # UMLS hits stay ahead of lexical ones and are never displaced by a
         # lexical duplicate: a curated equivalency outranks a string overlap,
         # and its umls_score is the evidence the ranker's prompt shows.
-        lexical_hits = lexical_candidates(source_text or source_code, domain_id, limit=lexical_limit)
+        lexical_hits = _without_no_match(
+            lexical_candidates(source_text or source_code, domain_id, limit=lexical_limit))
         report(STRATEGY_LEXICAL, lexical_hits)
         candidates += [hit for hit in lexical_hits if hit['concept_id'] not in seen]
 
@@ -1349,7 +1360,7 @@ def retrieval_pool(*, source_code, source_vocabulary_id, source_text, domain_id,
         # Always search when enabled, even if lexical returned plausible hits:
         # the correct concept can still be absent from that shortlist.
         by_id = {c['concept_id']: c for c in candidates}
-        semantic_hits = semantic_candidates(source_text or source_code, domain_id)
+        semantic_hits = _without_no_match(semantic_candidates(source_text or source_code, domain_id))
         report(STRATEGY_VECTORS, semantic_hits)
         for hit in semantic_hits:
             existing = by_id.get(hit['concept_id'])
@@ -1361,9 +1372,6 @@ def retrieval_pool(*, source_code, source_vocabulary_id, source_text, domain_id,
                 candidates.append(hit)
                 by_id[hit['concept_id']] = hit
 
-    # Concept 0 is OMOP's "No matching concept". It is never a destination:
-    # a code nothing fits stays unmapped rather than mapped to 0.
-    candidates = [c for c in candidates if c.get('concept_id')]
     return candidates, umls_cui, definitive
 
 

@@ -8,7 +8,7 @@ vi.mock("../../hooks/useAuth", () => ({
 
 const sourceCodes = {
   person_id: 48095,
-  summary: { total: 2, unmapped: 1, proposed: 1, approved: 0 },
+  summary: { total: 3, unmapped: 1, proposed: 2, approved: 0 },
   source_codes: [{
     source_value: "8716-3",
     omop_table: "measurement",
@@ -42,6 +42,23 @@ const sourceCodes = {
     example_quantity: "",
     source_metadata: {},
     source_code_description: "Respirations",
+  }, {
+    // Proposed with a destination already.
+    source_value: "8867-4",
+    omop_table: "measurement",
+    concept_id: 0,
+    concept_name: null,
+    row_count: 1,
+    mapping_id: 78,
+    mapping_status: "proposed",
+    mapping_target_concept_id: 3027018,
+    mapping_target_concept_name: "Heart rate",
+    source_vocabulary_id: "LOINC",
+    source_code: "8867-4",
+    source_unit: "",
+    example_quantity: "",
+    source_metadata: {},
+    source_code_description: "Pulse",
   }],
 };
 
@@ -78,5 +95,13 @@ describe("PatientSourceCodesTab missing destination", () => {
     expect(field).not.toHaveValue(0);
     // Saving notes or a rejection must not demand a destination.
     expect(field).not.toBeRequired();
+  });
+
+  it("keeps an existing destination required, so clearing it cannot pass as a change", async () => {
+    render(<PatientSourceCodesTab personId="48095" />);
+    fireEvent.click(await screen.findByText("Pulse"));
+    const field = await screen.findByLabelText(/Destination Concept ID/);
+    expect(field).toHaveValue(3027018);
+    expect(field).toBeRequired();
   });
 });
