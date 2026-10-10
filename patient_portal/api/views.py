@@ -7027,13 +7027,25 @@ def _resolve_source_code_mappings(
 
     for table_key, rows in rows_by_table.items():
         source_values = [r['source_value'] for r in rows]
-        mapping_by_sv: dict[str, SourceCodeConceptMapping] = {}
+        # One row per code, only the columns the response uses. A code matches
+        # several mappings (one per org and source vocabulary), and hydrating
+        # them all as models with their joins cost ~4s at a few thousand codes
+        # (#1789). Lowest id wins, so the choice no longer depends on the plan.
+        mapping_by_sv: dict[str, dict] = {}
         for m in (
             SourceCodeConceptMapping.objects
             .filter(source_code__in=source_values, omop_table=table_key)
-            .select_related('target_concept', 'created_by')
+            .order_by('source_code', 'id')
+            .distinct('source_code')
+            .values(
+                'id', 'status', 'source_vocabulary_id', 'source_code',
+                'source_code_description', 'origin', 'origin_system',
+                'created_by__email', 'target_concept_id',
+                'target_concept__concept_name', 'target_concept__concept_code',
+                'target_concept__vocabulary_id', 'destination_vocabulary_id',
+            )
         ):
-            key = m.source_code.lower()
+            key = m['source_code'].lower()
             if key not in mapping_by_sv:
                 mapping_by_sv[key] = m
 
@@ -7059,35 +7071,28 @@ def _resolve_source_code_mappings(
                 # The starting value for the edit dialog: the curator's own
                 # description when the mapping has one, else the source's.
                 'source_code_description': (
-                    (mapping.source_code_description if mapping else '')
+                    (mapping['source_code_description'] if mapping else '')
                     or _source_metadata_description(row.get('source_metadata'))
                 ),
             }
 
             if mapping:
-                entry['mapping_id'] = mapping.id
-                entry['mapping_status'] = mapping.status
-                entry['source_vocabulary_id'] = mapping.source_vocabulary_id or ''
-                entry['source_code'] = mapping.source_code
-                entry['mapping_origin'] = mapping.origin or ''
-                entry['mapping_origin_system'] = mapping.origin_system or ''
-                entry['mapping_created_by'] = (
-                    mapping.created_by.email if mapping.created_by_id else ''
-                )
-                if mapping.target_concept_id:
-                    entry['mapping_target_concept_id'] = mapping.target_concept_id
-                    entry['mapping_target_concept_name'] = (
-                        mapping.target_concept.concept_name
-                        if mapping.target_concept else None
-                    )
+                entry['mapping_id'] = mapping['id']
+                entry['mapping_status'] = mapping['status']
+                entry['source_vocabulary_id'] = mapping['source_vocabulary_id'] or ''
+                entry['source_code'] = mapping['source_code']
+                entry['mapping_origin'] = mapping['origin'] or ''
+                entry['mapping_origin_system'] = mapping['origin_system'] or ''
+                entry['mapping_created_by'] = mapping['created_by__email'] or ''
+                if mapping['target_concept_id']:
+                    entry['mapping_target_concept_id'] = mapping['target_concept_id']
+                    entry['mapping_target_concept_name'] = mapping['target_concept__concept_name']
                     entry['mapping_destination_concept_code'] = (
-                        mapping.target_concept.concept_code
-                        if mapping.target_concept else ''
+                        mapping['target_concept__concept_code'] or ''
                     )
                     entry['mapping_destination_vocabulary_id'] = (
-                        mapping.destination_vocabulary_id
-                        or (mapping.target_concept.vocabulary_id
-                            if mapping.target_concept else '')
+                        mapping['destination_vocabulary_id']
+                        or mapping['target_concept__vocabulary_id'] or ''
                     )
 
             results.append(entry)
