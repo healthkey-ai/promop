@@ -16,7 +16,8 @@ MAX_CONTEXT_TEXT = 512
 
 
 def build_source_context(*, source_code, vocabulary_id, description,
-                         source_concept, umls_name, domain_id, omop_table):
+                         source_concept, umls_name, domain_id, omop_table,
+                         source_metadata=None):
     """Keep independently sourced labels, including disagreements between them."""
     concept = None if source_concept is None else {
         'concept_id': source_concept.pk,
@@ -26,7 +27,7 @@ def build_source_context(*, source_code, vocabulary_id, description,
         'domain_id': source_concept.domain_id,
         'invalid_reason': source_concept.invalid_reason,
     }
-    return {
+    context = {
         'code': source_code,
         'vocabulary_id': vocabulary_id or None,
         'original_description': (description or '')[:MAX_CONTEXT_TEXT],
@@ -35,6 +36,10 @@ def build_source_context(*, source_code, vocabulary_id, description,
         'expected_domain': domain_id or None,
         'omop_table': omop_table or None,
     }
+    if source_metadata:
+        # What the sending system attached: names, codings, category (#1782).
+        context['source_metadata'] = source_metadata
+    return context
 
 
 def enrich_candidates(candidates, query, source_concept_id, *, min_similarity):
@@ -121,4 +126,5 @@ def candidate_context(candidate):
         'shared_umls_cuis': candidate.get('umls_cuis', [])[:MAX_EVIDENCE_ITEMS],
         'source_relationships': candidate.get('source_relationships', [])[:MAX_EVIDENCE_ITEMS],
         'generated_search_query': candidate.get('generated_search_query'),
+        'source_metadata_coding': candidate.get('metadata_coding'),
     }
