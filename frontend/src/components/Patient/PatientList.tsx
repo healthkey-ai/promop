@@ -1,7 +1,7 @@
 import PageTitle from '@/components/Branding/PageTitle';
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { Upload, Trash2, LogOut, Settings, Globe, RefreshCw } from "lucide-react";
+import { Upload, Trash2, LogOut, Settings, Globe, RefreshCw, Download } from "lucide-react";
 import api from "@/api/axios";
 import { useAuth, type User } from "@/hooks/useAuth";
 import type { ResolveRunStatus } from "@/types/sourceCodes";
@@ -102,6 +102,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   const [selectAllMode, setSelectAllMode] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const [resolveDialogOpen, setResolveDialogOpen] = useState(false);
   const [resolveRun, setResolveRun] = useState<ResolveRunStatus | null>(null);
   const resolvePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -251,6 +252,42 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
     }
   };
 
+  const handleDownloadCsv = async () => {
+    try {
+      setDownloading(true);
+      const params = selectAllMode
+        ? { org: orgFilter, search, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters, ordering }
+        : { person_ids: Array.from(selectedIds).join(",") };
+      const response = await api.get<Blob>("/v1/patient-records/export-csv/", { params, responseType: "blob" });
+      const disposition = String(response.headers?.["content-disposition"] ?? "");
+      const filename = /filename="([^"]+)"/.exec(disposition)?.[1] ?? "patients.csv";
+      const url = URL.createObjectURL(response.data);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setError(null);
+    } catch (err) {
+      // With responseType "blob" the error body arrives as a Blob too.
+      const data = (err as { response?: { data?: unknown } })?.response?.data;
+      let message = "Failed to download patients";
+      if (data instanceof Blob) {
+        try {
+          const parsed = JSON.parse(await data.text()) as { error?: string; detail?: string };
+          message = parsed.error || parsed.detail || message;
+        } catch { /* not JSON */ }
+      } else {
+        message = getErrorMessage(err, message);
+      }
+      setError(message);
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   const formatDate = (dateString?: string | null) => {
     if (!dateString) return "Not recorded";
     try {
@@ -305,6 +342,14 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                   Generate OMOP ({selectedIds.size})
                 </button>
               )}
+              <button
+                onClick={() => void handleDownloadCsv()}
+                disabled={downloading}
+                className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+              >
+                <Download size={16} />
+                {downloading ? "Downloading…" : `Download CSV (${selectAllMode ? `All ${patientCount}` : selectedIds.size})`}
+              </button>
             </>
           )}
           {canManageMappings && (

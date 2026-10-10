@@ -30246,3 +30246,122 @@ class SourceCodeReplaceTest(_SmartBase):
         )
         self.assertIn(resp.status_code, [200, 201])
         self.assertEqual(resp.json()['deleted'], 0)
+
+
+# ---------------------------------------------------------------------------
+# export-csv Tests
+# ---------------------------------------------------------------------------
+
+class PatientExportCsvTest(TestCase):
+    """GET /api/v1/patient-records/export-csv/ — full PatientRecord rows as CSV."""
+
+    URL = '/api/v1/patient-records/export-csv/'
+
+    def setUp(self):
+        from oauth2_provider.models import Application, AccessToken
+        from omop_core.models import Organization, ApplicationOrganization
+        from django.utils import timezone as tz
+        import datetime
+
+        self.org_a = Organization.objects.create(name='CSV Org A', slug='csv-org-a')
+        self.org_b = Organization.objects.create(name='CSV Org B', slug='csv-org-b')
+        self.p1 = Person.objects.create(person_id=9101, given_name='Ada', family_name='Lovelace')
+        self.p2 = Person.objects.create(person_id=9102, given_name='Bea', family_name='Bee')
+        self.p3 = Person.objects.create(person_id=9103, given_name='Cy', family_name='Other')
+        PatientRecord.objects.create(person=self.p1, organization=self.org_a, disease='Breast Cancer')
+        PatientRecord.objects.create(person=self.p2, organization=self.org_a, disease='=HYPERLINK("x")')
+        PatientRecord.objects.create(person=self.p3, organization=self.org_b, disease='Breast Cancer')
+
+        self.staff = Identity.objects.create_user(email='csv_staff@t.com', password='x', is_staff=True)
+        user_a = Identity.objects.create_user(email='csv_svc_a@t.com', password='x')
+        app_a = Application.objects.create(
+            name='CSV Org A App', client_id='csv-org-a-client',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS, user=user_a,
+        )
+        ApplicationOrganization.objects.create(application=app_a, organization=self.org_a)
+        self.read_token_a = AccessToken.objects.create(
+            user=user_a, application=app_a, token='csv-org-a-read-token',
+            expires=tz.now() + datetime.timedelta(hours=1), scope='patient/*.read',
+        )
+
+    def _rows(self, resp):
+        import csv as _csv
+        import io
+        return list(_csv.DictReader(io.StringIO(resp.content.decode('utf-8'))))
+
+    def test_selected_ids_export_full_records(self):
+        client = APIClient()
+        client.force_authenticate(user=self.staff)
+        resp = client.get(self.URL, {'person_ids': '9101,9103'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp['Content-Type'].startswith('text/csv'))
+        self.assertIn('attachment; filename="patients_', resp['Content-Disposition'])
+        rows = self._rows(resp)
+        self.assertEqual([r['person_id'] for r in rows], ['9101', '9103'])
+        # Full record: serializer columns, not just the list summary.
+        self.assertIn('disease', rows[0])
+        self.assertIn('lines_of_therapy', rows[0])
+        self.assertEqual(rows[0]['disease'], 'Breast Cancer')
+        # Nested values are written as JSON.
+        self.assertIsInstance(json.loads(rows[0]['lines_of_therapy']), list)
+
+    def test_formula_text_is_neutralised(self):
+        client = APIClient()
+        client.force_authenticate(user=self.staff)
+        rows = self._rows(client.get(self.URL, {'person_ids': '9102'}))
+        self.assertEqual(rows[0]['disease'], '\'=HYPERLINK("x")')
+
+    def test_org_token_cannot_export_other_org(self):
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.read_token_a.token}')
+        rows = self._rows(client.get(self.URL, {'person_ids': '9101,9102,9103'}))
+        self.assertEqual(sorted(r['person_id'] for r in rows), ['9101', '9102'])
+
+    def test_user_without_access_gets_header_only(self):
+        outsider = Identity.objects.create_user(email='csv_outsider@t.com', password='x')
+        client = APIClient()
+        client.force_authenticate(user=outsider)
+        resp = client.get(self.URL, {'person_ids': '9101'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._rows(resp), [])
+
+    def test_filters_select_rows_without_ids(self):
+        client = APIClient()
+        client.force_authenticate(user=self.staff)
+        rows = self._rows(client.get(self.URL, {'disease': 'Breast Cancer', 'search': ''}))
+        self.assertEqual(sorted(r['person_id'] for r in rows if r['person_id'] in {'9101', '9102', '9103'}),
+                         ['9101', '9103'])
+
+    def test_invalid_ids_rejected(self):
+        client = APIClient()
+        client.force_authenticate(user=self.staff)
+        self.assertEqual(client.get(self.URL, {'person_ids': '9101,abc'}).status_code, 400)
+        self.assertEqual(client.get(self.URL, {'person_ids': ','}).status_code, 400)
+
+    def test_too_many_ids_rejected(self):
+        client = APIClient()
+        client.force_authenticate(user=self.staff)
+        ids = ','.join(str(i) for i in range(1, 1003))
+        self.assertEqual(client.get(self.URL, {'person_ids': ids}).status_code, 413)
+
+    def test_unauthenticated_rejected(self):
+        resp = APIClient().get(self.URL, {'person_ids': '9101'})
+        self.assertIn(resp.status_code, [401, 403])
+
+    def test_post_not_allowed(self):
+        client = APIClient()
+        client.force_authenticate(user=self.staff)
+        self.assertEqual(client.post(self.URL, {'person_ids': '9101'}).status_code, 405)
+
+
+class CsvCellTest(TestCase):
+    def test_cell_conversion(self):
+        from patient_portal.api.views import _csv_cell
+        self.assertEqual(_csv_cell(None), '')
+        self.assertEqual(_csv_cell(True), 'true')
+        self.assertEqual(_csv_cell(['a', 1]), '["a", 1]')
+        self.assertEqual(_csv_cell('=SUM(A1)'), "'=SUM(A1)")
+        self.assertEqual(_csv_cell('@cmd'), "'@cmd")
+        self.assertEqual(_csv_cell('-1.50'), '-1.50')
+        self.assertEqual(_csv_cell(3.2), 3.2)

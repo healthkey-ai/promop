@@ -168,3 +168,43 @@ it('links the logo beside Patients to the system home', async () => {
   fireEvent.click(logo);
   expect(screen.getByText('System home')).toBeInTheDocument();
 });
+
+it('downloads the selected patients as CSV', async () => {
+  const csv = new Blob(['person_id\n7\n'], { type: 'text/csv' });
+  vi.mocked(api.get).mockImplementation(async (url: string) => (url === '/v1/patient-records/export-csv/'
+    ? { data: csv, headers: { 'content-disposition': 'attachment; filename="patients_2026-10-10.csv"' } }
+    : { data: cohort }));
+  const createObjectURL = vi.fn(() => 'blob:csv');
+  const revokeObjectURL = vi.fn();
+  Object.assign(URL, { createObjectURL, revokeObjectURL });
+  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
+  await screen.findByText('Recorded regimen');
+  expect(screen.queryByRole('button', { name: /Download CSV/ })).not.toBeInTheDocument();
+  fireEvent.click(screen.getAllByRole('checkbox')[1]);
+  const download = screen.getByRole('button', { name: 'Download CSV (1)' });
+  expect(download).toHaveClass('bg-primary');
+  fireEvent.click(download);
+  await waitFor(() => expect(api.get).toHaveBeenCalledWith('/v1/patient-records/export-csv/',
+    { params: { person_ids: '7' }, responseType: 'blob' }));
+  await waitFor(() => expect(click).toHaveBeenCalled());
+  expect(createObjectURL).toHaveBeenCalledWith(csv);
+  expect((click.mock.contexts[0] as HTMLAnchorElement).download).toBe('patients_2026-10-10.csv');
+  click.mockRestore();
+});
+
+it('downloads every matching patient with the list filters when all are selected', async () => {
+  vi.mocked(api.get).mockImplementation(async (url: string) => (url === '/v1/patient-records/export-csv/'
+    ? Promise.reject({ response: { data: new Blob([JSON.stringify({ error: 'At most 1000 patients per export; narrow the filters.' })]) } })
+    : { data: cohort }));
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
+  await screen.findByText('Recorded regimen');
+  fireEvent.change(screen.getByLabelText('ECOG'), { target: { value: '0' } });
+  await screen.findByText('Recorded regimen');
+  fireEvent.click(screen.getAllByRole('checkbox')[0]);
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV (All 30)' }));
+  await waitFor(() => expect(api.get).toHaveBeenCalledWith('/v1/patient-records/export-csv/', expect.objectContaining({
+    params: expect.objectContaining({ ecog: '0', org: 'all' }), responseType: 'blob',
+  })));
+  expect(await screen.findByText(/At most 1000 patients per export/)).toBeInTheDocument();
+});
