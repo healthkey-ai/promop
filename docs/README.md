@@ -185,7 +185,9 @@ supported claim and its limits. Read them together with the delivered architectu
 Staging means Render: **[promop-staging](https://promop-staging.onrender.com)**,
 with the `promop-staging-worker` worker. [Render staging configuration](render-staging-celery.md)
 is the operational guide; [production configuration](render-production-configuration.md)
-covers production startup and environment requirements. [Security settings](security-settings.md),
+covers production startup and environment requirements. To run your own instance on
+Google Cloud, [Using Terraform to Set Up PRomop](terraform/README.md) provides an
+example configuration and walkthrough. [Security settings](security-settings.md),
 [signing-key rotation](signing-key-rotation.md), and [Sentry](sentry.md) cover runtime
 controls and monitoring. The [security remediation plan](promop-security-soc2-remediation-plan.md)
 tracks implemented controls and outstanding operator evidence.
