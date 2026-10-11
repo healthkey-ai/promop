@@ -16,6 +16,13 @@
 # applying: the first apply needs an image in the registry.
 #
 # This is an example to copy and adapt, not a module consumed in place.
+#
+# WARNING — STATE FILE CONTAINS SECRETS
+# This configuration generates SECRET_KEY, AUDIT_HMAC_KEY, EXPORT_SIGNING_KEY,
+# ADMIN_PASSWORD, and DATABASE_URL and writes them into Terraform state in
+# plaintext. Use the GCS backend below — never commit terraform.tfstate to Git.
+# The .gitignore in this directory excludes it, but a shared repo still needs
+# the GCS backend so collaborators and CI read the same state.
 # ==========================================================================
 
 terraform {
@@ -34,7 +41,9 @@ terraform {
 
   # Keep state in a GCS bucket you create once by hand (backend blocks cannot
   # read variables). Without this block state is a local terraform.tfstate,
-  # which holds the generated secrets — keep it out of Git either way.
+  # which holds the generated secrets in plaintext — keep it out of Git either
+  # way (.gitignore in this directory excludes it, but use the backend for
+  # anything shared or long-lived).
   #
   # backend "gcs" {
   #   bucket = "<your-tf-state-bucket>"
@@ -311,8 +320,67 @@ resource "google_sql_user" "promop" {
   password = random_password.db.result
 }
 
+# ---------- PostgreSQL extensions ----------
+# PRomop's migrations create two extensions:
+#   migration 0094 — CREATE EXTENSION pg_trgm   (trigram indexes for concept search)
+#   migration 0204 — CREATE EXTENSION vector     (pgvector for semantic search)
+#
+# On Cloud SQL, CREATE EXTENSION requires the cloudsqlsuperuser role, which is
+# held by the built-in `postgres` user but NOT by the `promop` application user
+# created above. Running the migrate job without pre-enabling these extensions
+# will fail with:
+#
+#   ERROR: permission denied to create extension "pg_trgm"
+#
+# The null_resource below pre-enables both extensions as the postgres user via
+# gcloud sql connect. It runs once on initial creation (Terraform provisioners
+# only run on create, not on subsequent applies).
+#
+# @shpilevoy — this provisioner requires:
+#   1. The `gcloud` CLI is authenticated and has Cloud SQL Admin on the project.
+#   2. The Cloud SQL instance has a public IP (ipv4_enabled = true, as set above)
+#      OR the local machine has access via private IP / Cloud SQL Auth Proxy.
+#   3. The `postgres` user has a password on this instance. Cloud SQL sets a
+#      random one by default; retrieve it with:
+#        gcloud sql users set-password postgres --instance=<instance> --password=<pw>
+#      or set it explicitly by adding a google_sql_user resource for "postgres".
+#
+# Alternative: if you already manage the postgres user's password separately,
+# replace this provisioner with a one-time manual step:
+#   gcloud sql connect <instance> --user=postgres --database=promop
+#   promop=# CREATE EXTENSION IF NOT EXISTS pg_trgm;
+#   promop=# CREATE EXTENSION IF NOT EXISTS vector;
+resource "null_resource" "enable_extensions" {
+  triggers = {
+    instance = google_sql_database_instance.promop.connection_name
+    database = google_sql_database.promop.name
+  }
+
+  provisioner "local-exec" {
+    command = <<-SQL
+      gcloud sql connect ${google_sql_database_instance.promop.name} \
+        --project=${var.project_id} \
+        --user=postgres \
+        --database=${google_sql_database.promop.name} \
+        --quiet \
+        <<'EOF'
+      CREATE EXTENSION IF NOT EXISTS pg_trgm;
+      CREATE EXTENSION IF NOT EXISTS vector;
+      EOF
+    SQL
+  }
+
+  depends_on = [
+    google_sql_database.promop,
+    google_project_service.apis,
+  ]
+}
+
 # ---------- Redis (Celery broker + result backend) ----------
-# No AUTH: private IP only, reachable from the authorized network alone.
+# No AUTH token: the instance is reachable only from the authorized VPC network,
+# so no other service can reach it without being explicitly granted VPC access to
+# this specific network. Any future Cloud Run service that also joins this VPC
+# would be able to reach Redis — add AUTH if you plan to share the VPC.
 resource "google_redis_instance" "promop" {
   name           = "${local.name}-redis"
   region         = var.region
@@ -335,7 +403,9 @@ resource "google_redis_instance" "promop" {
 
 # ---------- Secrets ----------
 # Generated here, so a fresh environment needs no hand-made secrets. They are
-# also in Terraform state, which is why state belongs in a locked-down bucket.
+# also in Terraform state in plaintext, which is why state belongs in a
+# locked-down GCS bucket (see the backend block above) and must never be
+# committed to Git. The .gitignore in this directory excludes terraform.tfstate.
 resource "random_password" "generated" {
   for_each = local.generated_secrets
   length   = 50
@@ -397,7 +467,10 @@ resource "google_cloud_run_v2_service" "promop" {
       max_instance_count = var.max_instances
     }
 
-    # Only so requests can enqueue onto Redis; public egress is unchanged.
+    # PRIVATE_RANGES_ONLY routes RFC1918/RFC6598 addresses through the VPC so
+    # the service can reach Redis. Public IP traffic (Anthropic API, Google
+    # Drive / gdown, loinc.regenstrief.org, etc.) bypasses the VPC and goes
+    # directly to the internet — no NAT gateway is needed.
     vpc_access {
       network_interfaces {
         subnetwork = google_compute_subnetwork.vpc.id
@@ -506,7 +579,10 @@ resource "google_cloud_run_v2_job" "migrate" {
       timeout         = "3600s"
       max_retries     = 0
 
-      # It publishes the Athena sync onto Redis.
+      # PRIVATE_RANGES_ONLY: private traffic goes through the VPC (Redis);
+      # public traffic goes directly to the internet. The release job calls
+      # prepare-deployment.sh, which hits loinc.regenstrief.org to check the
+      # LOINC release — that reaches the internet directly without a NAT gateway.
       vpc_access {
         network_interfaces {
           subnetwork = google_compute_subnetwork.vpc.id
@@ -570,6 +646,9 @@ resource "google_cloud_run_v2_job" "migrate" {
     google_secret_manager_secret_iam_member.run_reads,
     google_secret_manager_secret_version.generated,
     google_secret_manager_secret_version.database_url,
+    # Extensions must exist before the migrate job runs migrations 0094 and 0204,
+    # which call CREATE EXTENSION pg_trgm and CREATE EXTENSION vector respectively.
+    null_resource.enable_extensions,
   ]
 }
 
@@ -587,6 +666,10 @@ resource "google_cloud_run_v2_worker_pool" "worker" {
   template {
     service_account = google_service_account.run.email
 
+    # PRIVATE_RANGES_ONLY: the worker reaches Redis (private) through the VPC
+    # and reaches external services (Anthropic API for Suggest, Google Drive /
+    # gdown for Athena vocabulary downloads, uts-ws.nlm.nih.gov for UMLS) directly
+    # via the internet without a NAT gateway.
     vpc_access {
       network_interfaces {
         subnetwork = google_compute_subnetwork.vpc.id
@@ -646,6 +729,8 @@ resource "google_cloud_run_v2_worker_pool" "worker" {
 
   # A pool cannot see the queue, so it does not autoscale. Instances x
   # CELERY_WORKER_CONCURRENCY database connections count against Cloud SQL.
+  # Cloud Run restarts a worker pool instance automatically on crash or OOM;
+  # Redis redelivers any in-flight task to the restarted instance.
   scaling {
     manual_instance_count = 1
   }
