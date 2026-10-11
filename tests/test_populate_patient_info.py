@@ -61,10 +61,10 @@ def _language_concept(name):
 
 class TestLanguagesSkills:
 
-    def test_no_language_skills_omitted(self):
+    def test_no_language_skills_clear_the_display(self):
         person = PersonFactory()
         data = _cmd().get_demographics(person)
-        assert 'languages_skills' not in data
+        assert data['languages_skills'] is None
 
     def test_single_language_skill_formatted(self):
         person = PersonFactory()
