@@ -24600,6 +24600,54 @@ class PersonLanguageSkillPatchTest(_SmartBase):
         self.assertFalse(
             self.PersonLanguageSkill.objects.filter(person=self.person).exists())
         self.assertIsNone(self._record().english_speak)
+        self.assertIsNone(self._record().languages_skills)
+
+    def test_patient_record_patch_cannot_edit_derived_language_columns(self):
+        """A whole-record autosave must not invent trial-matching capabilities."""
+        from omop_core.services.patient_record_service import DERIVED_LANGUAGE_FIELDS
+        from patient_portal.api.serializers import PatientRecordSerializer
+
+        serializer = PatientRecordSerializer()
+        self.assertTrue(all(serializer.fields[name].read_only for name in DERIVED_LANGUAGE_FIELDS))
+
+        payload = {name: True for name in DERIVED_LANGUAGE_FIELDS if name != 'languages_skills'}
+        payload['languages_skills'] = 'English language: speak'
+        response = self.write_client.patch(
+            f'/api/patient-info/{self.person.person_id}/', payload, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        record = self._record()
+        self.assertTrue(all(getattr(record, name) is None for name in DERIVED_LANGUAGE_FIELDS))
+        self.assertFalse(set(record.user_edited_fields) & DERIVED_LANGUAGE_FIELDS)
+
+    def test_refresh_discards_historical_language_edit_markers(self):
+        """Existing direct edits must stop overriding PersonLanguageSkill rows."""
+        from omop_core.services.patient_record_service import refresh_patient_record
+
+        self._patch({'english': ['read']})
+        record = self._record()
+        record.english_read = False
+        record.english_speak = True
+        record.languages_skills = 'English language: speak'
+        record.disease = 'Unmapped direct edit'
+        record.user_edited_fields = [
+            'english_read', 'english_speak', 'languages_skills', 'disease',
+        ]
+        record.save(update_fields=[
+            'english_read', 'english_speak', 'languages_skills', 'disease',
+            'user_edited_fields',
+        ])
+
+        refresh_patient_record(self.person)
+        record = self._record()
+        self.assertTrue(record.english_read)
+        self.assertFalse(record.english_speak)
+        self.assertEqual(record.languages_skills, 'English language: read')
+        self.assertEqual(record.disease, 'Unmapped direct edit')
+        self.assertIn('disease', record.user_edited_fields)
+        self.assertFalse(set(record.user_edited_fields) & {
+            'english_read', 'english_speak', 'languages_skills',
+        })
 
     def test_an_unchanged_write_reports_no_update(self):
         self._patch({'english': ['speak']})

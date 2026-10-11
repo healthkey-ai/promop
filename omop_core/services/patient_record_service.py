@@ -66,7 +66,16 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 12
+DERIVATION_VERSION = 13
+
+# These PatientRecord columns are projections of PersonLanguageSkill, never
+# independent edits. Older PATCH requests could mark them as user-edited and
+# preserve a value that disagreed with the source rows across refreshes.
+DERIVED_LANGUAGE_FIELDS = frozenset({
+    'languages_skills',
+    'english_speak', 'english_read', 'english_write', 'english_understand',
+    'spanish_speak', 'spanish_read', 'spanish_write', 'spanish_understand',
+})
 
 # Fields that are entirely derived from OMOP tables and must be reset before
 # each refresh so deletions are reflected (not just additions).
@@ -951,7 +960,7 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         # Snapshot user-edited values that may not yet have OMOP backing.
         # After derivation, these are restored when derivation produced nothing
         # for the field (meaning no OMOP fact backs it yet).
-        user_edited = set(patient_info.user_edited_fields or [])
+        user_edited = set(patient_info.user_edited_fields or []) - DERIVED_LANGUAGE_FIELDS
         preserved = {}
         for field in user_edited:
             if hasattr(patient_info, field):
@@ -1268,8 +1277,9 @@ def _get_demographics(person: Person, snapshot: OmopSnapshot = None) -> dict:
     language_rows = list(
         person.language_skills.select_related('language_concept').all())
     language_summary = person.get_language_skills_summary(language_rows)
-    if language_summary:
-        data['languages_skills'] = format_language_skills(language_summary)
+    data['languages_skills'] = (
+        format_language_skills(language_summary) if language_summary else None
+    )
     data.update(_flatten_language_capabilities(
         person.get_language_capabilities_by_code(language_rows)))
 
