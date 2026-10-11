@@ -11,6 +11,7 @@ from django.db import connection
 
 from omop_core.services.mappings import CONCEPT_PATIENT_REPORTED_TYPE, LAB_FIELD_TO_LOINC
 from omop_core.services.patient_record_service import (
+    DERIVED_LANGUAGE_FIELDS,
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
 )
 from omop_core.services.write_descriptor import build_writable_field_descriptor
@@ -36,6 +37,16 @@ def _load_ucum(unit):
 
 
 class TestMappedFields:
+    def test_language_fields_are_derived_from_skill_rows(self):
+        descriptor = build_writable_field_descriptor()
+        assert DERIVED_LANGUAGE_FIELDS <= descriptor.keys()
+        for field in DERIVED_LANGUAGE_FIELDS:
+            entry = descriptor[field]
+            assert entry['kind'] == 'computed'
+            assert entry['writable'] is False
+            assert entry['inputs'] == ['PersonLanguageSkill']
+            assert 'language-skills API' in entry['reason']
+
     def test_largest_lymph_node_recipe_uses_the_standard_cancer_modifier(self):
         concept = ConceptFactory(
             concept_id=36769292,
