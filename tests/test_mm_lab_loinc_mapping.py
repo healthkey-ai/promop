@@ -122,6 +122,64 @@ def test_second_m_protein_spep_code_projects():
     assert float(_get_laboratory_data(person)['monoclonal_protein_serum']) == pytest.approx(1.4)
 
 
+@pytest.mark.parametrize('code,field', [
+    ('104544-2', 'kappa_flc'),
+    ('42482-0', 'monoclonal_protein_urine'),
+    ('93021-4', 'clonal_plasma_cells'),
+])
+def test_approved_field_mapping_destination_projects_after_sccm_resolution(code, field):
+    person = PersonFactory()
+    _measure(person, code, 3.5, source_value='original hospital LOINC')
+
+    assert float(_get_laboratory_data(person)[field]) == pytest.approx(3.5)
+
+
+def test_latest_alias_result_wins_over_older_exact_field_mapping_result():
+    from omop_core.models import FieldConceptMapping, SourceCodeConceptMapping
+
+    person = PersonFactory()
+    record = PatientRecordFactory(person=person)
+    canonical = _loinc('33358-3')
+    FieldConceptMapping.objects.create(
+        field_name='monoclonal_protein_serum', concept=canonical,
+        vocabulary_id='LOINC', concept_code='33358-3',
+        source_value='33358-3', omop_table='measurement',
+        value_kind='number', status='approved',
+    )
+    SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id='LOINC', source_code='51435-6',
+        target_concept=canonical, status='approved',
+    )
+    MeasurementFactory(
+        person=person, measurement_concept=canonical,
+        measurement_source_value='33358-3', measurement_date='2024-01-01',
+        value_as_number=1.0,
+    )
+    _measure(person, '51435-6', 2.0, date='2024-02-01')
+
+    assert float(refresh_patient_record(person).monoclonal_protein_serum) == pytest.approx(2.0)
+
+
+def test_approved_field_mapping_does_not_read_conflicting_sccm_alias():
+    from omop_core.models import FieldConceptMapping, SourceCodeConceptMapping
+
+    person = PersonFactory()
+    canonical = _loinc('33358-3')
+    unrelated = _loinc('42482-0')
+    FieldConceptMapping.objects.create(
+        field_name='monoclonal_protein_serum', concept=canonical,
+        vocabulary_id='LOINC', concept_code='33358-3',
+        omop_table='measurement', status='approved',
+    )
+    SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id='LOINC', source_code='51435-6',
+        target_concept=unrelated, status='approved',
+    )
+    _measure(person, '51435-6', 2.0)
+
+    assert 'monoclonal_protein_serum' not in _get_laboratory_data(person)
+
+
 def test_fractional_results_survive_the_projection():
     """These were IntegerField, which truncated 1.87 to 1."""
     person = PersonFactory()
