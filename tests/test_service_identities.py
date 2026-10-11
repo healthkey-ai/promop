@@ -352,3 +352,150 @@ def test_etl_can_derive_the_person_it_provisioned():
 
     assert response.status_code == 202, response.data
     assert response.data['person_id'] == provisioned.data['person_id']
+
+
+@pytest.mark.django_db
+@override_settings(SERVICE_AUTH_TOKENS=GRANTS, SERVICE_AUTH_TOKEN='')
+def test_provision_stamps_the_named_organization_on_the_record():
+    """Without this the patient is missing from every org-scoped query (#1764)."""
+    from omop_core.models import Organization, PatientRecord
+    org = Organization.objects.create(name='HealthTree', slug='healthtree')
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION='Bearer etl-test-secret')
+
+    response = client.post('/api/persons/provision/',
+                           {'email': 'curehub@example.com',
+                            'organization': 'healthtree'}, format='json')
+
+    assert response.status_code == 201, response.data
+    assert response.data['organization'] == 'healthtree'
+    record = PatientRecord.objects.get(person__person_id=response.data['person_id'])
+    assert record.organization_id == org.id
+
+
+@pytest.mark.django_db
+@override_settings(SERVICE_AUTH_TOKENS=GRANTS, SERVICE_AUTH_TOKEN='')
+def test_provision_without_an_organization_stays_unscoped():
+    """Existing callers send no slug and must keep working."""
+    from omop_core.models import PatientRecord
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION='Bearer etl-test-secret')
+
+    response = client.post('/api/persons/provision/', {}, format='json')
+
+    assert response.status_code == 201, response.data
+    assert response.data['organization'] is None
+    record = PatientRecord.objects.get(person__person_id=response.data['person_id'])
+    assert record.organization_id is None
+
+
+@pytest.mark.django_db
+@override_settings(SERVICE_AUTH_TOKENS=GRANTS, SERVICE_AUTH_TOKEN='')
+def test_provision_rejects_an_organization_nobody_owns():
+    """A typo must not mint the orphaned record this parameter exists to stop."""
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION='Bearer etl-test-secret')
+
+    response = client.post('/api/persons/provision/',
+                           {'email': 'typo@example.com',
+                            'organization': 'heathtree'}, format='json')
+
+    assert response.status_code == 400, response.data
+    assert 'heathtree' in response.data['detail']
+    assert not Person.objects.exists()
+
+
+@pytest.mark.django_db
+@override_settings(SERVICE_AUTH_TOKENS=GRANTS, SERVICE_AUTH_TOKEN='')
+def test_provision_does_not_move_a_patient_another_organization_owns():
+    """Fill-if-empty, and the response reports the organization in force."""
+    from omop_core.models import Organization, PatientRecord
+    owner = Organization.objects.create(name='Owner', slug='owner-org')
+    Organization.objects.create(name='Other', slug='other-org')
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION='Bearer etl-test-secret')
+    first = client.post('/api/persons/provision/',
+                        {'email': 'shared@example.com',
+                         'organization': 'owner-org'}, format='json')
+
+    second = client.post('/api/persons/provision/',
+                         {'email': 'shared@example.com',
+                          'organization': 'other-org'}, format='json')
+
+    assert second.status_code == 200, second.data
+    assert second.data['person_id'] == first.data['person_id']
+    assert second.data['organization'] == 'owner-org'
+    record = PatientRecord.objects.get(person__person_id=first.data['person_id'])
+    assert record.organization_id == owner.id
+
+
+@pytest.mark.django_db
+@override_settings(SERVICE_AUTH_TOKENS=GRANTS, SERVICE_AUTH_TOKEN='')
+def test_provision_fills_an_organization_a_rerun_learned_later():
+    """A patient minted before the slug was known is still claimable."""
+    from omop_core.models import Organization, PatientRecord
+    org = Organization.objects.create(name='Late', slug='late-org')
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION='Bearer etl-test-secret')
+    first = client.post('/api/persons/provision/',
+                        {'email': 'late@example.com'}, format='json')
+    assert first.data['organization'] is None
+
+    second = client.post('/api/persons/provision/',
+                         {'email': 'late@example.com',
+                          'organization': 'late-org'}, format='json')
+
+    assert second.status_code == 200, second.data
+    assert second.data['organization'] == 'late-org'
+    record = PatientRecord.objects.get(person__person_id=first.data['person_id'])
+    assert record.organization_id == org.id
+
+
+@pytest.mark.django_db
+@override_settings(SERVICE_AUTH_TOKENS=GRANTS, SERVICE_AUTH_TOKEN='')
+def test_provisioned_organization_survives_the_importers_refresh():
+    """The importer refreshes after writing OMOP rows; the stamp must outlive it."""
+    from omop_core.models import Organization, PatientRecord
+    from omop_core.services.patient_record_service import refresh_patient_record
+    org = Organization.objects.create(name='Durable', slug='durable-org')
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION='Bearer etl-test-secret')
+    response = client.post('/api/persons/provision/',
+                           {'organization': 'durable-org'}, format='json')
+
+    person = Person.objects.get(person_id=response.data['person_id'])
+    refresh_patient_record(person)
+
+    assert PatientRecord.objects.get(person=person).organization_id == org.id
+
+
+@pytest.mark.django_db
+@override_settings(SERVICE_AUTH_TOKENS=GRANTS, SERVICE_AUTH_TOKEN='')
+def test_provision_rejects_a_non_string_organization():
+    """A JSON body can carry any type; normalizing one must not be a 500."""
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION='Bearer etl-test-secret')
+
+    response = client.post('/api/persons/provision/',
+                           {'organization': 123}, format='json')
+
+    assert response.status_code == 400, response.data
+    assert not Person.objects.exists()
+
+
+@pytest.mark.django_db(transaction=True)
+@override_settings(SERVICE_AUTH_TOKENS=GRANTS, SERVICE_AUTH_TOKEN='')
+def test_filling_an_organization_rereads_the_row_it_is_about_to_write():
+    """A concurrent claim must win; the loser reports it instead of moving it."""
+    from omop_core.models import Organization, PatientRecord
+    from patient_portal.api.views import _fill_record_org
+    winner = Organization.objects.create(name='Winner', slug='winner-org')
+    loser = Organization.objects.create(name='Loser', slug='loser-org')
+    person = Person.objects.create(person_id=990002)
+    stale = PatientRecord.objects.create(person=person)
+
+    # The claim that lands between this caller's read and its write.
+    PatientRecord.objects.filter(pk=stale.pk).update(organization=winner)
+
+    assert _fill_record_org(stale, loser) == 'winner-org'
+    assert PatientRecord.objects.get(pk=stale.pk).organization_id == winner.id
