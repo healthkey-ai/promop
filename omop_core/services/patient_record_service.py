@@ -3604,7 +3604,8 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
                 code_fields[code] = (field, field_casts[field])
         for code, target_id in SourceCodeConceptMapping.objects.filter(
             organization_id=None, source_vocabulary_id='LOINC',
-            status='approved', target_concept_id__in=field_by_target,
+            status='approved', omop_table__iexact='measurement',
+            target_concept_id__in=field_by_target,
         ).values_list('source_code', 'target_concept_id'):
             field = field_by_target[target_id]
             code_fields[code] = (field, field_casts[field])

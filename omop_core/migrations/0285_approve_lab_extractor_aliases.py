@@ -1,7 +1,8 @@
 """Approve unambiguous extractor LOINC aliases for incoming Measurements.
 
-The approved FieldConceptMapping is the destination authority.  Never replace
-an existing source-code mapping, including a curator's proposal or rejection.
+The approved FieldConceptMapping is the destination authority. Never replace
+a curator's source-code decision. Untouched import gaps and Athena-direct
+identity caches are machine-generated and can be promoted safely.
 Concept IDs are the stable Athena IDs in the field-curation fixture; they let
 fresh installs seed these rows before the full Athena load completes.
 """
@@ -43,31 +44,43 @@ def approve_aliases(apps, schema_editor):
                 or mapping.omop_table.lower() != 'measurement'
                 or mapping.concept_id not in (None, target_id)):
             continue
-        # Earlier imports cache direct Athena hits as approved identity rows.
-        # Those are machine-generated, not curator decisions, and must be
-        # upgraded or this alias would never take effect on populated sites.
-        # Any other existing row (including a proposal) is left alone.
+        source_id = Concept.objects.using(db).filter(
+            vocabulary_id='LOINC', concept_code=code,
+        ).values_list('concept_id', flat=True).first()
+        # Earlier imports cache direct Athena hits as approved identity rows
+        # or queue a gap before Athena arrives. These machine-generated rows
+        # are not curator decisions and must be upgraded on populated sites.
         existing = Source.objects.using(db).filter(
             organization_id=None, source_vocabulary_id='LOINC', source_code=code,
         ).first()
         if existing is not None:
-            if (existing.origin_system == 'athena-direct'
-                    and existing.origin == 'import'
-                    and existing.source == 'Athena'
-                    and existing.status == 'approved'
-                    and existing.reviewer_id is None
-                    and existing.target_concept_id == existing.source_concept_id):
+            machine_identity = (
+                existing.origin_system == 'athena-direct'
+                and existing.origin == 'import' and existing.source == 'Athena'
+                and existing.status == 'approved' and existing.reviewer_id is None
+                and existing.target_concept_id == existing.source_concept_id
+            )
+            untouched_gap = (
+                existing.status == 'proposed' and existing.origin == 'import'
+                and existing.target_concept_id is None
+                and existing.reviewer_id is None
+                and existing.suggested_target_concept_id is None
+                and not existing.suggestion_model_version
+                and not existing.suggest_strategy
+                and not existing.suggested_action
+                and existing.suggestion_confidence is None
+            )
+            if machine_identity or untouched_gap:
                 Source.objects.using(db).filter(pk=existing.pk).update(
+                    source_concept_id=existing.source_concept_id or source_id,
                     target_concept_id=target_id,
                     destination_vocabulary_id='LOINC',
                     domain_id='Measurement', omop_table='measurement',
+                    status='approved',
                     origin_system='lab-extractor-alias-v1', source='HealthKey',
                     notes=f'Unambiguous extractor alias for approved PatientRecord field {field}.',
                 )
             continue
-        source_id = Concept.objects.using(db).filter(
-            vocabulary_id='LOINC', concept_code=code,
-        ).values_list('concept_id', flat=True).first()
         Source.objects.using(db).create(
             organization_id=None, source_vocabulary_id='LOINC', source_code=code,
             source_concept_id=source_id, target_concept_id=target_id,

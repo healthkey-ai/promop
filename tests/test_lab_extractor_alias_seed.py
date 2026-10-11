@@ -88,6 +88,28 @@ def test_replaces_only_machine_generated_athena_identity():
     assert identity.origin_system == 'lab-extractor-alias-v1'
 
 
+def test_promotes_untouched_import_gap_but_not_curator_proposal():
+    FieldConceptMapping.objects.create(
+        field_name='kappa_flc', status='approved',
+        vocabulary_id='LOINC', concept_code='104544-2', omop_table='measurement',
+    )
+    gap = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id='LOINC', source_code='36916-5', status='proposed',
+        origin='import', origin_system='fhir-upload', occurrence_count=17,
+    )
+    curated = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id='LOINC', source_code='80515-0', status='proposed',
+        origin='curator',
+    )
+    _seed()
+    gap.refresh_from_db()
+    curated.refresh_from_db()
+    assert gap.status == 'approved'
+    assert gap.target_concept_id == 1091621
+    assert gap.occurrence_count == 17
+    assert curated.status == 'proposed'
+
+
 def test_import_resolver_uses_auto_approved_alias_after_athena_load():
     target = ConceptFactory(
         concept_id=3046299, concept_code='33358-3',

@@ -138,7 +138,7 @@ def test_latest_alias_result_wins_over_older_exact_field_mapping_result():
     from omop_core.models import FieldConceptMapping, SourceCodeConceptMapping
 
     person = PersonFactory()
-    record = PatientRecordFactory(person=person)
+    PatientRecordFactory(person=person)
     canonical = _loinc('33358-3')
     FieldConceptMapping.objects.create(
         field_name='monoclonal_protein_serum', concept=canonical,
@@ -148,7 +148,7 @@ def test_latest_alias_result_wins_over_older_exact_field_mapping_result():
     )
     SourceCodeConceptMapping.objects.create(
         source_vocabulary_id='LOINC', source_code='51435-6',
-        target_concept=canonical, status='approved',
+        target_concept=canonical, status='approved', omop_table='measurement',
     )
     MeasurementFactory(
         person=person, measurement_concept=canonical,
@@ -173,7 +173,7 @@ def test_approved_field_mapping_does_not_read_conflicting_sccm_alias():
     )
     SourceCodeConceptMapping.objects.create(
         source_vocabulary_id='LOINC', source_code='51435-6',
-        target_concept=unrelated, status='approved',
+        target_concept=unrelated, status='approved', omop_table='measurement',
     )
     _measure(person, '51435-6', 2.0)
 
