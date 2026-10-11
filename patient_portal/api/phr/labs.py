@@ -107,9 +107,26 @@ def _brief(row: Measurement) -> dict[str, Any]:
     return {k: v for k, v in item.items() if v is not None}
 
 
+def _genetic_ids(person) -> set[int]:
+    """Genetic findings, which Genetic testing shows: each variant's parent
+    measurement and the component rows that point back to it."""
+    from omop_core.services.genomics import PARENT_CODE
+
+    parents = set(
+        Measurement.objects.filter(person=person)
+        .filter(Q(measurement_concept__concept_code=PARENT_CODE) | Q(measurement_source_concept__concept_code=PARENT_CODE))
+        .values_list('pk', flat=True)
+    )
+    if not parents:
+        return set()
+    components = Measurement.objects.filter(person=person, measurement_event_id__in=parents).values_list('pk', flat=True)
+    return parents | set(components)
+
+
 def _rows(person):
     return (
         Measurement.objects.filter(person=person, is_erroneous=False)
+        .exclude(pk__in=_genetic_ids(person))
         .exclude(value_as_number__isnull=True, value_as_string__isnull=True)
         .select_related(
             'measurement_concept', 'measurement_source_concept', 'unit_concept', 'visit_occurrence',
@@ -142,6 +159,22 @@ def _test_meta(concept, markers: dict[str, LabMarker]) -> dict[str, Any]:
     return {k: v for k, v in meta.items() if v is not None}
 
 
+def _cancers(person, record) -> list[dict[str, str]]:
+    """The patient's cancers as lab filters: the record's slug for the primary, the name's for the rest."""
+    from omop_core.services.disease_episodes import disease_slug
+
+    from .views import diagnoses
+
+    out, seen = [], set()
+    primary_slug = ((record.disease_slug if record else '') or '').lower()
+    for cancer in diagnoses(person, record)['cancer']:
+        slug = primary_slug if cancer['id'] == 'primary' and primary_slug else (disease_slug(cancer['name']) or '')
+        if slug and slug not in seen:
+            seen.add(slug)
+            out.append({'slug': slug, 'name': cancer['name']})
+    return out
+
+
 def _markers() -> dict[str, LabMarker]:
     return {m.loinc_code: m for m in LabMarker.objects.all()}
 
@@ -164,16 +197,14 @@ def labs(person, record) -> dict[str, Any]:
         })
     tests.sort(key=lambda t: (t.get('rank') is None, t.get('rank') or 0, t['name'].lower()))
 
-    slug = (record.disease_slug or '').lower() if record else ''
-    disease = (record.disease or '').strip() if record else ''
     panels = sorted(
         {p for t in tests for p in t['panels']},
         key=lambda p: (PANEL_ORDER.index(p) if p in PANEL_ORDER else len(PANEL_ORDER), p),
     )
+    marked = {s for t in tests for s in t['disease_slugs']}
     filters = {
-        'diagnoses': [{'slug': slug, 'name': disease}]
-        if slug and disease and any(slug in t['disease_slugs'] for t in tests)
-        else [],
+        # A filter for each of the patient's cancers that has marker tests, primary first.
+        'diagnoses': [c for c in _cancers(person, record) if c['slug'] in marked],
         'panels': panels,
     }
     return {'tests': tests, 'filters': filters}

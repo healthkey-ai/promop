@@ -307,7 +307,9 @@ def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
             'source': sources[latest.pk],
         }
         cancer.append({k: v for k, v in entry.items() if v not in (None, [])})
+    # The primary cancer (the one the record follows) first, then the others newest first.
     cancer.sort(key=lambda c: c.get('date') or '', reverse=True)
+    cancer.sort(key=lambda c: c['id'] != 'primary')
 
     # Patient-added conditions may have no known date (stored as the day added).
     undated = set(
