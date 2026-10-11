@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from pathlib import Path
 import re
 import tempfile
 from zipfile import BadZipFile, ZipFile
+
+logger = logging.getLogger(__name__)
 
 from django.core.management.base import CommandError
 from django.db import connection
@@ -253,8 +256,33 @@ def execute_import(job_id):
 
 
 def dispatch_queued_imports():
-    """Publish migration-created intents only after a new worker is ready."""
+    """Publish migration-created intents only after a new worker is ready.
+
+    Also recovers imports stranded in ``running`` by a previous worker
+    replacement: if no import currently holds the advisory lock and the
+    receipt never completed, reset it to ``queued`` so it is dispatched
+    on this pass.  ``execute_import`` is idempotent, so re-running a
+    partially applied import is safe.
+    """
     from omop_core.tasks import import_hospital_code_seed_task
+
+    stranded = list(
+        HospitalCodeImport.objects.filter(
+            outcome='running', completed_at__isnull=True,
+        ).order_by('pk')
+    )
+    if stranded:
+        lock_free = _acquire_lock()
+        if lock_free:
+            _release_lock()
+            for job in stranded:
+                logger.info(
+                    'Recovering stranded hospital-code import %s (pk=%d).',
+                    job.artifact_identity, job.pk,
+                )
+                HospitalCodeImport.objects.filter(
+                    pk=job.pk, outcome='running',
+                ).update(outcome='queued', task_id='', started_at=None)
 
     dispatched = 0
     for job in HospitalCodeImport.objects.filter(
