@@ -3586,29 +3586,39 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     # additional source-code spellings for that destination; the checked-in
     # extractor table is a compatibility fallback for fields not yet backed by
     # an Athena-resolved FCM (including older test/demo installations).
-    from omop_core.models import FieldConceptMapping, SourceCodeConceptMapping
     code_fields = dict(_LOINC_LAB_FIELDS)
-    field_casts = {field: cast for field, cast in _LOINC_LAB_FIELDS.values()}
-    approved = list(FieldConceptMapping.objects.filter(
-        field_name__in={field for field, _ in _LOINC_LAB_FIELDS.values()},
-        status='approved', vocabulary_id='LOINC', omop_table__iexact='measurement',
-        concept_id__isnull=False,
-    ).values_list('field_name', 'concept_code', 'concept_id'))
-    if approved:
-        field_by_target = {concept_id: field for field, _, concept_id in approved}
-        for field, _, _ in approved:
-            code_fields = {code: entry for code, entry in code_fields.items()
-                           if entry[0] != field}
-        for field, code, _ in approved:
-            if code:
+    # Do not query curation tables for patients without a LOINC-coded numeric
+    # Measurement. In particular, unrelated measurements must not increase the
+    # full-refresh query budget (#541). Source-only LOINC codes still qualify.
+    has_loinc_lab = any(
+        m.value_as_number is not None and (
+            getattr(m.measurement_concept, 'vocabulary_id', None) == 'LOINC'
+            or bool(_LOINC_CODE_RE.fullmatch(m.measurement_source_value or ''))
+        ) for m in measurements
+    )
+    if has_loinc_lab:
+        from omop_core.models import FieldConceptMapping, SourceCodeConceptMapping
+        field_casts = {field: cast for field, cast in _LOINC_LAB_FIELDS.values()}
+        approved = list(FieldConceptMapping.objects.filter(
+            field_name__in={field for field, _ in _LOINC_LAB_FIELDS.values()},
+            status='approved', vocabulary_id='LOINC', omop_table__iexact='measurement',
+            concept_id__isnull=False,
+        ).values_list('field_name', 'concept_code', 'concept_id'))
+        if approved:
+            field_by_target = {concept_id: field for field, _, concept_id in approved}
+            for field, _, _ in approved:
+                code_fields = {code: entry for code, entry in code_fields.items()
+                               if entry[0] != field}
+            for field, code, _ in approved:
+                if code:
+                    code_fields[code] = (field, field_casts[field])
+            for code, target_id in SourceCodeConceptMapping.objects.filter(
+                organization_id=None, source_vocabulary_id='LOINC',
+                status='approved', omop_table__iexact='measurement',
+                target_concept_id__in=field_by_target,
+            ).values_list('source_code', 'target_concept_id'):
+                field = field_by_target[target_id]
                 code_fields[code] = (field, field_casts[field])
-        for code, target_id in SourceCodeConceptMapping.objects.filter(
-            organization_id=None, source_vocabulary_id='LOINC',
-            status='approved', omop_table__iexact='measurement',
-            target_concept_id__in=field_by_target,
-        ).values_list('source_code', 'target_concept_id'):
-            field = field_by_target[target_id]
-            code_fields[code] = (field, field_casts[field])
     for field, measurement in _latest_blood_count_measurements(snapshot).items():
         data.update(blood_count_projection(field, measurement))
 
