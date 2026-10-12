@@ -305,6 +305,28 @@ describe('PatientDetail — leaving during autosave', () => {
     }));
   });
 
+  it('sends a flushed edit after an earlier PATCH, not concurrently with it', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let finishFirst!: (response: unknown) => void;
+    (api.patch as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(() => new Promise((resolve) => { finishFirst = resolve; }))
+      .mockResolvedValue({ data: {} });
+    const view = await renderAt('101');
+
+    edit('Rome', 'Milan');
+    await flushAutosave();
+    await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1));
+    edit('Milan', 'Berlin');
+    view.unmount();
+    expect(api.patch).toHaveBeenCalledTimes(1);
+
+    await act(async () => { finishFirst({ data: {} }); });
+    await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(2));
+    expect((api.patch as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[1])).toEqual([
+      { city: 'Milan' }, { city: 'Berlin' },
+    ]);
+  });
+
   it('keeps a pending edit when record confirmation finishes', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     render(<MemoryRouter><PatientDetail personIdOverride="101" patientMode /></MemoryRouter>);

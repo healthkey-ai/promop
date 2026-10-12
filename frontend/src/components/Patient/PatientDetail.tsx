@@ -443,7 +443,7 @@ export default function PatientDetail({
   }, [personId, adoptServerRecord]);
 
    
-  const doSave = useCallback(async () => {
+  const performSave = useCallback(async () => {
     if (!pendingDataRef.current || !personId) return;
     const seq = ++saveSeqRef.current;
     setSaveStatus("saving");
@@ -563,6 +563,20 @@ export default function PatientDetail({
       }
     }
   }, [personId]);
+
+  const saveInFlightRef = useRef<Promise<void> | null>(null);
+  const doSave = useCallback(() => {
+    // An edit made while a prior PATCH is still in flight must not reach the
+    // server first: the older response could otherwise overwrite it. This also
+    // orders a save flushed during unmount behind the previous save.
+    const next = Promise.resolve(saveInFlightRef.current).then(() => performSave());
+    saveInFlightRef.current = next;
+    void next.then(
+      () => { if (saveInFlightRef.current === next) saveInFlightRef.current = null; },
+      () => { if (saveInFlightRef.current === next) saveInFlightRef.current = null; },
+    );
+    return next;
+  }, [performSave]);
 
   const doSaveRef = useRef(doSave);
   doSaveRef.current = doSave;
