@@ -8,7 +8,7 @@ from drf_spectacular.utils import (
 )
 from rest_framework import serializers, viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.pagination import CursorPagination, PageNumberPagination
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -11829,7 +11829,23 @@ def _mirror_to_concept_relationship(mapping):
     )
 
 
-def _upsert_source_code_mapping(concept, data, user, mapping=None):
+def _mapping_patient_scope(request):
+    """Validate an optional patient scope before a mapping can update facts."""
+    if 'patient_id' not in request.data:
+        return None
+    raw = request.data['patient_id']
+    if isinstance(raw, bool) or not str(raw).isdecimal() or int(raw) <= 0:
+        raise serializers.ValidationError({'patient_id': 'A valid patient ID is required.'})
+    person_id = int(raw)
+    from omop_core.authorization import can_write_patient
+    if not Person.objects.filter(person_id=person_id).exists():
+        raise serializers.ValidationError({'patient_id': 'Patient not found.'})
+    if not can_write_patient(request.user, person_id):
+        raise PermissionDenied('You cannot update this patient.')
+    return person_id
+
+
+def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=None):
     """Create or update one mapping. Returns (mapping, repoint_result).
 
     ``repoint_result`` is non-None when the save moved an approved mapping's
@@ -11998,7 +12014,8 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     was_proposed = mapping is not None and mapping.status == 'proposed'
     previous_concept_id = mapping.target_concept_id if mapping else None
     pending_repoints = list(mapping.pending_repoint_concept_ids) if mapping else []
-    if pending_repoints and (
+    deferred_repoints = list(mapping.deferred_repoint_concept_ids) if mapping else []
+    if (pending_repoints or deferred_repoints) and (
         source_vocabulary_id != mapping.source_vocabulary_id
         or source_code != mapping.source_code
         or (organization.pk if organization else None) != mapping.organization_id
@@ -12006,8 +12023,8 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
         or (omop_table and omop_table != mapping.omop_table)
     ):
         raise serializers.ValidationError({'detail': (
-            'This source has a destination change awaiting approval. Resolve '
-            'that review before changing its source identity or clinical table.'
+            'This source has clinical rows awaiting a destination update. Resolve '
+            'those rows before changing its source identity or clinical table.'
         )})
     if (mapping is not None and status_value != 'approved'
             and previous_concept_id is not None
@@ -12019,7 +12036,10 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     # status alone must not blank omop_table -- the re-point would then find no
     # table, move nothing, and still report success.
     values = {'updated_by': user,
-              'pending_repoint_concept_ids': [] if status_value == 'approved' else pending_repoints}
+              'pending_repoint_concept_ids': [] if status_value == 'approved' else pending_repoints,
+              'deferred_repoint_concept_ids': (
+                  [] if status_value == 'approved' and person_id is None else deferred_repoints
+              )}
     # A curator touching the row has answered any machine-proposed group action.
     # Leaving this set after choosing a destination would keep advertising
     # "Reject suggested" over the curator's newer decision.
@@ -12204,12 +12224,19 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
 
     repoint = None
     if status_value == 'approved' and concept is not None:
-        sources = set(pending_repoints)
+        sources = set(pending_repoints) | set(deferred_repoints)
         if not was_approved:
             sources.add(NO_MATCHING_CONCEPT_ID)
         if previous_concept_id is not None and previous_concept_id != concept.concept_id:
             sources.add(previous_concept_id)
         sources.discard(concept.concept_id)
+
+        # A patient-page save moves only this patient's rows. Retain old
+        # destinations so Generate OMOP can move them for other selected
+        # patients later, including approved standard-to-standard changes.
+        if person_id is not None and sources:
+            mapping.deferred_repoint_concept_ids = sorted(sources)
+            mapping.save(update_fields=['deferred_repoint_concept_ids'])
 
         affected_persons = set()
         for old_concept_id in sorted(sources):
@@ -12217,6 +12244,7 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
                 mapping=mapping,
                 old_concept_id=old_concept_id,
                 new_concept_id=concept.concept_id,
+                person_id=person_id,
                 # The concept-0 sweep reaches rows this mapping's own import
                 # never wrote, so it matches the code only -- see
                 # _source_value_match.
@@ -12625,8 +12653,10 @@ def code_mapping_list(request):
         return response
 
     with transaction.atomic():
+        person_id = _mapping_patient_scope(request)
         concept = _get_destination_concept(request.data)
-        mapping, repoint = _upsert_source_code_mapping(concept, request.data, request.user)
+        mapping, repoint = _upsert_source_code_mapping(
+            concept, request.data, request.user, person_id=person_id)
     from omop_core.services.mapping_destinations import destination_options
     payload = _serialize_code_mapping_row(concept, mapping, destination_count=len(destination_options(mapping)))
     payload['repoint'] = repoint
@@ -12735,7 +12765,9 @@ def code_mapping_detail(request, mapping_id):
     if unit_warning is not None:
         return unit_warning
     with transaction.atomic():
-        mapping, repoint = _upsert_source_code_mapping(concept, data, request.user, mapping=mapping)
+        person_id = _mapping_patient_scope(request)
+        mapping, repoint = _upsert_source_code_mapping(
+            concept, data, request.user, mapping=mapping, person_id=person_id)
     from omop_core.services.mapping_destinations import destination_options
     payload = _serialize_code_mapping_row(concept, mapping, destination_count=len(destination_options(mapping)))
     payload['repoint'] = repoint
