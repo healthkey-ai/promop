@@ -7,6 +7,7 @@ import type {
   SourceCodesResponse,
   ResolveResult,
   ResolveRunStatus,
+  ResolveCodeDetail,
 } from "../../types/sourceCodes";
 import EditMappingDialog from "../CodeMappings/EditMappingDialog";
 import {
@@ -183,6 +184,8 @@ export default function PatientSourceCodesTab({ personId }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [resolving, setResolving] = useState(false);
   const [resolveResult, setResolveResult] = useState<ResolveResult | null>(null);
+  const [resolveDetails, setResolveDetails] = useState<ResolveCodeDetail[]>([]);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [reference, setReference] = useState<Reference>(emptyReference);
   const [banner, setBanner] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Record<SectionKey, boolean>>({
@@ -270,9 +273,10 @@ export default function PatientSourceCodesTab({ personId }: Props) {
             resolvePollRef.current = null;
             setResolveResult({
               resolved: status.data.resolved,
-              skipped: (status.data.total - status.data.resolved - status.data.errors),
-              already_resolved: 0,
+              skipped: status.data.skipped,
+              already_resolved: status.data.already_resolved,
             });
+            setResolveDetails(status.data.code_details ?? []);
             setResolving(false);
             await fetchSourceCodes();
           }
@@ -398,8 +402,53 @@ export default function PatientSourceCodesTab({ personId }: Props) {
       {/* Resolve result toast */}
       {resolveResult && (
         <div className="rounded-md border border-green-200 bg-green-50 p-3 text-sm text-green-800">
-          Resolved {resolveResult.resolved} code(s). {resolveResult.skipped} skipped,{" "}
-          {resolveResult.already_resolved} already resolved.
+          <div className="flex items-center justify-between">
+            <span>
+              Resolved {resolveResult.resolved} code(s).{" "}
+              {resolveResult.skipped > 0 && `${resolveResult.skipped} skipped. `}
+              {resolveResult.already_resolved > 0 && `${resolveResult.already_resolved} already resolved.`}
+            </span>
+            {resolveDetails.length > 0 && (
+              <button
+                onClick={() => setDetailsOpen((o) => !o)}
+                className="ml-2 text-xs text-green-700 underline hover:text-green-900"
+              >
+                {detailsOpen ? "Hide details" : "Show details"}
+              </button>
+            )}
+          </div>
+          {detailsOpen && resolveDetails.length > 0 && (
+            <table className="mt-2 w-full text-xs">
+              <thead>
+                <tr className="border-b border-green-200 text-left">
+                  <th className="py-1 pr-2">Source code</th>
+                  <th className="py-1 pr-2">Table</th>
+                  <th className="py-1 pr-2">Rows</th>
+                  <th className="py-1 pr-2">Outcome</th>
+                  <th className="py-1">Target / Reason</th>
+                </tr>
+              </thead>
+              <tbody>
+                {resolveDetails.map((d, i) => (
+                  <tr key={i} className="border-b border-green-100">
+                    <td className="py-1 pr-2 font-mono">{d.source_value}</td>
+                    <td className="py-1 pr-2">{d.table}</td>
+                    <td className="py-1 pr-2">{d.rows}</td>
+                    <td className="py-1 pr-2">
+                      <span className={
+                        d.outcome === "resolved" ? "text-green-700 font-medium"
+                        : d.outcome === "skipped" ? "text-amber-700"
+                        : "text-gray-500"
+                      }>
+                        {d.outcome === "already_resolved" ? "already resolved" : d.outcome}
+                      </span>
+                    </td>
+                    <td className="py-1">{d.target ?? d.reason ?? ""}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
       )}
 

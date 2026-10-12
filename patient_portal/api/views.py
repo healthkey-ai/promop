@@ -5867,6 +5867,10 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
 
         Queue a bulk source-code resolution for multiple patients.
         Returns 202 with a run_id to poll.
+
+        Two modes:
+        - ``person_ids``: explicit list of person IDs (individual selection)
+        - ``select_all``: true + optional filter query params (selectAll mode)
         """
         if not _is_admin_actor(request):
             return Response(
@@ -5880,22 +5884,37 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         )
 
         person_ids = request.data.get('person_ids', [])
-        if not isinstance(person_ids, list) or not person_ids:
-            return Response(
-                {'detail': 'person_ids must be a non-empty list of integers.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        if not all(isinstance(pid, int) for pid in person_ids):
-            return Response(
-                {'detail': 'person_ids must contain only integers.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        select_all = request.data.get('select_all', False)
 
-        if len(person_ids) > BULK_RESOLVE_MAX_PERSONS:
-            return Response(
-                {'detail': f'Maximum {BULK_RESOLVE_MAX_PERSONS} person_ids per request.'},
-                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+        if select_all:
+            # Use the same filter pipeline as the patient list.
+            qs = self._apply_patient_list_filters(self.get_queryset())
+            person_ids = list(
+                qs.values_list('person__person_id', flat=True)
+                  .distinct()[:BULK_RESOLVE_MAX_PERSONS]
             )
+            if not person_ids:
+                return Response(
+                    {'detail': 'No patients match the current filters.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        else:
+            if not isinstance(person_ids, list) or not person_ids:
+                return Response(
+                    {'detail': 'person_ids must be a non-empty list of integers.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if not all(isinstance(pid, int) for pid in person_ids):
+                return Response(
+                    {'detail': 'person_ids must contain only integers.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if len(person_ids) > BULK_RESOLVE_MAX_PERSONS:
+                return Response(
+                    {'detail': f'Maximum {BULK_RESOLVE_MAX_PERSONS} person_ids per request.'},
+                    status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                )
 
         run = create_and_dispatch_resolve_run(person_ids, user=request.user)
         return Response(
@@ -5927,7 +5946,10 @@ def resolve_run_status(request: Request, run_id) -> Response:
         'total': run.total,
         'done': run.done,
         'resolved': run.resolved,
+        'skipped': run.skipped,
+        'already_resolved': run.already_resolved,
         'errors': run.errors,
+        'code_details': run.code_details,
     })
 
 

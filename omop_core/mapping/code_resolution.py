@@ -730,6 +730,7 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
     resolved = 0
     skipped = 0
     already_resolved = 0
+    code_details: list[dict] = []
     person_ids_touched: set[int] = set()
 
     # Concept IDs in quarantine vocabularies (HK-*).
@@ -776,11 +777,21 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
             )
             if mapping is None:
                 skipped += group['row_count']
+                code_details.append({
+                    'source_value': sv, 'table': table_key,
+                    'rows': group['row_count'], 'outcome': 'skipped',
+                    'reason': 'no approved mapping',
+                })
                 continue
 
             target_concept_id = mapping.target_concept_id
             if not target_concept_id:
                 skipped += group['row_count']
+                code_details.append({
+                    'source_value': sv, 'table': table_key,
+                    'rows': group['row_count'], 'outcome': 'skipped',
+                    'reason': 'mapping has no target concept',
+                })
                 continue
 
             # Find rows that need updating: concept_id = 0 or in quarantine.
@@ -794,6 +805,11 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
             count = rows_to_update.count()
             if count == 0:
                 already_resolved += group['row_count']
+                code_details.append({
+                    'source_value': sv, 'table': table_key,
+                    'rows': group['row_count'], 'outcome': 'already_resolved',
+                    'target': mapping.target_concept.concept_name if mapping.target_concept else str(target_concept_id),
+                })
                 continue
 
             with transaction.atomic():
@@ -802,6 +818,13 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
                 person_ids_touched.add(person.person_id)
                 resolved += count
                 already_resolved += group['row_count'] - count
+                target_name = mapping.target_concept.concept_name if mapping.target_concept else str(target_concept_id)
+                code_details.append({
+                    'source_value': sv, 'table': table_key,
+                    'rows': count, 'outcome': 'resolved',
+                    'target': target_name,
+                    'target_concept_id': target_concept_id,
+                })
 
     # Mark PatientRecord stale and dispatch derivation asynchronously.
     # The mapping updates above are fast; the derivation (12-32s on bulk-loaded
@@ -818,4 +841,5 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
         'resolved': resolved,
         'skipped': skipped,
         'already_resolved': already_resolved,
+        'code_details': code_details,
     }
