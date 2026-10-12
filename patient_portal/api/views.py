@@ -5872,7 +5872,7 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         """
         if not _is_admin_actor(request):
             return Response(
-                {'detail': 'Only administrators can resolve source codes.'},
+                {'detail': _admin_denial_detail(request)},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
@@ -7154,6 +7154,27 @@ def _is_admin_actor(request: Request) -> bool:
         or bool(getattr(actor, 'is_staff', False))
         or get_admin_orgs(actor).exists()
     )
+
+
+def _admin_denial_detail(request: Request) -> str:
+    """Build a diagnostic message explaining why _is_admin_actor returned False."""
+    from omop_core.models import GroupAccess
+    actor = request.user
+    grants = list(
+        GroupAccess.objects.filter(identity=actor)
+        .values_list('org__slug', 'org__is_active', 'role', 'expires_at')
+    )
+    admin_orgs = list(get_admin_orgs(actor).values_list('slug', flat=True))
+    parts = [
+        'Only administrators can perform this action.',
+        f'identity={getattr(actor, "pk", "?")}',
+        f'email={getattr(actor, "email", "?")}',
+        f'issuer={getattr(actor, "issuer", "?")}',
+        f'is_staff={getattr(actor, "is_staff", "?")}',
+        f'grants={grants}',
+        f'admin_orgs={admin_orgs}',
+    ]
+    return ' | '.join(parts)
 
 
 def _source_metadata_description(metadata) -> str:
