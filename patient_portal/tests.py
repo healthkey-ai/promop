@@ -29316,6 +29316,120 @@ class LegacyServiceGrantKillSwitchTest(TestCase):
             self._authenticate()
 
 
+class OrgAdminDelegatedTokenScopeTest(TestCase):
+    """A delegated read grant must not become durable organization authority."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from oauth2_provider.models import AccessToken, Application
+
+        cls.staff = Identity.objects.create_user(
+            email='org-scope-staff@test.com', password='x', is_staff=True,
+        )
+        cls.admin = Identity.objects.create_user(
+            email='org-scope-admin@test.com', password='x',
+        )
+        cls.member = Identity.objects.create_user(
+            email='org-scope-member@test.com', password='x',
+        )
+        cls.org = Organization.objects.create(name='Scoped Org', slug='scoped-org')
+        cls.other_org = Organization.objects.create(name='Other Org', slug='other-scoped-org')
+        GroupAccess.objects.create(identity=cls.admin, org=cls.org, role='org_admin')
+        cls.member_grant = GroupAccess.objects.create(
+            identity=cls.member, org=cls.org, role='analyst',
+        )
+        app = Application.objects.create(
+            name='Delegated org client', client_id='delegated-org-client',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_AUTHORIZATION_CODE,
+            user=cls.staff,
+        )
+        expiry = timezone.now() + timedelta(hours=1)
+        cls.staff_read_token = AccessToken.objects.create(
+            user=cls.staff, application=app, token='staff-org-read-only',
+            expires=expiry, scope='patient/*.read',
+        )
+        cls.admin_read_token = AccessToken.objects.create(
+            user=cls.admin, application=app, token='admin-org-read-only',
+            expires=expiry, scope='user/*.read',
+        )
+        cls.admin_write_token = AccessToken.objects.create(
+            user=cls.admin, application=app, token='admin-org-write',
+            expires=expiry, scope='user/*.write',
+        )
+
+    @staticmethod
+    def _bearer(token):
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
+        return client
+
+    def test_read_only_admin_token_cannot_invite_org_admin_on_either_api(self):
+        from omop_core.models import OrgInvitation
+
+        for prefix in ('/api', '/api/v1'):
+            with self.subTest(prefix=prefix):
+                response = self._bearer(self.admin_read_token).post(
+                    f'{prefix}/orgs/scoped-org/invite/',
+                    {'email': 'attacker@test.com', 'role': 'org_admin'},
+                )
+                self.assertEqual(response.status_code, 403)
+        self.assertFalse(OrgInvitation.objects.filter(email='attacker@test.com').exists())
+        self.assertFalse(Identity.objects.filter(email='attacker@test.com').exists())
+
+    def test_read_only_staff_token_cannot_create_org(self):
+        for prefix in ('/api', '/api/v1'):
+            with self.subTest(prefix=prefix):
+                response = self._bearer(self.staff_read_token).post(
+                    f'{prefix}/orgs/', {'name': 'Unauthorized', 'slug': 'unauthorized'},
+                )
+                self.assertEqual(response.status_code, 403)
+        self.assertFalse(Organization.objects.filter(slug='unauthorized').exists())
+
+    def test_read_only_admin_token_cannot_mutate_other_org_admin_routes(self):
+        from omop_core.models import OrgTrust
+
+        client = self._bearer(self.admin_read_token)
+        self.assertEqual(client.patch(
+            '/api/v1/orgs/scoped-org/', {'name': 'Changed'},
+        ).status_code, 403)
+        self.assertEqual(client.post(
+            '/api/v1/orgs/scoped-org/trusts/',
+            {'trusted_org': self.other_org.pk},
+        ).status_code, 403)
+        self.assertEqual(client.patch(
+            f'/api/v1/orgs/scoped-org/access/{self.member_grant.pk}/',
+            {'role': 'doctor'},
+        ).status_code, 403)
+        self.assertEqual(client.delete(
+            f'/api/v1/orgs/scoped-org/access/{self.member_grant.pk}/',
+        ).status_code, 403)
+        self.assertEqual(client.delete(
+            '/api/v1/orgs/scoped-org/trusts/1/',
+        ).status_code, 403)
+        self.assertEqual(client.delete(
+            '/api/v1/orgs/scoped-org/invitations/1/',
+        ).status_code, 403)
+        self.assertEqual(self._bearer(self.staff_read_token).delete(
+            '/api/v1/orgs/scoped-org/',
+        ).status_code, 403)
+        self.org.refresh_from_db()
+        self.member_grant.refresh_from_db()
+        self.assertEqual(self.org.name, 'Scoped Org')
+        self.assertEqual(self.member_grant.role, 'analyst')
+        self.assertFalse(OrgTrust.objects.filter(granting_org=self.org).exists())
+
+    def test_write_scoped_admin_token_can_still_invite(self):
+        response = self._bearer(self.admin_write_token).post(
+            '/api/v1/orgs/scoped-org/invite/',
+            {'email': 'allowed@test.com', 'role': 'doctor'},
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(GroupAccess.objects.filter(
+            identity__email='allowed@test.com', org=self.org, role='doctor',
+        ).exists())
+
+
 class ServiceTokenAdministrationBoundaryTest(TestCase):
     """Who may mint a service credential — #1218 review, finding 3.
 
