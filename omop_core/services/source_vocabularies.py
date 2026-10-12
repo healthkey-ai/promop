@@ -1,0 +1,358 @@
+"""Source code systems a code can arrive in, organised by OMOP domain.
+
+A curator picks the **domain** first -- is this a drug, a procedure, a
+condition, an observation, a measurement -- because that is what they can tell
+by looking at the source data, and it settles two things at once: which code
+systems are plausible, and which OMOP table the fact lands in.
+
+The catalogue is static rather than read from ``vocabulary``. Most of these are
+systems we *receive* codes in without holding their concepts: an NDC on a
+dispensing record, a dm+d code from a UK extract, an ICD-O-3 morphology from a
+pathology report. Deriving the list from loaded vocabularies would offer only
+the handful we happen to have loaded and block a curator from recording a
+mapping they can already make correctly.
+
+``vocabulary_id`` values use OHDSI spellings where one exists, so a mapping
+recorded today lines up with the concepts a later vocabulary load brings in.
+"""
+
+# OMOP domain -> the clinical table its facts land in. Picking the domain
+# settles the destination table; the curator never chooses it separately.
+DOMAIN_TO_TABLE = {
+    'Drug': 'drug_exposure',
+    'Procedure': 'procedure',
+    'Condition': 'condition',
+    'Observation': 'observation',
+    'Measurement': 'measurement',
+}
+
+DOMAIN_CHOICES = (
+    ('Condition', 'Condition — diagnoses, problems, findings'),
+    ('Drug', 'Drug — medications, vaccines, regimens'),
+    ('Measurement', 'Measurement — labs, vitals, quantitative results'),
+    ('Observation', 'Observation — assertions, history, social and clinical facts'),
+    ('Procedure', 'Procedure — interventions, surgeries, administered care'),
+)
+
+# (vocabulary_id, display label). Ordered so the systems a curator meets most
+# often sit at the top of each domain's list rather than alphabetically.
+_CONDITION_SYSTEMS = (
+    ('EPIC', 'Epic — hospital-local codes'),
+    ('CERNER', 'Cerner — hospital-local codes'),
+    ('SNOMED', 'SNOMED CT — OMOP standard; FHIR problem lists'),
+    ('ICD10CM', 'ICD-10-CM — US claims and EHR billing'),
+    ('ICD10', 'ICD-10 — WHO international'),
+    ('ICD10GM', 'ICD-10-GM — Germany'),
+    ('ICD10CA', 'ICD-10-CA — Canada'),
+    ('ICD11', 'ICD-11 — WHO, current revision'),
+    ('ICD9CM', 'ICD-9-CM — legacy, still in historical extracts'),
+    ('Read', 'Read v2 — UK legacy primary care'),
+    ('CTV3', 'CTV3 (Read v3) — UK legacy primary care'),
+    ('ICDO3', 'ICD-O-3 — cancer morphology and topography'),
+    ('Orphanet', 'Orphanet — rare disease'),
+    ('OMIM', 'OMIM — Mendelian inheritance'),
+    ('HPO', 'HPO — human phenotype ontology'),
+    ('MedDRA', 'MedDRA — adverse events, regulatory and trial data'),
+    ('NCIt', 'NCIt — NCI thesaurus; oncology fallback'),
+    ('MeSH', 'MeSH — diseases and biomedical terminology'),
+    ('ICPC', 'ICPC-2 — European primary care'),
+    ('CIEL', 'CIEL — interface terminology'),
+    ('Nebraska Lexicon', 'Nebraska Lexicon — interface terminology'),
+    ('DRG', 'MS-DRG — claims grouper'),
+    ('APR-DRG', 'APR-DRG — claims grouper'),
+)
+
+_PROCEDURE_SYSTEMS = (
+    ('EPIC', 'Epic — hospital-local codes'),
+    ('CERNER', 'Cerner — hospital-local codes'),
+    ('NCIt', 'NCIt — oncology procedures'),
+    ('MeSH', 'MeSH — biomedical procedures'),
+    ('SNOMED', 'SNOMED CT procedures — OMOP standard'),
+    ('CPT4', 'CPT-4 — US professional services'),
+    ('HCPCS', 'HCPCS Level II — US supplies and services'),
+    ('ICD10PCS', 'ICD-10-PCS — US inpatient procedures'),
+    ('ICD9Proc', 'ICD-9-Proc — legacy inpatient procedures'),
+    ('CDT', 'CDT — dental'),
+    ('Revenue Code', 'UB-04 revenue codes — facility billing'),
+    ('OPCS4', 'OPCS-4 — UK'),
+    ('OPS', 'OPS — Germany'),
+    ('CCAM', 'CCAM — France'),
+    ('CCI', 'CCI — Canada'),
+)
+
+_DRUG_SYSTEMS = (
+    ('EPIC', 'Epic — hospital-local codes'),
+    ('CERNER', 'Cerner — hospital-local codes'),
+    ('RxNorm', 'RxNorm — OMOP standard for drugs'),
+    ('NCIt', 'NCIt — oncology drugs, investigational agents and regimens'),
+    ('MeSH', 'MeSH — substances, drug aliases and investigational agents'),
+    ('RxNorm Extension', 'RxNorm Extension — OMOP, non-US drugs'),
+    ('NDC', 'NDC — US package level; very common in dispensing data'),
+    ('ATC', 'ATC — WHO classification, common outside the US'),
+    ('dm+d', 'dm+d — UK dictionary of medicines and devices'),
+    ('CVX', 'CVX — vaccines administered'),
+    ('MVX', 'MVX — vaccine manufacturers'),
+    ('HemOnc', 'HemOnc — regimens and lines of therapy'),
+    ('Multum', 'Multum — commercial drug database'),
+    ('FDB', 'First Databank — commercial drug database'),
+    ('Medi-Span', 'Medi-Span — commercial drug database'),
+    ('Gold Standard', 'Gold Standard — commercial drug database'),
+    ('GPI', 'GPI — generic product identifier'),
+    ('VANDF', 'VA National Drug File'),
+    ('NDFRT', 'NDF-RT — VA reference terminology'),
+    ('UNII', 'UNII — FDA unique ingredient identifier'),
+    ('SPL', 'SPL — FDA structured product labeling'),
+    ('AMT', 'AMT — Australian medicines terminology'),
+    ('CCDD', 'CCDD — Canadian clinical drug data set'),
+)
+
+_MEASUREMENT_SYSTEMS = (
+    ('EPIC', 'Epic — hospital-local codes'),
+    ('CERNER', 'Cerner — hospital-local codes'),
+    ('NCIt', 'NCIt — oncology measurements and biomarkers'),
+    ('MeSH', 'MeSH — biomedical measurements and findings'),
+    ('LOINC', 'LOINC — OMOP standard for labs and measurements'),
+    ('SNOMED', 'SNOMED CT — findings and qualitative results'),
+    ('CIEL', 'CIEL — interface terminology'),
+    ('OpenWearables', 'OpenWearables — unified wearable device metrics'),
+    ('Apple', 'Apple — Apple HealthKit wearable metrics'),
+    ('Garmin', 'Garmin — Garmin FIT wearable metrics'),
+    ('CPT4', 'CPT-4 — billed lab panels'),
+    ('UCUM', 'UCUM — units of measure'),
+    ('Nebraska Lexicon', 'Nebraska Lexicon — interface terminology'),
+)
+
+_OBSERVATION_SYSTEMS = (
+    ('EPIC', 'Epic — hospital-local codes'),
+    ('CERNER', 'Cerner — hospital-local codes'),
+    ('SNOMED', 'SNOMED CT — OMOP standard for observations'),
+    ('LOINC', 'LOINC — survey and assessment items'),
+    ('OpenWearables', 'OpenWearables — unified wearable device metrics'),
+    ('Apple', 'Apple — Apple HealthKit wearable metrics'),
+    ('Garmin', 'Garmin — Garmin FIT wearable metrics'),
+    ('ICD10CM', 'ICD-10-CM — Z-codes and social history'),
+    ('ICD10', 'ICD-10 — WHO Z-code equivalents'),
+    ('HCPCS', 'HCPCS — assessments and screenings'),
+    ('NCIt', 'NCIt — NCI thesaurus'),
+    ('MeSH', 'MeSH — biomedical terminology'),
+    ('PPI', 'PPI — participant-provided information (surveys)'),
+)
+
+SOURCE_SYSTEMS_BY_DOMAIN = {
+    'Condition': _CONDITION_SYSTEMS,
+    'Procedure': _PROCEDURE_SYSTEMS,
+    'Drug': _DRUG_SYSTEMS,
+    'Measurement': _MEASUREMENT_SYSTEMS,
+    'Observation': _OBSERVATION_SYSTEMS,
+}
+
+# The blank option, offered under every domain and first in the list. Uncoded is
+# the normal case for a parsed paper lab or a phrase from a note, and making it
+# the leading choice says so rather than making a curator hunt for its absence.
+NO_SOURCE_SYSTEM = {
+    'vocabulary_id': '',
+    'label': 'None — uncoded / free text (common for labs)',
+}
+
+
+def source_systems_for(domain_id):
+    """Code systems plausible for one OMOP domain, blank option first."""
+    systems = SOURCE_SYSTEMS_BY_DOMAIN.get(domain_id, ())
+    return [NO_SOURCE_SYSTEM] + [
+        {'vocabulary_id': vocab, 'label': label} for vocab, label in systems
+    ]
+
+
+def table_for_domain(domain_id):
+    return DOMAIN_TO_TABLE.get(domain_id, '')
+
+
+def domain_for_table(omop_table):
+    for domain, table in DOMAIN_TO_TABLE.items():
+        if table == omop_table:
+            return domain
+    return ''
+
+
+# ── Source vocabulary tab ordering for the Code Mapping page ─────────
+# Non-standard vocabularies (the ones curators actually need to map) come first,
+# then uncoded, then standard vocabularies last (they self-resolve).
+SOURCE_TAB_ORDER = [
+    'EPIC', 'CERNER',  # Hospital-local codes are the largest curation queues
+    'ICD10CM',
+    'ICD9CM', 'CPT4', 'HCPCS',
+    'RxNorm', 'NDC',
+    'Read', 'MeSH', 'OPCS4', 'Nebraska Lexicon',
+    'MedDRA', 'ICDO3', 'dm+d',
+    'OpenWearables',  # Wearable device metrics (includes Apple + Garmin)
+    '',  # Uncoded / free text
+    'LOINC', 'SNOMED',  # Standard — last
+]
+
+SOURCE_TAB_LABELS = {
+    'EPIC': 'Epic',
+    'CERNER': 'Cerner',
+    'ICD10CM': 'ICD-10-CM',
+    'ICD9CM': 'ICD-9-CM',
+    'ICD10PCS': 'ICD-10-PCS',
+    'ICD9Proc': 'ICD-9-Proc',
+    'OpenWearables': 'Wearables',
+    '': 'Uncoded',
+    # Others use vocabulary_id as-is.
+}
+
+# Wearable device vocabularies that are consolidated under the single
+# "Wearables" tab (OpenWearables) on the Code Mapping page.
+WEARABLE_SOURCE_VOCABULARIES = {'OpenWearables', 'Apple', 'Garmin'}
+
+# FHIR OID URIs that are aliases for OMOP vocabulary_ids.  Rows arriving
+# via crossmap imports sometimes carry the OID instead of the OMOP spelling.
+# The tab logic merges these into the canonical vocabulary.
+VOCABULARY_OID_ALIASES = {
+    'urn:oid:2.16.840.1.113883.6.96': 'SNOMED',
+}
+
+
+# Exact standard FHIR system identifiers. Vendor-local systems are recognised
+# separately below: their tenant segment remains part of the SCCM resolver key
+# because opaque codes can mean different things at different hospitals. The
+# browse layer rolls those exact identities into two practical vendor tabs.
+FHIR_SYSTEM_VOCABULARIES = {
+    'http://loinc.org': 'LOINC',
+    'http://snomed.info/sct': 'SNOMED',
+    'http://www.nlm.nih.gov/research/umls/rxnorm': 'RxNorm',
+    'http://hl7.org/fhir/sid/icd-10-cm': 'ICD10CM',
+    'http://hl7.org/fhir/sid/icd-10': 'ICD10CM',
+    'http://hl7.org/fhir/sid/cvx': 'CVX',
+}
+
+
+def hospital_vendor(system):
+    """Return EPIC/CERNER for a vendor-local system or vendor tab id."""
+    normalized = (system or '').strip().casefold().rstrip('/')
+    if normalized == 'epic' or normalized.startswith('urn:oid:1.2.840.114350.') \
+            or normalized.startswith(('http://open.epic.com/', 'https://open.epic.com/')):
+        return 'EPIC'
+    if normalized == 'cerner' or (
+        normalized.startswith(('http://fhir.cerner.com/', 'https://fhir.cerner.com/'))
+        and '/codeset/' in normalized
+    ):
+        return 'CERNER'
+    return ''
+
+
+def fhir_source_vocabulary(system):
+    """Return the resolver identity for a FHIR ``Coding.system`` URI.
+
+    Epic embeds a hospital id in ``urn:oid:1.2.840.114350.*`` and Cerner embeds
+    an instance id before ``codeSet``. Their opaque codes are only stable
+    inside that exact system, so retain the URI as the resolver key. The tab
+    layer separately rolls those keys up by :func:`hospital_vendor`.
+    """
+    identity = (system or '').strip().rstrip('/')
+    normalized = identity.casefold()
+    if not normalized:
+        return ''
+    standard = FHIR_SYSTEM_VOCABULARIES.get(normalized)
+    if standard:
+        return standard
+    if hospital_vendor(identity):
+        return identity
+    return ''
+
+
+def canonical_source_vocabulary(vocabulary_id):
+    """Normalize equivalent identifiers, without merging distinct vocabularies."""
+    vocabulary_id = (vocabulary_id or '').strip()
+    return VOCABULARY_OID_ALIASES.get(vocabulary_id, vocabulary_id)
+
+# OMOP vocabulary_id → UMLS root_source (SAB), for the UMLS bridge in Suggest
+# and for naming source codes from UMLS atoms. ICD10CM must precede ICD10:
+# Suggest's reverse map (SAB → vocabulary) keeps the first vocabulary it sees
+# for a shared SAB. MedDRA and CPT4 are licensed and absent from Athena on our
+# deployments, so UMLS is the only place their names come from.
+VOCAB_TO_UMLS_ROOT = {
+    'SNOMED': 'SNOMEDCT_US',
+    'ICD10CM': 'ICD10CM',
+    'ICD10PCS': 'ICD10PCS',
+    'LOINC': 'LNC',
+    'RxNorm': 'RXNORM',
+    'CPT4': 'CPT',
+    'HCPCS': 'HCPCS',
+    'NDC': 'NDC',
+    'CVX': 'CVX',
+    'ICD9CM': 'ICD9CM',
+    'MeSH': 'MSH',
+    'NDFRT': 'MED-RT',
+    'MedDRA': 'MDR',
+    'NCIt': 'NCI',
+}
+
+# Standard vocabularies — their concepts are already standard, so they appear
+# at the end of the tab strip as reference rather than work queue.
+STANDARD_SOURCE_VOCABULARIES = {'LOINC', 'SNOMED'}
+
+
+def source_tab_label(vocabulary_id):
+    """Human-readable tab label for a source vocabulary."""
+    return SOURCE_TAB_LABELS.get(vocabulary_id, vocabulary_id)
+
+
+def source_tab_sort_key(vocabulary_id):
+    """Sort key that places tabs in SOURCE_TAB_ORDER, unknowns before standard."""
+    try:
+        return SOURCE_TAB_ORDER.index(vocabulary_id)
+    except ValueError:
+        # Unknown vocabulary — place before the uncoded/standard block.
+        return len(SOURCE_TAB_ORDER) - 3
+
+
+def tables_for_source_vocabulary(vocabulary_id):
+    """OMOP tables a source vocabulary's codes can appear in.
+
+    A vocabulary can span multiple domains (e.g. SNOMED appears in conditions,
+    measurements, observations, procedures). Returns all relevant tables.
+    """
+    if not vocabulary_id:
+        # Uncoded — could be in any table.
+        return list(DOMAIN_TO_TABLE.values())
+    tables = []
+    for systems in SOURCE_SYSTEMS_BY_DOMAIN.values():
+        for vocab, _label in systems:
+            if vocab == vocabulary_id:
+                domain = next(
+                    d for d, s in SOURCE_SYSTEMS_BY_DOMAIN.items() if s is systems
+                )
+                table = DOMAIN_TO_TABLE.get(domain)
+                if table and table not in tables:
+                    tables.append(table)
+    return tables or list(DOMAIN_TO_TABLE.values())
+
+
+# ── Patient-scoped concept filtering ────────────────────────────────
+# Shared by sync_athena_mappings and import_fhir_crossmaps to restrict
+# imported mappings to concepts that actually appear in patient data.
+
+_PATIENT_SCOPED_CONCEPT_QUERIES = (
+    'SELECT DISTINCT drug_concept_id FROM drug_exposure WHERE drug_concept_id != 0',
+    'SELECT DISTINCT condition_concept_id FROM condition_occurrence WHERE condition_concept_id != 0',
+    'SELECT DISTINCT measurement_concept_id FROM measurement WHERE measurement_concept_id != 0',
+    'SELECT DISTINCT observation_concept_id FROM observation WHERE observation_concept_id != 0',
+    'SELECT DISTINCT procedure_concept_id FROM procedure_occurrence WHERE procedure_concept_id != 0',
+)
+
+
+def patient_scoped_concept_ids():
+    """Concept IDs actually used by patients across the five clinical tables.
+
+    Returns a set of integer concept_id values.  Concept 0 (no matching
+    concept) is excluded — it is not a real mapping target.
+    """
+    from django.db import connection
+
+    ids = set()
+    with connection.cursor() as cur:
+        for query in _PATIENT_SCOPED_CONCEPT_QUERIES:
+            cur.execute(query)
+            ids.update(row[0] for row in cur.fetchall())
+    return ids

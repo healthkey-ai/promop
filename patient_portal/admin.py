@@ -119,3 +119,54 @@ class BreakGlassGrantAdmin(admin.ModelAdmin):
 
     def has_change_permission(self, request, obj=None):
         return False  # immutable record of the emergency authorization
+
+
+from .models import ServiceApplication, ServiceAccessToken
+
+
+@admin.register(ServiceApplication)
+class ServiceApplicationAdmin(admin.ModelAdmin):
+    list_display = ['name', 'service_id', 'owner_contact', 'is_active', 'updated_at']
+    search_fields = ['name', 'service_id', 'owner_contact']
+    readonly_fields = ['created_at', 'updated_at']
+
+    def get_readonly_fields(self, request, obj=None):
+        return [*self.readonly_fields, *(['service_id'] if obj else [])]
+
+    def has_module_permission(self, request):
+        return request.user.is_active and request.user.is_staff
+
+    def has_view_permission(self, request, obj=None):
+        return self.has_module_permission(request)
+
+    def has_add_permission(self, request):
+        return self.has_module_permission(request)
+
+    def has_change_permission(self, request, obj=None):
+        return self.has_module_permission(request)
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(ServiceAccessToken)
+class ServiceAccessTokenAdmin(admin.ModelAdmin):
+    list_display = ['application', 'label', 'suffix', 'created_at', 'last_used_at', 'revoked_at']
+    fields = ['application', 'label', 'suffix', 'created_at', 'created_by', 'expires_at',
+              'last_used_at', 'revoked_at', 'revoked_by']
+    readonly_fields = fields
+
+    def has_module_permission(self, request):
+        return request.user.is_active and request.user.is_staff
+
+    def has_view_permission(self, request, obj=None):
+        return self.has_module_permission(request)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False

@@ -3,7 +3,7 @@ from datetime import date
 import pytest
 
 from omop_core.models import Observation
-from omop_core.services.episode_service import upsert_therapy_line_episode
+from omop_core.services.episode_service import author_therapy_line, upsert_therapy_line_episode
 from omop_core.services.mappings import (
     CONCEPT_DRUG_EXPOSURE_FIELD,
     CONCEPT_EHR_TYPE,
@@ -82,6 +82,40 @@ def test_upsert_therapy_line_episode_updates_corrected_dates_and_outcome_date():
     assert outcome.observation_date == date(2024, 5, 1)
 
 
+def test_authoring_line_with_a_new_regimen_replaces_old_asserted_source_concept():
+    _seed_episode_writer_concepts()
+    vocab = VocabularyFactory(vocabulary_id='HemOnc', vocabulary_name='HemOnc')
+    old_regimen = ConceptFactory(
+        concept_id=410001, concept_name='Old regimen', concept_code='OLD', vocabulary=vocab,
+    )
+    new_regimen = ConceptFactory(
+        concept_id=410002, concept_name='New regimen', concept_code='NEW', vocabulary=vocab,
+    )
+    person = PersonFactory()
+
+    # Simulate an existing authored/imported line with a previously asserted name.
+    upsert_therapy_line_episode(
+        person,
+        line_number=1,
+        regimen_concept=old_regimen,
+        regimen_source_concept=old_regimen,
+        start_date=date(2024, 1, 1),
+        today=date(2024, 1, 1),
+    )
+
+    author_therapy_line(
+        person,
+        line_number=1,
+        regimen_concept_id=new_regimen.concept_id,
+        start_date=date(2024, 1, 1),
+        replace=True,
+    )
+
+    episode = Episode.objects.get(person=person, episode_number=1)
+    assert episode.episode_object_concept_id == new_regimen.concept_id
+    assert episode.episode_source_concept_id == new_regimen.concept_id
+
+
 def test_upsert_preserves_existing_end_date_when_none_and_flag_set():
     # `preserve_end_date_when_none=True` (the CB profile-write path): a None end_date means "not provided,
     # keep what's there", NOT "clear it". Regression guard — CB has no therapy end_date field, so without
@@ -125,3 +159,17 @@ def test_upsert_clears_end_date_when_none_by_default():
 
     episode = Episode.objects.get(person=person, episode_number=1)
     assert episode.episode_end_date is None   # cleared (ongoing line)
+
+
+def test_episode_end_date_omission_preserves_and_explicit_null_clears():
+    _seed_episode_writer_concepts()
+    person = PersonFactory()
+    upsert_therapy_line_episode(person, line_number=1,
+                               start_date=date(2024, 1, 1), end_date=date(2024, 4, 1))
+    upsert_therapy_line_episode(person, line_number=1)
+    episode = Episode.objects.get(person=person, episode_number=1)
+    assert episode.episode_end_date == date(2024, 4, 1)
+    upsert_therapy_line_episode(person, line_number=1, start_date=None, end_date=None)
+    episode.refresh_from_db()
+    assert episode.episode_end_date is None
+    assert episode.episode_start_date == date(2024, 1, 1)

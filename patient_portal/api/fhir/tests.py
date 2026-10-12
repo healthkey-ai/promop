@@ -1,15 +1,17 @@
 """Tests for POST /api/fhir/sync/ — identity-resolved FHIR ingest."""
 from copy import deepcopy
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.db import connection
-from django.test import TestCase
+from django.test import TestCase, override_settings
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from patient_portal.models import Identity, PatientUser
 from omop_core.models import (
     ConditionOccurrence, DrugExposure, Measurement, Person, ProvenanceRecord,
-    PatientDocument,
+    PatientDocument, PatientRecord, Organization, GroupAccess,
 )
 
 # OMOP tables use manually-assigned integer PKs fed by Postgres sequences that
@@ -72,6 +74,7 @@ SAMPLE_BUNDLE = {
 }
 
 
+@override_settings(SERVICE_AUTH_SCOPES='patient/*.write')
 class FhirSyncTests(TestCase):
     def setUp(self):
         _ensure_pk_sequences()
@@ -119,6 +122,15 @@ class FhirSyncTests(TestCase):
     def test_rejects_non_bundle(self):
         resp = self.client.post('/api/fhir/sync/', {'bundle': {'resourceType': 'Patient'}}, format='json')
         self.assertEqual(resp.status_code, 400)
+
+    def test_rejects_non_numeric_observation_quantity(self):
+        bundle = deepcopy(SAMPLE_BUNDLE)
+        bundle['entry'][1]['resource']['valueQuantity']['value'] = '13.2'
+
+        resp = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('finite number', str(resp.data))
 
     def test_requires_auth(self):
         anon = APIClient()
@@ -253,6 +265,73 @@ class FhirSyncTests(TestCase):
         self.assertEqual(resp.status_code, 201, resp.content)
         self.assertEqual(resp.json()['person_id'], person.person_id)
         self.assertEqual(Measurement.objects.filter(person=person).count(), 1)
+
+    def test_service_token_explicit_read_only_actor_rejected(self):
+        from omop_core.services.pk import next_pk_batch
+
+        org = Organization.objects.create(name='FHIR Analyst Org', slug='fhir-analyst-org')
+        person = Person.objects.create(
+            person_id=next_pk_batch(Person, 'person_id', 1)[0],
+        )
+        PatientRecord.objects.create(person=person, organization=org)
+        analyst = Identity.objects.create_user(email='fhir-analyst@test.com', password='test')
+        GroupAccess.objects.create(identity=analyst, org=org, role='analyst')
+        service_user = Identity.objects.create(issuer='urn:service', sub='fhir-sync-analyst')
+        service_user.set_unusable_password()
+        service_user.save(update_fields=['password'])
+        client = APIClient()
+        client.force_authenticate(user=service_user, token='service-token')
+
+        resp = client.post('/api/fhir/sync/', {
+            'person_id': person.person_id,
+            'actor_iss': analyst.issuer,
+            'actor_sub': analyst.sub,
+            'bundle': SAMPLE_BUNDLE,
+        }, format='json')
+
+        self.assertEqual(resp.status_code, 403, resp.content)
+        self.assertIn('end-user authentication', resp.json()['detail'])
+        self.assertEqual(Measurement.objects.filter(person=person).count(), 0)
+
+    def test_userless_oauth_org_token_rejects_body_actor_for_provenance(self):
+        from datetime import timedelta
+        from oauth2_provider.models import AccessToken, Application
+        from omop_core.models import ApplicationOrganization
+        from omop_core.services.pk import next_pk_batch
+
+        org = Organization.objects.create(name='FHIR OAuth Org', slug='fhir-oauth-org')
+        owner = Identity.objects.create_user(email='fhir-oauth-owner@test.com', password='test')
+        app = Application.objects.create(
+            name='FHIR OAuth App',
+            user=owner,
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+        )
+        ApplicationOrganization.objects.create(application=app, organization=org)
+        token = AccessToken.objects.create(
+            user=None,
+            application=app,
+            token='fhir-userless-write-token',
+            expires=timezone.now() + timedelta(hours=1),
+            scope='patient/*.write',
+        )
+        person = Person.objects.create(
+            person_id=next_pk_batch(Person, 'person_id', 1)[0],
+        )
+        PatientRecord.objects.create(person=person, organization=org)
+        spoofed_actor = Identity.objects.create_user(email='spoofed-fhir@test.com', password='test')
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
+
+        resp = client.post('/api/fhir/sync/', {
+            'person_id': person.person_id,
+            'actor_iss': spoofed_actor.issuer,
+            'actor_sub': spoofed_actor.sub,
+            'bundle': SAMPLE_BUNDLE,
+        }, format='json')
+
+        self.assertEqual(resp.status_code, 403, resp.content)
+        self.assertFalse(Measurement.objects.filter(person=person).exists())
 
     # ---- B0 connector: patient self-service ingest ---------------------- #
 
@@ -795,3 +874,244 @@ class FhirSyncTests(TestCase):
         # 35 extra observations must add only a tiny, bounded number of queries —
         # per-row ingest would add ~140. This is the real "doesn't scale" proof.
         self.assertLess(q_large - q_small, 10, (q_small, q_large))
+
+
+class CuratedMappingResolutionTest(TestCase):
+    """Approved mappings steer what an import resolves to (#834).
+
+    Before this, the Code Mapping table was written by its own UI and read by
+    nothing: a curator could approve a mapping, watch it list as approved, and
+    the next import of that exact code would still land concept_id 0.
+    """
+
+    def setUp(self):
+        _ensure_pk_sequences()
+        self.user = Identity.objects.create_user(
+            email='curated_mapping@test.com', password='test', is_staff=True)
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def _bundle(self, system, code, text='M-PROTEIN, SERUM'):
+        return {'resourceType': 'Bundle', 'type': 'collection', 'entry': [{'resource': {
+            'resourceType': 'Observation',
+            'code': {'text': text, 'coding': [{'system': system, 'code': code}]},
+            'effectiveDateTime': '2026-08-12T09:00:00Z',
+            'valueQuantity': {'value': 3.2, 'unit': 'g/dL'},
+        }}]}
+
+    def _concept(self, concept_id, code, vocabulary_id, name):
+        from datetime import date
+        from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
+        vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id=vocabulary_id,
+            defaults={'vocabulary_name': vocabulary_id, 'vocabulary_concept_id': 0})
+        domain, _ = Domain.objects.get_or_create(
+            domain_id='Measurement',
+            defaults={'domain_name': 'Measurement', 'domain_concept_id': 21})
+        klass, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Lab Test',
+            defaults={'concept_class_name': 'Lab Test', 'concept_class_concept_id': 0})
+        return Concept.objects.create(
+            concept_id=concept_id, concept_name=name, domain=domain, vocabulary=vocab,
+            concept_class=klass, standard_concept='S', concept_code=code,
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+
+    def test_approved_mapping_resolves_an_otherwise_unmapped_code(self):
+        from omop_core.models import SourceCodeConceptMapping
+        target = self._concept(3046311, '33358-3', 'LOINC', 'Serum M-protein')
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='ICD10CM', source_code='C90.00',
+            target_concept=target, destination_vocabulary_id='LOINC',
+            omop_table='measurement', status='approved',
+        )
+        resp = self.client.post('/api/fhir/sync/', {
+            'bundle': self._bundle('http://hl7.org/fhir/sid/icd-10-cm', 'C90.00'),
+        }, format='json')
+        self.assertEqual(resp.status_code, 201, resp.content)
+        row = Measurement.objects.get(person_id=resp.json()['person_id'])
+        self.assertEqual(row.measurement_concept_id, target.concept_id)
+
+    def test_approved_loinc_mapping_overrides_the_direct_cache_hit(self):
+        """The batched FHIR cache must preserve SCCM-first resolution."""
+        from omop_core.models import SourceCodeConceptMapping
+        direct = self._concept(3046314, '33358-6', 'LOINC', 'Direct LOINC concept')
+        target = self._concept(3046315, '33358-7', 'LOINC', 'Curator-chosen concept')
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='LOINC', source_code=direct.concept_code,
+            target_concept=target, destination_vocabulary_id='LOINC',
+            omop_table='measurement', status='approved',
+        )
+        resp = self.client.post('/api/fhir/sync/', {
+            'bundle': self._bundle('http://loinc.org', direct.concept_code),
+        }, format='json')
+        self.assertEqual(resp.status_code, 201, resp.content)
+        row = Measurement.objects.get(person_id=resp.json()['person_id'])
+        self.assertEqual(row.measurement_concept_id, target.concept_id)
+
+    def test_proposed_mapping_does_not_steer_the_import(self):
+        """A draft an import wrote must not change what the next import
+        resolves to, or the machine quietly ratifies its own guess."""
+        from omop_core.models import SourceCodeConceptMapping
+        target = self._concept(3046312, '33358-4', 'LOINC', 'Serum M-protein')
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='ICD10CM', source_code='C90.01',
+            target_concept=target, omop_table='measurement', status='proposed',
+        )
+        resp = self.client.post('/api/fhir/sync/', {
+            'bundle': self._bundle('http://hl7.org/fhir/sid/icd-10-cm', 'C90.01'),
+        }, format='json')
+        row = Measurement.objects.get(person_id=resp.json()['person_id'])
+        self.assertNotEqual(row.measurement_concept_id, target.concept_id)
+
+    def test_uncoded_source_text_resolves_through_an_approved_mapping(self):
+        """A paper lab test name carries no code at all; the text is the key."""
+        from omop_core.models import SourceCodeConceptMapping
+        target = self._concept(3046313, '33358-5', 'LOINC', 'Serum M-protein')
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='', source_code='M-PROTEIN, SERUM',
+            target_concept=target, omop_table='measurement', status='approved',
+        )
+        bundle = {'resourceType': 'Bundle', 'type': 'collection', 'entry': [{'resource': {
+            'resourceType': 'Observation',
+            'code': {'text': 'M-PROTEIN, SERUM'},
+            'effectiveDateTime': '2026-08-12T09:00:00Z',
+            'valueQuantity': {'value': 3.2, 'unit': 'g/dL'},
+        }}]}
+        resp = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+        row = Measurement.objects.get(person_id=resp.json()['person_id'])
+        self.assertEqual(row.measurement_concept_id, target.concept_id)
+
+    def test_epic_and_cerner_local_codes_enter_separate_vendor_queues(self):
+        from omop_core.models import SourceCodeConceptMapping
+
+        cases = [
+            ('urn:oid:1.2.840.114350.1.13.211.2.7.5.737384.45', 'LOCAL-EPIC', 'EPIC'),
+            ('http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id',
+             'LOCAL-EPIC', 'EPIC'),
+            ('https://fhir.cerner.com/993df7f9-6163-4b2c-9388-9d472c4ef3f9/codeSet/72',
+             '674310', 'CERNER'),
+        ]
+        for system, code, expected in cases:
+            with self.subTest(system=system):
+                resp = self.client.post('/api/fhir/sync/', {
+                    'bundle': self._bundle(system, code, text=f'{expected} albumin'),
+                }, format='json')
+                self.assertEqual(resp.status_code, 201, resp.content)
+                mapping = SourceCodeConceptMapping.objects.get(
+                    source_vocabulary_id=system, source_code=code)
+                self.assertEqual(mapping.source_code_description, f'{expected} albumin')
+
+        # The same opaque Epic code in two systems must remain two resolver
+        # rows. The supplied corpus has 34,755 vendor/code keys with multiple
+        # labels, including genuine semantic conflicts.
+        self.assertEqual(SourceCodeConceptMapping.objects.filter(
+            source_code='LOCAL-EPIC').count(), 2)
+        self.assertTrue(Measurement.objects.filter(unit_source_value='g/dL').exists())
+
+    def test_hospital_context_is_attached_to_shared_epic_flowsheet_code(self):
+        from omop_core.models import SourceCodeConceptMapping
+        from omop_core.services.pk import next_pk
+
+        organization = Organization.objects.create(
+            name='FHIR Hospital', slug='fhir-hospital',
+        )
+        person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=person, organization=organization)
+        system = 'http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id'
+
+        with patch(
+            'patient_portal.api.fhir.sync.get_request_org',
+            return_value=organization,
+        ):
+            response = self.client.post('/api/fhir/sync/', {
+                'person_id': person.person_id,
+                'bundle': self._bundle(system, 'SHARED-10627', text='Local albumin'),
+            }, format='json')
+
+        self.assertEqual(response.status_code, 201, response.content)
+        mapping = SourceCodeConceptMapping.objects.get(
+            organization=organization,
+            source_vocabulary_id=system,
+            source_code='SHARED-10627',
+        )
+        self.assertEqual(mapping.source_code_description, 'Local albumin')
+
+    def test_hospital_code_does_not_use_cross_vocabulary_concept_collision(self):
+        from omop_core.models import SourceCodeConceptMapping
+        from omop_core.services.pk import next_pk
+
+        organization = Organization.objects.create(
+            name='FHIR Collision Hospital', slug='fhir-collision-hospital',
+        )
+        person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=person, organization=organization)
+        collision = self._concept(
+            3046999, '10627', 'LOINC', 'Unrelated global concept',
+        )
+        system = 'http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id'
+
+        with patch(
+            'patient_portal.api.fhir.sync.get_request_org',
+            return_value=organization,
+        ):
+            response = self.client.post('/api/fhir/sync/', {
+                'person_id': person.person_id,
+                'bundle': self._bundle(system, '10627', text='Local collision code'),
+            }, format='json')
+
+        self.assertEqual(response.status_code, 201, response.content)
+        mapping = SourceCodeConceptMapping.objects.get(
+            organization=organization,
+            source_vocabulary_id=system,
+            source_code='10627',
+        )
+        self.assertEqual(mapping.source_code_description, 'Local collision code')
+        measurement = Measurement.objects.get(person=person)
+        self.assertNotEqual(measurement.measurement_concept_id, collision.concept_id)
+
+    def test_reimport_after_a_curator_moves_the_concept_does_not_duplicate(self):
+        """The trap this design exists to avoid.
+
+        Import, then a curator re-points the code at a standard concept, then
+        the bundle arrives again (an ETL retry, a corrected report). With the
+        concept in the dedup key the second import found nothing at the new key
+        and inserted a second row, leaving one lab draw recorded twice.
+        """
+        from omop_core.models import SourceCodeConceptMapping
+        from omop_core.services.code_mapping import repoint_clinical_rows
+
+        bundle = {'resourceType': 'Bundle', 'type': 'collection', 'entry': [{'resource': {
+            'resourceType': 'Observation',
+            'code': {'text': 'M-PROTEIN, SERUM'},
+            'effectiveDateTime': '2026-08-12T09:00:00Z',
+            'valueQuantity': {'value': 3.2, 'unit': 'g/dL'},
+        }}]}
+        first = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+        self.assertEqual(first.status_code, 201, first.content)
+        person_id = first.json()['person_id']
+        original = Measurement.objects.get(person_id=person_id)
+
+        # The first import minted a destination and proposed the mapping
+        # itself, which is the queue a curator works from -- so this re-points
+        # that row rather than creating a second one for the same code.
+        mapping = SourceCodeConceptMapping.objects.get(source_code='M-PROTEIN, SERUM')
+        self.assertEqual(mapping.status, 'proposed')
+        self.assertEqual(mapping.origin, 'import')
+
+        target = self._concept(3046314, '33358-6', 'LOINC', 'Serum M-protein')
+        mapping.target_concept = target
+        mapping.status = 'approved'
+        mapping.save(update_fields=['target_concept', 'status'])
+        repoint_clinical_rows(
+            mapping=mapping,
+            old_concept_id=original.measurement_concept_id,
+            new_concept_id=target.concept_id,
+        )
+
+        second = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+        self.assertEqual(second.status_code, 201, second.content)
+
+        rows = Measurement.objects.filter(person_id=person_id)
+        self.assertEqual(rows.count(), 1, 'the re-import duplicated the lab draw')
+        self.assertEqual(rows.get().measurement_concept_id, target.concept_id)

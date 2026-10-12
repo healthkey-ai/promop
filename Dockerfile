@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     gnupg \
     gcc \
+    git \
     postgresql-client \
     libpq-dev \
     && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
@@ -18,7 +19,9 @@ RUN python --version && node --version && npm --version
 # Set working directory
 WORKDIR /app
 
-# Copy Python requirements and install
+# Copy Python requirements and install. Browser-only Athena operator tooling
+# uses requirements-athena-scrape.txt and scripts/install_athena_browser.py in
+# a purpose-built environment; it is not part of the application image.
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
@@ -33,6 +36,8 @@ WORKDIR /app
 
 # Copy ALL application files
 COPY . .
+
+RUN python scripts/verify_source_catalog_snapshots.py
 
 # Verify patient_portal directory exists
 RUN ls -la /app/patient_portal/
@@ -58,7 +63,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 
 # Run migrations and start gunicorn
 CMD python manage.py migrate && \
-    gunicorn ctomop.wsgi:application \
+    gunicorn promop.wsgi:application \
     --bind 0.0.0.0:$PORT \
     --workers 4 \
     --threads 2 \

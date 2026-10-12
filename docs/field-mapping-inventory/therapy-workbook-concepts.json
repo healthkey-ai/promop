@@ -1,0 +1,102 @@
+[
+  {
+    "concept_id": 4166414,
+    "concept_code": "416234007",
+    "concept_name": "Highly active antiretroviral therapy",
+    "vocabulary_id": "SNOMED",
+    "standard_concept": "S",
+    "invalid_reason": null,
+    "domain_id": "Procedure",
+    "concept_class_id": "Procedure"
+  },
+  {
+    "concept_id": 4306720,
+    "concept_code": "387222003",
+    "concept_name": "Carbamazepine",
+    "vocabulary_id": "SNOMED",
+    "standard_concept": null,
+    "invalid_reason": null,
+    "domain_id": "Drug",
+    "concept_class_id": "Substance"
+  },
+  {
+    "concept_id": 19023250,
+    "concept_code": "153010",
+    "concept_name": "Advil",
+    "vocabulary_id": "RxNorm",
+    "standard_concept": null,
+    "invalid_reason": null,
+    "domain_id": "Drug",
+    "concept_class_id": "Brand Name"
+  },
+  {
+    "concept_id": 19026850,
+    "concept_code": "203214",
+    "concept_name": "diclofenac sodium",
+    "vocabulary_id": "RxNorm",
+    "standard_concept": null,
+    "invalid_reason": null,
+    "domain_id": "Drug",
+    "concept_class_id": "Precise Ingredient"
+  },
+  {
+    "concept_id": 19044580,
+    "concept_code": "202976",
+    "concept_name": "Voltaren",
+    "vocabulary_id": "RxNorm",
+    "standard_concept": null,
+    "invalid_reason": null,
+    "domain_id": "Drug",
+    "concept_class_id": "Brand Name"
+  },
+  {
+    "concept_id": 19053148,
+    "concept_code": "215101",
+    "concept_name": "Aleve",
+    "vocabulary_id": "RxNorm",
+    "standard_concept": null,
+    "invalid_reason": null,
+    "domain_id": "Drug",
+    "concept_class_id": "Brand Name"
+  },
+  {
+    "concept_id": 19058062,
+    "concept_code": "215916",
+    "concept_name": "Cataflam",
+    "vocabulary_id": "RxNorm",
+    "standard_concept": null,
+    "invalid_reason": null,
+    "domain_id": "Drug",
+    "concept_class_id": "Brand Name"
+  },
+  {
+    "concept_id": 19072024,
+    "concept_code": "29451",
+    "concept_name": "megestrol acetate",
+    "vocabulary_id": "RxNorm",
+    "standard_concept": null,
+    "invalid_reason": null,
+    "domain_id": "Drug",
+    "concept_class_id": "Precise Ingredient"
+  },
+  {
+    "concept_id": 19132917,
+    "concept_code": "81997",
+    "concept_name": "diclofenac potassium",
+    "vocabulary_id": "RxNorm",
+    "standard_concept": null,
+    "invalid_reason": null,
+    "domain_id": "Drug",
+    "concept_class_id": "Precise Ingredient"
+  },
+  {
+    "concept_id": 40058763,
+    "concept_code": "485433",
+    "concept_name": "entecavir Oral Tablet",
+    "vocabulary_id": "RxNorm",
+    "standard_concept": "S",
+    "invalid_reason": null,
+    "domain_id": "Drug",
+    "concept_class_id": "Clinical Drug Form"
+  }
+]
