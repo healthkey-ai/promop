@@ -114,6 +114,49 @@ def test_about_omits_empty_fields_and_marks_patient_edits():
     }
 
 
+def test_about_shows_the_blood_type_from_the_newest_abo_rh_result_and_labs_leave_it_out():
+    record = PatientRecordFactory(disease='', facility_name='Dana-Farber')
+    abo_rh = ConceptFactory(concept_code='882-1', concept_name='ABO and Rh group [Type] in Blood')
+    visit = visit_at(record, 'MD Anderson Cancer Center')
+    with suppress_patient_record_refresh():
+        MeasurementFactory(person=record.person, measurement_concept=abo_rh, measurement_date='2019-05-01',
+                           value_as_string='A Rh(D) negative')
+        MeasurementFactory(person=record.person, measurement_concept=abo_rh, measurement_date='2024-03-01',
+                           value_as_string='O Rh(D) positive', visit_occurrence=visit)
+        MeasurementFactory(person=record.person, measurement_concept=abo_rh, measurement_date='2025-01-01',
+                           value_as_string='B Rh(D) positive', is_erroneous=True)
+    client = signed_in(record)
+
+    fields = {f['key']: f for f in client.get('/api/v1/phr/about/').data['fields']}
+
+    assert fields['blood_type'] == {
+        'key': 'blood_type',
+        'value': 'O positive',
+        'source': {'kind': 'record', 'facility': 'MD Anderson Cancer Center', 'date': '2024-03-01'},
+    }
+    assert client.get('/api/v1/phr/labs/').data['tests'] == []
+    assert client.get(f'/api/v1/phr/labs/{abo_rh.concept_id}/').status_code == 404
+
+
+@pytest.mark.parametrize(('abo', 'rh', 'shown'), [
+    ('Group AB', 'Rh negative', 'AB negative'),
+    ('O', None, 'O'),
+    ('Weak D, see note', 'Positive', 'Weak D, see note'),
+])
+def test_blood_type_joins_separate_abo_and_rh_results(abo, rh, shown):
+    record = PatientRecordFactory(disease='')
+    with suppress_patient_record_refresh():
+        MeasurementFactory(person=record.person, measurement_date='2024-03-01', value_as_string=abo,
+                           measurement_concept=ConceptFactory(concept_code='883-9', concept_name='ABO group [Type] in Blood'))
+        if rh:
+            MeasurementFactory(person=record.person, measurement_date='2024-03-01', value_as_string=rh,
+                               measurement_concept=ConceptFactory(concept_code='10331-7', concept_name='Rh [Type] in Blood'))
+
+    fields = {f['key']: f['value'] for f in signed_in(record).get('/api/v1/phr/about/').data['fields']}
+
+    assert fields['blood_type'] == shown
+
+
 # ---------------------------------------------------------------- diagnoses
 
 
