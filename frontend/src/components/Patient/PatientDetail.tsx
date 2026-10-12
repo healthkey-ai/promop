@@ -348,6 +348,9 @@ export default function PatientDetail({
 
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveSeqRef = useRef(0);
+  const saveRevisionRef = useRef(0);
+  const dirtyFieldsRef = useRef(new Set<string>());
+  const confirmedWritesRef = useRef<Record<string, unknown>>({});
    
   const pendingDataRef = useRef<{ info: Record<string, unknown>; name: string } | null>(null);
    
@@ -370,8 +373,6 @@ export default function PatientDetail({
   useEffect(() => { editedInfoRef.current = editedInfo; }, [editedInfo]);
   useEffect(() => { editedNameRef.current = editedName; }, [editedName]);
   useEffect(() => { patientNameRef.current = patientName; }, [patientName]);
-  useEffect(() => () => { if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current); }, []);
-
   // Take a record the server returned as the new save baseline and editor state.
   //
   // pendingDataRef is the synchronous copy of the editor state -- every edit is
@@ -379,15 +380,31 @@ export default function PatientDetail({
   // pre-refresh values, and diffed against the new baseline they were sent as
   // edits. Edits not yet saved are kept on top of the fresh record, so a refresh
   // landing inside the autosave window neither drops them nor shows them reverted.
-  const adoptServerRecord = useCallback((raw: Record<string, unknown>) => {
+  const adoptServerRecord = useCallback((raw: Record<string, unknown>, readRevision?: number) => {
     const fresh = normalizeRecord(raw);
-    const oldBaseline = patientInfoRef.current ?? {};
+    // A read begun before our PATCH can arrive after it and carry old values.
+    // Keep confirmed writes until a read begun after that PATCH acknowledges
+    // them. Child components that hand back a record without a request marker
+    // conservatively keep mismatching confirmed values as well.
+    if (readRevision !== undefined && readRevision === saveRevisionRef.current) {
+      confirmedWritesRef.current = {};
+    } else {
+      for (const [field, value] of Object.entries(confirmedWritesRef.current)) {
+        if (fresh[field] === value) delete confirmedWritesRef.current[field];
+        else fresh[field] = value;
+      }
+    }
     const pending = pendingDataRef.current;
-    const unsaved = pending
-      ? Object.fromEntries(Object.entries(pending.info).filter(
-          ([f, v]) => !LIFECYCLE.has(f) && v !== oldBaseline[f],
-        ))
-      : {};
+    const unsaved: Record<string, unknown> = {};
+    if (pending) {
+      for (const field of dirtyFieldsRef.current) {
+        if (!LIFECYCLE.has(field) && pending.info[field] !== fresh[field]) {
+          unsaved[field] = pending.info[field];
+        } else {
+          dirtyFieldsRef.current.delete(field);
+        }
+      }
+    }
     const edited = { ...fresh, ...unsaved };
 
     patientInfoRef.current = { ...fresh };
@@ -398,12 +415,13 @@ export default function PatientDetail({
 
   useEffect(() => {
     if (!personId) return;
+    const readRevision = saveRevisionRef.current;
     (async () => {
       try {
         setLoading(true);
         const res = await api.get(`/patient-info/${personId}/`);
         const d = res.data.patient_info;
-        adoptServerRecord(d);
+        adoptServerRecord(d, readRevision);
 
         const user = res.data.user;
         const name = d.patient_name
@@ -481,8 +499,21 @@ export default function PatientDetail({
           `/patient-info/${personId}/`,
           renamed ? { ...patchFields, patient_name: data.name } : patchFields,
         );
+        saveRevisionRef.current += 1;
         for (const f of Object.keys(patchFields)) {
           if (patientInfoRef.current) patientInfoRef.current[f] = info[f];
+          confirmedWritesRef.current[f] = info[f];
+          if (pendingDataRef.current?.info[f] === info[f]) dirtyFieldsRef.current.delete(f);
+        }
+      }
+      // Derived/read-only fields may change in the editor as a side effect of
+      // an actual edit (for example tnbc_status). They were not sent, so they
+      // must not remain an unsaved overlay across later server refreshes.
+      for (const field of dirtyFieldsRef.current) {
+        const descriptor = descriptors[field];
+        if (descriptor && (!descriptor.writable || descriptor.target !== 'patient_record')
+            && pendingDataRef.current?.info[field] === info[field]) {
+          dirtyFieldsRef.current.delete(field);
         }
       }
       if (seq === saveSeqRef.current) {
@@ -533,6 +564,18 @@ export default function PatientDetail({
     }
   }, [personId]);
 
+  const doSaveRef = useRef(doSave);
+  doSaveRef.current = doSave;
+  useEffect(() => () => {
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+      // The old PatientDetail instance retains its personId when a route switch
+      // unmounts it; flush its edit instead of dropping the two-second timer.
+      void doSaveRef.current();
+    }
+  }, []);
+
    
   const scheduleAutoSave = useCallback((info: Record<string, unknown>, name: string) => {
     pendingDataRef.current = { info, name };
@@ -551,14 +594,17 @@ export default function PatientDetail({
   // patched directly.
   const reloadPatientInfo = useCallback(() => {
     if (!personId) return;
+    const readRevision = saveRevisionRef.current;
     api.get(`/patient-info/${personId}/`)
-      .then((res) => adoptServerRecord(res.data.patient_info))
+      .then((res) => adoptServerRecord(res.data.patient_info, readRevision))
       .catch(() => {});
   }, [personId, adoptServerRecord]);
 
   const handleFieldChange = useCallback((field: string, value: unknown) => {
     const base = pendingDataRef.current?.info ?? editedInfoRef.current;
     const updated = { ...base, [field]: value };
+    if (value === patientInfoRef.current?.[field]) dirtyFieldsRef.current.delete(field);
+    else dirtyFieldsRef.current.add(field);
 
     if (["estrogen_receptor_status", "progesterone_receptor_status", "her2_status"].includes(field)) {
       const er = String(field === "estrogen_receptor_status" ? value : updated.estrogen_receptor_status ?? "");
@@ -635,6 +681,12 @@ export default function PatientDetail({
               ...(abbreviation ? { region: abbreviation } : {}),
             };
             setEditedInfo(updated);
+            if (updated.city === patientInfoRef.current?.city) dirtyFieldsRef.current.delete('city');
+            else dirtyFieldsRef.current.add('city');
+            if (abbreviation) {
+              if (updated.region === patientInfoRef.current?.region) dirtyFieldsRef.current.delete('region');
+              else dirtyFieldsRef.current.add('region');
+            }
             scheduleAutoSave(updated, editedNameRef.current);
           }
         }
@@ -871,6 +923,7 @@ export default function PatientDetail({
                         validated={!!editedInfo.validated}
                         validationDate={editedInfo.validation_date as string | null}
                         onConfirm={async () => {
+                          const readRevision = saveRevisionRef.current;
                           try {
                             const result = await confirmRecord();
                             adoptServerRecord({
@@ -878,7 +931,7 @@ export default function PatientDetail({
                               validated: result.validated,
                               validated_by: result.validated_by,
                               validation_date: result.validation_date,
-                            });
+                            }, readRevision);
                           } catch {
                             setSaveErrorMsg('Failed to confirm record. Please try again.');
                           }

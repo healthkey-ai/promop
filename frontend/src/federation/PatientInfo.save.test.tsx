@@ -206,6 +206,28 @@ describe('federated PatientInfo save', () => {
     expect(screen.getByDisplayValue('a.howell@example.org')).toBeInTheDocument();
   });
 
+  it('rebases pending edits when a /me refetch replaces the record', async () => {
+    await renderAndLoad();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.change(screen.getByDisplayValue('howell@example.org'), {
+      target: { value: 'a.howell@example.org' },
+    });
+    await act(async () => {
+      qc.setQueryData(['patient-info', 'me'], {
+        patient_info: { ...PATIENT_INFO, anc_thousand_per_ul: 4.2 },
+        user: { name: 'Alishia Howell', email: 'howell@example.org' },
+        patient_name: 'Alishia Tawny Howell',
+      });
+    });
+    expect(screen.getByDisplayValue('a.howell@example.org')).toBeInTheDocument();
+    fireEvent.change(screen.getByDisplayValue('a.howell@example.org'), {
+      target: { value: 'b.howell@example.org' },
+    });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0][1]).toEqual({ email: 'b.howell@example.org' });
+  });
+
   it('attempts nothing when the descriptor cannot be fetched', async () => {
     (client.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
       if (url.includes('writable-fields')) return Promise.reject(new Error('offline'));
