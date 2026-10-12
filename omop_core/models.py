@@ -5000,8 +5000,11 @@ class SourceCodeResolveRun(models.Model):
     total = models.IntegerField(default=0)
     done = models.IntegerField(default=0)
     resolved = models.IntegerField(default=0)
+    skipped = models.IntegerField(default=0)
+    already_resolved = models.IntegerField(default=0)
     errors = models.IntegerField(default=0)
     error_detail = models.JSONField(default=list, blank=True)
+    code_details = models.JSONField(default=list, blank=True)
 
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,

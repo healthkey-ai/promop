@@ -41,8 +41,11 @@ def run_bulk_resolve(run_id: uuid.UUID, person_ids: list[int] | None = None) -> 
     run.save(update_fields=['state'])
 
     total_resolved = 0
+    total_skipped = 0
+    total_already_resolved = 0
     total_errors = 0
     error_details: list[dict] = []
+    all_code_details: list[dict] = []
 
     try:
         for i, pid in enumerate(person_ids):
@@ -50,6 +53,9 @@ def run_bulk_resolve(run_id: uuid.UUID, person_ids: list[int] | None = None) -> 
                 person = Person.objects.get(person_id=pid)
                 result = resolve_person_source_codes(person)
                 total_resolved += result['resolved']
+                total_skipped += result['skipped']
+                total_already_resolved += result['already_resolved']
+                all_code_details.extend(result.get('code_details', []))
             except Person.DoesNotExist:
                 total_errors += 1
                 error_details.append({'person_id': pid, 'error': 'Person not found'})
@@ -60,8 +66,10 @@ def run_bulk_resolve(run_id: uuid.UUID, person_ids: list[int] | None = None) -> 
 
             run.done = i + 1
             run.resolved = total_resolved
+            run.skipped = total_skipped
+            run.already_resolved = total_already_resolved
             run.errors = total_errors
-            run.save(update_fields=['done', 'resolved', 'errors'])
+            run.save(update_fields=['done', 'resolved', 'skipped', 'already_resolved', 'errors'])
 
         run.state = SourceCodeResolveRun.COMPLETED
     except BaseException:
@@ -70,8 +78,9 @@ def run_bulk_resolve(run_id: uuid.UUID, person_ids: list[int] | None = None) -> 
         raise
     finally:
         run.error_detail = error_details
+        run.code_details = all_code_details
         run.finished_at = timezone.now()
-        run.save(update_fields=['state', 'error_detail', 'finished_at'])
+        run.save(update_fields=['state', 'error_detail', 'code_details', 'finished_at'])
 
 
 def create_and_dispatch_resolve_run(person_ids: list[int], user=None) -> SourceCodeResolveRun:
