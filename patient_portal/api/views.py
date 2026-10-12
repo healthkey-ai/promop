@@ -5837,8 +5837,8 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
     def resolve_source_codes(self, request: Request, pk: str | None = None) -> Response:
         """POST /api/v1/patient-records/{person_id}/resolve-source-codes/
 
-        Re-resolve clinical rows where concept_id is 0 or an HK-* quarantine
-        concept, using current approved SCCM mappings.  Scoped to one person.
+        Queue a source-code resolution for one person.  Returns 202 with a
+        run_id that the client polls via ``/v1/resolve-runs/{run_id}/``.
         """
         person, patient_info, err = self._resolve_patient_with_auth(request, pk)
         if err:
@@ -5846,21 +5846,19 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
 
         if not _is_admin_actor(request):
             return Response(
-                {'detail': 'Only administrators can resolve source codes.'},
+                {'detail': _admin_denial_detail(request)},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        from omop_core.mapping.code_resolution import resolve_person_source_codes
+        from omop_core.services.resolve_jobs import create_and_dispatch_resolve_run
 
-        source_values = request.data.get('source_values')
-        omop_tables = request.data.get('omop_tables')
-
-        result = resolve_person_source_codes(
-            person,
-            source_values=source_values,
-            omop_tables=omop_tables,
+        run = create_and_dispatch_resolve_run(
+            [person.person_id], user=request.user,
         )
-        return Response(result)
+        return Response(
+            {'run_id': str(run.id), 'total': 1},
+            status=status.HTTP_202_ACCEPTED,
+        )
 
     @action(detail=False, methods=['post'], url_path='bulk-resolve-source-codes',
             permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
