@@ -5837,6 +5837,45 @@ class ScopedTokenPermissionTest(TestCase):
         req = self._req("DELETE", claims, self._user(is_staff=True))
         self.assertTrue(self.permission.has_permission(req, None))
 
+    def test_org_admin_allows_post(self):
+        """Non-staff org admin can POST (e.g. Generate OMOP)."""
+        from omop_core.models import GroupAccess, Organization
+        user = self._user()
+        org = Organization.objects.create(name="Test Org", slug="test-org")
+        GroupAccess.objects.create(identity=user, org=org, role='org_admin')
+        req = self._req("POST", None, user)
+        self.assertTrue(self.permission.has_permission(req, None))
+
+    def test_org_admin_allows_delete(self):
+        """Non-staff org admin can DELETE."""
+        from omop_core.models import GroupAccess, Organization
+        user = self._user()
+        org = Organization.objects.create(name="Test Org 2", slug="test-org-2")
+        GroupAccess.objects.create(identity=user, org=org, role='org_admin')
+        req = self._req("DELETE", None, user)
+        self.assertTrue(self.permission.has_permission(req, None))
+
+    def test_firebase_org_admin_allows_post(self):
+        """Firebase-authenticated org admin can POST."""
+        from omop_core.models import GroupAccess, Organization
+        from patient_portal.api.providers.base import TokenClaims
+        user = self._user()
+        org = Organization.objects.create(name="Test Org 3", slug="test-org-3")
+        GroupAccess.objects.create(identity=user, org=org, role='org_admin')
+        claims = TokenClaims(issuer="https://securetoken.google.com/proj",
+                             sub="uid-admin", email="admin@test.com", name="A", raw={})
+        req = self._req("POST", claims, user)
+        self.assertTrue(self.permission.has_permission(req, None))
+
+    def test_doctor_denies_post(self):
+        """A doctor role (non-admin professional) still cannot POST."""
+        from omop_core.models import GroupAccess, Organization
+        user = self._user()
+        org = Organization.objects.create(name="Test Org 4", slug="test-org-4")
+        GroupAccess.objects.create(identity=user, org=org, role='doctor')
+        req = self._req("POST", None, user)
+        self.assertFalse(self.permission.has_permission(req, None))
+
 
 # ---------------------------------------------------------------------------
 # Person ID enumeration fix — TODO #4

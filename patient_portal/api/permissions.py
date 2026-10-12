@@ -163,6 +163,10 @@ class ScopedTokenPermission(BasePermission):
             # Staff users retain full access.
             if getattr(request.user, 'is_staff', False):
                 return True
+            # Org admins (direct grant or trust-derived) retain full access.
+            from omop_core.services.access import get_admin_orgs
+            if get_admin_orgs(request.user).exists():
+                return True
             # Regular authenticated users (patients): read + PATCH own data only.
             # POST (sync, bulk upload) and DELETE (visits, measurements, bulk) are denied.
             return request.method in _SAFE_METHODS or request.method == 'PATCH'
