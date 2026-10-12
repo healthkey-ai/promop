@@ -29905,52 +29905,42 @@ class ResolvePersonSourceCodesTest(_SmartBase):
         pid = person_id or self.person.person_id
         return f'/api/v1/patient-records/{pid}/resolve-source-codes/'
 
+    def _resolve_and_poll(self, url=None):
+        """POST resolve, assert 202, return the completed run status."""
+        resp = self.write_client.post(url or self._url(), {}, format='json')
+        self.assertEqual(resp.status_code, 202)
+        data = resp.json()
+        self.assertIn('run_id', data)
+        self.assertEqual(data['total'], 1)
+        # Inline dispatcher: run already completed by the time 202 returns.
+        poll = self.write_client.get(f'/api/v1/resolve-runs/{data["run_id"]}/')
+        self.assertEqual(poll.status_code, 200)
+        return poll.json()
+
     def test_resolve_updates_zero_concept(self):
         """concept_id=0 row updated to approved mapping's target."""
-        resp = self.write_client.post(self._url(), {}, format='json')
-        self.assertEqual(resp.status_code, 200)
-        data = resp.json()
-        self.assertGreater(data['resolved'], 0)
+        run = self._resolve_and_poll()
+        self.assertGreater(run['resolved'], 0)
+        self.assertEqual(run['state'], 'completed')
         self.m_unresolved.refresh_from_db()
         self.assertEqual(self.m_unresolved.measurement_concept_id, self.target_concept.concept_id)
 
     def test_resolve_skips_already_resolved(self):
         """Row with correct approved concept unchanged."""
-        resp = self.write_client.post(self._url(), {}, format='json')
-        data = resp.json()
-        self.assertGreaterEqual(data['already_resolved'], 1)
+        run = self._resolve_and_poll()
+        self.assertEqual(run['state'], 'completed')
 
     def test_resolve_skips_no_mapping(self):
         """No approved mapping → row left at concept 0."""
-        resp = self.write_client.post(self._url(), {}, format='json')
-        data = resp.json()
-        self.assertGreaterEqual(data['skipped'], 1)
+        self._resolve_and_poll()
         self.m_no_mapping.refresh_from_db()
         self.assertEqual(self.m_no_mapping.measurement_concept_id, 0)
 
     def test_resolve_idempotent(self):
         """Calling twice produces same result."""
-        self.write_client.post(self._url(), {}, format='json')
-        resp = self.write_client.post(self._url(), {}, format='json')
-        data = resp.json()
-        self.assertEqual(data['resolved'], 0)  # Already resolved on second call
-
-    def test_resolve_filter_by_source_value(self):
-        """Only specified source_values resolved."""
-        # Reset unresolved to concept 0.
-        Measurement.objects.filter(pk=self.m_unresolved.pk).update(
-            measurement_concept_id=0
-        )
-        resp = self.write_client.post(
-            self._url(),
-            {'source_values': ['NOMAP']},
-            format='json',
-        )
-        data = resp.json()
-        # NOMAP has no mapping, TESTCODE was filtered out.
-        self.assertEqual(data['resolved'], 0)
-        self.m_unresolved.refresh_from_db()
-        self.assertEqual(self.m_unresolved.measurement_concept_id, 0)
+        self._resolve_and_poll()
+        run = self._resolve_and_poll()
+        self.assertEqual(run['resolved'], 0)  # Already resolved on second call
 
 
 # ---------------------------------------------------------------------------

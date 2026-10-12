@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import api from "../../api/axios";
 import { useAuth } from "../../hooks/useAuth";
@@ -6,6 +6,7 @@ import type {
   PatientSourceCode,
   SourceCodesResponse,
   ResolveResult,
+  ResolveRunStatus,
 } from "../../types/sourceCodes";
 import EditMappingDialog from "../CodeMappings/EditMappingDialog";
 import {
@@ -248,16 +249,39 @@ export default function PatientSourceCodesTab({ personId }: Props) {
     };
   }, []);
 
+  const resolvePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  useEffect(() => () => { if (resolvePollRef.current) clearInterval(resolvePollRef.current); }, []);
+
   const handleResolve = async () => {
     setResolving(true);
     setResolveResult(null);
     try {
-      const res = await api.post<ResolveResult>(
+      const res = await api.post<{ run_id: string; total: number }>(
         `/v1/patient-records/${personId}/resolve-source-codes/`,
         {}
       );
-      setResolveResult(res.data);
-      await fetchSourceCodes();
+      const runId = res.data.run_id;
+
+      resolvePollRef.current = setInterval(async () => {
+        try {
+          const status = await api.get<ResolveRunStatus>(`/v1/resolve-runs/${runId}/`);
+          if (status.data.state === "completed" || status.data.state === "failed") {
+            if (resolvePollRef.current) clearInterval(resolvePollRef.current);
+            resolvePollRef.current = null;
+            setResolveResult({
+              resolved: status.data.resolved,
+              skipped: (status.data.total - status.data.resolved - status.data.errors),
+              already_resolved: 0,
+            });
+            setResolving(false);
+            await fetchSourceCodes();
+          }
+        } catch {
+          if (resolvePollRef.current) clearInterval(resolvePollRef.current);
+          resolvePollRef.current = null;
+          setResolving(false);
+        }
+      }, 2000);
     } catch (err) {
       const detail =
         err && typeof err === "object" && "response" in err
@@ -265,7 +289,6 @@ export default function PatientSourceCodesTab({ personId }: Props) {
               .response?.data
           : undefined;
       setError(detail?.detail || detail?.error || "Failed to resolve source codes.");
-    } finally {
       setResolving(false);
     }
   };
