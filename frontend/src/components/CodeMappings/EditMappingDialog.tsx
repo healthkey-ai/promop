@@ -128,6 +128,8 @@ export default function EditMappingDialog({
   const [unitAutoPopulated, setUnitAutoPopulated] = useState(false);
   const [sourceQuantity, setSourceQuantity] = useState("");
   const [sourceUnit, setSourceUnit] = useState("");
+  const [savedSourceQuantity, setSavedSourceQuantity] = useState("");
+  const [savedSourceUnit, setSavedSourceUnit] = useState("");
   const [savingSource, setSavingSource] = useState(false);
   const [sourceSaveMessage, setSourceSaveMessage] = useState("");
 
@@ -179,6 +181,8 @@ export default function EditMappingDialog({
       setUnitAutoPopulated(false);
       setSourceQuantity(selectedRow?.example_quantity || "");
       setSourceUnit(selectedRow?.source_unit || "");
+      setSavedSourceQuantity(selectedRow?.example_quantity || "");
+      setSavedSourceUnit(selectedRow?.source_unit || "");
       setSourceSaveMessage("");
 
       if (mode === "new") {
@@ -249,7 +253,10 @@ export default function EditMappingDialog({
         const dominant = dominantSourceUnit(evidence?.units);
         if (dominant) {
           setForm((prev) => {
-            if (prev.source_unit) return prev;
+            // A patient inventory row has an explicit source value, including
+            // an intentional curator correction to blank. Never replace it
+            // with the aggregate mapping's unit evidence.
+            if (selectedRow?.source_code_id || prev.source_unit) return prev;
             setUnitAutoPopulated(true);
             return { ...prev, source_unit: dominant };
           });
@@ -263,7 +270,7 @@ export default function EditMappingDialog({
       }
     })();
     return () => { active = false; };
-  }, [open, mode, selectedRow?.mapping_id]);
+  }, [open, mode, selectedRow?.mapping_id, selectedRow?.source_code_id]);
 
   // ── Cleanup timers on unmount ───────────────────────────────────
   useEffect(() => () => {
@@ -468,8 +475,8 @@ export default function EditMappingDialog({
   }, [strategies, rankingModel, form.source_code, form.source_vocabulary_id, form.source_code_description, form.omop_table, selectedRow?.source_metadata, sourceIdentityUnchanged, applyConcept]);
 
   const sourceContextDirty = Boolean(patientId && selectedRow?.source_code_id && (
-    sourceUnit.trim() !== (selectedRow?.source_unit || "")
-    || sourceQuantity.trim() !== (selectedRow?.example_quantity || "")
+    sourceUnit.trim() !== savedSourceUnit
+    || sourceQuantity.trim() !== savedSourceQuantity
   ));
 
   const persistSourceContext = async () => {
@@ -482,6 +489,8 @@ export default function EditMappingDialog({
       example_quantity_override: sourceQuantity.trim() === extractedQuantity ? null : sourceQuantity.trim(),
     });
     setForm((prev) => ({ ...prev, source_unit: sourceUnit.trim() }));
+    setSavedSourceUnit(sourceUnit.trim());
+    setSavedSourceQuantity(sourceQuantity.trim());
     onSourceCodeUpdated?.();
   };
 
