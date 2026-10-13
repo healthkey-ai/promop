@@ -469,7 +469,25 @@ export default function EditMappingDialog({
     }
   }, [strategies, rankingModel, form.source_code, form.source_vocabulary_id, form.source_code_description, form.omop_table, selectedRow?.source_metadata, sourceIdentityUnchanged, applyConcept]);
 
-  const submitForm = useCallback(async (event: React.FormEvent) => {
+  const sourceContextDirty = Boolean(patientId && selectedRow?.source_code_id && (
+    sourceUnit.trim() !== (selectedRow?.source_unit || "")
+    || sourceQuantity.trim() !== (selectedRow?.example_quantity || "")
+  ));
+
+  const persistSourceContext = async () => {
+    if (!patientId || !selectedRow?.source_code_id) return;
+    const extractedUnit = selectedRow.extracted_source_unit ?? "";
+    const extractedQuantity = selectedRow.extracted_example_quantity ?? "";
+    await api.patch(`/v1/patient-records/${patientId}/source-codes/`, {
+      source_code_id: selectedRow.source_code_id,
+      source_unit_override: sourceUnit.trim() === extractedUnit ? null : sourceUnit.trim(),
+      example_quantity_override: sourceQuantity.trim() === extractedQuantity ? null : sourceQuantity.trim(),
+    });
+    setForm((prev) => ({ ...prev, source_unit: sourceUnit.trim() }));
+    onSourceCodeUpdated?.();
+  };
+
+  const submitForm = async (event: React.FormEvent) => {
     event.preventDefault();
     setSaving(true);
     setError("");
@@ -480,9 +498,11 @@ export default function EditMappingDialog({
       });
     }
     try {
+      if (sourceContextDirty) await persistSourceContext();
       const payload = {
         ...form,
         ...(patientId ? { patient_id: Number(patientId) } : {}),
+        source_unit: patientId && selectedRow?.source_code_id ? sourceUnit.trim() : form.source_unit,
         // Empty stays empty: never send concept 0 as a destination.
         destination_concept_id: form.destination_concept_id ? Number(form.destination_concept_id) : null,
         target_concept_id: form.destination_concept_id ? Number(form.destination_concept_id) : null,
@@ -526,27 +546,21 @@ export default function EditMappingDialog({
         detail && typeof detail === "object" && !Array.isArray(detail)
           ? Object.entries(detail).map(([field, value]) => `${field === "detail" ? "" : `${field}: `}${Array.isArray(value) ? value.join(", ") : value}`).join(" ")
           : "";
-      setError(message || "Failed to save code mapping.");
+      setError(message || (sourceContextDirty
+        ? "Failed to save source context or code mapping. Please retry."
+        : "Failed to save code mapping."));
       setRepointing(null);
       setSaving(false);
     }
-  }, [form, patientId, selectedRow, willRepoint, onSaved, closeDialog]);
+  };
 
   const saveSourceContext = async () => {
     if (!patientId || !selectedRow?.source_code_id) return;
     setSavingSource(true);
     setSourceSaveMessage("");
     try {
-      const extractedUnit = selectedRow.extracted_source_unit ?? "";
-      const extractedQuantity = selectedRow.extracted_example_quantity ?? "";
-      await api.patch(`/v1/patient-records/${patientId}/source-codes/`, {
-        source_code_id: selectedRow.source_code_id,
-        source_unit_override: sourceUnit.trim() === extractedUnit ? null : sourceUnit.trim(),
-        example_quantity_override: sourceQuantity.trim() === extractedQuantity ? null : sourceQuantity.trim(),
-      });
-      setForm((prev) => ({ ...prev, source_unit: sourceUnit.trim() }));
+      await persistSourceContext();
       setSourceSaveMessage("Source context saved. Original FHIR evidence is unchanged.");
-      onSourceCodeUpdated?.();
     } catch {
       setSourceSaveMessage("Could not save source context. Please try again.");
     } finally {
