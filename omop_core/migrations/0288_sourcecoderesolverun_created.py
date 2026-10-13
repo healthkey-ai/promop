@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("omop_core", "0286_add_resolve_run_detail_fields"),
+        ("omop_core", "0287_deferred_patient_repoints"),
     ]
 
     operations = [
