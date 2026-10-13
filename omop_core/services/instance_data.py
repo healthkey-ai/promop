@@ -54,6 +54,9 @@ SYSTEM: frozenset[str] = frozenset({
     'omop_core.AthenaVocabularySync', 'omop_core.HospitalCodeImport',
     'omop_core.VocabularyRelease',
     'omop_core.VocabularyVersionHistory',
+    # A task for a human about two Persons here, named by local id. It says
+    # which pair to look at, so it means nothing on another instance.
+    'omop_core.PersonMergeCandidate',
     # Outreach state, not answers.
     'prolog_surveys.ParticipantMergeCandidate', 'prolog_surveys.SurveyAdministration',
     'prolog_surveys.SurveyContact', 'prolog_surveys.SurveyInvitation',
