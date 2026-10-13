@@ -36,6 +36,13 @@ export interface SourceFacilityEvidence {
   patients?: number;
 }
 
+export interface SourceSystemContext {
+  kind: "verified" | "observed" | "multiple" | "none";
+  label: string;
+  names: string[];
+  name_count: number;
+}
+
 interface SourceMetadata {
   records?: number;
   patients?: number;
@@ -54,6 +61,7 @@ interface SourceMetadata {
 
 export interface SourceEvidence {
   organization: { id: number; slug: string; name: string } | null;
+  system_context?: SourceSystemContext;
   facilities?: SourceFacilityEvidence[];
   occurrence_count: number;
   group_occurrence_count?: number | null;

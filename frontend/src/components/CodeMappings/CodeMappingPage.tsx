@@ -4,6 +4,7 @@ import PageTitle from '@/components/Branding/PageTitle';
 import InlineDestinationPicker from "./InlineDestinationPicker";
 import SuggestCandidates from "./SuggestCandidates";
 import EditMappingDialog from "./EditMappingDialog";
+import { hospitalContextDetails, hospitalContextText } from "./sourceSystemContext";
 import ConceptInputDetails from "@/components/UI/ConceptInputDetails";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -567,6 +568,8 @@ export default function CodeMappingPage() {
         row.source_code_description,
         row.organization_name,
         row.organization_slug,
+        row.source_system_context?.label,
+        ...(row.source_system_context?.names || []),
         row.destination_concept_name,
         row.destination_concept_code,
         String(row.destination_concept_id),
@@ -595,7 +598,8 @@ export default function CodeMappingPage() {
   );
   const showSystemColumn = foreignHits > 0;
   const showOrganizationColumn = selectedVocabulary === "EPIC" || selectedVocabulary === "CERNER"
-    || visibleRows.some((row) => !!row.organization_id);
+    || visibleRows.some((row) => !!row.organization_id
+      || Boolean(row.source_system_context && row.source_system_context.kind !== "none"));
   // The debounced query is what the server has answered, so the message
   // describes the rows on screen rather than re-announcing every keystroke.
   const crossTabSearch = !overallTab && debouncedSearch.trim() !== "";
@@ -1062,10 +1066,16 @@ export default function CodeMappingPage() {
               {row.source_code}
             </td>
             {showSystemColumn && (
-              <td className="px-4 py-3 text-xs text-slate-700">{systemLabel(row)}</td>
+              <td className="px-4 py-3 text-xs text-slate-700" title={row.source_vocabulary_id}>{systemLabel(row)}</td>
             )}
             {showOrganizationColumn && (
-              <td className="px-4 py-3 text-xs text-slate-700">{row.organization_name || "Global / unattributed"}</td>
+              <td className="px-4 py-3 text-xs text-slate-700" title={row.source_system_context
+                ? hospitalContextDetails(row.source_system_context)
+                : row.organization_name ? "Verified PRomop organization" : "No verified hospital attribution"}>
+                {row.source_system_context
+                  ? hospitalContextText(row.source_system_context)
+                  : row.organization_name ? `Verified: ${row.organization_name}` : "Global / hospital unverified"}
+              </td>
             )}
             <td className="px-4 py-3 text-right font-mono text-xs text-slate-700">{row.occurrence_count || 0}</td>
             <td className="px-4 py-3 text-xs text-slate-700">{row.source_code_description || "—"}</td>
@@ -1153,7 +1163,7 @@ export default function CodeMappingPage() {
           <tr>
             {header("Source code", "source_code")}
             {showSystemColumn && <th className="px-4 py-3 font-semibold">System</th>}
-            {showOrganizationColumn && <th className="px-4 py-3 font-semibold">Organization</th>}
+            {showOrganizationColumn && <th className="px-4 py-3 font-semibold">Hospital context</th>}
             {header("Seen", "occurrence_count")}
             {header("Source description", "source_code_description")}
             {header("Provenance", "origin_system")}

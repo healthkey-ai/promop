@@ -479,6 +479,10 @@ def test_detail_includes_source_evidence_without_putting_it_on_browse_rows(staff
     assert detail.status_code == 200
     assert detail.data['source_evidence'] == {
         'organization': {'id': organization.pk, 'slug': 'memorial', 'name': 'Memorial Hospital'},
+        'system_context': {
+            'kind': 'verified', 'label': 'Memorial Hospital',
+            'names': [], 'name_count': 0,
+        },
         'occurrence_count': 20,
         'group_occurrence_count': 37,
         'first_seen': None,
@@ -499,6 +503,7 @@ def test_detail_includes_source_evidence_without_putting_it_on_browse_rows(staff
     listed = client.get('/api/v1/code-mappings/', {'source': 'ICD10CM'})
     assert listed.status_code == 200
     assert 'source_evidence' not in listed.data[0]
+    assert listed.data[0]['source_system_context'] == detail.data['source_evidence']['system_context']
 
 
 def test_delete_with_destination_clears_instead_of_removing(staff_user):
