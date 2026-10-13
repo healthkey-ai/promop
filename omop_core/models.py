@@ -3110,6 +3110,10 @@ class PatientRecord(models.Model):
     bmi = models.FloatField(editable=False, help_text="Patient's BMI (computed)", blank=True, null=True)
     race = models.TextField(blank=True, null=True)
     ethnicity = models.TextField(blank=True, null=True)
+    blood_type = models.TextField(
+        blank=True, null=True,
+        help_text="Blood type from the latest valid ABO/Rh Measurement results",
+    )
     systolic_blood_pressure = models.IntegerField(help_text="Patient's systolic blood pressure", blank=True, null=True)
     diastolic_blood_pressure = models.IntegerField(help_text="Patient's diastolic blood pressure", blank=True, null=True)
 

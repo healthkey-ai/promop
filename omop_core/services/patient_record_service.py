@@ -66,7 +66,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 13
+DERIVATION_VERSION = 14
 
 # These PatientRecord columns are projections of PersonLanguageSkill, never
 # independent edits. Older PATCH requests could mark them as user-edited and
@@ -85,6 +85,7 @@ _OMOP_DERIVED_FIELDS = [
     # cleared. date_of_birth is deliberately not cleared: a manually supplied
     # DOB remains useful when Person has only the registration placeholder.
     'patient_age',
+    'blood_type',
     # Person extension fields projected onto PatientRecord for compatibility.
     'email', 'phone_number', 'facility_name', 'validated', 'validated_by',
     'validation_date', 'suppress_demographics_for_others',
@@ -768,6 +769,7 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
         .filter(person=person, is_erroneous=False)
         .select_related(
             'measurement_concept', 'value_as_concept',
+            'measurement_source_concept',
             'qualifier_concept', 'measurement_concept__vocabulary',
             'unit_concept',
         )
@@ -940,6 +942,12 @@ def _derived_value_matches(field_name, derived_value, saved_value):
     return derived_value == saved_value
 
 
+def _get_blood_type_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
+    from omop_core.services.blood_type import blood_type_from_measurements
+    rows = snapshot.measurements if snapshot is not None else _build_snapshot(person).measurements
+    return {'blood_type': blood_type_from_measurements(rows)}
+
+
 def refresh_patient_record(person: Person) -> PatientRecord:
     """Derive and upsert PatientRecord from OMOP tables for a given person.
 
@@ -982,6 +990,7 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         lab_derived_fields = set()
         for section_fn in [
             _get_demographics,
+            _get_blood_type_data,
             _get_location_data,
             _get_disease_data,
             _get_active_condition_data,
