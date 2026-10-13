@@ -122,6 +122,14 @@ def verify_email(request):
                 return invalid
             identity.mark_email_verified()
             promote_trusted_domain_grants(identity)
+            from patient_portal.services import adopt_provisioned_person
+            adopted = adopt_provisioned_person(identity)
+            if not adopted:
+                from patient_portal.models import PatientUser
+                pu = PatientUser.objects.filter(identity=identity).select_related('person').first()
+                if pu and not pu.person.email:
+                    pu.person.email = identity.email
+                    pu.person.save(update_fields=['email'])
     except (signing.BadSignature, KeyError, TypeError, ValueError, Identity.DoesNotExist):
         return invalid
     return Response({'detail': 'Your email address is confirmed.'})

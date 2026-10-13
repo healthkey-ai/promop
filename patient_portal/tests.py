@@ -31728,3 +31728,208 @@ class ProvenanceOrganizationLockTest(TransactionTestCase):
         self.row.refresh_from_db()
         self.assertEqual(self.row.value_as_number, Decimal('9'))
         self.assertEqual(self.row.unit_source_value, 'mg/dL')
+
+
+class AdoptProvisionedPersonTest(TestCase):
+    """Verify that email verification adopts a provisioned Person (#1817)."""
+
+    def _make_identity(self, email, name='Test User', verified=False):
+        identity = Identity.objects.create_user(
+            email=email, password='Str0ng!Pass99', name=name,
+        )
+        if verified:
+            identity.mark_email_verified()
+        return identity
+
+    def _provision_person(self, email):
+        """Mimic what an ETL does: Person with email, no PatientUser."""
+        from omop_core.services.pk import next_pk
+        person = Person.objects.create(
+            person_id=next_pk(Person, 'person_id'),
+            email=email,
+        )
+        PatientRecord.objects.create(person=person)
+        return person
+
+    def _signup_person(self, identity):
+        """Mimic what OrgPatientSignupView does: Person with email=None."""
+        from omop_core.services.pk import next_pk
+        person = Person.objects.create(
+            person_id=next_pk(Person, 'person_id'),
+            email=None,
+        )
+        org = Organization.objects.create(name='Adopt Test Org', slug='adopt-test')
+        PatientRecord.objects.create(person=person, organization=org)
+        PatientUser.objects.create(identity=identity, person=person)
+        GroupAccess.objects.create(identity=identity, org=org, role='patient')
+        return person, org
+
+    def test_happy_path_adoption(self):
+        """Provision → signup → verify → PatientUser repointed, placeholder deleted."""
+        from patient_portal.services import adopt_provisioned_person
+
+        provisioned = self._provision_person('adopt@example.com')
+        identity = self._make_identity('adopt@example.com', name='Ada Lovelace')
+        placeholder, org = self._signup_person(identity)
+
+        identity.mark_email_verified()
+        adopted = adopt_provisioned_person(identity)
+
+        self.assertIsNotNone(adopted)
+        self.assertEqual(adopted.person_id, provisioned.person_id)
+        # PatientUser repointed
+        pu = PatientUser.objects.get(identity=identity)
+        self.assertEqual(pu.person_id, provisioned.person_id)
+        # Placeholder deleted
+        self.assertFalse(Person.objects.filter(person_id=placeholder.person_id).exists())
+        self.assertFalse(PatientRecord.objects.filter(person_id=placeholder.person_id).exists())
+
+    def test_no_provisioned_person(self):
+        """No provisioned person → no adoption, verify_email stamps email on signup person."""
+        from patient_portal.services import adopt_provisioned_person
+
+        identity = self._make_identity('noone@example.com')
+        placeholder, _ = self._signup_person(identity)
+
+        identity.mark_email_verified()
+        adopted = adopt_provisioned_person(identity)
+
+        self.assertIsNone(adopted)
+        # PatientUser still on placeholder
+        pu = PatientUser.objects.get(identity=identity)
+        self.assertEqual(pu.person_id, placeholder.person_id)
+
+    def test_provisioned_person_already_claimed(self):
+        """Provisioned person owned by another identity → no adoption."""
+        from patient_portal.services import adopt_provisioned_person
+
+        provisioned = self._provision_person('claimed@example.com')
+        other_identity = self._make_identity('claimed@example.com', name='Other')
+        PatientUser.objects.create(identity=other_identity, person=provisioned)
+
+        identity = self._make_identity('claimed-dup@example.com')
+        # Override to same email for test
+        identity.email = 'claimed@example.com'
+        identity.save(update_fields=['email'])
+        placeholder, _ = self._signup_person(identity)
+
+        identity.mark_email_verified()
+        adopted = adopt_provisioned_person(identity)
+
+        self.assertIsNone(adopted)
+        pu = PatientUser.objects.get(identity=identity)
+        self.assertEqual(pu.person_id, placeholder.person_id)
+
+    def test_ambiguous_email_two_provisioned(self):
+        """Two unclaimed Persons with same email → no adoption."""
+        from patient_portal.services import adopt_provisioned_person
+
+        self._provision_person('ambig@example.com')
+        self._provision_person('Ambig@example.com')
+
+        identity = self._make_identity('ambig@example.com')
+        placeholder, _ = self._signup_person(identity)
+
+        identity.mark_email_verified()
+        adopted = adopt_provisioned_person(identity)
+
+        self.assertIsNone(adopted)
+        pu = PatientUser.objects.get(identity=identity)
+        self.assertEqual(pu.person_id, placeholder.person_id)
+
+    def test_placeholder_has_clinical_data(self):
+        """Placeholder with clinical rows → safety guard blocks adoption."""
+        from omop_core.test_utils import ensure_test_concept_zero
+        from patient_portal.services import adopt_provisioned_person
+
+        ensure_test_concept_zero()
+        provisioned = self._provision_person('clinical@example.com')
+        identity = self._make_identity('clinical@example.com')
+        placeholder, _ = self._signup_person(identity)
+
+        # Add a measurement to the placeholder
+        from omop_core.services.pk import next_pk
+        Measurement.objects.create(
+            measurement_id=next_pk(Measurement, 'measurement_id'),
+            person_id=placeholder.person_id,
+            measurement_concept_id=0,
+            measurement_type_concept_id=0,
+            measurement_date=date.today(),
+        )
+
+        identity.mark_email_verified()
+        adopted = adopt_provisioned_person(identity)
+
+        self.assertIsNone(adopted)
+        # Placeholder preserved
+        self.assertTrue(Person.objects.filter(person_id=placeholder.person_id).exists())
+
+    def test_idempotent_second_verify(self):
+        """Calling adopt twice is a no-op the second time."""
+        from patient_portal.services import adopt_provisioned_person
+
+        provisioned = self._provision_person('idem@example.com')
+        identity = self._make_identity('idem@example.com')
+        placeholder, _ = self._signup_person(identity)
+
+        identity.mark_email_verified()
+        first = adopt_provisioned_person(identity)
+        self.assertIsNotNone(first)
+
+        # Second call: PatientUser already on provisioned person, no placeholder
+        second = adopt_provisioned_person(identity)
+        # No unclaimed person with this email (provisioned is now claimed)
+        self.assertIsNone(second)
+
+    def test_group_access_preserved(self):
+        """Signup org grants survive the person swap."""
+        from patient_portal.services import adopt_provisioned_person
+
+        provisioned = self._provision_person('grants@example.com')
+        identity = self._make_identity('grants@example.com')
+        placeholder, org = self._signup_person(identity)
+
+        identity.mark_email_verified()
+        adopted = adopt_provisioned_person(identity)
+
+        self.assertIsNotNone(adopted)
+        # GroupAccess for org still exists
+        self.assertTrue(
+            GroupAccess.objects.filter(identity=identity, org=org, role='patient').exists()
+        )
+
+    def test_name_backfill(self):
+        """Provisioned person gets given_name/family_name from signup if blank."""
+        from patient_portal.services import adopt_provisioned_person
+
+        provisioned = self._provision_person('names@example.com')
+        self.assertIsNone(provisioned.given_name)
+        self.assertIsNone(provisioned.family_name)
+
+        identity = self._make_identity('names@example.com', name='Grace Hopper')
+        placeholder, _ = self._signup_person(identity)
+
+        identity.mark_email_verified()
+        adopted = adopt_provisioned_person(identity)
+
+        self.assertIsNotNone(adopted)
+        adopted.refresh_from_db()
+        self.assertEqual(adopted.given_name, 'Grace')
+        self.assertEqual(adopted.family_name, 'Hopper')
+
+    def test_verify_email_stamps_email_when_no_adoption(self):
+        """When there is no provisioned person, verify_email stamps email on the signup Person."""
+        from django.core import signing
+        from patient_portal.api.email_verification import _SALT
+
+        identity = self._make_identity('stamp@example.com')
+        placeholder, _ = self._signup_person(identity)
+        self.assertIsNone(placeholder.email)
+
+        token = signing.dumps({'id': identity.pk, 'email': 'stamp@example.com'}, salt=_SALT)
+        client = APIClient()
+        resp = client.post('/api/v1/auth/verify-email/', {'token': token}, format='json')
+        self.assertEqual(resp.status_code, 200)
+
+        placeholder.refresh_from_db()
+        self.assertEqual(placeholder.email, 'stamp@example.com')

@@ -222,6 +222,120 @@ def resolve_or_create_person(identity, email=None, allow_create=True, email_veri
 
 
 # ---------------------------------------------------------------------------
+# Provisioned-person adoption at email verification
+# ---------------------------------------------------------------------------
+
+_CLINICAL_TABLES = None  # lazy import to avoid circular dependency
+
+
+def _clinical_models():
+    global _CLINICAL_TABLES
+    if _CLINICAL_TABLES is None:
+        from omop_core.models import (
+            ConditionOccurrence,
+            DrugExposure,
+            Measurement,
+            Observation,
+            ProcedureOccurrence,
+        )
+        _CLINICAL_TABLES = (
+            ConditionOccurrence,
+            DrugExposure,
+            Measurement,
+            Observation,
+            ProcedureOccurrence,
+        )
+    return _CLINICAL_TABLES
+
+
+def _person_has_clinical_data(person):
+    """True if *person* has any rows in the five OMOP clinical tables."""
+    for model in _clinical_models():
+        if model.objects.filter(person_id=person.person_id).exists():
+            return True
+    return False
+
+
+def adopt_provisioned_person(identity):
+    """Adopt a provisioned Person when *identity*'s email is verified.
+
+    Called from ``verify_email`` after ``mark_email_verified()``.  If the
+    identity owns a pristine placeholder Person and exactly one unclaimed
+    Person carries the same (now verified) email, swap the PatientUser link
+    to the provisioned Person and delete the placeholder.
+
+    Returns the adopted Person, or None when adoption does not apply.
+    """
+    pu = PatientUser.objects.filter(identity=identity).select_related('person').first()
+    if pu is None:
+        return None
+    placeholder = pu.person
+
+    email = (identity.email or '').strip()
+    if not email:
+        return None
+
+    # Find unclaimed Persons with this email (exclude the placeholder).
+    candidates = list(
+        Person.objects
+        .filter(email__iexact=email)
+        .exclude(person_id=placeholder.person_id)
+    )
+    claimed = {
+        p.person_id
+        for p in candidates
+        if PatientUser.objects.filter(person=p).exists()
+    }
+    unclaimed = [p for p in candidates if p.person_id not in claimed]
+
+    if len(unclaimed) != 1:
+        return None
+    provisioned = unclaimed[0]
+
+    # Safety: the placeholder must be pristine (no clinical data).
+    if _person_has_clinical_data(placeholder):
+        logger.warning(
+            "adopt_provisioned_person: placeholder person %s has clinical data; "
+            "skipping adoption for identity %s",
+            placeholder.person_id,
+            identity.pk,
+        )
+        return None
+
+    with transaction.atomic():
+        # Backfill names on provisioned person from identity if blank.
+        name_parts = (identity.name or '').split(None, 1)
+        given = name_parts[0] if name_parts else ''
+        family = name_parts[1] if len(name_parts) > 1 else ''
+        updated_fields = []
+        if not provisioned.given_name and given:
+            provisioned.given_name = given
+            updated_fields.append('given_name')
+        if not provisioned.family_name and family:
+            provisioned.family_name = family
+            updated_fields.append('family_name')
+        if updated_fields:
+            provisioned.save(update_fields=updated_fields)
+
+        # Repoint PatientUser to the provisioned person.
+        pu.person = provisioned
+        pu.save(update_fields=['person'])
+
+        # Delete the placeholder's PatientRecord, then the placeholder Person.
+        PatientRecord.objects.filter(person=placeholder).delete()
+        placeholder.delete()
+
+    logger.info(
+        "adopt_provisioned_person: identity %s adopted provisioned person %s "
+        "(placeholder %s deleted)",
+        identity.pk,
+        provisioned.person_id,
+        placeholder.person_id,
+    )
+    return provisioned
+
+
+# ---------------------------------------------------------------------------
 # PROlog survey runner (prolog_surveys)
 # ---------------------------------------------------------------------------
 

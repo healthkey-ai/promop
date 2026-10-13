@@ -906,7 +906,7 @@ class OrgPatientSignupView(APIView):
                     gender_source_value='unknown',
                     race_source_value='unknown',
                     ethnicity_source_value='unknown',
-                    email=email,
+                    email=None,
                 )
                 PatientRecord.objects.create(person=person, organization=org)
                 PatientUser.objects.create(identity=identity, person=person)
