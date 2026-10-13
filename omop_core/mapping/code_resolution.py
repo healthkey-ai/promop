@@ -738,16 +738,21 @@ def _collapse_duplicates(model, concept_col, source_col, match,
 _EHR_TYPE_CONCEPT_ID = 32817
 
 
-def _create_missing_clinical_rows(person, *, omop_tables=None):
+def _create_missing_clinical_rows(person, *, omop_tables=None, source_values=None):
     """Create clinical rows for PatientSourceCode entries with no existing row.
 
     Only creates rows where an approved SCCM mapping exists and no clinical row
     with the same source value exists for this person in the target table.
 
+    *source_values*: optional list of source strings to limit creation to.
+    *omop_tables*: optional list of table keys (e.g. ``['measurement']``).
+
     Returns ``(created_count, detail_list)`` where *detail_list* contains one
     dict per processed PSC entry.
     """
     psc_qs = PatientSourceCode.objects.filter(person=person)
+    if source_values:
+        psc_qs = psc_qs.filter(source_value__in=source_values)
     if not psc_qs.exists():
         return 0, []
 
@@ -763,57 +768,58 @@ def _create_missing_clinical_rows(person, *, omop_tables=None):
     created = 0
     details: list[dict] = []
 
-    for psc in psc_qs.iterator():
-        table_key = normalize_omop_table(psc.omop_table)
-        if table_key not in _CREATE_FIELDS:
-            continue
-        if omop_tables and table_key not in omop_tables:
-            continue
+    with transaction.atomic():
+        for psc in psc_qs.iterator():
+            table_key = normalize_omop_table(psc.omop_table)
+            if table_key not in _CREATE_FIELDS:
+                continue
+            if omop_tables and table_key not in omop_tables:
+                continue
 
-        pk_field, concept_fk, source_col, date_col, type_fk = _CREATE_FIELDS[table_key]
-        model, _concept_id_col, _sv_col = CLINICAL_TABLES[table_key]
+            pk_field, concept_fk, source_col, date_col, type_fk = _CREATE_FIELDS[table_key]
+            model, _concept_id_col, _sv_col = CLINICAL_TABLES[table_key]
 
-        sv = psc.source_value
+            sv = psc.source_value
 
-        # Look up the approved SCCM mapping.
-        mapping = (
-            SourceCodeConceptMapping.objects
-            .filter(
-                source_code__iexact=sv[:SOURCE_CODE_MAX],
-                omop_table=table_key,
-                status='approved',
+            # Look up the approved SCCM mapping.
+            mapping = (
+                SourceCodeConceptMapping.objects
+                .filter(
+                    source_code__iexact=sv[:SOURCE_CODE_MAX],
+                    omop_table=table_key,
+                    status='approved',
+                )
+                .select_related('target_concept')
+                .first()
             )
-            .select_related('target_concept')
-            .first()
-        )
-        if not mapping or not mapping.target_concept_id:
-            continue
+            if not mapping or not mapping.target_concept_id:
+                continue
 
-        # Skip if any clinical row with this source value already exists
-        # for this person (the repoint pass handles those).
-        if model.objects.filter(person=person, **{f'{source_col}__iexact': sv}).exists():
-            continue
+            # Skip if any clinical row with this source value already exists
+            # for this person (the repoint pass handles those).
+            if model.objects.filter(person=person, **{f'{source_col}__iexact': sv}).exists():
+                continue
 
-        # Allocate PK and create the row.
-        row_pk = next_pk(model, pk_field)
-        row_date = psc.first_seen.date() if psc.first_seen else date.today()
-        model.objects.create(**{
-            pk_field: row_pk,
-            'person': person,
-            concept_fk: mapping.target_concept,
-            source_col: sv,
-            date_col: row_date,
-            type_fk: ehr_type_concept,
-        })
-        created += 1
-        details.append({
-            'source_value': sv,
-            'table': table_key,
-            'rows': 1,
-            'outcome': 'created',
-            'target': mapping.target_concept.concept_name or str(mapping.target_concept_id),
-            'target_concept_id': mapping.target_concept_id,
-        })
+            # Allocate PK and create the row.
+            row_pk = next_pk(model, pk_field)
+            row_date = psc.first_seen.date() if psc.first_seen else date.today()
+            model.objects.create(**{
+                pk_field: row_pk,
+                'person': person,
+                concept_fk: mapping.target_concept,
+                source_col: sv,
+                date_col: row_date,
+                type_fk: ehr_type_concept,
+            })
+            created += 1
+            details.append({
+                'source_value': sv,
+                'table': table_key,
+                'rows': 1,
+                'outcome': 'created',
+                'target': mapping.target_concept.concept_name or str(mapping.target_concept_id),
+                'target_concept_id': mapping.target_concept_id,
+            })
 
     return created, details
 
@@ -938,7 +944,7 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
     # Create clinical rows for PSC entries that have no existing row.
     with suppress_patient_record_refresh():
         rows_created, creation_details = _create_missing_clinical_rows(
-            person, omop_tables=omop_tables,
+            person, omop_tables=omop_tables, source_values=source_values,
         )
     if rows_created:
         person_ids_touched.add(person.person_id)

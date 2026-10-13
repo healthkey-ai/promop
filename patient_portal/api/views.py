@@ -5894,19 +5894,19 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                 )
             # Use the same filter pipeline as the patient list.
             qs = self._apply_patient_list_filters(self.get_queryset())
-            person_ids = list(
-                qs.values_list('person__person_id', flat=True).distinct()
-            )
-            if not person_ids:
+            pid_qs = qs.values_list('person__person_id', flat=True).distinct()
+            count = pid_qs.count()
+            if count == 0:
                 return Response(
                     {'detail': 'No patients match the current filters.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            if len(person_ids) > BULK_RESOLVE_MAX_PERSONS:
+            if count > BULK_RESOLVE_MAX_PERSONS:
                 return Response(
                     {'detail': f'Selection exceeds the {BULK_RESOLVE_MAX_PERSONS}-patient cap.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            person_ids = list(pid_qs)
         else:
             if not isinstance(person_ids, list) or not person_ids:
                 return Response(
