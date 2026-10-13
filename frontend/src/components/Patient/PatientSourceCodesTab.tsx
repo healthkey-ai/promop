@@ -49,6 +49,11 @@ function sourceCodeToRow(sc: PatientSourceCode): CodeMappingRow {
     source_code_description: sc.source_code_description || "",
     source_unit: sc.source_unit || "",
     example_quantity: sc.example_quantity || "",
+    source_code_id: sc.source_code_id,
+    extracted_source_unit: sc.extracted_source_unit,
+    extracted_example_quantity: sc.extracted_example_quantity,
+    source_unit_override: sc.source_unit_override,
+    example_quantity_override: sc.example_quantity_override,
     source_metadata: sc.source_metadata || {},
     // No destination is no destination, never concept 0 ("No matching concept").
     destination_concept_id: sc.mapping_target_concept_id || null,
@@ -126,9 +131,11 @@ function SourceCodeTable({
               <td className="px-3 py-2 text-right tabular-nums">{sc.row_count}</td>
               <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
                 {sc.source_unit || "\u2014"}
+                {sc.source_unit_override != null && <span className="ml-1 text-blue-700">(corrected)</span>}
               </td>
               <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
                 {sc.example_quantity || "\u2014"}
+                {sc.example_quantity_override != null && <span className="ml-1 text-blue-700">(corrected)</span>}
               </td>
               <td className="px-3 py-2 text-xs">
                 {sc.concept_id === 0 ? (
@@ -386,6 +393,7 @@ export default function PatientSourceCodesTab({ personId }: Props) {
       <EditMappingDialog
         open={dialogOpen}
         patientId={personId}
+        onSourceCodeUpdated={() => { void fetchSourceCodes(); }}
         onClose={handleDialogClose}
         mode={dialogMode}
         row={dialogRow}

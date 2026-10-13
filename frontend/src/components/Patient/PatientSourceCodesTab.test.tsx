@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import PatientSourceCodesTab from "./PatientSourceCodesTab";
 import api from "../../api/axios";
+import PatientSourceCodesTab from "./PatientSourceCodesTab";
 
 vi.mock("../../hooks/useAuth", () => ({
   useAuth: () => ({ currentUser: { email: "curator@example.com", is_staff: true } }),
@@ -22,8 +22,13 @@ const sourceCodes = {
     mapping_target_concept_name: null,
     source_vocabulary_id: "LOINC",
     source_code: "8716-3",
-    source_unit: "",
-    example_quantity: "",
+    source_code_id: 44,
+    source_unit: "mg/dL",
+    example_quantity: "12",
+    extracted_source_unit: "bad unit",
+    extracted_example_quantity: "12",
+    source_unit_override: "mg/dL",
+    example_quantity_override: null,
     source_metadata: { display: ["Vital signs"], text: ["Blood Pressure"] },
     source_code_description: "Blood Pressure",
   }, {
@@ -65,11 +70,11 @@ const sourceCodes = {
 
 vi.mock("../../api/axios", () => ({
   default: {
-    get: (url: string) => Promise.resolve({
+    get: vi.fn((url: string) => Promise.resolve({
       data: url.includes("source-codes") ? sourceCodes : {},
-    }),
+    })),
     post: vi.fn(() => Promise.resolve({ data: {} })),
-    patch: vi.fn(), delete: vi.fn(() => Promise.resolve({})),
+    patch: vi.fn(() => Promise.resolve({ data: {} })), delete: vi.fn(() => Promise.resolve({})),
   },
 }));
 
@@ -117,4 +122,58 @@ it("sends the current patient when saving a mapping", async () => {
     "/v1/code-mappings/78/",
     expect.objectContaining({ patient_id: 48095, status: "approved" }),
   ));
+});
+
+describe("PatientSourceCodesTab source context correction", () => {
+  it("lets a curator compare FHIR metadata and save a source-unit correction separately", async () => {
+    render(<PatientSourceCodesTab personId="48095" />);
+    fireEvent.click(await screen.findByText("Blood Pressure"));
+    fireEvent.click(screen.getByRole("button", { name: /Source Metadata/ }));
+    expect(screen.getByText(/Vital signs/)).toBeInTheDocument();
+    expect(screen.getByText(/Extracted: bad unit/)).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Search UCUM units" })).toHaveValue("mg/dL");
+    fireEvent.change(screen.getByLabelText(/^Source Unit/), { target: { value: "cells/uL" } });
+    expect(screen.getByRole("textbox", { name: "Search UCUM units" })).toHaveValue("cells/uL");
+    fireEvent.click(screen.getByRole("button", { name: "Save source context" }));
+    await waitFor(() => expect(api.patch).toHaveBeenCalledWith(
+      "/v1/patient-records/48095/source-codes/",
+      { source_code_id: 44, source_unit_override: "cells/uL", example_quantity_override: null },
+    ));
+    expect(await screen.findByText(/Source context saved/)).toBeInTheDocument();
+  });
+
+  it("drops an auto-selected destination unit when the source unit changes", async () => {
+    const getSpy = vi.spyOn(api, "get").mockImplementation((url: string) => Promise.resolve({
+      data: url.includes("unit-search")
+        ? { results: [{ concept_id: 8840, concept_code: "mg/dL", concept_name: "milligrams per deciliter", match: "exact" }] }
+        : url.includes("source-codes") ? sourceCodes : {},
+    }) as never);
+    try {
+      render(<PatientSourceCodesTab personId="48095" />);
+      fireEvent.click(await screen.findByText("Blood Pressure"));
+      await waitFor(() => expect(screen.queryByRole("textbox", { name: "Search UCUM units" })).not.toBeInTheDocument());
+      fireEvent.change(screen.getByLabelText(/^Source Unit/), { target: { value: "cells/uL" } });
+      expect(screen.getByRole("textbox", { name: "Search UCUM units" })).toHaveValue("cells/uL");
+    } finally {
+      getSpy.mockRestore();
+    }
+  });
+
+  it("keeps a manually chosen destination unit but asks for review after a source correction", async () => {
+    const getSpy = vi.spyOn(api, "get").mockImplementation((url: string) => Promise.resolve({
+      data: url.includes("unit-search")
+        ? { results: [{ concept_id: 8840, concept_code: "mg/dL", concept_name: "milligrams per deciliter", match: "close" }] }
+        : url.includes("source-codes") ? sourceCodes : {},
+    }) as never);
+    try {
+      render(<PatientSourceCodesTab personId="48095" />);
+      fireEvent.click(await screen.findByText("Blood Pressure"));
+      fireEvent.click(await screen.findByText("milligrams per deciliter"));
+      fireEvent.change(screen.getByLabelText(/^Source Unit/), { target: { value: "cells/uL" } });
+      expect(screen.getByText("milligrams per deciliter")).toBeInTheDocument();
+      expect(screen.getByText(/Source unit changed. Review this destination unit/)).toBeInTheDocument();
+    } finally {
+      getSpy.mockRestore();
+    }
+  });
 });

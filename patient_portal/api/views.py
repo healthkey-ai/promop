@@ -5649,7 +5649,7 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
     # Source codes on a patient
     # ------------------------------------------------------------------
 
-    @action(detail=True, methods=['get', 'post'], url_path='source-codes',
+    @action(detail=True, methods=['get', 'post', 'patch'], url_path='source-codes',
             permission_classes=[EtlWritePermission, PatientSelfScopePermission])
     def source_codes(self, request: Request, pk: str | None = None) -> Response:
         """Source codes for a patient.
@@ -5672,6 +5672,8 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
 
         if request.method == 'POST':
             return self._post_source_codes(request, person)
+        if request.method == 'PATCH':
+            return self._patch_source_code(request, person)
 
         # --- GET ---
         if not _is_admin_actor(request):
@@ -5692,6 +5694,51 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             'person_id': person.person_id,
             'source_codes': source_codes,
             'summary': summary,
+        })
+
+    def _patch_source_code(self, request: Request, person: Person) -> Response:
+        """Correct displayed source context without rewriting ETL evidence."""
+        from omop_core.models import PatientSourceCode
+
+        if is_machine_request(request) or not _is_admin_actor(request):
+            return Response({'detail': 'Only human curators can correct source codes.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        try:
+            source_code_id = int(request.data.get('source_code_id'))
+        except (TypeError, ValueError):
+            return Response({'source_code_id': 'A source-code row ID is required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        row = PatientSourceCode.objects.filter(person=person, pk=source_code_id).first()
+        if row is None:
+            return Response({'detail': 'Source-code row not found.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        fields = {
+            'source_unit_override': 50,
+            'example_quantity_override': 100,
+        }
+        supplied = set(request.data) & set(fields)
+        if not supplied or set(request.data) - (set(fields) | {'source_code_id'}):
+            return Response({'detail': 'Only source unit and quantity corrections are accepted.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        for name in supplied:
+            value = request.data[name]
+            if value is not None and (
+                not isinstance(value, str) or len(value.strip()) > fields[name]
+                or _contains_nul(value)
+            ):
+                return Response({name: f'Must be text of at most {fields[name]} characters, or null.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            setattr(row, name, value.strip() if value is not None else None)
+        row.source_corrected_by = request.user
+        row.source_corrected_at = timezone.now()
+        row.save(update_fields=[*supplied, 'source_corrected_by', 'source_corrected_at'])
+        return Response({
+            'source_code_id': row.pk,
+            'source_unit': row.source_unit_override if row.source_unit_override is not None else row.source_unit,
+            'example_quantity': (row.example_quantity_override if row.example_quantity_override is not None
+                                 else row.example_quantity),
+            'source_unit_override': row.source_unit_override,
+            'example_quantity_override': row.example_quantity_override,
         })
 
     # ---- POST helper (kept on the viewset for permission context) ----
@@ -7296,8 +7343,13 @@ def _resolve_source_code_mappings(
                 'mapping_target_concept_name': None,
                 'source_vocabulary_id': row.get('source_vocabulary_id', ''),
                 'source_code': source_value,
+                'source_code_id': row.get('source_code_id'),
                 'source_unit': row.get('source_unit', ''),
                 'example_quantity': row.get('example_quantity', ''),
+                'extracted_source_unit': row.get('extracted_source_unit', ''),
+                'extracted_example_quantity': row.get('extracted_example_quantity', ''),
+                'source_unit_override': row.get('source_unit_override'),
+                'example_quantity_override': row.get('example_quantity_override'),
                 'source_metadata': row.get('source_metadata') or {},
                 # The starting value for the edit dialog: the curator's own
                 # description when the mapping has one, else the source's.
@@ -7346,8 +7398,9 @@ def _get_patient_source_codes(person: Person) -> list[dict]:
 
     psc_rows = list(
         PatientSourceCode.objects.filter(person=person)
-        .values('source_value', 'source_vocabulary_id', 'omop_table', 'occurrence_count',
-                'source_unit', 'example_quantity', 'source_metadata')
+        .values('id', 'source_value', 'source_vocabulary_id', 'omop_table', 'occurrence_count',
+                'source_unit', 'example_quantity', 'source_metadata',
+                'source_unit_override', 'example_quantity_override')
     )
     if not psc_rows:
         return _aggregate_patient_source_codes(person)
@@ -7358,8 +7411,15 @@ def _get_patient_source_codes(person: Person) -> list[dict]:
             'source_value': row['source_value'],
             'source_vocabulary_id': row.get('source_vocabulary_id', ''),
             'row_count': row['occurrence_count'],
-            'source_unit': row.get('source_unit', ''),
-            'example_quantity': row.get('example_quantity', ''),
+            'source_code_id': row['id'],
+            'source_unit': (row['source_unit_override'] if row['source_unit_override'] is not None
+                            else row['source_unit']),
+            'example_quantity': (row['example_quantity_override'] if row['example_quantity_override'] is not None
+                                 else row['example_quantity']),
+            'extracted_source_unit': row['source_unit'],
+            'extracted_example_quantity': row['example_quantity'],
+            'source_unit_override': row['source_unit_override'],
+            'example_quantity_override': row['example_quantity_override'],
             'source_metadata': row.get('source_metadata') or {},
         })
 

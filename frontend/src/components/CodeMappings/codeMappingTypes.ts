@@ -52,6 +52,11 @@ export interface CodeMappingRow {
   source_evidence?: SourceEvidence;
   source_unit?: string;
   example_quantity?: string;
+  source_code_id?: number;
+  extracted_source_unit?: string;
+  extracted_example_quantity?: string;
+  source_unit_override?: string | null;
+  example_quantity_override?: string | null;
   source_metadata?: Record<string, unknown>;
   destination_unit_concept_id?: number | null;
 }

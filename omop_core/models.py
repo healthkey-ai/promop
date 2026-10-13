@@ -5050,6 +5050,19 @@ class PatientSourceCode(models.Model):
         max_length=100, blank=True, default='',
         help_text='Representative quantity value(s) from source (e.g. "7.5", "120-140").',
     )
+    source_unit_override = models.CharField(
+        max_length=50, null=True, blank=True,
+        help_text='Curator correction; null uses the original ETL source unit.',
+    )
+    example_quantity_override = models.CharField(
+        max_length=100, null=True, blank=True,
+        help_text='Curator correction; null uses the original ETL example quantity.',
+    )
+    source_corrected_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    source_corrected_at = models.DateTimeField(null=True, blank=True)
     source_metadata = models.JSONField(
         default=dict, blank=True,
         help_text='Unparsed metadata from ETL (reference ranges, category, etc.).',

@@ -77,6 +77,7 @@ export interface EditMappingDialogProps {
   onSaved: (saved: CodeMappingRow, repoint: RepointResult | null) => void;
   onDeleted: (row: CodeMappingRow) => void;
   onBanner?: (message: string | null) => void;
+  onSourceCodeUpdated?: () => void;
 }
 
 // ── Component ───────────────────────────────────────────────────────
@@ -96,6 +97,7 @@ export default function EditMappingDialog({
   onSaved,
   onDeleted,
   onBanner,
+  onSourceCodeUpdated,
 }: EditMappingDialogProps) {
   // ── refs ────────────────────────────────────────────────────────
   const dialogRequest = useRef(0);
@@ -124,6 +126,14 @@ export default function EditMappingDialog({
   const [mintOpen, setMintOpen] = useState(false);
   const [mintUnitOpen, setMintUnitOpen] = useState(false);
   const [unitAutoPopulated, setUnitAutoPopulated] = useState(false);
+  const [sourceQuantity, setSourceQuantity] = useState("");
+  const [sourceUnit, setSourceUnit] = useState("");
+  const [savedSourceQuantity, setSavedSourceQuantity] = useState("");
+  const [savedSourceUnit, setSavedSourceUnit] = useState("");
+  const [savingSource, setSavingSource] = useState(false);
+  const [sourceSaveMessage, setSourceSaveMessage] = useState("");
+  const [unitSelectionAuto, setUnitSelectionAuto] = useState(false);
+  const [unitSelectionNeedsReview, setUnitSelectionNeedsReview] = useState(false);
 
   const evidenceFacilities = sourceEvidence?.facilities || [];
 
@@ -171,6 +181,13 @@ export default function EditMappingDialog({
       setMintOpen(false);
       setIndividualSuggestion(null);
       setUnitAutoPopulated(false);
+      setSourceQuantity(selectedRow?.example_quantity || "");
+      setSourceUnit(selectedRow?.source_unit || "");
+      setSavedSourceQuantity(selectedRow?.example_quantity || "");
+      setSavedSourceUnit(selectedRow?.source_unit || "");
+      setSourceSaveMessage("");
+      setUnitSelectionAuto(false);
+      setUnitSelectionNeedsReview(false);
 
       if (mode === "new") {
         // When opened from PatientSourceCodesTab, selectedRow carries the
@@ -240,7 +257,10 @@ export default function EditMappingDialog({
         const dominant = dominantSourceUnit(evidence?.units);
         if (dominant) {
           setForm((prev) => {
-            if (prev.source_unit) return prev;
+            // A patient inventory row has an explicit source value, including
+            // an intentional curator correction to blank. Never replace it
+            // with the aggregate mapping's unit evidence.
+            if (selectedRow?.source_code_id || prev.source_unit) return prev;
             setUnitAutoPopulated(true);
             return { ...prev, source_unit: dominant };
           });
@@ -254,7 +274,7 @@ export default function EditMappingDialog({
       }
     })();
     return () => { active = false; };
-  }, [open, mode, selectedRow?.mapping_id]);
+  }, [open, mode, selectedRow?.mapping_id, selectedRow?.source_code_id]);
 
   // ── Cleanup timers on unmount ───────────────────────────────────
   useEffect(() => () => {
@@ -458,7 +478,46 @@ export default function EditMappingDialog({
     }
   }, [strategies, rankingModel, form.source_code, form.source_vocabulary_id, form.source_code_description, form.omop_table, selectedRow?.source_metadata, sourceIdentityUnchanged, applyConcept]);
 
-  const submitForm = useCallback(async (event: React.FormEvent) => {
+  const sourceContextDirty = Boolean(patientId && selectedRow?.source_code_id && (
+    sourceUnit.trim() !== savedSourceUnit
+    || sourceQuantity.trim() !== savedSourceQuantity
+  ));
+  const effectiveSourceUnit = patientId && selectedRow?.source_code_id
+    ? sourceUnit.trim() : form.source_unit;
+
+  const changeSourceUnit = (value: string) => {
+    setSourceUnit(value);
+    if (value.trim() === sourceUnit.trim()) return;
+    if (form.destination_unit_concept_id) {
+      if (unitSelectionAuto) {
+        setField("destination_unit_concept_id", "");
+        setField("destination_unit_concept_code", "");
+        setField("destination_unit_concept_name", "");
+        setUnitSelectionAuto(false);
+        setUnitSelectionNeedsReview(false);
+      } else {
+        setUnitSelectionNeedsReview(true);
+      }
+      setField("unit_match_type", "");
+    }
+  };
+
+  const persistSourceContext = async () => {
+    if (!patientId || !selectedRow?.source_code_id) return;
+    const extractedUnit = selectedRow.extracted_source_unit ?? "";
+    const extractedQuantity = selectedRow.extracted_example_quantity ?? "";
+    await api.patch(`/v1/patient-records/${patientId}/source-codes/`, {
+      source_code_id: selectedRow.source_code_id,
+      source_unit_override: sourceUnit.trim() === extractedUnit ? null : sourceUnit.trim(),
+      example_quantity_override: sourceQuantity.trim() === extractedQuantity ? null : sourceQuantity.trim(),
+    });
+    setForm((prev) => ({ ...prev, source_unit: sourceUnit.trim() }));
+    setSavedSourceUnit(sourceUnit.trim());
+    setSavedSourceQuantity(sourceQuantity.trim());
+    onSourceCodeUpdated?.();
+  };
+
+  const submitForm = async (event: React.FormEvent) => {
     event.preventDefault();
     setSaving(true);
     setError("");
@@ -469,9 +528,11 @@ export default function EditMappingDialog({
       });
     }
     try {
+      if (sourceContextDirty) await persistSourceContext();
       const payload = {
         ...form,
         ...(patientId ? { patient_id: Number(patientId) } : {}),
+        source_unit: patientId && selectedRow?.source_code_id ? sourceUnit.trim() : form.source_unit,
         // Empty stays empty: never send concept 0 as a destination.
         destination_concept_id: form.destination_concept_id ? Number(form.destination_concept_id) : null,
         target_concept_id: form.destination_concept_id ? Number(form.destination_concept_id) : null,
@@ -515,11 +576,27 @@ export default function EditMappingDialog({
         detail && typeof detail === "object" && !Array.isArray(detail)
           ? Object.entries(detail).map(([field, value]) => `${field === "detail" ? "" : `${field}: `}${Array.isArray(value) ? value.join(", ") : value}`).join(" ")
           : "";
-      setError(message || "Failed to save code mapping.");
+      setError(message || (sourceContextDirty
+        ? "Failed to save source context or code mapping. Please retry."
+        : "Failed to save code mapping."));
       setRepointing(null);
       setSaving(false);
     }
-  }, [form, patientId, selectedRow, willRepoint, onSaved, closeDialog]);
+  };
+
+  const saveSourceContext = async () => {
+    if (!patientId || !selectedRow?.source_code_id) return;
+    setSavingSource(true);
+    setSourceSaveMessage("");
+    try {
+      await persistSourceContext();
+      setSourceSaveMessage("Source context saved. Original FHIR evidence is unchanged.");
+    } catch {
+      setSourceSaveMessage("Could not save source context. Please try again.");
+    } finally {
+      setSavingSource(false);
+    }
+  };
 
   const deleteMapping = useCallback(async (row: CodeMappingRow) => {
     if (!row.mapping_id) return;
@@ -654,9 +731,40 @@ export default function EditMappingDialog({
                   />
                 </Field>
 
-                <ReadOnlyField id="source_quantity_display" label="Source Quantity" tip="Representative quantity value(s) from the source data." value={selectedRow?.example_quantity || "\u2014"} testId="source-quantity" />
-
-                <ReadOnlyField id="source_unit_display" label="Source Unit" tip="Unit string as reported by the ETL source." value={form.source_unit || "\u2014"} testId="source-unit-context" />
+                {patientId && selectedRow?.source_code_id ? (
+                  <>
+                    <Field id="source_quantity" label="Source Quantity" tip="Representative quantity from this patient's source-code inventory. Compare with Source Metadata below before correcting.">
+                      <input id="source_quantity" className={INPUT_CLASS} maxLength={100}
+                        value={sourceQuantity} onChange={(event) => setSourceQuantity(event.target.value)} />
+                      {selectedRow.example_quantity_override !== null && selectedRow.example_quantity_override !== undefined && (
+                        <p className="mt-1 text-xs text-slate-600">Extracted: {selectedRow.extracted_example_quantity || "\u2014"}</p>
+                      )}
+                    </Field>
+                    <Field id="source_unit" label="Source Unit" tip="Unit string from this patient's source-code inventory. This is context, not the destination unit concept.">
+                      <input id="source_unit" className={INPUT_CLASS} maxLength={50}
+                        value={sourceUnit} onChange={(event) => changeSourceUnit(event.target.value)} />
+                      {selectedRow.source_unit_override !== null && selectedRow.source_unit_override !== undefined && (
+                        <p className="mt-1 text-xs text-slate-600">Extracted: {selectedRow.extracted_source_unit || "\u2014"}</p>
+                      )}
+                    </Field>
+                    <div className="col-span-full flex flex-wrap items-center gap-2 text-xs">
+                      <button type="button" onClick={() => void saveSourceContext()} disabled={savingSource}
+                        className="rounded border border-slate-300 px-2 py-1 font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+                        {savingSource ? "Saving..." : "Save source context"}
+                      </button>
+                      <button type="button" onClick={() => {
+                        setSourceQuantity(selectedRow.extracted_example_quantity || "");
+                        changeSourceUnit(selectedRow.extracted_source_unit || "");
+                      }} className="text-slate-600 underline">Use extracted values</button>
+                      {sourceSaveMessage && <span role="status">{sourceSaveMessage}</span>}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <ReadOnlyField id="source_quantity_display" label="Source Quantity" tip="Representative quantity value(s) from the source data." value={selectedRow?.example_quantity || "\u2014"} testId="source-quantity" />
+                    <ReadOnlyField id="source_unit_display" label="Source Unit" tip="Unit string as reported by the ETL source." value={form.source_unit || "\u2014"} testId="source-unit-context" />
+                  </>
+                )}
 
                 {(reference.source_catalog_vocabularies || []).includes(form.source_vocabulary_id) && (
                   <SourceVocabularyLookup
@@ -964,19 +1072,23 @@ export default function EditMappingDialog({
               </div>
               {form.destination_concept_id && form.destination_vocabulary_id === "LOINC" && form.omop_table === "measurement" &&
                 <CanonicalUnitEditor key={form.destination_concept_id} conceptId={Number(form.destination_concept_id)} />}
-              {(form.omop_table === "measurement" || form.source_unit) && (
+              {(form.omop_table === "measurement" || effectiveSourceUnit) && (
                 <DestinationUnitPicker
-                  sourceUnit={form.source_unit}
+                  key={effectiveSourceUnit}
+                  sourceUnit={effectiveSourceUnit}
                   selectedConceptId={form.destination_unit_concept_id}
                   selectedConceptCode={form.destination_unit_concept_code}
                   selectedConceptName={form.destination_unit_concept_name}
                   matchType={form.unit_match_type}
                   autoPopulated={unitAutoPopulated}
-                  onSelect={(unit) => {
+                  needsReview={unitSelectionNeedsReview}
+                  onSelect={(unit, auto = false) => {
                     setField("destination_unit_concept_id", unit ? String(unit.concept_id) : "");
                     setField("destination_unit_concept_code", unit?.concept_code || "");
                     setField("destination_unit_concept_name", unit?.concept_name || "");
                     setField("unit_match_type", unit?.match || "");
+                    setUnitSelectionAuto(Boolean(unit && auto));
+                    setUnitSelectionNeedsReview(false);
                   }}
                   onMintUnit={() => setMintUnitOpen(true)}
                 />
@@ -1201,45 +1313,57 @@ interface DestinationUnitPickerProps {
   selectedConceptName: string;
   matchType: "exact" | "close" | "none" | "";
   autoPopulated?: boolean;
-  onSelect: (unit: UnitResult | null) => void;
+  needsReview?: boolean;
+  onSelect: (unit: UnitResult | null, auto?: boolean) => void;
   onMintUnit: () => void;
 }
 
 function DestinationUnitPicker({
   sourceUnit, selectedConceptId, selectedConceptCode, selectedConceptName,
-  matchType, autoPopulated, onSelect, onMintUnit,
+  matchType, autoPopulated, needsReview, onSelect, onMintUnit,
 }: DestinationUnitPickerProps) {
   const [query, setQuery] = useState(sourceUnit);
   const [results, setResults] = useState<UnitResult[]>([]);
   const [searching, setSearching] = useState(false);
   const [searched, setSearched] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const requestSeq = useRef(0);
+
+  useEffect(() => () => {
+    requestSeq.current += 1;
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+  }, []);
 
   const doSearch = useCallback(async (q: string) => {
+    const request = ++requestSeq.current;
     if (!q.trim()) { setResults([]); setSearched(false); return; }
     setSearching(true);
     try {
       const { data } = await api.get<{ results: UnitResult[] }>("/v1/code-mappings/unit-search/", { params: { q } });
+      if (request !== requestSeq.current) return;
       setResults(data.results);
       setSearched(true);
       // Auto-select exact match
       if (!selectedConceptId && data.results.length > 0 && data.results[0].match === "exact") {
-        onSelect(data.results[0]);
+        onSelect(data.results[0], true);
       } else if (data.results.length === 0) {
         onSelect(null);
       }
     } catch {
+      if (request !== requestSeq.current) return;
       setResults([]);
       setSearched(true);
     } finally {
-      setSearching(false);
+      if (request === requestSeq.current) setSearching(false);
     }
   }, [selectedConceptId, onSelect]);
 
-  // Auto-search on sourceUnit when dialog opens
+  // The keyed picker remounts when Source Unit changes, dropping the old query
+  // and results. Debounce the replacement search while the curator types.
   useEffect(() => {
     if (sourceUnit && !searched && !selectedConceptId) {
-      (async () => { await doSearch(sourceUnit); })();
+      const timer = setTimeout(() => { void doSearch(sourceUnit); }, 300);
+      return () => clearTimeout(timer);
     }
   }, [sourceUnit, searched, selectedConceptId, doSearch]);
 
@@ -1271,6 +1395,7 @@ function DestinationUnitPicker({
             <button type="button" onClick={() => onSelect(null)}
               className="ml-auto text-xs text-slate-500 hover:text-red-600">Clear</button>
           </div>
+          {needsReview && <p className="mt-2 text-xs text-amber-700">Source unit changed. Review this destination unit before saving the mapping.</p>}
         </>
       ) : (
         <Field id="destination_unit_search" label="Destination Unit" tip="UCUM concept linked to this mapping. Used for unit conversion during ETL.">

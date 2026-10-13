@@ -1,4 +1,5 @@
 export interface PatientSourceCode {
+  source_code_id?: number;
   source_value: string;
   omop_table: string;
   concept_id: number;
@@ -12,6 +13,10 @@ export interface PatientSourceCode {
   source_code: string;
   source_unit: string;
   example_quantity: string;
+  extracted_source_unit?: string;
+  extracted_example_quantity?: string;
+  source_unit_override?: string | null;
+  example_quantity_override?: string | null;
   source_metadata: Record<string, unknown>;
   /** The mapping's description, else the source's own name from source_metadata. */
   source_code_description?: string;

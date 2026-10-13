@@ -30515,6 +30515,80 @@ class SourceCodeContextFieldsTest(_SmartBase):
         self.assertEqual(psc.example_quantity, '5.0-10.0')
         self.assertEqual(psc.source_metadata['flag'], 'normal')
 
+    def test_curator_correction_survives_etl_upsert_and_can_be_cleared(self):
+        from django.test import Client
+        from omop_core.models import PatientSourceCode
+
+        row = PatientSourceCode.objects.create(
+            person=self.person, source_value='WBC_CORRECT', omop_table='measurement',
+            source_unit='wrong', example_quantity='10-20',
+            source_metadata={'fhir_valueQuantity': {'unit': 'cells/uL'}},
+        )
+        curator = Client()
+        curator.force_login(self.foundation_user)
+        response = curator.patch(
+            self._url(), data=json.dumps({
+                'source_code_id': row.pk,
+                'source_unit_override': 'cells/uL',
+                'example_quantity_override': '12',
+            }), content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json()['source_unit'], 'cells/uL')
+        row.refresh_from_db()
+        self.assertEqual(row.source_unit, 'wrong')
+        self.assertEqual(row.source_metadata['fhir_valueQuantity']['unit'], 'cells/uL')
+        self.assertEqual(row.source_corrected_by, self.foundation_user)
+
+        self.write_client.post(self._url(), {'source_codes': [{
+            'source_value': 'WBC_CORRECT', 'omop_table': 'measurement',
+            'source_unit': 'new extraction', 'example_quantity': '15',
+        }]}, format='json')
+        code = next(c for c in curator.get(self._url()).json()['source_codes']
+                    if c['source_value'] == 'WBC_CORRECT')
+        self.assertEqual(code['source_unit'], 'cells/uL')
+        self.assertEqual(code['example_quantity'], '12')
+        self.assertEqual(code['extracted_source_unit'], 'new extraction')
+        self.assertEqual(code['source_code_id'], row.pk)
+
+        response = curator.patch(self._url(), data=json.dumps({
+            'source_code_id': row.pk, 'source_unit_override': None,
+            'example_quantity_override': None,
+        }), content_type='application/json')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['source_unit'], 'new extraction')
+
+    def test_etl_token_cannot_correct_source_context(self):
+        from omop_core.models import PatientSourceCode
+        row = PatientSourceCode.objects.create(person=self.person, source_value='WBC_DENY')
+        response = self.write_client.patch(self._url(), {
+            'source_code_id': row.pk, 'source_unit_override': 'cells/uL',
+        }, format='json')
+        self.assertEqual(response.status_code, 403)
+
+    def test_correction_rejects_invalid_or_other_patient_row(self):
+        from django.test import Client
+        from omop_core.models import PatientSourceCode
+        other_person = Person.objects.create(
+            person_id=70002, given_name='Bob', family_name='Foundation',
+            year_of_birth=1980, gender_source_value='male',
+            race_source_value='unknown', ethnicity_source_value='unknown',
+        )
+        PatientRecord.objects.create(person=other_person, organization=self.organization)
+        row = PatientSourceCode.objects.create(person=other_person, source_value='OTHER')
+        curator = Client()
+        curator.force_login(self.foundation_user)
+        other = curator.patch(self._url(), data=json.dumps({
+            'source_code_id': row.pk, 'source_unit_override': 'g/dL',
+        }), content_type='application/json')
+        self.assertEqual(other.status_code, 404)
+        invalid = curator.patch(self._url(other_person.person_id), data=json.dumps({
+            'source_code_id': row.pk, 'source_unit_override': 'x' * 51,
+        }), content_type='application/json')
+        self.assertEqual(invalid.status_code, 400)
+        row.refresh_from_db()
+        self.assertIsNone(row.source_unit_override)
+
     def test_post_invalid_metadata_becomes_empty_dict(self):
         """source_metadata that is not a dict becomes {}."""
         resp = self.write_client.post(
