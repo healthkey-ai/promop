@@ -4866,6 +4866,26 @@ class HospitalCodeImport(models.Model):
         ordering = ['-created_at']
 
 
+class SourceSystemFacility(models.Model):
+    """An observed name for an exact FHIR source system, not verified ownership.
+
+    One system can be used by many facilities. These rows must not be used to
+    assign an Organization or to change source-code mapping identity.
+    """
+
+    source_vocabulary_id = models.CharField(max_length=255, db_index=True)
+    facility_name = models.TextField()
+    facility_id = models.TextField(blank=True, default='')
+    level = models.CharField(max_length=32, blank=True, default='')
+    confidence = models.CharField(max_length=32, blank=True, default='')
+    attribution_method = models.CharField(max_length=100, blank=True, default='')
+    provenance = models.CharField(max_length=255)
+    fingerprint = models.CharField(max_length=64, unique=True)
+
+    class Meta:
+        db_table = 'source_system_facility'
+
+
 class UmlsRelease(models.Model):
     """A loaded raw UMLS Metathesaurus release (not an OMOP vocabulary)."""
     release_version = models.CharField(max_length=20, primary_key=True)
