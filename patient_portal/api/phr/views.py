@@ -24,7 +24,7 @@ from omop_core.models import (
 )
 from patient_portal.models import PatientStatement, PatientUser
 
-from .labs import lab_history, labs
+from .labs import blood_type, lab_history, labs
 from .records import genetics, medication_detail, medications, procedures
 from .feed import imaging, whats_new
 from .therapy import therapy
@@ -76,7 +76,8 @@ def _edited(record: PatientRecord | None) -> set[str]:
 GENDERS = {'F': 'Female', 'M': 'Male', 'O': 'Other', 'U': 'Unknown'}
 
 
-def about_fields(record: PatientRecord | None) -> list[dict[str, Any]]:
+def about_fields(record: PatientRecord | None, person=None) -> list[dict[str, Any]]:
+    """About me's rows; with ``person``, the blood type from their ABO/Rh results."""
     if record is None:
         return []
     edited = _edited(record)
@@ -106,6 +107,15 @@ def about_fields(record: PatientRecord | None) -> list[dict[str, Any]]:
         field('race', record.race),
         field('ethnicity', record.ethnicity),
     ]
+    typed = blood_type(person) if person is not None else None
+    if typed:
+        value, row = typed
+        fields.append({
+            'key': 'blood_type',
+            'value': value,
+            'source': row_sources(Measurement, [row], type_attr='measurement_type_concept',
+                                  date_attr='measurement_date')[row.pk],
+        })
     return [f for f in fields if f]
 
 
@@ -115,7 +125,7 @@ def patient_name(person) -> str:
 
 class AboutView(PhrView):
     def build(self, person, record):
-        data = {'name': patient_name(person) or None, 'fields': about_fields(record)}
+        data = {'name': patient_name(person) or None, 'fields': about_fields(record, person)}
         return {k: v for k, v in data.items() if v is not None}
 
 
@@ -371,7 +381,7 @@ def section_status(person, record: PatientRecord | None) -> dict[str, str]:
 
     docs = PatientDocument.objects.filter(person=person)
     present = {
-        'about': bool(about_fields(record)),
+        'about': bool(about_fields(record, person)),
         'diagnoses': bool(record and _text(record.disease))
         or has(ConditionOccurrence.objects.filter(is_erroneous=False)),
         # Any cancer's lines (#1739), not only the primary one's.
