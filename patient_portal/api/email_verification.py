@@ -24,6 +24,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
 
 from patient_portal.models import Identity
+from patient_portal.person_adoption import adopt_provisioned_person
 
 logger = logging.getLogger(__name__)
 
@@ -122,9 +123,16 @@ def verify_email(request):
                 return invalid
             identity.mark_email_verified()
             promote_trusted_domain_grants(identity)
+            # The address is proof only now, so this is where an imported
+            # patient's record may be joined to their account (#1817).
+            outcome = adopt_provisioned_person(identity)
     except (signing.BadSignature, KeyError, TypeError, ValueError, Identity.DoesNotExist):
         return invalid
-    return Response({'detail': 'Your email address is confirmed.'})
+    # The person id can change here, so the client is told which one it holds now.
+    return Response({
+        'detail': 'Your email address is confirmed.',
+        'person_id': outcome.person_id,
+    })
 
 
 @api_view(['POST'])

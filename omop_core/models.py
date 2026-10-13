@@ -5158,3 +5158,40 @@ class SourceVocabularyTerm(models.Model):
         )]
         indexes = [GinIndex(OpClass(Upper('search_text'), name='gin_trgm_ops'),
                             name='ix_source_vocab_search_trgm')]
+
+
+class PersonMergeCandidate(models.Model):
+    """Two Person rows for one address that a human has to reconcile (#1817).
+
+    Written when email verification finds a provisioned patient for the address
+    but the account's own Person already holds data, so nothing is moved:
+    joining two populated patient records is a clinical-safety decision, and a
+    confirmed address is not proof that two records are the same person. The
+    same stance as ``prolog_surveys.ParticipantMergeCandidate``.
+
+    The pristine case needs no row here, because adoption settles it: the empty
+    placeholder is deleted and the account keeps the provisioned record.
+    """
+    claimed = models.ForeignKey(
+        Person, on_delete=models.CASCADE, related_name='merge_candidates',
+        help_text='The Person the account is linked to.',
+    )
+    provisioned = models.ForeignKey(
+        Person, on_delete=models.CASCADE, related_name='merge_claims',
+        help_text='The Person an importer provisioned for the same address.',
+    )
+    email = models.EmailField(help_text='The verified address both Persons hold.')
+    created_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(
+        null=True, blank=True, help_text='When a human settled this pair.',
+    )
+
+    class Meta:
+        db_table = 'person_merge_candidate'
+        constraints = [models.UniqueConstraint(
+            fields=['claimed', 'provisioned'], name='uq_person_merge_candidate_pair',
+        )]
+        indexes = [models.Index(fields=['resolved_at'])]
+
+    def __str__(self) -> str:  # pragma: no cover - admin/debug convenience
+        return f'merge candidate {self.claimed_id}/{self.provisioned_id}'

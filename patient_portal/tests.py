@@ -31728,3 +31728,221 @@ class ProvenanceOrganizationLockTest(TransactionTestCase):
         self.row.refresh_from_db()
         self.assertEqual(self.row.value_as_number, Decimal('9'))
         self.assertEqual(self.row.unit_source_value, 'mg/dL')
+
+
+from omop_core.models import PatientSourceCode, PersonMergeCandidate  # noqa: E402
+
+
+@override_settings(
+    EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
+    APP_BASE_URL='https://app.test',
+)
+class ProvisionedPersonAdoptionTest(TestCase):
+    """Verification joins a self-signup account to the Person ETL provisioned (#1817).
+
+    Signup mints a Person before the address is proved, so an imported patient
+    who signs up gets a second, empty record while their history stays on the
+    provisioned one. The join happens here, at verification, because only
+    ``email_verified_at`` is proof -- and only when the signup Person is empty.
+    """
+
+    PASSWORD = 'Str0ng!Pass99'
+    EMAIL = 'imported@example.org'
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()  # DRF throttle state leaks between tests.
+        self.org = Organization.objects.create(
+            name='Public Demo', slug='public-demo', allows_patient_signup=True,
+        )
+        self.importer_org = Organization.objects.create(name='Curehub', slug='curehub')
+
+    def _provision(self, email=EMAIL, organization=None, **person_fields):
+        """What POST /api/persons/provision/ leaves behind."""
+        from omop_core.services.pk import next_pk
+        person = Person.objects.create(
+            person_id=next_pk(Person, 'person_id'), email=email, **person_fields,
+        )
+        PatientRecord.objects.create(person=person, organization=organization)
+        return person
+
+    def _signup(self, email=EMAIL):
+        client = APIClient()
+        resp = client.post(f'/api/v1/orgs/{self.org.slug}/patient-signup/',
+                           {'email': email, 'password': self.PASSWORD,
+                            'given_name': 'Ann', 'family_name': 'Lee'})
+        self.assertEqual(resp.status_code, 201, resp.data)
+        return client, resp.data['person_id']
+
+    def _verify(self):
+        import re
+        from django.core import mail
+        token = re.search(r'verify-email\?token=(\S+)', mail.outbox[-1].body).group(1)
+        return APIClient().post('/api/v1/auth/verify-email/', {'token': token})
+
+    def _linked_person_id(self):
+        return PatientUser.objects.get(identity__email=self.EMAIL).person_id
+
+    def test_verification_adopts_the_provisioned_person(self):
+        provisioned = self._provision()
+        PatientSourceCode.objects.create(person=provisioned, source_value='1234-5')
+        _, signup_person_id = self._signup()
+        self.assertNotEqual(signup_person_id, provisioned.person_id)
+
+        resp = self._verify()
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['person_id'], provisioned.person_id)
+        self.assertEqual(self._linked_person_id(), provisioned.person_id)
+        self.assertFalse(Person.objects.filter(person_id=signup_person_id).exists())
+        self.assertEqual(PatientSourceCode.objects.filter(person=provisioned).count(), 1)
+
+    def test_signup_alone_adopts_nothing(self):
+        """Before the link is clicked the address is still only a claim."""
+        provisioned = self._provision()
+        _, signup_person_id = self._signup()
+        self.assertEqual(self._linked_person_id(), signup_person_id)
+        self.assertTrue(Person.objects.filter(person_id=provisioned.person_id).exists())
+
+    def test_signup_organization_and_name_fill_the_provisioned_blanks(self):
+        provisioned = self._provision()
+        self._signup()
+        self._verify()
+        provisioned.refresh_from_db()
+        record = PatientRecord.objects.get(person=provisioned)
+        self.assertEqual(record.organization_id, self.org.pk)
+        self.assertEqual((provisioned.given_name, provisioned.family_name), ('Ann', 'Lee'))
+
+    def test_the_importers_own_values_are_never_overwritten(self):
+        provisioned = self._provision(
+            organization=self.importer_org, given_name='Anna', family_name='Li',
+        )
+        self._signup()
+        self._verify()
+        provisioned.refresh_from_db()
+        record = PatientRecord.objects.get(person=provisioned)
+        self.assertEqual(record.organization_id, self.importer_org.pk)
+        self.assertEqual((provisioned.given_name, provisioned.family_name), ('Anna', 'Li'))
+
+    def test_a_signup_person_holding_data_is_left_alone_with_a_merge_candidate(self):
+        """Joining two populated records is a decision for a human, not for this."""
+        provisioned = self._provision()
+        _, signup_person_id = self._signup()
+        PatientSourceCode.objects.create(person_id=signup_person_id, source_value='9999-9')
+
+        resp = self._verify()
+
+        self.assertEqual(resp.data['person_id'], signup_person_id)
+        self.assertEqual(self._linked_person_id(), signup_person_id)
+        self.assertTrue(Person.objects.filter(person_id=provisioned.person_id).exists())
+        candidate = PersonMergeCandidate.objects.get()
+        self.assertEqual(candidate.claimed_id, signup_person_id)
+        self.assertEqual(candidate.provisioned_id, provisioned.person_id)
+        self.assertEqual(candidate.email, self.EMAIL)
+        self.assertIsNone(candidate.resolved_at)
+
+    def test_verifying_twice_changes_nothing_and_files_nothing(self):
+        provisioned = self._provision()
+        self._signup()
+        self._verify()
+        resp = self._verify()
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['person_id'], provisioned.person_id)
+        self.assertEqual(PersonMergeCandidate.objects.count(), 0)
+        self.assertEqual(Person.objects.filter(email__iexact=self.EMAIL).count(), 1)
+
+    def test_nothing_provisioned_leaves_the_signup_person_in_place(self):
+        _, signup_person_id = self._signup()
+        resp = self._verify()
+        self.assertEqual(resp.data['person_id'], signup_person_id)
+        self.assertEqual(self._linked_person_id(), signup_person_id)
+
+    def test_a_provisioned_person_without_the_address_is_not_a_candidate(self):
+        """ETL provisions without an email today, so there is nothing to match."""
+        provisioned = self._provision(email=None)
+        _, signup_person_id = self._signup()
+        self._verify()
+        self.assertEqual(self._linked_person_id(), signup_person_id)
+        self.assertTrue(Person.objects.filter(person_id=provisioned.person_id).exists())
+
+    def test_two_unclaimed_persons_for_one_address_adopt_neither(self):
+        first = self._provision()
+        second = self._provision()
+        _, signup_person_id = self._signup()
+        self._verify()
+        self.assertEqual(self._linked_person_id(), signup_person_id)
+        for person in (first, second):
+            self.assertTrue(Person.objects.filter(person_id=person.person_id).exists())
+        self.assertEqual(PersonMergeCandidate.objects.count(), 0)
+
+    def test_a_claimed_duplicate_beside_a_provisioned_one_still_settles(self):
+        """An address that already forked by some other route is not a dead end."""
+        provisioned = self._provision()
+        claimed = self._provision()
+        other = Identity.objects.create_user(email='someone.else@example.org', password=self.PASSWORD)
+        PatientUser.objects.create(identity=other, person=claimed)
+        self._signup()
+
+        self._verify()
+
+        self.assertEqual(self._linked_person_id(), provisioned.person_id)
+        self.assertEqual(PatientUser.objects.get(identity=other).person_id, claimed.person_id)
+
+    def test_an_account_with_no_person_adopts_without_deleting_anything(self):
+        provisioned = self._provision()
+        identity = Identity.objects.create_user(email=self.EMAIL, password=self.PASSWORD)
+        self.assertFalse(PatientUser.objects.filter(identity=identity).exists())
+
+        from patient_portal.person_adoption import adopt_provisioned_person
+        identity.mark_email_verified()
+        outcome = adopt_provisioned_person(identity)
+
+        self.assertTrue(outcome.adopted)
+        self.assertEqual(outcome.person_id, provisioned.person_id)
+        self.assertEqual(PatientUser.objects.get(identity=identity).person_id, provisioned.person_id)
+
+    def test_an_unverified_identity_adopts_nothing(self):
+        provisioned = self._provision()
+        identity = Identity.objects.create_user(email=self.EMAIL, password=self.PASSWORD)
+
+        from patient_portal.person_adoption import adopt_provisioned_person
+        outcome = adopt_provisioned_person(identity)
+
+        self.assertFalse(outcome.adopted)
+        self.assertFalse(PatientUser.objects.filter(person=provisioned).exists())
+
+    def test_a_record_the_patient_edited_counts_as_their_own_data(self):
+        """The placeholder is not pristine just because no clinical row landed."""
+        provisioned = self._provision()
+        _, signup_person_id = self._signup()
+        RecordRevision.objects.create(
+            patient_record=PatientRecord.objects.get(person_id=signup_person_id),
+            field='year_of_birth', old_value='1900', new_value='1972', changed_by='self',
+        )
+
+        self._verify()
+
+        self.assertEqual(self._linked_person_id(), signup_person_id)
+        self.assertEqual(PersonMergeCandidate.objects.count(), 1)
+        self.assertTrue(Person.objects.filter(person_id=provisioned.person_id).exists())
+
+    def test_a_placeholder_something_else_points_at_is_kept(self):
+        """An EHR connection on the empty placeholder makes it a human's call."""
+        provisioned = self._provision()
+        _, signup_person_id = self._signup()
+        FhirConnection.objects.create(
+            person_id=signup_person_id,
+            access_token='a', refresh_token='r', expires_at=timezone.now() + timedelta(hours=1),
+            institution=Institution.objects.create(
+                slug='clinic', display_name='Clinic', fhir_base='https://ehr.test/fhir',
+                smart_config_url='https://ehr.test/.well-known/smart-configuration',
+                client_id='cid', scopes='launch/patient',
+            ),
+        )
+
+        resp = self._verify()
+
+        self.assertEqual(resp.data['person_id'], signup_person_id)
+        self.assertEqual(self._linked_person_id(), signup_person_id)
+        self.assertTrue(Person.objects.filter(person_id=signup_person_id).exists())
+        self.assertEqual(PersonMergeCandidate.objects.count(), 1)
