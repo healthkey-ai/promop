@@ -23,7 +23,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
 
-from patient_portal.models import Identity
+from patient_portal.models import Identity, PatientUser
 
 logger = logging.getLogger(__name__)
 
@@ -124,8 +124,11 @@ def verify_email(request):
             promote_trusted_domain_grants(identity)
             from patient_portal.services import adopt_provisioned_person
             adopted = adopt_provisioned_person(identity)
-            if not adopted:
-                from patient_portal.models import PatientUser
+            if adopted is None:
+                # No provisioned person found — stamp the verified email
+                # on the signup Person.  False means adoption was blocked
+                # (e.g. clinical data on placeholder); do NOT stamp, as
+                # that would create a duplicate email.
                 pu = PatientUser.objects.filter(identity=identity).select_related('person').first()
                 if pu and not pu.person.email:
                     pu.person.email = identity.email

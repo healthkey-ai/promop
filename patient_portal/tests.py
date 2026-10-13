@@ -31860,7 +31860,8 @@ class AdoptProvisionedPersonTest(TestCase):
         identity.mark_email_verified()
         adopted = adopt_provisioned_person(identity)
 
-        self.assertIsNone(adopted)
+        # False (not None) — adoption blocked, caller must not stamp email.
+        self.assertIs(adopted, False)
         # Placeholder preserved
         self.assertTrue(Person.objects.filter(person_id=placeholder.person_id).exists())
 

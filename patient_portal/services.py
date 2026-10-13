@@ -264,7 +264,10 @@ def adopt_provisioned_person(identity):
     Person carries the same (now verified) email, swap the PatientUser link
     to the provisioned Person and delete the placeholder.
 
-    Returns the adopted Person, or None when adoption does not apply.
+    Returns the adopted Person, None when no match exists (caller may
+    stamp the email on the placeholder), or False when adoption was
+    blocked (caller should NOT stamp the email — doing so would create a
+    duplicate that poisons future lookups).
     """
     pu = PatientUser.objects.filter(identity=identity).select_related('person').first()
     if pu is None:
@@ -281,11 +284,10 @@ def adopt_provisioned_person(identity):
         .filter(email__iexact=email)
         .exclude(person_id=placeholder.person_id)
     )
-    claimed = {
-        p.person_id
-        for p in candidates
-        if PatientUser.objects.filter(person=p).exists()
-    }
+    claimed = set(
+        PatientUser.objects.filter(person__in=candidates)
+        .values_list('person_id', flat=True)
+    )
     unclaimed = [p for p in candidates if p.person_id not in claimed]
 
     if len(unclaimed) != 1:
@@ -300,30 +302,47 @@ def adopt_provisioned_person(identity):
             placeholder.person_id,
             identity.pk,
         )
+        return False  # blocked — caller must not stamp email
+
+    try:
+        with transaction.atomic():
+            # Re-lock the provisioned person to prevent concurrent adoption.
+            provisioned = Person.objects.select_for_update().get(
+                person_id=provisioned.person_id,
+            )
+            # Re-check it is still unclaimed under the lock.
+            if PatientUser.objects.filter(person=provisioned).exists():
+                return None
+
+            # Backfill names on provisioned person from identity if blank.
+            name_parts = (identity.name or '').split(None, 1)
+            given = name_parts[0] if name_parts else ''
+            family = name_parts[1] if len(name_parts) > 1 else ''
+            updated_fields = []
+            if not provisioned.given_name and given:
+                provisioned.given_name = given
+                updated_fields.append('given_name')
+            if not provisioned.family_name and family:
+                provisioned.family_name = family
+                updated_fields.append('family_name')
+            if updated_fields:
+                provisioned.save(update_fields=updated_fields)
+
+            # Repoint PatientUser to the provisioned person.
+            pu.person = provisioned
+            pu.save(update_fields=['person'])
+
+            # Delete the placeholder's PatientRecord, then the placeholder Person.
+            PatientRecord.objects.filter(person=placeholder).delete()
+            placeholder.delete()
+    except IntegrityError:
+        logger.warning(
+            "adopt_provisioned_person: concurrent adoption for person %s; "
+            "identity %s lost the race",
+            provisioned.person_id,
+            identity.pk,
+        )
         return None
-
-    with transaction.atomic():
-        # Backfill names on provisioned person from identity if blank.
-        name_parts = (identity.name or '').split(None, 1)
-        given = name_parts[0] if name_parts else ''
-        family = name_parts[1] if len(name_parts) > 1 else ''
-        updated_fields = []
-        if not provisioned.given_name and given:
-            provisioned.given_name = given
-            updated_fields.append('given_name')
-        if not provisioned.family_name and family:
-            provisioned.family_name = family
-            updated_fields.append('family_name')
-        if updated_fields:
-            provisioned.save(update_fields=updated_fields)
-
-        # Repoint PatientUser to the provisioned person.
-        pu.person = provisioned
-        pu.save(update_fields=['person'])
-
-        # Delete the placeholder's PatientRecord, then the placeholder Person.
-        PatientRecord.objects.filter(person=placeholder).delete()
-        placeholder.delete()
 
     logger.info(
         "adopt_provisioned_person: identity %s adopted provisioned person %s "
