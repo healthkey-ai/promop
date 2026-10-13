@@ -5887,17 +5887,26 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         select_all = request.data.get('select_all', False)
 
         if select_all:
+            if not getattr(settings, 'CELERY_BROKER_URL', ''):
+                return Response(
+                    {'detail': 'Resolve-all requires background processing (Celery).'},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
             # Use the same filter pipeline as the patient list.
             qs = self._apply_patient_list_filters(self.get_queryset())
-            person_ids = list(
-                qs.values_list('person__person_id', flat=True)
-                  .distinct()[:BULK_RESOLVE_MAX_PERSONS]
-            )
-            if not person_ids:
+            pid_qs = qs.values_list('person__person_id', flat=True).distinct()
+            count = pid_qs.count()
+            if count == 0:
                 return Response(
                     {'detail': 'No patients match the current filters.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            if count > BULK_RESOLVE_MAX_PERSONS:
+                return Response(
+                    {'detail': f'Selection exceeds the {BULK_RESOLVE_MAX_PERSONS}-patient cap.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            person_ids = list(pid_qs)
         else:
             if not isinstance(person_ids, list) or not person_ids:
                 return Response(
@@ -5946,10 +5955,11 @@ def resolve_run_status(request: Request, run_id) -> Response:
         'total': run.total,
         'done': run.done,
         'resolved': run.resolved,
+        'created': run.created,
         'skipped': run.skipped,
         'already_resolved': run.already_resolved,
         'errors': run.errors,
-        'code_details': run.code_details,
+        'code_details': run.code_details if run.state in ('completed', 'failed') else [],
     })
 
 
