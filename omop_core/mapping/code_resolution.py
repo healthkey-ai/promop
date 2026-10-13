@@ -587,7 +587,8 @@ def _source_value_match(model, source_col, mapping, include_description=True):
 
 
 def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
-                          apply_changes=True, match_description=True):
+                          apply_changes=True, match_description=True,
+                          person_id=None):
     """Move stored clinical rows from one destination concept to another.
 
     Approving a mapping that a curator re-pointed has to rewrite the rows
@@ -630,6 +631,8 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
     match = _source_value_match(
         model, source_col, mapping, include_description=match_description)
     qs = model.objects.filter(match, **{concept_col: old_concept_id})
+    if person_id is not None:
+        qs = qs.filter(person_id=person_id)
     if mapping.organization_id:
         # A shared Epic flowsheet code can mean different things at two
         # hospitals.  Only rows whose write provenance names this mapping's
@@ -717,7 +720,7 @@ def _collapse_duplicates(model, concept_col, source_col, match,
 # ------------------------------------------------------------------
 
 def resolve_person_source_codes(person, *, source_values=None, omop_tables=None):
-    """Re-resolve clinical rows for *person* where concept_id is 0 or HK-*.
+    """Re-resolve clinical rows for *person* with unresolved or prior targets.
 
     Uses the current approved SCCM mappings.  Returns a dict with counts:
     ``{'resolved': N, 'skipped': N, 'already_resolved': N}``.
@@ -794,11 +797,14 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
                 })
                 continue
 
-            # Find rows that need updating: concept_id = 0 or in quarantine.
-            # Build a Q filter for "unresolved" concept IDs.
+            # Patient-scoped approvals leave prior targets for Generate OMOP.
+            # This includes standard-to-standard remaps that a 0/HK-only
+            # resolver would otherwise never pick up for other patients.
             unresolved_q = Q(**{concept_col: NO_MATCHING_CONCEPT_ID})
             if quarantine_concept_ids:
                 unresolved_q |= Q(**{f'{concept_col}__in': quarantine_concept_ids})
+            if mapping.deferred_repoint_concept_ids:
+                unresolved_q |= Q(**{f'{concept_col}__in': mapping.deferred_repoint_concept_ids})
 
             rows_to_update = qs.filter(**{source_col: sv}).filter(unresolved_q)
 

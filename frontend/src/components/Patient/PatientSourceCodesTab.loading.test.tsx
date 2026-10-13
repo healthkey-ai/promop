@@ -64,17 +64,11 @@ describe("PatientSourceCodesTab loading (#1789)", () => {
     expect(screen.queryByRole("button", { name: /Show all/ })).not.toBeInTheDocument();
   });
 
-  it("keeps the table on screen while resolve is in progress", async () => {
+  it("leaves Generate OMOP to the patient list batch action", async () => {
     vi.mocked(api.get).mockImplementation((url: string) =>
       Promise.resolve({ data: url.includes("source-codes") ? response(1) : {} }) as never);
-    // POST returns 202 with run_id; resolve is now async (polled).
-    vi.mocked(api.post).mockResolvedValue({ data: { run_id: "test-run", total: 1 } } as never);
     render(<PatientSourceCodesTab personId="1" />);
     expect(await screen.findByText("CODE-0")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Generate OMOP" }));
-    // Button shows "Resolving..." while poll is in progress.
-    expect(await screen.findByText("Resolving...")).toBeInTheDocument();
-    // Table data stays visible during the resolve.
-    expect(screen.getByText("CODE-0")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Generate OMOP" })).not.toBeInTheDocument();
   });
 });

@@ -1,13 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import api from "../../api/axios";
 import { useAuth } from "../../hooks/useAuth";
 import type {
   PatientSourceCode,
   SourceCodesResponse,
-  ResolveResult,
-  ResolveRunStatus,
-  ResolveCodeDetail,
 } from "../../types/sourceCodes";
 import EditMappingDialog from "../CodeMappings/EditMappingDialog";
 import {
@@ -182,10 +179,6 @@ export default function PatientSourceCodesTab({ personId }: Props) {
   const [data, setData] = useState<SourceCodesResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [resolving, setResolving] = useState(false);
-  const [resolveResult, setResolveResult] = useState<ResolveResult | null>(null);
-  const [resolveDetails, setResolveDetails] = useState<ResolveCodeDetail[]>([]);
-  const [detailsOpen, setDetailsOpen] = useState(false);
   const [reference, setReference] = useState<Reference>(emptyReference);
   const [banner, setBanner] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Record<SectionKey, boolean>>({
@@ -252,51 +245,6 @@ export default function PatientSourceCodesTab({ personId }: Props) {
     };
   }, []);
 
-  const resolvePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  useEffect(() => () => { if (resolvePollRef.current) clearInterval(resolvePollRef.current); }, []);
-
-  const handleResolve = async () => {
-    setResolving(true);
-    setResolveResult(null);
-    try {
-      const res = await api.post<{ run_id: string; total: number }>(
-        `/v1/patient-records/${personId}/resolve-source-codes/`,
-        {}
-      );
-      const runId = res.data.run_id;
-
-      resolvePollRef.current = setInterval(async () => {
-        try {
-          const status = await api.get<ResolveRunStatus>(`/v1/resolve-runs/${runId}/`);
-          if (status.data.state === "completed" || status.data.state === "failed") {
-            if (resolvePollRef.current) clearInterval(resolvePollRef.current);
-            resolvePollRef.current = null;
-            setResolveResult({
-              resolved: status.data.resolved,
-              skipped: status.data.skipped,
-              already_resolved: status.data.already_resolved,
-            });
-            setResolveDetails(status.data.code_details ?? []);
-            setResolving(false);
-            await fetchSourceCodes();
-          }
-        } catch {
-          if (resolvePollRef.current) clearInterval(resolvePollRef.current);
-          resolvePollRef.current = null;
-          setResolving(false);
-        }
-      }, 2000);
-    } catch (err) {
-      const detail =
-        err && typeof err === "object" && "response" in err
-          ? (err as { response?: { data?: { detail?: string; error?: string } } })
-              .response?.data
-          : undefined;
-      setError(detail?.detail || detail?.error || "Failed to resolve source codes.");
-      setResolving(false);
-    }
-  };
-
   const handleRowClick = (sc: PatientSourceCode) => {
     setBanner(null);
     const row = sourceCodeToRow(sc);
@@ -314,8 +262,7 @@ export default function PatientSourceCodesTab({ personId }: Props) {
     handleDialogClose();
     if (repoint && repoint.rows_updated) {
       setBanner(
-        `Updated ${repoint.rows_updated} row(s) across `
-        + `${repoint.persons_marked_stale} patient(s)`
+        `Updated ${repoint.rows_updated} row(s) for this patient`
         + (repoint.rows_collapsed ? `, ${repoint.rows_collapsed} duplicate(s) collapsed` : "")
         + ". Patient records queued for re-derivation.",
       );
@@ -383,74 +330,7 @@ export default function PatientSourceCodesTab({ personId }: Props) {
             </span>
           )}
         </div>
-        <button
-          onClick={handleResolve}
-          disabled={resolving}
-          className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-        >
-          {resolving ? (
-            <>
-              <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
-              Resolving...
-            </>
-          ) : (
-            "Generate OMOP"
-          )}
-        </button>
       </div>
-
-      {/* Resolve result toast */}
-      {resolveResult && (
-        <div className="rounded-md border border-green-200 bg-green-50 p-3 text-sm text-green-800">
-          <div className="flex items-center justify-between">
-            <span>
-              Resolved {resolveResult.resolved} code(s).{" "}
-              {resolveResult.skipped > 0 && `${resolveResult.skipped} skipped. `}
-              {resolveResult.already_resolved > 0 && `${resolveResult.already_resolved} already resolved.`}
-            </span>
-            {resolveDetails.length > 0 && (
-              <button
-                onClick={() => setDetailsOpen((o) => !o)}
-                className="ml-2 text-xs text-green-700 underline hover:text-green-900"
-              >
-                {detailsOpen ? "Hide details" : "Show details"}
-              </button>
-            )}
-          </div>
-          {detailsOpen && resolveDetails.length > 0 && (
-            <table className="mt-2 w-full text-xs">
-              <thead>
-                <tr className="border-b border-green-200 text-left">
-                  <th className="py-1 pr-2">Source code</th>
-                  <th className="py-1 pr-2">Table</th>
-                  <th className="py-1 pr-2">Rows</th>
-                  <th className="py-1 pr-2">Outcome</th>
-                  <th className="py-1">Target / Reason</th>
-                </tr>
-              </thead>
-              <tbody>
-                {resolveDetails.map((d, i) => (
-                  <tr key={i} className="border-b border-green-100">
-                    <td className="py-1 pr-2 font-mono">{d.source_value}</td>
-                    <td className="py-1 pr-2">{d.table}</td>
-                    <td className="py-1 pr-2">{d.rows}</td>
-                    <td className="py-1 pr-2">
-                      <span className={
-                        d.outcome === "resolved" ? "text-green-700 font-medium"
-                        : d.outcome === "skipped" ? "text-amber-700"
-                        : "text-gray-500"
-                      }>
-                        {d.outcome === "already_resolved" ? "already resolved" : d.outcome}
-                      </span>
-                    </td>
-                    <td className="py-1">{d.target ?? d.reason ?? ""}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-      )}
 
       {/* Save banner */}
       {banner && (
@@ -505,6 +385,7 @@ export default function PatientSourceCodesTab({ personId }: Props) {
 
       <EditMappingDialog
         open={dialogOpen}
+        patientId={personId}
         onClose={handleDialogClose}
         mode={dialogMode}
         row={dialogRow}

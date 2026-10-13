@@ -63,6 +63,8 @@ export type { CodeMappingRow, Reference, RepointResult, ConceptResult };
 
 export interface EditMappingDialogProps {
   open: boolean;
+  /** Limit clinical row updates when this dialog is opened from a patient. */
+  patientId?: string;
   onClose: () => void;
   mode: "new" | "edit";
   row: CodeMappingRow | null;
@@ -81,6 +83,7 @@ export interface EditMappingDialogProps {
 
 export default function EditMappingDialog({
   open,
+  patientId,
   onClose,
   mode,
   row: selectedRow,
@@ -468,6 +471,7 @@ export default function EditMappingDialog({
     try {
       const payload = {
         ...form,
+        ...(patientId ? { patient_id: Number(patientId) } : {}),
         // Empty stays empty: never send concept 0 as a destination.
         destination_concept_id: form.destination_concept_id ? Number(form.destination_concept_id) : null,
         target_concept_id: form.destination_concept_id ? Number(form.destination_concept_id) : null,
@@ -515,7 +519,7 @@ export default function EditMappingDialog({
       setRepointing(null);
       setSaving(false);
     }
-  }, [form, selectedRow, willRepoint, onSaved, closeDialog]);
+  }, [form, patientId, selectedRow, willRepoint, onSaved, closeDialog]);
 
   const deleteMapping = useCallback(async (row: CodeMappingRow) => {
     if (!row.mapping_id) return;

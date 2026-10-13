@@ -1,6 +1,7 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import PatientSourceCodesTab from "./PatientSourceCodesTab";
+import api from "../../api/axios";
 
 vi.mock("../../hooks/useAuth", () => ({
   useAuth: () => ({ currentUser: { email: "curator@example.com", is_staff: true } }),
@@ -104,4 +105,16 @@ describe("PatientSourceCodesTab missing destination", () => {
     expect(field).toHaveValue(3027018);
     expect(field).toBeRequired();
   });
+});
+
+it("sends the current patient when saving a mapping", async () => {
+  vi.mocked(api.patch).mockResolvedValueOnce({ data: { mapping_id: 78 } } as never);
+  render(<PatientSourceCodesTab personId="48095" />);
+  fireEvent.click(await screen.findByText("Pulse"));
+  fireEvent.change(screen.getByLabelText("Status"), { target: { value: "approved" } });
+  fireEvent.submit(screen.getByRole("button", { name: "Update Mapping" }).closest("form")!);
+  await waitFor(() => expect(api.patch).toHaveBeenCalledWith(
+    "/v1/code-mappings/78/",
+    expect.objectContaining({ patient_id: 48095, status: "approved" }),
+  ));
 });

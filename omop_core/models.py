@@ -2097,6 +2097,9 @@ class SourceCodeConceptMapping(models.Model):
     # A proposal can move several times before approval. Keep the destinations
     # whose stored clinical rows must move when a curator finally signs off.
     pending_repoint_concept_ids = models.JSONField(default=list, db_default=[], blank=True)
+    # Prior targets left on other patients by a patient-scoped approval.
+    # Generate OMOP uses these when those patients are selected later.
+    deferred_repoint_concept_ids = models.JSONField(default=list, db_default=[], blank=True)
     # Immutable evidence for suggestion-quality measurement.  target_concept
     # changes when a curator corrects a proposal; this field preserves what the
     # model actually suggested so Recall can measure those overrides.

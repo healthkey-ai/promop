@@ -336,10 +336,11 @@ def import_upload(*, upload, vocabulary, provenance, actor, can_approve=True):
                     and previous_concept_id != concept.pk
                 )
                 pending_repoints = set(mapping.pending_repoint_concept_ids)
+                deferred_repoints = set(mapping.deferred_repoint_concept_ids)
                 if not approved and destination_changed:
                     pending_repoints.add(previous_concept_id)
                 if approval_changed:
-                    old_concept_ids = pending_repoints
+                    old_concept_ids = pending_repoints | deferred_repoints
                     if destination_changed:
                         old_concept_ids.add(previous_concept_id)
                     approval_repoints.append((
@@ -367,6 +368,9 @@ def import_upload(*, upload, vocabulary, provenance, actor, can_approve=True):
                 if mapping.pending_repoint_concept_ids != next_pending:
                     mapping.pending_repoint_concept_ids = next_pending
                     changed = True
+                if approval_changed and mapping.deferred_repoint_concept_ids:
+                    mapping.deferred_repoint_concept_ids = []
+                    changed = True
                 if approval_changed:
                     mapping.reviewer = actor
                     mapping.reviewed_at = now
@@ -391,6 +395,7 @@ def import_upload(*, upload, vocabulary, provenance, actor, can_approve=True):
                  'last_seen', 'origin_system', 'target_concept',
                  'destination_vocabulary_id', 'domain_id', 'omop_table', 'status',
                  'reviewer', 'reviewed_at', 'pending_repoint_concept_ids',
+                 'deferred_repoint_concept_ids',
                  'suggestion_confidence', 'updated_by', 'updated_at'],
                 batch_size=1_000,
             )
