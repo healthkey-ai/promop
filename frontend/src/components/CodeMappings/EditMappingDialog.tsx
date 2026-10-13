@@ -77,6 +77,8 @@ export interface EditMappingDialogProps {
   onSaved: (saved: CodeMappingRow, repoint: RepointResult | null) => void;
   onDeleted: (row: CodeMappingRow) => void;
   onBanner?: (message: string | null) => void;
+  patientId?: string;
+  onSourceCodeUpdated?: () => void;
 }
 
 // ── Component ───────────────────────────────────────────────────────
@@ -96,6 +98,8 @@ export default function EditMappingDialog({
   onSaved,
   onDeleted,
   onBanner,
+  patientId,
+  onSourceCodeUpdated,
 }: EditMappingDialogProps) {
   // ── refs ────────────────────────────────────────────────────────
   const dialogRequest = useRef(0);
@@ -124,6 +128,10 @@ export default function EditMappingDialog({
   const [mintOpen, setMintOpen] = useState(false);
   const [mintUnitOpen, setMintUnitOpen] = useState(false);
   const [unitAutoPopulated, setUnitAutoPopulated] = useState(false);
+  const [sourceQuantity, setSourceQuantity] = useState("");
+  const [sourceUnit, setSourceUnit] = useState("");
+  const [savingSource, setSavingSource] = useState(false);
+  const [sourceSaveMessage, setSourceSaveMessage] = useState("");
 
   const evidenceFacilities = sourceEvidence?.facilities || [];
 
@@ -171,6 +179,9 @@ export default function EditMappingDialog({
       setMintOpen(false);
       setIndividualSuggestion(null);
       setUnitAutoPopulated(false);
+      setSourceQuantity(selectedRow?.example_quantity || "");
+      setSourceUnit(selectedRow?.source_unit || "");
+      setSourceSaveMessage("");
 
       if (mode === "new") {
         // When opened from PatientSourceCodesTab, selectedRow carries the
@@ -521,6 +532,28 @@ export default function EditMappingDialog({
     }
   }, [form, patientId, selectedRow, willRepoint, onSaved, closeDialog]);
 
+  const saveSourceContext = async () => {
+    if (!patientId || !selectedRow?.source_code_id) return;
+    setSavingSource(true);
+    setSourceSaveMessage("");
+    try {
+      const extractedUnit = selectedRow.extracted_source_unit ?? "";
+      const extractedQuantity = selectedRow.extracted_example_quantity ?? "";
+      await api.patch(`/v1/patient-records/${patientId}/source-codes/`, {
+        source_code_id: selectedRow.source_code_id,
+        source_unit_override: sourceUnit.trim() === extractedUnit ? null : sourceUnit.trim(),
+        example_quantity_override: sourceQuantity.trim() === extractedQuantity ? null : sourceQuantity.trim(),
+      });
+      setForm((prev) => ({ ...prev, source_unit: sourceUnit.trim() }));
+      setSourceSaveMessage("Source context saved. Original FHIR evidence is unchanged.");
+      onSourceCodeUpdated?.();
+    } catch {
+      setSourceSaveMessage("Could not save source context. Please try again.");
+    } finally {
+      setSavingSource(false);
+    }
+  };
+
   const deleteMapping = useCallback(async (row: CodeMappingRow) => {
     if (!row.mapping_id) return;
     setError("");
@@ -654,9 +687,40 @@ export default function EditMappingDialog({
                   />
                 </Field>
 
-                <ReadOnlyField id="source_quantity_display" label="Source Quantity" tip="Representative quantity value(s) from the source data." value={selectedRow?.example_quantity || "\u2014"} testId="source-quantity" />
-
-                <ReadOnlyField id="source_unit_display" label="Source Unit" tip="Unit string as reported by the ETL source." value={form.source_unit || "\u2014"} testId="source-unit-context" />
+                {patientId && selectedRow?.source_code_id ? (
+                  <>
+                    <Field id="source_quantity" label="Source Quantity" tip="Representative quantity from this patient's source-code inventory. Compare with Source Metadata below before correcting.">
+                      <input id="source_quantity" className={INPUT_CLASS} maxLength={100}
+                        value={sourceQuantity} onChange={(event) => setSourceQuantity(event.target.value)} />
+                      {selectedRow.example_quantity_override !== null && selectedRow.example_quantity_override !== undefined && (
+                        <p className="mt-1 text-xs text-slate-600">Extracted: {selectedRow.extracted_example_quantity || "\u2014"}</p>
+                      )}
+                    </Field>
+                    <Field id="source_unit" label="Source Unit" tip="Unit string from this patient's source-code inventory. This is context, not the destination unit concept.">
+                      <input id="source_unit" className={INPUT_CLASS} maxLength={50}
+                        value={sourceUnit} onChange={(event) => setSourceUnit(event.target.value)} />
+                      {selectedRow.source_unit_override !== null && selectedRow.source_unit_override !== undefined && (
+                        <p className="mt-1 text-xs text-slate-600">Extracted: {selectedRow.extracted_source_unit || "\u2014"}</p>
+                      )}
+                    </Field>
+                    <div className="col-span-full flex flex-wrap items-center gap-2 text-xs">
+                      <button type="button" onClick={() => void saveSourceContext()} disabled={savingSource}
+                        className="rounded border border-slate-300 px-2 py-1 font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+                        {savingSource ? "Saving..." : "Save source context"}
+                      </button>
+                      <button type="button" onClick={() => {
+                        setSourceQuantity(selectedRow.extracted_example_quantity || "");
+                        setSourceUnit(selectedRow.extracted_source_unit || "");
+                      }} className="text-slate-600 underline">Use extracted values</button>
+                      {sourceSaveMessage && <span role="status">{sourceSaveMessage}</span>}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <ReadOnlyField id="source_quantity_display" label="Source Quantity" tip="Representative quantity value(s) from the source data." value={selectedRow?.example_quantity || "\u2014"} testId="source-quantity" />
+                    <ReadOnlyField id="source_unit_display" label="Source Unit" tip="Unit string as reported by the ETL source." value={form.source_unit || "\u2014"} testId="source-unit-context" />
+                  </>
+                )}
 
                 {(reference.source_catalog_vocabularies || []).includes(form.source_vocabulary_id) && (
                   <SourceVocabularyLookup

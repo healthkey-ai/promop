@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import api from "../../api/axios";
 import PatientSourceCodesTab from "./PatientSourceCodesTab";
 import api from "../../api/axios";
 
@@ -22,8 +23,13 @@ const sourceCodes = {
     mapping_target_concept_name: null,
     source_vocabulary_id: "LOINC",
     source_code: "8716-3",
-    source_unit: "",
-    example_quantity: "",
+    source_code_id: 44,
+    source_unit: "mg/dL",
+    example_quantity: "12",
+    extracted_source_unit: "bad unit",
+    extracted_example_quantity: "12",
+    source_unit_override: "mg/dL",
+    example_quantity_override: null,
     source_metadata: { display: ["Vital signs"], text: ["Blood Pressure"] },
     source_code_description: "Blood Pressure",
   }, {
@@ -69,7 +75,7 @@ vi.mock("../../api/axios", () => ({
       data: url.includes("source-codes") ? sourceCodes : {},
     }),
     post: vi.fn(() => Promise.resolve({ data: {} })),
-    patch: vi.fn(), delete: vi.fn(() => Promise.resolve({})),
+    patch: vi.fn(() => Promise.resolve({ data: {} })), delete: vi.fn(() => Promise.resolve({})),
   },
 }));
 
@@ -117,4 +123,21 @@ it("sends the current patient when saving a mapping", async () => {
     "/v1/code-mappings/78/",
     expect.objectContaining({ patient_id: 48095, status: "approved" }),
   ));
+});
+
+describe("PatientSourceCodesTab source context correction", () => {
+  it("lets a curator compare FHIR metadata and save a source-unit correction separately", async () => {
+    render(<PatientSourceCodesTab personId="48095" />);
+    fireEvent.click(await screen.findByText("Blood Pressure"));
+    fireEvent.click(screen.getByRole("button", { name: /Source Metadata/ }));
+    expect(screen.getByText(/Vital signs/)).toBeInTheDocument();
+    expect(screen.getByText(/Extracted: bad unit/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/^Source Unit/), { target: { value: "cells/uL" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save source context" }));
+    await waitFor(() => expect(api.patch).toHaveBeenCalledWith(
+      "/v1/patient-records/48095/source-codes/",
+      { source_code_id: 44, source_unit_override: "cells/uL", example_quantity_override: null },
+    ));
+    expect(await screen.findByText(/Source context saved/)).toBeInTheDocument();
+  });
 });
