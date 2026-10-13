@@ -138,6 +138,10 @@ System picker distinguish these cases and keep the exact FHIR `Coding.system`
 visible. No inferred name changes the persisted system URI, mapping key, or
 `organization_id`.
 
+On that seed, this rule produces one observed name for 498,392 code rows,
+multiple names for 7,408, and no defensible name for 186,000 rows. Those
+counts describe contextual labels, not verified organization assignments.
+
 Nikita's matching unit evidence preserves raw display, raw quantity code and
 system, normalized UCUM when available, validation verdict/reason, and counts.
 Alex's per-unit percentiles and suppression state are merged onto the matching
