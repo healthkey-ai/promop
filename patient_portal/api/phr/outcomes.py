@@ -50,9 +50,12 @@ def outcomes(person, record=None) -> dict[str, Any]:
         language = definition.get('default_language', 'en')
         mine = SurveyResponse.objects.filter(participant_id=person.person_id, survey_version__survey=version.survey)
         done = list(mine.filter(status=ResponseStatus.SUBMITTED, submitted_at__isnull=False).order_by('-submitted_at'))
-        # PROlog resumes only a response on the active version (its POST /responses/).
+        # PROlog resumes only a response on the active version (its POST /responses/),
+        # and opens one as soon as the survey is; it's a draft once answered.
         draft = (
-            mine.filter(status=ResponseStatus.IN_PROGRESS, survey_version=version).order_by('-started_at').first()
+            mine.filter(status=ResponseStatus.IN_PROGRESS, survey_version=version, answers__isnull=False)
+            .order_by('-started_at')
+            .first()
         )
         last = timezone.localdate(done[0].submitted_at) if done else None
         next_due = _a_year_after(last) if last else None

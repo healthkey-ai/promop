@@ -45,6 +45,7 @@ def test_outcomes_list_each_survey_due_a_year_after_it_was_last_completed():
     latest = answered(quality, record.person, days_ago=400)
     answered(effects, other.person, days_ago=10)  # someone else's
     draft = SurveyResponse.objects.create(survey_version=effects, participant_id=record.person.person_id, language='en')
+    draft.answers.create(question_key='q1', value={'option': 'yes'}, option_keys=['yes'])
     client = signed_in(record)
 
     data = client.get('/api/v1/phr/outcomes/').data
@@ -68,15 +69,17 @@ def test_outcomes_list_each_survey_due_a_year_after_it_was_last_completed():
     assert client.get('/api/v1/phr/status/').data['sections']['outcomes'] == 'ready'
 
 
-def test_a_survey_completed_this_year_is_upcoming():
+def test_a_survey_completed_this_year_is_upcoming_and_one_only_opened_is_no_draft():
     record = PatientRecordFactory(disease='')
     effects = survey('side-effects', 'Side effects survey')
     answered(effects, record.person, days_ago=30)
+    SurveyResponse.objects.create(survey_version=effects, participant_id=record.person.person_id, language='en')
 
     row = signed_in(record).get('/api/v1/phr/outcomes/').data['surveys'][0]
 
     assert row['status'] == 'upcoming'
     assert row['next_due'] > timezone.localdate().isoformat()
+    assert row['draft_response'] is None
 
 
 def test_only_active_outcome_surveys_show():
