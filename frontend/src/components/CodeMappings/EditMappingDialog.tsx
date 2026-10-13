@@ -77,7 +77,6 @@ export interface EditMappingDialogProps {
   onSaved: (saved: CodeMappingRow, repoint: RepointResult | null) => void;
   onDeleted: (row: CodeMappingRow) => void;
   onBanner?: (message: string | null) => void;
-  patientId?: string;
   onSourceCodeUpdated?: () => void;
 }
 
@@ -98,7 +97,6 @@ export default function EditMappingDialog({
   onSaved,
   onDeleted,
   onBanner,
-  patientId,
   onSourceCodeUpdated,
 }: EditMappingDialogProps) {
   // ── refs ────────────────────────────────────────────────────────

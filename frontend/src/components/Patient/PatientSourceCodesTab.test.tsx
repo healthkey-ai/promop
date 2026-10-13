@@ -2,7 +2,6 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import api from "../../api/axios";
 import PatientSourceCodesTab from "./PatientSourceCodesTab";
-import api from "../../api/axios";
 
 vi.mock("../../hooks/useAuth", () => ({
   useAuth: () => ({ currentUser: { email: "curator@example.com", is_staff: true } }),
