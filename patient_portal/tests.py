@@ -30172,6 +30172,247 @@ class BulkResolveSourceCodesTest(_SmartBase):
         self.assertEqual(data['done'], 2)
         self.assertGreaterEqual(data['resolved'], 2)
 
+    def test_select_all_rejected_without_celery(self):
+        """select_all without CELERY_BROKER_URL → 503."""
+        with self.settings(CELERY_BROKER_URL=''):
+            resp = self.write_client.post(
+                self._url(),
+                {'select_all': True},
+                format='json',
+            )
+        self.assertEqual(resp.status_code, 503)
+
+
+# ---------------------------------------------------------------------------
+# Resolve Creates New Clinical Rows Tests
+# ---------------------------------------------------------------------------
+
+class ResolveCreatesNewRowsTest(_SmartBase):
+    """Tests that Generate OMOP creates clinical rows for PSC entries with no
+    existing OMOP row but an approved mapping.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.foundation_user.is_staff = True
+        cls.foundation_user.save(update_fields=['is_staff'])
+
+        cls.zero_concept = Concept.objects.get(concept_id=0)
+        cls.target_concept = cls.condition_concept  # Breast cancer, 4112853
+
+    def _resolve_and_poll(self, person_ids):
+        """POST bulk resolve, poll, return completed run status dict."""
+        resp = self.write_client.post(
+            '/api/v1/patient-records/bulk-resolve-source-codes/',
+            {'person_ids': person_ids},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 202)
+        run_id = resp.json()['run_id']
+        poll = self.write_client.get(f'/api/v1/resolve-runs/{run_id}/')
+        self.assertEqual(poll.status_code, 200)
+        return poll.json()
+
+    def test_creates_measurement_for_psc_with_approved_mapping(self):
+        """PSC + approved SCCM + no clinical row → Measurement created."""
+        from omop_core.models import PatientSourceCode
+        PatientSourceCode.objects.create(
+            person=self.person,
+            source_value='CREATE_ME',
+            omop_table='measurement',
+        )
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='CREATE_ME',
+            omop_table='measurement',
+            status='approved',
+            target_concept=self.target_concept,
+        )
+
+        run = self._resolve_and_poll([self.person.person_id])
+        self.assertEqual(run['created'], 1)
+
+        row = Measurement.objects.filter(
+            person=self.person,
+            measurement_source_value='CREATE_ME',
+        ).first()
+        self.assertIsNotNone(row)
+        self.assertEqual(row.measurement_concept_id, self.target_concept.concept_id)
+        self.assertEqual(row.measurement_type_concept_id, 32817)  # EHR type
+
+    def test_no_creation_when_clinical_row_exists(self):
+        """Existing clinical row → no new row created (repoint only)."""
+        from omop_core.models import PatientSourceCode
+        PatientSourceCode.objects.create(
+            person=self.person,
+            source_value='EXISTING_CODE',
+            omop_table='measurement',
+        )
+        Measurement.objects.create(
+            measurement_id=93010,
+            person=self.person,
+            measurement_concept=self.zero_concept,
+            measurement_date=date(2023, 5, 1),
+            measurement_type_concept=self.type_concept,
+            measurement_source_value='EXISTING_CODE',
+        )
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='EXISTING_CODE',
+            omop_table='measurement',
+            status='approved',
+            target_concept=self.target_concept,
+        )
+
+        run = self._resolve_and_poll([self.person.person_id])
+        self.assertEqual(run['created'], 0)
+        # Existing row should be repointed, not duplicated.
+        count = Measurement.objects.filter(
+            person=self.person,
+            measurement_source_value='EXISTING_CODE',
+        ).count()
+        self.assertEqual(count, 1)
+
+    def test_no_creation_without_approved_mapping(self):
+        """PSC with no approved mapping → no clinical row created."""
+        from omop_core.models import PatientSourceCode
+        PatientSourceCode.objects.create(
+            person=self.person,
+            source_value='NO_MAP_CODE',
+            omop_table='measurement',
+        )
+
+        run = self._resolve_and_poll([self.person.person_id])
+        self.assertEqual(run['created'], 0)
+        self.assertFalse(
+            Measurement.objects.filter(
+                person=self.person,
+                measurement_source_value='NO_MAP_CODE',
+            ).exists()
+        )
+
+    def test_idempotent_on_second_run(self):
+        """Running twice creates only one row."""
+        from omop_core.models import PatientSourceCode
+        PatientSourceCode.objects.create(
+            person=self.person,
+            source_value='IDEM_CODE',
+            omop_table='measurement',
+        )
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='IDEM_CODE',
+            omop_table='measurement',
+            status='approved',
+            target_concept=self.target_concept,
+        )
+
+        self._resolve_and_poll([self.person.person_id])
+        run2 = self._resolve_and_poll([self.person.person_id])
+        self.assertEqual(run2['created'], 0)
+        count = Measurement.objects.filter(
+            person=self.person,
+            measurement_source_value='IDEM_CODE',
+        ).count()
+        self.assertEqual(count, 1)
+
+    def test_creates_across_multiple_tables(self):
+        """PSC entries for different tables each create a row."""
+        from omop_core.models import PatientSourceCode
+        PatientSourceCode.objects.create(
+            person=self.person,
+            source_value='MULTI_MEAS',
+            omop_table='measurement',
+        )
+        PatientSourceCode.objects.create(
+            person=self.person,
+            source_value='MULTI_COND',
+            omop_table='condition',
+        )
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='MULTI_MEAS',
+            omop_table='measurement',
+            status='approved',
+            target_concept=self.target_concept,
+        )
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='MULTI_COND',
+            omop_table='condition',
+            status='approved',
+            target_concept=self.target_concept,
+        )
+
+        run = self._resolve_and_poll([self.person.person_id])
+        self.assertEqual(run['created'], 2)
+        self.assertTrue(
+            Measurement.objects.filter(
+                person=self.person,
+                measurement_source_value='MULTI_MEAS',
+            ).exists()
+        )
+        self.assertTrue(
+            ConditionOccurrence.objects.filter(
+                person=self.person,
+                condition_source_value='MULTI_COND',
+            ).exists()
+        )
+
+    def test_created_count_in_run_status(self):
+        """The run status response includes the created count."""
+        from omop_core.models import PatientSourceCode
+        PatientSourceCode.objects.create(
+            person=self.person,
+            source_value='COUNT_TEST',
+            omop_table='measurement',
+        )
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='COUNT_TEST',
+            omop_table='measurement',
+            status='approved',
+            target_concept=self.target_concept,
+        )
+
+        run = self._resolve_and_poll([self.person.person_id])
+        self.assertIn('created', run)
+        self.assertEqual(run['created'], 1)
+        # Also check code_details has 'created' outcome.
+        created_details = [d for d in run['code_details'] if d['outcome'] == 'created']
+        self.assertEqual(len(created_details), 1)
+        self.assertEqual(created_details[0]['source_value'], 'COUNT_TEST')
+
+    def test_code_details_capped_at_500(self):
+        """code_details list is truncated to 500 entries."""
+        from omop_core.models import PatientSourceCode
+        from omop_core.services.resolve_jobs import run_bulk_resolve
+        from omop_core.models import SourceCodeResolveRun
+
+        # Create 510 PSC entries with approved mappings (no clinical rows).
+        for i in range(510):
+            sv = f'CAP_{i:04d}'
+            PatientSourceCode.objects.create(
+                person=self.person,
+                source_value=sv,
+                omop_table='measurement',
+            )
+            SourceCodeConceptMapping.objects.create(
+                source_vocabulary_id='',
+                source_code=sv,
+                omop_table='measurement',
+                status='approved',
+                target_concept=self.target_concept,
+            )
+
+        run_obj = SourceCodeResolveRun.objects.create(
+            total=1,
+        )
+        run_bulk_resolve(run_obj.id, [self.person.person_id])
+        run_obj.refresh_from_db()
+        self.assertLessEqual(len(run_obj.code_details), 500)
+
 
 # ---------------------------------------------------------------------------
 # Source Code Context Fields Tests

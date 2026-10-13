@@ -45,7 +45,7 @@ export interface ResolveCodeDetail {
   source_value: string;
   table: string;
   rows: number;
-  outcome: "resolved" | "skipped" | "already_resolved";
+  outcome: "resolved" | "created" | "skipped" | "already_resolved";
   reason?: string;
   target?: string;
   target_concept_id?: number;
@@ -57,6 +57,7 @@ export interface ResolveRunStatus {
   total: number;
   done: number;
   resolved: number;
+  created: number;
   skipped: number;
   already_resolved: number;
   errors: number;

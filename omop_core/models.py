@@ -5005,6 +5005,7 @@ class SourceCodeResolveRun(models.Model):
     resolved = models.IntegerField(default=0)
     skipped = models.IntegerField(default=0)
     already_resolved = models.IntegerField(default=0)
+    created = models.IntegerField(default=0)
     errors = models.IntegerField(default=0)
     error_detail = models.JSONField(default=list, blank=True)
     code_details = models.JSONField(default=list, blank=True)
