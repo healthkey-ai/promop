@@ -27,6 +27,7 @@ from patient_portal.models import PatientStatement, PatientUser
 from .labs import blood_type, lab_history, labs
 from .records import genetics, medication_detail, medications, procedures
 from .feed import imaging, whats_new
+from .outcomes import has_outcomes, outcomes
 from .therapy import therapy
 from .sources import PATIENT, RECORD, row_sources, source
 
@@ -387,7 +388,7 @@ def section_status(person, record: PatientRecord | None) -> dict[str, str]:
         # Any cancer's lines (#1739), not only the primary one's.
         'therapy': bool(record and (_text(record.first_line_therapy) or record.later_therapies))
         or _has_lines(person),
-        'outcomes': False,
+        'outcomes': has_outcomes(),
         'labs': has(Measurement.objects.filter(is_erroneous=False)),
         'medications': has(DrugExposure.objects.filter(is_erroneous=False)),
         'procedures': has(ProcedureOccurrence.objects.filter(is_erroneous=False, image_occurrences__isnull=True)),
@@ -462,3 +463,8 @@ class WhatsNewView(PhrView):
 class ImagingView(PhrView):
     def build(self, person, record):
         return imaging(person, record)
+
+
+class OutcomesView(PhrView):
+    def build(self, person, record):
+        return outcomes(person, record)

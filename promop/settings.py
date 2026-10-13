@@ -840,6 +840,13 @@ PROLOG_PUBLIC_URL = os.environ.get('PROLOG_PUBLIC_URL', APP_BASE_URL)
 # PHR_SHARE_URL/<token>. PHR_SHARE_SECRET derives the links, so rotating it
 # closes every open link; it falls back to SECRET_KEY.
 PHR_SHARE_URL = os.environ.get('PHR_SHARE_URL', f'{APP_BASE_URL.rstrip("/")}/r')
+# The PHR's My outcomes: the PROlog surveys it lists, in order, by slug. Each
+# shows once a version of it is active (manage.py load_definition --activate).
+PHR_OUTCOME_SURVEYS = [
+    slug.strip()
+    for slug in os.environ.get('PHR_OUTCOME_SURVEYS', 'quality-of-life,side-effects').split(',')
+    if slug.strip()
+]
 PHR_SHARE_SECRET = os.environ.get('PHR_SHARE_SECRET', '')
 # The product name in the invite email ("<name> shared their <product> record").
 PHR_SHARE_PRODUCT_NAME = os.environ.get('PHR_SHARE_PRODUCT_NAME', 'HealthKey')
