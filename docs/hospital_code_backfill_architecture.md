@@ -119,10 +119,24 @@ Alex's identifiers mix sites, Epic brands and tenants, attached facilities,
 and patient-entered aliases. Treating them all as authoritative hospitals
 would create false organization scope and multiply the mapping queue.
 
-The detail API moves that list to `source_evidence.facilities`; list responses
-remain compact. Edit Mapping shows the names with level and confidence so a
-curator can distinguish, for example, an individual Cerner site from a broad
+The detail API moves that list to `source_evidence.facilities`. Bounded list
+pages expose only a compact `source_system_context` display hint, never the
+full facility list. Edit Mapping shows the names with level and confidence so
+a curator can distinguish, for example, an individual Cerner site from a broad
 Epic tenant or a low-confidence connection alias.
+
+The v2 seed has 690,147 of 691,800 code rows with facility evidence. A
+read-only reconciliation found 568,108 code rows under 8,169 distinct
+`urn:oid:` systems. Of those systems, 3,306 span multiple observed facility
+names (399,989 rows). An OID is therefore not a hospital-name key. The display
+hint is derived **per code row**: a verified PRomop `Organization` takes
+precedence; otherwise exactly one distinct high-confidence site, brand, or
+tenant name is labelled *observed*. Multiple such names are labelled
+*multiple observed facilities*, and alias-only, attached-only, low-confidence,
+or missing evidence is left unverified. The browse column and Source Code
+System picker distinguish these cases and keep the exact FHIR `Coding.system`
+visible. No inferred name changes the persisted system URI, mapping key, or
+`organization_id`.
 
 Nikita's matching unit evidence preserves raw display, raw quantity code and
 system, normalized UCUM when available, validation verdict/reason, and counts.

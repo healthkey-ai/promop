@@ -11601,6 +11601,8 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
         source_retirement = mapping_source_retirement([mapping]).get(mapping.pk) if mapping else {
             'source_retired': None, 'source_retirement_evidence': [],
         }
+    from omop_core.services.source_system_context import source_system_context
+    system_context = source_system_context(mapping)
     # A mapping can legitimately have no destination yet: a code seen at ingest
     # whose concept is not loaded is a review-queue row, not an error.
     source_evidence = None
@@ -11621,6 +11623,7 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
             'last_seen': mapping.last_seen if mapping else None,
             'metadata': evidence_metadata,
             'facilities': facility_evidence if isinstance(facility_evidence, list) else [],
+            'system_context': system_context,
             'units': mapping.source_unit_evidence if mapping else [],
         }
     if concept is None:
@@ -11639,6 +11642,7 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
             'mapping_id': mapping.id if mapping else None,
             'domain_id': mapping.domain_id if mapping else '',
             'source_vocabulary_id': mapping.source_vocabulary_id if mapping else '',
+            'source_system_context': system_context,
             'source_code': mapping.source_code if mapping else '',
             'source_code_description': mapping.source_code_description if mapping else '',
             'organization_id': mapping.organization_id if mapping else None,
@@ -11705,6 +11709,7 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
         # the table came to be picked twice by two different rules.
         'domain_id': mapping.domain_id if mapping else '',
         'source_vocabulary_id': mapping.source_vocabulary_id if mapping else '',
+        'source_system_context': system_context,
         'source_code': mapping.source_code if mapping else '',
         'source_code_description': mapping.source_code_description if mapping else '',
         'organization_id': mapping.organization_id if mapping else None,
@@ -12662,7 +12667,7 @@ def code_mapping_list(request):
     if request.method == 'GET':
         mappings = SourceCodeConceptMapping.objects.select_related(
             'target_concept', 'created_by', 'reviewer', 'locked_by', 'organization',
-        ).defer('source_metadata', 'source_unit_evidence')
+        ).defer('source_unit_evidence')
         from omop_core.services.athena_mapping_guard import without_icd10_athena_duplicates
         mappings = without_icd10_athena_duplicates(mappings)
         if request.query_params.get('browse') == '1':

@@ -25,6 +25,7 @@ import ConceptInputDetails from "@/components/UI/ConceptInputDetails";
 import { HelpTip, Field, ReadOnlyField, INPUT_CLASS } from "@/components/UI/MappingFormPrimitives";
 import { confirmUnitOverride, unitConfirmation } from "./unitConfirmation";
 import SourceEvidencePanel, { type SourceEvidence } from "./SourceEvidencePanel";
+import { hospitalContextDetails, hospitalContextText } from "./sourceSystemContext";
 import api from "@/api/axios";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -144,6 +145,9 @@ export default function EditMappingDialog({
     && form.source_code === selectedRow.source_code
     && form.source_vocabulary_id === selectedRow.source_vocabulary_id,
   );
+  const sourceSystemContext = sourceIdentityUnchanged
+    ? selectedRow?.source_system_context ?? sourceEvidence?.system_context
+    : undefined;
   const willRepoint =
     mode === "edit"
     && form.status === "approved"
@@ -160,10 +164,12 @@ export default function EditMappingDialog({
       : [{ vocabulary_id: "", label: "None -- uncoded / free text" }, ...offered];
     const current = form.source_vocabulary_id;
     if (current && !withBlank.some((s) => s.vocabulary_id === current)) {
-      return [...withBlank, { vocabulary_id: current, label: `${current} -- not typical for this domain` }];
+      const contextLabel = sourceSystemContext && sourceSystemContext.kind !== "none"
+        ? `${sourceSystemContext.label} — ` : "";
+      return [...withBlank, { vocabulary_id: current, label: `${contextLabel}${current}` }];
     }
     return withBlank;
-  }, [reference, form.domain_id, form.source_vocabulary_id]);
+  }, [reference, form.domain_id, form.source_vocabulary_id, sourceSystemContext]);
 
   // ── Initialize form when dialog opens ───────────────────────────
   useEffect(() => {
@@ -701,6 +707,14 @@ export default function EditMappingDialog({
                       </option>
                     ))}
                   </select>
+                  {(form.source_vocabulary_id.startsWith("urn:oid:") || form.source_vocabulary_id.startsWith("http")) && (
+                    <div className="mt-1 text-xs text-slate-600">
+                      {sourceSystemContext && sourceSystemContext.kind !== "none" && (
+                        <p title={hospitalContextDetails(sourceSystemContext)}>{hospitalContextText(sourceSystemContext)}</p>
+                      )}
+                      <p>Exact FHIR Coding.system: <code className="break-all">{form.source_vocabulary_id}</code></p>
+                    </div>
+                  )}
                 </Field>
 
                 <Field id="source_code" label="Source Code Value" tip={TIP.source_code_value}>

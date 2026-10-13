@@ -3,6 +3,7 @@ import { MemoryRouter } from "react-router-dom";
 import { vi, describe, it, expect, beforeEach } from "vitest";
 import CodeMappingPage from "./CodeMappingPage";
 import CodeMappingAccuracyPage from "./CodeMappingAccuracyPage";
+import type { SourceSystemContext } from "./SourceEvidencePanel";
 
 const mockGet = vi.fn();
 const mockPost = vi.fn();
@@ -148,6 +149,7 @@ type TestMappingRow = Omit<typeof proposedRow, "status"> & {
   source_retired?: boolean | null;
   source_retirement_evidence?: string[];
   source_evidence?: Record<string, unknown>;
+  source_system_context?: SourceSystemContext;
 };
 
 /** A /suggest-runs/<id>/ payload, defaulted to a finished run. */
@@ -1843,7 +1845,7 @@ describe("server mapping pages", () => {
     render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
 
     const row = (await screen.findByText("10627")).closest("tr")!;
-    expect(cellUnder(row, "Organization")).toHaveTextContent("Hospital A");
+    expect(cellUnder(row, "Hospital context")).toHaveTextContent("Verified: Hospital A");
     fireEvent.change(screen.getByRole("combobox", { name: "Filter by organization" }), {
       target: { value: "hospital-a" },
     });
@@ -1851,6 +1853,30 @@ describe("server mapping pages", () => {
       "/v1/code-mappings/",
       { params: expect.objectContaining({ organization: "hospital-a" }) },
     ));
+  });
+
+  it("shows observed hospital context while retaining the exact Epic system URI", async () => {
+    const oid = "urn:oid:1.2.840.114350.1.13.88.2.7.5.737384.2050";
+    const context: SourceSystemContext = {
+      kind: "observed", label: "UPMC", names: ["UPMC"], name_count: 1,
+    };
+    renderPage([{
+      ...proposedRow,
+      source_vocabulary_id: oid,
+      source_code: "LOCAL-1826",
+      source_system_context: context,
+      source_evidence: {
+        organization: null, occurrence_count: 14, facilities: [],
+        metadata: {}, units: [], system_context: context,
+      },
+    }]);
+    const code = await screen.findByText("LOCAL-1826", { selector: "td" });
+    expect(cellUnder(code.closest("tr")!, "Hospital context")).toHaveTextContent("Observed at: UPMC");
+    fireEvent.click(code.closest("tr")!);
+    const picker = await screen.findByLabelText("Source Code System") as HTMLSelectElement;
+    expect(picker.value).toBe(oid);
+    expect(picker.selectedOptions[0].textContent).toContain("UPMC");
+    expect(screen.getByText(oid, { selector: "code" })).toBeInTheDocument();
   });
 
   it("counts all matching sources even when the page contains one label group", async () => {

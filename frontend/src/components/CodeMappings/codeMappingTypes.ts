@@ -3,7 +3,7 @@
  * EditMappingDialog. Extracted to avoid circular imports and duplication.
  */
 
-import type { SourceEvidence, SourceUnitEvidence } from "./SourceEvidencePanel";
+import type { SourceEvidence, SourceSystemContext, SourceUnitEvidence } from "./SourceEvidencePanel";
 
 // ── Row & form types ────────────────────────────────────────────────
 
@@ -11,6 +11,7 @@ export interface CodeMappingRow {
   mapping_id: number | null;
   domain_id?: string;
   source_vocabulary_id: string;
+  source_system_context?: SourceSystemContext;
   source_code: string;
   source_code_description: string;
   organization_id?: number | null;

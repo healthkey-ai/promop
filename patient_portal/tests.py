@@ -21956,6 +21956,34 @@ class CodeMappingApiTest(TestCase):
         SourceCodeConceptMapping.objects.filter(origin_system='hk-labs-seed').delete()
         self.client = APIClient()
 
+    def test_hospital_system_context_is_display_only_in_list_and_detail(self):
+        oid = 'urn:oid:1.2.840.114350.1.13.88.2.7.5.737384.2050'
+        mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id=oid, source_code='LOCAL-1826',
+            source_code_description='Local lab', status='proposed',
+            source_metadata={'facilities': [
+                {'name': 'UPMC', 'level': 'brand', 'confidence': 'high'},
+                {'name': 'Patient alias', 'level': 'unknown', 'confidence': 'low'},
+            ]},
+        )
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.get('/api/v1/code-mappings/', {'source': oid})
+        self.assertEqual(response.status_code, 200, response.data)
+        row = next(row for row in response.data if row['mapping_id'] == mapping.pk)
+        self.assertEqual(row['source_vocabulary_id'], oid)
+        self.assertEqual(row['source_system_context']['kind'], 'observed')
+        self.assertEqual(row['source_system_context']['label'], 'UPMC')
+        detail = self.client.get(f'/api/v1/code-mappings/{mapping.pk}/')
+        self.assertEqual(detail.status_code, 200, detail.data)
+        self.assertEqual(detail.data['source_system_context'], row['source_system_context'])
+        self.assertEqual(detail.data['source_evidence']['system_context'], row['source_system_context'])
+        browse = self.client.get('/api/v1/code-mappings/', {
+            'browse': '1', 'source': 'EPIC', 'rollup': '0',
+        })
+        self.assertEqual(browse.status_code, 200, browse.data)
+        browsed = next(row for row in browse.data['results'] if row['mapping_id'] == mapping.pk)
+        self.assertEqual(browsed['source_system_context'], row['source_system_context'])
+
     # ---------------------------------------------------------------- access
 
     def test_list_requires_mapping_admin(self):
