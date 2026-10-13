@@ -132,6 +132,8 @@ export default function EditMappingDialog({
   const [savedSourceUnit, setSavedSourceUnit] = useState("");
   const [savingSource, setSavingSource] = useState(false);
   const [sourceSaveMessage, setSourceSaveMessage] = useState("");
+  const [unitSelectionAuto, setUnitSelectionAuto] = useState(false);
+  const [unitSelectionNeedsReview, setUnitSelectionNeedsReview] = useState(false);
 
   const evidenceFacilities = sourceEvidence?.facilities || [];
 
@@ -184,6 +186,8 @@ export default function EditMappingDialog({
       setSavedSourceQuantity(selectedRow?.example_quantity || "");
       setSavedSourceUnit(selectedRow?.source_unit || "");
       setSourceSaveMessage("");
+      setUnitSelectionAuto(false);
+      setUnitSelectionNeedsReview(false);
 
       if (mode === "new") {
         // When opened from PatientSourceCodesTab, selectedRow carries the
@@ -478,6 +482,25 @@ export default function EditMappingDialog({
     sourceUnit.trim() !== savedSourceUnit
     || sourceQuantity.trim() !== savedSourceQuantity
   ));
+  const effectiveSourceUnit = patientId && selectedRow?.source_code_id
+    ? sourceUnit.trim() : form.source_unit;
+
+  const changeSourceUnit = (value: string) => {
+    setSourceUnit(value);
+    if (value.trim() === sourceUnit.trim()) return;
+    if (form.destination_unit_concept_id) {
+      if (unitSelectionAuto) {
+        setField("destination_unit_concept_id", "");
+        setField("destination_unit_concept_code", "");
+        setField("destination_unit_concept_name", "");
+        setUnitSelectionAuto(false);
+        setUnitSelectionNeedsReview(false);
+      } else {
+        setUnitSelectionNeedsReview(true);
+      }
+      setField("unit_match_type", "");
+    }
+  };
 
   const persistSourceContext = async () => {
     if (!patientId || !selectedRow?.source_code_id) return;
@@ -719,7 +742,7 @@ export default function EditMappingDialog({
                     </Field>
                     <Field id="source_unit" label="Source Unit" tip="Unit string from this patient's source-code inventory. This is context, not the destination unit concept.">
                       <input id="source_unit" className={INPUT_CLASS} maxLength={50}
-                        value={sourceUnit} onChange={(event) => setSourceUnit(event.target.value)} />
+                        value={sourceUnit} onChange={(event) => changeSourceUnit(event.target.value)} />
                       {selectedRow.source_unit_override !== null && selectedRow.source_unit_override !== undefined && (
                         <p className="mt-1 text-xs text-slate-600">Extracted: {selectedRow.extracted_source_unit || "\u2014"}</p>
                       )}
@@ -731,7 +754,7 @@ export default function EditMappingDialog({
                       </button>
                       <button type="button" onClick={() => {
                         setSourceQuantity(selectedRow.extracted_example_quantity || "");
-                        setSourceUnit(selectedRow.extracted_source_unit || "");
+                        changeSourceUnit(selectedRow.extracted_source_unit || "");
                       }} className="text-slate-600 underline">Use extracted values</button>
                       {sourceSaveMessage && <span role="status">{sourceSaveMessage}</span>}
                     </div>
@@ -1049,19 +1072,23 @@ export default function EditMappingDialog({
               </div>
               {form.destination_concept_id && form.destination_vocabulary_id === "LOINC" && form.omop_table === "measurement" &&
                 <CanonicalUnitEditor key={form.destination_concept_id} conceptId={Number(form.destination_concept_id)} />}
-              {(form.omop_table === "measurement" || form.source_unit) && (
+              {(form.omop_table === "measurement" || effectiveSourceUnit) && (
                 <DestinationUnitPicker
-                  sourceUnit={form.source_unit}
+                  key={effectiveSourceUnit}
+                  sourceUnit={effectiveSourceUnit}
                   selectedConceptId={form.destination_unit_concept_id}
                   selectedConceptCode={form.destination_unit_concept_code}
                   selectedConceptName={form.destination_unit_concept_name}
                   matchType={form.unit_match_type}
                   autoPopulated={unitAutoPopulated}
-                  onSelect={(unit) => {
+                  needsReview={unitSelectionNeedsReview}
+                  onSelect={(unit, auto = false) => {
                     setField("destination_unit_concept_id", unit ? String(unit.concept_id) : "");
                     setField("destination_unit_concept_code", unit?.concept_code || "");
                     setField("destination_unit_concept_name", unit?.concept_name || "");
                     setField("unit_match_type", unit?.match || "");
+                    setUnitSelectionAuto(Boolean(unit && auto));
+                    setUnitSelectionNeedsReview(false);
                   }}
                   onMintUnit={() => setMintUnitOpen(true)}
                 />
@@ -1286,45 +1313,57 @@ interface DestinationUnitPickerProps {
   selectedConceptName: string;
   matchType: "exact" | "close" | "none" | "";
   autoPopulated?: boolean;
-  onSelect: (unit: UnitResult | null) => void;
+  needsReview?: boolean;
+  onSelect: (unit: UnitResult | null, auto?: boolean) => void;
   onMintUnit: () => void;
 }
 
 function DestinationUnitPicker({
   sourceUnit, selectedConceptId, selectedConceptCode, selectedConceptName,
-  matchType, autoPopulated, onSelect, onMintUnit,
+  matchType, autoPopulated, needsReview, onSelect, onMintUnit,
 }: DestinationUnitPickerProps) {
   const [query, setQuery] = useState(sourceUnit);
   const [results, setResults] = useState<UnitResult[]>([]);
   const [searching, setSearching] = useState(false);
   const [searched, setSearched] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const requestSeq = useRef(0);
+
+  useEffect(() => () => {
+    requestSeq.current += 1;
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+  }, []);
 
   const doSearch = useCallback(async (q: string) => {
+    const request = ++requestSeq.current;
     if (!q.trim()) { setResults([]); setSearched(false); return; }
     setSearching(true);
     try {
       const { data } = await api.get<{ results: UnitResult[] }>("/v1/code-mappings/unit-search/", { params: { q } });
+      if (request !== requestSeq.current) return;
       setResults(data.results);
       setSearched(true);
       // Auto-select exact match
       if (!selectedConceptId && data.results.length > 0 && data.results[0].match === "exact") {
-        onSelect(data.results[0]);
+        onSelect(data.results[0], true);
       } else if (data.results.length === 0) {
         onSelect(null);
       }
     } catch {
+      if (request !== requestSeq.current) return;
       setResults([]);
       setSearched(true);
     } finally {
-      setSearching(false);
+      if (request === requestSeq.current) setSearching(false);
     }
   }, [selectedConceptId, onSelect]);
 
-  // Auto-search on sourceUnit when dialog opens
+  // The keyed picker remounts when Source Unit changes, dropping the old query
+  // and results. Debounce the replacement search while the curator types.
   useEffect(() => {
     if (sourceUnit && !searched && !selectedConceptId) {
-      (async () => { await doSearch(sourceUnit); })();
+      const timer = setTimeout(() => { void doSearch(sourceUnit); }, 300);
+      return () => clearTimeout(timer);
     }
   }, [sourceUnit, searched, selectedConceptId, doSearch]);
 
@@ -1356,6 +1395,7 @@ function DestinationUnitPicker({
             <button type="button" onClick={() => onSelect(null)}
               className="ml-auto text-xs text-slate-500 hover:text-red-600">Clear</button>
           </div>
+          {needsReview && <p className="mt-2 text-xs text-amber-700">Source unit changed. Review this destination unit before saving the mapping.</p>}
         </>
       ) : (
         <Field id="destination_unit_search" label="Destination Unit" tip="UCUM concept linked to this mapping. Used for unit conversion during ETL.">

@@ -70,9 +70,9 @@ const sourceCodes = {
 
 vi.mock("../../api/axios", () => ({
   default: {
-    get: (url: string) => Promise.resolve({
+    get: vi.fn((url: string) => Promise.resolve({
       data: url.includes("source-codes") ? sourceCodes : {},
-    }),
+    })),
     post: vi.fn(() => Promise.resolve({ data: {} })),
     patch: vi.fn(() => Promise.resolve({ data: {} })), delete: vi.fn(() => Promise.resolve({})),
   },
@@ -131,12 +131,49 @@ describe("PatientSourceCodesTab source context correction", () => {
     fireEvent.click(screen.getByRole("button", { name: /Source Metadata/ }));
     expect(screen.getByText(/Vital signs/)).toBeInTheDocument();
     expect(screen.getByText(/Extracted: bad unit/)).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Search UCUM units" })).toHaveValue("mg/dL");
     fireEvent.change(screen.getByLabelText(/^Source Unit/), { target: { value: "cells/uL" } });
+    expect(screen.getByRole("textbox", { name: "Search UCUM units" })).toHaveValue("cells/uL");
     fireEvent.click(screen.getByRole("button", { name: "Save source context" }));
     await waitFor(() => expect(api.patch).toHaveBeenCalledWith(
       "/v1/patient-records/48095/source-codes/",
       { source_code_id: 44, source_unit_override: "cells/uL", example_quantity_override: null },
     ));
     expect(await screen.findByText(/Source context saved/)).toBeInTheDocument();
+  });
+
+  it("drops an auto-selected destination unit when the source unit changes", async () => {
+    const getSpy = vi.spyOn(api, "get").mockImplementation((url: string) => Promise.resolve({
+      data: url.includes("unit-search")
+        ? { results: [{ concept_id: 8840, concept_code: "mg/dL", concept_name: "milligrams per deciliter", match: "exact" }] }
+        : url.includes("source-codes") ? sourceCodes : {},
+    }) as never);
+    try {
+      render(<PatientSourceCodesTab personId="48095" />);
+      fireEvent.click(await screen.findByText("Blood Pressure"));
+      await waitFor(() => expect(screen.queryByRole("textbox", { name: "Search UCUM units" })).not.toBeInTheDocument());
+      fireEvent.change(screen.getByLabelText(/^Source Unit/), { target: { value: "cells/uL" } });
+      expect(screen.getByRole("textbox", { name: "Search UCUM units" })).toHaveValue("cells/uL");
+    } finally {
+      getSpy.mockRestore();
+    }
+  });
+
+  it("keeps a manually chosen destination unit but asks for review after a source correction", async () => {
+    const getSpy = vi.spyOn(api, "get").mockImplementation((url: string) => Promise.resolve({
+      data: url.includes("unit-search")
+        ? { results: [{ concept_id: 8840, concept_code: "mg/dL", concept_name: "milligrams per deciliter", match: "close" }] }
+        : url.includes("source-codes") ? sourceCodes : {},
+    }) as never);
+    try {
+      render(<PatientSourceCodesTab personId="48095" />);
+      fireEvent.click(await screen.findByText("Blood Pressure"));
+      fireEvent.click(await screen.findByText("milligrams per deciliter"));
+      fireEvent.change(screen.getByLabelText(/^Source Unit/), { target: { value: "cells/uL" } });
+      expect(screen.getByText("milligrams per deciliter")).toBeInTheDocument();
+      expect(screen.getByText(/Source unit changed. Review this destination unit/)).toBeInTheDocument();
+    } finally {
+      getSpy.mockRestore();
+    }
   });
 });
