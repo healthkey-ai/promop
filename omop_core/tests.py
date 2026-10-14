@@ -7197,3 +7197,157 @@ class SeedHkLabsMappingsTest(TestCase):
             origin_system='hk-labs-seed',
         ).count()
         self.assertEqual(count1, count2)
+
+
+# ===========================================================================
+# recount_source_code_occurrences management command
+# ===========================================================================
+
+class RecountSourceCodeOccurrencesTest(_OmopBase):
+    """Tests for the recount_source_code_occurrences management command."""
+
+    PERSON_ID = 90800
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from omop_core.models import ProcedureOccurrence
+        cls.ProcedureOccurrence = ProcedureOccurrence
+
+        cls.generic_meas = _concept(
+            3090801, 'Lab test', cls.dom_meas, cls.vocab, cls.cc,
+        )
+        cls.generic_cond = _concept(
+            3090802, 'Condition finding', cls.dom_cond, cls.vocab, cls.cc,
+        )
+
+    # -- helpers --
+
+    def _create_measurement(self, mid, source_value, dt):
+        return Measurement.objects.create(
+            measurement_id=mid,
+            person=self.person,
+            measurement_concept=self.generic_meas,
+            measurement_date=dt,
+            measurement_type_concept=self.type_concept,
+            measurement_source_value=source_value,
+        )
+
+    def _create_condition(self, cid, source_value, dt):
+        return ConditionOccurrence.objects.create(
+            condition_occurrence_id=cid,
+            person=self.person,
+            condition_concept=self.generic_cond,
+            condition_start_date=dt,
+            condition_type_concept=self.type_concept,
+            condition_source_value=source_value,
+        )
+
+    def _create_sccm(self, source_code, omop_table, **kwargs):
+        defaults = dict(
+            source_vocabulary_id='',
+            source_code=source_code,
+            omop_table=omop_table,
+            domain_id='Measurement' if omop_table == 'measurement' else 'Condition',
+            status='proposed',
+            occurrence_count=0,
+            first_seen=None,
+            last_seen=None,
+            organization=None,
+        )
+        defaults.update(kwargs)
+        return SourceCodeConceptMapping.objects.create(**defaults)
+
+    # -- tests --
+
+    def test_happy_path_updates_count_and_dates(self):
+        """Clinical rows → SCCM row gets updated count and date range."""
+        self._create_measurement(908001, 'GLUCOSE', date(2024, 1, 10))
+        self._create_measurement(908002, 'GLUCOSE', date(2024, 6, 15))
+        self._create_measurement(908003, 'GLUCOSE', date(2024, 3, 20))
+        sccm = self._create_sccm('GLUCOSE', 'measurement')
+
+        call_command('recount_source_code_occurrences', verbosity=0)
+
+        sccm.refresh_from_db()
+        self.assertEqual(sccm.occurrence_count, 3)
+        self.assertEqual(sccm.first_seen.date(), date(2024, 1, 10))
+        self.assertEqual(sccm.last_seen.date(), date(2024, 6, 15))
+
+    def test_no_sccm_row_no_creation(self):
+        """Clinical rows without a mapping row are skipped, not created."""
+        self._create_measurement(908010, 'ORPHAN_CODE', date(2024, 5, 1))
+
+        before = SourceCodeConceptMapping.objects.count()
+        call_command('recount_source_code_occurrences', verbosity=0)
+        after = SourceCodeConceptMapping.objects.count()
+
+        self.assertEqual(before, after)
+
+    def test_approved_mapping_updated(self):
+        """Approved SCCM rows still get their count updated."""
+        self._create_measurement(908020, 'APPROVED_LAB', date(2024, 2, 1))
+        self._create_measurement(908021, 'APPROVED_LAB', date(2024, 8, 1))
+        sccm = self._create_sccm(
+            'APPROVED_LAB', 'measurement', status='approved', occurrence_count=1,
+        )
+
+        call_command('recount_source_code_occurrences', verbosity=0)
+
+        sccm.refresh_from_db()
+        self.assertEqual(sccm.occurrence_count, 2)
+
+    def test_dry_run_no_write(self):
+        """--dry-run reports but does not update."""
+        self._create_measurement(908030, 'DRY_CODE', date(2024, 4, 1))
+        sccm = self._create_sccm('DRY_CODE', 'measurement', occurrence_count=0)
+
+        call_command('recount_source_code_occurrences', '--dry-run', verbosity=0)
+
+        sccm.refresh_from_db()
+        self.assertEqual(sccm.occurrence_count, 0)
+
+    def test_empty_source_value_skipped(self):
+        """Rows with NULL or empty source_value are excluded."""
+        Measurement.objects.create(
+            measurement_id=908040,
+            person=self.person,
+            measurement_concept=self.generic_meas,
+            measurement_date=date(2024, 1, 1),
+            measurement_type_concept=self.type_concept,
+            measurement_source_value='',
+        )
+        Measurement.objects.create(
+            measurement_id=908041,
+            person=self.person,
+            measurement_concept=self.generic_meas,
+            measurement_date=date(2024, 1, 1),
+            measurement_type_concept=self.type_concept,
+            measurement_source_value=None,
+        )
+        # Only the non-empty row should count
+        self._create_measurement(908042, 'REAL_CODE', date(2024, 1, 1))
+        sccm = self._create_sccm('REAL_CODE', 'measurement')
+
+        call_command('recount_source_code_occurrences', verbosity=0)
+
+        sccm.refresh_from_db()
+        self.assertEqual(sccm.occurrence_count, 1)
+
+    def test_multiple_tables_independent(self):
+        """Codes in measurement and condition update their SCCM rows independently."""
+        self._create_measurement(908050, 'MEAS_MULTI', date(2024, 1, 1))
+        self._create_measurement(908051, 'MEAS_MULTI', date(2024, 2, 1))
+        self._create_condition(908060, 'COND_MULTI', date(2024, 5, 1))
+
+        sccm_meas = self._create_sccm('MEAS_MULTI', 'measurement')
+        sccm_cond = self._create_sccm('COND_MULTI', 'condition')
+
+        call_command('recount_source_code_occurrences', verbosity=0)
+
+        sccm_meas.refresh_from_db()
+        sccm_cond.refresh_from_db()
+        self.assertEqual(sccm_meas.occurrence_count, 2)
+        self.assertEqual(sccm_cond.occurrence_count, 1)
+        self.assertEqual(sccm_meas.first_seen.date(), date(2024, 1, 1))
+        self.assertEqual(sccm_cond.first_seen.date(), date(2024, 5, 1))
