@@ -5656,7 +5656,9 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
 
         GET  — list source codes with mapping status (admin only).
         POST — upsert source codes from ETL (staff or service token with
-               ``system/etl.write`` scope).
+               ``system/etl.write`` scope). ``replace`` prunes against the
+               payload, ``upload_id`` plus ``final`` against the run; see
+               `_post_source_codes`.
 
         EtlWritePermission, not ScopedTokenPermission: the POST documents the
         ``system/etl.write`` scope, and only this class consults it. Under the
@@ -5746,9 +5748,77 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
     # DATA_UPLOAD_MAX_MEMORY_SIZE usually binds first: with a FHIR resource in
     # source_metadata, 2.5 MB is ~1,200 entries. That is a 413 with max_bytes.
     _SOURCE_CODES_MAX = 5000
+    # Long enough for a uuid4 with dashes, or a run id of the caller's own
+    # shape; it is an opaque token, so nothing here parses it.
+    _SOURCE_CODES_UPLOAD_ID_MAX = 64
+    # A run that goes this long without a chunk is taken to have died, so a
+    # crashed import cannot lock a patient out of every later one.
+    _UPLOAD_STALE_AFTER = timedelta(hours=24)
+
+    def _open_source_code_upload(
+        self, person: Person, upload_id: str,
+    ) -> tuple['PatientSourceCodeUpload | None', Response | None]:
+        """Claim this run for the patient, or say why it cannot be claimed.
+
+        Call with the person row locked. One patient has at most one open run,
+        because a single token slot per source-code row cannot describe two:
+        a run that re-sends a code retags it, and the other run's final chunk
+        would then delete a code it had uploaded itself.
+        """
+        from omop_core.models import PatientSourceCodeUpload
+
+        now = timezone.now()
+        open_runs = PatientSourceCodeUpload.objects.filter(
+            person=person, finalized_at__isnull=True,
+        )
+        # A crashed import must not lock the patient out for good, so close
+        # what has gone quiet before looking for a conflict.
+        open_runs.filter(
+            last_chunk_at__lt=now - self._UPLOAD_STALE_AFTER,
+        ).update(finalized_at=now)
+
+        conflict = open_runs.exclude(upload_id=upload_id).first()
+        if conflict is not None:
+            return None, Response(
+                {'detail': (
+                    f'Upload {conflict.upload_id} is still open for this '
+                    f'patient. Finish or abandon it before starting another.'
+                ), 'open_upload_id': conflict.upload_id},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        run, created = PatientSourceCodeUpload.objects.get_or_create(
+            person=person, upload_id=upload_id,
+        )
+        if not created and run.finalized_at is not None:
+            # Reusing a token would prune against a run start that has
+            # already been honoured, so it is a caller bug, not a retry.
+            return None, Response(
+                {'detail': f'Upload {upload_id} has already been finalized.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        if not created:
+            run.save(update_fields=['last_chunk_at'])
+        return run, None
 
     def _post_source_codes(self, request: Request, person: Person) -> Response:
-        """Upsert PatientSourceCode rows from an ETL payload."""
+        """Upsert PatientSourceCode rows from an ETL payload.
+
+        Two ways to say "the stored set is exactly what I sent":
+
+        ``replace: true`` prunes against the keys in this one request, so it
+        only tells the truth for a set that fits under the cap. A caller that
+        has to chunk cannot use it past the first request without deleting the
+        chunks that follow.
+
+        ``upload_id`` is the chunked form (#1824). The caller tags every chunk
+        of one run with the same token and marks the last one ``final: true``;
+        the prune then runs against the token rather than the payload, so set
+        size stops mattering. A run that dies before ``final`` prunes nothing,
+        which leaves stale rows rather than a truncated patient. One patient
+        takes one run at a time: a chunk that arrives while another run is
+        open is a 409, as is a chunk on a token already finalized.
+        """
         from omop_core.models import PatientSourceCode
 
         if not _is_admin_actor(request):
@@ -5767,6 +5837,48 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             return Response(
                 {'detail': f'Maximum {self._SOURCE_CODES_MAX} source codes per request.'},
                 status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+
+        replace = request.data.get('replace') is True
+        final = request.data.get('final') is True
+        raw_upload_id = request.data.get('upload_id')
+        upload_id = ''
+        if raw_upload_id is not None:
+            if not isinstance(raw_upload_id, str) or not raw_upload_id.strip():
+                return Response(
+                    {'detail': 'upload_id must be a non-empty string.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            upload_id = raw_upload_id.strip()
+            if len(upload_id) > self._SOURCE_CODES_UPLOAD_ID_MAX:
+                return Response(
+                    {'detail': (
+                        f'upload_id must be at most '
+                        f'{self._SOURCE_CODES_UPLOAD_ID_MAX} characters.'
+                    )},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            # PostgreSQL stores NUL in no text column, so this would be a bare
+            # 500 at insert time, same as the entry fields below (#1778).
+            if _contains_nul(upload_id):
+                return Response(
+                    {'detail': (
+                        'upload_id contains a NUL character (\u0000), which '
+                        'cannot be stored.'
+                    )},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        # The two prune rules contradict each other: one deletes what this
+        # payload omits, the other what this run omits.
+        if replace and upload_id:
+            return Response(
+                {'detail': 'replace and upload_id cannot be combined.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if final and not upload_id:
+            return Response(
+                {'detail': 'final requires an upload_id.'},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # Validate and build model instances.
@@ -5823,10 +5935,9 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                 source_unit=source_unit,
                 example_quantity=example_quantity,
                 source_metadata=source_metadata,
+                upload_id=upload_id,
                 last_seen=now,
             ))
-
-        replace = request.data.get('replace') is True
 
         request_keys = {
             (o.source_value, o.source_vocabulary_id, o.omop_table) for o in objs
@@ -5834,10 +5945,20 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
 
         with transaction.atomic():
             deleted = 0
+            if replace or upload_id:
+                # Lock the person row, not this person's source codes: a
+                # queryset `exists()` compiles to LIMIT 1 FOR UPDATE, which
+                # locks one arbitrary row and serialises nothing. Every writer
+                # below takes the same single lock before it reads.
+                Person.objects.select_for_update().get(pk=person.pk)
+
+            run = None
+            if upload_id:
+                run, err = self._open_source_code_upload(person, upload_id)
+                if err:
+                    return err
+
             if replace and request_keys:
-                # Lock this person's rows for the duration of the transaction
-                # to prevent a concurrent replace from interleaving deletes.
-                PatientSourceCode.objects.filter(person=person).select_for_update().exists()
                 # Delete rows for this person that are absent from the payload.
                 # The upsert below will re-create or update every row in the
                 # payload, so afterwards the person's set equals exactly what
@@ -5870,11 +5991,28 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                 objs,
                 update_conflicts=True,
                 unique_fields=['person', 'source_value', 'source_vocabulary_id', 'omop_table'],
-                update_fields=['occurrence_count', 'source_unit', 'example_quantity', 'source_metadata', 'last_seen'],
+                update_fields=['occurrence_count', 'source_unit', 'example_quantity',
+                               'source_metadata', 'upload_id', 'last_seen'],
             )
 
+            if final:
+                # After the upsert, so this chunk's own rows carry the token.
+                # Every other row belongs to a run that has finished or been
+                # abandoned, because an overlapping run was refused above.
+                deleted, _ = (
+                    PatientSourceCode.objects.filter(person=person)
+                    .exclude(upload_id=upload_id)
+                    .delete()
+                )
+                run.finalized_at = timezone.now()
+                run.save(update_fields=['finalized_at', 'last_chunk_at'])
+                logger.info(
+                    'source-codes upload %s final for person %s: pruned %d stale rows',
+                    upload_id, person.person_id, deleted,
+                )
+
         result: dict = {'created': created, 'updated': updated}
-        if replace:
+        if replace or final:
             result['deleted'] = deleted
         resp_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
         return Response(result, status=resp_status)

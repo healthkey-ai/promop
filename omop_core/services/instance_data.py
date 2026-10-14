@@ -43,6 +43,9 @@ SYSTEM: frozenset[str] = frozenset({
     # Bookkeeping and derived caches, rebuilt by their own commands.
     'omop_core.CdmSource', 'omop_core.ConceptEmbedding', 'omop_core.RegimenMappingGap',
     'omop_core.SourceCodeResolveRun',
+    # Which ETL run last wrote a patient's source codes. Names runs by the
+    # caller's own ids, which mean nothing on another instance.
+    'omop_core.PatientSourceCodeUpload',
     'omop_core.SuggestEmbeddingSnapshot', 'omop_core.SuggestRun',
     # Historical model-quality feedback for this instance, not a live mapping.
     'omop_core.CodeMappingUpload', 'omop_core.MappingSuggestionReview',
