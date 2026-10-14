@@ -119,6 +119,17 @@ Alex's identifiers mix sites, Epic brands and tenants, attached facilities,
 and patient-entered aliases. Treating them all as authoritative hospitals
 would create false organization scope and multiply the mapping queue.
 
+For consumers that need a cross-code lookup, `source_system_facility` records
+distinct observed names per exact `source_vocabulary_id`, with the source
+facility identifier, level, confidence, attribution method, and seed
+provenance. It is intentionally many-to-many: one OID can have several sites,
+brands, or aliases, and a name is not verified ownership. The governed seed
+populates the table idempotently alongside SCCM; migration 0291 requeues the
+already-applied v2 seed for asynchronous registry backfill in existing
+deployments. No row creates an `Organization` foreign key or changes mapping
+resolution. Consumers should filter confidence and level for their own display
+needs, and retain the exact FHIR `Coding.system` URI as identity.
+
 The detail API moves that list to `source_evidence.facilities`. Bounded list
 pages expose only a compact `source_system_context` display hint, never the
 full facility list. Edit Mapping shows the names with level and confidence so

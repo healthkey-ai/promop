@@ -9,13 +9,15 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
+import hashlib
+import json
 import math
 
 from django.db import transaction
 from django.utils import timezone
 
 from omop_core.mapping.code_resolution import SOURCE_CODE_MAX
-from omop_core.models import SourceCodeConceptMapping
+from omop_core.models import SourceCodeConceptMapping, SourceSystemFacility
 from omop_core.services import source_vocabularies
 
 
@@ -329,6 +331,45 @@ def _chunks(values, size):
         yield values[start:start + size]
 
 
+def _facility_observations(rows, provenance):
+    """Deduplicate names observed on exact source systems in this batch.
+
+    A name is contextual evidence, not verified organization ownership. Keep
+    confidence and attribution distinct so a weak alias cannot be promoted by
+    a stronger observation of the same spelling.
+    """
+    observations = {}
+    for row in rows.values():
+        if not source_vocabularies.hospital_vendor(row.source_vocabulary_id):
+            continue
+        metadata = row.source_metadata
+        facilities = metadata.get('facilities', []) if isinstance(metadata, dict) else []
+        if not isinstance(facilities, list):
+            continue
+        for facility in facilities:
+            if not isinstance(facility, dict):
+                continue
+            name = _text(facility.get('name'))
+            if not name:
+                continue
+            values = (
+                row.source_vocabulary_id, name, _text(facility.get('id')),
+                _text(facility.get('level'))[:32],
+                _text(facility.get('confidence'))[:32],
+                _text(facility.get('attribution_method'))[:100], provenance,
+            )
+            fingerprint = hashlib.sha256(
+                json.dumps(values, ensure_ascii=False).encode('utf-8')
+            ).hexdigest()
+            observations[fingerprint] = SourceSystemFacility(
+                source_vocabulary_id=values[0], facility_name=values[1],
+                facility_id=values[2], level=values[3],
+                confidence=values[4], attribution_method=values[5],
+                provenance=values[6], fingerprint=fingerprint,
+            )
+    return list(observations.values())
+
+
 def upsert_inventory(build, *, provenance, actor=None, dry_run=False,
                      batch_size=2_000):
     """Insert new mappings and conservatively enrich existing mappings."""
@@ -365,6 +406,11 @@ def upsert_inventory(build, *, provenance, actor=None, dry_run=False,
         return outcome
 
     with transaction.atomic():
+        observations = _facility_observations(rows, provenance)
+        for chunk in _chunks(observations, batch_size):
+            SourceSystemFacility.objects.bulk_create(
+                chunk, batch_size=batch_size, ignore_conflicts=True,
+            )
         for keys in _chunks(new_keys, batch_size):
             SourceCodeConceptMapping.objects.bulk_create([
                 SourceCodeConceptMapping(

@@ -83,6 +83,9 @@ REFERENCE_FROM_RELEASE: dict[str, str] = {
     **dict.fromkeys((
         'omop_core.LoincClass', 'omop_core.LoincCodeClass', 'omop_core.LoincRelease',
     ), 'sync_loinc_release'),
+    # Derived from the checksum-pinned hospital inventory, not curated or
+    # copied independently of the seed that supplies its evidence.
+    'omop_core.SourceSystemFacility': 'import_hospital_code_seed',
     **dict.fromkeys((
         'prolog_surveys.Survey', 'prolog_surveys.SurveyOption',
         'prolog_surveys.SurveyQuestion', 'prolog_surveys.SurveyVersion',
