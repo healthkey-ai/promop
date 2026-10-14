@@ -73,6 +73,7 @@ import json
 import logging
 import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 
@@ -426,6 +427,12 @@ def vector_rerank(source_value, candidates):
     return [c for _position, c in scored] + [c for _position, c in unscored], True
 
 
+# The one place the model is named. `Dockerfile.gcp` bakes this same model into
+# the image and `tests/test_embedding_model_baked.py` fails if the two drift:
+# a name only the code knows would be fetched from the Hub at runtime, which is
+# what #1847 was.
+EMBEDDING_MODEL_NAME = 'BAAI/bge-small-en-v1.5'
+
 # Singleton for the embedding model -- loading it is expensive (~1s) and ~130MB
 # in memory, so concurrent workers must not duplicate the load.
 _embedding_model = None
@@ -433,13 +440,19 @@ _embedding_lock = threading.Lock()
 
 
 def _get_embedding_model():
-    """Return a cached SentenceTransformer instance (thread-safe)."""
+    """Return a cached SentenceTransformer instance (thread-safe).
+
+    Reads the model from wherever `HF_HOME` points. Under `HF_HUB_OFFLINE=1`
+    an absent cache raises here instead of going to huggingface.co, which is
+    deliberate: a container that silently downloads it spent 121s in a
+    rate-limit backoff before serving its first suggestion (#1847).
+    """
     global _embedding_model
     if _embedding_model is None:
         with _embedding_lock:
             if _embedding_model is None:  # double-check after acquiring lock
                 from sentence_transformers import SentenceTransformer
-                _embedding_model = SentenceTransformer('BAAI/bge-small-en-v1.5')
+                _embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
     return _embedding_model
 
 
@@ -1338,8 +1351,21 @@ def retrieval_pool(*, source_code, source_vocabulary_id, source_text, domain_id,
         )
         return [], None, False
 
+    # Per-strategy elapsed time, because a slow run is otherwise invisible: the
+    # 167s run in #1847 logged nothing between the task starting and the model
+    # loading, so which stage owned the time had to be guessed.
+    timings: dict[str, float] = {}
+
+    def timed(strategy, call):
+        started = time.perf_counter()
+        try:
+            return call()
+        finally:
+            timings[strategy] = round(time.perf_counter() - started, 3)
+
     if STRATEGY_UMLS in strategies:
-        umls_hits, umls_cui = umls_candidates(source_code, source_vocabulary_id, domain_id)
+        umls_hits, umls_cui = timed(STRATEGY_UMLS, lambda: umls_candidates(
+            source_code, source_vocabulary_id, domain_id))
         umls_hits = _without_no_match(umls_hits)
         definitive = len(umls_hits) == 1
         candidates = list(umls_hits)
@@ -1350,8 +1376,8 @@ def retrieval_pool(*, source_code, source_vocabulary_id, source_text, domain_id,
         # UMLS hits stay ahead of lexical ones and are never displaced by a
         # lexical duplicate: a curated equivalency outranks a string overlap,
         # and its umls_score is the evidence the ranker's prompt shows.
-        lexical_hits = _without_no_match(
-            lexical_candidates(source_text or source_code, domain_id, limit=lexical_limit))
+        lexical_hits = _without_no_match(timed(STRATEGY_LEXICAL, lambda: lexical_candidates(
+            source_text or source_code, domain_id, limit=lexical_limit)))
         report(STRATEGY_LEXICAL, lexical_hits)
         candidates += [hit for hit in lexical_hits if hit['concept_id'] not in seen]
 
@@ -1360,7 +1386,8 @@ def retrieval_pool(*, source_code, source_vocabulary_id, source_text, domain_id,
         # Always search when enabled, even if lexical returned plausible hits:
         # the correct concept can still be absent from that shortlist.
         by_id = {c['concept_id']: c for c in candidates}
-        semantic_hits = _without_no_match(semantic_candidates(source_text or source_code, domain_id))
+        semantic_hits = _without_no_match(timed(STRATEGY_VECTORS, lambda: semantic_candidates(
+            source_text or source_code, domain_id)))
         report(STRATEGY_VECTORS, semantic_hits)
         for hit in semantic_hits:
             existing = by_id.get(hit['concept_id'])
@@ -1371,6 +1398,13 @@ def retrieval_pool(*, source_code, source_vocabulary_id, source_text, domain_id,
             else:
                 candidates.append(hit)
                 by_id[hit['concept_id']] = hit
+
+    logger.info(
+        'Retrieval for %s:%s took %s (%d candidates).',
+        source_vocabulary_id or '(none)', source_code,
+        ', '.join(f'{name} {seconds:.3f}s' for name, seconds in timings.items()) or 'nothing',
+        len(candidates),
+    )
 
     return candidates, umls_cui, definitive
 
