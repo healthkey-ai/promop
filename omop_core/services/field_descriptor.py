@@ -171,6 +171,7 @@ _TAB_BLOOD = frozenset({
 })
 
 _TAB_LABS = frozenset({
+    'prothrombin_time_uln', 'activated_partial_thromboplastin_time_uln',
     'serum_creatinine_level', 'creatinine_clearance_rate', 'blood_urea_nitrogen',
     'egfr', 'serum_sodium', 'serum_potassium', 'serum_calcium_level',
     'magnesium', 'phosphorus', 'albumin_level', 'total_protein',
@@ -187,7 +188,7 @@ _TAB_BEHAVIOR = frozenset({
     'employment_status', 'education_level', 'marital_status', 'insurance_type',
     'number_of_dependents', 'annual_household_income',
     'pregnancy_test_date', 'pregnancy_test_result_value', 'contraceptive_use',
-    'consent_capability', 'caregiver_availability_status',
+    'consent_capability', 'caregiver_availability_status', 'able_to_swallow_tablets_capsules',
     'no_mental_health_disorder_status', 'no_substance_use_status',
     'substance_use_details', 'no_geographic_exposure_risk',
     'geographic_exposure_risk_details',

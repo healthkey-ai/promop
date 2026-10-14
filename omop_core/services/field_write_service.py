@@ -131,6 +131,20 @@ def apply_field_writes(person, changes, today=None, descriptor=None):
         descriptor = build_writable_field_descriptor()
 
     result = FieldWriteResult()
+    from omop_core.services.clinical_input_contract import CLINICAL_INPUT_FIELDS, write_clinical_inputs
+    clinical_changes = {field: value for field, value in changes.items() if field in CLINICAL_INPUT_FIELDS}
+    if clinical_changes:
+        # Enclose the whole mixed batch: a later validation/write failure must
+        # roll back earlier clinical facts too, even for non-HTTP callers.
+        from django.db import transaction
+        with transaction.atomic():
+            result = apply_field_writes(
+                person, {field: value for field, value in changes.items() if field not in CLINICAL_INPUT_FIELDS},
+                today=today, descriptor=descriptor,
+            )
+            write_clinical_inputs(person, clinical_changes)
+            result.applied.extend(clinical_changes)
+        return result
     person_dirty = set()      # Person columns changed by demographic writes
     location_updates = {}     # OMOP Location column -> value, applied once as an upsert
 
