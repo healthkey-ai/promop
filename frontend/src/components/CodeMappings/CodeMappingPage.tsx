@@ -195,7 +195,7 @@ const VOCABULARY_ALIASES: Record<string, string> = {
   // ICD10CM and ICD10 are now separate tabs — no alias needed.
   "urn:oid:2.16.840.1.113883.6.96": "SNOMED",
 };
-function tabForRow(row: CodeMappingRow): string {
+function tabForRow(row: Pick<CodeMappingRow, 'source_vocabulary_id'>): string {
   return VOCABULARY_ALIASES[row.source_vocabulary_id] ?? row.source_vocabulary_id;
 }
 
@@ -208,18 +208,22 @@ function tabForRow(row: CodeMappingRow): string {
 const SAME_VOCABULARY_SPELLINGS: Record<string, string> = {
   "urn:oid:2.16.840.1.113883.6.96": "SNOMED",
 };
-function duplicateScopeForRow(row: CodeMappingRow): string {
+function duplicateScopeForRow(row: Pick<CodeMappingRow, 'source_vocabulary_id'>): string {
   return SAME_VOCABULARY_SPELLINGS[row.source_vocabulary_id] ?? row.source_vocabulary_id;
 }
 
-function sectionForRow(row: CodeMappingRow): MappingSection {
+function sectionForRow(row: Pick<CodeMappingRow, 'status' | 'mapping_origin'>): MappingSection {
   if (row.mapping_origin === "athena") return "Athena Mapped";
   if (row.status === "approved") return "Mapped";
   if (row.status === "rejected") return "Rejected";
   return "Unmapped";
 }
 
-function mappingRowId(row: CodeMappingRow): string {
+type MappingIdentity = Pick<CodeMappingRow, 'mapping_id' | 'source_vocabulary_id' | 'source_code'
+  | 'destination_concept_id' | 'organization_id' | 'status' | 'mapping_origin'>;
+type DuplicateSummary = MappingIdentity & { summary: true };
+
+function mappingRowId(row: MappingIdentity): string {
   return `code-mapping-${row.mapping_id ?? encodeURIComponent(JSON.stringify([
     row.source_vocabulary_id, row.source_code, row.destination_concept_id, sectionForRow(row),
   ]))}`;
@@ -262,6 +266,7 @@ type BrowseResponse = {
   total?: number;
   results: CodeMappingRow[];
   duplicates: CodeMappingRow[];
+  duplicates_included?: boolean;
   tabs: { vocabulary_id: string; label: string; is_standard: boolean; proposed: number; approved: number; athena: number }[];
   selected_source: string;
   pages: Record<MappingSection, { page: number; page_size: number; total: number }>;
@@ -328,6 +333,15 @@ export default function CodeMappingPage() {
   const [rows, setRows] = useState<CodeMappingRow[]>([]);
   const [reference, setReference] = useState<Reference>(emptyReference);
   const referenceCache = useRef<Reference | null>(null);
+  const referenceRequest = useRef<Promise<void> | null>(null);
+  const [referenceError, setReferenceError] = useState("");
+  const [referenceReady, setReferenceReady] = useState(false);
+  const duplicateLoadSequence = useRef(0);
+  const [loadingDuplicate, setLoadingDuplicate] = useState<number | null>(null);
+  const [duplicateRevision, setDuplicateRevision] = useState(0);
+  const [asyncDuplicates, setAsyncDuplicates] = useState<{ source: string; rows: DuplicateSummary[] } | null>(null);
+  const [checkingDuplicates, setCheckingDuplicates] = useState(false);
+  const [duplicateError, setDuplicateError] = useState("");
   const [accuracy, setAccuracy] = useState<AccuracyResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -398,7 +412,9 @@ export default function CodeMappingPage() {
     setLoading(true);
     setError("");
     const params: Record<string, string | number> = {
-      browse: 1, search: debouncedSearch, seen_only: seenOnly ? "1" : "0",
+      browse: 1, include_duplicates: 0, search: debouncedSearch, seen_only: seenOnly ? "1" : "0",
+      sections: sectionNames.filter((section) => !({ Unmapped: unmappedCollapsed, Mapped: mappedCollapsed,
+        Rejected: rejectedCollapsed, "Athena Mapped": athenaCollapsed })[section]).join(','),
     };
     if (activeVocabulary !== null) params.source = activeVocabulary;
     if (provenanceFilter) params.provenance = provenanceFilter;
@@ -409,34 +425,65 @@ export default function CodeMappingPage() {
       const sort = sectionSorts[section];
       params[`order_${index}`] = sort ? `${sort.descending ? "-" : ""}${sort.column}` : "-occurrence_count";
     });
-    try {
-      const requests = await Promise.allSettled([
-        api.get<BrowseResponse | CodeMappingRow[]>("/v1/code-mappings/", { params }).then(({ data }) => {
-          if (sequence !== loadSequence.current) return;
-          setBrowse(Array.isArray(data) ? null : data);
-          setRows(Array.isArray(data) ? data : data.results);
-        }),
-        referenceCache.current ? Promise.resolve() : api.get<Reference>("/v1/code-mappings/reference/").then(({ data }) => {
-          if (sequence !== loadSequence.current) return;
+    // Only the browse request controls table loading. Ancillary metadata and
+    // counters must not hold the page open or turn usable rows into an error.
+    const mappingsRequest = api.get<BrowseResponse | CodeMappingRow[]>("/v1/code-mappings/", { params });
+    if (!referenceCache.current && !referenceRequest.current) {
+      referenceRequest.current = api.get<Reference>("/v1/code-mappings/reference/").then(({ data }) => {
           referenceCache.current = { ...emptyReference, ...(data || {}) };
           setReference(referenceCache.current);
+          setReferenceReady(true);
+          setReferenceError("");
           setSuggestionLimit((current) => current === "" ? current : Math.min(current, data?.suggest_max_per_run || 100));
-        }),
-        api.get<AccuracyResponse>("/v1/code-mappings/accuracy/").then(({ data }) => {
-          // Review counters can arrive before the slower table refresh.
-          if (sequence === loadSequence.current) setAccuracy(data);
-        }),
-      ]);
-      if (requests.some((request) => request.status === "rejected")) throw new Error("Refresh failed");
+      }).catch(() => {
+        setReferenceError("Could not load mapping options. Refresh to retry.");
+      }).finally(() => { referenceRequest.current = null; });
+    }
+    void api.get<AccuracyResponse>("/v1/code-mappings/accuracy/").then(({ data }) => {
+      if (sequence === loadSequence.current) setAccuracy(data);
+    }).catch(() => {
+      if (sequence === loadSequence.current) setAccuracy(null);
+    });
+    try {
+      const { data } = await mappingsRequest;
+      if (sequence !== loadSequence.current) return;
+      setBrowse(Array.isArray(data) ? null : data);
+      setRows(Array.isArray(data) ? data : data.results);
     } catch {
       if (sequence === loadSequence.current) setError("Failed to load code mappings.");
     } finally {
       if (sequence === loadSequence.current) setLoading(false);
     }
-  }, [activeVocabulary, debouncedSearch, pages, sectionSorts, provenanceFilter, organizationFilter, rollup, seenOnly, direction]);
+  }, [activeVocabulary, debouncedSearch, pages, sectionSorts, provenanceFilter, organizationFilter, rollup, seenOnly, direction,
+    unmappedCollapsed, mappedCollapsed, rejectedCollapsed, athenaCollapsed]);
 
   const refreshCurrent = useRef(fetchAll);
-  useEffect(() => { refreshCurrent.current = fetchAll; }, [fetchAll]);
+  useEffect(() => { refreshCurrent.current = async () => {
+    setDuplicateRevision((current) => current + 1);
+    await fetchAll();
+  }; }, [fetchAll]);
+
+  const duplicateSource = browse?.duplicates_included === false ? browse.selected_source : null;
+  useEffect(() => {
+    if (duplicateSource === null || direction === 'reverse') return;
+    let active = true;
+    (async () => {
+      setCheckingDuplicates(true);
+      setDuplicateError("");
+      try {
+        const { data } = await api.get<{ duplicate_summaries: DuplicateSummary[] }>("/v1/code-mappings/", {
+          params: { duplicates_only: 1, source: duplicateSource },
+        });
+        if (!Array.isArray(data.duplicate_summaries)) throw new Error("Duplicate summaries unavailable");
+        if (active) setAsyncDuplicates({ source: duplicateSource, rows: data.duplicate_summaries });
+      } catch {
+        if (active) setDuplicateError("Could not check duplicate source codes. Refresh to retry.");
+      } finally {
+        if (active) setCheckingDuplicates(false);
+      }
+    })();
+    return () => { active = false; };
+  }, [duplicateSource, duplicateRevision, direction]);
 
   useEffect(() => {
     (async () => { await fetchAll(); })();
@@ -515,9 +562,13 @@ export default function CodeMappingPage() {
   // Audit the entire tab, not just expanded/search-visible rows. A hidden
   // rejected mapping still owns its source code and can block re-creation.
   const duplicateCodes = useMemo(() => {
-    const groups = new Map<string, { code: string; vocabulary: string; rows: CodeMappingRow[] }>();
-    for (const row of browse?.duplicates ?? rows) {
-      if (!overallTab && tabForRow(row) !== selectedVocabulary) continue;
+    const groups = new Map<string, { code: string; vocabulary: string; rows: (CodeMappingRow | DuplicateSummary)[] }>();
+    const duplicateRows = browse?.duplicates_included === false
+      ? (asyncDuplicates?.source === browse.selected_source ? asyncDuplicates.rows : [])
+      : browse?.duplicates ?? rows;
+    for (const row of duplicateRows) {
+      // Server duplicates already cover the exact tab, including hospital OIDs.
+      if (!browse && !overallTab && tabForRow(row) !== selectedVocabulary) continue;
       const vocabulary = duplicateScopeForRow(row);
       const code = row.source_code.trim().toUpperCase();
       if (!code) continue;
@@ -530,9 +581,22 @@ export default function CodeMappingPage() {
     }
     return [...groups.values()].filter((group) => group.rows.length > 1)
       .sort((a, b) => a.vocabulary.localeCompare(b.vocabulary) || a.code.localeCompare(b.code));
-  }, [rows, overallTab, selectedVocabulary, browse]);
+  }, [rows, overallTab, selectedVocabulary, browse, asyncDuplicates]);
 
-  const revealDuplicate = (row: CodeMappingRow) => {
+  const revealDuplicate = async (row: CodeMappingRow | DuplicateSummary) => {
+    if ('summary' in row) {
+      const sequence = ++duplicateLoadSequence.current;
+      setLoadingDuplicate(row.mapping_id);
+      try {
+        const { data } = await api.get<CodeMappingRow>(`/v1/code-mappings/${row.mapping_id}/`);
+        if (sequence === duplicateLoadSequence.current) openEditDialog(data);
+      } catch {
+        if (sequence === duplicateLoadSequence.current) setError("Could not load this mapping. Try again.");
+      } finally {
+        if (sequence === duplicateLoadSequence.current) setLoadingDuplicate(null);
+      }
+      return;
+    }
     if (browse) { openEditDialog(row); return; }
     setSearchQuery("");
     if (!row.occurrence_count) setSeenOnly(false);
@@ -734,12 +798,16 @@ export default function CodeMappingPage() {
   );
 
   const openNewDialog = () => {
+    duplicateLoadSequence.current += 1;
+    setLoadingDuplicate(null);
     setInlineMappingId(null);
     setSelectedRow(null);
     setDialogMode("new");
   };
 
   const openEditDialog = (row: CodeMappingRow) => {
+    duplicateLoadSequence.current += 1;
+    setLoadingDuplicate(null);
     setInlineMappingId(null);
     setSelectedRow(row);
     setDialogMode("edit");
@@ -1257,7 +1325,7 @@ export default function CodeMappingPage() {
             : (browse ? sectionRows : sortMappingRows(sectionRows, sort)).map(renderRow)}
           {(groupEntries ? groupEntries.length === 0 : sectionRows.length === 0) && (
             <tr>
-              <td colSpan={colCount} className="px-4 py-8 text-center text-sm text-slate-500">{emptyText}</td>
+              <td colSpan={colCount} className="px-4 py-8 text-center text-sm text-slate-500">{loading ? "Loading rows…" : emptyText}</td>
             </tr>
           )}
         </tbody>
@@ -1301,14 +1369,6 @@ export default function CodeMappingPage() {
       onInitialConceptHandled={() => setLinkedConceptId(undefined)} />
   </div></div>;
 
-  if (loading && rows.length === 0 && !browse) {
-    return (
-      <div className="flex min-h-[400px] items-center justify-center">
-        <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
-      </div>
-    );
-  }
-
   return (
     <div className="min-h-screen bg-slate-50 p-6">
       <div className="mx-auto max-w-7xl">
@@ -1329,13 +1389,14 @@ export default function CodeMappingPage() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <button type="button" onClick={() => setUploadOpen(true)}
+            <button type="button" onClick={() => setUploadOpen(true)} disabled={!referenceReady}
               className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100">
               <Upload size={16} />
               Upload
             </button>
             <button
               onClick={openNewDialog}
+              disabled={!referenceReady}
               className="inline-flex items-center gap-2 rounded-md bg-slate-950 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
             >
               <Plus size={16} />
@@ -1346,6 +1407,9 @@ export default function CodeMappingPage() {
 
         {directionControls}
         {loading && <p role="status" className="mb-2 text-sm text-slate-500">Loading mappings…</p>}
+        {referenceError && <p role="alert" className="mb-2 text-sm text-amber-700">{referenceError}</p>}
+        {duplicateSource !== null && checkingDuplicates && <p role="status" className="mb-2 text-sm text-slate-500">Checking duplicate source codes…</p>}
+        {duplicateError && <p role="alert" className="mb-2 text-sm text-amber-700">{duplicateError}</p>}
 
         {error && !dialogMode && (
           <div role="alert" className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -1667,7 +1731,8 @@ export default function CodeMappingPage() {
                       <li key={mappingRowId(row)}>
                         <a
                           href={`#${mappingRowId(row)}`}
-                          onClick={(event) => { event.preventDefault(); revealDuplicate(row); }}
+                          onClick={(event) => { event.preventDefault(); void revealDuplicate(row); }}
+                          aria-busy={loadingDuplicate !== null && loadingDuplicate === row.mapping_id}
                           className="rounded underline hover:text-red-950 focus:outline-2 focus:outline-red-600"
                         >
                           {row.source_code} — {sectionForRow(row)} · {row.source_vocabulary_id || "Uncoded"}

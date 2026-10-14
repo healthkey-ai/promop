@@ -12670,6 +12670,12 @@ def code_mapping_list(request):
         ).defer('source_unit_evidence')
         from omop_core.services.athena_mapping_guard import without_icd10_athena_duplicates
         mappings = without_icd10_athena_duplicates(mappings)
+        if request.query_params.get('duplicates_only') == '1':
+            from omop_core.services.mapping_browse import mapping_duplicates
+            source = request.query_params.get('source')
+            if source is None:
+                return Response({'source': 'A source tab is required.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'duplicate_summaries': mapping_duplicates(mappings, source, compact=True)})
         if request.query_params.get('browse') == '1':
             from omop_core.services.mapping_browse import browse_mappings
             return Response(browse_mappings(mappings, request.query_params, _serialize_code_mapping_row))

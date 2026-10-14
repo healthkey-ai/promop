@@ -1795,6 +1795,73 @@ describe("server mapping pages", () => {
     render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
   };
 
+  it("shows the page shell while all initial requests are pending", () => {
+    mockGet.mockImplementation(() => new Promise(() => {}));
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    expect(screen.getByRole("heading", { name: "Code Mapping" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Search mappings")).toBeInTheDocument();
+    expect(screen.getByText("Loading mappings…")).toBeInTheDocument();
+  });
+
+  it("finishes an empty mapping load without waiting for reference or accuracy", async () => {
+    mockGet.mockImplementation((url: string) => url === "/v1/code-mappings/"
+      ? Promise.resolve({ data: [] }) : new Promise(() => {}));
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    await waitFor(() => expect(screen.queryByText("Loading mappings…")).not.toBeInTheDocument());
+    expect(screen.getByRole("heading", { name: "Code Mapping" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("keeps mapping rows usable when ancillary requests fail", async () => {
+    mockGet.mockImplementation((url: string) => url === "/v1/code-mappings/"
+      ? Promise.resolve({ data: browseData() }) : Promise.reject(new Error("ancillary unavailable")));
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    expect(await screen.findByRole("button", { name: "Approve M-PROTEIN, SERUM" })).toBeEnabled();
+    expect(screen.queryByText("Failed to load code mappings.")).not.toBeInTheDocument();
+    expect(screen.getByText("Could not load mapping options. Refresh to retry.")).toBeInTheDocument();
+  });
+
+  it("checks compact duplicate warnings after rows arrive and loads full details on click", async () => {
+    let finishAudit: (value: unknown) => void = () => {};
+    const summaries = [proposedRow, { ...proposedRow, mapping_id: 999, status: "rejected" }].map((row) => ({
+      mapping_id: row.mapping_id, source_code: row.source_code, source_vocabulary_id: row.source_vocabulary_id,
+      destination_concept_id: row.destination_concept_id, status: row.status, summary: true,
+    }));
+    mockGet.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
+      if (config?.params?.duplicates_only) return new Promise((resolve) => { finishAudit = resolve; });
+      if (url === "/v1/code-mappings/") return Promise.resolve({ data: browseData({ duplicates_included: false }) });
+      if (url === "/v1/code-mappings/999/") return Promise.resolve({ data: { ...proposedRow, mapping_id: 999, status: "rejected", notes: "Full notes" } });
+      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+    });
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    await screen.findByRole("button", { name: "Approve M-PROTEIN, SERUM" });
+    expect(screen.queryByText("Loading mappings…")).not.toBeInTheDocument();
+    expect(await screen.findByText("Checking duplicate source codes…")).toBeInTheDocument();
+    finishAudit({ data: { duplicate_summaries: summaries } });
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("1 duplicate source code on this tab");
+    fireEvent.click(within(alert).getByRole("link", { name: /rejected.*#999/ }));
+    await waitFor(() => expect(screen.getByLabelText("Notes")).toHaveValue("Full notes"));
+    expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/999/");
+  });
+
+  it("requests rows for collapsed sections only when they are expanded", async () => {
+    mockGet.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
+      if (url !== "/v1/code-mappings/") return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+      const mapped = String(config?.params?.sections).includes("Mapped");
+      return Promise.resolve({ data: browseData({
+        results: mapped ? [proposedRow, approvedRow] : [proposedRow],
+        pages: { ...browseData().pages, Mapped: { page: 1, page_size: 100, total: 1 } },
+      }) });
+    });
+    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    await screen.findByRole("button", { name: "Approve M-PROTEIN, SERUM" });
+    expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ sections: "Unmapped", include_duplicates: 0 }) });
+    fireEvent.click(screen.getByRole("button", { name: /^Mapped/ }));
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ sections: "Unmapped,Mapped" }) }));
+    expect(await screen.findByText("Protein.monoclonal [Mass/volume] in Serum")).toBeInTheDocument();
+  });
+
   it("defaults to Seen > 0 and resets pages when toggled", async () => {
     mockGet.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
       if (url !== "/v1/code-mappings/") return Promise.resolve({ data: url.includes("reference") ? reference : {} });
