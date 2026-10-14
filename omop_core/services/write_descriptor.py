@@ -292,7 +292,12 @@ def build_writable_field_descriptor():
     )
 
     descriptor = {}
+    from omop_core.services.clinical_input_contract import descriptors
+    clinical_inputs = descriptors()
     for field in sorted(PATIENT_RECORD_OMOP_MAPPED_FIELDS - _LIFECYCLE_FIELDS):
+        if field in clinical_inputs:
+            descriptor[field] = clinical_inputs[field]
+            continue
         if field in _ALIAS_TO_CANONICAL:
             canonical = _ALIAS_TO_CANONICAL[field]
             descriptor[field] = {

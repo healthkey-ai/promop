@@ -1,4 +1,5 @@
 from django.conf import settings
+from decimal import Decimal
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.db.models import F, Q
@@ -2122,6 +2123,17 @@ class PatientRecord(models.Model):
     molecular_markers = models.TextField(blank=True, null=True)
     stem_cell_transplant_history = models.JSONField(blank=True, null=True, default=list)
     sct_date = models.DateField(blank=True, null=True)
+    prothrombin_time_uln = models.DecimalField(
+        max_digits=10, decimal_places=5, blank=True, null=True,
+        validators=[MinValueValidator(Decimal('0.00001'))],
+        help_text='Prothrombin time ratio to laboratory ULN, not INR or seconds',
+    )
+    activated_partial_thromboplastin_time_uln = models.DecimalField(
+        max_digits=10, decimal_places=5, blank=True, null=True,
+        validators=[MinValueValidator(Decimal('0.00001'))],
+        help_text='aPTT ratio to laboratory ULN, not seconds',
+    )
+    able_to_swallow_tablets_capsules = models.BooleanField(blank=True, null=True)
     sct_eligibility = models.JSONField(blank=True, null=True, default=list,
         help_text="Multi-select from SctEligibility vocabulary")
     plasma_cell_leukemia = models.BooleanField(blank=True, null=True, default=None)

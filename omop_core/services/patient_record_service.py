@@ -67,6 +67,8 @@ DERIVATION_VERSION = 5
 # Fields that are entirely derived from OMOP tables and must be reset before
 # each refresh so deletions are reflected (not just additions).
 _OMOP_DERIVED_FIELDS = [
+    'prothrombin_time_uln', 'activated_partial_thromboplastin_time_uln',
+    'able_to_swallow_tablets_capsules',
     # Demographics. patient_age is a pure function of the birth date, so a value
     # left over from an earlier derivation is stale by construction and has to be
     # cleared. date_of_birth is deliberately not cleared: a manually supplied
@@ -696,6 +698,12 @@ def refresh_patient_record(person: Person) -> PatientRecord:
                 setattr(patient_info, field, value)
 
         _compute_derived_fields(patient_info)
+
+        # Final override for exactly these source-owned inputs, including SCT
+        # clear tombstones. Do not change unrelated extraction/therapy semantics.
+        from omop_core.services.clinical_input_contract import values_from_snapshot
+        for field, value in values_from_snapshot(snapshot).items():
+            setattr(patient_info, field, value)
 
         patient_info.derivation_version = DERIVATION_VERSION
         patient_info.derived_at = timezone.now()

@@ -78,6 +78,18 @@ def _auto_register_loinc_labs() -> dict[str, FieldProvenance]:
 # ---------------------------------------------------------------------------
 
 _MANUAL_ENTRIES: dict[str, FieldProvenance] = {
+    'prothrombin_time_uln': FieldProvenance(
+        omop_table='Observation', lookup_strategy='source_value', source_values=['cb:pt-uln'],
+        extractor='values_from_snapshot', description='Patient-reported PT ratio to laboratory ULN; not INR or seconds.',
+    ),
+    'activated_partial_thromboplastin_time_uln': FieldProvenance(
+        omop_table='Observation', lookup_strategy='source_value', source_values=['cb:aptt-uln'],
+        extractor='values_from_snapshot', description='Patient-reported aPTT ratio to laboratory ULN; not seconds.',
+    ),
+    'able_to_swallow_tablets_capsules': FieldProvenance(
+        omop_table='Observation', lookup_strategy='source_value', source_values=['cb:swallow-tablets'],
+        extractor='values_from_snapshot', description='Latest tablet/capsule swallowing ability; absent is unknown.',
+    ),
     # --- Disease / condition ---
     "disease": FieldProvenance(
         omop_table="ConditionOccurrence",
