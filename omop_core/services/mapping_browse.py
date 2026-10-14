@@ -1,5 +1,6 @@
 """Bounded curation pages with 100 codes per section."""
-from django.db.models import Case, CharField, Count, F, Q, Value, When, Window
+from django.contrib.postgres.aggregates import ArrayAgg
+from django.db.models import Case, CharField, Count, F, Q, Value, When
 from django.db.models.functions import Upper, Trim
 from rest_framework.exceptions import ValidationError
 
@@ -146,8 +147,52 @@ def _provenance_options(counts_by_origin):
             for origin, n in sorted(counts_by_origin.items(), key=lambda kv: (-kv[1], kv[0]))]
 
 
+def mapping_duplicates(mappings, source, *, compact=False):
+    catalog = mappings
+    # Aggregate duplicate IDs before loading rows. A window subquery joined
+    # back to the full catalog made PostgreSQL scan the catalog again and load
+    # every duplicate's destination/user metadata on the initial page request.
+    # A duplicate is one code twice in one *vocabulary*, not twice on one tab:
+    # the Wearables tab holds Apple, Garmin and OpenWearables, ingest resolves
+    # on the exact vocabulary, and the same code in two of them is two
+    # legitimate mappings. Only an OID spelling is the same vocabulary.
+    alias_cases = [When(source_vocabulary_id=key, then=Value(canonical))
+                   for key, canonical in vocab.VOCABULARY_OID_ALIASES.items()]
+    duplicate_groups = tab_queryset(catalog, source).order_by().annotate(
+        canonical=Case(*alias_cases, default=F('source_vocabulary_id'), output_field=CharField()),
+        code=Upper(Trim('source_code')),
+    ).exclude(code='').values('organization_id', 'canonical', 'code').annotate(
+        duplicate_count=Count('pk'), ids=ArrayAgg('pk'),
+    ).filter(duplicate_count__gt=1)
+    duplicate_ids = [pk for ids in duplicate_groups.values_list('ids', flat=True) for pk in ids]
+    duplicate_summaries = []
+    if compact:
+        for row in catalog.filter(pk__in=duplicate_ids).order_by('pk').values(
+            'pk', 'source_vocabulary_id', 'source_code', 'status',
+            'origin_system', 'organization_id', 'target_concept_id',
+        ):
+            duplicate_summaries.append({
+                'mapping_id': row['pk'],
+                'source_vocabulary_id': row['source_vocabulary_id'],
+                'source_code': row['source_code'], 'status': row['status'],
+                'organization_id': row['organization_id'],
+                'destination_concept_id': row['target_concept_id'],
+                'mapping_origin': 'athena' if row['origin_system'] == 'athena' else 'healthkey',
+                'summary': True,
+            })
+        duplicates = []
+    else:
+        duplicates = list(with_destination_counts(catalog.filter(pk__in=duplicate_ids)))
+
+    return duplicate_summaries if compact else duplicates
+
+
 def browse_mappings(mappings, params, serialize):
     catalog = mappings
+    requested_sections = params.get('sections')
+    included_sections = set(SECTION_FILTERS) if requested_sections is None else set(filter(None, requested_sections.split(',')))
+    if included_sections - set(SECTION_FILTERS):
+        raise ValidationError({'sections': 'Unknown mapping section.'})
     seen_only = _seen_only(params)
     # seen_only narrows only the Unmapped section; other sections show all codes.
     # Tab counts use the full queryset so the tab strip reflects total work.
@@ -202,24 +247,8 @@ def browse_mappings(mappings, params, serialize):
                      **{key: sum(c[key] for c in counts.values()) for key in ('proposed', 'approved', 'athena')}))
 
     tab_rows = tab_queryset(mappings, source)
-    # Only duplicate groups need full rows. Window filtering preserves every
-    # member, including rejected rows outside the current page/search.
-    # A duplicate is one code twice in one *vocabulary*, not twice on one tab:
-    # the Wearables tab holds Apple, Garmin and OpenWearables, ingest resolves
-    # on the exact vocabulary, and the same code in two of them is two
-    # legitimate mappings. Only an OID spelling is the same vocabulary.
-    alias_cases = [When(source_vocabulary_id=key, then=Value(canonical))
-                   for key, canonical in vocab.VOCABULARY_OID_ALIASES.items()]
-    duplicate_ids = tab_queryset(catalog, source).order_by().annotate(
-        canonical=Case(*alias_cases, default=F('source_vocabulary_id'), output_field=CharField()),
-        code=Upper(Trim('source_code')),
-    ).exclude(code='').annotate(
-        duplicate_count=Window(
-            Count('pk'),
-            partition_by=[F('organization_id'), F('canonical'), F('code')],
-        ),
-    ).filter(duplicate_count__gt=1).values_list('pk', flat=True)
-    duplicates = list(with_destination_counts(catalog.filter(pk__in=duplicate_ids)))
+    include_duplicates = params.get('include_duplicates', '1') != '0'
+    duplicates = mapping_duplicates(catalog, source) if include_duplicates else []
 
     # Values offered by the filter control, from the counts above so choosing
     # one does not empty the list of the others.
@@ -320,10 +349,14 @@ def browse_mappings(mappings, params, serialize):
             # a second aggregate.
             group_total = count_groups(query)
             page = min(requested_page, max(1, (group_total + PAGE_SIZE - 1) // PAGE_SIZE))
-            groups[section] = group_entries(query, page, PAGE_SIZE, order=order)
+            if section in included_sections:
+                groups[section] = group_entries(query, page, PAGE_SIZE, order=order)
             pages[section] = dict(page=page, page_size=PAGE_SIZE, total=group_total)
             continue
         page = min(requested_page, max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE))
+        pages[section] = dict(page=page, page_size=PAGE_SIZE, total=total)
+        if section not in included_sections:
+            continue
         # Correlated destination counts and retirement lookups run only on the
         # bounded page unless the curator explicitly sorts by destination count.
         if field == 'destination_count':
@@ -343,9 +376,12 @@ def browse_mappings(mappings, params, serialize):
     def render(row):
         return serialize(row.target_concept, row, metadata[row.pk], destination_count=row.destination_count)
 
-    return dict(results=[render(row) for row in results], duplicates=[render(row) for row in duplicates],
+    response = dict(results=[render(row) for row in results], duplicates=[render(row) for row in duplicates],
                 total=sum(section_totals), seen_only=params.get('seen_only') == '1',
                 tabs=tabs, selected_source=source, pages=pages, rejected_count=rejected,
                 provenances=provenances, selected_provenance=provenance,
                 organizations=organizations, selected_organization=organization,
                 groups=groups, rollup=rollup)
+    if not include_duplicates:
+        response['duplicates_included'] = False
+    return response

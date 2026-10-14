@@ -1,4 +1,5 @@
 import pytest
+from unittest.mock import patch
 from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
 
 from omop_core.models import MappingDestinationCandidate, SourceCodeConceptMapping
@@ -296,6 +297,40 @@ def test_duplicates_include_off_page_and_rejected_members(browse):
     data = browse(search='X').data
     assert {r['source_code'] for r in data['duplicates']} == {'MATCH', ' match '}
     assert len(data['results']) == 100
+
+
+def test_initial_page_defers_duplicate_audit_and_closed_sections_without_losing_totals(browse):
+    row('MATCH', occurrence_count=2)
+    row(' match ', status='rejected')
+    row('MAPPED', status='approved')
+    row('ATHENA', origin_system='athena', status='approved')
+    baseline = browse(seen_only='1').data
+    with patch('omop_core.services.mapping_browse.mapping_duplicates', side_effect=AssertionError('audit blocked page')):
+        data = browse(seen_only='1', include_duplicates='0', sections='Unmapped').data
+    assert data['duplicates'] == []
+    assert data['duplicates_included'] is False
+    assert [item['source_code'] for item in data['results']] == ['MATCH']
+    assert data['pages'] == baseline['pages']
+    assert data['tabs'] == baseline['tabs']
+    assert data['total'] == baseline['total'] == 4
+    expanded = browse(include_duplicates='0', sections='Unmapped,Mapped').data
+    assert {item['source_code'] for item in expanded['results']} == {'MATCH', 'MAPPED'}
+    assert browse(include_duplicates='0', sections='').data['results'] == []
+    assert browse(sections='unknown').status_code == 400
+
+
+def test_duplicate_audit_returns_compact_complete_summaries_independently(browse):
+    first = row('MATCH', occurrence_count=0, notes='Long notes unnecessary for a warning')
+    second = row(' match ', status='rejected')
+    row('UNRELATED', occurrence_count=100)
+    with patch('patient_portal.api.views._serialize_code_mapping_row', side_effect=AssertionError('full serialization')):
+        response = browse(duplicates_only='1', source='ICD10CM', search='UNRELATED', seen_only='1')
+    assert response.status_code == 200
+    summaries = response.data['duplicate_summaries']
+    assert {item['mapping_id'] for item in summaries} == {first.pk, second.pk}
+    assert {item['status'] for item in summaries} == {'proposed', 'rejected'}
+    assert all(item['summary'] is True and 'notes' not in item and 'destination_count' not in item for item in summaries)
+    assert browse(duplicates_only='1').status_code == 400
 
 
 @pytest.mark.parametrize('source', ['OpenWearables', '__overall__'])
