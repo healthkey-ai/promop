@@ -21,6 +21,7 @@ import OrgAdminPage from "@/components/OrgAdmin/OrgAdminPage";
 import ServiceApplicationsPage from "@/components/OrgAdmin/ServiceApplicationsPage";
 import FieldMappingPage from "@/components/FieldMappings/FieldMappingPage";
 import CodeMappingPage from "@/components/CodeMappings/CodeMappingPage";
+import SourceSystemManagementPage from "@/components/CodeMappings/SourceSystemManagementPage";
 import SuggestRunLogPage from "@/components/CodeMappings/SuggestRunLogPage";
 import CodeMappingAccuracyPage from "@/components/CodeMappings/CodeMappingAccuracyPage";
 import MappingHubPage from "@/components/MappingHub/MappingHubPage";
@@ -167,6 +168,7 @@ function AppRoutes() {
       <Route path="/mappings" element={mappingAdminRoute(<MappingHubPage />)} />
       <Route path="/field-mappings" element={mappingAdminRoute(<FieldMappingPage />)} />
       <Route path="/code-mappings" element={mappingAdminRoute(<CodeMappingPage />)} />
+      <Route path="/code-mappings/source-systems" element={mappingAdminRoute(<SourceSystemManagementPage />)} />
       <Route path="/code-mappings/suggest-runs/:runId" element={mappingAdminRoute(<SuggestRunLogPage />)} />
       <Route path="/code-mappings/accuracy" element={mappingAdminRoute(<CodeMappingAccuracyPage />)} />
       <Route path="/therapy-mappings" element={mappingAdminRoute(<TherapyMappingPage />)} />

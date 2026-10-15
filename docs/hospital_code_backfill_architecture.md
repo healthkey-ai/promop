@@ -130,6 +130,14 @@ deployments. No row creates an `Organization` foreign key or changes mapping
 resolution. Consumers should filter confidence and level for their own display
 needs, and retain the exact FHIR `Coding.system` URI as identity.
 
+Curators can inspect the associations at **Code Mapping → Source systems /
+hospitals**, or follow the exact FHIR system and observed-facility links in
+Edit Mapping. The read-only page filters by exact URI and facility name, shows
+all confidence levels and provenance, and reports the latest hospital seed receipt plus
+the number of codes under an exact system with per-code facility evidence.
+Empty registry results do not mean the URI should be replaced with a name:
+check whether the asynchronous seed replay is queued, running, or failed.
+
 The detail API moves that list to `source_evidence.facilities`. Bounded list
 pages expose only a compact `source_system_context` display hint, never the
 full facility list. Edit Mapping shows the names with level and confidence so
