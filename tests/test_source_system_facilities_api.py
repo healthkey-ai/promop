@@ -167,3 +167,15 @@ def test_curator_can_add_confirm_and_reject_without_erasing_imported_evidence(st
     assert staff_client.patch(URL, {
         'id': imported.id, 'review_status': 'invalid',
     }, format='json').status_code == 400
+
+
+def test_curator_can_manage_existing_non_uri_system_but_not_invent_unknown_one(staff_client):
+    SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id='EPIC', source_code='LOCAL',
+    )
+    assert staff_client.post(URL, {
+        'source_vocabulary_id': 'EPIC', 'facility_name': 'Hospital A',
+    }, format='json').status_code == 201
+    assert staff_client.post(URL, {
+        'source_vocabulary_id': 'Unknown system', 'facility_name': 'Hospital B',
+    }, format='json').status_code == 400

@@ -30,10 +30,13 @@ def source_system_facilities(request):
         source_system = str(request.data.get('source_vocabulary_id') or '').strip()
         name = str(request.data.get('facility_name') or '').strip()
         facility_id = str(request.data.get('facility_id') or '').strip()
-        if (not source_system.startswith(('urn:oid:', 'http://', 'https://'))
-                or len(source_system) > 255 or not name or len(name) > 255
+        if (not source_system or len(source_system) > 255 or not name or len(name) > 255
                 or len(facility_id) > 255):
-            return Response({'detail': 'A valid exact system URI and facility name are required.'},
+            return Response({'detail': 'An exact source system and facility name are required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not (SourceCodeConceptMapping.objects.filter(source_vocabulary_id=source_system).exists()
+                or SourceSystemFacility.objects.filter(source_vocabulary_id=source_system).exists()):
+            return Response({'detail': 'Source system has no code or facility evidence.'},
                             status=status.HTTP_400_BAD_REQUEST)
         if SourceSystemFacility.objects.filter(
                 source_vocabulary_id=source_system, facility_name__iexact=name,
@@ -108,6 +111,7 @@ def source_system_facilities(request):
     if not facility:
         custom_systems = SourceCodeConceptMapping.objects.filter(
             Q(source_vocabulary_id__startswith='urn:oid:')
+            | Q(source_vocabulary_id__in=('EPIC', 'CERNER'))
             | Q(source_vocabulary_id__startswith='http://open.epic.com/')
             | Q(source_vocabulary_id__startswith='https://open.epic.com/')
             | Q(source_vocabulary_id__startswith='http://fhir.cerner.com/')

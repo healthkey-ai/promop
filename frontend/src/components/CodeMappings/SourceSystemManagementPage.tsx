@@ -190,11 +190,11 @@ export default function SourceSystemManagementPage() {
     <Link to="/code-mappings" className="text-sm text-sky-700 underline">← Code Mapping</Link>
     <PageTitle className="mt-4 text-2xl font-semibold text-slate-950">Source Code Systems/Hospitals Management</PageTitle>
     <p className="mt-2 max-w-4xl text-sm text-slate-600">
-      Manage observed and curator-confirmed facility associations for each exact FHIR Coding.system. Multiple hospitals may use one system. Confirming an association records a curator decision, not verified Organization ownership, and never changes the source code or its OMOP mapping.
+      Manage observed and curator-confirmed facility associations for each exact source-system ID (the FHIR Coding.system URI for imported codes). Multiple hospitals may use one system. Confirming an association records a curator decision, not verified Organization ownership, and never changes the source code or its OMOP mapping.
     </p>
 
     <form key={`${system}|${facility}`} onSubmit={applyFilters} className="mt-5 grid gap-3 rounded-md border border-slate-200 bg-white p-4 md:grid-cols-[2fr_1fr_auto] md:items-end">
-      <label className="text-sm font-medium text-slate-700">Exact FHIR Coding.system
+      <label className="text-sm font-medium text-slate-700">Exact source code system
         <input name="system" defaultValue={system}
           placeholder="urn:oid:…" className="mt-1 w-full rounded border border-slate-300 px-3 py-2 font-mono text-xs" />
       </label>
@@ -237,7 +237,7 @@ export default function SourceSystemManagementPage() {
         <table aria-label="Source code systems and observed hospitals" className="w-full min-w-[900px] text-left text-sm">
           <thead className="bg-slate-100 text-xs uppercase text-slate-600"><tr>
             <th className="px-3 py-3"><button type="button" onClick={toggleSort} aria-label="Sort by source code system"
-              className="text-sky-800 hover:underline">Exact FHIR Coding.system {sort === "system_asc" ? "↑" : "↓"}</button></th>
+              className="text-sky-800 hover:underline">Source Code System {sort === "system_asc" ? "↑" : "↓"}</button></th>
             <th className="px-3 py-3 text-right">Facility associations</th>
           </tr></thead>
           <tbody>{data.results.map((group) => <SystemRow key={group.source_vocabulary_id}
