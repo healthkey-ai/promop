@@ -25,7 +25,7 @@ import ConceptInputDetails from "@/components/UI/ConceptInputDetails";
 import { HelpTip, Field, ReadOnlyField, INPUT_CLASS } from "@/components/UI/MappingFormPrimitives";
 import { confirmUnitOverride, unitConfirmation } from "./unitConfirmation";
 import SourceEvidencePanel, { type SourceEvidence } from "./SourceEvidencePanel";
-import { hospitalContextDetails, hospitalContextText } from "./sourceSystemContext";
+import { hospitalContextDetails, hospitalContextText, sourceSystemManagementUrl } from "./sourceSystemContext";
 import api from "@/api/axios";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -712,7 +712,11 @@ export default function EditMappingDialog({
                       {sourceSystemContext && sourceSystemContext.kind !== "none" && (
                         <p title={hospitalContextDetails(sourceSystemContext)}>{hospitalContextText(sourceSystemContext)}</p>
                       )}
-                      <p>Exact FHIR Coding.system: <code className="break-all">{form.source_vocabulary_id}</code></p>
+                      <p>Exact FHIR Coding.system: <a href={sourceSystemManagementUrl(form.source_vocabulary_id)}
+                        target="_blank" rel="noopener noreferrer" className="text-sky-700 underline hover:text-sky-900"
+                        title="Inspect this exact source system and its observed hospitals">
+                        <code className="break-all">{form.source_vocabulary_id}</code>
+                      </a></p>
                     </div>
                   )}
                 </Field>
@@ -796,7 +800,7 @@ export default function EditMappingDialog({
             </fieldset>
 
             {mode === "edit" && selectedRow?.mapping_id && (
-              <SourceEvidencePanel evidence={sourceEvidence} loading={loadingDestinations}
+              <SourceEvidencePanel evidence={sourceEvidence} sourceSystem={selectedRow.source_vocabulary_id} loading={loadingDestinations}
                 error={sourceEvidenceError} />
             )}
 

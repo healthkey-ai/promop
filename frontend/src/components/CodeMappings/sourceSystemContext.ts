@@ -1,5 +1,11 @@
 import type { SourceSystemContext } from "./SourceEvidencePanel";
 
+export function sourceSystemManagementUrl(system: string, facility?: string): string {
+  const params = new URLSearchParams({ system });
+  if (facility) params.set("facility", facility);
+  return `/code-mappings/source-systems?${params.toString()}`;
+}
+
 export function hospitalContextText(context?: SourceSystemContext): string {
   if (!context || context.kind === "none") return "Global / hospital unverified";
   if (context.kind === "verified") return `Verified: ${context.label}`;

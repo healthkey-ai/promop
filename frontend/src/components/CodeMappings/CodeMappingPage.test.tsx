@@ -1933,7 +1933,7 @@ describe("server mapping pages", () => {
       source_code: "LOCAL-1826",
       source_system_context: context,
       source_evidence: {
-        organization: null, occurrence_count: 14, facilities: [],
+        organization: null, occurrence_count: 14, facilities: [{ name: "UPMC", level: "brand", confidence: "high" }],
         metadata: {}, units: [], system_context: context,
       },
     }]);
@@ -1944,6 +1944,10 @@ describe("server mapping pages", () => {
     expect(picker.value).toBe(oid);
     expect(picker.selectedOptions[0].textContent).toContain("UPMC");
     expect(screen.getByText(oid, { selector: "code" })).toBeInTheDocument();
+    const systemLink = screen.getByRole("link", { name: oid });
+    expect(systemLink).toHaveAttribute("href", `/code-mappings/source-systems?system=${encodeURIComponent(oid)}`);
+    const facilityLink = screen.getByRole("link", { name: "UPMC" });
+    expect(facilityLink).toHaveAttribute("href", `/code-mappings/source-systems?system=${encodeURIComponent(oid)}&facility=UPMC`);
   });
 
   it("counts all matching sources even when the page contains one label group", async () => {

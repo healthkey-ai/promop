@@ -1389,6 +1389,10 @@ export default function CodeMappingPage() {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <a href="/code-mappings/source-systems"
+              className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100">
+              Source systems / hospitals
+            </a>
             <button type="button" onClick={() => setUploadOpen(true)} disabled={!referenceReady}
               className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100">
               <Upload size={16} />
