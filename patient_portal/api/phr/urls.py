@@ -41,6 +41,7 @@ from .views import (
     StatusView,
     TherapyView,
     ImagingView,
+    OutcomesView,
     WhatsNewView,
 )
 
@@ -66,6 +67,7 @@ urlpatterns = [
     path('therapy/<str:item_id>/reason/', TherapyReasonView.as_view(), name='phr-therapy-reason'),
     path('whats-new/', WhatsNewView.as_view(), name='phr-whats-new'),
     path('imaging/', ImagingView.as_view(), name='phr-imaging'),
+    path('outcomes/', OutcomesView.as_view(), name='phr-outcomes'),
     # The patient's shares.
     path('shares/', SharesView.as_view(), name='phr-shares'),
     path('shares/options/', ShareOptionsView.as_view(), name='phr-share-options'),
