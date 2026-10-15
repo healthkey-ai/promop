@@ -41,10 +41,9 @@ interface RegistryResponse {
   } | null;
 }
 
-function SystemRow({ group, initiallyOpen, onMutate }: {
-  group: SystemGroup; initiallyOpen: boolean; onMutate: () => void;
+function SystemRow({ group, open, onToggle, onMutate }: {
+  group: SystemGroup; open: boolean; onToggle: () => void; onMutate: () => void;
 }) {
-  const [open, setOpen] = useState(initiallyOpen);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const review = async (id: number, review_status: Association["review_status"]) => {
@@ -82,7 +81,7 @@ function SystemRow({ group, initiallyOpen, onMutate }: {
   return <>
     <tr className="border-t border-slate-200 bg-slate-50">
       <td className="px-3 py-3">
-        <button type="button" onClick={() => setOpen(!open)} aria-expanded={open}
+        <button type="button" onClick={onToggle} aria-expanded={open}
           aria-label={`${open ? "Collapse" : "Expand"} ${group.source_vocabulary_id}`}
           className="flex w-full items-start gap-2 text-left text-sky-800 hover:underline">
           <span aria-hidden="true">{open ? "▾" : "▸"}</span>
@@ -137,6 +136,7 @@ function SystemRow({ group, initiallyOpen, onMutate }: {
 export default function SourceSystemManagementPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [refresh, setRefresh] = useState(0);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const system = searchParams.get("system") || "";
   const facility = searchParams.get("facility") || "";
   const page = Number(searchParams.get("page") || "1");
@@ -209,7 +209,7 @@ export default function SourceSystemManagementPage() {
       <div className="rounded border border-slate-200 bg-white p-3">
         <span className="block text-xs font-semibold uppercase text-slate-500">Matching source systems</span>
         <span className="font-medium">{data.total.toLocaleString()}</span>
-        <span className="block text-xs text-slate-500">{data.association_total.toLocaleString()} observed facility associations</span>
+        <span className="block text-xs text-slate-500">{data.association_total.toLocaleString()} facility associations (including rejected)</span>
       </div>
       <div className="rounded border border-slate-200 bg-white p-3">
         <span className="block text-xs font-semibold uppercase text-slate-500">Latest hospital seed import</span>
@@ -238,10 +238,13 @@ export default function SourceSystemManagementPage() {
           <thead className="bg-slate-100 text-xs uppercase text-slate-600"><tr>
             <th className="px-3 py-3"><button type="button" onClick={toggleSort} aria-label="Sort by source code system"
               className="text-sky-800 hover:underline">Exact FHIR Coding.system {sort === "system_asc" ? "↑" : "↓"}</button></th>
-            <th className="px-3 py-3 text-right">Observed facilities</th>
+            <th className="px-3 py-3 text-right">Facility associations</th>
           </tr></thead>
-          <tbody>{data.results.map((group) => <SystemRow key={`${group.source_vocabulary_id}|${system}`}
-            group={group} initiallyOpen={system === group.source_vocabulary_id}
+          <tbody>{data.results.map((group) => <SystemRow key={group.source_vocabulary_id}
+            group={group} open={expanded[group.source_vocabulary_id] ?? system === group.source_vocabulary_id}
+            onToggle={() => setExpanded((current) => ({ ...current,
+              [group.source_vocabulary_id]: !(current[group.source_vocabulary_id] ?? system === group.source_vocabulary_id),
+            }))}
             onMutate={() => setRefresh((value) => value + 1)} />)}</tbody>
         </table>
       </div>}
