@@ -2,6 +2,10 @@ FROM python:3.12-slim AS backend
 
 WORKDIR /app
 
+# Where the baked model lands. The final stage copies this path and points
+# runtime at it.
+ENV HF_HOME=/opt/huggingface
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential libpq-dev curl git && \
     rm -rf /var/lib/apt/lists/*
@@ -9,6 +13,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
+
+# Bake the embedding model into the image. Cloud Run gives every container a
+# fresh filesystem, so a runtime load reaches huggingface.co unauthenticated
+# from a shared egress NAT and gets rate-limited: one measured suggestion spent
+# 121s of its 167s asleep in a backoff, for 0.3s of actual embedding (#1847).
+# Three attempts, because the build must not fail on the same rate limit. The
+# name is spelled out rather than imported: this runs before settings exist,
+# and tests/test_embedding_model_baked.py fails if it drifts from the code.
+ENV EMBEDDING_MODEL_NAME=BAAI/bge-small-en-v1.5
+RUN for attempt in 1 2 3; do \
+        python -c "import os; from sentence_transformers import SentenceTransformer; \
+SentenceTransformer(os.environ['EMBEDDING_MODEL_NAME'])" && break; \
+        echo "model download attempt $attempt failed; retrying in 30s"; \
+        sleep 30; \
+    done; \
+    python -c "import os, sys; \
+sys.exit(0 if os.path.isdir(os.environ['HF_HOME']) and os.listdir(os.environ['HF_HOME']) else 1)"
 
 COPY . .
 
@@ -35,9 +56,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=backend /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=backend /usr/local/bin /usr/local/bin
 COPY --from=backend /app /app
+COPY --from=backend /opt/huggingface /opt/huggingface
 COPY --from=frontend /app/frontend/dist/remote /app/frontend/dist/remote
 
 ENV WHITENOISE_ROOT=/app/frontend/dist/remote
+# Read the baked model and never the network. Offline turns a missing cache
+# into an immediate error instead of a silent download and a rate-limit stall.
+ENV HF_HOME=/opt/huggingface \
+    HF_HUB_OFFLINE=1
 
 EXPOSE 8080
 
