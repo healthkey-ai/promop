@@ -92,6 +92,23 @@ describe("PatientSourceCodesTab source description (#1778)", () => {
   });
 });
 
+it("links an Epic patient source system to its exact hospital-management group", async () => {
+  const oid = "urn:oid:1.2.840.114350.1.13.90.2.7.2.707679";
+  const getSpy = vi.spyOn(api, "get").mockImplementation((url: string) => Promise.resolve({
+    data: url.includes("source-codes") ? {
+      ...sourceCodes, source_codes: [{ ...sourceCodes.source_codes[0], source_vocabulary_id: oid }],
+    } : {},
+  }) as never);
+  try {
+    render(<PatientSourceCodesTab personId="48095" />);
+    fireEvent.click(await screen.findByText("Blood Pressure"));
+    expect(screen.getByRole("link", { name: "Manage hospitals for this source code system" }))
+      .toHaveAttribute("href", `/code-mappings/source-systems?system=${encodeURIComponent(oid)}`);
+  } finally {
+    getSpy.mockRestore();
+  }
+});
+
 describe("PatientSourceCodesTab missing destination", () => {
   it("opens a proposed row with no destination empty, never 0", async () => {
     render(<PatientSourceCodesTab personId="48095" />);
