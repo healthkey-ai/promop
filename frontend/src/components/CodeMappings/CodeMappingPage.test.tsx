@@ -1946,6 +1946,8 @@ describe("server mapping pages", () => {
     expect(screen.getByText(oid, { selector: "code" })).toBeInTheDocument();
     const systemLink = screen.getByRole("link", { name: oid });
     expect(systemLink).toHaveAttribute("href", `/code-mappings/source-systems?system=${encodeURIComponent(oid)}`);
+    expect(screen.getByRole("link", { name: "Manage hospitals for this source code system" }))
+      .toHaveAttribute("href", `/code-mappings/source-systems?system=${encodeURIComponent(oid)}`);
     const facilityLink = screen.getByRole("link", { name: "UPMC" });
     expect(facilityLink).toHaveAttribute("href", `/code-mappings/source-systems?system=${encodeURIComponent(oid)}&facility=UPMC`);
   });

@@ -4867,7 +4867,7 @@ class HospitalCodeImport(models.Model):
 
 
 class SourceSystemFacility(models.Model):
-    """An observed name for an exact FHIR source system, not verified ownership.
+    """An observed or curated name for an exact FHIR system, not ownership.
 
     One system can be used by many facilities. These rows must not be used to
     assign an Organization or to change source-code mapping identity.
@@ -4881,6 +4881,12 @@ class SourceSystemFacility(models.Model):
     attribution_method = models.CharField(max_length=100, blank=True, default='')
     provenance = models.CharField(max_length=255)
     fingerprint = models.CharField(max_length=64, unique=True)
+    review_status = models.CharField(max_length=16, default='unreviewed', choices=[
+        ('unreviewed', 'Unreviewed'), ('confirmed', 'Confirmed'),
+        ('rejected', 'Rejected'),
+    ])
+    reviewed_by = models.CharField(max_length=255, blank=True, default='')
+    reviewed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = 'source_system_facility'

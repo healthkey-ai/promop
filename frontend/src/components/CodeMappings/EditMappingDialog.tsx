@@ -717,6 +717,10 @@ export default function EditMappingDialog({
                         title="Inspect this exact source system and its observed hospitals">
                         <code className="break-all">{form.source_vocabulary_id}</code>
                       </a></p>
+                      <a href={sourceSystemManagementUrl(form.source_vocabulary_id)}
+                        target="_blank" rel="noopener noreferrer" className="inline-block text-sky-700 underline hover:text-sky-900">
+                        Manage hospitals for this source code system
+                      </a>
                     </div>
                   )}
                 </Field>
