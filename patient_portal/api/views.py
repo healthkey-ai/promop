@@ -6172,7 +6172,10 @@ def derivation_status(request: Request, task_id: str) -> Response:
 
 
 def _resolve_provision_org(request):
-    """Return ``(organization, error_response)`` for a provisioning call.
+    """Return ``(organization, error_response)`` for a caller naming a tenant.
+
+    Shared by ``provision`` and the PATCH that fills an organization in
+    afterwards, so both answer a bad slug the same way.
 
     The rule ``PatientSignupView._resolve_org`` applies: the caller's own
     organization wins, otherwise it may name a slug. One difference, the slug is
@@ -6437,6 +6440,14 @@ class PersonViewSet(viewsets.GenericViewSet):
 
         Profile fields (demographics, location, language skills) and replaceable
         fields (email, phone, etc.) are delegated to _project_profile_fields.
+
+        ``organization`` names the tenant, on the same fill-if-empty rule as
+        ``provision``, for a patient who was provisioned before that parameter
+        existed (#1819). Re-importing one never filled it: nothing else writes
+        ``PatientRecord.organization``, and ``provision`` cannot be called again
+        without minting a duplicate. The response carries the slug in force
+        whenever the request named one, so a caller can see that a patient
+        another organization owns was left where it is.
         """
         try:
             person = Person.objects.get(person_id=person_id)
@@ -6460,6 +6471,22 @@ class PersonViewSet(viewsets.GenericViewSet):
                         {'detail': 'Analysts have read-only access. Contact a doctor or org admin to update patient data.'},
                         status=status.HTTP_403_FORBIDDEN,
                     )
+
+        # Resolved before any write, so a bad slug cannot leave half a patch
+        # applied. Machine credential or staff only: this is a tenancy change,
+        # and PATCH is reachable by a session patient and by a doctor holding a
+        # write scope, neither of whom may put a patient in an organization.
+        org = None
+        if 'organization' in request.data:
+            if not (is_service_token(request)
+                    or getattr(request.user, 'is_staff', False)):
+                return Response(
+                    {'detail': 'Only a service credential or staff may set the organization.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            org, org_error = _resolve_provision_org(request)
+            if org_error is not None:
+                return org_error
 
         _PERSON_STR_PLACEHOLDERS = {'', 'unknown', 'Unknown'}
 
@@ -6661,10 +6688,19 @@ class PersonViewSet(viewsets.GenericViewSet):
         if changed or touched_location or touched_languages:
             refresh_patient_record(person)
 
-        return Response({
+        body = {
             'person_id': person.person_id,
             'updated_fields': changed + touched_location + touched_languages,
-        })
+        }
+        if 'organization' in request.data:
+            # After the refresh above: derivation rebuilds the record, and the
+            # stamp has to be what the caller is told at the end of the request.
+            record, _ = PatientRecord.objects.get_or_create(person=person)
+            was_unassigned = record.organization_id is None
+            body['organization'] = _fill_record_org(record, org)
+            if org is not None and was_unassigned and body['organization'] == org.slug:
+                body['updated_fields'] = body['updated_fields'] + ['organization']
+        return Response(body)
 
 
 # =============================================================================
