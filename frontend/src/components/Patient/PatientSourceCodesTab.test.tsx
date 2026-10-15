@@ -102,8 +102,10 @@ it("links an Epic patient source system to its exact hospital-management group",
   try {
     render(<PatientSourceCodesTab personId="48095" />);
     fireEvent.click(await screen.findByText("Blood Pressure"));
-    expect(screen.getByRole("link", { name: "Manage hospitals for this source code system" }))
-      .toHaveAttribute("href", `/code-mappings/source-systems?system=${encodeURIComponent(oid)}`);
+    const systemLink = screen.getByRole("link", { name: oid });
+    expect(systemLink).toHaveAttribute("href", `/code-mappings/source-systems?system=${encodeURIComponent(oid)}`);
+    expect(systemLink).toHaveAttribute("title", expect.stringContaining("review and manage facilities"));
+    expect(screen.queryByRole("link", { name: "Manage hospitals for this source code system" })).not.toBeInTheDocument();
   } finally {
     getSpy.mockRestore();
   }

@@ -714,13 +714,9 @@ export default function EditMappingDialog({
                       )}
                       <p>Exact FHIR Coding.system: <a href={sourceSystemManagementUrl(form.source_vocabulary_id)}
                         target="_blank" rel="noopener noreferrer" className="text-sky-700 underline hover:text-sky-900"
-                        title="Inspect this exact source system and its observed hospitals">
+                        title="Open Source Code Systems/Hospitals Management to review and manage facilities associated with this exact source system">
                         <code className="break-all">{form.source_vocabulary_id}</code>
                       </a></p>
-                      <a href={sourceSystemManagementUrl(form.source_vocabulary_id)}
-                        target="_blank" rel="noopener noreferrer" className="inline-block text-sky-700 underline hover:text-sky-900">
-                        Manage hospitals for this source code system
-                      </a>
                     </div>
                   )}
                 </Field>
