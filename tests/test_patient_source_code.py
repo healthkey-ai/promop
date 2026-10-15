@@ -389,3 +389,374 @@ class TestPostSourceCodesRejections:
         body = resp.json()
         assert body['max_bytes'] == 10_000
         assert '10000-byte' in body['detail']
+
+
+# ---------------------------------------------------------------------------
+# Chunked uploads: upload_id + final (#1824)
+# ---------------------------------------------------------------------------
+
+def _entry(source_value, **kwargs):
+    entry = {
+        'source_value': source_value,
+        'source_vocabulary_id': 'LOINC',
+        'omop_table': 'measurement',
+    }
+    entry.update(kwargs)
+    return entry
+
+
+def _age_open_uploads(person, hours=25):
+    """Backdate open runs so the staleness cut-off treats them as abandoned."""
+    from datetime import timedelta
+    from django.utils import timezone
+    from omop_core.models import PatientSourceCodeUpload
+
+    PatientSourceCodeUpload.objects.filter(
+        person=person, finalized_at__isnull=True,
+    ).update(last_chunk_at=timezone.now() - timedelta(hours=hours))
+
+
+def _codes(person):
+    return set(
+        PatientSourceCode.objects
+        .filter(person=person)
+        .values_list('source_value', flat=True)
+    )
+
+
+class TestChunkedUpload:
+    def test_final_prunes_rows_from_earlier_runs(self, smart_env):
+        """The bug in #1824: chunk 2's rows outlived every later import."""
+        url, person = _url(smart_env['person'].person_id), smart_env['person']
+        client = smart_env['client']
+
+        client.post(url, {'source_codes': [_entry('A'), _entry('B')],
+                          'upload_id': 'run-1'}, format='json')
+        client.post(url, {'source_codes': [_entry('C')],
+                          'upload_id': 'run-1', 'final': True}, format='json')
+        assert _codes(person) == {'A', 'B', 'C'}
+
+        # Second run drops B and C, adds D, in two chunks.
+        client.post(url, {'source_codes': [_entry('A')],
+                          'upload_id': 'run-2'}, format='json')
+        resp = client.post(url, {'source_codes': [_entry('D')],
+                                 'upload_id': 'run-2', 'final': True},
+                           format='json')
+        assert resp.status_code == 201
+        assert resp.json()['deleted'] == 2
+        assert _codes(person) == {'A', 'D'}
+
+    def test_non_final_chunk_prunes_nothing(self, smart_env):
+        url, person = _url(smart_env['person'].person_id), smart_env['person']
+        PatientSourceCode.objects.create(
+            person=person, source_value='STALE',
+            source_vocabulary_id='LOINC', omop_table='measurement',
+        )
+        resp = smart_env['client'].post(
+            url, {'source_codes': [_entry('A')], 'upload_id': 'run-1'},
+            format='json',
+        )
+        assert resp.status_code == 201
+        assert 'deleted' not in resp.json()
+        assert _codes(person) == {'STALE', 'A'}
+
+    def test_abandoned_run_leaves_the_set_alone(self, smart_env):
+        """A run that dies before final is stale, never truncated."""
+        url, person = _url(smart_env['person'].person_id), smart_env['person']
+        client = smart_env['client']
+
+        client.post(url, {'source_codes': [_entry('A'), _entry('B')],
+                          'upload_id': 'run-1', 'final': True}, format='json')
+        client.post(url, {'source_codes': [_entry('A')],
+                          'upload_id': 'run-2'}, format='json')
+        assert _codes(person) == {'A', 'B'}
+
+        # run-2 is still open, so the next run has to wait for it to go stale.
+        _age_open_uploads(person)
+        client.post(url, {'source_codes': [_entry('A')],
+                          'upload_id': 'run-3', 'final': True}, format='json')
+        assert _codes(person) == {'A'}
+
+    def test_retried_chunk_is_idempotent(self, smart_env):
+        url, person = _url(smart_env['person'].person_id), smart_env['person']
+        client = smart_env['client']
+        chunk = {'source_codes': [_entry('A')], 'upload_id': 'run-1'}
+
+        client.post(url, chunk, format='json')
+        resp = client.post(url, chunk, format='json')
+        assert resp.json() == {'created': 0, 'updated': 1}
+
+        client.post(url, {'source_codes': [_entry('B')],
+                          'upload_id': 'run-1', 'final': True}, format='json')
+        assert _codes(person) == {'A', 'B'}
+
+    def test_final_retags_a_row_an_earlier_run_wrote(self, smart_env):
+        """A code present in both runs survives on the new token."""
+        url, person = _url(smart_env['person'].person_id), smart_env['person']
+        client = smart_env['client']
+
+        client.post(url, {'source_codes': [_entry('A')],
+                          'upload_id': 'run-1', 'final': True}, format='json')
+        client.post(url, {'source_codes': [_entry('A')],
+                          'upload_id': 'run-2', 'final': True}, format='json')
+
+        row = PatientSourceCode.objects.get(person=person, source_value='A')
+        assert row.upload_id == 'run-2'
+        assert _codes(person) == {'A'}
+
+    def test_final_prunes_untagged_rows_from_before_the_feature(self, smart_env):
+        url, person = _url(smart_env['person'].person_id), smart_env['person']
+        PatientSourceCode.objects.create(
+            person=person, source_value='LEGACY',
+            source_vocabulary_id='LOINC', omop_table='measurement',
+        )
+        resp = smart_env['client'].post(
+            url, {'source_codes': [_entry('A')], 'upload_id': 'run-1',
+                  'final': True}, format='json',
+        )
+        assert resp.json()['deleted'] == 1
+        assert _codes(person) == {'A'}
+
+    def test_other_patients_are_untouched(self, smart_env):
+        other = Person.objects.create(
+            person_id=80002, year_of_birth=1970,
+            gender_source_value='male', race_source_value='unknown',
+            ethnicity_source_value='unknown',
+        )
+        PatientSourceCode.objects.create(
+            person=other, source_value='THEIRS',
+            source_vocabulary_id='LOINC', omop_table='measurement',
+        )
+        smart_env['client'].post(
+            _url(smart_env['person'].person_id),
+            {'source_codes': [_entry('A')], 'upload_id': 'run-1',
+             'final': True}, format='json',
+        )
+        assert _codes(other) == {'THEIRS'}
+
+    def test_replace_still_prunes_against_the_payload(self, smart_env):
+        """The single-request form keeps its meaning."""
+        url, person = _url(smart_env['person'].person_id), smart_env['person']
+        client = smart_env['client']
+
+        client.post(url, {'source_codes': [_entry('A'), _entry('B')]},
+                    format='json')
+        resp = client.post(url, {'source_codes': [_entry('A')],
+                                 'replace': True}, format='json')
+        assert resp.json()['deleted'] == 1
+        assert _codes(person) == {'A'}
+
+    def test_replace_with_upload_id_is_a_400(self, smart_env):
+        resp = smart_env['client'].post(
+            _url(smart_env['person'].person_id),
+            {'source_codes': [_entry('A')], 'replace': True,
+             'upload_id': 'run-1'}, format='json',
+        )
+        assert resp.status_code == 400
+        assert 'cannot be combined' in resp.json()['detail']
+        assert not _codes(smart_env['person'])
+
+    def test_final_without_upload_id_is_a_400(self, smart_env):
+        resp = smart_env['client'].post(
+            _url(smart_env['person'].person_id),
+            {'source_codes': [_entry('A')], 'final': True}, format='json',
+        )
+        assert resp.status_code == 400
+        assert 'final requires an upload_id' in resp.json()['detail']
+        assert not _codes(smart_env['person'])
+
+    @pytest.mark.parametrize('bad', ['', '   ', 17, True, ['run-1'], {}])
+    def test_malformed_upload_id_is_a_400(self, smart_env, bad):
+        resp = smart_env['client'].post(
+            _url(smart_env['person'].person_id),
+            {'source_codes': [_entry('A')], 'upload_id': bad}, format='json',
+        )
+        assert resp.status_code == 400
+        assert not _codes(smart_env['person'])
+
+    def test_overlong_upload_id_is_a_400(self, smart_env):
+        resp = smart_env['client'].post(
+            _url(smart_env['person'].person_id),
+            {'source_codes': [_entry('A')], 'upload_id': 'x' * 65},
+            format='json',
+        )
+        assert resp.status_code == 400
+        assert '64 characters' in resp.json()['detail']
+        assert not _codes(smart_env['person'])
+
+    def test_upload_id_is_stripped_and_stored(self, smart_env):
+        smart_env['client'].post(
+            _url(smart_env['person'].person_id),
+            {'source_codes': [_entry('A')], 'upload_id': '  run-1  '},
+            format='json',
+        )
+        row = PatientSourceCode.objects.get(
+            person=smart_env['person'], source_value='A',
+        )
+        assert row.upload_id == 'run-1'
+
+    def test_untagged_post_leaves_the_token_empty(self, smart_env):
+        smart_env['client'].post(
+            _url(smart_env['person'].person_id),
+            {'source_codes': [_entry('A')]}, format='json',
+        )
+        row = PatientSourceCode.objects.get(
+            person=smart_env['person'], source_value='A',
+        )
+        assert row.upload_id == ''
+
+    def test_chunked_set_over_the_cap_prunes_exactly(self, smart_env):
+        """The reported shape: a set that does not fit in one request."""
+        url, person = _url(smart_env['person'].person_id), smart_env['person']
+        client = smart_env['client']
+        # Shrinking the cap tests the same code path as 5,000 would.
+        from patient_portal.api.views import PatientRecordV1ViewSet
+        original = PatientRecordV1ViewSet._SOURCE_CODES_MAX
+        PatientRecordV1ViewSet._SOURCE_CODES_MAX = 10
+        try:
+            first = [_entry(f'C{i}') for i in range(10)]
+            second = [_entry(f'C{i}') for i in range(10, 15)]
+            client.post(url, {'source_codes': first, 'upload_id': 'run-1'},
+                        format='json')
+            client.post(url, {'source_codes': second, 'upload_id': 'run-1',
+                              'final': True}, format='json')
+            assert len(_codes(person)) == 15
+
+            # Re-import: 12 codes, overlapping but not identical.
+            first = [_entry(f'C{i}') for i in range(3, 13)]
+            second = [_entry(f'C{i}') for i in range(13, 15)]
+            client.post(url, {'source_codes': first, 'upload_id': 'run-2'},
+                        format='json')
+            resp = client.post(url, {'source_codes': second,
+                                     'upload_id': 'run-2', 'final': True},
+                               format='json')
+            assert resp.json()['deleted'] == 3
+            assert _codes(person) == {f'C{i}' for i in range(3, 15)}
+        finally:
+            PatientRecordV1ViewSet._SOURCE_CODES_MAX = original
+
+
+class TestOverlappingUploads:
+    """One patient takes one run at a time (#1824 review)."""
+
+    def test_second_run_is_refused_while_the_first_is_open(self, smart_env):
+        url, person = _url(smart_env['person'].person_id), smart_env['person']
+        client = smart_env['client']
+
+        client.post(url, {'source_codes': [_entry('X')],
+                          'upload_id': 'run-a'}, format='json')
+        resp = client.post(url, {'source_codes': [_entry('X')],
+                                 'upload_id': 'run-b'}, format='json')
+        assert resp.status_code == 409
+        assert resp.json()['open_upload_id'] == 'run-a'
+        assert _codes(person) == {'X'}
+
+    def test_interleaved_runs_cannot_truncate_the_patient(self, smart_env):
+        """Run B retagging X would make A's final chunk delete A's own code."""
+        url, person = _url(smart_env['person'].person_id), smart_env['person']
+        client = smart_env['client']
+
+        client.post(url, {'source_codes': [_entry('X')],
+                          'upload_id': 'run-a'}, format='json')
+        # Everything run B tries is refused while A is open.
+        for body in (
+            {'source_codes': [_entry('X')], 'upload_id': 'run-b'},
+            {'source_codes': [_entry('Z')], 'upload_id': 'run-b', 'final': True},
+        ):
+            assert client.post(url, body, format='json').status_code == 409
+
+        resp = client.post(url, {'source_codes': [_entry('Y')],
+                                 'upload_id': 'run-a', 'final': True},
+                           format='json')
+        assert resp.status_code == 201
+        assert _codes(person) == {'X', 'Y'}
+
+    def test_a_finalized_token_cannot_be_reused(self, smart_env):
+        url, person = _url(smart_env['person'].person_id), smart_env['person']
+        client = smart_env['client']
+
+        client.post(url, {'source_codes': [_entry('A')],
+                          'upload_id': 'run-1', 'final': True}, format='json')
+        resp = client.post(url, {'source_codes': [_entry('B')],
+                                 'upload_id': 'run-1'}, format='json')
+        assert resp.status_code == 409
+        assert 'already been finalized' in resp.json()['detail']
+        assert _codes(person) == {'A'}
+
+    def test_a_stale_run_is_superseded_and_then_refused(self, smart_env):
+        url, person = _url(smart_env['person'].person_id), smart_env['person']
+        client = smart_env['client']
+
+        client.post(url, {'source_codes': [_entry('A')],
+                          'upload_id': 'run-a'}, format='json')
+        _age_open_uploads(person)
+
+        assert client.post(url, {'source_codes': [_entry('B')],
+                                 'upload_id': 'run-b'},
+                           format='json').status_code == 201
+        # run-a was closed as abandoned, so its late chunk is not a retry:
+        # first run-b holds the patient, and once run-b is done the token
+        # itself is spent.
+        resp = client.post(url, {'source_codes': [_entry('C')],
+                                 'upload_id': 'run-a'}, format='json')
+        assert resp.status_code == 409
+        assert resp.json()['open_upload_id'] == 'run-b'
+
+        client.post(url, {'source_codes': [_entry('B')],
+                          'upload_id': 'run-b', 'final': True}, format='json')
+        resp = client.post(url, {'source_codes': [_entry('C')],
+                                 'upload_id': 'run-a'}, format='json')
+        assert resp.status_code == 409
+        assert 'already been finalized' in resp.json()['detail']
+
+    def test_runs_on_different_patients_do_not_block_each_other(self, smart_env):
+        other = Person.objects.create(
+            person_id=80003, year_of_birth=1960,
+            gender_source_value='male', race_source_value='unknown',
+            ethnicity_source_value='unknown',
+        )
+        PatientRecord.objects.create(person=other, organization=smart_env['org'])
+        client = smart_env['client']
+        client.post(_url(smart_env['person'].person_id),
+                    {'source_codes': [_entry('A')], 'upload_id': 'run-a'},
+                    format='json')
+        resp = client.post(_url(other.person_id),
+                           {'source_codes': [_entry('A')], 'upload_id': 'run-b'},
+                           format='json')
+        assert resp.status_code == 201
+
+    def test_ledger_records_the_run(self, smart_env):
+        from omop_core.models import PatientSourceCodeUpload
+
+        url, person = _url(smart_env['person'].person_id), smart_env['person']
+        client = smart_env['client']
+
+        client.post(url, {'source_codes': [_entry('A')],
+                          'upload_id': 'run-1'}, format='json')
+        run = PatientSourceCodeUpload.objects.get(person=person,
+                                                  upload_id='run-1')
+        assert run.finalized_at is None
+
+        client.post(url, {'source_codes': [_entry('B')],
+                          'upload_id': 'run-1', 'final': True}, format='json')
+        run.refresh_from_db()
+        assert run.finalized_at is not None
+
+    def test_untagged_posts_keep_no_ledger_row(self, smart_env):
+        from omop_core.models import PatientSourceCodeUpload
+
+        smart_env['client'].post(
+            _url(smart_env['person'].person_id),
+            {'source_codes': [_entry('A')], 'replace': True}, format='json',
+        )
+        assert not PatientSourceCodeUpload.objects.exists()
+
+    def test_nul_in_upload_id_is_a_400(self, smart_env):
+        resp = smart_env['client'].post(
+            _url(smart_env['person'].person_id),
+            {'source_codes': [_entry('A')], 'upload_id': 'run\x001'},
+            format='json',
+        )
+        assert resp.status_code == 400
+        assert 'NUL' in resp.json()['detail']
+        assert not _codes(smart_env['person'])

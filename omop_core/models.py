@@ -5093,6 +5093,16 @@ class PatientSourceCode(models.Model):
         default=dict, blank=True,
         help_text='Unparsed metadata from ETL (reference ranges, category, etc.).',
     )
+    # No index: every query that reads it is already narrowed to one person by
+    # the FK, and an index here would cost a blocking build on deploy.
+    upload_id = models.CharField(
+        max_length=64, blank=True, default='',
+        help_text=(
+            'Token naming the ETL run that last wrote this row. A chunked '
+            'upload sends the same token on every request and prunes rows '
+            'carrying an older one once the final chunk lands (#1824).'
+        ),
+    )
     first_seen = models.DateTimeField(auto_now_add=True)
     last_seen = models.DateTimeField(auto_now=True)
 
@@ -5107,6 +5117,45 @@ class PatientSourceCode(models.Model):
 
     def __str__(self):
         return f'{self.source_value} ({self.omop_table}) — person {self.person_id}'
+
+
+class PatientSourceCodeUpload(models.Model):
+    """One ETL run writing a patient's source codes, in one or more chunks.
+
+    The token on `PatientSourceCode.upload_id` says which run last wrote a
+    row, which is enough to prune when runs do not overlap. It is not enough
+    on its own: a second run that re-sends a code retags that row, so the
+    first run's final chunk would then delete a code it had itself uploaded
+    and leave the patient truncated. This ledger is what lets the endpoint see
+    that another run is still open and refuse (#1824).
+
+    A run with no chunk for `_UPLOAD_STALE_AFTER` is treated as abandoned and
+    closed, so a crashed import cannot block a patient for good.
+    """
+    person = models.ForeignKey(
+        Person, on_delete=models.CASCADE, related_name='source_code_uploads',
+    )
+    upload_id = models.CharField(max_length=64)
+    started_at = models.DateTimeField(auto_now_add=True)
+    last_chunk_at = models.DateTimeField(auto_now=True)
+    finalized_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text='Set by the final chunk, or when a later run supersedes an '
+                  'abandoned one.',
+    )
+
+    class Meta:
+        db_table = 'patient_source_code_upload'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['person', 'upload_id'],
+                name='uq_patient_source_code_upload',
+            ),
+        ]
+
+    def __str__(self):
+        state = 'finalized' if self.finalized_at else 'open'
+        return f'{self.upload_id} ({state}) — person {self.person_id}'
 
 
 class ConceptEmbedding(models.Model):
