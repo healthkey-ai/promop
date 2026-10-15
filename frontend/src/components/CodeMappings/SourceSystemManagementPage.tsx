@@ -19,6 +19,7 @@ interface RegistryResponse {
   page: number;
   page_size: number;
   seed_import: {
+    artifact_identity: string;
     outcome: string;
     expected_rows: number;
     completed_at: string | null;
@@ -98,8 +99,9 @@ export default function SourceSystemManagementPage() {
         <span className="font-medium">{data.total.toLocaleString()}</span>
       </div>
       <div className="rounded border border-slate-200 bg-white p-3">
-        <span className="block text-xs font-semibold uppercase text-slate-500">Pinned seed import</span>
+        <span className="block text-xs font-semibold uppercase text-slate-500">Latest hospital seed import</span>
         <span className="font-medium">{receipt ? receipt.outcome : "No receipt recorded"}</span>
+        {receipt?.artifact_identity && <span className="block break-all text-xs text-slate-500">{receipt.artifact_identity}</span>}
         {receipt?.completed_at && <span className="block text-xs text-slate-500">Completed {new Date(receipt.completed_at).toLocaleString()}</span>}
         {receipt?.failure_reason && <span className="block text-xs text-red-700">{receipt.failure_reason}</span>}
       </div>

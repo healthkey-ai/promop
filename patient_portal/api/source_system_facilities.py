@@ -10,7 +10,6 @@ from omop_core.services.access import has_professional_access
 
 
 PAGE_SIZE = 50
-SEED_IDENTITY = 'healthtree-hospital-seed-20261005-v2'
 
 
 @api_view(['GET'])
@@ -47,9 +46,9 @@ def source_system_facilities(request):
         'confidence', 'attribution_method', 'provenance',
     )[start:start + PAGE_SIZE])
 
-    receipt = HospitalCodeImport.objects.filter(
-        artifact_identity=SEED_IDENTITY,
-    ).values('outcome', 'expected_rows', 'completed_at', 'failure_reason').first()
+    receipt = HospitalCodeImport.objects.order_by('-created_at', '-id').values(
+        'artifact_identity', 'outcome', 'expected_rows', 'completed_at', 'failure_reason',
+    ).first()
     if receipt:
         receipt['failure_reason'] = receipt['failure_reason'][:300]
 

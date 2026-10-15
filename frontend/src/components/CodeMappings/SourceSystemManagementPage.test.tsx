@@ -16,7 +16,7 @@ function response(overrides: Record<string, unknown> = {}) {
       attribution_method: "connection", provenance: "healthtree-hospital-seed-20261005-v2",
     }],
     total: 1, page: 1, page_size: 50,
-    seed_import: { outcome: "applied", expected_rows: 691800, completed_at: null, failure_reason: "" },
+    seed_import: { artifact_identity: "healthtree-hospital-seed-20261005-v2", outcome: "applied", expected_rows: 691800, completed_at: null, failure_reason: "" },
     system_diagnostics: { source_code_rows: 10, codes_with_facility_evidence: 8 },
     ...overrides,
   };
@@ -35,6 +35,7 @@ describe("SourceSystemManagementPage", () => {
     expect(screen.getByRole("heading", { name: "Source Code Systems/Hospitals Management" })).toBeInTheDocument();
     expect(screen.getByText(system, { selector: "td" })).toBeInTheDocument();
     expect(screen.getByText("8 with per-code facility evidence")).toBeInTheDocument();
+    expect(screen.getByText("healthtree-hospital-seed-20261005-v2", { selector: "span" })).toBeInTheDocument();
     await waitFor(() => expect(mockGet).toHaveBeenCalledWith(
       "/v1/code-mappings/source-systems/",
       { params: { system, facility: "University Hospital", page: 1 } },
@@ -52,7 +53,7 @@ describe("SourceSystemManagementPage", () => {
   it("explains missing registry rows when per-code evidence exists", async () => {
     mockGet.mockResolvedValue({ data: response({
       results: [], total: 0,
-      seed_import: { outcome: "failed", expected_rows: 691800, completed_at: null, failure_reason: "Download failed" },
+      seed_import: { artifact_identity: "healthtree-hospital-seed-20261005-v2", outcome: "failed", expected_rows: 691800, completed_at: null, failure_reason: "Download failed" },
     }) });
     render(<MemoryRouter initialEntries={[`/code-mappings/source-systems?system=${encodeURIComponent(system)}`]}>
       <SourceSystemManagementPage />

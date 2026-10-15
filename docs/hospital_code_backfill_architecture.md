@@ -133,7 +133,7 @@ needs, and retain the exact FHIR `Coding.system` URI as identity.
 Curators can inspect the associations at **Code Mapping → Source systems /
 hospitals**, or follow the exact FHIR system and observed-facility links in
 Edit Mapping. The read-only page filters by exact URI and facility name, shows
-all confidence levels and provenance, and reports the pinned seed receipt plus
+all confidence levels and provenance, and reports the latest hospital seed receipt plus
 the number of codes under an exact system with per-code facility evidence.
 Empty registry results do not mean the URI should be replaced with a name:
 check whether the asynchronous seed replay is queued, running, or failed.

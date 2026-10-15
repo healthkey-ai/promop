@@ -46,6 +46,11 @@ def test_exact_system_and_facility_filters_keep_ambiguity_visible(staff_client):
         source_metadata={'facilities': []},
     )
     HospitalCodeImport.objects.create(
+        source_url='https://example.test', artifact_filename='old.zip',
+        artifact_identity='healthtree-hospital-seed-20261002-v1',
+        artifact_sha256='f' * 64, expected_rows=691_800, outcome='applied',
+    )
+    HospitalCodeImport.objects.create(
         source_url='https://example.test', artifact_filename='seed.zip',
         artifact_identity='healthtree-hospital-seed-20261005-v2',
         artifact_sha256='d' * 64, expected_rows=691_800, outcome='queued',
@@ -61,6 +66,7 @@ def test_exact_system_and_facility_filters_keep_ambiguity_visible(staff_client):
         'source_code_rows': 3, 'codes_with_facility_evidence': 1,
     }
     assert response.data['seed_import']['outcome'] == 'queued'
+    assert response.data['seed_import']['artifact_identity'] == 'healthtree-hospital-seed-20261005-v2'
 
     filtered = staff_client.get(URL, {'system': EPIC, 'facility': 'university'})
     assert filtered.data['total'] == 1
