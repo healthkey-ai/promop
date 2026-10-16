@@ -22800,7 +22800,9 @@ class CodeMappingRepointTest(TestCase):
         self.assertEqual(Measurement.objects.filter(person=self.person).count(), 1)
         self.assertEqual(resp.data['repoint']['rows_updated'], 1)
 
-    def test_patient_source_code_save_updates_only_current_patient(self):
+    def test_patient_source_code_save_skips_repoint(self):
+        """Saving with patient_id skips repoint entirely — Generate OMOP
+        from the patients list handles resolution for all patients."""
         other_person = Person.objects.create(
             person_id=910002, gender_concept_id=0, year_of_birth=1970,
             race_concept_id=0, ethnicity_concept_id=0,
@@ -22820,15 +22822,22 @@ class CodeMappingRepointTest(TestCase):
             'status': 'approved',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
-        self.assertEqual(resp.data['repoint']['rows_updated'], 1)
-        self.assertEqual(resp.data['repoint']['persons_marked_stale'], 1)
+        # No repoint — clinical rows are untouched until Generate OMOP.
+        self.assertIsNone(resp.data['repoint'])
+        self.mapping.refresh_from_db()
+        self.assertIn(self.minted.concept_id, self.mapping.deferred_repoint_concept_ids)
         self.row.refresh_from_db()
         other_row.refresh_from_db()
-        self.assertEqual(self.row.measurement_concept_id, self.standard.concept_id)
+        self.assertEqual(self.row.measurement_concept_id, self.minted.concept_id)
         self.assertEqual(other_row.measurement_concept_id, self.minted.concept_id)
 
-        # The selected-patient Generate OMOP path handles the other person later.
+        # Generate OMOP resolves both patients afterward.
         from omop_core.mapping.code_resolution import resolve_person_source_codes
+        result = resolve_person_source_codes(self.person)
+        self.assertEqual(result['resolved'], 1)
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.measurement_concept_id, self.standard.concept_id)
+
         result = resolve_person_source_codes(other_person)
         self.assertEqual(result['resolved'], 1)
         other_row.refresh_from_db()
@@ -22847,6 +22856,8 @@ class CodeMappingRepointTest(TestCase):
         self.assertEqual(self.row.measurement_concept_id, self.minted.concept_id)
 
     def test_generate_omop_finishes_patient_scoped_standard_target_change(self):
+        """Patient-scoped save defers the standard-to-standard repoint;
+        Generate OMOP resolves both patients afterward."""
         self.mapping.status = 'approved'
         self.mapping.target_concept = self.standard
         self.mapping.save(update_fields=['status', 'target_concept'])
@@ -22871,18 +22882,54 @@ class CodeMappingRepointTest(TestCase):
             'status': 'approved',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        # No repoint — both rows untouched.
+        self.assertIsNone(resp.data['repoint'])
         self.row.refresh_from_db()
         other_row.refresh_from_db()
         self.mapping.refresh_from_db()
-        self.assertEqual(self.row.measurement_concept_id, self.corrected.concept_id)
+        self.assertEqual(self.row.measurement_concept_id, self.standard.concept_id)
         self.assertEqual(other_row.measurement_concept_id, self.standard.concept_id)
         self.assertIn(self.standard.concept_id, self.mapping.deferred_repoint_concept_ids)
 
+        # Generate OMOP resolves both patients.
         from omop_core.mapping.code_resolution import resolve_person_source_codes
+        result = resolve_person_source_codes(self.person)
+        self.assertEqual(result['resolved'], 1)
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.measurement_concept_id, self.corrected.concept_id)
+
         result = resolve_person_source_codes(other_person)
         self.assertEqual(result['resolved'], 1)
         other_row.refresh_from_db()
         self.assertEqual(other_row.measurement_concept_id, self.corrected.concept_id)
+
+    def test_code_mappings_approve_after_patient_save_sweeps_deferred_ids(self):
+        """Patient-tab save populates deferred_repoint_concept_ids, then
+        a Code Mappings page approve (no patient_id) sweeps and clears them."""
+        # Step 1: patient-tab save defers the repoint.
+        resp = self.client.patch(f'/api/v1/code-mappings/{self.mapping.id}/', {
+            'patient_id': self.person.person_id,
+            'destination_concept_id': self.standard.concept_id,
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertIsNone(resp.data['repoint'])
+        self.mapping.refresh_from_db()
+        self.assertNotEqual(self.mapping.deferred_repoint_concept_ids, [])
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.measurement_concept_id, self.minted.concept_id)
+
+        # Step 2: Code Mappings page approve (no patient_id) clears deferred
+        # and repoints the stored rows.
+        resp = self.client.patch(f'/api/v1/code-mappings/{self.mapping.id}/', {
+            'destination_concept_id': self.standard.concept_id,
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.mapping.refresh_from_db()
+        self.assertEqual(self.mapping.deferred_repoint_concept_ids, [])
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.measurement_concept_id, self.standard.concept_id)
 
     def test_repoint_marks_patient_records_for_re_derivation(self):
         """Derivation is deferred, not skipped: 12-32s per patient is too slow
