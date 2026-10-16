@@ -12102,10 +12102,10 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
     """Create or update one mapping. Returns (mapping, repoint_result).
 
     ``repoint_result`` is non-None when the save moved an approved mapping's
-    destination, in which case the clinical rows already stored have been
-    re-pointed. Approving is the moment a curation decision reaches the data;
-    doing it in the same request is what makes the dialog's Update & Approve
-    button mean what it says.
+    destination **and** no ``person_id`` was supplied.  When ``person_id`` is
+    set (a patient-page save), rows are not re-pointed immediately; old
+    concept IDs are stored in ``deferred_repoint_concept_ids`` for
+    Generate OMOP to apply later.
     """
     # Blank is legal and meaningful: a paper lab test name or a phrase from a
     # note has no code system, and requiring one would make those unmappable.
@@ -13000,6 +13000,8 @@ def code_mapping_detail(request, mapping_id):
         mapping.origin_system = ''
         mapping.locked_by = None
         mapping.locked_at = None
+        mapping.pending_repoint_concept_ids = []
+        mapping.deferred_repoint_concept_ids = []
         mapping.save()
         mapping.destination_candidates.all().delete()
         from omop_core.services.mapping_destinations import destination_options

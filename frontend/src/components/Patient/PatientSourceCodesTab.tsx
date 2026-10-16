@@ -265,7 +265,7 @@ export default function PatientSourceCodesTab({ personId }: Props) {
     setDialogRow(null);
   };
 
-  const handleDialogSaved = (_saved: CodeMappingRow, repoint: RepointResult | null) => {
+  const handleDialogSaved = (saved: CodeMappingRow, repoint: RepointResult | null) => {
     handleDialogClose();
     if (repoint && repoint.rows_updated) {
       setBanner(
@@ -273,6 +273,8 @@ export default function PatientSourceCodesTab({ personId }: Props) {
         + (repoint.rows_collapsed ? `, ${repoint.rows_collapsed} duplicate(s) collapsed` : "")
         + ". Patient records queued for re-derivation.",
       );
+    } else if (saved.status === "approved") {
+      setBanner("Mapping approved. Run Generate OMOP to apply to clinical rows.");
     } else {
       setBanner("Mapping saved.");
     }

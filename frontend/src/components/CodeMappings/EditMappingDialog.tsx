@@ -149,7 +149,8 @@ export default function EditMappingDialog({
     ? selectedRow?.source_system_context ?? sourceEvidence?.system_context
     : undefined;
   const willRepoint =
-    mode === "edit"
+    !patientId
+    && mode === "edit"
     && form.status === "approved"
     && selectedRow !== null
     && String(selectedRow.destination_concept_id || "") !== form.destination_concept_id;

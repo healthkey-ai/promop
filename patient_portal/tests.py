@@ -22824,6 +22824,8 @@ class CodeMappingRepointTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         # No repoint — clinical rows are untouched until Generate OMOP.
         self.assertIsNone(resp.data['repoint'])
+        self.mapping.refresh_from_db()
+        self.assertIn(self.minted.concept_id, self.mapping.deferred_repoint_concept_ids)
         self.row.refresh_from_db()
         other_row.refresh_from_db()
         self.assertEqual(self.row.measurement_concept_id, self.minted.concept_id)
@@ -22900,6 +22902,34 @@ class CodeMappingRepointTest(TestCase):
         self.assertEqual(result['resolved'], 1)
         other_row.refresh_from_db()
         self.assertEqual(other_row.measurement_concept_id, self.corrected.concept_id)
+
+    def test_code_mappings_approve_after_patient_save_sweeps_deferred_ids(self):
+        """Patient-tab save populates deferred_repoint_concept_ids, then
+        a Code Mappings page approve (no patient_id) sweeps and clears them."""
+        # Step 1: patient-tab save defers the repoint.
+        resp = self.client.patch(f'/api/v1/code-mappings/{self.mapping.id}/', {
+            'patient_id': self.person.person_id,
+            'destination_concept_id': self.standard.concept_id,
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertIsNone(resp.data['repoint'])
+        self.mapping.refresh_from_db()
+        self.assertNotEqual(self.mapping.deferred_repoint_concept_ids, [])
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.measurement_concept_id, self.minted.concept_id)
+
+        # Step 2: Code Mappings page approve (no patient_id) clears deferred
+        # and repoints the stored rows.
+        resp = self.client.patch(f'/api/v1/code-mappings/{self.mapping.id}/', {
+            'destination_concept_id': self.standard.concept_id,
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.mapping.refresh_from_db()
+        self.assertEqual(self.mapping.deferred_repoint_concept_ids, [])
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.measurement_concept_id, self.standard.concept_id)
 
     def test_repoint_marks_patient_records_for_re_derivation(self):
         """Derivation is deferred, not skipped: 12-32s per patient is too slow
