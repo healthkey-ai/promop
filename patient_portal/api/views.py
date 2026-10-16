@@ -11779,6 +11779,8 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
     system_context = source_system_context(mapping)
     # A mapping can legitimately have no destination yet: a code seen at ingest
     # whose concept is not loaded is a review-queue row, not an error.
+    from omop_core.services.mapping_source_units import source_units
+    units = source_units(mapping)
     source_evidence = None
     if include_source_evidence:
         evidence_metadata = dict(mapping.source_metadata or {}) if mapping else {}
@@ -11803,6 +11805,7 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
     if concept is None:
         payload = {
             **source_retirement,
+            'source_units': units,
             'destination_concept_id': None,
             'destination_concept_name': '',
             'destination_concept_code': '',
@@ -11861,6 +11864,7 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
         return payload
     payload = {
         **source_retirement,
+        'source_units': units,
         # Destination
         'destination_concept_id': concept.concept_id,
         'destination_concept_name': concept.concept_name,
@@ -12839,9 +12843,10 @@ def code_mapping_list(request):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == 'GET':
+        from omop_core.services.mapping_source_units import SourceUnits
         mappings = SourceCodeConceptMapping.objects.select_related(
             'target_concept', 'created_by', 'reviewer', 'locked_by', 'organization',
-        ).defer('source_unit_evidence')
+        ).defer('source_unit_evidence').annotate(source_units=SourceUnits('source_unit_evidence'))
         from omop_core.services.athena_mapping_guard import without_icd10_athena_duplicates
         mappings = without_icd10_athena_duplicates(mappings)
         if request.query_params.get('duplicates_only') == '1':

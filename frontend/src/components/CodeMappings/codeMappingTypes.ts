@@ -52,6 +52,7 @@ export interface CodeMappingRow {
   locked_at?: string | null;
   source_evidence?: SourceEvidence;
   source_unit?: string;
+  source_units?: string[];
   example_quantity?: string;
   source_code_id?: number;
   extracted_source_unit?: string;
