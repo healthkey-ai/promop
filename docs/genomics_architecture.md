@@ -54,7 +54,9 @@ The repository's domain regression fixture records 81252-9 in Observation. Paren
 | variant_category | LOINC 83005-9 | Observation when resolved; frozen seed fallback is Measurement |
 | variant_name | LOINC 81253-7; source genomics:variant_name | Observation text; v3 promotion of exact untouched seeds |
 | variant_description, origin | `genomics:<field>` | Observation text |
-| assessment, specimen_id, specimen_type, collection_date, report_id, laboratory | `genomics:<field>` | Observation text |
+| assessment, specimen_id, collection_date, report_id, laboratory | `genomics:<field>` | Observation text |
+| specimen_type | SNOMED 371439000 "Specimen type"; source genomics:specimen_type | Observation text; approved by 0297 (#1865) |
+| pathologist_notes | LOINC 77202-0 "Laboratory comment [Text] in Report Narrative"; source genomics:pathologist_notes | Observation text; added by 0297 (#1865) |
 | interpretation_date, classification_framework, evidence_source, genomic_reference_sequence_id, zygosity | `genomics:<field>` | Observation text |
 | status | LOINC 69548-6; source genomics:status | Measurement text |
 | clone_fraction | genomics:clone_fraction | Measurement number and unit; no LOINC recipe |
