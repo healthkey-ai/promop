@@ -512,6 +512,31 @@ def test_genetics_groups_findings_into_tests_and_attaches_matching_documents(mon
     }
 
 
+def test_each_genetic_test_shows_its_specimen_method_and_pathologist_notes_once(monkeypatch):
+    """D22 (#1865): the report's details repeat on every finding but appear once per test."""
+    record = PatientRecordFactory(disease='')
+    m1 = lab(record, loinc('81252-9', 'Gene variant'), '2025-03-10')
+    m2 = lab(record, loinc('81252-9', 'Gene variant'), '2025-03-10')
+    m3 = lab(record, loinc('81252-9', 'Gene variant'), '2024-01-05')
+    report = {'test_date': '2025-03-10', 'variant_analysis_method_type': 'FISH',
+              'specimen_type': 'Bone marrow aspirate',
+              'pathologist_notes': 'FISH on CD138-selected plasma cells.'}
+    monkeypatch.setattr('omop_core.services.genomics.list_variants', lambda person: [
+        {'id': m1.pk, 'gene': 'tp53', 'variant': 'del(17p)', **report},
+        {'id': m2.pk, 'gene': 'fgfr3', 'variant': 't(4;14)', **report},
+        {'id': m3.pk, 'gene': 'kras', 'variant': 'G12D', 'test_date': '2024-01-05', 'assay_method': 'NGS'},
+    ])
+
+    tests = signed_in(record).get('/api/v1/phr/genetics/').data['tests']
+
+    fish, ngs = tests
+    # The editor's method component labels the test when no imported assay method exists.
+    assert (fish['type'], [f['name'] for f in fish['findings']]) == ('FISH', ['TP53', 'FGFR3'])
+    assert fish['specimen'] == 'Bone marrow aspirate'
+    assert fish['notes'] == 'FISH on CD138-selected plasma cells.'
+    assert 'specimen' not in ngs and 'notes' not in ngs
+
+
 def test_unlabelled_findings_join_the_only_genetic_report_from_that_day(monkeypatch):
     record = PatientRecordFactory(disease='')
     m1 = lab(record, loinc('81252-9', 'Gene variant'), '2026-08-20')

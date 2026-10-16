@@ -227,7 +227,7 @@ export default function GenomicsTab({ formData, readOnly = false }: {
       {markerFor((draft || viewing)!)?.expert_review && <p className="text-sm text-amber-700">{markerFor((draft || viewing)!)?.expert_review}</p>}
     {viewing && <div className="space-y-4">
       {editable && markerFor(viewing)?.writable !== false && <Button onClick={() => { setDraft(editFinding(viewing)); setViewing(null); }}>Edit result</Button>}
-      <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4">{[...fields, ['assessment', 'Source result assessment'], ['variant_description', 'Full finding description'], ['variant_category', 'Original variant category'], ['gene', 'Original gene field']].map(([key, label]) => <div key={key}>
+      <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4">{[...fields, ['assessment', 'Source result assessment'], ['variant_description', 'Full finding description'], ['pathologist_notes', 'Pathologist notes'], ['variant_category', 'Original variant category'], ['gene', 'Original gene field']].map(([key, label]) => <div key={key}>
         <dt className="flex items-center gap-1.5 text-sm text-muted-foreground">{label}{attributeLink(key, label)}</dt><dd className="text-sm whitespace-pre-wrap break-words">{key === 'status' ? findingStatus(viewing) : (key === 'genomic_feature' ? featureLabel(viewing) : viewing[key]) ?? '—'}{['allelic_frequency', 'clone_fraction'].includes(key) && viewing[key] != null ? ` ${viewing[`${key}_unit`] === '1' ? '(fraction)' : '%'}` : ''}</dd>
       </div>)}</dl>
     </div>}
@@ -272,6 +272,9 @@ export default function GenomicsTab({ formData, readOnly = false }: {
         {draft.assessment && <p className="text-sm">Source result assessment: {draft.assessment}</p>}
         <label className="space-y-1 text-sm sm:col-span-2"><span className="block font-medium">Full finding description</span>
           <textarea className="w-full rounded-md border bg-background px-3 py-2" rows={4} maxLength={10000} value={draft.variant_description ?? ''} onChange={e => setDraft({ ...draft, variant_description: e.target.value })} />
+        </label>
+        <label className="space-y-1 text-sm sm:col-span-2"><span className="block font-medium">Pathologist notes</span>
+          <textarea className="w-full rounded-md border bg-background px-3 py-2" rows={4} maxLength={10000} value={draft.pathologist_notes ?? ''} onChange={e => setDraft({ ...draft, pathologist_notes: e.target.value })} />
         </label>
       </fieldset>
       <div className="flex gap-2"><Button type="submit" disabled={busy}>{busy ? 'Saving…' : 'Save genomic finding'}</Button><Button type="button" variant="outline" disabled={busy} onClick={() => { setDraft(null); setError(''); }}>Cancel</Button></div>

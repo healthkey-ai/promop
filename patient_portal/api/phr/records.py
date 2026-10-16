@@ -263,7 +263,10 @@ def genetics(person, record) -> dict[str, Any]:
     # One test per (method, date): the findings a single report produced.
     tests: OrderedDict[tuple, dict[str, Any]] = OrderedDict()
     for variant in sorted(variants, key=lambda v: v.get('test_date') or '', reverse=True):
-        method = (variant.get('assay_method') or '').strip() or UNLABELLED
+        # Imported findings carry assay_method; the Genomics editor writes the
+        # variant analysis method component (LOINC 81304-8).
+        method = ((variant.get('assay_method') or '').strip()
+                  or (variant.get('variant_analysis_method_type') or '').strip() or UNLABELLED)
         when = variant.get('test_date')
         test = tests.setdefault((method.lower(), when), {
             'id': f"test-{variant.get('id')}",
@@ -272,6 +275,12 @@ def genetics(person, record) -> dict[str, Any]:
             'findings': [],
         })
         test['findings'].append(_finding(variant, sources))
+        # Specimen and pathologist notes describe the report, so every finding
+        # from it repeats them (D22, #1865). Show each distinct value once.
+        for key, field in (('specimen', 'specimen_type'), ('notes', 'pathologist_notes')):
+            value = (variant.get(field) or '').strip()
+            if value and value not in test.setdefault(key, []):
+                test[key].append(value)
 
     documents = list(PatientDocument.objects.filter(
         person=person, doc_type__in=GENETIC_DOC_LABELS,
@@ -309,6 +318,10 @@ def genetics(person, record) -> dict[str, Any]:
         if 'source' not in test:
             first = next((f['source'] for f in test['findings'] if f.get('source')), None)
             test['source'] = first or source('record', None, None)
+        if 'specimen' in test:
+            test['specimen'] = '; '.join(test['specimen'])
+        if 'notes' in test:
+            test['notes'] = '\n\n'.join(test['notes'])
         items.append({k: v for k, v in test.items() if v is not None})
     items.sort(key=lambda t: t.get('date') or '', reverse=True)
     return {'tests': items}
