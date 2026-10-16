@@ -249,6 +249,36 @@ def test_group_approval_reports_all_mismatching_members_before_queueing():
     assert not SourceCodeConceptMapping.objects.filter(status='approved').exists()
 
 
+def test_patient_scoped_save_skips_unit_consistency_check():
+    """A patient-page save (patient_id present) skips the expensive global
+    Measurement aggregation and approves directly without a 409."""
+    destination = loinc_destination()
+    row = mapping(destination)
+    # A mismatched unit that would normally trigger a 409 confirmation.
+    measurement(destination, 'mmol/L')
+    person = MeasurementFactory._meta.model.objects.filter(
+        measurement_source_value='ALB-1',
+    ).first().person
+    client = APIClient()
+    client.force_authenticate(Identity.objects.create_user(
+        email='patient-unit-curator@example.test', is_staff=True,
+    ))
+    url = f'/api/v1/code-mappings/{row.pk}/'
+
+    # Without patient_id → 409 confirmation required.
+    warning = client.patch(url, {'status': 'approved'}, format='json')
+    assert warning.status_code == 409
+    assert warning.data['code'] == 'unit_mismatch_confirmation_required'
+
+    # With patient_id → unit check skipped, approval succeeds.
+    approved = client.patch(url, {
+        'status': 'approved', 'patient_id': person.person_id,
+    }, format='json')
+    assert approved.status_code == 200
+    row.refresh_from_db()
+    assert row.status == 'approved'
+
+
 def test_audit_command_exits_nonzero_and_prints_evidence(capsys):
     destination = loinc_destination()
     row = mapping(destination, status='approved')
