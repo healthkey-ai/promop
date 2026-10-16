@@ -6,9 +6,11 @@ date, so these details live on each finding as genomics components:
 
 - Method is already ``genetic_mutations.variant_analysis_method_type``
   (LOINC 81304-8, approved). Nothing to do.
-- Specimen is ``genetic_mutations.specimen_type``, proposed with SNOMED
-  371439000 "Specimen type" (Observation domain). Approve it so new facts carry
-  the concept. A curator's approval or rejection is left alone.
+- Specimen is ``genetic_mutations.specimen_type``. Map it to SNOMED 371439000
+  "Specimen type" (Observation domain) and approve it, so new facts carry the
+  concept. A curator's approval of any concept stands. A proposed or rejected
+  row gets 371439000: rejecting a different concept is not a reason to leave
+  the field without one.
 - Pathologist notes become a new component, ``genetic_mutations.pathologist_notes``,
   under LOINC 77202-0 "Laboratory comment [Text] in Report Narrative"
   (Observation domain).
@@ -42,14 +44,15 @@ def approve_specimen_type(apps, schema_editor):
     Concept = apps.get_model('omop_core', 'Concept')
     Mapping = apps.get_model('omop_core', 'FieldConceptMapping')
     mapping = Mapping.objects.using(using).filter(field_name='genetic_mutations.specimen_type').first()
-    if mapping is None or mapping.status != 'proposed':
+    # An approval is a curator's judgment and stands. A rejection only rules
+    # out the concept that was rejected; the field still needs one.
+    if mapping is None or mapping.status == 'approved':
         return
     concept = _standard(Concept, using, 'SNOMED', '371439000', 'Observation')
     if concept is None:
         logger.warning('SNOMED 371439000 is not loaded; approving specimen_type without a concept.')
-    else:
-        mapping.concept = concept
-        mapping.vocabulary_id, mapping.concept_code = 'SNOMED', '371439000'
+    mapping.concept = concept
+    mapping.vocabulary_id, mapping.concept_code = 'SNOMED', '371439000'
     mapping.omop_table = 'observation'
     mapping.status = 'approved'
     mapping.reviewed_at = timezone.now()

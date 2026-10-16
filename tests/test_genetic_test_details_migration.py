@@ -37,14 +37,29 @@ def test_proposed_specimen_type_is_approved_with_the_snomed_observable():
     assert mapped_concept(row)[0] == concept.pk
 
 
-@pytest.mark.parametrize('status', ['approved', 'rejected'])
-def test_a_curator_decision_on_specimen_type_is_left_alone(status):
+def test_a_curator_approval_of_another_concept_stands():
     ConceptFactory(vocabulary__vocabulary_id='SNOMED', concept_code='371439000', domain__domain_id='Observation')
+    chosen = ConceptFactory(vocabulary__vocabulary_id='LOINC', concept_code='66746-9', domain__domain_id='Measurement')
     row = specimen_mapping(provenance='curator')
-    FieldConceptMapping.objects.filter(pk=row.pk).update(status=status)
+    FieldConceptMapping.objects.filter(pk=row.pk).update(
+        status='approved', concept=chosen, vocabulary_id='LOINC', concept_code='66746-9', omop_table='measurement')
     before = FieldConceptMapping.objects.filter(pk=row.pk).values().get()
     run()
     assert FieldConceptMapping.objects.filter(pk=row.pk).values().get() == before
+
+
+def test_a_rejected_concept_is_replaced_by_the_snomed_observable_and_approved():
+    """Rejecting another concept rules that concept out, not a concept for the field."""
+    concept = ConceptFactory(vocabulary__vocabulary_id='SNOMED', concept_code='371439000',
+                             domain__domain_id='Observation')
+    rejected = ConceptFactory(vocabulary__vocabulary_id='SNOMED', concept_code='123038009',
+                              domain__domain_id='Specimen')
+    row = specimen_mapping(provenance='curator')
+    FieldConceptMapping.objects.filter(pk=row.pk).update(
+        status='rejected', concept=rejected, vocabulary_id='SNOMED', concept_code='123038009')
+    run()
+    row.refresh_from_db()
+    assert (row.status, row.concept_id, row.concept_code) == ('approved', concept.pk, '371439000')
 
 
 def test_pathologist_notes_use_the_loinc_laboratory_comment_once_loaded():
