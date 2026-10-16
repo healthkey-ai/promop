@@ -570,6 +570,47 @@ def test_delete_without_destination_truly_deletes(staff_user):
     assert not SourceCodeConceptMapping.objects.filter(id=mapping.id).exists()
 
 
+# --- source_units in browse and flat responses (#1869, #1870) ---------------
+
+def _unit_evidence(*codes):
+    return [{'code': c, 'display': c, 'count': 1} for c in codes]
+
+
+def test_flat_browse_row_includes_source_units(browse):
+    row('ALB', occurrence_count=1, source_unit_evidence=_unit_evidence('mg/dL'))
+    data = browse().data
+    assert data['results'][0]['source_units'] == ['mg/dL']
+
+
+def test_flat_browse_row_without_units_returns_empty_list(browse):
+    row('ALB', occurrence_count=1)
+    data = browse().data
+    assert data['results'][0]['source_units'] == []
+
+
+def test_rollup_groups_include_source_units():
+    """Grouped browse entries carry source_units and group_key."""
+    from rest_framework.test import APIRequestFactory, force_authenticate
+    user = Identity.objects.create_user(email='rollup-units@example.test', is_staff=True)
+    row('A', source_code_description='Albumin', occurrence_count=5,
+        source_unit_evidence=_unit_evidence('mg/dL'))
+    row('B', source_code_description='ALBUMIN', occurrence_count=3,
+        source_unit_evidence=_unit_evidence('mg/dL'))
+    row('C', source_code_description='albumin', occurrence_count=2,
+        source_unit_evidence=_unit_evidence('mmol/L'))
+
+    request = APIRequestFactory().get('/api/v1/code-mappings/', {'browse': '1', 'rollup': '1'})
+    force_authenticate(request, user=user)
+    data = code_mapping_list(request).data
+    unmapped = data['groups']['Unmapped']
+    by_units = {tuple(e['source_units']): e for e in unmapped}
+    assert ('mg/dL',) in by_units
+    assert ('mmol/L',) in by_units
+    assert by_units[('mg/dL',)]['members'] == 2
+    assert by_units[('mg/dL',)]['group_key'] == 'albumin|["mg/dL"]'
+    assert by_units[('mmol/L',)]['members'] == 1
+
+
 def test_delete_rejected_mapping_clears_destination(staff_user):
     """DELETE on a rejected mapping with a destination clears it."""
     concept = ConceptFactory(concept_id=999998, concept_name='Rejected Concept', concept_code='99998')

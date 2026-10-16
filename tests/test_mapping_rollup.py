@@ -488,3 +488,105 @@ def test_deterministic_exact_match_avoids_the_ranker(monkeypatch):
     }
     monkeypatch.setattr('omop_core.mapping.suggestions.lexical_candidates', lambda *a, **k: [candidate])
     assert deterministic_proposal('Ferritin', 'Measurement')['concept']['concept_id'] == 123
+
+
+# --- unit-aware grouping (#1869, #1870) ------------------------------------
+
+def _unit_evidence(*codes):
+    """Build a source_unit_evidence list from unit code strings."""
+    return [{'code': c, 'display': c, 'count': 1} for c in codes]
+
+
+def test_same_label_different_units_become_separate_groups():
+    """Albumin in mg/dL and albumin in mmol/L are two review entries."""
+    row('A1', 'Albumin', seen=10, source_unit_evidence=_unit_evidence('mg/dL'))
+    row('A2', 'ALBUMIN', seen=20, source_unit_evidence=_unit_evidence('mg/dL'))
+    row('A3', 'albumin', seen=5, source_unit_evidence=_unit_evidence('mmol/L'))
+    found, total = entries()
+    assert total == 2
+    by_units = {tuple(e['source_units']): e for e in found}
+    assert ('mg/dL',) in by_units
+    assert ('mmol/L',) in by_units
+    assert by_units[('mg/dL',)]['members'] == 2
+    assert by_units[('mg/dL',)]['seen'] == 30
+    assert by_units[('mmol/L',)]['members'] == 1
+    assert by_units[('mmol/L',)]['seen'] == 5
+
+
+def test_group_key_includes_units_when_present():
+    row('X', 'Ferritin', seen=1, source_unit_evidence=_unit_evidence('ng/mL'))
+    found, _ = entries()
+    assert found[0]['group_key'] == 'ferritin|["ng/mL"]'
+
+
+def test_group_key_is_plain_label_when_no_units():
+    row('X', 'Ferritin', seen=1)
+    found, _ = entries()
+    assert found[0]['group_key'] == 'ferritin'
+
+
+def test_group_entries_include_source_units_list():
+    row('X', 'Zinc', seen=1, source_unit_evidence=_unit_evidence('ug/dL', 'mg/L'))
+    found, _ = entries()
+    # Units are sorted deterministically.
+    assert found[0]['source_units'] == ['mg/L', 'ug/dL']
+
+
+def test_group_members_filters_by_unit_group_key():
+    """Expanding a unit-qualified group returns only codes with those units."""
+    row('MG', 'Albumin', seen=10, source_unit_evidence=_unit_evidence('mg/dL'))
+    row('MMOL', 'ALBUMIN', seen=5, source_unit_evidence=_unit_evidence('mmol/L'))
+    row('NOUNITS', 'albumin', seen=3)
+    qs = SourceCodeConceptMapping.objects.all()
+    # The mg/dL group key
+    mg_members = group_members(qs, 'albumin|["mg/dL"]')
+    assert list(mg_members.values_list('source_code', flat=True)) == ['MG']
+    # The mmol/L group key
+    mmol_members = group_members(qs, 'albumin|["mmol/L"]')
+    assert list(mmol_members.values_list('source_code', flat=True)) == ['MMOL']
+    # The no-units group uses the plain label
+    plain_members = group_members(qs, 'albumin')
+    assert list(plain_members.values_list('source_code', flat=True)) == ['NOUNITS']
+
+
+def test_empty_units_still_use_supplied_group_seen():
+    """When no units are present, the extract-provided group count is preferred."""
+    row('A', 'Albumin', seen=4, source_group_occurrence_count=100)
+    row('B', 'ALBUMIN', seen=6, source_group_occurrence_count=100)
+    found, _ = entries()
+    assert found[0]['seen'] == 100
+
+
+def test_unit_subgroups_ignore_supplied_group_seen_and_sum_instead():
+    """supplied_group_seen describes the whole label, not a unit subgroup."""
+    row('A', 'Albumin', seen=4, source_group_occurrence_count=100,
+        source_unit_evidence=_unit_evidence('mg/dL'))
+    row('B', 'ALBUMIN', seen=6, source_group_occurrence_count=100,
+        source_unit_evidence=_unit_evidence('mg/dL'))
+    found, _ = entries()
+    assert found[0]['seen'] == 10  # summed, not 100
+
+
+def test_multiple_units_per_code_form_a_multiunit_group():
+    """A code reporting both mg/dL and g/dL lands in a group keyed on both."""
+    row('MULTI', 'Albumin', seen=7,
+        source_unit_evidence=_unit_evidence('g/dL', 'mg/dL'))
+    row('SINGLE', 'ALBUMIN', seen=3,
+        source_unit_evidence=_unit_evidence('mg/dL'))
+    found, total = entries()
+    assert total == 2
+    keys = {e['group_key'] for e in found}
+    assert 'albumin|["g/dL", "mg/dL"]' in keys
+    assert 'albumin|["mg/dL"]' in keys
+
+
+def test_duplicate_and_blank_units_are_normalized():
+    """Duplicate units collapse; blank entries are stripped."""
+    evidence = [
+        {'code': 'mg/dL', 'display': 'mg/dL', 'count': 5},
+        {'code': 'mg/dL', 'display': 'mg/dL', 'count': 3},
+        {'code': '', 'display': '', 'count': 1},
+    ]
+    row('X', 'Ferritin', seen=1, source_unit_evidence=evidence)
+    found, _ = entries()
+    assert found[0]['source_units'] == ['mg/dL']

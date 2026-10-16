@@ -2071,7 +2071,7 @@ describe("server mapping pages", () => {
     render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
     await screen.findByRole("table", { name: "Unmapped mappings" });
     payload = browseData({ rollup: true, groups: { Unmapped: [entry()] } });
-    fireEvent.click(screen.getByLabelText("Group by label"));
+    fireEvent.click(screen.getByLabelText("Group by label and units"));
     await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", {
       params: expect.objectContaining({ rollup: 1 }),
     }));
@@ -2300,7 +2300,7 @@ describe("server mapping pages", () => {
 
   it("offers Seen and Source description sorting while grouped", async () => {
     renderBrowse({ rollup: true, groups: { Unmapped: [entry()] } });
-    fireEvent.click(await screen.findByLabelText("Group by label"));
+    fireEvent.click(await screen.findByLabelText("Group by label and units"));
     await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", {
       params: expect.objectContaining({ rollup: 1 }),
     }));
@@ -2314,6 +2314,36 @@ describe("server mapping pages", () => {
       params: expect.objectContaining({ rollup: 1, page_0: 1, order_0: "source_code_description" }),
     }));
     expect(descriptionSort.closest("th")).toHaveAttribute("aria-sort", "ascending");
+  });
+
+  it("displays Units column with joined values in flat rows", async () => {
+    renderBrowse({ results: [{ ...proposedRow, source_units: ["mg/dL", "mmol/L"] }] });
+    await screen.findByRole("table", { name: "Unmapped mappings" });
+    expect(screen.getByText("mg/dL; mmol/L")).toBeInTheDocument();
+  });
+
+  it("displays Unknown when source_units is empty", async () => {
+    renderBrowse({ results: [{ ...proposedRow, source_units: [] }] });
+    await screen.findByRole("table", { name: "Unmapped mappings" });
+    expect(screen.getAllByText("Unknown").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("displays Units column in grouped rollup rows", async () => {
+    renderBrowse({
+      rollup: true,
+      groups: { Unmapped: [entry({ source_units: ["ng/mL"], group_key: 'albumin|["ng/mL"]' })] },
+    });
+    await screen.findByRole("table", { name: "Unmapped mappings" });
+    expect(screen.getByText("ng/mL")).toBeInTheDocument();
+  });
+
+  it("includes units in group expand aria-label", async () => {
+    renderBrowse({
+      rollup: true,
+      groups: { Unmapped: [entry({ source_units: ["g/dL"], group_key: 'albumin|["g/dL"]' })] },
+    });
+    await screen.findByRole("table", { name: "Unmapped mappings" });
+    expect(screen.getByRole("button", { name: /Expand Albumin \(g\/dL\)/ })).toBeInTheDocument();
   });
 
   it("requests the next page and sorts the full section on the server", async () => {

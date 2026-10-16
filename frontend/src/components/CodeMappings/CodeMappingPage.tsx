@@ -282,6 +282,8 @@ type BrowseResponse = {
 /** One review row standing for every vendor code sharing a label. */
 type GroupEntry = {
   label: string | null;
+  group_key?: string;
+  source_units?: string[];
   description: string;
   members: number;
   seen: number;
@@ -298,7 +300,7 @@ type GroupEntry = {
 };
 
 /** The key the members endpoint takes: a label, or ':<pk>' for an unlabelled row. */
-const groupKey = (entry: GroupEntry) => entry.label ?? `:${entry.mapping_id}`;
+const groupKey = (entry: GroupEntry) => entry.group_key ?? entry.label ?? `:${entry.mapping_id}`;
 /** Cache key. A label whose codes span Unmapped and Mapped is two entries, and
  *  the server scopes members by section -- keying on the label alone would let
  *  one entry show the other's rows. */
@@ -1075,7 +1077,7 @@ export default function CodeMappingPage() {
   };
 
   const renderTable = (sectionRows: CodeMappingRow[], emptyText: string, section: MappingSection, { hideStatus = false }: { hideStatus?: boolean } = {}) => {
-    const colCount = 7 + (showSystemColumn ? 1 : 0) + (showOrganizationColumn ? 1 : 0) + (hideStatus ? 0 : 2);
+    const colCount = 8 + (showSystemColumn ? 1 : 0) + (showOrganizationColumn ? 1 : 0) + (hideStatus ? 0 : 2);
     const sort = sectionSorts[section];
     // Present only when the server grouped this response; otherwise the flat
     // queue renders exactly as before.
@@ -1147,6 +1149,7 @@ export default function CodeMappingPage() {
             )}
             <td className="px-4 py-3 text-right font-mono text-xs text-slate-700">{row.occurrence_count || 0}</td>
             <td className="px-4 py-3 text-xs text-slate-700">{row.source_code_description || "—"}</td>
+            <td className="px-4 py-3 text-xs text-slate-700">{row.source_units?.length ? row.source_units.join("; ") : "Unknown"}</td>
             <td className="px-4 py-3 text-xs text-slate-700">{row.origin_system || "—"}</td>
             <td className="px-4 py-3">
               <div className="font-medium text-slate-950">{row.destination_concept_name}</div>
@@ -1234,6 +1237,7 @@ export default function CodeMappingPage() {
             {showOrganizationColumn && <th className="px-4 py-3 font-semibold">Hospital context</th>}
             {header("Seen", "occurrence_count")}
             {header("Source description", "source_code_description")}
+            <th className="px-4 py-3 font-semibold">Units</th>
             {header("Provenance", "origin_system")}
             {header("Destination concept", "destination_concept_name")}
             {header("Concept ID", "destination_concept_id")}
@@ -1254,7 +1258,7 @@ export default function CodeMappingPage() {
                     <td className="px-4 py-3">
                       <button type="button"
                         aria-expanded={open}
-                        aria-label={`${open ? "Collapse" : "Expand"} ${entry.description || "unlabelled"}`}
+                        aria-label={`${open ? "Collapse" : "Expand"} ${entry.description || "unlabelled"}${entry.source_units?.length ? ` (${entry.source_units.join("; ")})` : ""}`}
                         onClick={() => toggleGroup(entry, section)}
                         className="inline-flex items-center gap-2 text-left font-medium text-slate-900 hover:underline">
                         <span aria-hidden="true" className="inline-block w-3">{open ? "▾" : "▸"}</span>
@@ -1267,6 +1271,7 @@ export default function CodeMappingPage() {
                     {showOrganizationColumn && <td className="px-4 py-3" />}
                     <td className="px-4 py-3 text-right font-mono text-xs text-slate-700">{entry.seen.toLocaleString()}</td>
                     <td className="px-4 py-3 text-xs font-medium text-slate-900">{entry.description || "—"}</td>
+                    <td className="px-4 py-3 text-xs text-slate-700">{entry.source_units?.length ? entry.source_units.join("; ") : "Unknown"}</td>
                     <td className="px-4 py-3" />
                     <td className="px-4 py-3">
                       {/* Naming one side of a disagreement is worse than
@@ -1460,7 +1465,7 @@ export default function CodeMappingPage() {
                 }} />
               {/* One decision per label rather than per vendor code: albumin
                   arrives under 2,557 of them. */}
-              Group by label
+              Group by label and units
             </label>
             {showProvenanceFilter && (
               <select
