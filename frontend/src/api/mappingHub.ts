@@ -17,6 +17,8 @@ export interface TherapyComponentItem {
   code: string;
   title: string;
   concept_id?: number | null;
+  standard_concept?: string | null;
+  invalid_reason?: string | null;
   classes?: TherapyClassItem[];
 }
 
@@ -90,6 +92,11 @@ export async function fetchComponents(search?: string): Promise<TherapyComponent
 
 export async function createComponent(data: { code: string; title: string; concept_id?: number | null }): Promise<TherapyComponentItem> {
   const resp = await api.post('/v1/therapy-components/', data);
+  return resp.data as TherapyComponentItem;
+}
+
+export async function updateComponent(code: string, data: { title?: string; concept_id?: number | null }): Promise<TherapyComponentItem> {
+  const resp = await api.patch(`/v1/therapy-components/${code}/`, data);
   return resp.data as TherapyComponentItem;
 }
 

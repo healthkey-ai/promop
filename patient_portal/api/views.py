@@ -9922,6 +9922,8 @@ def therapy_regimen_detail(request, code):
             'concept_name': concept.concept_name if concept else comp.title,
             'concept_code': concept.concept_code if concept else comp.code,
             'vocabulary_id': concept.vocabulary_id if concept else None,
+            'standard_concept': concept.standard_concept if concept else None,
+            'invalid_reason': concept.invalid_reason if concept else None,
             'classes': classes,
         })
 
@@ -9957,7 +9959,7 @@ def therapy_component_list(request):
         comp = TherapyComponent.objects.create(code=code, title=title, concept_id=concept_id)
         return Response({'code': comp.code, 'title': comp.title, 'concept_id': comp.concept_id}, status=status.HTTP_201_CREATED)
 
-    qs = TherapyComponent.objects.all().order_by('title')
+    qs = TherapyComponent.objects.all().select_related('concept').order_by('title')
     search = request.query_params.get('search', '').strip()
     if search:
         qs = qs.filter(title__icontains=search)
@@ -9970,12 +9972,84 @@ def therapy_component_list(request):
     )
     items = []
     for comp in qs:
+        concept = comp.concept
         classes = [
             {'code': link.therapy_class.code, 'title': link.therapy_class.title, 'concept_id': link.therapy_class.concept_id}
             for link in comp.component_classes.all()
         ]
-        items.append({'code': comp.code, 'title': comp.title, 'concept_id': comp.concept_id, 'classes': classes})
+        item = {'code': comp.code, 'title': comp.title, 'concept_id': comp.concept_id, 'classes': classes}
+        if concept:
+            item['standard_concept'] = concept.standard_concept
+            item['invalid_reason'] = concept.invalid_reason
+        else:
+            item['standard_concept'] = None
+            item['invalid_reason'] = None
+        items.append(item)
     return Response(items)
+
+
+@api_view(['GET', 'PATCH', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def therapy_component_detail(request, code):
+    """Single therapy component with concept status.
+
+    GET /api/v1/therapy-components/<code>/
+    PATCH /api/v1/therapy-components/<code>/  {title?, concept_id?}
+    DELETE /api/v1/therapy-components/<code>/
+    """
+    try:
+        comp = TherapyComponent.objects.select_related('concept').get(code=code)
+    except TherapyComponent.DoesNotExist:
+        return Response({'detail': f'Component not found: {code}'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method in ('DELETE', 'PATCH'):
+        denied = _require_mapping_admin(request)
+        if denied:
+            return denied
+
+    if request.method == 'DELETE':
+        comp.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    if request.method == 'PATCH':
+        changed = False
+        if 'title' in request.data:
+            new_title = request.data['title']
+            if isinstance(new_title, str) and not new_title.strip():
+                return Response({'detail': 'title must not be empty'}, status=status.HTTP_400_BAD_REQUEST)
+            comp.title = new_title.strip() if isinstance(new_title, str) else new_title
+            changed = True
+        if 'concept_id' in request.data:
+            concept_id, err = _validate_concept_id(request.data['concept_id'])
+            if err:
+                return err
+            if concept_id is not None:
+                from omop_core.models import Concept
+                if not Concept.objects.filter(concept_id=concept_id).exists():
+                    return Response(
+                        {'detail': f'Concept {concept_id} does not exist'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            comp.concept_id = concept_id
+            changed = True
+        if changed:
+            comp.save()
+            comp = TherapyComponent.objects.select_related('concept').get(pk=comp.pk)
+
+    concept = comp.concept
+    classes = [
+        {'code': link.therapy_class.code, 'title': link.therapy_class.title, 'concept_id': link.therapy_class.concept_id}
+        for link in TherapyComponentClassLink.objects.filter(component=comp).select_related('therapy_class')
+    ]
+    data = {
+        'code': comp.code,
+        'title': comp.title,
+        'concept_id': comp.concept_id,
+        'standard_concept': concept.standard_concept if concept else None,
+        'invalid_reason': concept.invalid_reason if concept else None,
+        'classes': classes,
+    }
+    return Response(data)
 
 
 @api_view(['GET', 'POST'])

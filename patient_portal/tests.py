@@ -32021,3 +32021,158 @@ class ProvisionedPersonAdoptionTest(TestCase):
         self.assertEqual(self._linked_person_id(), signup_person_id)
         self.assertTrue(Person.objects.filter(person_id=signup_person_id).exists())
         self.assertEqual(PersonMergeCandidate.objects.count(), 1)
+
+
+class TherapyComponentDetailTest(MappingHubTestBase):
+    """GET/PATCH/DELETE on /api/v1/therapy-components/<code>/."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        # Create a standard concept to link components to
+        from omop_core.models import Concept, TherapyComponent
+        vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HemOnc',
+            defaults={'vocabulary_name': 'HemOnc', 'vocabulary_concept_id': 0},
+        )
+        domain, _ = Domain.objects.get_or_create(
+            domain_id='Drug', defaults={'domain_name': 'Drug', 'domain_concept_id': 0},
+        )
+        cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Component',
+            defaults={'concept_class_name': 'Component', 'concept_class_concept_id': 0},
+        )
+        cls.standard_concept, _ = Concept.objects.get_or_create(
+            concept_id=35_803_100,
+            defaults={
+                'concept_name': 'Lenalidomide',
+                'domain': domain,
+                'vocabulary': vocab,
+                'concept_class': cc,
+                'concept_code': '35803100',
+                'standard_concept': 'S',
+                'valid_start_date': '1970-01-01',
+                'valid_end_date': '2099-12-31',
+                'invalid_reason': None,
+            },
+        )
+        cls.non_standard_concept, _ = Concept.objects.get_or_create(
+            concept_id=35_803_200,
+            defaults={
+                'concept_name': 'Lenalidomide [non-std]',
+                'domain': domain,
+                'vocabulary': vocab,
+                'concept_class': cc,
+                'concept_code': '35803200',
+                'standard_concept': None,
+                'valid_start_date': '1970-01-01',
+                'valid_end_date': '2099-12-31',
+                'invalid_reason': 'U',
+            },
+        )
+        # Link comp to standard concept
+        cls.comp.concept = cls.standard_concept
+        cls.comp.save()
+
+    def test_get_returns_concept_status(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.get(f'/api/v1/therapy-components/{self.comp.code}/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['code'], self.comp.code)
+        self.assertEqual(resp.data['concept_id'], self.standard_concept.concept_id)
+        self.assertEqual(resp.data['standard_concept'], 'S')
+        self.assertIsNone(resp.data['invalid_reason'])
+        self.assertIn('classes', resp.data)
+
+    def test_get_no_concept_returns_nulls(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.get(f'/api/v1/therapy-components/{self.comp2.code}/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIsNone(resp.data['concept_id'])
+        self.assertIsNone(resp.data['standard_concept'])
+        self.assertIsNone(resp.data['invalid_reason'])
+
+    def test_patch_updates_concept_id(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.patch(
+            f'/api/v1/therapy-components/{self.comp2.code}/',
+            {'concept_id': self.standard_concept.concept_id},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['concept_id'], self.standard_concept.concept_id)
+        self.assertEqual(resp.data['standard_concept'], 'S')
+
+    def test_patch_with_invalid_concept_returns_400(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.patch(
+            f'/api/v1/therapy-components/{self.comp.code}/',
+            {'concept_id': 999_999_999},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('does not exist', resp.data['detail'])
+
+    def test_patch_null_concept_clears_it(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.patch(
+            f'/api/v1/therapy-components/{self.comp.code}/',
+            {'concept_id': None},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIsNone(resp.data['concept_id'])
+        self.assertIsNone(resp.data['standard_concept'])
+
+    def test_non_standard_concept_flagged_in_list(self):
+        self.client.force_authenticate(user=self.admin)
+        # Point comp at a non-standard concept (rolled back by per-test savepoint)
+        self.comp.concept = self.non_standard_concept
+        self.comp.save()
+        resp = self.client.get('/api/v1/therapy-components/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        lena = next(c for c in resp.data if c['code'] == self.comp.code)
+        self.assertIsNone(lena['standard_concept'])
+        self.assertEqual(lena['invalid_reason'], 'U')
+
+    def test_unauthenticated_returns_401_or_403(self):
+        resp = self.client.get(f'/api/v1/therapy-components/{self.comp.code}/')
+        self.assertIn(resp.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+    def test_non_admin_cannot_patch(self):
+        self.client.force_authenticate(user=self.regular)
+        resp = self.client.patch(
+            f'/api/v1/therapy-components/{self.comp.code}/',
+            {'concept_id': self.standard_concept.concept_id},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_not_found_returns_404(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.get('/api/v1/therapy-components/NONEXISTENT/')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_delete_removes_component(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.delete(f'/api/v1/therapy-components/{self.comp2.code}/')
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        from omop_core.models import TherapyComponent
+        self.assertFalse(TherapyComponent.objects.filter(code=self.comp2.code).exists())
+
+    def test_non_admin_cannot_delete(self):
+        self.client.force_authenticate(user=self.regular)
+        resp = self.client.delete(f'/api/v1/therapy-components/{self.comp2.code}/')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_regimen_detail_includes_concept_status(self):
+        """Nested components in regimen detail include standard_concept/invalid_reason."""
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.get(f'/api/v1/therapy-regimens/{self.reg.code}/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        comp_data = next(
+            (c for c in resp.data['components'] if c['code'] == self.comp.code), None,
+        )
+        self.assertIsNotNone(comp_data)
+        self.assertIn('standard_concept', comp_data)
+        self.assertIn('invalid_reason', comp_data)

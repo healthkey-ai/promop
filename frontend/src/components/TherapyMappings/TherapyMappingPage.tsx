@@ -5,7 +5,7 @@ import { ArrowLeft, ChevronDown, ChevronRight, Plus, Search, Trash2, X } from 'l
 import {
   fetchRegimens, fetchRegimenDetail, createRegimen, deleteRegimen,
   addRegimenComponent, removeRegimenComponent,
-  fetchComponents, createComponent,
+  fetchComponents, createComponent, updateComponent,
   addComponentClass, removeComponentClass,
   fetchClasses, createClass,
   fetchDiseaseTherapyRegimens, addDiseaseTherapyRegimen, removeDiseaseTherapyRegimen,
@@ -261,6 +261,77 @@ function RegimenComponentTab() {
 // Component-Class Tab
 // ---------------------------------------------------------------------------
 
+function ConceptStatusBadge({ comp }: { comp: TherapyComponentItem }) {
+  if (!comp.concept_id) return null;
+  if (comp.invalid_reason) {
+    return <span className="rounded px-1.5 py-0.5 text-xs bg-red-100 text-red-700">Invalid</span>;
+  }
+  if (comp.standard_concept != null && comp.standard_concept !== 'S') {
+    return <span className="rounded px-1.5 py-0.5 text-xs bg-amber-100 text-amber-700">Non-standard</span>;
+  }
+  return null;
+}
+
+function InlineConceptEditor({ comp, onSaved }: { comp: TherapyComponentItem; onSaved: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(String(comp.concept_id ?? ''));
+  const [saving, setSaving] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+
+  const handleSave = useCallback(async () => {
+    setSaving(true);
+    setEditError(null);
+    const trimmed = value.trim();
+    const parsed = trimmed === '' ? null : parseInt(trimmed, 10);
+    if (parsed !== null && (isNaN(parsed) || String(parsed) !== trimmed)) {
+      setEditError('Concept ID must be a whole number');
+      setSaving(false);
+      return;
+    }
+    try {
+      await updateComponent(comp.code, { concept_id: parsed });
+      setEditing(false);
+      onSaved();
+    } catch (e: unknown) {
+      const axiosDetail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      const msg = axiosDetail ?? (e instanceof Error ? e.message : 'Save failed');
+      setEditError(msg);
+    } finally {
+      setSaving(false);
+    }
+  }, [comp.code, value, onSaved]);
+
+  if (!editing) {
+    return (
+      <button
+        onClick={() => { setValue(String(comp.concept_id ?? '')); setEditing(true); setEditError(null); }}
+        className="text-xs text-muted-foreground hover:text-foreground hover:underline"
+        title="Click to edit concept ID"
+      >
+        {comp.concept_id ? `HemOnc:${comp.concept_id}` : 'No concept'}
+      </button>
+    );
+  }
+
+  return (
+    <span className="inline-flex items-center gap-1">
+      <input
+        className="h-6 w-24 rounded border border-input bg-background px-1.5 text-xs"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        placeholder="Concept ID"
+        autoFocus
+        onKeyDown={(e) => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') setEditing(false); }}
+      />
+      <button onClick={handleSave} disabled={saving} className="text-xs text-primary hover:underline">
+        {saving ? '...' : 'Save'}
+      </button>
+      <button onClick={() => setEditing(false)} className="text-xs text-muted-foreground hover:underline">Cancel</button>
+      {editError && <span className="text-xs text-destructive">{editError}</span>}
+    </span>
+  );
+}
+
 function ComponentClassTab() {
   const [components, setComponents] = useState<TherapyComponentItem[]>([]);
   const [allClasses, setAllClasses] = useState<TherapyClassItem[]>([]);
@@ -426,7 +497,8 @@ function ComponentClassTab() {
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-medium text-sm">{comp.title}</span>
                   <span className="text-xs text-muted-foreground">({comp.code})</span>
-                  {comp.concept_id && <span className="text-xs text-muted-foreground">HemOnc:{comp.concept_id}</span>}
+                  <InlineConceptEditor comp={comp} onSaved={loadData} />
+                  <ConceptStatusBadge comp={comp} />
                   {compClasses.map(cl => (
                     <span key={cl.code} className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-0.5 text-xs text-blue-700">
                       {cl.title}
