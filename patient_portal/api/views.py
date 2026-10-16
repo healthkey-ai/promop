@@ -10012,8 +10012,13 @@ def therapy_component_detail(request, code):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     if request.method == 'PATCH':
+        changed = False
         if 'title' in request.data:
-            comp.title = request.data['title']
+            new_title = request.data['title']
+            if isinstance(new_title, str) and not new_title.strip():
+                return Response({'detail': 'title must not be empty'}, status=status.HTTP_400_BAD_REQUEST)
+            comp.title = new_title.strip() if isinstance(new_title, str) else new_title
+            changed = True
         if 'concept_id' in request.data:
             concept_id, err = _validate_concept_id(request.data['concept_id'])
             if err:
@@ -10026,11 +10031,10 @@ def therapy_component_detail(request, code):
                         status=status.HTTP_400_BAD_REQUEST,
                     )
             comp.concept_id = concept_id
+            changed = True
+        if changed:
             comp.save()
-            comp.refresh_from_db()
             comp = TherapyComponent.objects.select_related('concept').get(pk=comp.pk)
-        else:
-            comp.save()
 
     concept = comp.concept
     classes = [

@@ -266,7 +266,7 @@ function ConceptStatusBadge({ comp }: { comp: TherapyComponentItem }) {
   if (comp.invalid_reason) {
     return <span className="rounded px-1.5 py-0.5 text-xs bg-red-100 text-red-700">Invalid</span>;
   }
-  if (comp.standard_concept !== 'S') {
+  if (comp.standard_concept != null && comp.standard_concept !== 'S') {
     return <span className="rounded px-1.5 py-0.5 text-xs bg-amber-100 text-amber-700">Non-standard</span>;
   }
   return null;
@@ -281,14 +281,20 @@ function InlineConceptEditor({ comp, onSaved }: { comp: TherapyComponentItem; on
   const handleSave = useCallback(async () => {
     setSaving(true);
     setEditError(null);
+    const trimmed = value.trim();
+    const parsed = trimmed === '' ? null : parseInt(trimmed, 10);
+    if (parsed !== null && (isNaN(parsed) || String(parsed) !== trimmed)) {
+      setEditError('Concept ID must be a whole number');
+      setSaving(false);
+      return;
+    }
     try {
-      await updateComponent(comp.code, {
-        concept_id: value.trim() === '' ? null : Number(value),
-      });
+      await updateComponent(comp.code, { concept_id: parsed });
       setEditing(false);
       onSaved();
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Save failed';
+      const axiosDetail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      const msg = axiosDetail ?? (e instanceof Error ? e.message : 'Save failed');
       setEditError(msg);
     } finally {
       setSaving(false);

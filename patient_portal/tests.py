@@ -32078,9 +32078,8 @@ class TherapyComponentDetailTest(MappingHubTestBase):
         self.assertIsNone(resp.data['standard_concept'])
 
     def test_non_standard_concept_flagged_in_list(self):
-        from omop_core.models import TherapyComponent
         self.client.force_authenticate(user=self.admin)
-        # Point comp at a non-standard concept
+        # Point comp at a non-standard concept (rolled back by per-test savepoint)
         self.comp.concept = self.non_standard_concept
         self.comp.save()
         resp = self.client.get('/api/v1/therapy-components/')
@@ -32088,9 +32087,6 @@ class TherapyComponentDetailTest(MappingHubTestBase):
         lena = next(c for c in resp.data if c['code'] == self.comp.code)
         self.assertIsNone(lena['standard_concept'])
         self.assertEqual(lena['invalid_reason'], 'U')
-        # Restore
-        self.comp.concept = self.standard_concept
-        self.comp.save()
 
     def test_unauthenticated_returns_401_or_403(self):
         resp = self.client.get(f'/api/v1/therapy-components/{self.comp.code}/')
@@ -32109,6 +32105,18 @@ class TherapyComponentDetailTest(MappingHubTestBase):
         self.client.force_authenticate(user=self.admin)
         resp = self.client.get('/api/v1/therapy-components/NONEXISTENT/')
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_delete_removes_component(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.delete(f'/api/v1/therapy-components/{self.comp2.code}/')
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        from omop_core.models import TherapyComponent
+        self.assertFalse(TherapyComponent.objects.filter(code=self.comp2.code).exists())
+
+    def test_non_admin_cannot_delete(self):
+        self.client.force_authenticate(user=self.regular)
+        resp = self.client.delete(f'/api/v1/therapy-components/{self.comp2.code}/')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_regimen_detail_includes_concept_status(self):
         """Nested components in regimen detail include standard_concept/invalid_reason."""
