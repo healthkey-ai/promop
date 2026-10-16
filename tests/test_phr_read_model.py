@@ -186,12 +186,97 @@ def test_primary_cancer_uses_the_disease_specific_stage_and_hides_what_is_missin
     }]
 
 
-def test_spread_is_shown_for_solid_tumours_only():
+def test_metastasis_flags_are_shown_for_solid_tumours_only():
     breast = PatientRecordFactory(disease='Breast cancer', disease_slug='breast-cancer', metastatic_status=True)
     myeloma = PatientRecordFactory(disease='Multiple myeloma', disease_slug='myeloma', metastatic_status=True)
 
     assert signed_in(breast).get('/api/v1/phr/diagnoses/').data['cancer'][0]['spread'] == 'Metastatic'
     assert 'spread' not in signed_in(myeloma).get('/api/v1/phr/diagnoses/').data['cancer'][0]
+
+
+@pytest.mark.parametrize('slug', [
+    'myeloma', 'multiple-myeloma', 'follicular-lymphoma',
+    'chronic-lymphocytic-leukemia', 'mantle-cell-lymphoma',
+])
+def test_blood_cancer_spread_uses_the_custom_field_instead_of_metastasis(slug):
+    record = PatientRecordFactory(
+        disease=slug.replace('-', ' '), disease_slug=slug,
+        custom_fields={'hematologic_spread': ' Bone lesions in spine (L2, L4) and right hip '},
+        metastasis_status='Metastatic', bone_only_metastasis_status=True, metastatic_status=True,
+    )
+
+    cancer = signed_in(record).get('/api/v1/phr/diagnoses/').data['cancer'][0]
+
+    assert cancer['spread'] == 'Bone lesions in spine (L2, L4) and right hip'
+
+
+@pytest.mark.parametrize('custom_fields', [{}, {'hematologic_spread': None}, {'hematologic_spread': '  '}])
+def test_missing_blood_cancer_spread_is_omitted(custom_fields):
+    record = PatientRecordFactory(
+        disease='Multiple myeloma', disease_slug='myeloma', custom_fields=custom_fields,
+        metastasis_status='Metastatic', metastatic_status=False,
+    )
+
+    assert 'spread' not in signed_in(record).get('/api/v1/phr/diagnoses/').data['cancer'][0]
+
+
+@pytest.mark.parametrize(('slug', 'expected'), [('breast-cancer', 'Metastatic'), ('unknown-cancer', None)])
+def test_blood_cancer_spread_is_not_used_for_solid_or_unclassified_cancers(slug, expected):
+    record = PatientRecordFactory(
+        disease=slug.replace('-', ' '), disease_slug=slug, metastatic_status=True,
+        custom_fields={'hematologic_spread': 'Bone lesions in spine'},
+    )
+
+    assert signed_in(record).get('/api/v1/phr/diagnoses/').data['cancer'][0].get('spread') == expected
+
+
+def test_flat_blood_cancer_spread_is_not_copied_to_a_secondary_cancer():
+    record = PatientRecordFactory(
+        disease='Multiple myeloma', disease_slug='myeloma',
+        custom_fields={'hematologic_spread': 'Bone lesions in spine'},
+    )
+    condition(record, icd10('C82', 'Follicular lymphoma'), '2024-03-01')
+
+    cancer = signed_in(record).get('/api/v1/phr/diagnoses/').data['cancer']
+
+    assert cancer[0]['spread'] == 'Bone lesions in spine'
+    assert len(cancer) == 2
+    assert 'spread' not in cancer[1]
+
+
+def test_unmapped_spread_observations_are_projected_into_the_phr():
+    from omop_core.models import CustomPatientField, FieldConceptMapping
+    from omop_core.services.patient_record_service import refresh_patient_record
+    from tests.factories import ObservationFactory
+
+    record = PatientRecordFactory(disease='Multiple myeloma', disease_slug='multiple-myeloma')
+    condition(record, icd10('C90.00', 'Multiple myeloma'), '2021-02-01')
+    mapping = FieldConceptMapping.objects.create(
+        field_name='hematologic_spread', omop_table='observation',
+        source_value='phr:hematologic-spread', value_kind='string', status='approved',
+    )
+    CustomPatientField.objects.create(
+        field_name='hematologic_spread', display_name='Hematologic Spread', tab='disease',
+        field_type='text', mode='editable', mapping=mapping,
+    )
+    unmapped = ConceptFactory(concept_id=0, concept_name='No matching concept')
+    with suppress_patient_record_refresh():
+        ObservationFactory(person=record.person, observation_concept=unmapped,
+                           observation_source_value=mapping.source_value, observation_date='2023-01-01',
+                           value_as_string='Old involvement')
+        ObservationFactory(person=record.person, observation_concept=unmapped,
+                           observation_source_value=mapping.source_value, observation_date='2024-01-01',
+                           value_as_string='Bone lesions in spine (L2, L4) and right hip')
+        ObservationFactory(person=record.person, observation_concept=unmapped,
+                           observation_source_value=mapping.source_value, observation_date='2025-01-01',
+                           value_as_string='Entered in error', is_erroneous=True)
+        ObservationFactory(observation_concept=unmapped, observation_source_value=mapping.source_value,
+                           observation_date='2026-01-01', value_as_string='Another patient')
+    refresh_patient_record(record.person)
+
+    cancer = signed_in(record).get('/api/v1/phr/diagnoses/').data['cancer'][0]
+
+    assert cancer['spread'] == 'Bone lesions in spine (L2, L4) and right hip'
 
 
 def test_cancer_conditions_become_dated_transitions_and_other_conditions_are_listed_newest_first():
