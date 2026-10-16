@@ -1149,7 +1149,7 @@ export default function CodeMappingPage() {
             )}
             <td className="px-4 py-3 text-right font-mono text-xs text-slate-700">{row.occurrence_count || 0}</td>
             <td className="px-4 py-3 text-xs text-slate-700">{row.source_code_description || "—"}</td>
-            <td className="px-4 py-3 text-xs text-slate-700">{row.source_units?.length ? row.source_units.join("; ") : "Unknown"}</td>
+            <td className="px-4 py-3 text-xs text-slate-700">{row.source_units?.length ? row.source_units.join("; ") : "—"}</td>
             <td className="px-4 py-3 text-xs text-slate-700">{row.origin_system || "—"}</td>
             <td className="px-4 py-3">
               <div className="font-medium text-slate-950">{row.destination_concept_name}</div>
@@ -1271,7 +1271,7 @@ export default function CodeMappingPage() {
                     {showOrganizationColumn && <td className="px-4 py-3" />}
                     <td className="px-4 py-3 text-right font-mono text-xs text-slate-700">{entry.seen.toLocaleString()}</td>
                     <td className="px-4 py-3 text-xs font-medium text-slate-900">{entry.description || "—"}</td>
-                    <td className="px-4 py-3 text-xs text-slate-700">{entry.source_units?.length ? entry.source_units.join("; ") : "Unknown"}</td>
+                    <td className="px-4 py-3 text-xs text-slate-700">{entry.source_units?.length ? entry.source_units.join("; ") : "—"}</td>
                     <td className="px-4 py-3" />
                     <td className="px-4 py-3">
                       {/* Naming one side of a disagreement is worse than

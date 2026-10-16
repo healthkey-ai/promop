@@ -2322,10 +2322,12 @@ describe("server mapping pages", () => {
     expect(screen.getByText("mg/dL; mmol/L")).toBeInTheDocument();
   });
 
-  it("displays Unknown when source_units is empty", async () => {
+  it("displays dash when source_units is empty", async () => {
     renderBrowse({ results: [{ ...proposedRow, source_units: [] }] });
     await screen.findByRole("table", { name: "Unmapped mappings" });
-    expect(screen.getAllByText("Unknown").length).toBeGreaterThanOrEqual(1);
+    // Units column shows "—" for codes without unit evidence (conditions, procedures, etc.)
+    const cells = screen.getAllByText("—");
+    expect(cells.length).toBeGreaterThanOrEqual(1);
   });
 
   it("displays Units column in grouped rollup rows", async () => {
