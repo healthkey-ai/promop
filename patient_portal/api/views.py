@@ -13096,14 +13096,17 @@ def code_mapping_detail(request, mapping_id):
         if (data.get('destination_concept_id') or data.get('target_concept_id') or data.get('concept_id'))
         else mapping.target_concept
     )
+    person_id = _mapping_patient_scope(request)
+    # The unit-consistency check aggregates the global Measurement table
+    # (~30-60s on a large dataset).  A patient-page save defers the repoint
+    # entirely, so the warning has no immediate effect — skip it.
     unit_warning = (
         _unit_confirmation_response(mapping, concept, data)
-        if _can_approve_mappings(request.user) else None
+        if person_id is None and _can_approve_mappings(request.user) else None
     )
     if unit_warning is not None:
         return unit_warning
     with transaction.atomic():
-        person_id = _mapping_patient_scope(request)
         mapping, repoint = _upsert_source_code_mapping(
             concept, data, request.user, mapping=mapping, person_id=person_id)
     from omop_core.services.mapping_destinations import destination_options
