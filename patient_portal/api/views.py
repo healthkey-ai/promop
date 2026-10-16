@@ -12484,35 +12484,37 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
             sources.add(previous_concept_id)
         sources.discard(concept.concept_id)
 
-        # A patient-page save moves only this patient's rows. Retain old
-        # destinations so Generate OMOP can move them for other selected
-        # patients later, including approved standard-to-standard changes.
-        if person_id is not None and sources:
-            mapping.deferred_repoint_concept_ids = sorted(sources)
-            mapping.save(update_fields=['deferred_repoint_concept_ids'])
-
-        affected_persons = set()
-        for old_concept_id in sorted(sources):
-            outcome = repoint_clinical_rows(
-                mapping=mapping,
-                old_concept_id=old_concept_id,
-                new_concept_id=concept.concept_id,
-                person_id=person_id,
-                # The concept-0 sweep reaches rows this mapping's own import
-                # never wrote, so it matches the code only -- see
-                # _source_value_match.
-                match_description=old_concept_id != NO_MATCHING_CONCEPT_ID,
-            )
-            affected_persons |= outcome.pop('person_ids', set())
-            if repoint is None:
-                repoint = outcome
-            else:
-                for key, value in outcome.items():
-                    repoint[key] += value
-        if repoint is not None:
-            # Distinct patients, not the sum of each sweep's total: a person
-            # with rows in both would otherwise be reported twice.
-            repoint['persons_marked_stale'] = len(affected_persons)
+        # A patient-page save skips the repoint entirely. The curator
+        # uses Generate OMOP from the patients list to apply the mapping,
+        # which calls resolve_person_source_codes per patient.  Retain old
+        # destinations so that path (and the Code-Mapping-page full repoint)
+        # can move them later.
+        if person_id is not None:
+            if sources:
+                mapping.deferred_repoint_concept_ids = sorted(sources)
+                mapping.save(update_fields=['deferred_repoint_concept_ids'])
+        else:
+            affected_persons = set()
+            for old_concept_id in sorted(sources):
+                outcome = repoint_clinical_rows(
+                    mapping=mapping,
+                    old_concept_id=old_concept_id,
+                    new_concept_id=concept.concept_id,
+                    # The concept-0 sweep reaches rows this mapping's own import
+                    # never wrote, so it matches the code only -- see
+                    # _source_value_match.
+                    match_description=old_concept_id != NO_MATCHING_CONCEPT_ID,
+                )
+                affected_persons |= outcome.pop('person_ids', set())
+                if repoint is None:
+                    repoint = outcome
+                else:
+                    for key, value in outcome.items():
+                        repoint[key] += value
+            if repoint is not None:
+                # Distinct patients, not the sum of each sweep's total: a person
+                # with rows in both would otherwise be reported twice.
+                repoint['persons_marked_stale'] = len(affected_persons)
 
     # Mirror to concept_relationship when both concepts exist.
     if status_value == 'approved' and mapping.source_concept_id and concept:
