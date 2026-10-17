@@ -12278,11 +12278,9 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
     if requested_status and requested_status not in valid_statuses:
         raise serializers.ValidationError({'status': f"Status must be one of: {', '.join(sorted(valid_statuses))}."})
 
-    # A new mapping is always proposed. Creating and approving in one act
-    # removes the review step the Unmapped queue exists to provide, and it is
-    # also what let a create write clinical data -- now approval is the only
-    # transition that does, which is a far easier property to reason about.
-    status_value = 'proposed' if mapping is None else (requested_status or mapping.status)
+    # Default new mappings to proposed, but honour an explicit status from the
+    # caller (admins can create a mapping as approved or rejected directly).
+    status_value = requested_status or ('proposed' if mapping is None else mapping.status)
 
     # Check before changing mappings, scoring suggestions, or repointing facts.
     # Rejected rows may still be dismissed, and Athena rows do not conflict
