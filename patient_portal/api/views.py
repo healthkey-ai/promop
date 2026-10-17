@@ -11838,6 +11838,29 @@ def _concept_unit_fields(concept):
     return concept_unit_fields(concept)
 
 
+def _mapping_based_on(mapping):
+    """Labels from the source FHIR resource's basedOn references only."""
+    metadata = mapping.source_metadata if mapping else None
+    if not isinstance(metadata, dict):
+        return []
+    resource = metadata.get('fhir', metadata)
+    if not isinstance(resource, dict):
+        return []
+    references = resource.get('basedOn', [])
+    if not isinstance(references, list):
+        return []
+    labels = []
+    for reference in references:
+        if not isinstance(reference, dict):
+            continue
+        for key in ('display', 'reference'):
+            value = reference.get(key)
+            if isinstance(value, str) and value.strip():
+                labels.append(value.strip())
+                break
+    return labels
+
+
 def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
                                 destination_count=None, include_source_evidence=False):
     """One row of the Code Mapping list: a source code and where it lands.
@@ -11859,6 +11882,7 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
     # whose concept is not loaded is a review-queue row, not an error.
     from omop_core.services.mapping_source_units import source_units
     units = source_units(mapping)
+    based_on = _mapping_based_on(mapping)
     source_evidence = None
     if include_source_evidence:
         evidence_metadata = dict(mapping.source_metadata or {}) if mapping else {}
@@ -11884,6 +11908,7 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
         payload = {
             **source_retirement,
             'source_units': units,
+            'based_on': based_on,
             'destination_concept_id': None,
             'destination_concept_name': '',
             'destination_concept_code': '',
@@ -11943,6 +11968,7 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
     payload = {
         **source_retirement,
         'source_units': units,
+        'based_on': based_on,
         # Destination
         'destination_concept_id': concept.concept_id,
         'destination_concept_name': concept.concept_name,

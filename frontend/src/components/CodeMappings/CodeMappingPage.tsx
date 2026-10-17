@@ -1134,7 +1134,7 @@ export default function CodeMappingPage() {
             </td>
             <td className="px-4 py-3 text-xs text-slate-700">{row.domain_id || "—"}</td>
             <td className="px-4 py-3 text-right font-mono text-xs text-slate-700">{row.occurrence_count || 0}</td>
-            <td className="px-4 py-3 text-xs text-slate-700">{row.origin || "—"}</td>
+            <td className="px-4 py-3 text-xs text-slate-700">{row.based_on?.join("; ") || ""}</td>
             <td className="px-4 py-3 text-xs text-slate-700">{row.source_units?.length ? (row.source_units.length > 2 ? row.source_units.slice(0, 2).join("; ") + " .." : row.source_units.join("; ")) : "—"}</td>
             <td className="px-4 py-3">
               {row.destination_concept_code ? (

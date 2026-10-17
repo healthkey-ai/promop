@@ -25,6 +25,31 @@ def row(code, **kwargs):
     return SourceCodeConceptMapping.objects.create(source_code=code, **{'source_vocabulary_id': 'ICD10CM', 'status': 'proposed', **kwargs})
 
 
+@pytest.mark.parametrize('has_destination', [False, True])
+@pytest.mark.parametrize(('metadata', 'expected'), [
+    ({'fhir': {'resourceType': 'Observation', 'basedOn': [
+        {'display': ' Complete blood count ', 'reference': 'ServiceRequest/123'},
+        {'reference': 'ServiceRequest/456'},
+        {'display': ' ', 'reference': ' ServiceRequest/789 '},
+    ]}}, ['Complete blood count', 'ServiceRequest/456', 'ServiceRequest/789']),
+    ({'resourceType': 'Observation', 'basedOn': [{'display': 'Blood test'}]}, ['Blood test']),
+    ({}, []),
+    ({'fhir': {'resourceType': 'Observation'}}, []),
+    ({'fhir': {'basedOn': []}}, []),
+    ({'fhir': {'basedOn': [None, 'bad', {}, {'identifier': {'value': '123'}}]}}, []),
+    ({'fhir': {'basedOn': 'bad'}}, []),
+    ({'fhir': None}, []),
+])
+def test_based_on_comes_only_from_source_fhir_metadata(browse, has_destination, metadata, expected):
+    row('BASED-ON', source_metadata=metadata, origin='curator', origin_system='import',
+        target_concept=ConceptFactory() if has_destination else None)
+
+    result = browse().data['results'][0]
+
+    assert result['based_on'] == expected
+    assert 'source_metadata' not in result
+
+
 def test_pages_sort_before_slicing_and_report_full_counts(browse):
     for i in range(105):
         row(f'C{i:03}', occurrence_count=i)
