@@ -156,6 +156,10 @@ def is_cancer_condition(row: ConditionOccurrence) -> bool:
 # Per-disease presentation. Stage systems differ by cancer, so the label goes
 # with the disease; fields that don't apply are simply absent.
 SOLID_TUMOURS = {'breast-cancer', 'lung-cancer', 'colon-cancer'}
+HEMATOLOGIC_CANCERS = {
+    'myeloma', 'multiple-myeloma', 'follicular-lymphoma',
+    'chronic-lymphocytic-leukemia', 'mantle-cell-lymphoma',
+}
 STAGE_FIELDS = {
     'myeloma': ('stage', 'Stage & risk group'),
     'multiple-myeloma': ('stage', 'Stage & risk group'),
@@ -183,6 +187,13 @@ def _labelled(record, field, label):
 
 
 def _spread(record) -> str | None:
+    slug = (record.disease_slug or '').lower()
+    if slug in HEMATOLOGIC_CANCERS:
+        # This flat custom field belongs to the primary diagnosis. Do not infer
+        # blood-cancer involvement from solid-tumour metastasis flags (D05).
+        return _text((record.custom_fields or {}).get('hematologic_spread'))
+    if slug not in SOLID_TUMOURS:
+        return None
     if _text(record.metastasis_status):
         return _text(record.metastasis_status)
     if record.bone_only_metastasis_status:
@@ -210,7 +221,7 @@ def primary_cancer(record: PatientRecord, transitions: list[dict]) -> dict[str, 
         'subtype': _text(record.histologic_type),
         'stage': _labelled(record, stage_field, stage_label),
         'risk': _labelled(record, *risk) if risk else None,
-        'spread': _spread(record) if slug in SOLID_TUMOURS else None,
+        'spread': _spread(record),
         'biomarkers': [b for b in (_labelled(record, f, label) for f, label in BIOMARKER_FIELDS) if b],
         'date': record.diagnosis_date.isoformat() if record.diagnosis_date else None,
         'status': status.capitalize() if status else None,

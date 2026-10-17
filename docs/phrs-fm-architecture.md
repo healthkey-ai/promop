@@ -69,6 +69,19 @@ signup, invite acceptance, and landing on the patient's own record:
 `PatientHome` reuses the patient detail tabs for own-record viewing and patient-enabled
 actions. The UI does not expose provider patient lists to patient identities.
 
+The section API at `/api/v1/phr/diagnoses/` returns `spread` on the primary
+blood cancer card from `PatientRecord.custom_fields.hematologic_spread` (D05,
+[#1859](https://github.com/healthkey-ai/promop/issues/1859)). This is the latest
+valid Observation projected through the approved custom field mapping. The
+mapping deliberately uses concept 0 and the source key `phr:hematologic-spread`
+for unmapped narrative text; it does not assign a solid-tumour metastasis concept.
+Supported blood cancer slugs are myeloma (including `multiple-myeloma`),
+follicular lymphoma, chronic lymphocytic leukemia and mantle cell lymphoma.
+Empty values are omitted, and solid tumours continue to use their metastasis
+fields. The flat custom field has no per-disease association, so secondary
+cancer cards do not inherit it. Shared diagnoses use the same presentation.
+HealthTree's PHR app owns card rendering.
+
 ## Provisioning
 
 PROMOP supports three patient account paths:
