@@ -1215,9 +1215,8 @@ export default function EditMappingDialog({
                 <HelpTip tip={TIP.status} />
                 <select
                   id="status"
-                  title={isNewMapping ? TIP.status_new : TIP.status}
-                  value={isNewMapping ? "proposed" : form.status}
-                  disabled={isNewMapping}
+                  title={TIP.status}
+                  value={form.status}
                   onChange={(e) => setField("status", e.target.value)}
                   className="h-9 rounded-md border border-slate-300 px-2 text-sm font-normal text-slate-950 disabled:bg-slate-100 disabled:text-slate-500"
                 >
