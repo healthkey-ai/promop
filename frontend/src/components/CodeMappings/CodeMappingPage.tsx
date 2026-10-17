@@ -718,6 +718,7 @@ export default function CodeMappingPage() {
     try {
       const payload = {
         label: groupKey(entry), source: selectedVocabulary,
+        section, queue_sections: "1",
         seen_only: seenOnly ? "1" : "0",
         ...(provenanceFilter ? { provenance: provenanceFilter } : {}),
         ...(organizationFilter ? { organization: organizationFilter } : {}),
@@ -1140,6 +1141,7 @@ export default function CodeMappingPage() {
             </td>
             <td className="px-4 py-3">
               <button type="button" onClick={(e) => { e.stopPropagation(); void toggleApproval(row); }}
+                disabled={!row.destination_concept_id}
                 aria-label={row.status === "approved" ? `Unapprove ${row.source_code}` : `Approve ${row.source_code}`}
                 className="mr-1 rounded border border-slate-300 px-2 py-1 text-xs">
                 {row.status === "approved" ? "Unapprove" : "Approve"}

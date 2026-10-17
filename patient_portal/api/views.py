@@ -12683,7 +12683,7 @@ def code_mapping_group(request):
 def _group_job_rows(data):
     """Still-proposed members of one label on one vendor tab/filter scope."""
     from omop_core.services.athena_mapping_guard import without_icd10_athena_duplicates
-    from omop_core.services.mapping_browse import visible_rows
+    from omop_core.services.mapping_browse import section_filters, visible_rows
     from omop_core.services.mapping_rollup import group_members
 
     label = str(data.get('label') or '')
@@ -12695,14 +12695,19 @@ def _group_job_rows(data):
         })
     # A search deliberately reaches across tabs for browsing. A group decision
     # never does: Epic and Cerner albumin are two decisions.
-    filters = {key: data.get(key) for key in ('source', 'provenance', 'organization', 'seen_only')}
+    filters = {key: data.get(key) for key in ('source', 'provenance', 'organization', 'seen_only', 'queue_sections')}
     filters['search'] = ''
     mappings = without_icd10_athena_duplicates(
         SourceCodeConceptMapping.objects.select_related('organization')
     )
-    return group_members(
-        visible_rows(mappings, filters, section='Unmapped'), label,
-    ).filter(status='proposed').order_by('pk')
+    section = data.get('section', 'Unmapped') if data.get('queue_sections') == '1' else 'Unmapped'
+    rows = visible_rows(mappings, filters, section=section)
+    if data.get('queue_sections') == '1':
+        sections = section_filters(filters)
+        if section not in sections:
+            raise serializers.ValidationError({'section': 'Unknown mapping section.'})
+        rows = sections[section](rows)
+    return group_members(rows, label).filter(status='proposed').order_by('pk')
 
 
 def _lock_group_job(request, *, mode, action='', destination=None):
