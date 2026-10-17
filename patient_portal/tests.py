@@ -30043,6 +30043,37 @@ class PatientSourceCodesTest(_SmartBase):
         self.assertEqual(data['source_codes'], [])
         self.assertEqual(data['summary']['total'], 0)
 
+    def test_proposed_without_destination_shown_as_unmapped(self):
+        """A proposed mapping with no target_concept is reported as unmapped (#1889)."""
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='HGB',
+            omop_table='measurement',
+            status='proposed',
+            target_concept=None,
+        )
+        resp = self.write_client.get(self._url())
+        data = resp.json()
+        hgb = next(sc for sc in data['source_codes'] if sc['source_value'] == 'HGB')
+        self.assertEqual(hgb['mapping_status'], 'unmapped')
+        self.assertIsNotNone(hgb['mapping_id'])
+        # Summary should count it as unmapped, not proposed.
+        self.assertEqual(data['summary']['proposed'], 0)
+
+    def test_proposed_with_destination_stays_proposed(self):
+        """A proposed mapping WITH a target_concept keeps its proposed status."""
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='HGB',
+            omop_table='measurement',
+            status='proposed',
+            target_concept=self.condition_concept,
+        )
+        resp = self.write_client.get(self._url())
+        data = resp.json()
+        hgb = next(sc for sc in data['source_codes'] if sc['source_value'] == 'HGB')
+        self.assertEqual(hgb['mapping_status'], 'proposed')
+
 
 # ---------------------------------------------------------------------------
 # Per-Patient Resolve Source Codes Tests (Issue 2)

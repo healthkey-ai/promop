@@ -7535,7 +7535,11 @@ def _resolve_source_code_mappings(
 
             if mapping:
                 entry['mapping_id'] = mapping['id']
-                entry['mapping_status'] = mapping['status']
+                # A proposed mapping with no destination is functionally unmapped.
+                if mapping['status'] == 'proposed' and not mapping['target_concept_id']:
+                    entry['mapping_status'] = 'unmapped'
+                else:
+                    entry['mapping_status'] = mapping['status']
                 entry['source_vocabulary_id'] = mapping['source_vocabulary_id'] or ''
                 entry['source_code'] = mapping['source_code']
                 entry['mapping_origin'] = mapping['origin'] or ''
