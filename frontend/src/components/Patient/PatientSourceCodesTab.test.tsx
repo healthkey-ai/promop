@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import api from "../../api/axios";
 import PatientSourceCodesTab from "./PatientSourceCodesTab";
@@ -25,6 +25,7 @@ const sourceCodes = {
     source_code_id: 44,
     source_unit: "mg/dL",
     example_quantity: "12",
+    based_on: ["Blood test", "ServiceRequest/456"],
     extracted_source_unit: "bad unit",
     extracted_example_quantity: "12",
     source_unit_override: "mg/dL",
@@ -89,6 +90,20 @@ describe("PatientSourceCodesTab source description (#1778)", () => {
     render(<PatientSourceCodesTab personId="48095" />);
     fireEvent.click(await screen.findByText("Blood Pressure"));
     expect(await screen.findByLabelText(/Source Description/)).toHaveValue("Blood Pressure");
+    expect(screen.getByLabelText("BasedOn")).toHaveValue("Blood test; ServiceRequest/456");
+    expect(screen.getByText("New Mapping")).toBeInTheDocument();
+  });
+
+  it("shows Qty beside Units and BasedOn beneath both, omitting the line when absent", async () => {
+    render(<PatientSourceCodesTab personId="48095" />);
+    const row = (await screen.findByText("Blood Pressure")).closest("tr")!;
+    const cell = within(row).getByText("12").closest("td")!;
+    expect(cell).toHaveAttribute("colspan", "2");
+    expect(within(cell).getByText("mg/dL")).toBeInTheDocument();
+    expect(cell).toHaveTextContent("BasedOn: Blood test; ServiceRequest/456");
+    expect(screen.getAllByRole("columnheader", { name: "Qty" }).length).toBeGreaterThan(0);
+    const empty = screen.getByText("Respirations").closest("tr")!;
+    expect(within(empty).queryByText("BasedOn:")).not.toBeInTheDocument();
   });
 });
 

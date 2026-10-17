@@ -5,7 +5,7 @@ from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
 from omop_core.models import MappingDestinationCandidate, SourceCodeConceptMapping
 from patient_portal.api.views import code_mapping_detail, code_mapping_list
 from patient_portal.models import Identity
-from tests.factories import ConceptFactory
+from tests.factories import ConceptFactory, PersonFactory
 
 pytestmark = pytest.mark.django_db
 
@@ -44,10 +44,94 @@ def test_based_on_comes_only_from_source_fhir_metadata(browse, has_destination, 
     row('BASED-ON', source_metadata=metadata, origin='curator', origin_system='import',
         target_concept=ConceptFactory() if has_destination else None)
 
+    from omop_core.models import PatientSourceCode
+    PatientSourceCode.objects.create(person=PersonFactory(), source_value='BASED-ON',
+        source_vocabulary_id='ICD10CM', source_metadata=metadata)
     result = browse().data['results'][0]
 
     assert result['based_on'] == expected
     assert 'source_metadata' not in result
+
+
+@pytest.mark.parametrize('has_destination', [False, True])
+@pytest.mark.parametrize(('value', 'expected'), [(12.5, '12.5'), (0, '0'), (None, ''), (True, '')])
+def test_mapping_quantity_uses_patient_inventory_samples(browse, has_destination, value, expected):
+    row('QUANTITY', source_metadata={'fhir': {'resourceType': 'Observation', 'valueQuantity': {'value': value}}},
+        target_concept=ConceptFactory() if has_destination else None)
+
+    from omop_core.models import PatientSourceCode
+    PatientSourceCode.objects.create(person=PersonFactory(), source_value='QUANTITY',
+        source_vocabulary_id='ICD10CM', example_quantity=expected)
+    assert browse().data['results'][0]['example_quantity'] == expected
+
+
+def test_queue_sections_follow_destination_and_approval_including_athena(browse):
+    destination = ConceptFactory()
+    row('NO-DEST', status='approved')
+    row('PROPOSED', target_concept=destination)
+    row('REJECTED', status='rejected', target_concept=destination)
+    row('APPROVED', status='approved', target_concept=destination)
+    row('ATHENA', status='approved', target_concept=destination, origin_system='athena')
+    data = browse(queue_sections='1').data
+    assert {section: page['total'] for section, page in data['pages'].items()} == {
+        'Unmapped': 1, 'Proposed': 2, 'Approved': 2,
+    }
+
+
+def test_patient_samples_are_distinct_bounded_and_match_exact_source_identity(browse):
+    from omop_core.models import PatientSourceCode
+    mapping = row('SAMPLE', source_metadata={'fhir': {'basedOn': [{'display': 'Not a patient sample'}]}})
+    for i in range(6):
+        PatientSourceCode.objects.create(person=PersonFactory(), source_value='SAMPLE',
+            source_vocabulary_id='ICD10CM', example_quantity=str(i),
+            source_metadata={'fhir': {'basedOn': [{'reference': f'ServiceRequest/{i}'}]}})
+    PatientSourceCode.objects.create(person=PersonFactory(), source_value='SAMPLE',
+        source_vocabulary_id='OTHER', example_quantity='wrong vocabulary')
+    data = browse(queue_sections='1').data['results'][0]
+    assert data['mapping_id'] == mapping.pk
+    assert data['sample_quantities'] == ['0', '1', '2']
+    assert data['based_on'] == ['ServiceRequest/0', 'ServiceRequest/1', 'ServiceRequest/2']
+
+
+def test_samples_do_not_cross_organization_boundaries_and_honor_corrections(browse):
+    from omop_core.models import PatientSourceCode
+    from tests.factories import PatientRecordFactory, OrganizationFactory
+    org = OrganizationFactory()
+    row('SCOPED', organization=org)
+    mine = PatientRecordFactory(organization=org)
+    other = PatientRecordFactory(organization=OrganizationFactory())
+    for person, quantity in ((mine.person, '12'), (other.person, '999')):
+        PatientSourceCode.objects.create(person=person, source_value='SCOPED', source_vocabulary_id='ICD10CM',
+            example_quantity=quantity, example_quantity_override='0' if person == mine.person else None,
+            source_metadata={'fhir': {'basedOn': [{'display': quantity}]}})
+    data = browse(queue_sections='1').data['results'][0]
+    assert data['sample_quantities'] == ['0']
+    assert data['based_on'] == ['12']
+
+
+def test_sampling_cost_stays_flat_across_a_page(browse):
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+    row('FIRST')
+    with CaptureQueriesContext(connection) as small:
+        assert browse(queue_sections='1', include_duplicates='0').status_code == 200
+    for i in range(20):
+        row(f'NEXT-{i}')
+    with CaptureQueriesContext(connection) as large:
+        assert browse(queue_sections='1', include_duplicates='0').status_code == 200
+    assert len(large) == len(small)
+
+
+def test_label_groups_show_patient_examples_before_expansion(browse):
+    from omop_core.models import PatientSourceCode
+    row('GROUPED', source_code_description='Albumin', source_label_norm='albumin')
+    PatientSourceCode.objects.create(person=PersonFactory(), source_value='GROUPED',
+        source_vocabulary_id='ICD10CM', example_quantity='12', source_unit='g/dL',
+        source_metadata={'fhir': {'basedOn': [{'display': 'Albumin order'}]}})
+    group = browse(queue_sections='1', rollup='1').data['groups']['Unmapped'][0]
+    assert group['example_quantity'] == '12'
+    assert group['source_units'] == ['g/dL']
+    assert group['based_on'] == ['Albumin order']
 
 
 def test_pages_sort_before_slicing_and_report_full_counts(browse):

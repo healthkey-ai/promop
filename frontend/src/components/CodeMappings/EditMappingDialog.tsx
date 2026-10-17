@@ -796,6 +796,12 @@ export default function EditMappingDialog({
                     }}
                   />
                 )}
+                <div className="col-span-full w-full sm:ml-auto sm:w-1/2">
+                  <ReadOnlyField id="source_based_on" label="BasedOn"
+                    tip="Source FHIR basedOn display text, or its reference when no display is provided."
+                    value={sourceIdentityUnchanged ? selectedRow?.based_on?.join("; ") || "" : ""}
+                    testId="source-based-on" fullWidth />
+                </div>
               </div>
               <SourceMetadataBlock metadata={selectedRow?.source_metadata} />
             </fieldset>

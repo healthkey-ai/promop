@@ -56,6 +56,7 @@ export interface CodeMappingRow {
   /** Source FHIR basedOn displays, falling back to references. */
   based_on?: string[];
   example_quantity?: string;
+  sample_quantities?: string[];
   source_code_id?: number;
   extracted_source_unit?: string;
   extracted_example_quantity?: string;
