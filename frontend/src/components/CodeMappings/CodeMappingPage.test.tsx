@@ -2282,6 +2282,24 @@ describe("server mapping pages", () => {
     expect(within(table).queryByTitle("Sort Unmapped by Source")).not.toBeInTheDocument();
   });
 
+  it("displays FHIR BasedOn labels and leaves missing values empty", async () => {
+    renderBrowse({ pages: { ...browseData().pages, Mapped: { page: 1, page_size: 100, total: 1 } }, results: [
+      { ...proposedRow, based_on: ["Complete blood count", "ServiceRequest/456"] },
+      { ...approvedRow, based_on: [] },
+      { ...proposedRow, mapping_id: 99, source_code: "NO-BASED-ON" },
+    ] });
+    const unmapped = await screen.findByRole("table", { name: "Unmapped mappings" });
+    fireEvent.click(screen.getByRole("button", { name: /^Mapped\(/ }));
+    const mapped = screen.getByRole("table", { name: "Mapped mappings" });
+    expect(within(unmapped).getByRole("columnheader", { name: "BasedOn" })).toBeInTheDocument();
+    const cells = (id: number) => within(document.getElementById(`code-mapping-${id}`)!).getAllByRole("cell");
+    expect(cells(7)[3]).toHaveTextContent("Complete blood count; ServiceRequest/456");
+    expect(cells(8)[3]).toBeEmptyDOMElement();
+    expect(cells(99)[3]).toBeEmptyDOMElement();
+    expect(within(unmapped).queryByText("import")).not.toBeInTheDocument();
+    expect(within(mapped).queryByText("curator")).not.toBeInTheDocument();
+  });
+
   it("displays Units column with joined values in flat rows", async () => {
     renderBrowse({ results: [{ ...proposedRow, source_units: ["mg/dL", "mmol/L"] }] });
     await screen.findByRole("table", { name: "Unmapped mappings" });

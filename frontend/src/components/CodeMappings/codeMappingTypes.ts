@@ -53,6 +53,8 @@ export interface CodeMappingRow {
   source_evidence?: SourceEvidence;
   source_unit?: string;
   source_units?: string[];
+  /** Source FHIR basedOn displays, falling back to references. */
+  based_on?: string[];
   example_quantity?: string;
   source_code_id?: number;
   extracted_source_unit?: string;
