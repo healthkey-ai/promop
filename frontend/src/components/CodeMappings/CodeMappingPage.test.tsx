@@ -295,7 +295,7 @@ describe("CodeMappingPage", () => {
     expect(await screen.findByRole("region", { name: "Concept to source code" })).toBeInTheDocument();
     await screen.findByText(/No matching standard concepts/);
     fireEvent.click(screen.getByRole("button", { name: "Source Code → Concept" }));
-    expect(await screen.findByText("M-PROTEIN, SERUM", { selector: "td" })).toBeInTheDocument();
+    expect(await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' })).toBeInTheDocument();
   });
 
   describe("duplicate source-code errors", () => {
@@ -324,7 +324,7 @@ describe("CodeMappingPage", () => {
       fireEvent.click(within(alert).getByRole("link", { name: /Unmapped.*#101/ }));
       await waitFor(() => expect(document.getElementById("code-mapping-101")).toHaveFocus());
 
-      fireEvent.click(screen.getByRole("button", { name: /Athena Mapped \(1\)/ }));
+      fireEvent.click(screen.getByRole("button", { name: /Athena Mapped\(1\)/ }));
       fireEvent.click(within(alert).getByRole("link", { name: /Athena Mapped.*#103/ }));
       await waitFor(() => expect(document.getElementById("code-mapping-103")).toHaveFocus());
       scroll.mockRestore();
@@ -467,7 +467,7 @@ describe("CodeMappingPage", () => {
       // curator opens the row -- so this is the only place it can be asserted.
       renderPage([high, low]);
       const table = await screen.findByRole("table", { name: "Unmapped mappings" });
-      expect(columnIndex(table, "Source code")).toBe(0);
+      expect(columnIndex(table, "Source")).toBe(0);
       expect(within(table).queryByRole("columnheader", { name: "Retired" })).not.toBeInTheDocument();
       const row = document.getElementById("code-mapping-31")!;
       fireEvent.click(within(row).getByRole("button", { name: "Edit Z10" }));
@@ -486,7 +486,7 @@ describe("CodeMappingPage", () => {
     // #1575 replaced the Provenance-then-Seen default with plain Seen. Grouping
     // by provenance buried the rows a Suggest run had just answered, because a
     // run rewrites origin_system from '' to 'suggest v0.4', which sorts last.
-    it("defaults Unmapped to Seen descending, with Provenance still sortable", async () => {
+    it("defaults Unmapped to Seen descending", async () => {
       renderPage([
         { ...high, origin_system: "suggest v0.4", occurrence_count: 200 },
         { ...low, origin_system: "curator", occurrence_count: 3 },
@@ -494,21 +494,11 @@ describe("CodeMappingPage", () => {
         { ...low, mapping_id: 34, source_code: "A1", origin_system: "curator", occurrence_count: 20 },
       ]);
       const table = await screen.findByRole("table", { name: "Unmapped mappings" });
-      const provenance = within(table).getByRole("button", { name: "Provenance" });
-      // The highest-Seen row leads whatever its provenance, and the header
-      // says which column that is rather than leaving the default implicit.
       expect(within(table).getByRole("button", { name: "Seen" }).closest("th")).toHaveAttribute("aria-sort", "descending");
-      expect(provenance.closest("th")).toHaveAttribute("aria-sort", "none");
-      expect(ids(table)).toEqual(["code-mapping-31", "code-mapping-34", "code-mapping-33", "code-mapping-32"]);
-      fireEvent.click(provenance);
-      expect(provenance.closest("th")).toHaveAttribute("aria-sort", "ascending");
-      expect(ids(table)).toEqual(["code-mapping-34", "code-mapping-33", "code-mapping-32", "code-mapping-31"]);
-      fireEvent.click(provenance);
-      expect(provenance.closest("th")).toHaveAttribute("aria-sort", "descending");
       expect(ids(table)).toEqual(["code-mapping-31", "code-mapping-34", "code-mapping-33", "code-mapping-32"]);
     });
 
-    it.each(["Source code", "Seen", "Source description", "Destination concept", "Concept ID", "Dest count", "Status"])(
+    it.each(["Source", "Seen", "Destination", "Status"])(
       "sorts %s ascending and descending", async (column) => {
         renderPage([high, low]);
         const table = await screen.findByRole("table", { name: "Unmapped mappings" });
@@ -528,14 +518,14 @@ describe("CodeMappingPage", () => {
         { ...high, mapping_id: 51, status: "approved", mapping_origin: "athena" },
         { ...low, mapping_id: 52, status: "approved", mapping_origin: "athena" }]);
       const unmapped = await screen.findByRole("table", { name: "Unmapped mappings" });
-      fireEvent.click(screen.getByRole("button", { name: /^Mapped \(/ }));
-      fireEvent.click(screen.getByRole("button", { name: /^Athena Mapped \(/ }));
+      fireEvent.click(screen.getByRole("button", { name: /^Mapped\(/ }));
+      fireEvent.click(screen.getByRole("button", { name: /^Athena Mapped\(/ }));
       const mapped = screen.getByRole("table", { name: "Mapped mappings" });
       const athena = screen.getByRole("table", { name: "Athena Mapped mappings" });
       for (const table of [unmapped, mapped, athena]) {
-        fireEvent.click(within(table).getByRole("button", { name: "Concept ID" }));
+        fireEvent.click(within(table).getByRole("button", { name: "Destination" }));
       }
-      fireEvent.click(within(mapped).getByRole("button", { name: "Concept ID" }));
+      fireEvent.click(within(mapped).getByRole("button", { name: "Destination" }));
       expect(ids(unmapped)).toEqual(["code-mapping-32", "code-mapping-31"]);
       expect(ids(mapped)).toEqual(["code-mapping-41", "code-mapping-42"]);
       expect(ids(athena)).toEqual(["code-mapping-52", "code-mapping-51"]);
@@ -544,26 +534,20 @@ describe("CodeMappingPage", () => {
 
     it("does not spend dialog space on absent retirement metadata", async () => {
       renderPage([{ ...low, mapping_id: 33, source_code: "A3", source_retired: null }]);
-      const cell = await screen.findByText("A3", { selector: "td" });
+      const cell = await screen.findByText("A3", { selector: '[data-testid=source-code]' });
       fireEvent.click(cell.closest("tr")!);
       await screen.findByText("Edit Mapping");
       expect(screen.queryByTestId("source-code-metadata")).not.toBeInTheDocument();
     });
   });
 
-  it("puts the source code first without repeating the selected source-system tab", async () => {
+  it("stacks source code, description and system in one Source column", async () => {
     renderPage();
-    const row = (await screen.findByText("M-PROTEIN, SERUM", { selector: "td" })).closest("tr")!;
-    expect(cellUnder(row, "Source code")).toHaveTextContent("M-PROTEIN, SERUM");
+    const row = (await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' })).closest("tr")!;
+    const sourceCell = cellUnder(row, "Source");
+    expect(sourceCell).toHaveTextContent("M-PROTEIN, SERUM");
+    expect(sourceCell).toHaveTextContent("M-protein, serum");
     expect(screen.queryByRole("columnheader", { name: "Source code system" })).not.toBeInTheDocument();
-  });
-
-  it("shows source descriptions beside source codes, and no OMOP table column", async () => {
-    // Seen came back as its own column in #1080, so only OMOP table is gone.
-    renderPage();
-    const row = (await screen.findByText("M-PROTEIN, SERUM", { selector: "td" })).closest("tr")!;
-    expect(cellUnder(row, "Source description")).toHaveTextContent("M-protein, serum");
-    expect(screen.getByRole("columnheader", { name: "Source description" })).toBeInTheDocument();
     expect(screen.queryByRole("columnheader", { name: "OMOP table" })).not.toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: "Seen" })).toBeInTheDocument();
   });
@@ -571,7 +555,7 @@ describe("CodeMappingPage", () => {
   it("also filters legacy list responses and keeps the checkbox synchronized across sections", async () => {
     renderPage([proposedRow, { ...proposedRow, mapping_id: 77, source_code: "NEVER SEEN", occurrence_count: 0 },
       { ...approvedRow, source_vocabulary_id: "" }]);
-    await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+    await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
     expect(screen.queryByText("NEVER SEEN")).not.toBeInTheDocument();
     expect(screen.getByTestId("all-mappings-count")).toHaveTextContent("(2)");
     fireEvent.click(screen.getByRole("button", { name: /^Mapped/ }));
@@ -584,7 +568,7 @@ describe("CodeMappingPage", () => {
 
   it("searches mappings across source-vocabulary tabs", async () => {
     renderPage();
-    await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+    await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
 
     fireEvent.change(screen.getByRole("textbox", { name: "Search mappings" }), {
       target: { value: "C90.00" },
@@ -592,12 +576,13 @@ describe("CodeMappingPage", () => {
     // The matching ICD-10-CM row lives in the non-active tab and is approved,
     // so expand its section after the global search has located it.
     fireEvent.click(screen.getByRole("button", { name: /^Mapped/ }));
-    expect(await screen.findByText("C90.00", { selector: "td" })).toBeInTheDocument();
+    expect(await screen.findByText("C90.00", { selector: '[data-testid=source-code]' })).toBeInTheDocument();
   });
 
   it("labels cross-tab hits with their coding system in browse mode (#963)", async () => {
     // The page always asks for browse=1, and the server answers a query with
     // rows from every coding system (mapping_browse: `mappings if search`).
+    // System info is stacked in the Source column (no separate System column).
     const pages = { Unmapped: { page: 1, page_size: 100, total: 1 }, Mapped: { page: 1, page_size: 100, total: 1 },
       Rejected: { page: 1, page_size: 100, total: 0 }, "Athena Mapped": { page: 1, page_size: 100, total: 0 } };
     const tabs = [
@@ -615,19 +600,14 @@ describe("CodeMappingPage", () => {
       return Promise.resolve({ data: url.includes("reference") ? reference : {} });
     });
     render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
-    await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
-    // One tab's rows: nothing to label.
-    expect(screen.queryByRole("columnheader", { name: "System" })).not.toBeInTheDocument();
+    await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
 
     fireEvent.change(screen.getByRole("textbox", { name: "Search mappings" }), { target: { value: "C90.00" } });
     fireEvent.click(screen.getByRole("button", { name: /^Mapped/ }));
-    const row = (await screen.findByText("C90.00", { selector: "td" })).closest("tr")!;
-    expect(cellUnder(row, "System")).toHaveTextContent("ICD-10-CM");
+    const row = (await screen.findByText("C90.00", { selector: '[data-testid=source-code]' })).closest("tr")!;
+    // System label is stacked in the Source column, not a separate column.
+    expect(cellUnder(row, "Source")).toHaveTextContent("ICD-10-CM");
     expect(await screen.findByText(/Searching all coding systems — 1 match from other tabs/)).toBeInTheDocument();
-
-    fireEvent.change(screen.getByRole("textbox", { name: "Search mappings" }), { target: { value: "" } });
-    await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
-    await waitFor(() => expect(screen.queryByRole("columnheader", { name: "System" })).not.toBeInTheDocument());
   });
 
   it("splits proposed and approved into Unmapped and Mapped sections", async () => {
@@ -646,18 +626,18 @@ describe("CodeMappingPage", () => {
   it("can collapse and expand the Unmapped section", async () => {
     renderPage();
     const unmapped = await screen.findByRole("button", { name: /Unmapped/ });
-    expect(screen.getByText("M-PROTEIN, SERUM", { selector: "td" })).toBeInTheDocument();
+    expect(screen.getByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' })).toBeInTheDocument();
 
     fireEvent.click(unmapped);
-    expect(screen.queryByText("M-PROTEIN, SERUM", { selector: "td" })).not.toBeInTheDocument();
+    expect(screen.queryByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' })).not.toBeInTheDocument();
 
     fireEvent.click(unmapped);
-    expect(await screen.findByText("M-PROTEIN, SERUM", { selector: "td" })).toBeInTheDocument();
+    expect(await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' })).toBeInTheDocument();
   });
 
   it("offers tabs for the source vocabularies represented in the queue", async () => {
     renderPage();
-    await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+    await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
     const tabs = within(screen.getByRole("tablist", { name: "Source vocabularies" }));
     expect(tabs.getByRole("tab", { name: /Uncoded/ })).toBeInTheDocument();
     expect(tabs.getByRole("tab", { name: /ICD-10-CM/ })).toBeInTheDocument();
@@ -672,13 +652,13 @@ describe("CodeMappingPage", () => {
 
     fireEvent.click(icd10);
     expect(icd10).toHaveAttribute("aria-selected", "true");
-    expect(await screen.findByText("C90.00", { selector: "td" })).toBeInTheDocument();
+    expect(await screen.findByText("C90.00", { selector: '[data-testid=source-code]' })).toBeInTheDocument();
 
     fireEvent.click(uncoded);
     expect(uncoded).toHaveAttribute("aria-selected", "true");
     expect(icd10).toHaveAttribute("aria-selected", "false");
-    expect(await screen.findByText("M-PROTEIN, SERUM", { selector: "td" })).toBeInTheDocument();
-    expect(screen.queryByText("C90.00", { selector: "td" })).not.toBeInTheDocument();
+    expect(await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' })).toBeInTheDocument();
+    expect(screen.queryByText("C90.00", { selector: '[data-testid=source-code]' })).not.toBeInTheDocument();
   });
 
   it("adds a tab for a source system that arrives in SCCM data", async () => {
@@ -686,12 +666,12 @@ describe("CodeMappingPage", () => {
     const tabs = within(await screen.findByRole("tablist", { name: "Source vocabularies" }));
     const medDra = tabs.getByRole("tab", { name: /MedDRA/ });
     fireEvent.click(medDra);
-    expect(await screen.findByText("10000001", { selector: "td" })).toBeInTheDocument();
+    expect(await screen.findByText("10000001", { selector: '[data-testid=source-code]' })).toBeInTheDocument();
   });
 
   it("has no All tab", async () => {
     renderPage();
-    await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+    await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
     const tabs = within(screen.getByRole("tablist", { name: "Source vocabularies" }));
     expect(tabs.queryByRole("tab", { name: /^All/ })).not.toBeInTheDocument();
   });
@@ -700,13 +680,13 @@ describe("CodeMappingPage", () => {
     // SNOMED sorts first; the proposals are in HK-Labs. Defaulting to SNOMED
     // would make the queue look empty when it is not.
     renderPage();
-    expect(await screen.findByText("M-PROTEIN, SERUM", { selector: "td" })).toBeInTheDocument();
+    expect(await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' })).toBeInTheDocument();
   });
 
   describe("the dialog", () => {
     const openDialog = async () => {
       renderPage();
-      const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
       fireEvent.click(cell.closest("tr")!);
       return await screen.findByText("Edit Mapping");
     };
@@ -780,7 +760,7 @@ describe("CodeMappingPage", () => {
           { ...loincHit, concept_id: 555, concept_code: "555", concept_name: "Other source destination", selectable: true, selected: false, origins: ["HT-One"] },
           { ...loincHit, concept_id: null, concept_code: "999", concept_name: "Concept not loaded", selectable: false, selected: false, origins: ["HT-One"] },
         ] } }) : originalGet(url));
-      fireEvent.click((await screen.findByText("M-PROTEIN, SERUM", { selector: "td" })).closest("tr")!);
+      fireEvent.click((await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' })).closest("tr")!);
       const choices = await screen.findByLabelText("Source data destinations (3)");
       expect(screen.getByText(/Multiple destinations are available/)).toBeInTheDocument();
       expect(screen.getByRole("option", { name: /Concept not loaded/ })).toBeDisabled();
@@ -804,7 +784,7 @@ describe("CodeMappingPage", () => {
 
     it("does not open when the approve checkbox is clicked", async () => {
       renderPage();
-      await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
       fireEvent.click(screen.getByRole("button", { name: /^Approve M-PROTEIN/ }));
       expect(screen.queryByText("Edit Mapping")).not.toBeInTheDocument();
     });
@@ -849,7 +829,7 @@ describe("CodeMappingPage", () => {
         source_code_description: "Extramedullary plasmacytoma not having achieved remission",
         source_concept_id: 45542660,
       }]);
-      const cell = await screen.findByText("C90.20", { selector: "td" });
+      const cell = await screen.findByText("C90.20", { selector: '[data-testid=source-code]' });
       fireEvent.click(cell.closest("tr")!);
       // Opening the dialog takes a lock first (#1440), so it appears a tick later.
       await screen.findByText("Edit Mapping");
@@ -909,7 +889,7 @@ describe("CodeMappingPage", () => {
           ],
         },
       }]);
-      const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
       fireEvent.click(cell.closest("tr")!);
       const evidence = await screen.findByRole("region", { name: "Source evidence" });
       await waitFor(() => expect(evidence).toHaveTextContent("Memorial Hospital"));
@@ -941,7 +921,7 @@ describe("CodeMappingPage", () => {
       renderPage([{ ...proposedRow,
         source_vocabulary_id: "http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id",
       }]);
-      const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
       fireEvent.click(cell.closest("tr")!);
       const codeField = (await screen.findByLabelText("Source Code Value")).closest("div");
       const descriptionField = screen.getByLabelText("Source Description").closest("div");
@@ -1290,7 +1270,7 @@ describe("CodeMappingPage", () => {
   describe("review regressions", () => {
     const openDialog = async () => {
       renderPage();
-      const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
       fireEvent.click(cell.closest("tr")!);
       return await screen.findByText("Edit Mapping");
     };
@@ -1319,7 +1299,7 @@ describe("CodeMappingPage", () => {
       // whose catalogue has no ICD10CM. Falling back to the first option
       // rendered it as "uncoded" — the defect this page exists to remove.
       renderPage([{ ...proposedRow, source_vocabulary_id: "ICD10CM", domain_id: "Measurement" }]);
-      const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
       fireEvent.click(cell.closest("tr")!);
       await screen.findByText("Edit Mapping");
 
@@ -1341,13 +1321,13 @@ describe("CodeMappingPage", () => {
         row({ mapping_id: 2, source_code: "HUMAN-ADA", origin: "curator", created_by: "ada@example.com", occurrence_count: 1 }),
         row({ mapping_id: 3, source_code: "MACHINE", origin: "import", created_by: "", occurrence_count: 5 }),
       ]);
-      await screen.findByText("MACHINE", { selector: "td" });
+      await screen.findByText("MACHINE", { selector: '[data-testid=source-code]' });
 
       // The data rows carry role="button" (whole-row click), which overrides
       // their implicit "row" role — so query the code cells directly. Testing
       // Library returns them in DOM order.
       const codes = screen
-        .getAllByText(/^(MACHINE|HUMAN-ADA|HUMAN-ZOE)$/, { selector: "td" })
+        .getAllByText(/^(MACHINE|HUMAN-ADA|HUMAN-ZOE)$/, { selector: '[data-testid=source-code]' })
         .map((cell) => cell.textContent);
       // Zoe's 900 first, then the import's 5, then Ada's 1 -- who raised it no
       // longer changes the order.
@@ -1356,7 +1336,7 @@ describe("CodeMappingPage", () => {
 
     it("names the creating curator instead of an import system", async () => {
       renderPage([row({ origin: "curator", created_by: "ada@example.com", origin_system: "" })]);
-      const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
       fireEvent.click(cell.closest("tr")!);
       await screen.findByText("Edit Mapping");
       expect(screen.getByText(/Created by ada@example.com/)).toBeInTheDocument();
@@ -1365,7 +1345,7 @@ describe("CodeMappingPage", () => {
 
     it("shows the current provenance to the left of Status in the footer", async () => {
       renderPage();
-      const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
       fireEvent.click(cell.closest("tr")!);
       await screen.findByText("Edit Mapping");
 
@@ -1383,7 +1363,7 @@ describe("CodeMappingPage", () => {
       // server enforces proposed-on-create; offering Approved here would
       // promise a one-step create-and-approve the API no longer honours.
       renderPage();
-      await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
       fireEvent.click(screen.getByRole("button", { name: /New Mapping/ }));
       await screen.findByText("New Mapping", { selector: "h2" });
 
@@ -1399,7 +1379,7 @@ describe("CodeMappingPage", () => {
       const tabs = within(await screen.findByRole("tablist", { name: "Source vocabularies" }));
       fireEvent.click(tabs.getByRole("tab", { name: /ICD-10-CM/ }));
       fireEvent.click(await screen.findByText(/^Mapped/));
-      const cell = await screen.findByText(code, { selector: "td" });
+      const cell = await screen.findByText(code, { selector: '[data-testid=source-code]' });
       fireEvent.click(cell.closest("tr")!);
       await screen.findByText("Edit Mapping");
     };
@@ -1444,7 +1424,7 @@ describe("CodeMappingPage", () => {
       renderPage([{
         ...approvedRow, source_code: "UNAPPROVED", status: "proposed" as const,
       }]);
-      const cell = await screen.findByText("UNAPPROVED", { selector: "td" });
+      const cell = await screen.findByText("UNAPPROVED", { selector: '[data-testid=source-code]' });
       fireEvent.click(cell.closest("tr")!);
       await screen.findByText("Edit Mapping");
       expect(screen.queryByText(/approved by/)).not.toBeInTheDocument();
@@ -1475,7 +1455,7 @@ describe("CodeMappingPage", () => {
   describe("Suggest", () => {
     it("keeps Suggest available after switching source vocabularies", async () => {
       renderPage();
-      await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
       expect(screen.getByRole("button", { name: /Suggest/ })).toBeEnabled();
 
       const tabs = within(screen.getByRole("tablist", { name: "Source vocabularies" }));
@@ -1494,7 +1474,7 @@ describe("CodeMappingPage", () => {
     it("includes all Seen counts without a threshold control", async () => {
       mockPost.mockResolvedValue({ data: suggestRun({ updated: 3, total: 5, ranked: 2 }) });
       renderPage();
-      await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
       expect(screen.queryByLabelText(/seen at least/i)).not.toBeInTheDocument();
 
       fireEvent.click(screen.getByRole("button", { name: /Suggest/ }));
@@ -1511,7 +1491,7 @@ describe("CodeMappingPage", () => {
         data: suggestRun({ total: 5, done: 5, destinations: 3, landed_in: { LOINC: 3 } }),
       });
       renderPage();
-      await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
       fireEvent.click(screen.getByRole("button", { name: /Suggest/ }));
 
       await waitFor(() =>
@@ -1526,7 +1506,7 @@ describe("CodeMappingPage", () => {
       // normal state and not a failure.
       mockPost.mockResolvedValue({ data: suggestRun({ updated: 0, total: 0, ranked: 0 }) });
       renderPage();
-      await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
       fireEvent.click(screen.getByRole("button", { name: /Suggest/ }));
       await waitFor(() =>
         expect(screen.getByTestId("suggest-progress"))
@@ -1536,7 +1516,7 @@ describe("CodeMappingPage", () => {
     it("puts Suggest first directly below the tabs, followed by the enabled strategies", async () => {
       mockPost.mockResolvedValue({ data: suggestRun() });
       renderPage();
-      await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
       const toolbar = screen.getByRole("group", { name: "Suggest controls" });
       expect(screen.getByRole("tablist").nextElementSibling).toBe(toolbar);
       const controls = toolbar.querySelectorAll("button, input");
@@ -1563,7 +1543,7 @@ describe("CodeMappingPage", () => {
     it("can suggest with semantic retrieval alone and requires at least one retriever", async () => {
       mockPost.mockResolvedValue({ data: suggestRun() });
       renderPage();
-      await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
       const toolbar = screen.getByRole("group", { name: "Suggest controls" });
       for (const name of ["UMLS", "Lexical"]) {
         fireEvent.click(within(toolbar).getByRole("checkbox", { name }));
@@ -1613,7 +1593,7 @@ describe("CodeMappingPage", () => {
           <CodeMappingPage />
         </MemoryRouter>,
       );
-      await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
       fireEvent.click(screen.getByRole("button", { name: /Suggest/ }));
 
       // The in-flight phase names what it is doing, against a known denominator.
@@ -1639,7 +1619,7 @@ describe("CodeMappingPage", () => {
         data: suggestRun({ total: 5, done: 5, destinations: 3, remaining: 28 }),
       });
       renderPage();
-      await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
       fireEvent.click(screen.getByRole("button", { name: /Suggest/ }));
       await waitFor(() =>
         expect(screen.getByTestId("suggest-progress"))
@@ -1670,7 +1650,7 @@ describe("CodeMappingPage", () => {
           <CodeMappingPage />
         </MemoryRouter>,
       );
-      await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
       fireEvent.click(screen.getByRole("button", { name: /Suggest/ }));
       await waitFor(() =>
         expect(screen.getByTestId("suggest-progress"))
@@ -1684,7 +1664,7 @@ describe("CodeMappingPage", () => {
         data: suggestRun({ state: "failure", error: "retrieval exploded" }),
       });
       renderPage();
-      await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
       fireEvent.click(screen.getByRole("button", { name: /Suggest/ }));
       await waitFor(() =>
         expect(screen.getByTestId("suggest-progress")).toHaveTextContent("retrieval exploded"));
@@ -1701,7 +1681,7 @@ describe("CodeMappingPage", () => {
         destination_concept_id: null as unknown as number,
         domain_id: "Measurement",
       }]);
-      expect(await screen.findByText("99999-9", { selector: "td" })).toBeInTheDocument();
+      expect(await screen.findByText("99999-9", { selector: '[data-testid=source-code]' })).toBeInTheDocument();
     });
   });
 });
@@ -1911,8 +1891,7 @@ describe("server mapping pages", () => {
     });
     render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
 
-    const row = (await screen.findByText("10627")).closest("tr")!;
-    expect(cellUnder(row, "Hospital context")).toHaveTextContent("Verified: Hospital A");
+    await screen.findByText("10627");
     fireEvent.change(screen.getByRole("combobox", { name: "Filter by organization" }), {
       target: { value: "hospital-a" },
     });
@@ -1937,8 +1916,7 @@ describe("server mapping pages", () => {
         metadata: {}, units: [], system_context: context,
       },
     }]);
-    const code = await screen.findByText("LOCAL-1826", { selector: "td" });
-    expect(cellUnder(code.closest("tr")!, "Hospital context")).toHaveTextContent("Observed at: UPMC");
+    const code = await screen.findByText("LOCAL-1826", { selector: '[data-testid=source-code]' });
     fireEvent.click(code.closest("tr")!);
     const picker = await screen.findByLabelText("Source Code System") as HTMLSelectElement;
     expect(picker.value).toBe(oid);
@@ -1957,7 +1935,7 @@ describe("server mapping pages", () => {
       pages: { ...browseData().pages, Unmapped: { page: 1, page_size: 100, total: 1 } } });
     await screen.findByText("Albumin");
     expect(screen.getByTestId("all-mappings-count")).toHaveTextContent("(2557)");
-    expect(screen.getByRole("button", { name: "Unmapped (1 groups)" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Unmapped(1 groups)" })).toBeInTheDocument();
     expect(screen.getByText("Downloads include loaded rows only.")).toBeInTheDocument();
   });
 
@@ -2054,11 +2032,11 @@ describe("server mapping pages", () => {
   // #1571: one review row per label. albumin arrives under 2,557 vendor codes,
   // so a per-code queue asks the same question 2,557 times and scatters the
   // volume so the queue cannot be ordered usefully.
-  it("does not group until asked", async () => {
+  it("groups by default", async () => {
     renderBrowse();
     await screen.findByRole("table", { name: "Unmapped mappings" });
     expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", {
-      params: expect.not.objectContaining({ rollup: expect.anything() }),
+      params: expect.objectContaining({ rollup: 1 }),
     });
   });
 
@@ -2071,7 +2049,7 @@ describe("server mapping pages", () => {
     render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
     await screen.findByRole("table", { name: "Unmapped mappings" });
     payload = browseData({ rollup: true, groups: { Unmapped: [entry()] } });
-    fireEvent.click(screen.getByLabelText("Group by label and units"));
+    fireEvent.click(screen.getByLabelText("Group by label"));
     await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", {
       params: expect.objectContaining({ rollup: 1 }),
     }));
@@ -2096,7 +2074,8 @@ describe("server mapping pages", () => {
     })] } });
     const table = await screen.findByRole("table", { name: "Unmapped mappings" });
     expect(within(table).getByText("Albumin [Mass/volume] in Serum or Plasma")).toBeInTheDocument();
-    expect(within(table).getByText("LOINC:1751-7")).toBeInTheDocument();
+    expect(within(table).getByText("1751-7")).toBeInTheDocument();
+    expect(within(table).getByText("LOINC")).toBeInTheDocument();
   });
 
   it("suggests once for a label group and sends the active vendor/filter scope", async () => {
@@ -2298,22 +2277,12 @@ describe("server mapping pages", () => {
     expect(await screen.findByRole("table", { name: "Athena Mapped mappings" })).toBeInTheDocument();
   });
 
-  it("offers Seen and Source description sorting while grouped", async () => {
+  it("offers Seen sorting while grouped", async () => {
     renderBrowse({ rollup: true, groups: { Unmapped: [entry()] } });
-    fireEvent.click(await screen.findByLabelText("Group by label and units"));
-    await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", {
-      params: expect.objectContaining({ rollup: 1 }),
-    }));
     const table = await screen.findByRole("table", { name: "Unmapped mappings" });
     expect(within(table).getByTitle("Sort Unmapped by Seen").closest("th")).toHaveAttribute("aria-sort", "descending");
-    const descriptionSort = within(table).getByTitle("Sort Unmapped by Source description");
-    expect(descriptionSort).toBeInTheDocument();
-    expect(within(table).queryByTitle("Sort Unmapped by Source code")).not.toBeInTheDocument();
-    fireEvent.click(descriptionSort);
-    await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", {
-      params: expect.objectContaining({ rollup: 1, page_0: 1, order_0: "source_code_description" }),
-    }));
-    expect(descriptionSort.closest("th")).toHaveAttribute("aria-sort", "ascending");
+    // Source is not sortable in grouped mode (only Seen is).
+    expect(within(table).queryByTitle("Sort Unmapped by Source")).not.toBeInTheDocument();
   });
 
   it("displays Units column with joined values in flat rows", async () => {
@@ -2330,22 +2299,13 @@ describe("server mapping pages", () => {
     expect(cells.length).toBeGreaterThanOrEqual(1);
   });
 
-  it("displays Units column in grouped rollup rows", async () => {
+  it("uses plain label as group key (no units)", async () => {
     renderBrowse({
       rollup: true,
-      groups: { Unmapped: [entry({ source_units: ["ng/mL"], group_key: 'albumin|["ng/mL"]' })] },
+      groups: { Unmapped: [entry({ group_key: "albumin" })] },
     });
     await screen.findByRole("table", { name: "Unmapped mappings" });
-    expect(screen.getByText("ng/mL")).toBeInTheDocument();
-  });
-
-  it("includes units in group expand aria-label", async () => {
-    renderBrowse({
-      rollup: true,
-      groups: { Unmapped: [entry({ source_units: ["g/dL"], group_key: 'albumin|["g/dL"]' })] },
-    });
-    await screen.findByRole("table", { name: "Unmapped mappings" });
-    expect(screen.getByRole("button", { name: /Expand Albumin \(g\/dL\)/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Expand Albumin/ })).toBeInTheDocument();
   });
 
   it("requests the next page and sorts the full section on the server", async () => {
@@ -2500,15 +2460,15 @@ describe("expanded ICD10 review feedback", () => {
     });
     mockPatch.mockResolvedValue({ data: { ...mapping, status } });
     render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
-    fireEvent.click(await screen.findByText("Z12.11", { selector: "td" }));
+    fireEvent.click(await screen.findByText("Z12.11", { selector: '[data-testid=source-code]' }));
     // The dialog takes an edit lock before opening (#1440), so it is a tick late.
     await screen.findByRole("dialog");
     fireEvent.change(screen.getByLabelText("Status"), { target: { value: status } });
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Update Mapping" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-    expect(screen.getByRole("button", { name: "Unmapped (0)" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Unmapped(0)" })).toBeInTheDocument();
     expect(within(screen.getByRole("table", { name: "Unmapped mappings" })).queryByText("Z12.11")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: `Mapped (${status === "approved" ? 1 : 0})` })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: `Mapped(${status === "approved" ? 1 : 0})` })).toBeInTheDocument();
   });
 });
 

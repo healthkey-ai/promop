@@ -282,7 +282,7 @@ type BrowseResponse = {
 type GroupEntry = {
   label: string | null;
   group_key?: string;
-  source_units?: string[];
+
   description: string;
   members: number;
   seen: number;
@@ -1128,7 +1128,7 @@ export default function CodeMappingPage() {
           >
             <td className="px-4 py-3">
               {row.locked_by_username && <span title={`Locked by ${row.locked_by_username}`} className="mr-1 text-amber-500">&#128274;</span>}
-              <div className="font-mono text-xs text-slate-900">{row.source_code}</div>
+              <div data-testid="source-code" className="font-mono text-xs text-slate-900">{row.source_code}</div>
               {row.source_code_description && <div className="text-xs text-slate-700">{row.source_code_description}</div>}
               {row.source_vocabulary_id && <div className="text-xs text-slate-500">{systemLabel(row)}</div>}
             </td>
