@@ -22147,12 +22147,8 @@ class CodeMappingApiTest(TestCase):
             {'reviewed C90.00', 'reviewed MULTIPLE MYELOMA'},
         )
 
-    def test_delete_without_a_destination_removes_one_row_and_leaves_the_sibling(self):
-        """A queue entry with nothing to clear is still deleted outright.
-
-        #1441 made DELETE clear a destination rather than remove the row, but
-        only when there is a destination to clear.
-        """
+    def test_delete_unmapped_row_rejected(self):
+        """An unmapped source code cannot be deleted — it represents real patient data."""
         self.client.force_authenticate(user=self.staff)
         sibling = SourceCodeConceptMapping.objects.create(
             source_vocabulary_id='ICD10CM',
@@ -22160,12 +22156,11 @@ class CodeMappingApiTest(TestCase):
             omop_table='measurement',
         )
         resp = self.client.delete(f'/api/v1/code-mappings/{sibling.id}/')
-        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
-        self.assertFalse(SourceCodeConceptMapping.objects.filter(id=sibling.id).exists())
-        self.assertTrue(SourceCodeConceptMapping.objects.filter(id=self.mapping.id).exists())
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(SourceCodeConceptMapping.objects.filter(id=sibling.id).exists())
 
-    def test_delete_with_a_destination_clears_it_and_leaves_the_sibling(self):
-        """The row stays in the queue so it can receive new proposals."""
+    def test_delete_mapped_row_truly_deletes(self):
+        """A mapped row is truly deleted (not just cleared)."""
         self.client.force_authenticate(user=self.staff)
         sibling = SourceCodeConceptMapping.objects.create(
             source_vocabulary_id='ICD10CM',
@@ -22176,12 +22171,40 @@ class CodeMappingApiTest(TestCase):
             status='approved',
         )
         resp = self.client.delete(f'/api/v1/code-mappings/{sibling.id}/')
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        sibling.refresh_from_db()
-        self.assertIsNone(sibling.target_concept_id)
-        self.assertEqual(sibling.destination_vocabulary_id, '')
-        self.assertEqual(sibling.status, 'proposed')
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(SourceCodeConceptMapping.objects.filter(id=sibling.id).exists())
         self.assertTrue(SourceCodeConceptMapping.objects.filter(id=self.mapping.id).exists())
+
+    def test_delete_mapped_row_repoints_clinical_rows_to_zero(self):
+        """Deleting a mapped row repoints its clinical rows back to concept 0."""
+        from omop_core.test_utils import ensure_test_concept_zero
+        concept_zero = ensure_test_concept_zero()
+
+        self.client.force_authenticate(user=self.staff)
+        person = Person.objects.create(person_id=990099)
+        PatientRecord.objects.create(person=person, derivation_version=1)
+        m = Measurement.objects.create(
+            measurement_id=990099001,
+            person=person,
+            measurement_concept=self.standard,
+            measurement_date=date(2024, 6, 1),
+            measurement_type_concept_id=0,
+            measurement_source_value='C90.00',
+        )
+        sibling = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='ICD10CM',
+            source_code='C90.00',
+            target_concept=self.standard,
+            destination_vocabulary_id='LOINC',
+            omop_table='measurement',
+            status='approved',
+        )
+        resp = self.client.delete(f'/api/v1/code-mappings/{sibling.id}/')
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        m.refresh_from_db()
+        self.assertEqual(m.measurement_concept_id, 0)
+        pr = PatientRecord.objects.get(person=person)
+        self.assertEqual(pr.derivation_version, 0)
 
     def test_blank_source_systems_stay_distinct(self):
         """'' is a value, not NULL, so two uncoded codes do not collide."""

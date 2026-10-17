@@ -1065,9 +1065,18 @@ export default function CodeMappingPage() {
     }
   };
 
-  /** Callback for EditMappingDialog onDeleted. */
+  /** Callback for EditMappingDialog onDeleted — remove the row from local state. */
   const handleDialogDeleted = (row: CodeMappingRow) => {
-    applySavedMapping(row);
+    setRows((current) => current.filter((r) => r.mapping_id !== row.mapping_id));
+    setExpandedGroups((current) => {
+      let touched = false;
+      const next = Object.fromEntries(Object.entries(current).map(([key, members]) => {
+        if (!members?.some((r) => r.mapping_id === row.mapping_id)) return [key, members];
+        touched = true;
+        return [key, members.filter((r) => r.mapping_id !== row.mapping_id)];
+      }));
+      return touched ? next : current;
+    });
     void refreshCurrent.current();
   };
 

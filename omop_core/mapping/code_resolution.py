@@ -629,7 +629,7 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
               'person_ids': set()}
     # `is None`, not falsiness: concept 0 is OMOP's "No matching concept" and is
     # the single most common value a re-point moves rows *off*.
-    if old_concept_id is None or not new_concept_id or old_concept_id == new_concept_id:
+    if old_concept_id is None or new_concept_id is None or old_concept_id == new_concept_id:
         return result
 
     table = normalize_omop_table(mapping.omop_table)
