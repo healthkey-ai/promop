@@ -29,6 +29,7 @@ from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.validators import validate_email
+from omop_core.services.source_fhir_context import based_on_labels as _source_based_on
 from omop_core.models import (
     Organization,
     Person, PatientRecord, Concept, ConceptClass, Domain, ProvenanceRecord, Vocabulary,
@@ -7525,6 +7526,7 @@ def _resolve_source_code_mappings(
                 'source_unit_override': row.get('source_unit_override'),
                 'example_quantity_override': row.get('example_quantity_override'),
                 'source_metadata': row.get('source_metadata') or {},
+                'based_on': _source_based_on(row.get('source_metadata')),
                 # The starting value for the edit dialog: the curator's own
                 # description when the mapping has one, else the source's.
                 'source_code_description': (
@@ -11838,29 +11840,6 @@ def _concept_unit_fields(concept):
     return concept_unit_fields(concept)
 
 
-def _mapping_based_on(mapping):
-    """Labels from the source FHIR resource's basedOn references only."""
-    metadata = mapping.source_metadata if mapping else None
-    if not isinstance(metadata, dict):
-        return []
-    resource = metadata.get('fhir', metadata)
-    if not isinstance(resource, dict):
-        return []
-    references = resource.get('basedOn', [])
-    if not isinstance(references, list):
-        return []
-    labels = []
-    for reference in references:
-        if not isinstance(reference, dict):
-            continue
-        for key in ('display', 'reference'):
-            value = reference.get(key)
-            if isinstance(value, str) and value.strip():
-                labels.append(value.strip())
-                break
-    return labels
-
-
 def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
                                 destination_count=None, include_source_evidence=False):
     """One row of the Code Mapping list: a source code and where it lands.
@@ -11882,7 +11861,15 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
     # whose concept is not loaded is a review-queue row, not an error.
     from omop_core.services.mapping_source_units import source_units
     units = source_units(mapping)
-    based_on = _mapping_based_on(mapping)
+    if mapping is not None and not hasattr(mapping, '_source_samples'):
+        from omop_core.services.mapping_samples import attach_source_samples
+        attach_source_samples([mapping])
+    samples = getattr(mapping, '_source_samples', None)
+    if not units and samples is not None:
+        units = samples['units']
+    based_on = samples['based_on'] if samples is not None else []
+    quantities = samples['quantities'] if samples is not None else []
+    quantity = '; '.join(quantities)
     source_evidence = None
     if include_source_evidence:
         evidence_metadata = dict(mapping.source_metadata or {}) if mapping else {}
@@ -11909,6 +11896,8 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
             **source_retirement,
             'source_units': units,
             'based_on': based_on,
+            'example_quantity': quantity,
+            'sample_quantities': quantities,
             'destination_concept_id': None,
             'destination_concept_name': '',
             'destination_concept_code': '',
@@ -11969,6 +11958,8 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
         **source_retirement,
         'source_units': units,
         'based_on': based_on,
+        'example_quantity': quantity,
+        'sample_quantities': quantities,
         # Destination
         'destination_concept_id': concept.concept_id,
         'destination_concept_name': concept.concept_name,
@@ -12649,7 +12640,7 @@ def code_mapping_group(request):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.services.athena_mapping_guard import without_icd10_athena_duplicates
-    from omop_core.services.mapping_browse import SECTION_FILTERS, visible_rows
+    from omop_core.services.mapping_browse import section_filters, visible_rows
     from omop_core.services.mapping_destinations import with_destination_counts
     from omop_core.services.mapping_rollup import group_members
     from omop_core.services.source_retirement import mapping_source_retirement
@@ -12657,8 +12648,9 @@ def code_mapping_group(request):
     label = request.query_params.get('label')
     if not label:
         return Response({'detail': 'label is required.'}, status=status.HTTP_400_BAD_REQUEST)
+    filters = section_filters(request.query_params)
     section = request.query_params.get('section', 'Unmapped')
-    if section not in SECTION_FILTERS:
+    if section not in filters:
         return Response({'detail': 'Unknown section.'}, status=status.HTTP_400_BAD_REQUEST)
 
     mappings = without_icd10_athena_duplicates(SourceCodeConceptMapping.objects.select_related(
@@ -12668,10 +12660,12 @@ def code_mapping_group(request):
     # provenance filter expands into all 2,557 -- including the rows the filter
     # existed to hide -- and a cross-tab search expands into one tab only.
     rows = list(with_destination_counts(
-        SECTION_FILTERS[section](group_members(visible_rows(mappings, request.query_params, section=section), label))
+        filters[section](group_members(visible_rows(mappings, request.query_params, section=section), label))
     ).order_by('-occurrence_count', 'source_code', 'id')[:MAX_GROUP_MEMBERS + 1])
     truncated = len(rows) > MAX_GROUP_MEMBERS
     rows = rows[:MAX_GROUP_MEMBERS]
+    from omop_core.services.mapping_samples import attach_source_samples
+    attach_source_samples(rows)
     metadata = mapping_source_retirement(rows)
     return Response({
         'label': label,
@@ -12689,7 +12683,7 @@ def code_mapping_group(request):
 def _group_job_rows(data):
     """Still-proposed members of one label on one vendor tab/filter scope."""
     from omop_core.services.athena_mapping_guard import without_icd10_athena_duplicates
-    from omop_core.services.mapping_browse import visible_rows
+    from omop_core.services.mapping_browse import section_filters, visible_rows
     from omop_core.services.mapping_rollup import group_members
 
     label = str(data.get('label') or '')
@@ -12701,14 +12695,19 @@ def _group_job_rows(data):
         })
     # A search deliberately reaches across tabs for browsing. A group decision
     # never does: Epic and Cerner albumin are two decisions.
-    filters = {key: data.get(key) for key in ('source', 'provenance', 'organization', 'seen_only')}
+    filters = {key: data.get(key) for key in ('source', 'provenance', 'organization', 'seen_only', 'queue_sections')}
     filters['search'] = ''
     mappings = without_icd10_athena_duplicates(
         SourceCodeConceptMapping.objects.select_related('organization')
     )
-    return group_members(
-        visible_rows(mappings, filters, section='Unmapped'), label,
-    ).filter(status='proposed').order_by('pk')
+    section = data.get('section', 'Unmapped') if data.get('queue_sections') == '1' else 'Unmapped'
+    rows = visible_rows(mappings, filters, section=section)
+    if data.get('queue_sections') == '1':
+        sections = section_filters(filters)
+        if section not in sections:
+            raise serializers.ValidationError({'section': 'Unknown mapping section.'})
+        rows = sections[section](rows)
+    return group_members(rows, label).filter(status='proposed').order_by('pk')
 
 
 def _lock_group_job(request, *, mode, action='', destination=None):
@@ -12994,6 +12993,9 @@ def code_mapping_list(request):
             with_destination_counts(mappings).order_by('source_vocabulary_id', 'source_code', 'id'), request,
         )
         from omop_core.services.source_retirement import mapping_source_retirement
+        from omop_core.services.mapping_samples import attach_source_samples
+        mappings = list(mappings)
+        attach_source_samples(mappings)
         source_metadata = mapping_source_retirement(mappings)
         rows = [
             _serialize_code_mapping_row(

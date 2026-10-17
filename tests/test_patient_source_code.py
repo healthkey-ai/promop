@@ -49,6 +49,33 @@ def _url(person_id):
     return f'/api/v1/patient-records/{person_id}/source-codes/'
 
 
+@pytest.mark.parametrize('mapped', [False, True])
+def test_patient_source_context_keeps_quantity_and_based_on_from_the_patient(smart_env, mapped):
+    PatientSourceCode.objects.create(
+        person=smart_env['person'], source_value='QTY', omop_table='measurement',
+        source_unit='mg/dL', example_quantity='12', example_quantity_override='0',
+        source_metadata={'fhir': {'basedOn': [
+            {'display': 'Blood test', 'reference': 'ServiceRequest/123'},
+            {'reference': 'ServiceRequest/456'},
+        ]}},
+    )
+    PatientSourceCode.objects.create(person=smart_env['person'], source_value='EMPTY', omop_table='measurement')
+    if mapped:
+        for code in ('QTY', 'EMPTY'):
+            SourceCodeConceptMapping.objects.create(
+                source_code=code, omop_table='measurement', origin='curator',
+                source_metadata={'fhir': {'basedOn': [{'display': 'Another patient order'}]}},
+            )
+
+    response = smart_env['client'].get(_url(smart_env['person'].person_id))
+    assert response.status_code == 200
+    rows = {r['source_value']: r for r in response.data['source_codes']}
+    assert rows['QTY']['example_quantity'] == '0'
+    assert rows['QTY']['source_unit'] == 'mg/dL'
+    assert rows['QTY']['based_on'] == ['Blood test', 'ServiceRequest/456']
+    assert rows['EMPTY']['based_on'] == []
+
+
 # ---------------------------------------------------------------------------
 # POST tests
 # ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ import type {
   SourceCodesResponse,
 } from "../../types/sourceCodes";
 import EditMappingDialog from "../CodeMappings/EditMappingDialog";
+import SourceQuantityCell from "../CodeMappings/SourceQuantityCell";
 import {
   type CodeMappingRow,
   type Reference,
@@ -49,6 +50,7 @@ function sourceCodeToRow(sc: PatientSourceCode): CodeMappingRow {
     source_code_description: sc.source_code_description || "",
     source_unit: sc.source_unit || "",
     example_quantity: sc.example_quantity || "",
+    based_on: sc.based_on || [],
     source_code_id: sc.source_code_id,
     extracted_source_unit: sc.extracted_source_unit,
     extracted_example_quantity: sc.extracted_example_quantity,
@@ -102,7 +104,7 @@ function SourceCodeTable({
             <th className="px-3 py-2 text-left font-medium">Source</th>
             <th className="px-3 py-2 text-left font-medium">Domain</th>
             <th className="px-3 py-2 text-right font-medium">Seen</th>
-            <th className="px-3 py-2 text-left font-medium">BasedOn</th>
+            <th className="px-3 py-2 text-left font-medium">Qty</th>
             <th className="px-3 py-2 text-left font-medium">Units</th>
             <th className="px-3 py-2 text-left font-medium">Destination</th>
           </tr>
@@ -127,13 +129,8 @@ function SourceCodeTable({
                 {TABLE_LABELS[sc.omop_table] || sc.omop_table}
               </td>
               <td className="px-3 py-2 text-right tabular-nums">{sc.row_count}</td>
-              <td className="px-3 py-2 text-xs text-muted-foreground">
-                {sc.mapping_origin || "\u2014"}
-              </td>
-              <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
-                {sc.source_unit || "\u2014"}
-                {sc.source_unit_override != null && <span className="ml-1 text-blue-700">(corrected)</span>}
-              </td>
+              <SourceQuantityCell quantity={sc.example_quantity} units={sc.source_unit}
+                basedOn={sc.based_on} correctedUnit={sc.source_unit_override != null} />
               <td className="px-3 py-2 text-xs">
                 {sc.mapping_destination_concept_code ? (
                   <>

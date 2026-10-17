@@ -116,6 +116,7 @@ def group_entries(queryset, page, page_size, order='-occurrence_count'):
     return [
         {
             'label': entry['label'],
+            'sample_mapping_id': entry['max_id'],
             'group_key': entry['group_key'],
             'description': entry['description'],
             'members': entry['members'],

@@ -13,6 +13,7 @@ export interface PatientSourceCode {
   source_code: string;
   source_unit: string;
   example_quantity: string;
+  based_on?: string[];
   extracted_source_unit?: string;
   extracted_example_quantity?: string;
   source_unit_override?: string | null;

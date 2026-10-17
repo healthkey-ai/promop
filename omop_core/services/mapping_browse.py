@@ -61,6 +61,20 @@ SECTION_FILTERS = {
 }
 
 
+# The interactive queue partitions by usable destination and approval, including
+# Athena rows. Keep the legacy browse contract for other API consumers.
+_HAS_DESTINATION = Q(target_concept_id__isnull=False) & ~Q(target_concept_id=0)
+QUEUE_SECTION_FILTERS = {
+    'Unmapped': lambda qs: qs.exclude(_HAS_DESTINATION),
+    'Proposed': lambda qs: qs.filter(_HAS_DESTINATION).exclude(status='approved'),
+    'Approved': lambda qs: qs.filter(_HAS_DESTINATION, status='approved'),
+}
+
+
+def section_filters(params):
+    return QUEUE_SECTION_FILTERS if params.get('queue_sections') == '1' else SECTION_FILTERS
+
+
 def tab_queryset(mappings, source):
     """The rows on one source tab, or every row on the Overall tab."""
     from omop_core.services.athena_mapping_guard import source_tab_vocabularies
@@ -189,9 +203,11 @@ def mapping_duplicates(mappings, source, *, compact=False):
 
 def browse_mappings(mappings, params, serialize):
     catalog = mappings
+    filters = section_filters(params)
+    queue_sections = params.get('queue_sections') == '1'
     requested_sections = params.get('sections')
-    included_sections = set(SECTION_FILTERS) if requested_sections is None else set(filter(None, requested_sections.split(',')))
-    if included_sections - set(SECTION_FILTERS):
+    included_sections = set(filters) if requested_sections is None else set(filter(None, requested_sections.split(',')))
+    if included_sections - set(filters):
         raise ValidationError({'sections': 'Unknown mapping section.'})
     seen_only = _seen_only(params)
     # seen_only narrows only the Unmapped section; other sections show all codes.
@@ -306,7 +322,7 @@ def browse_mappings(mappings, params, serialize):
         totals = {key: sum(bucket.get(key, 0) for bucket in selected_counts)
                   for key in ('unmapped', 'mapped', 'athena', 'rejected', 'athena_rejected')}
     rejected = totals['rejected']
-    section_queries = {name: carve(filtered) for name, carve in SECTION_FILTERS.items()}
+    section_queries = {name: carve(filtered) for name, carve in filters.items()}
     # Seen > 0 narrows only the Unmapped section: a curator triaging the queue
     # wants to focus on codes patients actually have, but Mapped and Athena
     # Mapped are reference that should be visible regardless of occurrence.
@@ -320,6 +336,8 @@ def browse_mappings(mappings, params, serialize):
     pages, selected_ids, groups = {}, [], {}
     section_totals = [totals['unmapped'], totals['mapped'], rejected,
                       totals['athena'] + totals['athena_rejected']]
+    if queue_sections:
+        section_totals = [query.count() for query in section_queries.values()]
     for index, (section, query) in enumerate(section_queries.items()):
         try:
             requested_page = max(1, int(params.get(f'page_{index}', 1)))
@@ -371,6 +389,17 @@ def browse_mappings(mappings, params, serialize):
     # Load all bounded sections together, preserving their selected order.
     page_rows = {row.pk: row for row in with_destination_counts(mappings.filter(pk__in=selected_ids))}
     results = [page_rows[pk] for pk in selected_ids if pk in page_rows]
+    from omop_core.services.mapping_samples import attach_source_samples
+    group_list = [entry for entries in groups.values() for entry in entries]
+    from omop_core.models import SourceCodeConceptMapping
+    group_mappings = list(SourceCodeConceptMapping.objects.filter(
+        pk__in=[entry['sample_mapping_id'] for entry in group_list])) if group_list else []
+    attach_source_samples(results + duplicates + group_mappings)
+    samples_by_id = {mapping.pk: mapping._source_samples for mapping in group_mappings}
+    for entry in group_list:
+        sample = samples_by_id.get(entry.pop('sample_mapping_id'), {})
+        entry.update(example_quantity='; '.join(sample.get('quantities', [])),
+                     based_on=sample.get('based_on', []), source_units=sample.get('units', []))
     metadata = mapping_source_retirement(results + duplicates)
 
     def render(row):

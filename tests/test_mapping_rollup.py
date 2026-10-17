@@ -18,6 +18,17 @@ def entries(page=1, page_size=100, order='-occurrence_count'):
     return group_entries(qs, page, page_size, order=order), count_groups(qs)
 
 
+def test_group_jobs_stay_inside_the_displayed_queue_section():
+    from patient_portal.api.views import _group_job_rows
+    from tests.factories import ConceptFactory
+    unmapped = row('NO-DEST', 'Albumin', seen=1)
+    proposed = row('HAS-DEST', 'Albumin', seen=0, target_concept=ConceptFactory())
+    for section, expected in (('Unmapped', unmapped.pk), ('Proposed', proposed.pk)):
+        rows = _group_job_rows({'source': 'EPIC', 'label': 'albumin', 'section': section,
+                                'queue_sections': '1', 'seen_only': '1'})
+        assert list(rows.values_list('pk', flat=True)) == [expected]
+
+
 def test_codes_sharing_a_label_become_one_entry_carrying_their_summed_seen():
     """The point of the whole thing: albumin arrives under 2,557 codes, and its
     largest single row carries 1.6% of the label's real weight."""
