@@ -2301,7 +2301,7 @@ describe("server mapping pages", () => {
     expect(basedOn).toHaveAttribute("readonly");
     const fields = screen.getByTestId("source-fields");
     expect(fields.lastElementChild).toContainElement(basedOn);
-    expect(fields.lastElementChild).toHaveClass("sm:ml-auto");
+    expect(fields.lastElementChild).toHaveClass("sm:grid-cols-2", "items-end");
     fireEvent.change(screen.getByLabelText("Source Code Value"), { target: { value: "DIFFERENT" } });
     expect(basedOn).toHaveValue("");
   });
