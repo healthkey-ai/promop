@@ -588,8 +588,8 @@ def test_flat_browse_row_without_units_returns_empty_list(browse):
     assert data['results'][0]['source_units'] == []
 
 
-def test_rollup_groups_include_source_units():
-    """Grouped browse entries carry source_units and group_key."""
+def test_rollup_groups_by_label_only():
+    """Grouped browse entries group by label, not by units."""
     from rest_framework.test import APIRequestFactory, force_authenticate
     user = Identity.objects.create_user(email='rollup-units@example.test', is_staff=True)
     row('A', source_code_description='Albumin', occurrence_count=5,
@@ -603,12 +603,11 @@ def test_rollup_groups_include_source_units():
     force_authenticate(request, user=user)
     data = code_mapping_list(request).data
     unmapped = data['groups']['Unmapped']
-    by_units = {tuple(e['source_units']): e for e in unmapped}
-    assert ('mg/dL',) in by_units
-    assert ('mmol/L',) in by_units
-    assert by_units[('mg/dL',)]['members'] == 2
-    assert by_units[('mg/dL',)]['group_key'] == 'albumin|["mg/dL"]'
-    assert by_units[('mmol/L',)]['members'] == 1
+    # All three rows share the same normalised label and belong to one group.
+    assert len(unmapped) == 1
+    group = unmapped[0]
+    assert group['members'] == 3
+    assert group['group_key'] == 'albumin'
 
 
 def test_delete_rejected_mapping_clears_destination(staff_user):

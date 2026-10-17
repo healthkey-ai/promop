@@ -99,14 +99,12 @@ function SourceCodeTable({
       <table className="w-full text-sm">
         <thead className="border-b bg-muted/50">
           <tr>
-            <th className="px-3 py-2 text-left font-medium">Source Code</th>
+            <th className="px-3 py-2 text-left font-medium">Source</th>
             <th className="px-3 py-2 text-left font-medium">Domain</th>
-            <th className="px-3 py-2 text-right font-medium">Rows</th>
+            <th className="px-3 py-2 text-right font-medium">Seen</th>
+            <th className="px-3 py-2 text-left font-medium">BasedOn</th>
             <th className="px-3 py-2 text-left font-medium">Units</th>
-            <th className="px-3 py-2 text-left font-medium">Qty</th>
-            <th className="px-3 py-2 text-left font-medium">Current Concept</th>
-            <th className="px-3 py-2 text-left font-medium">Mapping Target</th>
-            <th className="px-3 py-2 text-left font-medium">Provenance</th>
+            <th className="px-3 py-2 text-left font-medium">Destination</th>
           </tr>
         </thead>
         <tbody className="divide-y">
@@ -129,48 +127,25 @@ function SourceCodeTable({
                 {TABLE_LABELS[sc.omop_table] || sc.omop_table}
               </td>
               <td className="px-3 py-2 text-right tabular-nums">{sc.row_count}</td>
+              <td className="px-3 py-2 text-xs text-muted-foreground">
+                {sc.mapping_origin || "\u2014"}
+              </td>
               <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
                 {sc.source_unit || "\u2014"}
                 {sc.source_unit_override != null && <span className="ml-1 text-blue-700">(corrected)</span>}
               </td>
-              <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
-                {sc.example_quantity || "\u2014"}
-                {sc.example_quantity_override != null && <span className="ml-1 text-blue-700">(corrected)</span>}
-              </td>
               <td className="px-3 py-2 text-xs">
-                {sc.concept_id === 0 ? (
-                  <span className="text-muted-foreground">No matching concept</span>
-                ) : (
-                  <span>
-                    {sc.concept_name || `Concept ${sc.concept_id}`}
-                    <span className="ml-1 text-muted-foreground">({sc.concept_id})</span>
-                  </span>
-                )}
-              </td>
-              <td className="px-3 py-2 text-xs">
-                {sc.mapping_target_concept_id ? (
-                  <div>
-                    <div>
-                      {sc.mapping_target_concept_name || `Concept ${sc.mapping_target_concept_id}`}
-                      <span className="ml-1 text-muted-foreground">
-                        ({sc.mapping_target_concept_id})
-                      </span>
-                    </div>
-                    {(sc.mapping_destination_concept_code || sc.mapping_destination_vocabulary_id) && (
-                      <div className="text-muted-foreground">
-                        {sc.mapping_destination_concept_code}
-                        {sc.mapping_destination_vocabulary_id && (
-                          <span className="ml-1">({sc.mapping_destination_vocabulary_id})</span>
-                        )}
-                      </div>
+                {sc.mapping_destination_concept_code ? (
+                  <>
+                    <div className="font-mono text-xs">{sc.mapping_destination_concept_code}</div>
+                    <div>{sc.mapping_target_concept_name || "\u2014"}</div>
+                    {sc.mapping_destination_vocabulary_id && (
+                      <div className="text-muted-foreground">{sc.mapping_destination_vocabulary_id}</div>
                     )}
-                  </div>
+                  </>
                 ) : (
                   <span className="text-muted-foreground">&mdash;</span>
                 )}
-              </td>
-              <td className="px-3 py-2 text-xs text-muted-foreground">
-                {sc.mapping_origin_system || sc.mapping_origin || "\u2014"}
               </td>
             </tr>
           ))}

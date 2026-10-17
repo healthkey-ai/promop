@@ -25,7 +25,6 @@ description. Ordering happens here, before pagination, so pages remain stable.
 """
 from django.db.models import Case, CharField, Count, F, Max, Min, Q, Sum, Value, When
 
-from omop_core.services.mapping_source_units import SourceUnits
 from django.db.models.functions import Cast, Coalesce, Concat, Lower
 
 #: Separates a synthetic single-row key from a real label. Outside the
@@ -44,11 +43,7 @@ def _group_key():
     return Case(
         When(source_label_norm__isnull=True, then=Concat(
             Value(SYNTHETIC_PREFIX), Cast('id', CharField()))),
-        default=Case(
-            When(source_units=[], then=F('source_label_norm')),
-            default=Concat('source_label_norm', Value('|'), Cast('source_units', CharField())),
-            output_field=CharField(),
-        ),
+        default=F('source_label_norm'),
         output_field=CharField(),
     )
 
@@ -56,9 +51,8 @@ def _group_key():
 def _grouped(queryset):
     return (
         queryset.order_by()
-        .annotate(source_units=SourceUnits('source_unit_evidence'))
         .annotate(group_key=_group_key())
-        .values('group_key', 'source_units')
+        .values('group_key')
         .annotate(
             summed_seen=Sum('occurrence_count'),
             supplied_group_seen=Max('source_group_occurrence_count'),
@@ -94,10 +88,7 @@ def _grouped(queryset):
             max_id=Max('id'),
         )
         .annotate(
-            # Imported group totals describe the whole label, not a unit subgroup.
-            seen=Case(When(source_units=[], then=Coalesce(
-                'supplied_group_seen', 'summed_seen', Value(0))),
-                default=Coalesce('summed_seen', Value(0))),
+            seen=Coalesce('supplied_group_seen', 'summed_seen', Value(0)),
             description_sort=Lower('description'),
         )
     )
@@ -126,7 +117,6 @@ def group_entries(queryset, page, page_size, order='-occurrence_count'):
         {
             'label': entry['label'],
             'group_key': entry['group_key'],
-            'source_units': entry['source_units'],
             'description': entry['description'],
             'members': entry['members'],
             'seen': entry['seen'],
@@ -160,6 +150,4 @@ def group_members(queryset, label):
         if not 0 < pk <= 9223372036854775807:
             return queryset.none()
         return queryset.filter(pk=pk)
-    return queryset.annotate(source_units=SourceUnits('source_unit_evidence')).annotate(
-        unit_group_key=_group_key(),
-    ).filter(unit_group_key=label)
+    return queryset.filter(source_label_norm=label)

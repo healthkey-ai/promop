@@ -4,7 +4,6 @@ import PageTitle from '@/components/Branding/PageTitle';
 import InlineDestinationPicker from "./InlineDestinationPicker";
 import SuggestCandidates from "./SuggestCandidates";
 import EditMappingDialog from "./EditMappingDialog";
-import { hospitalContextDetails, hospitalContextText } from "./sourceSystemContext";
 import ConceptInputDetails from "@/components/UI/ConceptInputDetails";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -283,7 +282,7 @@ type BrowseResponse = {
 type GroupEntry = {
   label: string | null;
   group_key?: string;
-  source_units?: string[];
+
   description: string;
   members: number;
   seen: number;
@@ -365,7 +364,7 @@ export default function CodeMappingPage() {
   );
   const [provenanceFilter, setProvenanceFilter] = useState("");
   const [organizationFilter, setOrganizationFilter] = useState("");
-  const [rollup, setRollup] = useState(false);
+  const [rollup, setRollup] = useState(true);
   const [seenOnly, setSeenOnly] = useState(true);
   // key -> members, or null while the fetch is in flight.
   const [expandedGroups, setExpandedGroups] = useState<Record<string, CodeMappingRow[] | null>>({});
@@ -662,10 +661,6 @@ export default function CodeMappingPage() {
     () => (overallTab ? 0 : visibleRows.filter((row) => tabForRow(row) !== selectedVocabulary).length),
     [overallTab, visibleRows, selectedVocabulary],
   );
-  const showSystemColumn = foreignHits > 0;
-  const showOrganizationColumn = selectedVocabulary === "EPIC" || selectedVocabulary === "CERNER"
-    || visibleRows.some((row) => !!row.organization_id
-      || Boolean(row.source_system_context && row.source_system_context.kind !== "none"));
   // The debounced query is what the server has answered, so the message
   // describes the rows on screen rather than re-announcing every keystroke.
   const crossTabSearch = !overallTab && debouncedSearch.trim() !== "";
@@ -1077,7 +1072,7 @@ export default function CodeMappingPage() {
   };
 
   const renderTable = (sectionRows: CodeMappingRow[], emptyText: string, section: MappingSection, { hideStatus = false }: { hideStatus?: boolean } = {}) => {
-    const colCount = 8 + (showSystemColumn ? 1 : 0) + (showOrganizationColumn ? 1 : 0) + (hideStatus ? 0 : 2);
+    const colCount = 6 + (hideStatus ? 0 : 2);
     const sort = sectionSorts[section];
     // Present only when the server grouped this response; otherwise the flat
     // queue renders exactly as before.
@@ -1131,31 +1126,24 @@ export default function CodeMappingPage() {
               navigationTarget?.id === mappingRowId(row) ? "bg-red-50" : ""
             }`}
           >
-            <td className="px-4 py-3 font-mono text-xs text-slate-900">
-              {row.locked_by_username && <span title={`Locked by ${row.locked_by_username}`} className="mr-1 text-amber-500">&#128274;</span>}
-              {row.source_code}
-            </td>
-            {showSystemColumn && (
-              <td className="px-4 py-3 text-xs text-slate-700" title={row.source_vocabulary_id}>{systemLabel(row)}</td>
-            )}
-            {showOrganizationColumn && (
-              <td className="px-4 py-3 text-xs text-slate-700" title={row.source_system_context
-                ? hospitalContextDetails(row.source_system_context)
-                : row.organization_name ? "Verified PRomop organization" : "No verified hospital attribution"}>
-                {row.source_system_context
-                  ? hospitalContextText(row.source_system_context)
-                  : row.organization_name ? `Verified: ${row.organization_name}` : "Global / hospital unverified"}
-              </td>
-            )}
-            <td className="px-4 py-3 text-right font-mono text-xs text-slate-700">{row.occurrence_count || 0}</td>
-            <td className="px-4 py-3 text-xs text-slate-700">{row.source_code_description || "—"}</td>
-            <td className="px-4 py-3 text-xs text-slate-700">{row.source_units?.length ? row.source_units.join("; ") : "—"}</td>
-            <td className="px-4 py-3 text-xs text-slate-700">{row.origin_system || "—"}</td>
             <td className="px-4 py-3">
-              <div className="font-medium text-slate-950">{row.destination_concept_name}</div>
-              <div className="font-mono text-xs text-slate-500">
-                {row.destination_vocabulary_id}:{row.destination_concept_code}
-              </div>
+              {row.locked_by_username && <span title={`Locked by ${row.locked_by_username}`} className="mr-1 text-amber-500">&#128274;</span>}
+              <div data-testid="source-code" className="font-mono text-xs text-slate-900">{row.source_code}</div>
+              {row.source_code_description && <div className="text-xs text-slate-700">{row.source_code_description}</div>}
+              {row.source_vocabulary_id && <div className="text-xs text-slate-500">{systemLabel(row)}</div>}
+            </td>
+            <td className="px-4 py-3 text-xs text-slate-700">{row.domain_id || "—"}</td>
+            <td className="px-4 py-3 text-right font-mono text-xs text-slate-700">{row.occurrence_count || 0}</td>
+            <td className="px-4 py-3 text-xs text-slate-700">{row.origin || "—"}</td>
+            <td className="px-4 py-3 text-xs text-slate-700">{row.source_units?.length ? (row.source_units.length > 2 ? row.source_units.slice(0, 2).join("; ") + " .." : row.source_units.join("; ")) : "—"}</td>
+            <td className="px-4 py-3">
+              {row.destination_concept_code ? (
+                <>
+                  <div className="font-mono text-xs text-slate-900">{row.destination_concept_code}</div>
+                  <div className="text-xs text-slate-700">{row.destination_concept_name}</div>
+                  {row.destination_vocabulary_id && <div className="text-xs text-slate-500">{row.destination_vocabulary_id}</div>}
+                </>
+              ) : <span className="text-xs text-slate-500">—</span>}
               {(row.measurement_type || row.suggested_unit) && (
                 <ConceptInputDetails domain_id={row.destination_domain_id || ""} measurement_type={row.measurement_type} suggested_unit={row.suggested_unit} example_units={row.example_units} />
               )}
@@ -1167,8 +1155,6 @@ export default function CodeMappingPage() {
                 <Search size={12} />{row.destination_concept_id ? "Change destination" : "Choose destination"}
               </button>}
             </td>
-            <td className="px-4 py-3 font-mono text-xs text-slate-900">{row.destination_concept_id}</td>
-            <td className={`px-4 py-3 text-center font-mono text-xs font-medium ${row.destination_count !== 1 ? "text-red-600" : "text-slate-700"}`}>{row.destination_count ?? 0}</td>
             {!hideStatus && (
             <td className="px-4 py-3">
               <div className="inline-flex items-center gap-2">
@@ -1232,16 +1218,12 @@ export default function CodeMappingPage() {
       <table aria-label={`${section} mappings`} className="w-full border-collapse text-left text-sm">
         <thead className="bg-slate-100 text-xs uppercase text-slate-600">
           <tr>
-            {header("Source code", "source_code")}
-            {showSystemColumn && <th className="px-4 py-3 font-semibold">System</th>}
-            {showOrganizationColumn && <th className="px-4 py-3 font-semibold">Hospital context</th>}
+            {header("Source", "source_code")}
+            <th className="px-4 py-3 font-semibold">Domain</th>
             {header("Seen", "occurrence_count")}
-            {header("Source description", "source_code_description")}
+            <th className="px-4 py-3 font-semibold">BasedOn</th>
             <th className="px-4 py-3 font-semibold">Units</th>
-            {header("Provenance", "origin_system")}
-            {header("Destination concept", "destination_concept_name")}
-            {header("Concept ID", "destination_concept_id")}
-            {header("Dest count", "destination_count")}
+            {header("Destination", "destination_concept_name")}
             {!hideStatus && header("Status", "status")}
             {!hideStatus && <th className="w-16 px-4 py-3 font-semibold" aria-label="Actions" />}
           </tr>
@@ -1258,7 +1240,7 @@ export default function CodeMappingPage() {
                     <td className="px-4 py-3">
                       <button type="button"
                         aria-expanded={open}
-                        aria-label={`${open ? "Collapse" : "Expand"} ${entry.description || "unlabelled"}${entry.source_units?.length ? ` (${entry.source_units.join("; ")})` : ""}`}
+                        aria-label={`${open ? "Collapse" : "Expand"} ${entry.description || "unlabelled"}`}
                         onClick={() => toggleGroup(entry, section)}
                         className="inline-flex items-center gap-2 text-left font-medium text-slate-900 hover:underline">
                         <span aria-hidden="true" className="inline-block w-3">{open ? "▾" : "▸"}</span>
@@ -1266,31 +1248,25 @@ export default function CodeMappingPage() {
                           {entry.members === 1 ? "1 code" : `${entry.members.toLocaleString()} codes`}
                         </span>
                       </button>
+                      {entry.description && <div className="mt-0.5 text-xs text-slate-700">{entry.description}</div>}
                     </td>
-                    {showSystemColumn && <td className="px-4 py-3" />}
-                    {showOrganizationColumn && <td className="px-4 py-3" />}
+                    <td className="px-4 py-3" />
                     <td className="px-4 py-3 text-right font-mono text-xs text-slate-700">{entry.seen.toLocaleString()}</td>
-                    <td className="px-4 py-3 text-xs font-medium text-slate-900">{entry.description || "—"}</td>
-                    <td className="px-4 py-3 text-xs text-slate-700">{entry.source_units?.length ? entry.source_units.join("; ") : "—"}</td>
+                    <td className="px-4 py-3" />
                     <td className="px-4 py-3" />
                     <td className="px-4 py-3">
                       {/* Naming one side of a disagreement is worse than
                           naming neither, so a mixed group names no concept. */}
                       {entry.mixed_destinations ? (
                         <span className="text-xs font-medium text-amber-700">Mixed destinations</span>
-                      ) : entry.destination_concept_name ? (
+                      ) : entry.destination_concept_code ? (
                         <>
-                          <div className="font-medium text-slate-950">{entry.destination_concept_name}</div>
-                          <div className="font-mono text-xs text-slate-500">
-                            {entry.destination_vocabulary_id}:{entry.destination_concept_code}
-                          </div>
+                          <div className="font-mono text-xs text-slate-900">{entry.destination_concept_code}</div>
+                          <div className="text-xs text-slate-700">{entry.destination_concept_name}</div>
+                          {entry.destination_vocabulary_id && <div className="text-xs text-slate-500">{entry.destination_vocabulary_id}</div>}
                         </>
                       ) : <span className="text-xs text-slate-500">—</span>}
                     </td>
-                    <td className="px-4 py-3 font-mono text-xs text-slate-900">
-                      {entry.mixed_destinations ? "" : entry.destination_concept_id ?? ""}
-                    </td>
-                    <td className="px-4 py-3" />
                     {!hideStatus && <td className="px-4 py-3 text-xs text-slate-700">
                       {entry.suggested_action === "reject"
                         ? <span className="font-medium text-amber-700">Reject suggested</span>
@@ -1465,7 +1441,7 @@ export default function CodeMappingPage() {
                 }} />
               {/* One decision per label rather than per vendor code: albumin
                   arrives under 2,557 of them. */}
-              Group by label and units
+              Group by label
             </label>
             {showProvenanceFilter && (
               <select
@@ -1768,10 +1744,11 @@ export default function CodeMappingPage() {
           <button
             type="button"
             onClick={() => setUnmappedCollapsed((v) => !v)}
-            className="mb-2 inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-slate-700"
+            className="mb-2 inline-flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-slate-700"
           >
             {unmappedCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-            Unmapped <span className="font-normal text-slate-500">({browse?.pages.Unmapped.total ?? unmappedRows.length}{browse?.rollup ? " groups" : ""})</span>
+            <span className="inline-flex rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-medium text-yellow-800">Unmapped</span>
+            <span className="font-normal text-slate-500">({browse?.pages.Unmapped.total ?? unmappedRows.length}{browse?.rollup ? " groups" : ""})</span>
           </button>
           <DownloadMenu rows={unmappedRows} section="Unmapped" />
           {!unmappedCollapsed && (
@@ -1790,10 +1767,11 @@ export default function CodeMappingPage() {
           <button
             type="button"
             onClick={() => setMappedCollapsed((v) => !v)}
-            className="mb-2 inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-slate-700"
+            className="mb-2 inline-flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-slate-700"
           >
             {mappedCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-            Mapped <span className="font-normal text-slate-500">({browse?.pages.Mapped.total ?? mappedRows.length}{browse?.rollup ? " groups" : ""})</span>
+            <span className="inline-flex rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-800">Mapped</span>
+            <span className="font-normal text-slate-500">({browse?.pages.Mapped.total ?? mappedRows.length}{browse?.rollup ? " groups" : ""})</span>
           </button>
           <DownloadMenu rows={mappedRows} section="Mapped" />
           {!mappedCollapsed && renderTable(mappedRows, "No approved mappings in this vocabulary.", "Mapped")}
@@ -1804,10 +1782,11 @@ export default function CodeMappingPage() {
             <button
               type="button"
               onClick={() => setRejectedCollapsed((v) => !v)}
-              className="mb-2 inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-slate-700"
+              className="mb-2 inline-flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-slate-700"
             >
               {rejectedCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-              Rejected <span className="font-normal text-slate-500">({browse?.pages.Rejected?.total ?? rejectedRows.length}{browse?.rollup ? " groups" : ""})</span>
+              <span className="inline-flex rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-800">Rejected</span>
+              <span className="font-normal text-slate-500">({browse?.pages.Rejected?.total ?? rejectedRows.length}{browse?.rollup ? " groups" : ""})</span>
             </button>
             <DownloadMenu rows={rejectedRows} section="Rejected" />
             {!rejectedCollapsed && renderTable(rejectedRows, "No rejected mappings in this vocabulary.", "Rejected")}
@@ -1819,10 +1798,11 @@ export default function CodeMappingPage() {
             <button
               type="button"
               onClick={() => setAthenaCollapsed((v) => !v)}
-              className="mb-2 inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-slate-700"
+              className="mb-2 inline-flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-slate-700"
             >
               {athenaCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-              Athena Mapped <span className="font-normal text-slate-500">({browse?.pages["Athena Mapped"].total ?? athenaRows.length}{browse?.rollup ? " groups" : ""})</span>
+              <span className="inline-flex rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-800">Athena Mapped</span>
+              <span className="font-normal text-slate-500">({browse?.pages["Athena Mapped"].total ?? athenaRows.length}{browse?.rollup ? " groups" : ""})</span>
             </button>
             <DownloadMenu rows={athenaRows} section="Athena Mapped" />
             {!athenaCollapsed && renderTable(athenaRows, "No Athena mappings in this vocabulary.", "Athena Mapped", { hideStatus: true })}
