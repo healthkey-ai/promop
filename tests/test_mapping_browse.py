@@ -650,8 +650,8 @@ def test_detail_includes_source_evidence_without_putting_it_on_browse_rows(staff
     assert listed.data[0]['source_system_context'] == detail.data['source_evidence']['system_context']
 
 
-def test_delete_with_destination_clears_instead_of_removing(staff_user):
-    """DELETE on a mapping with a destination clears the destination, keeping the row."""
+def test_delete_with_destination_truly_deletes(staff_user):
+    """DELETE on a mapped row repoints clinical rows to 0 and truly deletes."""
     concept = ConceptFactory(concept_id=999999, concept_name='Test Concept', concept_code='12345')
     mapping = row('TEST-CODE', status='approved', target_concept=concept,
                   destination_vocabulary_id='SNOMED')
@@ -660,23 +660,18 @@ def test_delete_with_destination_clears_instead_of_removing(staff_user):
         target_concept_code='12345', target_concept=concept,
     )
     response = _delete(staff_user, mapping.id)
-    assert response.status_code == 200
-    mapping.refresh_from_db()
-    assert mapping.target_concept_id is None
-    assert mapping.status == 'proposed'
-    assert mapping.destination_vocabulary_id == ''
-    assert mapping.reviewer_id is None
-    assert mapping.suggestion_model_version == ''
-    assert mapping.last_suggest_attempt == ''
-    assert not MappingDestinationCandidate.objects.filter(mapping=mapping).exists()
-
-
-def test_delete_without_destination_truly_deletes(staff_user):
-    """DELETE on a proposed mapping with no destination removes the row."""
-    mapping = row('JUNK-CODE')
-    response = _delete(staff_user, mapping.id)
     assert response.status_code == 204
     assert not SourceCodeConceptMapping.objects.filter(id=mapping.id).exists()
+    # CASCADE removes candidates too
+    assert not MappingDestinationCandidate.objects.filter(mapping_id=mapping.id).exists()
+
+
+def test_delete_without_destination_is_rejected(staff_user):
+    """DELETE on an unmapped row returns 400 — the source code is real data."""
+    mapping = row('JUNK-CODE')
+    response = _delete(staff_user, mapping.id)
+    assert response.status_code == 400
+    assert SourceCodeConceptMapping.objects.filter(id=mapping.id).exists()
 
 
 # --- source_units in browse and flat responses (#1869, #1870) ---------------
@@ -719,13 +714,11 @@ def test_rollup_groups_by_label_only():
     assert group['group_key'] == 'albumin'
 
 
-def test_delete_rejected_mapping_clears_destination(staff_user):
-    """DELETE on a rejected mapping with a destination clears it."""
+def test_delete_rejected_mapping_with_destination_truly_deletes(staff_user):
+    """DELETE on a rejected mapping with a destination truly deletes it."""
     concept = ConceptFactory(concept_id=999998, concept_name='Rejected Concept', concept_code='99998')
     mapping = row('REJECTED-CODE', status='rejected', target_concept=concept,
                   destination_vocabulary_id='SNOMED')
     response = _delete(staff_user, mapping.id)
-    assert response.status_code == 200
-    mapping.refresh_from_db()
-    assert mapping.target_concept_id is None
-    assert mapping.status == 'proposed'
+    assert response.status_code == 204
+    assert not SourceCodeConceptMapping.objects.filter(id=mapping.id).exists()

@@ -13081,38 +13081,21 @@ def code_mapping_detail(request, mapping_id):
             _check_mapping_lock(mapping, request.user)
         except MappingLocked as exc:
             return exc.as_response()
-        # If the mapping has no destination and is still proposed, truly delete
-        # the row — it is an unwanted queue entry with nothing to clear.
-        if mapping.target_concept_id is None and mapping.status == 'proposed':
-            mapping.delete()
-            return Response(status=status.HTTP_204_NO_CONTENT)
-        # Otherwise, clear the destination but keep the source code in the
-        # queue so it can receive new proposals.
-        mapping.target_concept = None
-        mapping.suggested_target_concept = None
-        mapping.destination_vocabulary_id = ''
-        mapping.status = 'proposed'
-        mapping.reviewer = None
-        mapping.reviewed_at = None
-        mapping.suggestion_outcome = ''
-        mapping.suggested_action = ''
-        mapping.suggestion_model_version = ''
-        mapping.suggestion_confidence = None
-        mapping.last_suggest_attempt = ''
-        mapping.suggest_strategy = ''
-        mapping.umls_cui = ''
-        mapping.origin_system = ''
-        mapping.locked_by = None
-        mapping.locked_at = None
-        mapping.pending_repoint_concept_ids = []
-        mapping.deferred_repoint_concept_ids = []
-        mapping.save()
-        mapping.destination_candidates.all().delete()
-        from omop_core.services.mapping_destinations import destination_options
-        payload = _serialize_code_mapping_row(
-            None, mapping, destination_count=len(destination_options(mapping)),
+        # Unmapped rows represent real patient data — removing them from the
+        # queue hides a code that exists in clinical tables.
+        if mapping.target_concept_id is None:
+            return Response(
+                {'detail': 'Cannot delete an unmapped source code.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Mapped row: repoint clinical rows back to concept 0, then delete.
+        repoint_clinical_rows(
+            mapping=mapping,
+            old_concept_id=mapping.target_concept_id,
+            new_concept_id=0,
         )
-        return Response(payload)
+        mapping.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     # PATCH — approval check is inside _upsert_source_code_mapping.
     try:
