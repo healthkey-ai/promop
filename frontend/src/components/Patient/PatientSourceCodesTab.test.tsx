@@ -162,6 +162,12 @@ describe("PatientSourceCodesTab source context correction", () => {
   it("lets a curator compare FHIR metadata and save a source-unit correction separately", async () => {
     render(<PatientSourceCodesTab personId="48095" />);
     fireEvent.click(await screen.findByText("Blood Pressure"));
+    const contextRow = screen.getByTestId("source-context-row");
+    expect(contextRow).toContainElement(screen.getByLabelText("BasedOn"));
+    expect(within(contextRow).getByRole("button", { name: "Save source context" }))
+      .toHaveAttribute("title", "Save this patient's quantity and unit corrections separately from the code mapping.");
+    expect(within(contextRow).getByRole("button", { name: "Use extracted values" }))
+      .toHaveAttribute("title", "Restore the original extracted quantity and unit in this form. Click Save source context to save them.");
     fireEvent.click(screen.getByRole("button", { name: /Source Metadata/ }));
     expect(screen.getByText(/Vital signs/)).toBeInTheDocument();
     expect(screen.getByText(/Extracted: bad unit/)).toBeInTheDocument();

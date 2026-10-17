@@ -766,17 +766,6 @@ export default function EditMappingDialog({
                         <p className="mt-1 text-xs text-slate-600">Extracted: {selectedRow.extracted_source_unit || "\u2014"}</p>
                       )}
                     </Field>
-                    <div className="col-span-full flex flex-wrap items-center gap-2 text-xs">
-                      <button type="button" onClick={() => void saveSourceContext()} disabled={savingSource}
-                        className="rounded border border-slate-300 px-2 py-1 font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50">
-                        {savingSource ? "Saving..." : "Save source context"}
-                      </button>
-                      <button type="button" onClick={() => {
-                        setSourceQuantity(selectedRow.extracted_example_quantity || "");
-                        changeSourceUnit(selectedRow.extracted_source_unit || "");
-                      }} className="text-slate-600 underline">Use extracted values</button>
-                      {sourceSaveMessage && <span role="status">{sourceSaveMessage}</span>}
-                    </div>
                   </>
                 ) : (
                   <>
@@ -796,11 +785,27 @@ export default function EditMappingDialog({
                     }}
                   />
                 )}
-                <div className="col-span-full w-full sm:ml-auto sm:w-1/2">
-                  <ReadOnlyField id="source_based_on" label="BasedOn"
-                    tip="Source FHIR basedOn display text, or its reference when no display is provided."
-                    value={sourceIdentityUnchanged ? selectedRow?.based_on?.join("; ") || "" : ""}
-                    testId="source-based-on" fullWidth />
+                <div data-testid="source-context-row" className="col-span-full grid grid-cols-1 items-end gap-3 sm:grid-cols-2">
+                  {patientId && selectedRow?.source_code_id ? (
+                    <div className="flex min-h-10 flex-wrap items-center gap-2 text-xs">
+                      <button type="button" onClick={() => void saveSourceContext()} disabled={savingSource}
+                        title="Save this patient's quantity and unit corrections separately from the code mapping."
+                        className="rounded border border-slate-300 px-2 py-1 font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+                        {savingSource ? "Saving..." : "Save source context"}
+                      </button>
+                      <button type="button" title="Restore the original extracted quantity and unit in this form. Click Save source context to save them." onClick={() => {
+                        setSourceQuantity(selectedRow.extracted_example_quantity || "");
+                        changeSourceUnit(selectedRow.extracted_source_unit || "");
+                      }} className="text-slate-600 underline">Use extracted values</button>
+                      {sourceSaveMessage && <span role="status">{sourceSaveMessage}</span>}
+                    </div>
+                  ) : <div />}
+                  <div className="min-w-0">
+                    <ReadOnlyField id="source_based_on" label="BasedOn"
+                      tip="Source FHIR basedOn display text, or its reference when no display is provided."
+                      value={sourceIdentityUnchanged ? selectedRow?.based_on?.join("; ") || "" : ""}
+                      testId="source-based-on" fullWidth />
+                  </div>
                 </div>
               </div>
               <SourceMetadataBlock metadata={selectedRow?.source_metadata} />
