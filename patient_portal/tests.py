@@ -25221,12 +25221,7 @@ class CodeMappingRepointSafetyTest(TestCase):
 
 
 class CodeMappingCuratorWorkflowTest(TestCase):
-    """A curator-created mapping is proposed, and approval is what moves rows.
-
-    Creating and approving in one act removed the review step the Unmapped
-    queue exists for, and it made a create write clinical data. Approval is now
-    the only transition that does.
-    """
+    """Admins can create mappings in any status; approval moves clinical rows."""
 
     @classmethod
     def setUpTestData(cls):
@@ -25284,7 +25279,7 @@ class CodeMappingCuratorWorkflowTest(TestCase):
             measurement_source_value='POTASSIUM', value_as_number=Decimal('4.1'),
         )
 
-    def _create(self, status_value='approved'):
+    def _create(self, status_value='proposed'):
         return self.client.post('/api/v1/code-mappings/', {
             'domain_id': 'Measurement',
             'source_vocabulary_id': '',
@@ -25294,16 +25289,22 @@ class CodeMappingCuratorWorkflowTest(TestCase):
             'status': status_value,
         }, format='json')
 
-    def test_creation_is_always_proposed(self):
-        """Even when the client asks for approved."""
-        resp = self._create(status_value='approved')
+    def test_creation_defaults_to_proposed(self):
+        """When no status is given, a new mapping is proposed."""
+        resp = self._create(status_value='')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
         self.assertEqual(resp.data['status'], 'proposed')
         self.assertEqual(resp.data['origin'], 'curator')
 
-    def test_creation_moves_no_clinical_data(self):
-        """Approval is the only transition that rewrites patient rows."""
-        resp = self._create()
+    def test_admin_can_create_as_approved(self):
+        """An admin can save a new mapping directly as approved."""
+        resp = self._create(status_value='approved')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['status'], 'approved')
+
+    def test_proposed_creation_moves_no_clinical_data(self):
+        """A proposed create does not rewrite patient rows."""
+        resp = self._create(status_value='proposed')
         self.assertIsNone(resp.data['repoint'])
         self.row.refresh_from_db()
         self.assertEqual(self.row.measurement_concept_id, 0)

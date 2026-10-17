@@ -1378,10 +1378,7 @@ describe("CodeMappingPage", () => {
       expect(within(footer.children[2] as HTMLElement).getByRole("button", { name: "Cancel" })).toBeInTheDocument();
     });
 
-    it("locks Status to Proposed on a new mapping", async () => {
-      // Approval is the only transition that rewrites patient data, and the
-      // server enforces proposed-on-create; offering Approved here would
-      // promise a one-step create-and-approve the API no longer honours.
+    it("defaults Status to Proposed on a new mapping but allows changing it", async () => {
       renderPage();
       await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
       fireEvent.click(screen.getByRole("button", { name: /New Mapping/ }));
@@ -1389,7 +1386,7 @@ describe("CodeMappingPage", () => {
 
       const statusSelect = screen.getByLabelText("Status") as HTMLSelectElement;
       expect(statusSelect.value).toBe("proposed");
-      expect(statusSelect.disabled).toBe(true);
+      expect(statusSelect.disabled).toBe(false);
     });
   });
 
