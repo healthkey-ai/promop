@@ -1227,8 +1227,8 @@ export default function EditMappingDialog({
                   className="h-9 rounded-md border border-slate-300 px-2 text-sm font-normal text-slate-950 disabled:bg-slate-100 disabled:text-slate-500"
                 >
                   <option value="proposed">Proposed</option>
-                  <option value="approved" disabled={!canApprove}>
-                    {canApprove ? "Approved" : "Approved (admin only)"}
+                  <option value="approved" disabled={!canApprove || !form.destination_concept_id}>
+                    {!form.destination_concept_id ? "Approved (set destination first)" : canApprove ? "Approved" : "Approved (admin only)"}
                   </option>
                   <option value="rejected">Rejected</option>
                 </select>
