@@ -609,13 +609,8 @@ export default function EditMappingDialog({
     if (!row.mapping_id) return;
     setError("");
     try {
-      const response = await api.delete(`/v1/code-mappings/${row.mapping_id}/`);
-      if (response.status === 200 && response.data?.mapping_id) {
-        // Backend cleared the destination instead of deleting.
-        onDeleted(response.data as CodeMappingRow);
-      } else {
-        onDeleted(row);
-      }
+      await api.delete(`/v1/code-mappings/${row.mapping_id}/`);
+      onDeleted(row);
       closeDialog();
     } catch {
       setError("Failed to delete code mapping.");

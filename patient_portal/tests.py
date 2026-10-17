@@ -22164,8 +22164,8 @@ class CodeMappingApiTest(TestCase):
         self.assertFalse(SourceCodeConceptMapping.objects.filter(id=sibling.id).exists())
         self.assertTrue(SourceCodeConceptMapping.objects.filter(id=self.mapping.id).exists())
 
-    def test_delete_with_a_destination_clears_it_and_leaves_the_sibling(self):
-        """The row stays in the queue so it can receive new proposals."""
+    def test_delete_with_a_destination_removes_it_and_leaves_the_sibling(self):
+        """DELETE truly removes the row even when it has a destination."""
         self.client.force_authenticate(user=self.staff)
         sibling = SourceCodeConceptMapping.objects.create(
             source_vocabulary_id='ICD10CM',
@@ -22176,11 +22176,8 @@ class CodeMappingApiTest(TestCase):
             status='approved',
         )
         resp = self.client.delete(f'/api/v1/code-mappings/{sibling.id}/')
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        sibling.refresh_from_db()
-        self.assertIsNone(sibling.target_concept_id)
-        self.assertEqual(sibling.destination_vocabulary_id, '')
-        self.assertEqual(sibling.status, 'proposed')
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(SourceCodeConceptMapping.objects.filter(id=sibling.id).exists())
         self.assertTrue(SourceCodeConceptMapping.objects.filter(id=self.mapping.id).exists())
 
     def test_blank_source_systems_stay_distinct(self):
