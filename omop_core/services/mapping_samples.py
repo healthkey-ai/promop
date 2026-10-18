@@ -18,6 +18,11 @@ def attach_source_samples(mappings):
     # Join the bounded mapping page in one pass. Match the exact source
     # identity, and never sample another organization's patient for an
     # organization-scoped mapping. One inventory row per patient/source.
+    #
+    # The window ORDER BY prefers rows that carry data: a row with a
+    # quantity, unit, or non-empty metadata sorts before one without.
+    # Without this, the first 30 patients by person_id may all have
+    # empty fields, so quantities and basedOn would always be [].
     with connection.cursor() as cursor:
         cursor.execute('''
             SELECT mapping_id, quantity, unit, metadata FROM (
@@ -25,7 +30,18 @@ def attach_source_samples(mappings):
                        COALESCE(sc.example_quantity_override, sc.example_quantity) AS quantity,
                        COALESCE(sc.source_unit_override, sc.source_unit) AS unit,
                        sc.source_metadata AS metadata,
-                       row_number() OVER (PARTITION BY m.id ORDER BY sc.person_id, sc.id) AS sample_rank
+                       row_number() OVER (
+                           PARTITION BY m.id
+                           ORDER BY
+                               (CASE WHEN COALESCE(NULLIF(COALESCE(sc.example_quantity_override,
+                                          sc.example_quantity), ''), NULLIF(COALESCE(
+                                          sc.source_unit_override, sc.source_unit), ''))
+                                     IS NOT NULL THEN 0 ELSE 1 END),
+                               (CASE WHEN sc.source_metadata IS NOT NULL
+                                      AND sc.source_metadata != '{}'::jsonb
+                                     THEN 0 ELSE 1 END),
+                               sc.person_id, sc.id
+                       ) AS sample_rank
                 FROM source_code_concept_mapping m
                 JOIN patient_source_code sc ON sc.source_value = m.source_code
                     AND sc.source_vocabulary_id = m.source_vocabulary_id
