@@ -17,6 +17,7 @@ from typing import Any
 from django.db.models import Q
 
 from omop_core.models import Measurement
+from omop_core.services.condition_context import measurement_context_filter
 from patient_portal.models import LabMarker
 
 from .sources import row_sources
@@ -135,6 +136,7 @@ def _rows(person):
     return (
         Measurement.objects.filter(person=person, is_erroneous=False)
         .exclude(pk__in=_genetic_ids(person))
+        .exclude(measurement_context_filter())
         .exclude(value_as_number__isnull=True, value_as_string__isnull=True)
         .select_related(
             'measurement_concept', 'measurement_source_concept', 'unit_concept', 'visit_occurrence',

@@ -1811,3 +1811,14 @@ class PrologSurveyResponseSerializer(serializers.Serializer):
         # `.all()` on purpose: it reads the viewset's prefetch cache, where a
         # filtered queryset would issue a query per row.
         return {a.question_key: a.value for a in obj.answers.all()}
+
+
+class ConditionContextSerializer(serializers.Serializer):
+    """A partial patch: omitted fields survive; blank/null explicitly clears."""
+    note = serializers.CharField(max_length=10000, required=False, allow_blank=True, allow_null=True)
+    care_team = serializers.CharField(max_length=2000, required=False, allow_blank=True, allow_null=True)
+
+    def to_internal_value(self, data):
+        if isinstance(data, dict) and set(data) - set(self.fields):
+            raise serializers.ValidationError({'non_field_errors': ['Only note and care_team may be updated here.']})
+        return super().to_internal_value(data)
