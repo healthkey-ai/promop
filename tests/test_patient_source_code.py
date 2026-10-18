@@ -375,6 +375,117 @@ class TestSourceDescriptionDefault:
         assert _description(smart_env, 'GLU') == 'Glucose [Mass/volume]'
 
 
+# ---------------------------------------------------------------------------
+# etl#42: the source vocabulary is part of the mapping key
+# ---------------------------------------------------------------------------
+
+_SITE_A = 'urn:oid:1.2.840.114350.1.13.159.2.7.2.696570'
+_SITE_B = 'urn:oid:1.2.840.114350.1.13.129.2.7.2.696570'
+
+
+def _row(smart_env, source_value, omop_table='measurement'):
+    resp = smart_env['client'].get(_url(smart_env['person'].person_id))
+    assert resp.status_code == 200
+    return next(
+        sc for sc in resp.json()['source_codes']
+        if sc['source_value'] == source_value and sc['omop_table'] == omop_table
+    )
+
+
+class TestDescriptionIsScopedToTheSourceVocabulary:
+    """Epic codes are local to one hospital, so code 6 is not one code."""
+
+    def _code(self, smart_env, vocabulary, metadata=None, source_value='6'):
+        PatientSourceCode.objects.create(
+            person=smart_env['person'], source_value=source_value,
+            source_vocabulary_id=vocabulary, omop_table='measurement',
+            occurrence_count=1, source_metadata=metadata or {},
+        )
+
+    def _mapping(self, vocabulary, description, source_value='6'):
+        return SourceCodeConceptMapping.objects.create(
+            source_code=source_value, omop_table='measurement',
+            source_vocabulary_id=vocabulary, status='proposed',
+            source_code_description=description,
+        )
+
+    def test_another_sites_label_is_not_used(self, smart_env):
+        first = self._mapping(_SITE_A, 'erythema')
+        mine = self._mapping(_SITE_B, 'temperature')
+        assert first.id < mine.id
+        self._code(smart_env, _SITE_B)
+
+        row = _row(smart_env, '6')
+        assert row['source_code_description'] == 'temperature'
+        assert row['mapping_id'] == mine.id
+        assert row['source_vocabulary_id'] == _SITE_B
+
+    def test_loinc_row_does_not_wear_an_epic_label(self, smart_env):
+        self._mapping(_SITE_A, 'rainbow tube', source_value='785-6')
+        self._code(smart_env, 'LOINC', {'text': ['MCH']}, source_value='785-6')
+
+        row = _row(smart_env, '785-6')
+        assert row['source_code_description'] == 'MCH'
+        assert row['mapping_id'] is None
+        assert row['mapping_status'] == 'unmapped'
+        assert row['source_vocabulary_id'] == 'LOINC'
+
+    def test_no_mapping_for_this_vocabulary_keeps_the_rows_own_identity(self, smart_env):
+        self._mapping(_SITE_A, 'erythema')
+        self._code(smart_env, _SITE_B, {'text': ['Temp']})
+
+        row = _row(smart_env, '6')
+        assert row['source_code_description'] == 'Temp'
+        assert row['mapping_id'] is None
+        assert row['source_vocabulary_id'] == _SITE_B
+
+    def test_own_vocabulary_still_matches(self, smart_env):
+        mine = self._mapping(_SITE_A, 'erythema')
+        self._code(smart_env, _SITE_A, {'text': ['Temp']})
+
+        row = _row(smart_env, '6')
+        assert row['mapping_id'] == mine.id
+        assert row['source_code_description'] == 'erythema'
+
+    def test_oid_alias_matches_the_canonical_mapping(self, smart_env):
+        """Ingest stores SNOMED; the ETL may post the OID for the same system."""
+        mine = self._mapping('SNOMED', 'Fever', source_value='386661006')
+        self._code(smart_env, 'urn:oid:2.16.840.1.113883.6.96',
+                   source_value='386661006')
+
+        row = _row(smart_env, '386661006')
+        assert row['mapping_id'] == mine.id
+        assert row['source_code_description'] == 'Fever'
+
+    def test_uncoded_rows_match_only_uncoded_mappings(self, smart_env):
+        self._mapping(_SITE_A, 'erythema', source_value='M-Protein')
+        mine = self._mapping('', 'M-Protein, Serum', source_value='M-Protein')
+        self._code(smart_env, '', source_value='M-Protein')
+
+        row = _row(smart_env, 'M-Protein')
+        assert row['mapping_id'] == mine.id
+        assert row['source_code_description'] == 'M-Protein, Serum'
+
+    def test_clinical_fallback_still_matches_on_the_code_alone(self, smart_env):
+        """Those rows carry no vocabulary at all, so the code is all there is."""
+        from omop_core.models import Measurement
+
+        person = smart_env['person']
+        mine = self._mapping(_SITE_A, 'erythema')
+        Measurement.objects.create(
+            measurement_id=9900001, person=person,
+            measurement_concept_id=0,
+            measurement_date=date(2026, 1, 1),
+            measurement_type_concept=smart_env['type_concept'],
+            measurement_source_value='6',
+        )
+        assert not PatientSourceCode.objects.filter(person=person).exists()
+
+        row = _row(smart_env, '6')
+        assert row['mapping_id'] == mine.id
+        assert row['source_code_description'] == 'erythema'
+
+
 class TestPostSourceCodesRejections:
     def test_nul_in_metadata_is_a_400(self, smart_env):
         resp = smart_env['client'].post(_url(smart_env['person'].person_id), {

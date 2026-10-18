@@ -7465,8 +7465,20 @@ def _contains_nul(value) -> bool:
     return False
 
 
+def _mapping_vocabulary_keys(source_vocabulary_id) -> tuple[str, ...]:
+    """Vocabularies a row may match a mapping on, canonical first.
+
+    Ingest stores the canonical form, the ETL posts the URI it received.
+    """
+    raw = (source_vocabulary_id or '').strip()
+    canonical = source_vocabularies.canonical_source_vocabulary(raw)
+    return (canonical,) if canonical == raw else (canonical, raw)
+
+
 def _resolve_source_code_mappings(
     rows_by_table: dict[str, list[dict]],
+    *,
+    match_vocabulary: bool = True,
 ) -> list[dict]:
     """Join source-code rows with SCCM mappings and sort by mapping status.
 
@@ -7475,21 +7487,29 @@ def _resolve_source_code_mappings(
 
     Each value in *rows_by_table* is a list of dicts with keys
     ``source_value``, ``source_vocabulary_id``, ``row_count``.
+
+    An Epic code is local to one hospital, so matching on the code alone served
+    whichever row had the lowest id and showed another site's label (etl#42).
+    The vocabulary is part of the key, as in the table's unique constraint and
+    in ``code_resolution.resolve_source_code``. *match_vocabulary* is False for
+    the clinical-table fallback, whose rows carry ``''`` because the column
+    does not exist there, not because the code is uncoded.
     """
     results: list[dict] = []
 
     for table_key, rows in rows_by_table.items():
         source_values = [r['source_value'] for r in rows]
-        # One row per code, only the columns the response uses. A code matches
-        # several mappings (one per org and source vocabulary), and hydrating
-        # them all as models with their joins cost ~4s at a few thousand codes
-        # (#1789). Lowest id wins, so the choice no longer depends on the plan.
-        mapping_by_sv: dict[str, dict] = {}
+        keys = ['source_code', 'source_vocabulary_id'] if match_vocabulary else ['source_code']
+        # One row per key, only the columns the response uses: hydrating every
+        # match as a model with its joins cost ~4s at a few thousand codes
+        # (#1789). Lowest id wins within one key, so the choice does not
+        # depend on the plan.
+        mapping_by_sv: dict[tuple[str, str], dict] = {}
         for m in (
             SourceCodeConceptMapping.objects
             .filter(source_code__in=source_values, omop_table=table_key)
-            .order_by('source_code', 'id')
-            .distinct('source_code')
+            .order_by(*keys, 'id')
+            .distinct(*keys)
             .values(
                 'id', 'status', 'source_vocabulary_id', 'source_code',
                 'source_code_description', 'origin', 'origin_system',
@@ -7498,13 +7518,21 @@ def _resolve_source_code_mappings(
                 'target_concept__vocabulary_id', 'destination_vocabulary_id',
             )
         ):
-            key = m['source_code'].lower()
-            if key not in mapping_by_sv:
-                mapping_by_sv[key] = m
+            key = (m['source_vocabulary_id'] if match_vocabulary else '',
+                   m['source_code'].lower())
+            mapping_by_sv.setdefault(key, m)
 
         for row in rows:
             source_value = row['source_value']
-            mapping = mapping_by_sv.get(source_value.lower())
+            vocabularies = (
+                _mapping_vocabulary_keys(row.get('source_vocabulary_id'))
+                if match_vocabulary else ('',)
+            )
+            mapping = next(
+                (found for vocabulary in vocabularies
+                 if (found := mapping_by_sv.get((vocabulary, source_value.lower())))),
+                None,
+            )
 
             entry: dict = {
                 'source_value': source_value,
@@ -7632,7 +7660,9 @@ def _aggregate_patient_source_codes(person: Person) -> list[dict]:
             for g in groups
         ]
 
-    return _resolve_source_code_mappings(by_table)
+    # The clinical tables keep no source vocabulary, so this path can only
+    # match on the code. See _resolve_source_code_mappings.
+    return _resolve_source_code_mappings(by_table, match_vocabulary=False)
 
 
 def _skip_refresh_requested(request: Request) -> bool:
