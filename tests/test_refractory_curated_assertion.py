@@ -22,6 +22,7 @@ from tests.factories import (
     ConceptFactory,
     DomainFactory,
     DrugExposureFactory,
+    MeasurementFactory,
     ObservationFactory,
     PatientRecordFactory,
     PersonFactory,
@@ -101,6 +102,21 @@ def test_curated_assertion_supersedes_the_inference():
     record = refresh_patient_record(person)
 
     assert record.btk_inhibitor_refractory is False
+
+
+def test_measurement_assertion_also_supersedes_the_inference():
+    """The reviewed answer is supported in either OMOP fact table."""
+    person = _person_on_btk_with_progression()
+    concept = _curated_concept(
+        _BTK_CURATED_CODE, 'BTK inhibitor refractory disease status',
+    )
+    MeasurementFactory(
+        person=person, measurement_concept=concept,
+        measurement_source_value=_BTK_CURATED_CODE,
+        measurement_date=date(2026, 6, 1), value_as_number=0,
+    )
+
+    assert refresh_patient_record(person).btk_inhibitor_refractory is False
 
 
 def test_curated_answer_is_stable_across_repeated_derivation():

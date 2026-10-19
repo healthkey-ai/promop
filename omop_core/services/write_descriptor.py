@@ -447,6 +447,7 @@ def _curated_writes(choice_options=None, genomics_recipes=None):
                 'omop_table': target,
                 'endpoint': _MAPPING_ENDPOINTS[target],
                 'concept_id': concept_id,
+                'concept_code': row.concept.concept_code,
                 'type_concept_id': type_concept_id,
                 'source_value': source_value,
             },

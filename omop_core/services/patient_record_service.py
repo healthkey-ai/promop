@@ -66,7 +66,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 14
+DERIVATION_VERSION = 15
 
 # These PatientRecord columns are projections of PersonLanguageSkill, never
 # independent edits. Older PATCH requests could mark them as user-edited and
@@ -3213,27 +3213,28 @@ def _assertion_detail(row):
     return None
 
 
-def _get_assertion_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
-    """Project latest dated, typed OMOP eligibility/social assertions.
+def _latest_assertion_rows(snapshot: OmopSnapshot) -> dict:
+    """Latest dated row per assertion field, including an unusable answer.
 
-    Both OMOP tables are supported because FHIR ingestion uses Measurement for
-    its coded Observations, while native OMOP integrations correctly use
-    Observation for non-measurement facts.  OMOP requires a date and type
-    concept for both tables; erroneous rows are excluded.  No row, or an
-    unparseable answer, deliberately leaves the projection unknown.
+    The row is selected before parsing because a newer unparseable answer must
+    suppress an older valid one rather than resurrecting it. Held separately so
+    the curated reader can apply the same precedence without parsing twice.
     """
-    snapshot = snapshot or _build_snapshot(person)
     # Only collect rows matching known assertion codes (O(K) instead of O(N))
     _assertion_codes = set(_ASSERTION_FIELDS.keys())
+    meas_by_code = getattr(snapshot, 'meas_by_code', {})
+    meas_by_source = getattr(snapshot, 'meas_by_source', {})
+    obs_by_code = getattr(snapshot, 'obs_by_code', {})
+    obs_by_source = getattr(snapshot, 'obs_by_source', {})
     rows = []
     for code in _assertion_codes:
-        for m in snapshot.meas_by_code.get(code, ()):
+        for m in meas_by_code.get(code, ()):
             rows.append((m.measurement_date, m.measurement_id, code, m))
-        for m in snapshot.meas_by_source.get(code, ()):
+        for m in meas_by_source.get(code, ()):
             rows.append((m.measurement_date, m.measurement_id, code, m))
-        for o in snapshot.obs_by_code.get(code, ()):
+        for o in obs_by_code.get(code, ()):
             rows.append((o.observation_date, o.observation_id, code, o))
-        for o in snapshot.obs_by_source.get(code, ()):
+        for o in obs_by_source.get(code, ()):
             rows.append((o.observation_date, o.observation_id, code, o))
     # Deduplicate by (table, id) since a row could appear in both code and source indexes
     seen = set()
@@ -3246,19 +3247,26 @@ def _get_assertion_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     rows = deduped
     rows.sort(key=lambda item: (item[0], item[1]), reverse=True)
 
+    latest = {}
+    for row_date, row_id, code, row in rows:
+        field, _ = _ASSERTION_FIELDS[code]
+        latest.setdefault(field, (row_date, row_id, code, row))
+    return latest
+
+
+def _get_assertion_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
+    """Project latest dated, typed OMOP eligibility/social assertions.
+
+    Both OMOP tables are supported because FHIR ingestion uses Measurement for
+    its coded Observations, while native OMOP integrations correctly use
+    Observation for non-measurement facts.  OMOP requires a date and type
+    concept for both tables; erroneous rows are excluded.  No row, or an
+    unparseable answer, deliberately leaves the projection unknown.
+    """
+    snapshot = snapshot or _build_snapshot(person)
     data = {}
-    seen_fields = set()
-    for _, _, code, row in rows:
-        spec = _ASSERTION_FIELDS.get(code)
-        if not spec:
-            continue
-        field, value_kind = spec
-        if field in seen_fields:
-            continue
-        # A newer row with no valid typed answer supersedes an older answer:
-        # falling back would resurrect a stale assertion after the source has
-        # explicitly replaced it with an unknown/unusable value.
-        seen_fields.add(field)
+    for field, (row_date, _, code, row) in _latest_assertion_rows(snapshot).items():
+        value_kind = _ASSERTION_FIELDS[code][1]
         value = _assertion_value(row, value_kind)
         if value is None:
             continue
@@ -3271,7 +3279,7 @@ def _get_assertion_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         if field == 'pregnancy_test_result_value':
             # The event date comes from the same fact; it is never copied from
             # a separately patched PatientRecord column.
-            data['pregnancy_test_date'] = row.measurement_date if isinstance(row, Measurement) else row.observation_date
+            data['pregnancy_test_date'] = row_date
     return data
 
 
@@ -4051,10 +4059,17 @@ def _get_cll_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     # fallback for records that have none: it means "took the drug and
     # progressed at some point", not "this drug failed", so it must not
     # overwrite a clinician's explicit answer on the next derivation.
-    curated_codes = {_observation_code(o) for o in observations}
-    if had_btk and _CURATED_REFRACTORY_CODES['btk_inhibitor_refractory'] not in curated_codes:
+    def _has_curated_answer(code):
+        # The assertion extractor reads both OMOP tables; a Measurement answer
+        # must suppress inference exactly like an Observation answer.
+        return bool(
+            snapshot.obs_by_code.get(code) or snapshot.obs_by_source.get(code)
+            or snapshot.meas_by_code.get(code) or snapshot.meas_by_source.get(code)
+        )
+
+    if had_btk and not _has_curated_answer(_CURATED_REFRACTORY_CODES['btk_inhibitor_refractory']):
         data['btk_inhibitor_refractory'] = has_progression
-    if had_bcl2 and _CURATED_REFRACTORY_CODES['bcl2_inhibitor_refractory'] not in curated_codes:
+    if had_bcl2 and not _has_curated_answer(_CURATED_REFRACTORY_CODES['bcl2_inhibitor_refractory']):
         data['bcl2_inhibitor_refractory'] = has_progression
 
     # ALC doubling time — index lookup by LOINC concept code 731-0
