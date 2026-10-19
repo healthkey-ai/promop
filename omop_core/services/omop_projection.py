@@ -1,5 +1,6 @@
 """Project PatientRecord edits into today's OMOP facts, retaining earlier days."""
 import logging
+from datetime import date
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
@@ -77,6 +78,7 @@ def curated_values_from_snapshot(snapshot):
         _latest_loinc_measurement,
     )
     from omop_core.services.clinical_units import blood_count_projection
+    from omop_core.services.field_write_service import _invert_inverse_assertion
     from omop_core.services.write_descriptor import (
         _LIFECYCLE_FIELDS, _WRITE_RECIPE_INCOMPLETE,
         get_serializer_read_only_fields, mapping_target_for,
@@ -134,7 +136,12 @@ def curated_values_from_snapshot(snapshot):
         if selected is not None:
             row_date = (getattr(row, 'measurement_date', None)
                         or getattr(row, 'observation_date', None))
-            if (row_date, row.pk) <= (selected[0], selected[1]):
+            # Only a strictly older approved mapping is suppressed. A mapped
+            # row and the selected assertion can share a date on different
+            # tables, and their table-local ids are not comparable (separate
+            # sequences); deferring to the other table there would silently
+            # undo a reviewed same-day edit on the next refresh.
+            if (row_date or date.min) < (selected[0] or date.min):
                 continue
         question = {
             'ki67_proliferation_index': '29593-1',
@@ -163,6 +170,11 @@ def curated_values_from_snapshot(snapshot):
         if value is None:
             continue
         try:
+            # The stored row carries the source answer. Invert only when the
+            # mapping is the reviewed inverse code for this field; another
+            # approved concept already describes the field directly.
+            value = _invert_inverse_assertion(
+                name, value, source_value, mapping['concept__concept_code'])
             value = readable_fields[name].to_python(value)
             if name == 'cytogenetic_markers':
                 from omop_core.services.cytogenetics import (

@@ -111,6 +111,32 @@ def test_older_approved_observation_cannot_overwrite_newer_measurement_answer(
     assert getattr(refresh_patient_record(person), field_name) is False
 
 
+def test_same_day_approved_mapping_wins_over_the_other_table_tie_break():
+    """Table-local ids are not comparable on an equal date.
+
+    A reviewed same-day edit can land in the table with the smaller id. The
+    other table's larger id must not make an older-looking answer decisive and
+    undo the edit on the next refresh.
+    """
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    concept = ConceptFactory(concept_code='8659-8', concept_name='Contraceptive use')
+    _approved_observation_mapping('contraceptive_use', concept, 'boolean')
+
+    ObservationFactory(
+        person=person, observation_concept=concept,
+        observation_source_value='8659-8', observation_date=date(2026, 2, 1),
+        observation_id=100, value_as_number=1,
+    )
+    MeasurementFactory(
+        person=person, measurement_concept=concept,
+        measurement_source_value='8659-8', measurement_date=date(2026, 2, 1),
+        measurement_id=200, value_as_number=0,
+    )
+
+    assert refresh_patient_record(person).contraceptive_use is True
+
+
 def test_pregnancy_answer_and_date_come_from_the_same_newer_fact():
     """The older mapped Observation must not supply the answer for a new test."""
     person = PersonFactory()
