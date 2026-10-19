@@ -3178,17 +3178,25 @@ def _get_behavior_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             if measurement.value_as_string not in (None, ''):
                 if caster is str:
                     data[field_name] = measurement.value_as_string
-                else:
-                    try:
-                        data[field_name] = caster(float(measurement.value_as_string))
-                    except (TypeError, ValueError):
+                    break
+                try:
+                    value = float(measurement.value_as_string)
+                    if not math.isfinite(value):
                         continue
+                    data[field_name] = caster(value)
+                except (TypeError, ValueError, OverflowError):
+                    continue
                 break
 
             if measurement.value_as_number is None:
                 continue
-            value = float(measurement.value_as_number)
-            data[field_name] = caster(value) if caster is not str else str(value)
+            try:
+                value = float(measurement.value_as_number)
+                if not math.isfinite(value):
+                    continue
+                data[field_name] = caster(value) if caster is not str else str(value)
+            except (TypeError, ValueError, OverflowError):
+                continue
             break
 
     return data
@@ -4016,16 +4024,28 @@ def _get_cll_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     if cd_markers:
         data['protein_expressions'] = ', '.join(cd_markers)
 
-    def _cll_bool_answer(value_str, value_num, truthy_tokens):
-        """Three-valued CLL boolean: None when the row carried no value.
+    def _cll_bool_answer(value_str, value_num, truthy_tokens, falsy_tokens):
+        """Three-valued CLL boolean: None when the row carried no usable answer.
 
-        A row that answers the question with an empty value must not fabricate a
-        negative and then block an older usable answer; only an explicit value
-        (``false``/``no``/``0``/``absent``) is a negative.
+        A row that answers the question with an empty value, a padded token, or
+        an unrecognised string must not fabricate a negative and then block an
+        older usable answer; only an explicit truthy/falsy token (or numeric
+        ``1``/``0``) is a decisive answer.
         """
-        if not value_str and value_num is None:
+        if value_str:
+            normalized = value_str.strip()
+            if normalized in truthy_tokens:
+                return True
+            if normalized in falsy_tokens:
+                return False
             return None
-        return value_str in truthy_tokens or value_num == 1
+        if value_num is None:
+            return None
+        if value_num == 1:
+            return True
+        if value_num == 0:
+            return False
+        return None
 
     for obs in observations:
         if not obs.observation_concept:
@@ -4039,28 +4059,42 @@ def _get_cll_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             if stage_val:
                 data.setdefault('binet_stage', stage_val)
         elif 'tumor burden' in cname or 'tumour burden' in cname:
-            data.setdefault('tumor_burden', obs.value_as_string or cname)
+            if obs.value_as_string:
+                data.setdefault('tumor_burden', obs.value_as_string)
         elif 'disease activity' in cname:
-            data.setdefault('disease_activity', obs.value_as_string or cname)
+            if obs.value_as_string:
+                data.setdefault('disease_activity', obs.value_as_string)
         elif 'bone marrow involvement' in cname or 'bone marrow infiltrat' in cname:
-            answer = _cll_bool_answer(val_str, val_num, ('true', 'yes', '1'))
+            answer = _cll_bool_answer(
+                val_str, val_num, ('true', 'yes', '1'), ('false', 'no', '0'),
+            )
             if answer is not None:
                 data.setdefault('bone_marrow_involvement', answer)
         elif 'hepatomegaly' in cname:
-            answer = _cll_bool_answer(val_str, val_num, ('true', 'yes', '1', 'present'))
+            answer = _cll_bool_answer(
+                val_str, val_num, ('true', 'yes', '1', 'present'),
+                ('false', 'no', '0', 'absent'),
+            )
             if answer is not None:
                 data.setdefault('hepatomegaly', answer)
         elif 'splenomegaly' in cname:
-            answer = _cll_bool_answer(val_str, val_num, ('true', 'yes', '1', 'present'))
+            answer = _cll_bool_answer(
+                val_str, val_num, ('true', 'yes', '1', 'present'),
+                ('false', 'no', '0', 'absent'),
+            )
             if answer is not None:
                 data.setdefault('splenomegaly', answer)
         elif 'lymphadenopathy' in cname:
-            answer = _cll_bool_answer(val_str, val_num, ('true', 'yes', '1', 'present'))
+            answer = _cll_bool_answer(
+                val_str, val_num, ('true', 'yes', '1', 'present'),
+                ('false', 'no', '0', 'absent'),
+            )
             if answer is not None:
                 data.setdefault('lymphadenopathy', answer)
         elif 'autoimmune cytopenia' in cname:
             answer = _cll_bool_answer(
                 val_str, val_num, ('true', 'yes', '1', 'refractory'),
+                ('false', 'no', '0'),
             )
             if answer is not None:
                 data.setdefault('autoimmune_cytopenias_refractory_to_steroids', answer)
@@ -4144,7 +4178,8 @@ def _get_lymphoma_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             elif obs.value_as_string:
                 data.setdefault('flipi_score_options', obs.value_as_string)
         elif 'gelf' in cname:
-            data.setdefault('gelf_criteria_status', obs.value_as_string or cname)
+            if obs.value_as_string:
+                data.setdefault('gelf_criteria_status', obs.value_as_string)
 
     for m in measurements:
         if not m.measurement_concept:

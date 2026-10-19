@@ -248,6 +248,31 @@ def test_behavior_measurement_union_uses_newer_source_only_row():
     assert record.sleep_hours_per_night == 8
 
 
+def test_behavior_measurement_non_finite_answer_is_skipped():
+    """A non-numeric/infinite newer row must not abort or replace a real one."""
+    person = PersonFactory()
+    coded = ConceptFactory(concept_code='89555-7', concept_name='Exercise minutes')
+    source_only = ConceptFactory(
+        concept_code='LOCAL-EXERCISE', concept_name='Exercise minutes local',
+    )
+    with suppress_patient_record_refresh():
+        PatientRecordFactory(person=person, exercise_minutes_per_week=1)
+        MeasurementFactory(
+            person=person, measurement_concept=coded,
+            measurement_source_value='89555-7', measurement_date=OLD,
+            value_as_number=90,
+        )
+        MeasurementFactory(
+            person=person, measurement_concept=source_only,
+            measurement_source_value='89555-7', measurement_date=NEW,
+            value_as_string='inf',
+        )
+
+    record = _refresh(person)
+
+    assert record.exercise_minutes_per_week == 90
+
+
 # ---------------------------------------------------------------------------
 # CLL
 # ---------------------------------------------------------------------------
@@ -337,6 +362,98 @@ def test_cll_empty_newer_observation_keeps_older_answer():
     record = _refresh(person)
 
     assert record.hepatomegaly is True
+
+
+def test_cll_padded_boolean_answer_is_still_recognised():
+    person = PersonFactory()
+    concept = ConceptFactory(concept_name='Hepatomegaly')
+    with suppress_patient_record_refresh():
+        PatientRecordFactory(person=person)
+        ObservationFactory(
+            person=person, observation_concept=concept,
+            observation_date=OLD, value_as_string='false',
+        )
+        ObservationFactory(
+            person=person, observation_concept=concept,
+            observation_date=NEW, value_as_string=' TRUE ',
+        )
+
+    record = _refresh(person)
+
+    assert record.hepatomegaly is True
+
+
+@pytest.mark.parametrize(
+    ('concept_name', 'field'),
+    [
+        ('Hepatomegaly', 'hepatomegaly'),
+        ('Bone marrow involvement', 'bone_marrow_involvement'),
+        ('Autoimmune cytopenia', 'autoimmune_cytopenias_refractory_to_steroids'),
+    ],
+)
+def test_cll_unrecognised_answer_does_not_fabricate_negative(concept_name, field):
+    person = PersonFactory()
+    concept = ConceptFactory(concept_name=concept_name)
+    with suppress_patient_record_refresh():
+        PatientRecordFactory(person=person)
+        ObservationFactory(
+            person=person, observation_concept=concept,
+            observation_date=OLD, value_as_string='true',
+        )
+        ObservationFactory(
+            person=person, observation_concept=concept,
+            observation_date=NEW, value_as_string='unknown',
+        )
+
+    record = _refresh(person)
+
+    assert getattr(record, field) is True
+
+
+def test_cll_unrecognised_numeric_answer_is_skipped():
+    person = PersonFactory()
+    concept = ConceptFactory(concept_name='Hepatomegaly')
+    with suppress_patient_record_refresh():
+        PatientRecordFactory(person=person)
+        ObservationFactory(
+            person=person, observation_concept=concept,
+            observation_date=OLD, value_as_string='true',
+        )
+        ObservationFactory(
+            person=person, observation_concept=concept,
+            observation_date=NEW, value_as_number=2,
+        )
+
+    record = _refresh(person)
+
+    assert record.hepatomegaly is True
+
+
+@pytest.mark.parametrize(
+    ('concept_name', 'field', 'old_value'),
+    [
+        ('Tumor burden criteria', 'tumor_burden', 'Low'),
+        ('Disease activity', 'disease_activity', 'Inactive'),
+    ],
+)
+def test_cll_empty_newer_label_keeps_older_answer(concept_name, field, old_value):
+    """An empty newer label must not replace a real older answer."""
+    person = PersonFactory()
+    concept = ConceptFactory(concept_name=concept_name)
+    with suppress_patient_record_refresh():
+        PatientRecordFactory(person=person)
+        ObservationFactory(
+            person=person, observation_concept=concept,
+            observation_date=OLD, value_as_string=old_value,
+        )
+        ObservationFactory(
+            person=person, observation_concept=concept,
+            observation_date=NEW,
+        )
+
+    record = _refresh(person)
+
+    assert getattr(record, field) == old_value
 
 
 def test_cll_newest_false_observation_blocks_condition_fallback():
@@ -438,6 +555,25 @@ def test_lymphoma_latest_gelf_status():
         ObservationFactory(
             person=person, observation_concept=gelf,
             observation_date=NEW, value_as_string='No',
+        )
+
+    record = _refresh(person)
+
+    assert record.gelf_criteria_status == 'No'
+
+
+def test_lymphoma_empty_newer_gelf_does_not_erase_older_status():
+    person = PersonFactory()
+    gelf = ConceptFactory(concept_name='GELF criteria')
+    with suppress_patient_record_refresh():
+        PatientRecordFactory(person=person)
+        ObservationFactory(
+            person=person, observation_concept=gelf,
+            observation_date=OLD, value_as_string='No',
+        )
+        ObservationFactory(
+            person=person, observation_concept=gelf,
+            observation_date=NEW,
         )
 
     record = _refresh(person)
