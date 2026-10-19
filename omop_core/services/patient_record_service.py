@@ -66,7 +66,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 15
+DERIVATION_VERSION = 16
 
 # These PatientRecord columns are projections of PersonLanguageSkill, never
 # independent edits. Older PATCH requests could mark them as user-edited and
@@ -760,6 +760,24 @@ def _union_by_code_and_source(snapshot: OmopSnapshot, codes, table: str = 'measu
             seen.add(rid)
             result.append(row)
     return result
+
+
+def _fact_recency_key(row):
+    """Newest-first sort key for an OMOP fact row: event date, then row id.
+
+    The per-code and per-source snapshot indexes are each newest-first, but a
+    union of them is not globally ordered, and a table's id sequence only
+    breaks ties within that table. Callers that mix Measurement and Observation
+    rows therefore still get a deterministic (date, id) order, matching
+    ``_latest_assertion_rows``.
+    """
+    if isinstance(row, Measurement):
+        return (row.measurement_date or date.min, row.measurement_id)
+    if isinstance(row, Observation):
+        return (row.observation_date or date.min, row.observation_id)
+    if isinstance(row, ConditionOccurrence):
+        return (row.condition_start_date or date.min, row.condition_occurrence_id)
+    raise TypeError(f'not an OMOP fact row: {type(row)!r}')
 
 
 def _build_snapshot(person: Person) -> OmopSnapshot:
@@ -3124,12 +3142,16 @@ def _get_behavior_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
                 data['tobacco_use_details'] = f'Former smoker, quit {obs.observation_date}'
             else:
                 data['tobacco_use_details'] = details
+            break
 
     # Backward compat: old format wrote SNOMED codes directly into
     # observation_concept_id. Only apply if the new format didn't match.
     if 'no_tobacco_use_status' not in data:
         _OLD_TOBACCO_CODES = ('266919005', '8517006', '77176002')
         old_tobacco_obs = _rows_by_codes(snapshot, _OLD_TOBACCO_CODES, table='observation')
+        # The three code buckets are each newest-first but not ordered against
+        # each other, so the newest row overall decides, regardless of code.
+        old_tobacco_obs.sort(key=_fact_recency_key, reverse=True)
         for obs in old_tobacco_obs:
             code = obs.observation_concept.concept_code
             if code == '266919005':
@@ -3141,34 +3163,40 @@ def _get_behavior_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             elif code == '77176002':
                 data['no_tobacco_use_status'] = False
                 data['tobacco_use_details'] = 'Current smoker'
+            break
 
     # Use index lookups instead of scanning all measurements
     for code, (field_name, caster) in _BEHAVIOR_MEASUREMENT_FIELDS.items():
         if field_name in data:
             continue
-        # Union of concept code and source value indexes (not fallback)
-        _code_rows = snapshot.meas_by_code.get(code, ())
-        _source_rows = snapshot.meas_by_source.get(code, ())
-        if _code_rows and _source_rows:
-            _seen_ids = {m.measurement_id for m in _code_rows}
-            candidates = list(_code_rows) + [m for m in _source_rows if m.measurement_id not in _seen_ids]
-        else:
-            candidates = _code_rows or _source_rows
+        # Union of concept code and source value indexes (not fallback).
+        # The union groups code matches ahead of source-only matches, so sort
+        # by date/id before taking the first usable value.
+        candidates = _union_by_code_and_source(snapshot, (code,))
+        candidates.sort(key=_fact_recency_key, reverse=True)
         for measurement in candidates:
             if measurement.value_as_string not in (None, ''):
                 if caster is str:
                     data[field_name] = measurement.value_as_string
-                else:
-                    try:
-                        data[field_name] = caster(float(measurement.value_as_string))
-                    except (TypeError, ValueError):
+                    break
+                try:
+                    value = float(measurement.value_as_string)
+                    if not math.isfinite(value):
                         continue
+                    data[field_name] = caster(value)
+                except (TypeError, ValueError, OverflowError):
+                    continue
                 break
 
             if measurement.value_as_number is None:
                 continue
-            value = float(measurement.value_as_number)
-            data[field_name] = caster(value) if caster is not str else str(value)
+            try:
+                value = float(measurement.value_as_number)
+                if not math.isfinite(value):
+                    continue
+                data[field_name] = caster(value) if caster is not str else str(value)
+            except (TypeError, ValueError, OverflowError):
+                continue
             break
 
     return data
@@ -3305,38 +3333,29 @@ def _get_infection_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
                 return 'positive'
         return None
 
-    _HIV_CODES = ('5221-7', '7917-8')
-    hiv_measurements = _union_by_code_and_source(snapshot, _HIV_CODES)
-    for m in hiv_measurements:
-        result = _infection_value(m)
-        if result == 'negative':
-            data['no_hiv_status'] = True
-            data['hiv_status'] = False
-        elif result == 'positive':
-            data['no_hiv_status'] = False
-            data['hiv_status'] = True
+    def _latest_result(codes, positive_field, negative_field):
+        """Apply the newest recognized result across the code/source union.
 
-    _HEPB_CODES = ('5195-3',)
-    hepb_measurements = _union_by_code_and_source(snapshot, _HEPB_CODES)
-    for m in hepb_measurements:
-        result = _infection_value(m)
-        if result == 'negative':
-            data['no_hepatitis_b_status'] = True
-            data['hepatitis_b_status'] = False
-        elif result == 'positive':
-            data['no_hepatitis_b_status'] = False
-            data['hepatitis_b_status'] = True
+        The union lists code-matched rows ahead of source-only rows, so it must
+        be re-sorted by date/id before reading it; sorting also skips a newer
+        unparseable answer instead of letting a stale one win.
+        """
+        rows = _union_by_code_and_source(snapshot, codes)
+        rows.sort(key=_fact_recency_key, reverse=True)
+        for m in rows:
+            result = _infection_value(m)
+            if result == 'negative':
+                data[negative_field] = True
+                data[positive_field] = False
+                return
+            if result == 'positive':
+                data[negative_field] = False
+                data[positive_field] = True
+                return
 
-    _HEPC_CODES = ('5196-1',)
-    hepc_measurements = _union_by_code_and_source(snapshot, _HEPC_CODES)
-    for m in hepc_measurements:
-        result = _infection_value(m)
-        if result == 'negative':
-            data['no_hepatitis_c_status'] = True
-            data['hepatitis_c_status'] = False
-        elif result == 'positive':
-            data['no_hepatitis_c_status'] = False
-            data['hepatitis_c_status'] = True
+    _latest_result(('5221-7', '7917-8'), 'hiv_status', 'no_hiv_status')
+    _latest_result(('5195-3',), 'hepatitis_b_status', 'no_hepatitis_b_status')
+    _latest_result(('5196-1',), 'hepatitis_c_status', 'no_hepatitis_c_status')
 
     return data
 
@@ -3403,23 +3422,24 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
     snapshot = snapshot or _build_snapshot(person)
     data = {}
 
-    # Query Measurement first (upload handler routes all FHIR Obs through Measurement
-    # when they have a recognisable LOINC code).
+    # FHIR Observations with a recognisable LOINC code arrive as Measurement
+    # rows, but some environments keep them in Observation, so both tables are
+    # read below.
     MM_LOINC_CODES = {
         '47082-2': 'plasma_cell_leukemia',   # Plasma cell leukemia status (boolean)
         '24646-7': 'bone_lesions',            # Bone lesion presence (boolean → text)
         '89599-5': 'meets_crab',              # CRAB criteria met (boolean)
     }
 
-    mm_measurements = sorted(
-        _rows_by_sources(snapshot, MM_LOINC_CODES.keys()),
-        key=lambda m: m.measurement_date or date.min,
-    )
     def _coerce_mm_boolean(number_value, string_value):
         if number_value is not None:
             return bool(number_value)
         if string_value:
-            return string_value.lower() in ('true', '1', 'yes', 'present')
+            normalized = string_value.strip().lower()
+            if normalized in ('true', '1', 'yes', 'present'):
+                return True
+            if normalized in ('false', '0', 'no', 'absent'):
+                return False
         return None
 
     def _set_mm_field(field, bool_val):
@@ -3430,20 +3450,23 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
         else:
             data[field] = bool_val
 
-    for m in mm_measurements:
-        field = MM_LOINC_CODES.get(m.measurement_source_value)
-        _set_mm_field(field, _coerce_mm_boolean(m.value_as_number, m.value_as_string))
-
-    # Observation rows should supplement missing fields, not only act as an
-    # all-or-nothing fallback, because some environments split MM facts across
-    # Measurement and Observation tables.
-    mm_obs = sorted(
-        _rows_by_sources(snapshot, MM_LOINC_CODES.keys(), table='observation'),
-        key=lambda o: o.observation_date or date.min,
-    )
-    for o in mm_obs:
-        field = MM_LOINC_CODES.get(o.observation_source_value)
-        _set_mm_field(field, _coerce_mm_boolean(o.value_as_number, o.value_as_string))
+    # Some environments split MM facts across Measurement and Observation, so
+    # merge both and let the newest usable row per field win regardless of
+    # table. The sort is stable, so a Measurement still wins an exact
+    # (date, id) tie, matching _latest_assertion_rows.
+    mm_rows = list(_rows_by_sources(snapshot, MM_LOINC_CODES.keys()))
+    mm_rows += _rows_by_sources(snapshot, MM_LOINC_CODES.keys(), table='observation')
+    mm_rows.sort(key=_fact_recency_key, reverse=True)
+    for row in mm_rows:
+        source_value = (
+            row.measurement_source_value
+            if isinstance(row, Measurement)
+            else row.observation_source_value
+        )
+        _set_mm_field(
+            MM_LOINC_CODES.get(source_value),
+            _coerce_mm_boolean(row.value_as_number, row.value_as_string),
+        )
 
     # ── meets_slim: derived from plasma cells and FLC ratio in OMOP ─────────
     # SLiM = Sixty (plasma cells ≥60%), Light chain ratio ≥100, or MRI lesions
@@ -3985,10 +4008,12 @@ def _get_cll_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         if not m.measurement_concept:
             continue
         cname = m.measurement_concept.concept_name.lower()
-        if 'clonal' in cname and 'bone marrow' in cname and 'b' in cname and m.value_as_number:
-            data['clonal_bone_marrow_b_lymphocytes'] = float(m.value_as_number)
-        elif 'clonal b' in cname and 'lymphocyte' in cname and m.value_as_number:
-            data['clonal_b_lymphocyte_count'] = int(m.value_as_number)
+        if ('clonal' in cname and 'bone marrow' in cname and 'b' in cname
+                and m.value_as_number is not None):
+            data.setdefault('clonal_bone_marrow_b_lymphocytes', float(m.value_as_number))
+        elif ('clonal b' in cname and 'lymphocyte' in cname
+                and m.value_as_number is not None):
+            data.setdefault('clonal_b_lymphocyte_count', int(m.value_as_number))
 
     cd_markers = []
     for m in measurements:
@@ -3998,6 +4023,29 @@ def _get_cll_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
                 cd_markers.append(f'{cname}: {m.value_as_string}')
     if cd_markers:
         data['protein_expressions'] = ', '.join(cd_markers)
+
+    def _cll_bool_answer(value_str, value_num, truthy_tokens, falsy_tokens):
+        """Three-valued CLL boolean: None when the row carried no usable answer.
+
+        A row that answers the question with an empty value, a padded token, or
+        an unrecognised string must not fabricate a negative and then block an
+        older usable answer; only an explicit truthy/falsy token (or numeric
+        ``1``/``0``) is a decisive answer.
+        """
+        if value_str:
+            normalized = value_str.strip()
+            if normalized in truthy_tokens:
+                return True
+            if normalized in falsy_tokens:
+                return False
+            return None
+        if value_num is None:
+            return None
+        if value_num == 1:
+            return True
+        if value_num == 0:
+            return False
+        return None
 
     for obs in observations:
         if not obs.observation_concept:
@@ -4009,30 +4057,56 @@ def _get_cll_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         if 'binet' in cname:
             stage_val = obs.value_as_string or (str(int(val_num)) if val_num else None)
             if stage_val:
-                data['binet_stage'] = stage_val
+                data.setdefault('binet_stage', stage_val)
         elif 'tumor burden' in cname or 'tumour burden' in cname:
-            data['tumor_burden'] = obs.value_as_string or cname
+            if obs.value_as_string:
+                data.setdefault('tumor_burden', obs.value_as_string)
         elif 'disease activity' in cname:
-            data['disease_activity'] = obs.value_as_string or cname
+            if obs.value_as_string:
+                data.setdefault('disease_activity', obs.value_as_string)
         elif 'bone marrow involvement' in cname or 'bone marrow infiltrat' in cname:
-            data['bone_marrow_involvement'] = val_str in ('true', 'yes', '1') or val_num == 1
-        elif 'hepatomegaly' in cname:
-            data['hepatomegaly'] = val_str in ('true', 'yes', '1', 'present') or val_num == 1
-        elif 'splenomegaly' in cname:
-            data['splenomegaly'] = val_str in ('true', 'yes', '1', 'present') or val_num == 1
-        elif 'lymphadenopathy' in cname:
-            data['lymphadenopathy'] = val_str in ('true', 'yes', '1', 'present') or val_num == 1
-        elif 'autoimmune cytopenia' in cname:
-            data['autoimmune_cytopenias_refractory_to_steroids'] = (
-                val_str in ('true', 'yes', '1', 'refractory') or val_num == 1
+            answer = _cll_bool_answer(
+                val_str, val_num, ('true', 'yes', '1'), ('false', 'no', '0'),
             )
+            if answer is not None:
+                data.setdefault('bone_marrow_involvement', answer)
+        elif 'hepatomegaly' in cname:
+            answer = _cll_bool_answer(
+                val_str, val_num, ('true', 'yes', '1', 'present'),
+                ('false', 'no', '0', 'absent'),
+            )
+            if answer is not None:
+                data.setdefault('hepatomegaly', answer)
+        elif 'splenomegaly' in cname:
+            answer = _cll_bool_answer(
+                val_str, val_num, ('true', 'yes', '1', 'present'),
+                ('false', 'no', '0', 'absent'),
+            )
+            if answer is not None:
+                data.setdefault('splenomegaly', answer)
+        elif 'lymphadenopathy' in cname:
+            answer = _cll_bool_answer(
+                val_str, val_num, ('true', 'yes', '1', 'present'),
+                ('false', 'no', '0', 'absent'),
+            )
+            if answer is not None:
+                data.setdefault('lymphadenopathy', answer)
+        elif 'autoimmune cytopenia' in cname:
+            answer = _cll_bool_answer(
+                val_str, val_num, ('true', 'yes', '1', 'refractory'),
+                ('false', 'no', '0'),
+            )
+            if answer is not None:
+                data.setdefault('autoimmune_cytopenias_refractory_to_steroids', answer)
 
-    for cond in conditions:
+    # Newest condition start first, so the latest Richter report wins by
+    # date/id rather than by snapshot ordering.
+    for cond in sorted(conditions, key=_fact_recency_key, reverse=True):
         if not cond.condition_concept:
             continue
         cname = (cond.condition_concept.concept_name or '').lower()
         if 'richter' in cname:
-            data['richter_transformation'] = cond.condition_concept.concept_name
+            data.setdefault('richter_transformation', cond.condition_concept.concept_name)
         if 'hepatomegaly' in cname and 'hepatomegaly' not in data:
             data['hepatomegaly'] = True
         if 'splenomegaly' in cname and 'splenomegaly' not in data:
@@ -4100,11 +4174,12 @@ def _get_lymphoma_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         cname = obs.observation_concept.concept_name.lower()
         if 'flipi' in cname:
             if obs.value_as_number is not None:
-                data['flipi_score'] = int(obs.value_as_number)
+                data.setdefault('flipi_score', int(obs.value_as_number))
             elif obs.value_as_string:
-                data['flipi_score_options'] = obs.value_as_string
+                data.setdefault('flipi_score_options', obs.value_as_string)
         elif 'gelf' in cname:
-            data['gelf_criteria_status'] = obs.value_as_string or cname
+            if obs.value_as_string:
+                data.setdefault('gelf_criteria_status', obs.value_as_string)
 
     for m in measurements:
         if not m.measurement_concept:
