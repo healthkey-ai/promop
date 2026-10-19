@@ -63,6 +63,27 @@ def _outcome(code: str | None) -> dict[str, str] | None:
     return {'code': key, 'label': label, 'explanation': explanation}
 
 
+def _line_rows(person, episode_id: int | None) -> list[DrugExposure]:
+    if episode_id is None:
+        return []
+    ids = EpisodeEvent.objects.filter(episode_id=episode_id).values_list('event_id', flat=True)
+    return list(
+        DrugExposure.objects.filter(person=person, drug_exposure_id__in=list(ids), is_erroneous=False)
+        .select_related('drug_concept', 'visit_occurrence')
+        .order_by('drug_exposure_start_date', 'drug_exposure_id')
+    )
+
+
+def _line_source(ctx: '_Context', rows: list[DrugExposure], start: date) -> dict[str, Any]:
+    """Where the line was given: its first medicine's care site, else the record's facility."""
+    if rows:
+        first = row_sources(DrugExposure, rows[:1], type_attr='drug_type_concept',
+                            date_attr='drug_exposure_start_date')[rows[0].pk]
+        if first.get('facility'):
+            return {**first, 'date': start.isoformat()}
+    return source('record', ctx.facility, start)
+
+
 def _medications(person, episode_id: int | None) -> list[dict[str, Any]]:
     if episode_id is None:
         return []
@@ -147,7 +168,7 @@ def _shape(ctx: _Context, entry: dict) -> dict[str, Any] | None:
         'outcome': _outcome(entry.get('outcome')),
         'intent': (entry.get('intent') or '').strip() or None,
         'stopped_because': STOP_REASONS.get(reason.lower().replace(' ', '_'), reason) or None,
-        'source': source('record', ctx.facility, start),
+        'source': _line_source(ctx, _line_rows(ctx.person, entry.get('episode_id')), start),
     }
     told = ctx.reasons.get(line['id'])
     if told is not None:

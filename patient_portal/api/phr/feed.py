@@ -15,7 +15,7 @@ from django.utils import timezone
 
 from omop_core.models import ConditionOccurrence, DrugExposure, Measurement, PatientDocument, ProcedureOccurrence
 
-from .labs import VITALS, effective_concept
+from .labs import NOT_LABS, effective_concept
 from .records import GENETIC_DOC_LABELS
 from .sources import care_site_names, row_sources, source
 
@@ -40,7 +40,7 @@ def whats_new(person, record) -> dict[str, Any]:
         for row in rows:
             if section == 'labs':
                 concept = effective_concept(row)
-                if concept is None or concept.concept_code in VITALS or not (
+                if concept is None or concept.concept_code in NOT_LABS or not (
                         row.value_as_number is not None or row.value_as_string):
                     continue
             counts[(getattr(row, date_field), section, _site(row, sites))] += 1

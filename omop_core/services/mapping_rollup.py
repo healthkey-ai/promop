@@ -23,7 +23,8 @@ real key is built from, so a synthetic key can never collide with a label.
 The review queue can order groups by summed occurrence or by their displayed
 description. Ordering happens here, before pagination, so pages remain stable.
 """
-from django.db.models import CharField, Count, F, Max, Min, Q, Sum, Value
+from django.db.models import Case, CharField, Count, F, Max, Min, Q, Sum, Value, When
+
 from django.db.models.functions import Cast, Coalesce, Concat, Lower
 
 #: Separates a synthetic single-row key from a real label. Outside the
@@ -39,10 +40,10 @@ GROUP_ORDER_FIELDS = {
 
 
 def _group_key():
-    return Coalesce(
-        'source_label_norm',
-        Concat(Value(SYNTHETIC_PREFIX), Cast('id', CharField()),
-               output_field=CharField()),
+    return Case(
+        When(source_label_norm__isnull=True, then=Concat(
+            Value(SYNTHETIC_PREFIX), Cast('id', CharField()))),
+        default=F('source_label_norm'),
         output_field=CharField(),
     )
 
@@ -115,6 +116,8 @@ def group_entries(queryset, page, page_size, order='-occurrence_count'):
     return [
         {
             'label': entry['label'],
+            'sample_mapping_id': entry['max_id'],
+            'group_key': entry['group_key'],
             'description': entry['description'],
             'members': entry['members'],
             'seen': entry['seen'],

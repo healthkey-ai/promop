@@ -15,7 +15,7 @@ import { useEffect } from 'react';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { MemoryRouter, Routes, Route, useNavigate, type NavigateFunction } from 'react-router-dom';
-import { PatientDetailRoute } from './PatientDetail';
+import PatientDetail, { PatientDetailRoute } from './PatientDetail';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
 
 vi.mock('@/api/axios', () => ({
@@ -35,10 +35,34 @@ vi.mock('@/components/PatientInfo/tabs/TreatmentTab', () => ({
   ),
 }));
 
+vi.mock('@/components/PatientInfo/tabs/BehaviorTab', () => ({
+  default: ({ formData, onChange, onRefresh }: {
+    formData: Record<string, unknown>;
+    onChange: (field: string, value: unknown) => void;
+    onRefresh?: () => void;
+  }) => (
+    <>
+      <span>TNBC: {String(formData.tnbc_status)}</span>
+      <button onClick={() => onChange('estrogen_receptor_status', 'Negative')}>Set ER negative</button>
+      <button onClick={onRefresh}>Refresh patient</button>
+    </>
+  ),
+}));
+
+vi.mock('@/api/clinicalFacts', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/api/clinicalFacts')>(),
+  confirmRecord: vi.fn(),
+}));
+
 import api from '@/api/axios';
+import { confirmRecord } from '@/api/clinicalFacts';
 
 const text = { kind: 'direct', writable: true, target: 'patient_record', value_kind: 'string' };
-const DESCRIPTORS = { phone_number: text, city: text };
+const DESCRIPTORS = {
+  phone_number: text, city: text,
+  estrogen_receptor_status: text,
+  tnbc_status: { kind: 'derived', writable: false, target: 'patient_record', value_kind: 'boolean' },
+};
 
 const RECORDS: Record<string, Record<string, unknown>> = {
   '101': { person_id: 101, patient_name: 'Ada Lovelace', city: 'Rome', phone_number: '2025550101', current_line_of_therapy: 1 },
@@ -74,12 +98,15 @@ beforeEach(() => {
     return Promise.resolve({ data: [] });
   });
   (api.patch as ReturnType<typeof vi.fn>).mockResolvedValue({ data: {} });
+  (confirmRecord as ReturnType<typeof vi.fn>).mockResolvedValue({
+    validated: true, validated_by: 'patient', validation_date: '2026-10-12',
+  });
 });
 
 afterEach(() => vi.useRealTimers());
 
 async function renderAt(personId: string) {
-  render(
+  const view = render(
     <MemoryRouter initialEntries={[`/patient/${personId}`]}>
       <CaptureNavigate />
       <Routes>
@@ -90,6 +117,7 @@ async function renderAt(personId: string) {
   await waitFor(() =>
     expect(screen.getByDisplayValue(RECORDS[personId].patient_name as string)).toBeInTheDocument(),
   );
+  return view;
 }
 
 function edit(displayValue: string, next: string) {
@@ -189,5 +217,125 @@ describe('PatientDetail — a server refresh on the same patient', () => {
 
     await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1));
     expect(lastPatch()!.body).toEqual({ phone_number: '2025550199' });
+  });
+
+  it('does not revert a confirmed save when an older refresh arrives later', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    refreshedRecord = { ...RECORDS['101'], current_line_of_therapy: 2 };
+    await renderAt('101');
+
+    edit('Rome', 'Milan');
+    await flushAutosave();
+    await waitFor(() => expect(lastPatch()?.body).toEqual({ city: 'Milan' }));
+    await openTreatmentAndRefresh();
+
+    expect(screen.getByDisplayValue('Milan')).toBeInTheDocument();
+    edit('2025550101', '2025550199');
+    await flushAutosave();
+    await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(2));
+    expect(lastPatch()?.body).toEqual({ phone_number: '2025550199' });
+  });
+
+  it('uses the server TNBC value after an unsendable derived change', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const original = RECORDS['101'];
+    RECORDS['101'] = {
+      ...original, estrogen_receptor_status: 'Positive', tnbc_status: true,
+    };
+    try {
+      refreshedRecord = { ...RECORDS['101'], current_line_of_therapy: 2 };
+      await renderAt('101');
+      fireEvent.click(screen.getByRole('button', { name: 'Behavior' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Set ER negative' }));
+      expect(screen.getByText('TNBC: false')).toBeInTheDocument();
+      await flushAutosave();
+      await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1));
+      expect(lastPatch()?.body).toEqual({ estrogen_receptor_status: 'Negative' });
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh patient' }));
+      await waitFor(() => expect(screen.getByText('TNBC: true')).toBeInTheDocument());
+    } finally {
+      RECORDS['101'] = original;
+    }
+  });
+
+  it('rebases an unsaved edit through reloadPatientInfo', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    await renderAt('101');
+    edit('Rome', 'Milan');
+    fireEvent.click(screen.getByRole('button', { name: 'Behavior' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh patient' }));
+    fireEvent.click(screen.getByRole('button', { name: 'General' }));
+    expect(screen.getByDisplayValue('Milan')).toBeInTheDocument();
+    await flushAutosave();
+    await waitFor(() => expect(lastPatch()?.body).toEqual({ city: 'Milan' }));
+  });
+
+  it('ignores a reload started before a saved edit', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    await renderAt('101');
+    let finishReload!: (response: unknown) => void;
+    const originalGet = (api.get as ReturnType<typeof vi.fn>).getMockImplementation()!;
+    (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) =>
+      url === '/patient-info/101/'
+        ? new Promise((resolve) => { finishReload = resolve; })
+        : originalGet(url),
+    );
+
+    edit('Rome', 'Milan');
+    fireEvent.click(screen.getByRole('button', { name: 'Behavior' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh patient' }));
+    await flushAutosave();
+    await waitFor(() => expect(lastPatch()?.body).toEqual({ city: 'Milan' }));
+    await act(async () => {
+      finishReload({ data: { patient_info: { ...RECORDS['101'] } } });
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'General' }));
+    expect(screen.getByDisplayValue('Milan')).toBeInTheDocument();
+  });
+});
+
+describe('PatientDetail — leaving during autosave', () => {
+  it('flushes the pending edit for the old patient on unmount', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const view = await renderAt('101');
+    edit('Rome', 'Milan');
+    view.unmount();
+    await waitFor(() => expect(lastPatch()).toEqual({
+      url: '/patient-info/101/', body: { city: 'Milan' },
+    }));
+  });
+
+  it('sends a flushed edit after an earlier PATCH, not concurrently with it', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let finishFirst!: (response: unknown) => void;
+    (api.patch as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(() => new Promise((resolve) => { finishFirst = resolve; }))
+      .mockResolvedValue({ data: {} });
+    const view = await renderAt('101');
+
+    edit('Rome', 'Milan');
+    await flushAutosave();
+    await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1));
+    edit('Milan', 'Berlin');
+    view.unmount();
+    expect(api.patch).toHaveBeenCalledTimes(1);
+
+    await act(async () => { finishFirst({ data: {} }); });
+    await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(2));
+    expect((api.patch as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[1])).toEqual([
+      { city: 'Milan' }, { city: 'Berlin' },
+    ]);
+  });
+
+  it('keeps a pending edit when record confirmation finishes', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(<MemoryRouter><PatientDetail personIdOverride="101" patientMode /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByDisplayValue('Rome')).toBeInTheDocument());
+    edit('Rome', 'Milan');
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm Record' }));
+    await waitFor(() => expect(confirmRecord).toHaveBeenCalled());
+    expect(screen.getByDisplayValue('Milan')).toBeInTheDocument();
+    await flushAutosave();
+    await waitFor(() => expect(lastPatch()?.body).toEqual({ city: 'Milan' }));
   });
 });

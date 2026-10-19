@@ -43,6 +43,9 @@ SYSTEM: frozenset[str] = frozenset({
     # Bookkeeping and derived caches, rebuilt by their own commands.
     'omop_core.CdmSource', 'omop_core.ConceptEmbedding', 'omop_core.RegimenMappingGap',
     'omop_core.SourceCodeResolveRun',
+    # Which ETL run last wrote a patient's source codes. Names runs by the
+    # caller's own ids, which mean nothing on another instance.
+    'omop_core.PatientSourceCodeUpload',
     'omop_core.SuggestEmbeddingSnapshot', 'omop_core.SuggestRun',
     # Historical model-quality feedback for this instance, not a live mapping.
     'omop_core.CodeMappingUpload', 'omop_core.MappingSuggestionReview',
@@ -54,6 +57,9 @@ SYSTEM: frozenset[str] = frozenset({
     'omop_core.AthenaVocabularySync', 'omop_core.HospitalCodeImport',
     'omop_core.VocabularyRelease',
     'omop_core.VocabularyVersionHistory',
+    # A task for a human about two Persons here, named by local id. It says
+    # which pair to look at, so it means nothing on another instance.
+    'omop_core.PersonMergeCandidate',
     # Outreach state, not answers.
     'prolog_surveys.ParticipantMergeCandidate', 'prolog_surveys.SurveyAdministration',
     'prolog_surveys.SurveyContact', 'prolog_surveys.SurveyInvitation',
@@ -80,6 +86,10 @@ REFERENCE_FROM_RELEASE: dict[str, str] = {
     **dict.fromkeys((
         'omop_core.LoincClass', 'omop_core.LoincCodeClass', 'omop_core.LoincRelease',
     ), 'sync_loinc_release'),
+    # Imported evidence comes from the pinned hospital inventory. Curator
+    # decisions on these rows are instance-local; do not copy the whole
+    # registry and duplicate the seed evidence on another instance.
+    'omop_core.SourceSystemFacility': 'import_hospital_code_seed',
     **dict.fromkeys((
         'prolog_surveys.Survey', 'prolog_surveys.SurveyOption',
         'prolog_surveys.SurveyQuestion', 'prolog_surveys.SurveyVersion',

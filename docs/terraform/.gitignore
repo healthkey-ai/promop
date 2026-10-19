@@ -1,0 +1,12 @@
+# Terraform state holds every generated secret (SECRET_KEY, AUDIT_HMAC_KEY,
+# EXPORT_SIGNING_KEY, ADMIN_PASSWORD, DATABASE_URL) in plaintext. Never commit
+# it. Use the GCS backend in promop.tf instead.
+terraform.tfstate
+terraform.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+
+# tfvars holds your project_id, admin_email, and Drive URL. Not a secret, but
+# environment-specific — keep it out of a shared repo.
+terraform.tfvars
+*.auto.tfvars

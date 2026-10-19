@@ -1,5 +1,6 @@
 import ConceptToCodeTab from "./ConceptToCodeTab";
 import CodeMappingUploadDialog, { type CodeMappingUploadResult } from "./CodeMappingUploadDialog";
+import SourceQuantityCell from "./SourceQuantityCell";
 import PageTitle from '@/components/Branding/PageTitle';
 import InlineDestinationPicker from "./InlineDestinationPicker";
 import SuggestCandidates from "./SuggestCandidates";
@@ -7,7 +8,7 @@ import EditMappingDialog from "./EditMappingDialog";
 import ConceptInputDetails from "@/components/UI/ConceptInputDetails";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { ArrowLeft, Check, ChevronDown, ChevronRight, Download, Pencil, Plus, Search, Sparkles, Upload } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronRight, Download, Pencil, Plus, Search, Sparkles, Upload } from "lucide-react";
 import api from "@/api/axios";
 import { useAuth } from "@/hooks/useAuth";
 import { confirmUnitOverride, unitConfirmation } from "./unitConfirmation";
@@ -17,8 +18,6 @@ import {
   type RepointResult,
   type SuggestRunProgress,
   emptyReference,
-  statusClass,
-  strategyLabel,
   STRATEGY_LABELS,
   SUGGEST_POLL_INTERVAL_MS,
   SUGGEST_POLL_MAX_FAILURES,
@@ -194,7 +193,7 @@ const VOCABULARY_ALIASES: Record<string, string> = {
   // ICD10CM and ICD10 are now separate tabs — no alias needed.
   "urn:oid:2.16.840.1.113883.6.96": "SNOMED",
 };
-function tabForRow(row: CodeMappingRow): string {
+function tabForRow(row: Pick<CodeMappingRow, 'source_vocabulary_id'>): string {
   return VOCABULARY_ALIASES[row.source_vocabulary_id] ?? row.source_vocabulary_id;
 }
 
@@ -207,24 +206,26 @@ function tabForRow(row: CodeMappingRow): string {
 const SAME_VOCABULARY_SPELLINGS: Record<string, string> = {
   "urn:oid:2.16.840.1.113883.6.96": "SNOMED",
 };
-function duplicateScopeForRow(row: CodeMappingRow): string {
+function duplicateScopeForRow(row: Pick<CodeMappingRow, 'source_vocabulary_id'>): string {
   return SAME_VOCABULARY_SPELLINGS[row.source_vocabulary_id] ?? row.source_vocabulary_id;
 }
 
-function sectionForRow(row: CodeMappingRow): MappingSection {
-  if (row.mapping_origin === "athena") return "Athena Mapped";
-  if (row.status === "approved") return "Mapped";
-  if (row.status === "rejected") return "Rejected";
-  return "Unmapped";
+function sectionForRow(row: Pick<CodeMappingRow, 'status' | 'destination_concept_id'>): MappingSection {
+  if (!row.destination_concept_id) return "Unmapped";
+  return row.status === "approved" ? "Approved" : "Proposed";
 }
 
-function mappingRowId(row: CodeMappingRow): string {
+type MappingIdentity = Pick<CodeMappingRow, 'mapping_id' | 'source_vocabulary_id' | 'source_code'
+  | 'destination_concept_id' | 'organization_id' | 'status' | 'mapping_origin'>;
+type DuplicateSummary = MappingIdentity & { summary: true };
+
+function mappingRowId(row: MappingIdentity): string {
   return `code-mapping-${row.mapping_id ?? encodeURIComponent(JSON.stringify([
     row.source_vocabulary_id, row.source_code, row.destination_concept_id, sectionForRow(row),
   ]))}`;
 }
 
-type MappingSection = "Unmapped" | "Mapped" | "Rejected" | "Athena Mapped";
+type MappingSection = "Unmapped" | "Proposed" | "Approved";
 type SortColumn = "origin_system" | "source_code" | "occurrence_count" | "source_code_description"
   | "destination_concept_name" | "destination_concept_id" | "destination_count" | "status";
 type SectionSort = { column: SortColumn; descending: boolean };
@@ -261,6 +262,7 @@ type BrowseResponse = {
   total?: number;
   results: CodeMappingRow[];
   duplicates: CodeMappingRow[];
+  duplicates_included?: boolean;
   tabs: { vocabulary_id: string; label: string; is_standard: boolean; proposed: number; approved: number; athena: number }[];
   selected_source: string;
   pages: Record<MappingSection, { page: number; page_size: number; total: number }>;
@@ -276,6 +278,8 @@ type BrowseResponse = {
 /** One review row standing for every vendor code sharing a label. */
 type GroupEntry = {
   label: string | null;
+  group_key?: string;
+
   description: string;
   members: number;
   seen: number;
@@ -287,17 +291,20 @@ type GroupEntry = {
   mixed_destinations: boolean;
   status: string | null;
   mixed_statuses: boolean;
+  example_quantity?: string;
+  based_on?: string[];
+  source_units?: string[];
   suggested_action?: string;
   mapping_id: number | null;
 };
 
 /** The key the members endpoint takes: a label, or ':<pk>' for an unlabelled row. */
-const groupKey = (entry: GroupEntry) => entry.label ?? `:${entry.mapping_id}`;
+const groupKey = (entry: GroupEntry) => entry.group_key ?? entry.label ?? `:${entry.mapping_id}`;
 /** Cache key. A label whose codes span Unmapped and Mapped is two entries, and
  *  the server scopes members by section -- keying on the label alone would let
  *  one entry show the other's rows. */
 const expansionKey = (entry: GroupEntry, section: MappingSection) => `${section}|${groupKey(entry)}`;
-const sectionNames: MappingSection[] = ["Unmapped", "Mapped", "Rejected", "Athena Mapped"];
+const sectionNames: MappingSection[] = ["Unmapped", "Proposed", "Approved"];
 const DEFAULT_SECTION_SORT: SectionSort = { column: "occurrence_count", descending: true };
 // A blank origin_system is a real value -- enqueue_unmapped_source_codes writes
 // it for every newly queued code -- but "" is already the select's "no filter"
@@ -327,6 +334,15 @@ export default function CodeMappingPage() {
   const [rows, setRows] = useState<CodeMappingRow[]>([]);
   const [reference, setReference] = useState<Reference>(emptyReference);
   const referenceCache = useRef<Reference | null>(null);
+  const referenceRequest = useRef<Promise<void> | null>(null);
+  const [referenceError, setReferenceError] = useState("");
+  const [referenceReady, setReferenceReady] = useState(false);
+  const duplicateLoadSequence = useRef(0);
+  const [loadingDuplicate, setLoadingDuplicate] = useState<number | null>(null);
+  const [duplicateRevision, setDuplicateRevision] = useState(0);
+  const [asyncDuplicates, setAsyncDuplicates] = useState<{ source: string; rows: DuplicateSummary[] } | null>(null);
+  const [checkingDuplicates, setCheckingDuplicates] = useState(false);
+  const [duplicateError, setDuplicateError] = useState("");
   const [accuracy, setAccuracy] = useState<AccuracyResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -336,9 +352,8 @@ export default function CodeMappingPage() {
   // The empty string is a real vocabulary ID: it represents the Uncoded tab.
   const [activeVocabulary, setActiveVocabulary] = useState<string | null>(null);
   const [unmappedCollapsed, setUnmappedCollapsed] = useState(false);
-  const [mappedCollapsed, setMappedCollapsed] = useState(true);
-  const [rejectedCollapsed, setRejectedCollapsed] = useState(true);
-  const [athenaCollapsed, setAthenaCollapsed] = useState(true);
+  const [approvedCollapsed, setApprovedCollapsed] = useState(true);
+  const [proposedCollapsed, setProposedCollapsed] = useState(false);
   // Every section defaults to Seen descending (#1575), stated explicitly so
   // the header shows which column is sorted. The server applies the same
   // default for a caller that sends no order.
@@ -348,7 +363,7 @@ export default function CodeMappingPage() {
   );
   const [provenanceFilter, setProvenanceFilter] = useState("");
   const [organizationFilter, setOrganizationFilter] = useState("");
-  const [rollup, setRollup] = useState(false);
+  const [rollup, setRollup] = useState(true);
   const [seenOnly, setSeenOnly] = useState(true);
   // key -> members, or null while the fetch is in flight.
   const [expandedGroups, setExpandedGroups] = useState<Record<string, CodeMappingRow[] | null>>({});
@@ -397,7 +412,9 @@ export default function CodeMappingPage() {
     setLoading(true);
     setError("");
     const params: Record<string, string | number> = {
-      browse: 1, search: debouncedSearch, seen_only: seenOnly ? "1" : "0",
+      browse: 1, include_duplicates: 0, search: debouncedSearch, seen_only: seenOnly ? "1" : "0",
+      queue_sections: "1",
+      sections: sectionNames.filter((section) => !({ Unmapped: unmappedCollapsed, Proposed: proposedCollapsed, Approved: approvedCollapsed })[section]).join(','),
     };
     if (activeVocabulary !== null) params.source = activeVocabulary;
     if (provenanceFilter) params.provenance = provenanceFilter;
@@ -408,34 +425,65 @@ export default function CodeMappingPage() {
       const sort = sectionSorts[section];
       params[`order_${index}`] = sort ? `${sort.descending ? "-" : ""}${sort.column}` : "-occurrence_count";
     });
-    try {
-      const requests = await Promise.allSettled([
-        api.get<BrowseResponse | CodeMappingRow[]>("/v1/code-mappings/", { params }).then(({ data }) => {
-          if (sequence !== loadSequence.current) return;
-          setBrowse(Array.isArray(data) ? null : data);
-          setRows(Array.isArray(data) ? data : data.results);
-        }),
-        referenceCache.current ? Promise.resolve() : api.get<Reference>("/v1/code-mappings/reference/").then(({ data }) => {
-          if (sequence !== loadSequence.current) return;
+    // Only the browse request controls table loading. Ancillary metadata and
+    // counters must not hold the page open or turn usable rows into an error.
+    const mappingsRequest = api.get<BrowseResponse | CodeMappingRow[]>("/v1/code-mappings/", { params });
+    if (!referenceCache.current && !referenceRequest.current) {
+      referenceRequest.current = api.get<Reference>("/v1/code-mappings/reference/").then(({ data }) => {
           referenceCache.current = { ...emptyReference, ...(data || {}) };
           setReference(referenceCache.current);
+          setReferenceReady(true);
+          setReferenceError("");
           setSuggestionLimit((current) => current === "" ? current : Math.min(current, data?.suggest_max_per_run || 100));
-        }),
-        api.get<AccuracyResponse>("/v1/code-mappings/accuracy/").then(({ data }) => {
-          // Review counters can arrive before the slower table refresh.
-          if (sequence === loadSequence.current) setAccuracy(data);
-        }),
-      ]);
-      if (requests.some((request) => request.status === "rejected")) throw new Error("Refresh failed");
+      }).catch(() => {
+        setReferenceError("Could not load mapping options. Refresh to retry.");
+      }).finally(() => { referenceRequest.current = null; });
+    }
+    void api.get<AccuracyResponse>("/v1/code-mappings/accuracy/").then(({ data }) => {
+      if (sequence === loadSequence.current) setAccuracy(data);
+    }).catch(() => {
+      if (sequence === loadSequence.current) setAccuracy(null);
+    });
+    try {
+      const { data } = await mappingsRequest;
+      if (sequence !== loadSequence.current) return;
+      setBrowse(Array.isArray(data) ? null : data);
+      setRows(Array.isArray(data) ? data : data.results);
     } catch {
       if (sequence === loadSequence.current) setError("Failed to load code mappings.");
     } finally {
       if (sequence === loadSequence.current) setLoading(false);
     }
-  }, [activeVocabulary, debouncedSearch, pages, sectionSorts, provenanceFilter, organizationFilter, rollup, seenOnly, direction]);
+  }, [activeVocabulary, debouncedSearch, pages, sectionSorts, provenanceFilter, organizationFilter, rollup, seenOnly, direction,
+    unmappedCollapsed, proposedCollapsed, approvedCollapsed]);
 
   const refreshCurrent = useRef(fetchAll);
-  useEffect(() => { refreshCurrent.current = fetchAll; }, [fetchAll]);
+  useEffect(() => { refreshCurrent.current = async () => {
+    setDuplicateRevision((current) => current + 1);
+    await fetchAll();
+  }; }, [fetchAll]);
+
+  const duplicateSource = browse?.duplicates_included === false ? browse.selected_source : null;
+  useEffect(() => {
+    if (duplicateSource === null || direction === 'reverse') return;
+    let active = true;
+    (async () => {
+      setCheckingDuplicates(true);
+      setDuplicateError("");
+      try {
+        const { data } = await api.get<{ duplicate_summaries: DuplicateSummary[] }>("/v1/code-mappings/", {
+          params: { duplicates_only: 1, source: duplicateSource },
+        });
+        if (!Array.isArray(data.duplicate_summaries)) throw new Error("Duplicate summaries unavailable");
+        if (active) setAsyncDuplicates({ source: duplicateSource, rows: data.duplicate_summaries });
+      } catch {
+        if (active) setDuplicateError("Could not check duplicate source codes. Refresh to retry.");
+      } finally {
+        if (active) setCheckingDuplicates(false);
+      }
+    })();
+    return () => { active = false; };
+  }, [duplicateSource, duplicateRevision, direction]);
 
   useEffect(() => {
     (async () => { await fetchAll(); })();
@@ -514,9 +562,13 @@ export default function CodeMappingPage() {
   // Audit the entire tab, not just expanded/search-visible rows. A hidden
   // rejected mapping still owns its source code and can block re-creation.
   const duplicateCodes = useMemo(() => {
-    const groups = new Map<string, { code: string; vocabulary: string; rows: CodeMappingRow[] }>();
-    for (const row of browse?.duplicates ?? rows) {
-      if (!overallTab && tabForRow(row) !== selectedVocabulary) continue;
+    const groups = new Map<string, { code: string; vocabulary: string; rows: (CodeMappingRow | DuplicateSummary)[] }>();
+    const duplicateRows = browse?.duplicates_included === false
+      ? (asyncDuplicates?.source === browse.selected_source ? asyncDuplicates.rows : [])
+      : browse?.duplicates ?? rows;
+    for (const row of duplicateRows) {
+      // Server duplicates already cover the exact tab, including hospital OIDs.
+      if (!browse && !overallTab && tabForRow(row) !== selectedVocabulary) continue;
       const vocabulary = duplicateScopeForRow(row);
       const code = row.source_code.trim().toUpperCase();
       if (!code) continue;
@@ -529,16 +581,28 @@ export default function CodeMappingPage() {
     }
     return [...groups.values()].filter((group) => group.rows.length > 1)
       .sort((a, b) => a.vocabulary.localeCompare(b.vocabulary) || a.code.localeCompare(b.code));
-  }, [rows, overallTab, selectedVocabulary, browse]);
+  }, [rows, overallTab, selectedVocabulary, browse, asyncDuplicates]);
 
-  const revealDuplicate = (row: CodeMappingRow) => {
+  const revealDuplicate = async (row: CodeMappingRow | DuplicateSummary) => {
+    if ('summary' in row) {
+      const sequence = ++duplicateLoadSequence.current;
+      setLoadingDuplicate(row.mapping_id);
+      try {
+        const { data } = await api.get<CodeMappingRow>(`/v1/code-mappings/${row.mapping_id}/`);
+        if (sequence === duplicateLoadSequence.current) openEditDialog(data);
+      } catch {
+        if (sequence === duplicateLoadSequence.current) setError("Could not load this mapping. Try again.");
+      } finally {
+        if (sequence === duplicateLoadSequence.current) setLoadingDuplicate(null);
+      }
+      return;
+    }
     if (browse) { openEditDialog(row); return; }
     setSearchQuery("");
     if (!row.occurrence_count) setSeenOnly(false);
-    if (row.mapping_origin === "athena") setAthenaCollapsed(false);
-    else if (row.status === "approved") setMappedCollapsed(false);
-    else if (row.status === "rejected") setRejectedCollapsed(false);
-    else setUnmappedCollapsed(false);
+    if (!row.destination_concept_id) setUnmappedCollapsed(false);
+    else if (row.status === "approved") setApprovedCollapsed(false);
+    else setProposedCollapsed(false);
     // An object also retriggers navigation when the same link is clicked twice.
     setNavigationTarget({ id: mappingRowId(row) });
   };
@@ -567,6 +631,8 @@ export default function CodeMappingPage() {
         row.source_code_description,
         row.organization_name,
         row.organization_slug,
+        row.source_system_context?.label,
+        ...(row.source_system_context?.names || []),
         row.destination_concept_name,
         row.destination_concept_code,
         String(row.destination_concept_id),
@@ -593,9 +659,6 @@ export default function CodeMappingPage() {
     () => (overallTab ? 0 : visibleRows.filter((row) => tabForRow(row) !== selectedVocabulary).length),
     [overallTab, visibleRows, selectedVocabulary],
   );
-  const showSystemColumn = foreignHits > 0;
-  const showOrganizationColumn = selectedVocabulary === "EPIC" || selectedVocabulary === "CERNER"
-    || visibleRows.some((row) => !!row.organization_id);
   // The debounced query is what the server has answered, so the message
   // describes the rows on screen rather than re-announcing every keystroke.
   const crossTabSearch = !overallTab && debouncedSearch.trim() !== "";
@@ -614,7 +677,7 @@ export default function CodeMappingPage() {
     try {
       const { data } = await api.get<{ results: CodeMappingRow[] }>("/v1/code-mappings/group/", {
         params: {
-          label: groupKey(entry), section,
+          label: groupKey(entry), section, queue_sections: "1",
           seen_only: seenOnly ? "1" : "0",
           // The server picks the default tab until one is clicked, so sending
           // activeVocabulary would fetch across every vocabulary on first load.
@@ -644,8 +707,8 @@ export default function CodeMappingPage() {
     void loadGroup(entry, section);
   }, [expandedGroups, loadGroup]);
 
-  const runGroupJob = async (entry: GroupEntry, action: "suggest" | "approve" | "reject") => {
-    const key = expansionKey(entry, "Unmapped");
+  const runGroupJob = async (entry: GroupEntry, action: "suggest" | "approve", section: MappingSection) => {
+    const key = expansionKey(entry, section);
     if (action !== "suggest" && !window.confirm(
       `${action === "approve" ? "Approve" : "Reject"} ${entry.proposed.toLocaleString()} still-proposed code(s) in this label group?`,
     )) return;
@@ -655,6 +718,7 @@ export default function CodeMappingPage() {
     try {
       const payload = {
         label: groupKey(entry), source: selectedVocabulary,
+        section, queue_sections: "1",
         seen_only: seenOnly ? "1" : "0",
         ...(provenanceFilter ? { provenance: provenanceFilter } : {}),
         ...(organizationFilter ? { organization: organizationFilter } : {}),
@@ -690,7 +754,7 @@ export default function CodeMappingPage() {
       setBanner(
         action === "suggest"
           ? proposedRejection
-            ? `Proposed rejection for ${finished.done} eligible code(s); confirm it on the group row.`
+            ? `Proposed rejection for ${finished.done} eligible code(s); review the individual mappings.`
             : finished.destinations
               ? `Suggested once and applied the destination to ${finished.destinations} eligible code(s).`
               : "Group Suggest found no safe destination; no mapping was changed."
@@ -711,31 +775,21 @@ export default function CodeMappingPage() {
     && !provenanceOptions.some((option) => provenanceValue(option.origin_system) === provenanceFilter);
   const showProvenanceFilter = provenanceOptions.length > 1 || provenanceFilter !== "";
 
-  // Four-section layout: UNMAPPED / MAPPED / REJECTED / ATHENA MAPPED.
-  const athenaRows = useMemo(
-    () => visibleRows.filter((r) => r.mapping_origin === "athena").sort(browse ? () => 0 : byOccurrence),
-    [visibleRows, browse],
-  );
-  const unmappedRows = useMemo(
-    () => visibleRows.filter((r) => r.mapping_origin !== "athena" && r.status !== "approved" && r.status !== "rejected").sort(browse ? () => 0 : byOccurrence),
-    [visibleRows, browse],
-  );
-  const rejectedRows = useMemo(
-    () => visibleRows.filter((r) => r.mapping_origin !== "athena" && r.status === "rejected").sort(browse ? () => 0 : byOccurrence),
-    [visibleRows, browse],
-  );
-  const mappedRows = useMemo(
-    () => visibleRows.filter((r) => r.mapping_origin !== "athena" && r.status === "approved").sort(browse ? () => 0 : byOccurrence),
-    [visibleRows, browse],
-  );
+  const unmappedRows = useMemo(() => visibleRows.filter((r) => sectionForRow(r) === "Unmapped").sort(browse ? () => 0 : byOccurrence), [visibleRows, browse]);
+  const proposedRows = useMemo(() => visibleRows.filter((r) => sectionForRow(r) === "Proposed").sort(browse ? () => 0 : byOccurrence), [visibleRows, browse]);
+  const approvedRows = useMemo(() => visibleRows.filter((r) => sectionForRow(r) === "Approved").sort(browse ? () => 0 : byOccurrence), [visibleRows, browse]);
 
   const openNewDialog = () => {
+    duplicateLoadSequence.current += 1;
+    setLoadingDuplicate(null);
     setInlineMappingId(null);
     setSelectedRow(null);
     setDialogMode("new");
   };
 
   const openEditDialog = (row: CodeMappingRow) => {
+    duplicateLoadSequence.current += 1;
+    setLoadingDuplicate(null);
     setInlineMappingId(null);
     setSelectedRow(row);
     setDialogMode("edit");
@@ -766,13 +820,11 @@ export default function CodeMappingPage() {
     });
     setBrowse((current) => {
       const previous = current?.results.find((row) => row.mapping_id === saved.mapping_id);
-      if (!current || !previous || previous.status === saved.status
-          || previous.source_vocabulary_id !== saved.source_vocabulary_id
-          || previous.mapping_origin === "athena") return current;
+      if (!current || !previous || previous.source_vocabulary_id !== saved.source_vocabulary_id) return current;
       const pages = { ...current.pages };
       for (const [row, delta] of [[previous, -1], [saved, 1]] as const) {
         const section = sectionForRow(row);
-        pages[section] = { ...pages[section], total: Math.max(0, pages[section].total + delta) };
+        pages[section] = { ...(pages[section] ?? { page: 1, page_size: 100 }), total: Math.max(0, (pages[section]?.total || 0) + delta) };
       }
       return {
         ...current, pages,
@@ -996,14 +1048,23 @@ export default function CodeMappingPage() {
     }
   };
 
-  /** Callback for EditMappingDialog onDeleted. */
+  /** Callback for EditMappingDialog onDeleted — remove the row from local state. */
   const handleDialogDeleted = (row: CodeMappingRow) => {
-    applySavedMapping(row);
+    setRows((current) => current.filter((r) => r.mapping_id !== row.mapping_id));
+    setExpandedGroups((current) => {
+      let touched = false;
+      const next = Object.fromEntries(Object.entries(current).map(([key, members]) => {
+        if (!members?.some((r) => r.mapping_id === row.mapping_id)) return [key, members];
+        touched = true;
+        return [key, members.filter((r) => r.mapping_id !== row.mapping_id)];
+      }));
+      return touched ? next : current;
+    });
     void refreshCurrent.current();
   };
 
-  const renderTable = (sectionRows: CodeMappingRow[], emptyText: string, section: MappingSection, { hideStatus = false }: { hideStatus?: boolean } = {}) => {
-    const colCount = 7 + (showSystemColumn ? 1 : 0) + (showOrganizationColumn ? 1 : 0) + (hideStatus ? 0 : 2);
+  const renderTable = (sectionRows: CodeMappingRow[], emptyText: string, section: MappingSection) => {
+    const colCount = 7;
     const sort = sectionSorts[section];
     // Present only when the server grouped this response; otherwise the flat
     // queue renders exactly as before.
@@ -1057,28 +1118,29 @@ export default function CodeMappingPage() {
               navigationTarget?.id === mappingRowId(row) ? "bg-red-50" : ""
             }`}
           >
-            <td className="px-4 py-3 font-mono text-xs text-slate-900">
-              {row.locked_by_username && <span title={`Locked by ${row.locked_by_username}`} className="mr-1 text-amber-500">&#128274;</span>}
-              {row.source_code}
-            </td>
-            {showSystemColumn && (
-              <td className="px-4 py-3 text-xs text-slate-700">{systemLabel(row)}</td>
-            )}
-            {showOrganizationColumn && (
-              <td className="px-4 py-3 text-xs text-slate-700">{row.organization_name || "Global / unattributed"}</td>
-            )}
-            <td className="px-4 py-3 text-right font-mono text-xs text-slate-700">{row.occurrence_count || 0}</td>
-            <td className="px-4 py-3 text-xs text-slate-700">{row.source_code_description || "—"}</td>
-            <td className="px-4 py-3 text-xs text-slate-700">{row.origin_system || "—"}</td>
             <td className="px-4 py-3">
-              <div className="font-medium text-slate-950">{row.destination_concept_name}</div>
-              <div className="font-mono text-xs text-slate-500">
-                {row.destination_vocabulary_id}:{row.destination_concept_code}
-              </div>
+              {row.locked_by_username && <span title={`Locked by ${row.locked_by_username}`} className="mr-1 text-amber-500">&#128274;</span>}
+              <div data-testid="source-code" className="font-mono text-xs text-slate-900">{row.source_code}</div>
+              {row.source_code_description && <div className="text-xs text-slate-700">{row.source_code_description}</div>}
+              {row.source_vocabulary_id && <div className="text-xs text-slate-500">{systemLabel(row)}</div>}
+            </td>
+            <td className="px-4 py-3 text-xs text-slate-700">{row.domain_id || "—"}</td>
+            <td className="px-4 py-3 text-right font-mono text-xs text-slate-700">{row.occurrence_count || 0}</td>
+            <SourceQuantityCell quantity={row.example_quantity}
+              units={row.source_units?.length ? (row.source_units.length > 2 ? row.source_units.slice(0, 2).join("; ") + " .." : row.source_units.join("; ")) : row.source_unit}
+              basedOn={row.based_on} />
+            <td className="px-4 py-3">
+              {row.destination_concept_code ? (
+                <>
+                  <div className="font-mono text-xs text-slate-900">{row.destination_concept_code}</div>
+                  <div className="text-xs text-slate-700">{row.destination_concept_name}</div>
+                  {row.destination_vocabulary_id && <div className="text-xs text-slate-500">{row.destination_vocabulary_id}</div>}
+                </>
+              ) : <span className="text-xs text-slate-500">—</span>}
               {(row.measurement_type || row.suggested_unit) && (
                 <ConceptInputDetails domain_id={row.destination_domain_id || ""} measurement_type={row.measurement_type} suggested_unit={row.suggested_unit} example_units={row.example_units} />
               )}
-              {section === "Unmapped" && row.mapping_id && <button type="button"
+              {section !== "Approved" && row.mapping_id && <button type="button"
                 aria-label={`Choose destination for ${row.source_code}`}
                 aria-expanded={inlineMappingId === row.mapping_id}
                 onClick={event => { event.stopPropagation(); setInlineMappingId(current => current === row.mapping_id ? null : row.mapping_id); }}
@@ -1086,48 +1148,19 @@ export default function CodeMappingPage() {
                 <Search size={12} />{row.destination_concept_id ? "Change destination" : "Choose destination"}
               </button>}
             </td>
-            <td className="px-4 py-3 font-mono text-xs text-slate-900">{row.destination_concept_id}</td>
-            <td className={`px-4 py-3 text-center font-mono text-xs font-medium ${row.destination_count !== 1 ? "text-red-600" : "text-slate-700"}`}>{row.destination_count ?? 0}</td>
-            {!hideStatus && (
             <td className="px-4 py-3">
-              <div className="inline-flex items-center gap-2">
-                <button
-                  type="button"
-                  // Stops a one-click approve from also opening the dialog.
-                  onClick={(e) => { e.stopPropagation(); void toggleApproval(row); }}
-                  className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
-                    row.status === "approved"
-                      ? "border-green-500 bg-green-500 text-white"
-                      : "border-slate-300 hover:border-slate-600"
-                  }`}
-                  title={row.status === "approved" ? "Mark mapping as proposed" : "Approve mapping"}
-                  aria-label={row.status === "approved" ? `Unapprove ${row.source_code}` : `Approve ${row.source_code}`}
-                >
-                  {row.status === "approved" && <Check size={10} />}
-                </button>
-                <span className={`inline-flex rounded px-2 py-1 text-xs font-medium ${statusClass[row.status]}`}>
-                  {row.status}
-                </span>
-                {row.suggest_strategy && (
-                  <span className="inline-flex rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700" title={`Suggested via ${strategyLabel[row.suggest_strategy] || row.suggest_strategy}`}>
-                    {strategyLabel[row.suggest_strategy] || row.suggest_strategy}
-                  </span>
-                )}
-              </div>
-            </td>
-            )}
-            {!hideStatus && (
-            <td className="px-4 py-3">
-              <button
-                type="button"
-                onClick={(e) => { e.stopPropagation(); openEditDialog(row); }}
+              <button type="button" onClick={(e) => { e.stopPropagation(); void toggleApproval(row); }}
+                disabled={!row.destination_concept_id}
+                aria-label={row.status === "approved" ? `Unapprove ${row.source_code}` : `Approve ${row.source_code}`}
+                className="mr-1 rounded border border-slate-300 px-2 py-1 text-xs">
+                {row.status === "approved" ? "Unapprove" : "Approve"}
+              </button>
+              <button type="button" onClick={(e) => { e.stopPropagation(); openEditDialog(row); }}
                 className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-300 text-slate-700 hover:bg-slate-100"
-                aria-label={`Edit ${row.source_code}`}
-              >
+                aria-label={`Edit ${row.source_code}`}>
                 <Pencil size={14} />
               </button>
             </td>
-            )}
           </tr>
           {inlineMappingId === row.mapping_id && row.mapping_id && <tr>
             <td colSpan={colCount} className="bg-slate-50 p-3">
@@ -1151,17 +1184,13 @@ export default function CodeMappingPage() {
       <table aria-label={`${section} mappings`} className="w-full border-collapse text-left text-sm">
         <thead className="bg-slate-100 text-xs uppercase text-slate-600">
           <tr>
-            {header("Source code", "source_code")}
-            {showSystemColumn && <th className="px-4 py-3 font-semibold">System</th>}
-            {showOrganizationColumn && <th className="px-4 py-3 font-semibold">Organization</th>}
+            {header("Source", "source_code")}
+            <th className="px-4 py-3 font-semibold">Domain</th>
             {header("Seen", "occurrence_count")}
-            {header("Source description", "source_code_description")}
-            {header("Provenance", "origin_system")}
-            {header("Destination concept", "destination_concept_name")}
-            {header("Concept ID", "destination_concept_id")}
-            {header("Dest count", "destination_count")}
-            {!hideStatus && header("Status", "status")}
-            {!hideStatus && <th className="w-16 px-4 py-3 font-semibold" aria-label="Actions" />}
+            <th className="px-4 py-3 font-semibold">Qty</th>
+            <th className="px-4 py-3 font-semibold">Units</th>
+            {header("Destination", "destination_concept_name")}
+            <th className="w-16 px-4 py-3 font-semibold" aria-label="Actions" />
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
@@ -1184,58 +1213,43 @@ export default function CodeMappingPage() {
                           {entry.members === 1 ? "1 code" : `${entry.members.toLocaleString()} codes`}
                         </span>
                       </button>
+                      {entry.description && <div className="mt-0.5 text-xs text-slate-700">{entry.description}</div>}
                     </td>
-                    {showSystemColumn && <td className="px-4 py-3" />}
-                    {showOrganizationColumn && <td className="px-4 py-3" />}
-                    <td className="px-4 py-3 text-right font-mono text-xs text-slate-700">{entry.seen.toLocaleString()}</td>
-                    <td className="px-4 py-3 text-xs font-medium text-slate-900">{entry.description || "—"}</td>
                     <td className="px-4 py-3" />
+                    <td className="px-4 py-3 text-right font-mono text-xs text-slate-700">{entry.seen.toLocaleString()}</td>
+                    <SourceQuantityCell quantity={entry.example_quantity} units={entry.source_units?.join("; ")} basedOn={entry.based_on} />
                     <td className="px-4 py-3">
                       {/* Naming one side of a disagreement is worse than
                           naming neither, so a mixed group names no concept. */}
                       {entry.mixed_destinations ? (
                         <span className="text-xs font-medium text-amber-700">Mixed destinations</span>
-                      ) : entry.destination_concept_name ? (
+                      ) : entry.destination_concept_code ? (
                         <>
-                          <div className="font-medium text-slate-950">{entry.destination_concept_name}</div>
-                          <div className="font-mono text-xs text-slate-500">
-                            {entry.destination_vocabulary_id}:{entry.destination_concept_code}
-                          </div>
+                          <div className="font-mono text-xs text-slate-900">{entry.destination_concept_code}</div>
+                          <div className="text-xs text-slate-700">{entry.destination_concept_name}</div>
+                          {entry.destination_vocabulary_id && <div className="text-xs text-slate-500">{entry.destination_vocabulary_id}</div>}
                         </>
                       ) : <span className="text-xs text-slate-500">—</span>}
                     </td>
-                    <td className="px-4 py-3 font-mono text-xs text-slate-900">
-                      {entry.mixed_destinations ? "" : entry.destination_concept_id ?? ""}
-                    </td>
-                    <td className="px-4 py-3" />
-                    {!hideStatus && <td className="px-4 py-3 text-xs text-slate-700">
-                      {entry.suggested_action === "reject"
-                        ? <span className="font-medium text-amber-700">Reject suggested</span>
-                        : entry.mixed_statuses ? "Mixed" : entry.status || "—"}
-                    </td>}
-                    {!hideStatus && <td className="px-4 py-3">
-                      {section === "Unmapped" && entry.proposed > 0 && (
+                    <td className="px-4 py-3">
+                      {section !== "Approved" && entry.proposed > 0 && (
                         <div className="flex flex-col gap-1">
                           <button type="button" disabled={groupRunning === cacheKey}
-                            onClick={() => void runGroupJob(entry, "suggest")}
+                            onClick={() => void runGroupJob(entry, "suggest", section)}
                             className="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-white disabled:opacity-50">
                             Suggest group
                           </button>
                           {entry.destination_concept_id && !entry.mixed_destinations && canApprove && (
                             <button type="button" disabled={groupRunning === cacheKey}
-                              onClick={() => void runGroupJob(entry, "approve")}
+                              onClick={() => void runGroupJob(entry, "approve", section)}
                               className="rounded border border-green-300 px-2 py-1 text-xs text-green-800 hover:bg-green-50 disabled:opacity-50">
                               Approve {entry.proposed.toLocaleString()}
                             </button>
                           )}
-                          <button type="button" disabled={groupRunning === cacheKey}
-                            onClick={() => void runGroupJob(entry, "reject")}
-                            className="rounded border border-red-200 px-2 py-1 text-xs text-red-700 hover:bg-red-50 disabled:opacity-50">
-                            {entry.suggested_action === "reject" ? "Confirm reject" : "Reject group"}
-                          </button>
+
                         </div>
                       )}
-                    </td>}
+                    </td>
                   </tr>
                   {open && members === null && (
                     <tr><td colSpan={colCount} className="px-4 py-3 text-center text-xs text-slate-500" role="status">Loading codes…</td></tr>
@@ -1247,7 +1261,7 @@ export default function CodeMappingPage() {
             : (browse ? sectionRows : sortMappingRows(sectionRows, sort)).map(renderRow)}
           {(groupEntries ? groupEntries.length === 0 : sectionRows.length === 0) && (
             <tr>
-              <td colSpan={colCount} className="px-4 py-8 text-center text-sm text-slate-500">{emptyText}</td>
+              <td colSpan={colCount} className="px-4 py-8 text-center text-sm text-slate-500">{loading ? "Loading rows…" : emptyText}</td>
             </tr>
           )}
         </tbody>
@@ -1291,14 +1305,6 @@ export default function CodeMappingPage() {
       onInitialConceptHandled={() => setLinkedConceptId(undefined)} />
   </div></div>;
 
-  if (loading && rows.length === 0 && !browse) {
-    return (
-      <div className="flex min-h-[400px] items-center justify-center">
-        <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
-      </div>
-    );
-  }
-
   return (
     <div className="min-h-screen bg-slate-50 p-6">
       <div className="mx-auto max-w-7xl">
@@ -1319,13 +1325,18 @@ export default function CodeMappingPage() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <button type="button" onClick={() => setUploadOpen(true)}
+            <a href="/code-mappings/source-systems"
+              className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100">
+              Source systems / hospitals
+            </a>
+            <button type="button" onClick={() => setUploadOpen(true)} disabled={!referenceReady}
               className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100">
               <Upload size={16} />
               Upload
             </button>
             <button
               onClick={openNewDialog}
+              disabled={!referenceReady}
               className="inline-flex items-center gap-2 rounded-md bg-slate-950 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
             >
               <Plus size={16} />
@@ -1336,6 +1347,9 @@ export default function CodeMappingPage() {
 
         {directionControls}
         {loading && <p role="status" className="mb-2 text-sm text-slate-500">Loading mappings…</p>}
+        {referenceError && <p role="alert" className="mb-2 text-sm text-amber-700">{referenceError}</p>}
+        {duplicateSource !== null && checkingDuplicates && <p role="status" className="mb-2 text-sm text-slate-500">Checking duplicate source codes…</p>}
+        {duplicateError && <p role="alert" className="mb-2 text-sm text-amber-700">{duplicateError}</p>}
 
         {error && !dialogMode && (
           <div role="alert" className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -1453,9 +1467,9 @@ export default function CodeMappingPage() {
                   setActiveVocabulary(tab.vocabulary_id);
                   if (tab.vocabulary_id === OVERALL_TAB) {
                     setUnmappedCollapsed(true);
-                    setMappedCollapsed(true);
-                    setRejectedCollapsed(true);
-                    setAthenaCollapsed(true);
+                    setApprovedCollapsed(true);
+                    setProposedCollapsed(true);
+
                   }
                 }}
                 title={`Source vocabulary: ${tab.label}`}
@@ -1647,7 +1661,7 @@ export default function CodeMappingPage() {
         {duplicateCodes.length > 0 && (
           <div role="alert" className="mb-4 rounded-md border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">
             <p className="font-semibold">Error: {duplicateCodes.length} duplicate source code{duplicateCodes.length === 1 ? "" : "s"} on this tab</p>
-            <p className="mt-1">These source codes occur in multiple mapping rows. Follow a link, then select the row to open its edit dialog and delete unwanted duplicates. Hidden rejected mappings are included.</p>
+            <p className="mt-1">These source codes occur in multiple mapping rows. Follow a link, then select the row to open its edit dialog and delete unwanted duplicates. Rejected decisions remain available in their destination-based section.</p>
             <ul aria-label="Duplicate source codes" className="mt-2 max-h-60 space-y-2 overflow-y-auto">
               {duplicateCodes.map((group) => (
                 <li key={JSON.stringify([group.vocabulary, group.code])}>
@@ -1657,7 +1671,8 @@ export default function CodeMappingPage() {
                       <li key={mappingRowId(row)}>
                         <a
                           href={`#${mappingRowId(row)}`}
-                          onClick={(event) => { event.preventDefault(); revealDuplicate(row); }}
+                          onClick={(event) => { event.preventDefault(); void revealDuplicate(row); }}
+                          aria-busy={loadingDuplicate !== null && loadingDuplicate === row.mapping_id}
                           className="rounded underline hover:text-red-950 focus:outline-2 focus:outline-red-600"
                         >
                           {row.source_code} — {sectionForRow(row)} · {row.source_vocabulary_id || "Uncoded"}
@@ -1680,70 +1695,21 @@ export default function CodeMappingPage() {
           {browse && <span className="ml-3 text-xs text-slate-500">Downloads include loaded rows only.</span>}
         </div>
 
-        <section className="mb-6">
-          <button
-            type="button"
-            onClick={() => setUnmappedCollapsed((v) => !v)}
-            className="mb-2 inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-slate-700"
-          >
-            {unmappedCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-            Unmapped <span className="font-normal text-slate-500">({browse?.pages.Unmapped.total ?? unmappedRows.length}{browse?.rollup ? " groups" : ""})</span>
-          </button>
-          <DownloadMenu rows={unmappedRows} section="Unmapped" />
-          {!unmappedCollapsed && (
-            <>
-          <div className="mb-2">
-            <p className="text-xs text-slate-500">
-              The destination concept exists — an import minted or chose it — but no curator has confirmed it.
-            </p>
-          </div>
-          {renderTable(unmappedRows, "Nothing awaiting review in this vocabulary.", "Unmapped")}
-            </>
-          )}
-        </section>
-
-        <section className="mb-6">
-          <button
-            type="button"
-            onClick={() => setMappedCollapsed((v) => !v)}
-            className="mb-2 inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-slate-700"
-          >
-            {mappedCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-            Mapped <span className="font-normal text-slate-500">({browse?.pages.Mapped.total ?? mappedRows.length}{browse?.rollup ? " groups" : ""})</span>
-          </button>
-          <DownloadMenu rows={mappedRows} section="Mapped" />
-          {!mappedCollapsed && renderTable(mappedRows, "No approved mappings in this vocabulary.", "Mapped")}
-        </section>
-
-        {(rejectedRows.length > 0 || (browse?.pages.Rejected?.total ?? 0) > 0) && (
-          <section className="mb-6">
-            <button
-              type="button"
-              onClick={() => setRejectedCollapsed((v) => !v)}
-              className="mb-2 inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-slate-700"
-            >
-              {rejectedCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-              Rejected <span className="font-normal text-slate-500">({browse?.pages.Rejected?.total ?? rejectedRows.length}{browse?.rollup ? " groups" : ""})</span>
+        {sectionNames.map((section) => {
+          const sectionRows = section === "Unmapped" ? unmappedRows : section === "Proposed" ? proposedRows : approvedRows;
+          const collapsed = section === "Unmapped" ? unmappedCollapsed : section === "Proposed" ? proposedCollapsed : approvedCollapsed;
+          const setCollapsed = section === "Unmapped" ? setUnmappedCollapsed : section === "Proposed" ? setProposedCollapsed : setApprovedCollapsed;
+          return <section key={section} className="mb-6">
+            <button type="button" onClick={() => setCollapsed((v) => !v)}
+              className="mb-2 inline-flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-slate-700">
+              {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+              <span>{section}</span>
+              <span className="font-normal text-slate-500">({browse?.pages[section]?.total ?? sectionRows.length}{browse?.rollup ? " groups" : ""})</span>
             </button>
-            <DownloadMenu rows={rejectedRows} section="Rejected" />
-            {!rejectedCollapsed && renderTable(rejectedRows, "No rejected mappings in this vocabulary.", "Rejected")}
-          </section>
-        )}
-
-        {(athenaRows.length > 0 || (browse?.pages["Athena Mapped"]?.total ?? 0) > 0) && (
-          <section>
-            <button
-              type="button"
-              onClick={() => setAthenaCollapsed((v) => !v)}
-              className="mb-2 inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-slate-700"
-            >
-              {athenaCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-              Athena Mapped <span className="font-normal text-slate-500">({browse?.pages["Athena Mapped"].total ?? athenaRows.length}{browse?.rollup ? " groups" : ""})</span>
-            </button>
-            <DownloadMenu rows={athenaRows} section="Athena Mapped" />
-            {!athenaCollapsed && renderTable(athenaRows, "No Athena mappings in this vocabulary.", "Athena Mapped", { hideStatus: true })}
-          </section>
-        )}
+            <DownloadMenu rows={sectionRows} section={section} />
+            {!collapsed && renderTable(sectionRows, `No ${section.toLowerCase()} mappings in this vocabulary.`, section)}
+          </section>;
+        })}
       </div>
 
       {uploadOpen && <CodeMappingUploadDialog

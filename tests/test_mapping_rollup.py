@@ -18,6 +18,17 @@ def entries(page=1, page_size=100, order='-occurrence_count'):
     return group_entries(qs, page, page_size, order=order), count_groups(qs)
 
 
+def test_group_jobs_stay_inside_the_displayed_queue_section():
+    from patient_portal.api.views import _group_job_rows
+    from tests.factories import ConceptFactory
+    unmapped = row('NO-DEST', 'Albumin', seen=1)
+    proposed = row('HAS-DEST', 'Albumin', seen=0, target_concept=ConceptFactory())
+    for section, expected in (('Unmapped', unmapped.pk), ('Proposed', proposed.pk)):
+        rows = _group_job_rows({'source': 'EPIC', 'label': 'albumin', 'section': section,
+                                'queue_sections': '1', 'seen_only': '1'})
+        assert list(rows.values_list('pk', flat=True)) == [expected]
+
+
 def test_codes_sharing_a_label_become_one_entry_carrying_their_summed_seen():
     """The point of the whole thing: albumin arrives under 2,557 codes, and its
     largest single row carries 1.6% of the label's real weight."""
@@ -488,3 +499,64 @@ def test_deterministic_exact_match_avoids_the_ranker(monkeypatch):
     }
     monkeypatch.setattr('omop_core.mapping.suggestions.lexical_candidates', lambda *a, **k: [candidate])
     assert deterministic_proposal('Ferritin', 'Measurement')['concept']['concept_id'] == 123
+
+
+# --- label-only grouping (#1884) -------------------------------------------
+
+def _unit_evidence(*codes):
+    """Build a source_unit_evidence list from unit code strings."""
+    return [{'code': c, 'display': c, 'count': 1} for c in codes]
+
+
+def test_same_label_different_units_merge_into_one_group():
+    """Grouping is by label only — different units do not split groups."""
+    row('A1', 'Albumin', seen=10, source_unit_evidence=_unit_evidence('mg/dL'))
+    row('A2', 'ALBUMIN', seen=20, source_unit_evidence=_unit_evidence('mg/dL'))
+    row('A3', 'albumin', seen=5, source_unit_evidence=_unit_evidence('mmol/L'))
+    found, total = entries()
+    assert total == 1
+    assert found[0]['members'] == 3
+    assert found[0]['group_key'] == 'albumin'
+
+
+def test_group_key_is_plain_label_regardless_of_units():
+    row('X', 'Ferritin', seen=1, source_unit_evidence=_unit_evidence('ng/mL'))
+    found, _ = entries()
+    assert found[0]['group_key'] == 'ferritin'
+
+
+def test_group_key_is_plain_label_when_no_units():
+    row('X', 'Ferritin', seen=1)
+    found, _ = entries()
+    assert found[0]['group_key'] == 'ferritin'
+
+
+def test_group_members_filters_by_label():
+    """Expanding a group returns all codes sharing the label, regardless of units."""
+    row('MG', 'Albumin', seen=10, source_unit_evidence=_unit_evidence('mg/dL'))
+    row('MMOL', 'ALBUMIN', seen=5, source_unit_evidence=_unit_evidence('mmol/L'))
+    row('NOUNITS', 'albumin', seen=3)
+    qs = SourceCodeConceptMapping.objects.all()
+    members = group_members(qs, 'albumin')
+    codes = set(members.values_list('source_code', flat=True))
+    assert codes == {'MG', 'MMOL', 'NOUNITS'}
+
+
+def test_supplied_group_seen_preferred_over_sum():
+    """When supplied_group_occurrence_count exists, it is preferred."""
+    row('A', 'Albumin', seen=4, source_group_occurrence_count=100)
+    row('B', 'ALBUMIN', seen=6, source_group_occurrence_count=100)
+    found, _ = entries()
+    assert found[0]['seen'] == 100
+
+
+def test_multiple_units_per_label_form_one_group():
+    """Codes with different units under the same label are one group."""
+    row('MULTI', 'Albumin', seen=7,
+        source_unit_evidence=_unit_evidence('g/dL', 'mg/dL'))
+    row('SINGLE', 'ALBUMIN', seen=3,
+        source_unit_evidence=_unit_evidence('mg/dL'))
+    found, total = entries()
+    assert total == 1
+    assert found[0]['members'] == 2
+    assert found[0]['group_key'] == 'albumin'

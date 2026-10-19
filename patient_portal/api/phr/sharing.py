@@ -174,7 +174,7 @@ def catalog(person, record) -> list[dict[str, Any]]:
     """Everything the patient can choose to share or print, section by section."""
     dx = diagnoses(person, record)
     sections = {
-        'about': _groups(about_fields(record), lambda f: about_group(f['key']), lambda f: f['key'], ABOUT_LABELS),
+        'about': _groups(about_fields(record, person), lambda f: about_group(f['key']), lambda f: f['key'], ABOUT_LABELS),
         'diagnoses': [
             _item(d['id'], d['name'], d.get('date'), detail='cancer') for d in dx['cancer']
         ] + [_item(d['id'], d['name'], d.get('date')) for d in dx['other']],

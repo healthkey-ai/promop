@@ -27,6 +27,7 @@ from omop_core.services.mappings import (
     DERIVED_FIELD_TO_CODE, LAB_FIELD_TO_LOINC,
 )
 from omop_core.services.patient_record_service import (
+    DERIVED_LANGUAGE_FIELDS,
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
     _LAB_FIELD_ALIASES,
 )
@@ -515,6 +516,8 @@ def get_serializer_read_only_fields():
             read_only.add(field.name)
     # KIND_COMPUTED: derived from other fields (BMI, tnbc_status, etc.)
     read_only |= set(_COMPUTED_INPUTS)
+    # The language summary and eight capabilities belong to PersonLanguageSkill.
+    read_only |= DERIVED_LANGUAGE_FIELDS
     # KIND_ALIAS: mirrors of canonical fields
     read_only |= set(_ALIAS_TO_CANONICAL)
     # Profile fields now write through PatientRecord PATCH (KIND_DIRECT),
@@ -566,6 +569,14 @@ def build_writable_field_descriptor():
 
     descriptor = {}
     for field in sorted(PATIENT_RECORD_OMOP_MAPPED_FIELDS - _LIFECYCLE_FIELDS):
+        if field in DERIVED_LANGUAGE_FIELDS:
+            descriptor[field] = {
+                'kind': KIND_COMPUTED,
+                'writable': False,
+                'inputs': ['PersonLanguageSkill'],
+                'reason': 'Derived from PersonLanguageSkill; write via the language-skills API.',
+            }
+            continue
         if field.startswith('genomics_'):
             # The recipe decides whether a finding can be stored; approval only
             # decides whether its concept flows forward. So review status is

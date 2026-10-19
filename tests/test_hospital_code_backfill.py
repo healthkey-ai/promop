@@ -1,8 +1,8 @@
 import pytest
 
-from omop_core.models import SourceCodeConceptMapping
+from omop_core.models import SourceCodeConceptMapping, SourceSystemFacility
 from omop_core.services.hospital_code_backfill import (
-    build_inventory,
+    BuildResult, InventoryRow, build_inventory,
     upsert_inventory,
 )
 
@@ -11,6 +11,19 @@ pytestmark = pytest.mark.django_db
 
 EPIC = 'urn:oid:1.2.840.114350.1.13.670.2.7.5.737384.352'
 CERNER = 'https://fhir.cerner.com/11e960ca-465e-403d-a8ac-dfa9be65dd83/codeSet/72'
+
+
+def test_non_hospital_system_does_not_enter_facility_registry():
+    row = InventoryRow(
+        source_vocabulary_id='http://loinc.org', source_code='1234-5',
+        source_code_description='Test', occurrence_count=1,
+        source_metadata={'facilities': [{'name': 'Example Hospital', 'confidence': 'high'}]},
+    )
+
+    upsert_inventory(BuildResult({('http://loinc.org', '1234-5'): row}, {}),
+                     provenance='test-seed')
+
+    assert not SourceSystemFacility.objects.exists()
 
 
 def primary(system, code, label, count, **values):

@@ -1,7 +1,7 @@
 import PageTitle from '@/components/Branding/PageTitle';
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { Upload, Trash2, LogOut, Settings, Globe, RefreshCw } from "lucide-react";
+import { Upload, Trash2, LogOut, Settings, Globe, RefreshCw, Download } from "lucide-react";
 import api from "@/api/axios";
 import { useAuth, type User } from "@/hooks/useAuth";
 import type { ResolveRunStatus } from "@/types/sourceCodes";
@@ -102,6 +102,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   const [selectAllMode, setSelectAllMode] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const [resolveDialogOpen, setResolveDialogOpen] = useState(false);
   const [resolveRun, setResolveRun] = useState<ResolveRunStatus | null>(null);
   const resolvePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -222,15 +223,21 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   };
 
   const handleResolveConfirm = async () => {
-    const personIds = Array.from(selectedIds);
-    if (personIds.length === 0) return;
+    if (!selectAllMode && selectedIds.size === 0) return;
     try {
+      const body = selectAllMode
+        ? { select_all: true }
+        : { person_ids: Array.from(selectedIds) };
+      const params = selectAllMode
+        ? { org: orgFilter, search, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters }
+        : undefined;
       const res = await api.post<{ run_id: string; total: number }>(
         "/v1/patient-records/bulk-resolve-source-codes/",
-        { person_ids: personIds }
+        body,
+        { params }
       );
       const runId = res.data.run_id;
-      setResolveRun({ run_id: runId, state: "pending", total: res.data.total, done: 0, resolved: 0, errors: 0 });
+      setResolveRun({ run_id: runId, state: "pending", total: res.data.total, done: 0, resolved: 0, created: 0, skipped: 0, already_resolved: 0, errors: 0, code_details: [] });
 
       resolvePollRef.current = setInterval(async () => {
         try {
@@ -248,6 +255,42 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
     } catch (err) {
       setError(getErrorMessage(err, "Failed to start bulk resolve"));
       setResolveDialogOpen(false);
+    }
+  };
+
+  const handleDownloadCsv = async () => {
+    try {
+      setDownloading(true);
+      const params = selectAllMode
+        ? { org: orgFilter, search, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters, ordering }
+        : { person_ids: Array.from(selectedIds).join(",") };
+      const response = await api.get<Blob>("/v1/patient-records/export-csv/", { params, responseType: "blob" });
+      const disposition = String(response.headers?.["content-disposition"] ?? "");
+      const filename = /filename="([^"]+)"/.exec(disposition)?.[1] ?? "patients.csv";
+      const url = URL.createObjectURL(response.data);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setError(null);
+    } catch (err) {
+      // With responseType "blob" the error body arrives as a Blob too.
+      const data = (err as { response?: { data?: unknown } })?.response?.data;
+      let message = "Failed to download patients";
+      if (data instanceof Blob) {
+        try {
+          const parsed = JSON.parse(await data.text()) as { error?: string; detail?: string };
+          message = parsed.error || parsed.detail || message;
+        } catch { /* not JSON */ }
+      } else {
+        message = getErrorMessage(err, message);
+      }
+      setError(message);
+    } finally {
+      setDownloading(false);
     }
   };
 
@@ -296,15 +339,23 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                 <Trash2 size={16} />
                 Delete ({selectAllMode ? `All ${patientCount}` : selectedIds.size})
               </button>
-              {!selectAllMode && !!(currentUser?.is_staff || currentUser?.is_org_admin) && (
+              {!!(currentUser?.is_staff || currentUser?.is_org_admin) && (
                 <button
                   onClick={() => { setResolveRun(null); setResolveDialogOpen(true); }}
                   className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-foreground hover:bg-accent"
                 >
                   <RefreshCw size={16} />
-                  Generate OMOP ({selectedIds.size})
+                  Generate OMOP ({selectAllMode ? `All ${patientCount}` : selectedIds.size})
                 </button>
               )}
+              <button
+                onClick={() => void handleDownloadCsv()}
+                disabled={downloading}
+                className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+              >
+                <Download size={16} />
+                {downloading ? "Downloading…" : `Download CSV (${selectAllMode ? `All ${patientCount}` : selectedIds.size})`}
+              </button>
             </>
           )}
           {canManageMappings && (
@@ -680,7 +731,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
             {!resolveRun ? (
               <>
                 <p className="mt-2 text-sm text-muted-foreground">
-                  Re-resolve source codes for {selectedIds.size} selected patient{selectedIds.size !== 1 ? "s" : ""}?
+                  Re-resolve source codes for {selectAllMode ? `all ${patientCount}` : selectedIds.size} selected patient{(selectAllMode ? patientCount : selectedIds.size) !== 1 ? "s" : ""}?
                   This will update unmapped clinical rows to approved OMOP concepts.
                 </p>
                 <div className="mt-6 flex justify-end gap-3">
@@ -721,6 +772,9 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                   {(resolveRun.state === "completed" || resolveRun.state === "failed") && (
                     <p className="text-sm text-muted-foreground">
                       Resolved {resolveRun.resolved} source code(s).
+                      {resolveRun.created > 0 && ` ${resolveRun.created} clinical row(s) created.`}
+                      {resolveRun.skipped > 0 && ` ${resolveRun.skipped} skipped.`}
+                      {resolveRun.already_resolved > 0 && ` ${resolveRun.already_resolved} already resolved.`}
                       {resolveRun.errors > 0 && ` ${resolveRun.errors} error(s).`}
                     </p>
                   )}

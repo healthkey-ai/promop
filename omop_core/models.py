@@ -2097,6 +2097,9 @@ class SourceCodeConceptMapping(models.Model):
     # A proposal can move several times before approval. Keep the destinations
     # whose stored clinical rows must move when a curator finally signs off.
     pending_repoint_concept_ids = models.JSONField(default=list, db_default=[], blank=True)
+    # Prior targets left on other patients by a patient-scoped approval.
+    # Generate OMOP uses these when those patients are selected later.
+    deferred_repoint_concept_ids = models.JSONField(default=list, db_default=[], blank=True)
     # Immutable evidence for suggestion-quality measurement.  target_concept
     # changes when a curator corrects a proposal; this field preserves what the
     # model actually suggested so Recall can measure those overrides.
@@ -3107,6 +3110,10 @@ class PatientRecord(models.Model):
     bmi = models.FloatField(editable=False, help_text="Patient's BMI (computed)", blank=True, null=True)
     race = models.TextField(blank=True, null=True)
     ethnicity = models.TextField(blank=True, null=True)
+    blood_type = models.TextField(
+        blank=True, null=True,
+        help_text="Blood type from the latest valid ABO/Rh Measurement results",
+    )
     systolic_blood_pressure = models.IntegerField(help_text="Patient's systolic blood pressure", blank=True, null=True)
     diastolic_blood_pressure = models.IntegerField(help_text="Patient's diastolic blood pressure", blank=True, null=True)
 
@@ -4863,6 +4870,32 @@ class HospitalCodeImport(models.Model):
         ordering = ['-created_at']
 
 
+class SourceSystemFacility(models.Model):
+    """An observed or curated name for an exact FHIR system, not ownership.
+
+    One system can be used by many facilities. These rows must not be used to
+    assign an Organization or to change source-code mapping identity.
+    """
+
+    source_vocabulary_id = models.CharField(max_length=255, db_index=True)
+    facility_name = models.TextField()
+    facility_id = models.TextField(blank=True, default='')
+    level = models.CharField(max_length=32, blank=True, default='')
+    confidence = models.CharField(max_length=32, blank=True, default='')
+    attribution_method = models.CharField(max_length=100, blank=True, default='')
+    provenance = models.CharField(max_length=255)
+    fingerprint = models.CharField(max_length=64, unique=True)
+    review_status = models.CharField(max_length=16, default='unreviewed', choices=[
+        ('unreviewed', 'Unreviewed'), ('confirmed', 'Confirmed'),
+        ('rejected', 'Rejected'),
+    ])
+    reviewed_by = models.CharField(max_length=255, blank=True, default='')
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'source_system_facility'
+
+
 class UmlsRelease(models.Model):
     """A loaded raw UMLS Metathesaurus release (not an OMOP vocabulary)."""
     release_version = models.CharField(max_length=20, primary_key=True)
@@ -5000,8 +5033,12 @@ class SourceCodeResolveRun(models.Model):
     total = models.IntegerField(default=0)
     done = models.IntegerField(default=0)
     resolved = models.IntegerField(default=0)
+    skipped = models.IntegerField(default=0)
+    already_resolved = models.IntegerField(default=0)
+    created = models.IntegerField(default=0)
     errors = models.IntegerField(default=0)
     error_detail = models.JSONField(default=list, blank=True)
+    code_details = models.JSONField(default=list, blank=True)
 
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
@@ -5043,9 +5080,32 @@ class PatientSourceCode(models.Model):
         max_length=100, blank=True, default='',
         help_text='Representative quantity value(s) from source (e.g. "7.5", "120-140").',
     )
+    source_unit_override = models.CharField(
+        max_length=50, null=True, blank=True,
+        help_text='Curator correction; null uses the original ETL source unit.',
+    )
+    example_quantity_override = models.CharField(
+        max_length=100, null=True, blank=True,
+        help_text='Curator correction; null uses the original ETL example quantity.',
+    )
+    source_corrected_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    source_corrected_at = models.DateTimeField(null=True, blank=True)
     source_metadata = models.JSONField(
         default=dict, blank=True,
         help_text='Unparsed metadata from ETL (reference ranges, category, etc.).',
+    )
+    # No index: every query that reads it is already narrowed to one person by
+    # the FK, and an index here would cost a blocking build on deploy.
+    upload_id = models.CharField(
+        max_length=64, blank=True, default='',
+        help_text=(
+            'Token naming the ETL run that last wrote this row. A chunked '
+            'upload sends the same token on every request and prunes rows '
+            'carrying an older one once the final chunk lands (#1824).'
+        ),
     )
     first_seen = models.DateTimeField(auto_now_add=True)
     last_seen = models.DateTimeField(auto_now=True)
@@ -5061,6 +5121,45 @@ class PatientSourceCode(models.Model):
 
     def __str__(self):
         return f'{self.source_value} ({self.omop_table}) — person {self.person_id}'
+
+
+class PatientSourceCodeUpload(models.Model):
+    """One ETL run writing a patient's source codes, in one or more chunks.
+
+    The token on `PatientSourceCode.upload_id` says which run last wrote a
+    row, which is enough to prune when runs do not overlap. It is not enough
+    on its own: a second run that re-sends a code retags that row, so the
+    first run's final chunk would then delete a code it had itself uploaded
+    and leave the patient truncated. This ledger is what lets the endpoint see
+    that another run is still open and refuse (#1824).
+
+    A run with no chunk for `_UPLOAD_STALE_AFTER` is treated as abandoned and
+    closed, so a crashed import cannot block a patient for good.
+    """
+    person = models.ForeignKey(
+        Person, on_delete=models.CASCADE, related_name='source_code_uploads',
+    )
+    upload_id = models.CharField(max_length=64)
+    started_at = models.DateTimeField(auto_now_add=True)
+    last_chunk_at = models.DateTimeField(auto_now=True)
+    finalized_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text='Set by the final chunk, or when a later run supersedes an '
+                  'abandoned one.',
+    )
+
+    class Meta:
+        db_table = 'patient_source_code_upload'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['person', 'upload_id'],
+                name='uq_patient_source_code_upload',
+            ),
+        ]
+
+    def __str__(self):
+        state = 'finalized' if self.finalized_at else 'open'
+        return f'{self.upload_id} ({state}) — person {self.person_id}'
 
 
 class ConceptEmbedding(models.Model):
@@ -5138,3 +5237,40 @@ class SourceVocabularyTerm(models.Model):
         )]
         indexes = [GinIndex(OpClass(Upper('search_text'), name='gin_trgm_ops'),
                             name='ix_source_vocab_search_trgm')]
+
+
+class PersonMergeCandidate(models.Model):
+    """Two Person rows for one address that a human has to reconcile (#1817).
+
+    Written when email verification finds a provisioned patient for the address
+    but the account's own Person already holds data, so nothing is moved:
+    joining two populated patient records is a clinical-safety decision, and a
+    confirmed address is not proof that two records are the same person. The
+    same stance as ``prolog_surveys.ParticipantMergeCandidate``.
+
+    The pristine case needs no row here, because adoption settles it: the empty
+    placeholder is deleted and the account keeps the provisioned record.
+    """
+    claimed = models.ForeignKey(
+        Person, on_delete=models.CASCADE, related_name='merge_candidates',
+        help_text='The Person the account is linked to.',
+    )
+    provisioned = models.ForeignKey(
+        Person, on_delete=models.CASCADE, related_name='merge_claims',
+        help_text='The Person an importer provisioned for the same address.',
+    )
+    email = models.EmailField(help_text='The verified address both Persons hold.')
+    created_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(
+        null=True, blank=True, help_text='When a human settled this pair.',
+    )
+
+    class Meta:
+        db_table = 'person_merge_candidate'
+        constraints = [models.UniqueConstraint(
+            fields=['claimed', 'provisioned'], name='uq_person_merge_candidate_pair',
+        )]
+        indexes = [models.Index(fields=['resolved_at'])]
+
+    def __str__(self) -> str:  # pragma: no cover - admin/debug convenience
+        return f'merge candidate {self.claimed_id}/{self.provisioned_id}'

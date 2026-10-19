@@ -41,16 +41,19 @@ from omop_core.models import (
     Measurement,
     Observation,
     PatientRecord,
+    PatientSourceCode,
     ProcedureOccurrence,
     ProvenanceRecord,
     SourceCodeConceptMapping,
 )
+from omop_core.services.pk import next_pk
 from omop_core.mapping.therapy import (
     SOURCE_HEALTHKEY,
     _get_or_create_quarantine_concept,
     _slug,
 )
 from omop_core.signals import suppress_patient_record_refresh
+from omop_core.services.provenance_attribution import ATTRIBUTION, exclusively_attributed, with_attribution
 from omop_core.services.source_vocabularies import VOCABULARY_OID_ALIASES, canonical_source_vocabulary
 from omop_core.services import source_vocabularies
 from omop_core.data_migrations.snomed_relationships_v1 import SINGLE_ORIGIN, MULTIPLE_ORIGIN
@@ -76,6 +79,18 @@ CLINICAL_TABLES = {
     'condition': (ConditionOccurrence, 'condition_concept_id', 'condition_source_value'),
     'drug_exposure': (DrugExposure, 'drug_concept_id', 'drug_source_value'),
     'procedure': (ProcedureOccurrence, 'procedure_concept_id', 'procedure_source_value'),
+}
+
+# Fields needed to *create* a new clinical row, per table. Keyed on the
+# canonical table name (same keys as CLINICAL_TABLES). Each tuple is:
+#   (pk_field, concept_fk_field, source_value_field, date_field, type_concept_fk_field)
+# where *_fk_field names the Django FK attribute (not the raw _id column).
+_CREATE_FIELDS = {
+    'measurement':   ('measurement_id',         'measurement_concept',  'measurement_source_value',  'measurement_date',         'measurement_type_concept'),
+    'observation':   ('observation_id',          'observation_concept',  'observation_source_value',  'observation_date',          'observation_type_concept'),
+    'condition':     ('condition_occurrence_id', 'condition_concept',    'condition_source_value',    'condition_start_date',      'condition_type_concept'),
+    'drug_exposure': ('drug_exposure_id',        'drug_concept',         'drug_source_value',         'drug_exposure_start_date',  'drug_type_concept'),
+    'procedure':     ('procedure_occurrence_id', 'procedure_concept',    'procedure_source_value',    'procedure_date',            'procedure_type_concept'),
 }
 
 # Which HK-* vocabulary a minted destination lands in, per OMOP table, and the
@@ -586,7 +601,8 @@ def _source_value_match(model, source_col, mapping, include_description=True):
 
 
 def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
-                          apply_changes=True, match_description=True):
+                          apply_changes=True, match_description=True,
+                          person_id=None):
     """Move stored clinical rows from one destination concept to another.
 
     Approving a mapping that a curator re-pointed has to rewrite the rows
@@ -613,7 +629,7 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
               'person_ids': set()}
     # `is None`, not falsiness: concept 0 is OMOP's "No matching concept" and is
     # the single most common value a re-point moves rows *off*.
-    if old_concept_id is None or not new_concept_id or old_concept_id == new_concept_id:
+    if old_concept_id is None or new_concept_id is None or old_concept_id == new_concept_id:
         return result
 
     table = normalize_omop_table(mapping.omop_table)
@@ -629,17 +645,14 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
     match = _source_value_match(
         model, source_col, mapping, include_description=match_description)
     qs = model.objects.filter(match, **{concept_col: old_concept_id})
+    if person_id is not None:
+        qs = qs.filter(person_id=person_id)
     if mapping.organization_id:
         # A shared Epic flowsheet code can mean different things at two
         # hospitals.  Only rows whose write provenance names this mapping's
         # organization are safe to move; historical rows with no attribution
         # deliberately remain unresolved rather than being guessed.
-        content_type = ContentType.objects.get_for_model(model)
-        attributed_ids = ProvenanceRecord.objects.filter(
-            content_type=content_type,
-            organization_id=mapping.organization_id,
-        ).values('object_id')
-        qs = qs.filter(pk__in=attributed_ids)
+        qs = exclusively_attributed(qs, mapping.organization_id)
     person_ids = set(qs.values_list('person_id', flat=True).distinct())
     result['rows_updated'] = qs.count()
     if not apply_changes or not result['rows_updated']:
@@ -691,21 +704,16 @@ def _collapse_duplicates(model, concept_col, source_col, match,
         match, person_id__in=person_ids, **{concept_col: concept_id},
     )
     if organization_id:
-        content_type = ContentType.objects.get_for_model(model)
-        attributed_ids = ProvenanceRecord.objects.filter(
-            content_type=content_type,
-            organization_id=organization_id,
-        ).values('object_id')
-        candidates = candidates.filter(pk__in=attributed_ids)
+        candidates = exclusively_attributed(candidates, organization_id)
     rows = (
-        candidates
+        with_attribution(candidates)
         .order_by(pk_col)
-        .values_list(pk_col, 'person_id', *identity_cols)
+        .values_list(pk_col, ATTRIBUTION, 'person_id', *identity_cols)
     )
 
     seen, doomed = set(), []
     for row in rows:
-        pk, key = row[0], row[1:]
+        pk, key = row[0], (tuple(row[1]),) + row[2:]
         if key in seen:
             doomed.append(pk)
         else:
@@ -722,11 +730,106 @@ def _collapse_duplicates(model, concept_col, source_col, match,
 
 
 # ------------------------------------------------------------------
+# Create clinical rows for source codes that have no OMOP row yet
+# ------------------------------------------------------------------
+
+# EHR type concept (concept_id 32817). Used as the type concept for rows
+# created by Generate OMOP, matching what the FHIR sync writes.
+_EHR_TYPE_CONCEPT_ID = 32817
+
+
+def _create_missing_clinical_rows(person, *, omop_tables=None, source_values=None):
+    """Create clinical rows for PatientSourceCode entries with no existing row.
+
+    Only creates rows where an approved SCCM mapping exists and no clinical row
+    with the same source value exists for this person in the target table.
+
+    *source_values*: optional list of source strings to limit creation to.
+    *omop_tables*: optional list of table keys (e.g. ``['measurement']``).
+
+    Returns ``(created_count, detail_list)`` where *detail_list* contains one
+    dict per processed PSC entry.
+    """
+    psc_qs = PatientSourceCode.objects.filter(person=person)
+    if source_values:
+        psc_qs = psc_qs.filter(source_value__in=source_values)
+    if not psc_qs.exists():
+        return 0, []
+
+    try:
+        ehr_type_concept = Concept.objects.get(concept_id=_EHR_TYPE_CONCEPT_ID)
+    except Concept.DoesNotExist:
+        logger.warning(
+            'Concept %d (EHR type) not loaded — cannot create clinical rows',
+            _EHR_TYPE_CONCEPT_ID,
+        )
+        return 0, []
+
+    created = 0
+    details: list[dict] = []
+
+    with transaction.atomic():
+        for psc in psc_qs.iterator():
+            table_key = normalize_omop_table(psc.omop_table)
+            if table_key not in _CREATE_FIELDS:
+                continue
+            if omop_tables and table_key not in omop_tables:
+                continue
+
+            pk_field, concept_fk, source_col, date_col, type_fk = _CREATE_FIELDS[table_key]
+            model, _concept_id_col, _sv_col = CLINICAL_TABLES[table_key]
+
+            sv = psc.source_value
+
+            # Look up the approved SCCM mapping.
+            mapping = (
+                SourceCodeConceptMapping.objects
+                .filter(
+                    source_code__iexact=sv[:SOURCE_CODE_MAX],
+                    omop_table=table_key,
+                    status='approved',
+                )
+                .select_related('target_concept')
+                .first()
+            )
+            if not mapping or not mapping.target_concept_id:
+                continue
+
+            # Skip if any clinical row with this source value already exists
+            # for this person (the repoint pass handles those).
+            if model.objects.filter(person=person, **{f'{source_col}__iexact': sv}).exists():
+                continue
+
+            # Allocate PK and create the row.
+            row_pk = next_pk(model, pk_field)
+            row_date = psc.first_seen.date() if psc.first_seen else date.today()
+            model.objects.create(**{
+                pk_field: row_pk,
+                'person': person,
+                concept_fk: mapping.target_concept,
+                source_col: sv,
+                date_col: row_date,
+                type_fk: ehr_type_concept,
+            })
+            created += 1
+            details.append({
+                'source_value': sv,
+                'table': table_key,
+                'rows': 1,
+                'outcome': 'created',
+                'target': mapping.target_concept.concept_name or str(mapping.target_concept_id),
+                'target_concept_id': mapping.target_concept_id,
+            })
+
+    return created, details
+
+
+# ------------------------------------------------------------------
 # Per-patient source code resolution
 # ------------------------------------------------------------------
 
 def resolve_person_source_codes(person, *, source_values=None, omop_tables=None):
-    """Re-resolve clinical rows for *person* where concept_id is 0 or HK-*.
+    """Re-resolve clinical rows for *person* with unresolved or prior targets.
 
     Uses the current approved SCCM mappings.  Returns a dict with counts:
     ``{'resolved': N, 'skipped': N, 'already_resolved': N}``.
@@ -739,6 +842,7 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
     resolved = 0
     skipped = 0
     already_resolved = 0
+    code_details: list[dict] = []
     person_ids_touched: set[int] = set()
 
     # Concept IDs in quarantine vocabularies (HK-*).
@@ -785,24 +889,42 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
             )
             if mapping is None:
                 skipped += group['row_count']
+                code_details.append({
+                    'source_value': sv, 'table': table_key,
+                    'rows': group['row_count'], 'outcome': 'skipped',
+                    'reason': 'no approved mapping',
+                })
                 continue
 
             target_concept_id = mapping.target_concept_id
             if not target_concept_id:
                 skipped += group['row_count']
+                code_details.append({
+                    'source_value': sv, 'table': table_key,
+                    'rows': group['row_count'], 'outcome': 'skipped',
+                    'reason': 'mapping has no target concept',
+                })
                 continue
 
-            # Find rows that need updating: concept_id = 0 or in quarantine.
-            # Build a Q filter for "unresolved" concept IDs.
+            # Patient-scoped approvals leave prior targets for Generate OMOP.
+            # This includes standard-to-standard remaps that a 0/HK-only
+            # resolver would otherwise never pick up for other patients.
             unresolved_q = Q(**{concept_col: NO_MATCHING_CONCEPT_ID})
             if quarantine_concept_ids:
                 unresolved_q |= Q(**{f'{concept_col}__in': quarantine_concept_ids})
+            if mapping.deferred_repoint_concept_ids:
+                unresolved_q |= Q(**{f'{concept_col}__in': mapping.deferred_repoint_concept_ids})
 
             rows_to_update = qs.filter(**{source_col: sv}).filter(unresolved_q)
 
             count = rows_to_update.count()
             if count == 0:
                 already_resolved += group['row_count']
+                code_details.append({
+                    'source_value': sv, 'table': table_key,
+                    'rows': group['row_count'], 'outcome': 'already_resolved',
+                    'target': mapping.target_concept.concept_name if mapping.target_concept else str(target_concept_id),
+                })
                 continue
 
             with transaction.atomic():
@@ -811,6 +933,22 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
                 person_ids_touched.add(person.person_id)
                 resolved += count
                 already_resolved += group['row_count'] - count
+                target_name = mapping.target_concept.concept_name if mapping.target_concept else str(target_concept_id)
+                code_details.append({
+                    'source_value': sv, 'table': table_key,
+                    'rows': count, 'outcome': 'resolved',
+                    'target': target_name,
+                    'target_concept_id': target_concept_id,
+                })
+
+    # Create clinical rows for PSC entries that have no existing row.
+    with suppress_patient_record_refresh():
+        rows_created, creation_details = _create_missing_clinical_rows(
+            person, omop_tables=omop_tables, source_values=source_values,
+        )
+    if rows_created:
+        person_ids_touched.add(person.person_id)
+    code_details.extend(creation_details)
 
     # Mark PatientRecord stale and dispatch derivation asynchronously.
     # The mapping updates above are fast; the derivation (12-32s on bulk-loaded
@@ -825,6 +963,8 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
 
     return {
         'resolved': resolved,
+        'created': rows_created,
         'skipped': skipped,
         'already_resolved': already_resolved,
+        'code_details': code_details,
     }

@@ -114,6 +114,49 @@ def test_about_omits_empty_fields_and_marks_patient_edits():
     }
 
 
+def test_about_shows_the_blood_type_from_the_newest_abo_rh_result_and_labs_leave_it_out():
+    record = PatientRecordFactory(disease='', facility_name='Dana-Farber')
+    abo_rh = ConceptFactory(concept_code='882-1', concept_name='ABO and Rh group [Type] in Blood')
+    visit = visit_at(record, 'MD Anderson Cancer Center')
+    with suppress_patient_record_refresh():
+        MeasurementFactory(person=record.person, measurement_concept=abo_rh, measurement_date='2019-05-01',
+                           value_as_string='A Rh(D) negative')
+        MeasurementFactory(person=record.person, measurement_concept=abo_rh, measurement_date='2024-03-01',
+                           value_as_string='O Rh(D) positive', visit_occurrence=visit)
+        MeasurementFactory(person=record.person, measurement_concept=abo_rh, measurement_date='2025-01-01',
+                           value_as_string='B Rh(D) positive', is_erroneous=True)
+    client = signed_in(record)
+
+    fields = {f['key']: f for f in client.get('/api/v1/phr/about/').data['fields']}
+
+    assert fields['blood_type'] == {
+        'key': 'blood_type',
+        'value': 'O positive',
+        'source': {'kind': 'record', 'facility': 'MD Anderson Cancer Center', 'date': '2024-03-01'},
+    }
+    assert client.get('/api/v1/phr/labs/').data['tests'] == []
+    assert client.get(f'/api/v1/phr/labs/{abo_rh.concept_id}/').status_code == 404
+
+
+@pytest.mark.parametrize(('abo', 'rh', 'shown'), [
+    ('Group AB', 'Rh negative', 'AB negative'),
+    ('O', None, 'O'),
+    ('Weak D, see note', 'Positive', 'Weak D, see note'),
+])
+def test_blood_type_joins_separate_abo_and_rh_results(abo, rh, shown):
+    record = PatientRecordFactory(disease='')
+    with suppress_patient_record_refresh():
+        MeasurementFactory(person=record.person, measurement_date='2024-03-01', value_as_string=abo,
+                           measurement_concept=ConceptFactory(concept_code='883-9', concept_name='ABO group [Type] in Blood'))
+        if rh:
+            MeasurementFactory(person=record.person, measurement_date='2024-03-01', value_as_string=rh,
+                               measurement_concept=ConceptFactory(concept_code='10331-7', concept_name='Rh [Type] in Blood'))
+
+    fields = {f['key']: f['value'] for f in signed_in(record).get('/api/v1/phr/about/').data['fields']}
+
+    assert fields['blood_type'] == shown
+
+
 # ---------------------------------------------------------------- diagnoses
 
 
@@ -143,12 +186,97 @@ def test_primary_cancer_uses_the_disease_specific_stage_and_hides_what_is_missin
     }]
 
 
-def test_spread_is_shown_for_solid_tumours_only():
+def test_metastasis_flags_are_shown_for_solid_tumours_only():
     breast = PatientRecordFactory(disease='Breast cancer', disease_slug='breast-cancer', metastatic_status=True)
     myeloma = PatientRecordFactory(disease='Multiple myeloma', disease_slug='myeloma', metastatic_status=True)
 
     assert signed_in(breast).get('/api/v1/phr/diagnoses/').data['cancer'][0]['spread'] == 'Metastatic'
     assert 'spread' not in signed_in(myeloma).get('/api/v1/phr/diagnoses/').data['cancer'][0]
+
+
+@pytest.mark.parametrize('slug', [
+    'myeloma', 'multiple-myeloma', 'follicular-lymphoma',
+    'chronic-lymphocytic-leukemia', 'mantle-cell-lymphoma',
+])
+def test_blood_cancer_spread_uses_the_custom_field_instead_of_metastasis(slug):
+    record = PatientRecordFactory(
+        disease=slug.replace('-', ' '), disease_slug=slug,
+        custom_fields={'hematologic_spread': ' Bone lesions in spine (L2, L4) and right hip '},
+        metastasis_status='Metastatic', bone_only_metastasis_status=True, metastatic_status=True,
+    )
+
+    cancer = signed_in(record).get('/api/v1/phr/diagnoses/').data['cancer'][0]
+
+    assert cancer['spread'] == 'Bone lesions in spine (L2, L4) and right hip'
+
+
+@pytest.mark.parametrize('custom_fields', [{}, {'hematologic_spread': None}, {'hematologic_spread': '  '}])
+def test_missing_blood_cancer_spread_is_omitted(custom_fields):
+    record = PatientRecordFactory(
+        disease='Multiple myeloma', disease_slug='myeloma', custom_fields=custom_fields,
+        metastasis_status='Metastatic', metastatic_status=False,
+    )
+
+    assert 'spread' not in signed_in(record).get('/api/v1/phr/diagnoses/').data['cancer'][0]
+
+
+@pytest.mark.parametrize(('slug', 'expected'), [('breast-cancer', 'Metastatic'), ('unknown-cancer', None)])
+def test_blood_cancer_spread_is_not_used_for_solid_or_unclassified_cancers(slug, expected):
+    record = PatientRecordFactory(
+        disease=slug.replace('-', ' '), disease_slug=slug, metastatic_status=True,
+        custom_fields={'hematologic_spread': 'Bone lesions in spine'},
+    )
+
+    assert signed_in(record).get('/api/v1/phr/diagnoses/').data['cancer'][0].get('spread') == expected
+
+
+def test_flat_blood_cancer_spread_is_not_copied_to_a_secondary_cancer():
+    record = PatientRecordFactory(
+        disease='Multiple myeloma', disease_slug='myeloma',
+        custom_fields={'hematologic_spread': 'Bone lesions in spine'},
+    )
+    condition(record, icd10('C82', 'Follicular lymphoma'), '2024-03-01')
+
+    cancer = signed_in(record).get('/api/v1/phr/diagnoses/').data['cancer']
+
+    assert cancer[0]['spread'] == 'Bone lesions in spine'
+    assert len(cancer) == 2
+    assert 'spread' not in cancer[1]
+
+
+def test_unmapped_spread_observations_are_projected_into_the_phr():
+    from omop_core.models import CustomPatientField, FieldConceptMapping
+    from omop_core.services.patient_record_service import refresh_patient_record
+    from tests.factories import ObservationFactory
+
+    record = PatientRecordFactory(disease='Multiple myeloma', disease_slug='multiple-myeloma')
+    condition(record, icd10('C90.00', 'Multiple myeloma'), '2021-02-01')
+    mapping = FieldConceptMapping.objects.create(
+        field_name='hematologic_spread', omop_table='observation',
+        source_value='phr:hematologic-spread', value_kind='string', status='approved',
+    )
+    CustomPatientField.objects.create(
+        field_name='hematologic_spread', display_name='Hematologic Spread', tab='disease',
+        field_type='text', mode='editable', mapping=mapping,
+    )
+    unmapped = ConceptFactory(concept_id=0, concept_name='No matching concept')
+    with suppress_patient_record_refresh():
+        ObservationFactory(person=record.person, observation_concept=unmapped,
+                           observation_source_value=mapping.source_value, observation_date='2023-01-01',
+                           value_as_string='Old involvement')
+        ObservationFactory(person=record.person, observation_concept=unmapped,
+                           observation_source_value=mapping.source_value, observation_date='2024-01-01',
+                           value_as_string='Bone lesions in spine (L2, L4) and right hip')
+        ObservationFactory(person=record.person, observation_concept=unmapped,
+                           observation_source_value=mapping.source_value, observation_date='2025-01-01',
+                           value_as_string='Entered in error', is_erroneous=True)
+        ObservationFactory(observation_concept=unmapped, observation_source_value=mapping.source_value,
+                           observation_date='2026-01-01', value_as_string='Another patient')
+    refresh_patient_record(record.person)
+
+    cancer = signed_in(record).get('/api/v1/phr/diagnoses/').data['cancer'][0]
+
+    assert cancer['spread'] == 'Bone lesions in spine (L2, L4) and right hip'
 
 
 def test_cancer_conditions_become_dated_transitions_and_other_conditions_are_listed_newest_first():
@@ -174,7 +302,7 @@ def test_cancer_conditions_become_dated_transitions_and_other_conditions_are_lis
     ]
 
 
-def test_a_second_cancer_gets_its_own_entry_and_cancers_are_newest_first():
+def test_a_second_cancer_gets_its_own_entry_after_the_primary():
     record = PatientRecordFactory(disease='Multiple myeloma', disease_slug='myeloma', diagnosis_date='2024-03-12')
     condition(record, icd10('D47.2', 'Monoclonal gammopathy'), '2019-06-04')
     condition(record, icd10('C90.00', 'Multiple myeloma'), '2024-03-12')
@@ -182,12 +310,13 @@ def test_a_second_cancer_gets_its_own_entry_and_cancers_are_newest_first():
 
     cancer = signed_in(record).get('/api/v1/phr/diagnoses/').data['cancer']
 
+    # The primary cancer first, though the prostate cancer is newer.
     assert [(c['name'], c['date'], c.get('status')) for c in cancer] == [
-        ('Malignant neoplasm of prostate', '2025-11-08', 'Resolved'),
         ('Multiple myeloma', '2024-03-12', None),
+        ('Malignant neoplasm of prostate', '2025-11-08', 'Resolved'),
     ]
-    assert [t['name'] for t in cancer[1]['transitions']] == ['Monoclonal gammopathy', 'Multiple myeloma']
-    assert 'transitions' not in cancer[0]
+    assert [t['name'] for t in cancer[0]['transitions']] == ['Monoclonal gammopathy', 'Multiple myeloma']
+    assert 'transitions' not in cancer[1]
 
 
 def test_without_a_derived_primary_each_cancer_condition_is_listed():
@@ -457,7 +586,7 @@ def test_genetics_groups_findings_into_tests_and_attaches_matching_documents(mon
 
     assert [(t['type'], t['date'], [f['name'] for f in t['findings']]) for t in tests] == [
         ('FISH', '2023-04-02', ['TP53', 't(11;14)']),
-        ('Gene expression profiling', '2022-02-02', []),
+        ('GEP', '2022-02-02', []),
         ('NGS', '2021-06-01', ['KRAS']),
     ]
     assert tests[0]['document'] == {'title': 'FISH panel report', 'url': 'https://example.test/fish.pdf'}
@@ -466,6 +595,31 @@ def test_genetics_groups_findings_into_tests_and_attaches_matching_documents(mon
         'id': m1.pk, 'name': 'TP53', 'variant': 'del(17p)', 'interpretation': 'pathogenic', 'percent': 38,
         'source': {'kind': 'record', 'facility': None, 'date': '2023-04-02'},
     }
+
+
+def test_each_genetic_test_shows_its_specimen_method_and_pathologist_notes_once(monkeypatch):
+    """D22 (#1865): the report's details repeat on every finding but appear once per test."""
+    record = PatientRecordFactory(disease='')
+    m1 = lab(record, loinc('81252-9', 'Gene variant'), '2025-03-10')
+    m2 = lab(record, loinc('81252-9', 'Gene variant'), '2025-03-10')
+    m3 = lab(record, loinc('81252-9', 'Gene variant'), '2024-01-05')
+    report = {'test_date': '2025-03-10', 'variant_analysis_method_type': 'FISH',
+              'specimen_type': 'Bone marrow aspirate',
+              'pathologist_notes': 'FISH on CD138-selected plasma cells.'}
+    monkeypatch.setattr('omop_core.services.genomics.list_variants', lambda person: [
+        {'id': m1.pk, 'gene': 'tp53', 'variant': 'del(17p)', **report},
+        {'id': m2.pk, 'gene': 'fgfr3', 'variant': 't(4;14)', **report},
+        {'id': m3.pk, 'gene': 'kras', 'variant': 'G12D', 'test_date': '2024-01-05', 'assay_method': 'NGS'},
+    ])
+
+    tests = signed_in(record).get('/api/v1/phr/genetics/').data['tests']
+
+    fish, ngs = tests
+    # The editor's method component labels the test when no imported assay method exists.
+    assert (fish['type'], [f['name'] for f in fish['findings']]) == ('FISH', ['TP53', 'FGFR3'])
+    assert fish['specimen'] == 'Bone marrow aspirate'
+    assert fish['notes'] == 'FISH on CD138-selected plasma cells.'
+    assert 'specimen' not in ngs and 'notes' not in ngs
 
 
 def test_unlabelled_findings_join_the_only_genetic_report_from_that_day(monkeypatch):
@@ -885,3 +1039,71 @@ def test_lab_markers_gain_m_protein_and_readable_names_without_overwriting_admin
     assert labels == {'33358-3': 'M-protein', '48378-4': 'Kappa/lambda ratio', '718-7': 'Hgb (admin)'}
     m_protein = LabMarker.objects.get(loinc_code='33358-3')
     assert (m_protein.rank, m_protein.disease_slugs) == (1, ['myeloma', 'multiple-myeloma'])
+
+
+# ---------------------------------------------------------------- design gaps (Phase 7)
+
+
+def test_labs_leave_out_genetic_findings_and_offer_each_cancers_markers():
+    record = PatientRecordFactory(disease='Multiple myeloma', disease_slug='myeloma', diagnosis_date='2024-03-12')
+    condition(record, icd10('C90.00', 'Multiple myeloma'), '2024-03-12')
+    condition(record, icd10('C61', 'Malignant neoplasm of prostate'), '2025-11-08')
+    from omop_core.services.disease_episodes import disease_slug
+    prostate = disease_slug('Malignant neoplasm of prostate')
+    LabMarker.objects.create(loinc_code='48378-4', rank=1, disease_slugs=['myeloma'])
+    LabMarker.objects.create(loinc_code='2857-1', rank=2, disease_slugs=[prostate])
+    lab(record, loinc('48378-4', 'Kappa lc.free/Lambda lc.free [Mass Ratio] in Serum'), '2024-02-01', 2.5)
+    lab(record, loinc('2857-1', 'Prostate specific Ag [Mass/volume] in Serum or Plasma'), '2026-07-30', 0.02)
+    # A genetic finding: the variant's parent row and a component pointing back to it.
+    parent = lab(record, loinc('81252-9', 'Discrete genetic variant'), '2025-11-08', value_as_string='Not detected')
+    lab(record, loinc('21636-6', 'BRCA1 gene mutations found'), '2025-11-08', value_as_string='Negative',
+        measurement_event_id=parent.pk)
+
+    data = signed_in(record).get('/api/v1/phr/labs/').data
+
+    assert [t['name'] for t in data['tests']] == ['Kappa lc.free/Lambda lc.free', 'Prostate specific Ag']
+    assert data['filters']['diagnoses'] == [
+        {'slug': 'myeloma', 'name': 'Multiple myeloma'},
+        {'slug': prostate, 'name': 'Malignant neoplasm of prostate'},
+    ]
+
+
+def test_a_line_of_therapys_medicines_are_not_prescriptions_to_confirm():
+    record = PatientRecordFactory(disease='Multiple myeloma', disease_slug='myeloma',
+                                  first_line_therapy='VRd', first_line_start_date='2024-03-12',
+                                  first_line_end_date='2024-10-14')
+    therapy_line(record, 1, '2024-03-12', '2024-10-14', [('Bortezomib', '2024-03-12', '2024-08-26')])
+    prescription = drug(record, ConceptFactory(concept_name='Acyclovir', concept_code='RX-ACY'), '2024-03-18', None)
+
+    meds = {m['name']: m for m in signed_in(record).get('/api/v1/phr/medications/').data['medications']}
+
+    assert 'pending' not in meds['Bortezomib']
+    assert meds['Acyclovir']['pending'] is True
+    assert meds['Acyclovir']['id'] == str(prescription.drug_concept_id)
+
+
+def test_a_line_is_sourced_to_where_its_medicines_were_given():
+    record = PatientRecordFactory(disease='Prostate cancer', disease_slug='prostate-cancer',
+                                  facility_name='MD Anderson Cancer Center',
+                                  first_line_therapy='Bicalutamide', first_line_start_date='2026-01-14',
+                                  first_line_end_date='2026-03-06')
+    episode = therapy_line(record, 1, '2026-01-14', '2026-03-06', [('Bicalutamide', '2026-01-14', '2026-03-06')])
+    visit = visit_at(record, 'Houston Methodist urology')
+    exposure_id = EpisodeEvent.objects.get(episode_id=episode.episode_id).event_id
+    DrugExposure.objects.filter(pk=exposure_id).update(visit_occurrence=visit)
+
+    line = signed_in(record).get('/api/v1/phr/therapy/').data['tracks'][0]['lines'][0]
+
+    assert line['source'] == {'kind': 'record', 'facility': 'Houston Methodist urology', 'date': '2026-01-14'}
+
+
+def test_a_named_genetic_result_keeps_its_case(monkeypatch):
+    record = PatientRecordFactory(disease='')
+    m1 = lab(record, loinc('81252-9', 'Gene variant'), '2024-10-02')
+    monkeypatch.setattr('omop_core.services.genomics.list_variants', lambda person: [
+        {'id': m1.pk, 'gene': 'GEP70 risk score', 'test_date': '2024-10-02', 'assay_method': 'GEP'},
+    ])
+
+    tests = signed_in(record).get('/api/v1/phr/genetics/').data['tests']
+
+    assert [f['name'] for f in tests[0]['findings']] == ['GEP70 risk score']

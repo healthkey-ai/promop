@@ -1,6 +1,6 @@
 import type { CandidateActivity, SuggestCandidate } from "./SuggestCandidates";
 
-const STRATEGY_LABELS: Record<string, string> = { umls: "U", lexical: "L", vectors: "V", semantic: "V", additional: "+" };
+const STRATEGY_LABELS: Record<string, string> = { umls: "U", lexical: "L", vectors: "V", semantic: "V", metadata: "M", additional: "+" };
 
 const RANKER_STYLE: Record<string, string> = {
   jev: "bg-indigo-100 text-indigo-700",

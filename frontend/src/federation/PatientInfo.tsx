@@ -106,14 +106,33 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
 
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingDataRef = useRef<Record<string, unknown> | null>(null);
+  const dirtyFieldsRef = useRef(new Set<string>());
+  const serverInfoRef = useRef<Record<string, unknown>>(initialInfo);
   const editedInfoRef = useRef<Record<string, unknown>>({});
   const editedNameRef = useRef("");
   const [prevData, setPrevData] = useState(data);
 
   if (data && data !== prevData) {
     setPrevData(data);
-    setEditedInfo(initialInfo);
-    setEditedName(initialName);
+    const pending = pendingDataRef.current;
+    const rebased = { ...initialInfo };
+    for (const field of dirtyFieldsRef.current) {
+      if (field === 'patient_name') continue;
+      if (pending && pending[field] !== initialInfo[field]) rebased[field] = pending[field];
+      else dirtyFieldsRef.current.delete(field);
+    }
+    if (pending && ['estrogen_receptor_status', 'progesterone_receptor_status', 'her2_status']
+      .some((field) => dirtyFieldsRef.current.has(field))) {
+      rebased.tnbc_status = pending.tnbc_status;
+    }
+    const pendingName = dirtyFieldsRef.current.has('patient_name')
+      ? pending?.patient_name : initialName;
+    pendingDataRef.current = pending
+      ? { ...rebased, ...(dirtyFieldsRef.current.has('patient_name') ? { patient_name: pendingName } : {}) }
+      : null;
+    serverInfoRef.current = { ...initialInfo };
+    setEditedInfo(rebased);
+    setEditedName(String(pendingName ?? initialName));
   }
 
   useEffect(() => { editedInfoRef.current = editedInfo; }, [editedInfo]);
@@ -122,9 +141,6 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
 
   // The last state the server confirmed, so an edit can be told from a value that
   // merely came back in the payload. Advanced as each write lands.
-  const serverInfoRef = useRef<Record<string, unknown>>({});
-  useEffect(() => { serverInfoRef.current = { ...initialInfo }; }, [initialInfo]);
-
   /**
    * PatientRecord is a derived read model with no writable clinical columns, so
    * this cannot be "PATCH whatever changed" — it used to send the whole record,
@@ -183,9 +199,20 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
         ? { ...combined, patient_name: info.patient_name }
         : combined;
 
+      const clearUnsendableEdits = () => {
+        for (const field of dirtyFieldsRef.current) {
+          const descriptor = descriptors[field];
+          if (descriptor && (!descriptor.writable || descriptor.target !== 'patient_record')
+              && info[field] === pendingDataRef.current?.[field]) {
+            dirtyFieldsRef.current.delete(field);
+          }
+        }
+      };
+
       // Nothing left to say is not a reason to say it: the OMOP writes above have
       // already done the work, and an empty PATCH can only fail.
       if (Object.keys(payload).length === 0) {
+        clearUnsendableEdits();
         setSaveStatus("saved");
         setTimeout(() => setSaveStatus((s) => (s === "saved" ? "idle" : s)), 1200);
         return;
@@ -194,7 +221,12 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
       const result = await patchMutation.mutateAsync(payload);
       for (const f of Object.keys(combined)) {
         serverInfoRef.current[f] = info[f];
+        if (pendingDataRef.current?.[f] === info[f]) dirtyFieldsRef.current.delete(f);
       }
+      if (renamed && pendingDataRef.current?.patient_name === info.patient_name) {
+        dirtyFieldsRef.current.delete('patient_name');
+      }
+      clearUnsendableEdits();
       setSaveStatus("saved");
       onPatientUpdated?.(result);
       setTimeout(() => setSaveStatus((s) => (s === "saved" ? "idle" : s)), 1200);
@@ -217,6 +249,8 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
     if (readOnly) return;
     const base = pendingDataRef.current ?? editedInfoRef.current;
     const updated = { ...base, [field]: value };
+    if (value === serverInfoRef.current[field]) dirtyFieldsRef.current.delete(field);
+    else dirtyFieldsRef.current.add(field);
 
     if (["estrogen_receptor_status", "progesterone_receptor_status", "her2_status"].includes(field)) {
       const er = String(field === "estrogen_receptor_status" ? value : updated.estrogen_receptor_status ?? "");
@@ -234,9 +268,11 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
   const handleNameChange = useCallback((name: string) => {
     if (readOnly) return;
     setEditedName(name);
+    if (name === initialName) dirtyFieldsRef.current.delete('patient_name');
+    else dirtyFieldsRef.current.add('patient_name');
     const base = pendingDataRef.current ?? editedInfoRef.current;
     scheduleAutoSave({ ...base, patient_name: name });
-  }, [scheduleAutoSave, readOnly]);
+  }, [scheduleAutoSave, readOnly, initialName]);
 
 
 
@@ -256,12 +292,16 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
             // rather than storing a value the API will refuse.
             const abbreviation = place["state abbreviation"];
             setEditedInfo((prev) => {
-              const updated = {
+              const updated: Record<string, unknown> = {
                 ...prev,
                 city: place["place name"],
                 ...(abbreviation ? { region: abbreviation } : {}),
               };
               pendingDataRef.current = updated;
+              for (const field of ['city', 'region']) {
+                if (updated[field] === serverInfoRef.current[field]) dirtyFieldsRef.current.delete(field);
+                else dirtyFieldsRef.current.add(field);
+              }
               return updated;
             });
           }

@@ -24,9 +24,10 @@ from omop_core.models import (
 )
 from patient_portal.models import PatientStatement, PatientUser
 
-from .labs import lab_history, labs
+from .labs import blood_type, lab_history, labs
 from .records import genetics, medication_detail, medications, procedures
 from .feed import imaging, whats_new
+from .outcomes import has_outcomes, outcomes
 from .therapy import therapy
 from .sources import PATIENT, RECORD, row_sources, source
 
@@ -76,7 +77,8 @@ def _edited(record: PatientRecord | None) -> set[str]:
 GENDERS = {'F': 'Female', 'M': 'Male', 'O': 'Other', 'U': 'Unknown'}
 
 
-def about_fields(record: PatientRecord | None) -> list[dict[str, Any]]:
+def about_fields(record: PatientRecord | None, person=None) -> list[dict[str, Any]]:
+    """About me's rows; with ``person``, the blood type from their ABO/Rh results."""
     if record is None:
         return []
     edited = _edited(record)
@@ -106,6 +108,15 @@ def about_fields(record: PatientRecord | None) -> list[dict[str, Any]]:
         field('race', record.race),
         field('ethnicity', record.ethnicity),
     ]
+    typed = blood_type(person) if person is not None else None
+    if typed:
+        value, row = typed
+        fields.append({
+            'key': 'blood_type',
+            'value': value,
+            'source': row_sources(Measurement, [row], type_attr='measurement_type_concept',
+                                  date_attr='measurement_date')[row.pk],
+        })
     return [f for f in fields if f]
 
 
@@ -115,7 +126,7 @@ def patient_name(person) -> str:
 
 class AboutView(PhrView):
     def build(self, person, record):
-        data = {'name': patient_name(person) or None, 'fields': about_fields(record)}
+        data = {'name': patient_name(person) or None, 'fields': about_fields(record, person)}
         return {k: v for k, v in data.items() if v is not None}
 
 
@@ -145,6 +156,10 @@ def is_cancer_condition(row: ConditionOccurrence) -> bool:
 # Per-disease presentation. Stage systems differ by cancer, so the label goes
 # with the disease; fields that don't apply are simply absent.
 SOLID_TUMOURS = {'breast-cancer', 'lung-cancer', 'colon-cancer'}
+HEMATOLOGIC_CANCERS = {
+    'myeloma', 'multiple-myeloma', 'follicular-lymphoma',
+    'chronic-lymphocytic-leukemia', 'mantle-cell-lymphoma',
+}
 STAGE_FIELDS = {
     'myeloma': ('stage', 'Stage & risk group'),
     'multiple-myeloma': ('stage', 'Stage & risk group'),
@@ -172,6 +187,13 @@ def _labelled(record, field, label):
 
 
 def _spread(record) -> str | None:
+    slug = (record.disease_slug or '').lower()
+    if slug in HEMATOLOGIC_CANCERS:
+        # This flat custom field belongs to the primary diagnosis. Do not infer
+        # blood-cancer involvement from solid-tumour metastasis flags (D05).
+        return _text((record.custom_fields or {}).get('hematologic_spread'))
+    if slug not in SOLID_TUMOURS:
+        return None
     if _text(record.metastasis_status):
         return _text(record.metastasis_status)
     if record.bone_only_metastasis_status:
@@ -199,7 +221,7 @@ def primary_cancer(record: PatientRecord, transitions: list[dict]) -> dict[str, 
         'subtype': _text(record.histologic_type),
         'stage': _labelled(record, stage_field, stage_label),
         'risk': _labelled(record, *risk) if risk else None,
-        'spread': _spread(record) if slug in SOLID_TUMOURS else None,
+        'spread': _spread(record),
         'biomarkers': [b for b in (_labelled(record, f, label) for f, label in BIOMARKER_FIELDS) if b],
         'date': record.diagnosis_date.isoformat() if record.diagnosis_date else None,
         'status': status.capitalize() if status else None,
@@ -307,7 +329,9 @@ def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
             'source': sources[latest.pk],
         }
         cancer.append({k: v for k, v in entry.items() if v not in (None, [])})
+    # The primary cancer (the one the record follows) first, then the others newest first.
     cancer.sort(key=lambda c: c.get('date') or '', reverse=True)
+    cancer.sort(key=lambda c: c['id'] != 'primary')
 
     # Patient-added conditions may have no known date (stored as the day added).
     undated = set(
@@ -369,13 +393,13 @@ def section_status(person, record: PatientRecord | None) -> dict[str, str]:
 
     docs = PatientDocument.objects.filter(person=person)
     present = {
-        'about': bool(about_fields(record)),
+        'about': bool(about_fields(record, person)),
         'diagnoses': bool(record and _text(record.disease))
         or has(ConditionOccurrence.objects.filter(is_erroneous=False)),
         # Any cancer's lines (#1739), not only the primary one's.
         'therapy': bool(record and (_text(record.first_line_therapy) or record.later_therapies))
         or _has_lines(person),
-        'outcomes': False,
+        'outcomes': has_outcomes(),
         'labs': has(Measurement.objects.filter(is_erroneous=False)),
         'medications': has(DrugExposure.objects.filter(is_erroneous=False)),
         'procedures': has(ProcedureOccurrence.objects.filter(is_erroneous=False, image_occurrences__isnull=True)),
@@ -450,3 +474,8 @@ class WhatsNewView(PhrView):
 class ImagingView(PhrView):
     def build(self, person, record):
         return imaging(person, record)
+
+
+class OutcomesView(PhrView):
+    def build(self, person, record):
+        return outcomes(person, record)

@@ -97,7 +97,10 @@ from omop_core.services.access import get_admin_orgs
 from omop_core.services.pk import next_pk
 from patient_portal.models import Identity, PatientUser
 from omop_core.models import Person, PatientRecord
-from .permissions import IsStaffPermission, IsStaffOrOrgAdmin, IsStaffOrAccessAdmin
+from .permissions import (
+    IsStaffPermission, IsStaffOrOrgAdmin, IsStaffOrAccessAdmin,
+    OrgAdminTokenScopePermission,
+)
 from .serializers import (
     OrganizationSerializer, OrgTrustSerializer,
     OrgInvitationSerializer, GroupAccessSerializer,
@@ -297,7 +300,7 @@ def _grant_org_access(identity, org, role, granted_by, redirect_url=''):
 class OrgListCreateView(APIView):
     def get_permissions(self):
         if self.request.method == 'POST':
-            return [IsStaffPermission()]
+            return [IsStaffPermission(), OrgAdminTokenScopePermission()]
         return [IsStaffOrOrgAdmin()]
 
     def get(self, request):
@@ -318,7 +321,9 @@ class OrgListCreateView(APIView):
 class OrgDetailView(APIView):
     def get_permissions(self):
         if self.request.method == 'DELETE':
-            return [IsStaffPermission()]
+            return [IsStaffPermission(), OrgAdminTokenScopePermission()]
+        if self.request.method == 'PATCH':
+            return [IsStaffOrOrgAdmin(), OrgAdminTokenScopePermission()]
         return [IsStaffOrOrgAdmin()]
 
     def get(self, request, slug):
@@ -355,7 +360,7 @@ class OrgDetailView(APIView):
 # ---------------------------------------------------------------------------
 
 class OrgInviteView(APIView):
-    permission_classes = [IsStaffOrAccessAdmin]
+    permission_classes = [IsStaffOrAccessAdmin, OrgAdminTokenScopePermission]
 
     def post(self, request, slug):
         org = _get_org(slug)
@@ -460,7 +465,7 @@ class OrgInvitationListView(APIView):
 
 
 class OrgInvitationDetailView(APIView):
-    permission_classes = [IsStaffOrAccessAdmin]
+    permission_classes = [IsStaffOrAccessAdmin, OrgAdminTokenScopePermission]
 
     def delete(self, request, slug, invitation_id):
         org = _get_org(slug)
@@ -640,7 +645,7 @@ def org_invitation_lookup(request):
 # ---------------------------------------------------------------------------
 
 class OrgTrustListCreateView(APIView):
-    permission_classes = [IsStaffOrAccessAdmin]
+    permission_classes = [IsStaffOrAccessAdmin, OrgAdminTokenScopePermission]
 
     def get(self, request, slug):
         org = _get_org(slug)
@@ -656,7 +661,7 @@ class OrgTrustListCreateView(APIView):
 
 
 class OrgTrustDetailView(APIView):
-    permission_classes = [IsStaffOrAccessAdmin]
+    permission_classes = [IsStaffOrAccessAdmin, OrgAdminTokenScopePermission]
 
     def delete(self, request, slug, trust_id):
         org = _get_org(slug)
@@ -679,7 +684,7 @@ class OrgAccessListView(APIView):
 
 
 class OrgAccessDetailView(APIView):
-    permission_classes = [IsStaffOrAccessAdmin]
+    permission_classes = [IsStaffOrAccessAdmin, OrgAdminTokenScopePermission]
 
     def patch(self, request, slug, access_id):
         """Update role and/or premium status for an access grant.

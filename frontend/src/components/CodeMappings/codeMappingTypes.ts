@@ -3,7 +3,7 @@
  * EditMappingDialog. Extracted to avoid circular imports and duplication.
  */
 
-import type { SourceEvidence, SourceUnitEvidence } from "./SourceEvidencePanel";
+import type { SourceEvidence, SourceSystemContext, SourceUnitEvidence } from "./SourceEvidencePanel";
 
 // ── Row & form types ────────────────────────────────────────────────
 
@@ -11,6 +11,7 @@ export interface CodeMappingRow {
   mapping_id: number | null;
   domain_id?: string;
   source_vocabulary_id: string;
+  source_system_context?: SourceSystemContext;
   source_code: string;
   source_code_description: string;
   organization_id?: number | null;
@@ -20,7 +21,8 @@ export interface CodeMappingRow {
   source_retired?: boolean | null;
   source_retirement_evidence?: string[];
   umls_source_name?: string;
-  destination_concept_id: number;
+  /** Null while the row has no destination; never 0. */
+  destination_concept_id: number | null;
   destination_concept_name: string;
   destination_concept_code: string;
   destination_vocabulary_id: string;
@@ -50,7 +52,16 @@ export interface CodeMappingRow {
   locked_at?: string | null;
   source_evidence?: SourceEvidence;
   source_unit?: string;
+  source_units?: string[];
+  /** Source FHIR basedOn displays, falling back to references. */
+  based_on?: string[];
   example_quantity?: string;
+  sample_quantities?: string[];
+  source_code_id?: number;
+  extracted_source_unit?: string;
+  extracted_example_quantity?: string;
+  source_unit_override?: string | null;
+  example_quantity_override?: string | null;
   source_metadata?: Record<string, unknown>;
   destination_unit_concept_id?: number | null;
 }
@@ -198,6 +209,7 @@ export const strategyLabel: Record<string, string> = {
   vectors: "Vectors",
   lexical: "Lexical",
   semantic: "Vectors",  // legacy alias
+  metadata: "Source metadata",  // legacy: rows suggested between #1783 and #1787
 };
 
 /** Pipeline order, which is also the order the checkboxes read in. */
@@ -306,7 +318,8 @@ export function buildEditForm(row: CodeMappingRow, reference: Reference): Mappin
     source_code: row.source_code,
     source_code_description: row.source_code_description || "",
     source_concept_id: row.source_concept_id ? String(row.source_concept_id) : "",
-    destination_concept_id: String(row.destination_concept_id),
+    // Concept 0 is "No matching concept": a missing destination, shown empty.
+    destination_concept_id: row.destination_concept_id ? String(row.destination_concept_id) : "",
     destination_concept_name: row.destination_concept_name,
     destination_concept_code: row.destination_concept_code || "",
     destination_vocabulary_id: row.destination_vocabulary_id,

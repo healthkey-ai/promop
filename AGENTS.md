@@ -67,6 +67,46 @@ Django reads only `DATABASE_URL`, so every command sets it: `DATABASE_URL="${STA
   do not run the full Django or pytest suite locally. Wait for the required
   checks before merging. See "Targeted Tests Before a Push" in `CLAUDE.md`.
 
+## Migration conflicts
+
+Two branches that each add an `omop_core` migration off the same base are each
+green on their own, but once both merge, `dev` has two leaf migrations. Django
+then refuses to migrate, the conflict check and the migration-graph tests fail,
+and the staging deploy is skipped until someone repairs it. This has broken
+`dev` repeatedly (e4ee0a1a, 97d3767a, 5dca221f, #1833, 82e12773, #1871). A PR's
+CI result describes the base it ran against, not `dev` at the moment you merge,
+so a stale green check does not catch it.
+
+- **Rebase before creating a migration.** `git fetch origin dev && git rebase
+  origin/dev`, then run `makemigrations`, so the migration gets the next number
+  and depends on the current leaf.
+- **Rebase again immediately before merging a PR that adds a migration.** If
+  `omop_core/migrations/` on `dev` changed since the branch's last CI run,
+  rebase, check the graph, push, and wait for CI to pass on the new head. Do
+  not merge on the older green result.
+- **Check the graph locally after every rebase.** With `DATABASE_URL` pointed at
+  local PostgreSQL and `DEBUG=True`, run
+  `.venv/bin/python manage.py makemigrations --check --dry-run`. It fails with
+  "Conflicting migrations detected" when there are two leaves.
+- **Regenerate an unmerged migration rather than merge around it.** If your
+  migration is not on `dev` and has not been applied to staging, delete it,
+  rebase, and run `makemigrations` again so it sits on the current leaf.
+  Hand-edit its `dependencies` only if it contains data migration code that
+  `makemigrations` cannot regenerate.
+- **Never renumber or rename a migration that is on `dev` or applied to
+  staging.** Django keys on the full name, so a renamed migration looks like it
+  never ran and would be applied a second time (see e4ee0a1a). Rejoin the leaves
+  with a merge migration instead.
+- **When `dev` already has two leaves**, fix it at once on a branch: add one
+  empty merge migration whose `dependencies` list both leaves, with a docstring
+  naming the PRs that forked the graph (as in
+  `0295_merge_source_code_upload_and_facility_review`). Check that nobody has
+  already opened the same fix, because two identical merge migrations create a
+  new pair of leaves (#1833).
+- **Merge migration PRs one at a time.** When several open PRs add
+  migrations, merge one, then rebase the next onto the new `dev`, check it, and
+  let CI pass before merging it.
+
 ## Documentation naming and ownership
 
 - Use `_architecture.md` for implemented architecture and `_plan.md` for future

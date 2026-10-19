@@ -245,7 +245,7 @@ def prolog_participant_id(request):
     return person.person_id if person is not None else None
 
 
-def create_unidentified_person(source='prolog'):
+def create_unidentified_person(source='prolog', organization=None):
     """Create a Person with no Identity, no PatientUser and no demographics.
 
     The counterpart to resolve_or_create_person, which provisions a person *for
@@ -267,6 +267,12 @@ def create_unidentified_person(source='prolog'):
       year_of_birth=1900 and "unknown" source values because it is provisioning
       a patient. This person is not a patient yet, and a placeholder birth year
       is an identifying attribute that is also false.
+    * **Takes the organization here, not later.** A record created without one
+      drops out of every org-scoped query (#1764), and the stamp cannot be
+      applied afterwards by the caller that knows the org: an importer runs
+      `refresh_patient_record` once its OMOP rows are in, which builds a bare
+      `PatientRecord(person=person)` when none exists. The same reason
+      `import_org_patients` creates the row before it refreshes.
 
     Callers that later learn who this is promote the same row in place — an
     Identity and a PatientUser are attached to it — so no answer moves and no
@@ -274,7 +280,7 @@ def create_unidentified_person(source='prolog'):
     """
     with transaction.atomic():
         person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
-        PatientRecord.objects.create(person=person)
+        PatientRecord.objects.create(person=person, organization=organization)
     logger.info('minted unidentified person %s for %s', person.person_id, source)
     return person
 

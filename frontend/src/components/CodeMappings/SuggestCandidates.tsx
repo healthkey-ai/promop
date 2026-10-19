@@ -49,7 +49,7 @@ type Props = {
   domains?: { domain_id: string; label: string }[];
 };
 
-const STRATEGY_LABELS: Record<string, string> = { umls: "U", lexical: "L", vectors: "V", semantic: "V" };
+const STRATEGY_LABELS: Record<string, string> = { umls: "U", lexical: "L", vectors: "V", semantic: "V", metadata: "M" };
 
 const RANKER_STYLE: Record<string, string> = {
   jev: "bg-indigo-100 text-indigo-700",

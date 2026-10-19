@@ -1,10 +1,11 @@
 import pytest
+from unittest.mock import patch
 from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
 
 from omop_core.models import MappingDestinationCandidate, SourceCodeConceptMapping
 from patient_portal.api.views import code_mapping_detail, code_mapping_list
 from patient_portal.models import Identity
-from tests.factories import ConceptFactory
+from tests.factories import ConceptFactory, PersonFactory
 
 pytestmark = pytest.mark.django_db
 
@@ -22,6 +23,115 @@ def browse():
 
 def row(code, **kwargs):
     return SourceCodeConceptMapping.objects.create(source_code=code, **{'source_vocabulary_id': 'ICD10CM', 'status': 'proposed', **kwargs})
+
+
+@pytest.mark.parametrize('has_destination', [False, True])
+@pytest.mark.parametrize(('metadata', 'expected'), [
+    ({'fhir': {'resourceType': 'Observation', 'basedOn': [
+        {'display': ' Complete blood count ', 'reference': 'ServiceRequest/123'},
+        {'reference': 'ServiceRequest/456'},
+        {'display': ' ', 'reference': ' ServiceRequest/789 '},
+    ]}}, ['Complete blood count', 'ServiceRequest/456', 'ServiceRequest/789']),
+    ({'resourceType': 'Observation', 'basedOn': [{'display': 'Blood test'}]}, ['Blood test']),
+    ({}, []),
+    ({'fhir': {'resourceType': 'Observation'}}, []),
+    ({'fhir': {'basedOn': []}}, []),
+    ({'fhir': {'basedOn': [None, 'bad', {}, {'identifier': {'value': '123'}}]}}, []),
+    ({'fhir': {'basedOn': 'bad'}}, []),
+    ({'fhir': None}, []),
+])
+def test_based_on_comes_only_from_source_fhir_metadata(browse, has_destination, metadata, expected):
+    row('BASED-ON', source_metadata=metadata, origin='curator', origin_system='import',
+        target_concept=ConceptFactory() if has_destination else None)
+
+    from omop_core.models import PatientSourceCode
+    PatientSourceCode.objects.create(person=PersonFactory(), source_value='BASED-ON',
+        source_vocabulary_id='ICD10CM', source_metadata=metadata)
+    result = browse().data['results'][0]
+
+    assert result['based_on'] == expected
+    assert 'source_metadata' not in result
+
+
+@pytest.mark.parametrize('has_destination', [False, True])
+@pytest.mark.parametrize(('value', 'expected'), [(12.5, '12.5'), (0, '0'), (None, ''), (True, '')])
+def test_mapping_quantity_uses_patient_inventory_samples(browse, has_destination, value, expected):
+    row('QUANTITY', source_metadata={'fhir': {'resourceType': 'Observation', 'valueQuantity': {'value': value}}},
+        target_concept=ConceptFactory() if has_destination else None)
+
+    from omop_core.models import PatientSourceCode
+    PatientSourceCode.objects.create(person=PersonFactory(), source_value='QUANTITY',
+        source_vocabulary_id='ICD10CM', example_quantity=expected)
+    assert browse().data['results'][0]['example_quantity'] == expected
+
+
+def test_queue_sections_follow_destination_and_approval_including_athena(browse):
+    destination = ConceptFactory()
+    row('NO-DEST', status='approved')
+    row('PROPOSED', target_concept=destination)
+    row('REJECTED', status='rejected', target_concept=destination)
+    row('APPROVED', status='approved', target_concept=destination)
+    row('ATHENA', status='approved', target_concept=destination, origin_system='athena')
+    data = browse(queue_sections='1').data
+    assert {section: page['total'] for section, page in data['pages'].items()} == {
+        'Unmapped': 1, 'Proposed': 2, 'Approved': 2,
+    }
+
+
+def test_patient_samples_are_distinct_bounded_and_match_exact_source_identity(browse):
+    from omop_core.models import PatientSourceCode
+    mapping = row('SAMPLE', source_metadata={'fhir': {'basedOn': [{'display': 'Not a patient sample'}]}})
+    for i in range(6):
+        PatientSourceCode.objects.create(person=PersonFactory(), source_value='SAMPLE',
+            source_vocabulary_id='ICD10CM', example_quantity=str(i),
+            source_metadata={'fhir': {'basedOn': [{'reference': f'ServiceRequest/{i}'}]}})
+    PatientSourceCode.objects.create(person=PersonFactory(), source_value='SAMPLE',
+        source_vocabulary_id='OTHER', example_quantity='wrong vocabulary')
+    data = browse(queue_sections='1').data['results'][0]
+    assert data['mapping_id'] == mapping.pk
+    assert data['sample_quantities'] == ['0', '1', '2']
+    assert data['based_on'] == ['ServiceRequest/0', 'ServiceRequest/1', 'ServiceRequest/2']
+
+
+def test_samples_do_not_cross_organization_boundaries_and_honor_corrections(browse):
+    from omop_core.models import PatientSourceCode
+    from tests.factories import PatientRecordFactory, OrganizationFactory
+    org = OrganizationFactory()
+    row('SCOPED', organization=org)
+    mine = PatientRecordFactory(organization=org)
+    other = PatientRecordFactory(organization=OrganizationFactory())
+    for person, quantity in ((mine.person, '12'), (other.person, '999')):
+        PatientSourceCode.objects.create(person=person, source_value='SCOPED', source_vocabulary_id='ICD10CM',
+            example_quantity=quantity, example_quantity_override='0' if person == mine.person else None,
+            source_metadata={'fhir': {'basedOn': [{'display': quantity}]}})
+    data = browse(queue_sections='1').data['results'][0]
+    assert data['sample_quantities'] == ['0']
+    assert data['based_on'] == ['12']
+
+
+def test_sampling_cost_stays_flat_across_a_page(browse):
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+    row('FIRST')
+    with CaptureQueriesContext(connection) as small:
+        assert browse(queue_sections='1', include_duplicates='0').status_code == 200
+    for i in range(20):
+        row(f'NEXT-{i}')
+    with CaptureQueriesContext(connection) as large:
+        assert browse(queue_sections='1', include_duplicates='0').status_code == 200
+    assert len(large) == len(small)
+
+
+def test_label_groups_show_patient_examples_before_expansion(browse):
+    from omop_core.models import PatientSourceCode
+    row('GROUPED', source_code_description='Albumin', source_label_norm='albumin')
+    PatientSourceCode.objects.create(person=PersonFactory(), source_value='GROUPED',
+        source_vocabulary_id='ICD10CM', example_quantity='12', source_unit='g/dL',
+        source_metadata={'fhir': {'basedOn': [{'display': 'Albumin order'}]}})
+    group = browse(queue_sections='1', rollup='1').data['groups']['Unmapped'][0]
+    assert group['example_quantity'] == '12'
+    assert group['source_units'] == ['g/dL']
+    assert group['based_on'] == ['Albumin order']
 
 
 def test_pages_sort_before_slicing_and_report_full_counts(browse):
@@ -298,6 +408,40 @@ def test_duplicates_include_off_page_and_rejected_members(browse):
     assert len(data['results']) == 100
 
 
+def test_initial_page_defers_duplicate_audit_and_closed_sections_without_losing_totals(browse):
+    row('MATCH', occurrence_count=2)
+    row(' match ', status='rejected')
+    row('MAPPED', status='approved')
+    row('ATHENA', origin_system='athena', status='approved')
+    baseline = browse(seen_only='1').data
+    with patch('omop_core.services.mapping_browse.mapping_duplicates', side_effect=AssertionError('audit blocked page')):
+        data = browse(seen_only='1', include_duplicates='0', sections='Unmapped').data
+    assert data['duplicates'] == []
+    assert data['duplicates_included'] is False
+    assert [item['source_code'] for item in data['results']] == ['MATCH']
+    assert data['pages'] == baseline['pages']
+    assert data['tabs'] == baseline['tabs']
+    assert data['total'] == baseline['total'] == 4
+    expanded = browse(include_duplicates='0', sections='Unmapped,Mapped').data
+    assert {item['source_code'] for item in expanded['results']} == {'MATCH', 'MAPPED'}
+    assert browse(include_duplicates='0', sections='').data['results'] == []
+    assert browse(sections='unknown').status_code == 400
+
+
+def test_duplicate_audit_returns_compact_complete_summaries_independently(browse):
+    first = row('MATCH', occurrence_count=0, notes='Long notes unnecessary for a warning')
+    second = row(' match ', status='rejected')
+    row('UNRELATED', occurrence_count=100)
+    with patch('patient_portal.api.views._serialize_code_mapping_row', side_effect=AssertionError('full serialization')):
+        response = browse(duplicates_only='1', source='ICD10CM', search='UNRELATED', seen_only='1')
+    assert response.status_code == 200
+    summaries = response.data['duplicate_summaries']
+    assert {item['mapping_id'] for item in summaries} == {first.pk, second.pk}
+    assert {item['status'] for item in summaries} == {'proposed', 'rejected'}
+    assert all(item['summary'] is True and 'notes' not in item and 'destination_count' not in item for item in summaries)
+    assert browse(duplicates_only='1').status_code == 400
+
+
 @pytest.mark.parametrize('source', ['OpenWearables', '__overall__'])
 def test_same_code_in_different_vocabularies_on_one_tab_is_not_a_duplicate(browse, source):
     # Wearables consolidates three vocabularies; ingest resolves on the exact one.
@@ -479,6 +623,10 @@ def test_detail_includes_source_evidence_without_putting_it_on_browse_rows(staff
     assert detail.status_code == 200
     assert detail.data['source_evidence'] == {
         'organization': {'id': organization.pk, 'slug': 'memorial', 'name': 'Memorial Hospital'},
+        'system_context': {
+            'kind': 'verified', 'label': 'Memorial Hospital',
+            'names': [], 'name_count': 0,
+        },
         'occurrence_count': 20,
         'group_occurrence_count': 37,
         'first_seen': None,
@@ -499,10 +647,11 @@ def test_detail_includes_source_evidence_without_putting_it_on_browse_rows(staff
     listed = client.get('/api/v1/code-mappings/', {'source': 'ICD10CM'})
     assert listed.status_code == 200
     assert 'source_evidence' not in listed.data[0]
+    assert listed.data[0]['source_system_context'] == detail.data['source_evidence']['system_context']
 
 
-def test_delete_with_destination_clears_instead_of_removing(staff_user):
-    """DELETE on a mapping with a destination clears the destination, keeping the row."""
+def test_delete_with_destination_truly_deletes(staff_user):
+    """DELETE on a mapped row repoints clinical rows to 0 and truly deletes."""
     concept = ConceptFactory(concept_id=999999, concept_name='Test Concept', concept_code='12345')
     mapping = row('TEST-CODE', status='approved', target_concept=concept,
                   destination_vocabulary_id='SNOMED')
@@ -511,32 +660,65 @@ def test_delete_with_destination_clears_instead_of_removing(staff_user):
         target_concept_code='12345', target_concept=concept,
     )
     response = _delete(staff_user, mapping.id)
-    assert response.status_code == 200
-    mapping.refresh_from_db()
-    assert mapping.target_concept_id is None
-    assert mapping.status == 'proposed'
-    assert mapping.destination_vocabulary_id == ''
-    assert mapping.reviewer_id is None
-    assert mapping.suggestion_model_version == ''
-    assert mapping.last_suggest_attempt == ''
-    assert not MappingDestinationCandidate.objects.filter(mapping=mapping).exists()
-
-
-def test_delete_without_destination_truly_deletes(staff_user):
-    """DELETE on a proposed mapping with no destination removes the row."""
-    mapping = row('JUNK-CODE')
-    response = _delete(staff_user, mapping.id)
     assert response.status_code == 204
     assert not SourceCodeConceptMapping.objects.filter(id=mapping.id).exists()
+    # CASCADE removes candidates too
+    assert not MappingDestinationCandidate.objects.filter(mapping_id=mapping.id).exists()
 
 
-def test_delete_rejected_mapping_clears_destination(staff_user):
-    """DELETE on a rejected mapping with a destination clears it."""
+def test_delete_without_destination_is_rejected(staff_user):
+    """DELETE on an unmapped row returns 400 — the source code is real data."""
+    mapping = row('JUNK-CODE')
+    response = _delete(staff_user, mapping.id)
+    assert response.status_code == 400
+    assert SourceCodeConceptMapping.objects.filter(id=mapping.id).exists()
+
+
+# --- source_units in browse and flat responses (#1869, #1870) ---------------
+
+def _unit_evidence(*codes):
+    return [{'code': c, 'display': c, 'count': 1} for c in codes]
+
+
+def test_flat_browse_row_includes_source_units(browse):
+    row('ALB', occurrence_count=1, source_unit_evidence=_unit_evidence('mg/dL'))
+    data = browse().data
+    assert data['results'][0]['source_units'] == ['mg/dL']
+
+
+def test_flat_browse_row_without_units_returns_empty_list(browse):
+    row('ALB', occurrence_count=1)
+    data = browse().data
+    assert data['results'][0]['source_units'] == []
+
+
+def test_rollup_groups_by_label_only():
+    """Grouped browse entries group by label, not by units."""
+    from rest_framework.test import APIRequestFactory, force_authenticate
+    user = Identity.objects.create_user(email='rollup-units@example.test', is_staff=True)
+    row('A', source_code_description='Albumin', occurrence_count=5,
+        source_unit_evidence=_unit_evidence('mg/dL'))
+    row('B', source_code_description='ALBUMIN', occurrence_count=3,
+        source_unit_evidence=_unit_evidence('mg/dL'))
+    row('C', source_code_description='albumin', occurrence_count=2,
+        source_unit_evidence=_unit_evidence('mmol/L'))
+
+    request = APIRequestFactory().get('/api/v1/code-mappings/', {'browse': '1', 'rollup': '1'})
+    force_authenticate(request, user=user)
+    data = code_mapping_list(request).data
+    unmapped = data['groups']['Unmapped']
+    # All three rows share the same normalised label and belong to one group.
+    assert len(unmapped) == 1
+    group = unmapped[0]
+    assert group['members'] == 3
+    assert group['group_key'] == 'albumin'
+
+
+def test_delete_rejected_mapping_with_destination_truly_deletes(staff_user):
+    """DELETE on a rejected mapping with a destination truly deletes it."""
     concept = ConceptFactory(concept_id=999998, concept_name='Rejected Concept', concept_code='99998')
     mapping = row('REJECTED-CODE', status='rejected', target_concept=concept,
                   destination_vocabulary_id='SNOMED')
     response = _delete(staff_user, mapping.id)
-    assert response.status_code == 200
-    mapping.refresh_from_db()
-    assert mapping.target_concept_id is None
-    assert mapping.status == 'proposed'
+    assert response.status_code == 204
+    assert not SourceCodeConceptMapping.objects.filter(id=mapping.id).exists()

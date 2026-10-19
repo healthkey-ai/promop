@@ -4,10 +4,12 @@ A "test" is a measurement concept — the standard concept, or the source
 concept where an import left the standard one unmapped (concept 0), the same
 rule PRomop's lab-results screen uses. Ranking, panels and cancer markers come
 from LabMarker rows that clinical admins maintain. Vitals are excluded: they
-are not part of the record's first version.
+are not part of the record's first version. So is blood typing, which About me
+shows as the patient's blood type.
 """
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from decimal import Decimal
 from typing import Any
@@ -24,6 +26,12 @@ VITALS = frozenset({
     '29463-7', '3141-9', '8302-2', '39156-5', '8480-6', '8462-4', '85354-9', '8867-4',
     '8310-5', '59408-5', '2708-6', '9279-1', '89247-1', '89243-0',
 })
+# ABO/Rh typing, shown on About me as the blood type: the combined group, or
+# its ABO and Rh halves reported separately.
+ABO_RH, ABO, RH = '882-1', '883-9', '10331-7'
+BLOOD_TYPING = frozenset({ABO_RH, ABO, RH})
+# What the Labs section (and What's new's lab count) leaves out.
+NOT_LABS = VITALS | BLOOD_TYPING
 HISTORY_LIMIT = 500
 # Results per test in the list's history table; the detail endpoint has them all.
 RECENT_LIMIT = 8
@@ -107,9 +115,26 @@ def _brief(row: Measurement) -> dict[str, Any]:
     return {k: v for k, v in item.items() if v is not None}
 
 
+def _genetic_ids(person) -> set[int]:
+    """Genetic findings, which Genetic testing shows: each variant's parent
+    measurement and the component rows that point back to it."""
+    from omop_core.services.genomics import PARENT_CODE
+
+    parents = set(
+        Measurement.objects.filter(person=person)
+        .filter(Q(measurement_concept__concept_code=PARENT_CODE) | Q(measurement_source_concept__concept_code=PARENT_CODE))
+        .values_list('pk', flat=True)
+    )
+    if not parents:
+        return set()
+    components = Measurement.objects.filter(person=person, measurement_event_id__in=parents).values_list('pk', flat=True)
+    return parents | set(components)
+
+
 def _rows(person):
     return (
         Measurement.objects.filter(person=person, is_erroneous=False)
+        .exclude(pk__in=_genetic_ids(person))
         .exclude(value_as_number__isnull=True, value_as_string__isnull=True)
         .select_related(
             'measurement_concept', 'measurement_source_concept', 'unit_concept', 'visit_occurrence',
@@ -122,7 +147,7 @@ def _grouped(rows) -> dict[int, list[Measurement]]:
     groups: dict[int, list[Measurement]] = defaultdict(list)
     for row in rows:
         concept = effective_concept(row)
-        if concept is None or concept.concept_code in VITALS:
+        if concept is None or concept.concept_code in NOT_LABS:
             continue
         groups[concept.concept_id].append(row)
     return groups
@@ -140,6 +165,22 @@ def _test_meta(concept, markers: dict[str, LabMarker]) -> dict[str, Any]:
         'disease_slugs': list(marker.disease_slugs) if marker else [],
     }
     return {k: v for k, v in meta.items() if v is not None}
+
+
+def _cancers(person, record) -> list[dict[str, str]]:
+    """The patient's cancers as lab filters: the record's slug for the primary, the name's for the rest."""
+    from omop_core.services.disease_episodes import disease_slug
+
+    from .views import diagnoses
+
+    out, seen = [], set()
+    primary_slug = ((record.disease_slug if record else '') or '').lower()
+    for cancer in diagnoses(person, record)['cancer']:
+        slug = primary_slug if cancer['id'] == 'primary' and primary_slug else (disease_slug(cancer['name']) or '')
+        if slug and slug not in seen:
+            seen.add(slug)
+            out.append({'slug': slug, 'name': cancer['name']})
+    return out
 
 
 def _markers() -> dict[str, LabMarker]:
@@ -164,16 +205,14 @@ def labs(person, record) -> dict[str, Any]:
         })
     tests.sort(key=lambda t: (t.get('rank') is None, t.get('rank') or 0, t['name'].lower()))
 
-    slug = (record.disease_slug or '').lower() if record else ''
-    disease = (record.disease or '').strip() if record else ''
     panels = sorted(
         {p for t in tests for p in t['panels']},
         key=lambda p: (PANEL_ORDER.index(p) if p in PANEL_ORDER else len(PANEL_ORDER), p),
     )
+    marked = {s for t in tests for s in t['disease_slugs']}
     filters = {
-        'diagnoses': [{'slug': slug, 'name': disease}]
-        if slug and disease and any(slug in t['disease_slugs'] for t in tests)
-        else [],
+        # A filter for each of the patient's cancers that has marker tests, primary first.
+        'diagnoses': [c for c in _cancers(person, record) if c['slug'] in marked],
         'panels': panels,
     }
     return {'tests': tests, 'filters': filters}
@@ -186,7 +225,7 @@ def lab_history(person, concept_id: int, record=None) -> dict[str, Any] | None:
             | Q(measurement_concept_id=0, measurement_source_concept_id=concept_id)
         )[:HISTORY_LIMIT]
     )
-    if not rows or effective_concept(rows[0]).concept_code in VITALS:
+    if not rows or effective_concept(rows[0]).concept_code in NOT_LABS:
         return None
     sources = row_sources(Measurement, rows, type_attr='measurement_type_concept', date_attr='measurement_date')
     from .therapy import lines_for_markers
@@ -204,3 +243,51 @@ def lab_history(person, concept_id: int, record=None) -> dict[str, Any] | None:
             for line in lines_for_markers(person, record, meta.get('disease_slugs'))
         ],
     }
+
+
+_GROUP = re.compile(r'\b(AB|A|B|O)\b')
+
+
+def _value_text(row: Measurement) -> str:
+    if row.value_as_string and row.value_as_string.strip():
+        return row.value_as_string.strip()
+    return (row.value_as_concept.concept_name or '').strip() if row.value_as_concept_id else ''
+
+
+def _rh(text: str) -> str | None:
+    lower = text.lower()
+    if 'neg' in lower or re.search(r'(AB|A|B|O)\s*-', text, re.IGNORECASE) or lower.strip() == '-':
+        return 'negative'
+    if 'pos' in lower or '+' in text:
+        return 'positive'
+    return None
+
+
+def blood_type(person) -> tuple[str, Measurement] | None:
+    """The patient's blood type ("O positive") and the result it was read from.
+
+    The newest combined ABO/Rh result, else the newest ABO result with the
+    newest Rh result. A value the wording rules don't recognise is shown as
+    the care center wrote it.
+    """
+    newest: dict[str, Measurement] = {}
+    rows = (
+        Measurement.objects.filter(person=person, is_erroneous=False)
+        .filter(Q(measurement_concept__concept_code__in=BLOOD_TYPING)
+                | Q(measurement_concept_id=0, measurement_source_concept__concept_code__in=BLOOD_TYPING))
+        .select_related('measurement_concept', 'measurement_source_concept', 'value_as_concept', 'visit_occurrence')
+        .order_by('-measurement_date', '-measurement_id')
+    )
+    for row in rows:
+        concept = effective_concept(row)
+        if concept is not None and _value_text(row):
+            newest.setdefault(concept.concept_code, row)
+    row = newest.get(ABO_RH) or newest.get(ABO)
+    if row is None:
+        return None
+    text = _value_text(row)
+    group = _GROUP.search(text.upper())
+    if group is None:
+        return text, row
+    rh = _rh(text) if row is newest.get(ABO_RH) else (_rh(_value_text(newest[RH])) if RH in newest else None)
+    return ' '.join(part for part in (group.group(1), rh) if part), row

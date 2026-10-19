@@ -5,9 +5,9 @@ import { useAuth } from "../../hooks/useAuth";
 import type {
   PatientSourceCode,
   SourceCodesResponse,
-  ResolveResult,
 } from "../../types/sourceCodes";
 import EditMappingDialog from "../CodeMappings/EditMappingDialog";
+import SourceQuantityCell from "../CodeMappings/SourceQuantityCell";
 import {
   type CodeMappingRow,
   type Reference,
@@ -47,11 +47,18 @@ function sourceCodeToRow(sc: PatientSourceCode): CodeMappingRow {
     domain_id: domain,
     source_vocabulary_id: sc.source_vocabulary_id || "",
     source_code: sc.source_code || sc.source_value,
-    source_code_description: "",
+    source_code_description: sc.source_code_description || "",
     source_unit: sc.source_unit || "",
     example_quantity: sc.example_quantity || "",
+    based_on: sc.based_on || [],
+    source_code_id: sc.source_code_id,
+    extracted_source_unit: sc.extracted_source_unit,
+    extracted_example_quantity: sc.extracted_example_quantity,
+    source_unit_override: sc.source_unit_override,
+    example_quantity_override: sc.example_quantity_override,
     source_metadata: sc.source_metadata || {},
-    destination_concept_id: sc.mapping_target_concept_id || 0,
+    // No destination is no destination, never concept 0 ("No matching concept").
+    destination_concept_id: sc.mapping_target_concept_id || null,
     destination_concept_name: sc.mapping_target_concept_name || "",
     destination_concept_code: sc.mapping_destination_concept_code || "",
     destination_vocabulary_id: sc.mapping_destination_vocabulary_id || "",
@@ -73,6 +80,9 @@ function sourceCodeToRow(sc: PatientSourceCode): CodeMappingRow {
 
 type SectionKey = "unmapped" | "proposed" | "approved";
 
+/** Rows rendered per section before "Show all": thousands of rows render slowly. */
+export const SECTION_ROW_LIMIT = 200;
+
 const SECTIONS: { key: SectionKey; label: string; defaultOpen: boolean }[] = [
   { key: "unmapped", label: "Unmapped", defaultOpen: true },
   { key: "proposed", label: "Proposed", defaultOpen: true },
@@ -91,14 +101,12 @@ function SourceCodeTable({
       <table className="w-full text-sm">
         <thead className="border-b bg-muted/50">
           <tr>
-            <th className="px-3 py-2 text-left font-medium">Source Code</th>
+            <th className="px-3 py-2 text-left font-medium">Source</th>
             <th className="px-3 py-2 text-left font-medium">Domain</th>
-            <th className="px-3 py-2 text-right font-medium">Rows</th>
-            <th className="px-3 py-2 text-left font-medium">Units</th>
+            <th className="px-3 py-2 text-right font-medium">Seen</th>
             <th className="px-3 py-2 text-left font-medium">Qty</th>
-            <th className="px-3 py-2 text-left font-medium">Current Concept</th>
-            <th className="px-3 py-2 text-left font-medium">Mapping Target</th>
-            <th className="px-3 py-2 text-left font-medium">Provenance</th>
+            <th className="px-3 py-2 text-left font-medium">Units</th>
+            <th className="px-3 py-2 text-left font-medium">Destination</th>
           </tr>
         </thead>
         <tbody className="divide-y">
@@ -110,6 +118,9 @@ function SourceCodeTable({
             >
               <td className="px-3 py-2">
                 <div className="font-mono text-xs">{sc.source_value}</div>
+                {sc.source_code_description && (
+                  <div className="text-xs">{sc.source_code_description}</div>
+                )}
                 {sc.source_vocabulary_id && (
                   <div className="text-xs text-muted-foreground">{sc.source_vocabulary_id}</div>
                 )}
@@ -118,46 +129,20 @@ function SourceCodeTable({
                 {TABLE_LABELS[sc.omop_table] || sc.omop_table}
               </td>
               <td className="px-3 py-2 text-right tabular-nums">{sc.row_count}</td>
-              <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
-                {sc.source_unit || "\u2014"}
-              </td>
-              <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
-                {sc.example_quantity || "\u2014"}
-              </td>
+              <SourceQuantityCell quantity={sc.example_quantity} units={sc.source_unit}
+                basedOn={sc.based_on} correctedUnit={sc.source_unit_override != null} />
               <td className="px-3 py-2 text-xs">
-                {sc.concept_id === 0 ? (
-                  <span className="text-muted-foreground">No matching concept</span>
-                ) : (
-                  <span>
-                    {sc.concept_name || `Concept ${sc.concept_id}`}
-                    <span className="ml-1 text-muted-foreground">({sc.concept_id})</span>
-                  </span>
-                )}
-              </td>
-              <td className="px-3 py-2 text-xs">
-                {sc.mapping_target_concept_id ? (
-                  <div>
-                    <div>
-                      {sc.mapping_target_concept_name || `Concept ${sc.mapping_target_concept_id}`}
-                      <span className="ml-1 text-muted-foreground">
-                        ({sc.mapping_target_concept_id})
-                      </span>
-                    </div>
-                    {(sc.mapping_destination_concept_code || sc.mapping_destination_vocabulary_id) && (
-                      <div className="text-muted-foreground">
-                        {sc.mapping_destination_concept_code}
-                        {sc.mapping_destination_vocabulary_id && (
-                          <span className="ml-1">({sc.mapping_destination_vocabulary_id})</span>
-                        )}
-                      </div>
+                {sc.mapping_destination_concept_code ? (
+                  <>
+                    <div className="font-mono text-xs">{sc.mapping_destination_concept_code}</div>
+                    <div>{sc.mapping_target_concept_name || "\u2014"}</div>
+                    {sc.mapping_destination_vocabulary_id && (
+                      <div className="text-muted-foreground">{sc.mapping_destination_vocabulary_id}</div>
                     )}
-                  </div>
+                  </>
                 ) : (
                   <span className="text-muted-foreground">&mdash;</span>
                 )}
-              </td>
-              <td className="px-3 py-2 text-xs text-muted-foreground">
-                {sc.mapping_origin_system || sc.mapping_origin || "\u2014"}
               </td>
             </tr>
           ))}
@@ -173,10 +158,13 @@ export default function PatientSourceCodesTab({ personId }: Props) {
   const [data, setData] = useState<SourceCodesResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [resolving, setResolving] = useState(false);
-  const [resolveResult, setResolveResult] = useState<ResolveResult | null>(null);
   const [reference, setReference] = useState<Reference>(emptyReference);
   const [banner, setBanner] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<Record<SectionKey, boolean>>({
+    unmapped: false,
+    proposed: false,
+    approved: false,
+  });
   const [collapsed, setCollapsed] = useState<Record<SectionKey, boolean>>({
     unmapped: false,
     proposed: false,
@@ -236,28 +224,6 @@ export default function PatientSourceCodesTab({ personId }: Props) {
     };
   }, []);
 
-  const handleResolve = async () => {
-    setResolving(true);
-    setResolveResult(null);
-    try {
-      const res = await api.post<ResolveResult>(
-        `/v1/patient-records/${personId}/resolve-source-codes/`,
-        {}
-      );
-      setResolveResult(res.data);
-      await fetchSourceCodes();
-    } catch (err) {
-      const detail =
-        err && typeof err === "object" && "response" in err
-          ? (err as { response?: { data?: { detail?: string; error?: string } } })
-              .response?.data
-          : undefined;
-      setError(detail?.detail || detail?.error || "Failed to resolve source codes.");
-    } finally {
-      setResolving(false);
-    }
-  };
-
   const handleRowClick = (sc: PatientSourceCode) => {
     setBanner(null);
     const row = sourceCodeToRow(sc);
@@ -271,15 +237,16 @@ export default function PatientSourceCodesTab({ personId }: Props) {
     setDialogRow(null);
   };
 
-  const handleDialogSaved = (_saved: CodeMappingRow, repoint: RepointResult | null) => {
+  const handleDialogSaved = (saved: CodeMappingRow, repoint: RepointResult | null) => {
     handleDialogClose();
     if (repoint && repoint.rows_updated) {
       setBanner(
-        `Updated ${repoint.rows_updated} row(s) across `
-        + `${repoint.persons_marked_stale} patient(s)`
+        `Updated ${repoint.rows_updated} row(s) for this patient`
         + (repoint.rows_collapsed ? `, ${repoint.rows_collapsed} duplicate(s) collapsed` : "")
         + ". Patient records queued for re-derivation.",
       );
+    } else if (saved.status === "approved") {
+      setBanner("Mapping approved. Run Generate OMOP to apply to clinical rows.");
     } else {
       setBanner("Mapping saved.");
     }
@@ -296,10 +263,14 @@ export default function PatientSourceCodesTab({ personId }: Props) {
     setCollapsed((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
-  if (loading) {
+  // A refetch after a save keeps the table on screen; only the first load blanks it.
+  if (loading && !data) {
     return (
-      <div className="space-y-4 p-6">
-        <div className="h-6 w-64 animate-pulse rounded bg-muted" />
+      <div className="space-y-4 p-6" role="status" aria-live="polite">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+          Loading source codes…
+        </div>
         <div className="h-48 animate-pulse rounded bg-muted" />
       </div>
     );
@@ -333,30 +304,14 @@ export default function PatientSourceCodesTab({ personId }: Props) {
           <span className="text-red-600">{summary.unmapped} unmapped</span>,{" "}
           <span className="text-yellow-600">{summary.proposed} proposed</span>,{" "}
           <span className="text-green-600">{summary.approved} approved</span>
-        </div>
-        <button
-          onClick={handleResolve}
-          disabled={resolving}
-          className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-        >
-          {resolving ? (
-            <>
-              <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
-              Resolving...
-            </>
-          ) : (
-            "Generate OMOP"
+          {loading && (
+            <span className="ml-2 inline-flex items-center gap-1" role="status">
+              <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
+              Refreshing…
+            </span>
           )}
-        </button>
-      </div>
-
-      {/* Resolve result toast */}
-      {resolveResult && (
-        <div className="rounded-md border border-green-200 bg-green-50 p-3 text-sm text-green-800">
-          Resolved {resolveResult.resolved} code(s). {resolveResult.skipped} skipped,{" "}
-          {resolveResult.already_resolved} already resolved.
         </div>
-      )}
+      </div>
 
       {/* Save banner */}
       {banner && (
@@ -385,7 +340,18 @@ export default function PatientSourceCodesTab({ personId }: Props) {
             </button>
             {!isCollapsed && (
               <div className="mt-1">
-                <SourceCodeTable rows={rows} onRowClick={handleRowClick} />
+                <SourceCodeTable
+                  rows={expanded[key] ? rows : rows.slice(0, SECTION_ROW_LIMIT)}
+                  onRowClick={handleRowClick}
+                />
+                {!expanded[key] && rows.length > SECTION_ROW_LIMIT && (
+                  <button
+                    onClick={() => setExpanded((prev) => ({ ...prev, [key]: true }))}
+                    className="mt-2 text-sm font-medium text-primary hover:underline"
+                  >
+                    Show all {rows.length} ({rows.length - SECTION_ROW_LIMIT} more)
+                  </button>
+                )}
               </div>
             )}
           </section>
@@ -400,6 +366,8 @@ export default function PatientSourceCodesTab({ personId }: Props) {
 
       <EditMappingDialog
         open={dialogOpen}
+        patientId={personId}
+        onSourceCodeUpdated={() => { void fetchSourceCodes(); }}
         onClose={handleDialogClose}
         mode={dialogMode}
         row={dialogRow}

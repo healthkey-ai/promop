@@ -59,6 +59,17 @@ def _exposures(person):
     )
 
 
+def _in_lines_of_therapy(person, rows: list[DrugExposure]) -> set[int]:
+    """Exposures that belong to one of the patient's lines of therapy (Episode → EpisodeEvent)."""
+    from omop_oncology.models import Episode, EpisodeEvent
+
+    episodes = Episode.objects.filter(person=person).values_list('episode_id', flat=True)
+    return set(
+        EpisodeEvent.objects.filter(episode_id__in=list(episodes), event_id__in=[r.pk for r in rows])
+        .values_list('event_id', flat=True)
+    )
+
+
 def _medication_groups(person) -> tuple[OrderedDict, dict]:
     rows = _exposures(person)
     sources = row_sources(DrugExposure, rows, type_attr='drug_type_concept', date_attr='drug_exposure_start_date')
@@ -66,6 +77,11 @@ def _medication_groups(person) -> tuple[OrderedDict, dict]:
     for row in rows:
         if _drug_name(row):
             groups.setdefault(_group_key(row), []).append(row)
+    # Medicines given as part of a line of therapy are shown with that line;
+    # here they are not asked about as prescriptions.
+    in_line = _in_lines_of_therapy(person, rows)
+    for row in rows:
+        row.in_line_of_therapy = row.pk in in_line
     return groups, sources
 
 
@@ -80,6 +96,7 @@ def _summary(key: str, rows: list[DrugExposure], sources: dict, today: date,
     current = any(_is_current(r, today) for r in rows)
     ends = [r.drug_exposure_end_date for r in rows if r.drug_exposure_end_date]
     ended = None if current or not ends else max(ends)
+    in_line = all(getattr(r, 'in_line_of_therapy', False) for r in rows)
     source = sources[latest.pk]
     confirmation = None
     if with_statements and statement is not None:
@@ -103,7 +120,8 @@ def _summary(key: str, rows: list[DrugExposure], sources: dict, today: date,
         'my_note': (note.note or None) if with_statements and note is not None else None,
         # Prescriptions from the record wait for the patient to say whether
         # they took them.
-        'pending': True if with_statements and source['kind'] == 'record' and statement is None else None,
+        'pending': True if with_statements and source['kind'] == 'record' and statement is None and not in_line
+        else None,
     }
     return {k: v for k, v in item.items() if v is not None}
 
@@ -208,7 +226,7 @@ GENETIC_DOC_LABELS = {
     'FISH': 'FISH',
     'CYTOGENETICS': 'Cytogenetics',
     'NGS': 'NGS',
-    'GEP': 'Gene expression profiling',
+    'GEP': 'GEP',
     'CYTOMETRY': 'Flow cytometry',
     'MRD': 'MRD',
     'BONE_MARROW': 'Bone marrow',
@@ -220,7 +238,8 @@ def _finding(variant: dict, sources: dict) -> dict[str, Any]:
     feature = (variant.get('genomic_feature') or '').strip()
     item = {
         'id': variant.get('id'),
-        'name': feature or gene.upper(),
+        # Gene symbols in capitals (TP53); a named result like "GEP70 risk score" as written.
+        'name': feature or (gene if ' ' in gene else gene.upper()),
         'variant': (variant.get('variant') or '').strip() or None,
         'interpretation': variant.get('interpretation'),
         'origin': variant.get('origin'),
@@ -244,7 +263,10 @@ def genetics(person, record) -> dict[str, Any]:
     # One test per (method, date): the findings a single report produced.
     tests: OrderedDict[tuple, dict[str, Any]] = OrderedDict()
     for variant in sorted(variants, key=lambda v: v.get('test_date') or '', reverse=True):
-        method = (variant.get('assay_method') or '').strip() or UNLABELLED
+        # Imported findings carry assay_method; the Genomics editor writes the
+        # variant analysis method component (LOINC 81304-8).
+        method = ((variant.get('assay_method') or '').strip()
+                  or (variant.get('variant_analysis_method_type') or '').strip() or UNLABELLED)
         when = variant.get('test_date')
         test = tests.setdefault((method.lower(), when), {
             'id': f"test-{variant.get('id')}",
@@ -253,6 +275,12 @@ def genetics(person, record) -> dict[str, Any]:
             'findings': [],
         })
         test['findings'].append(_finding(variant, sources))
+        # Specimen and pathologist notes describe the report, so every finding
+        # from it repeats them (D22, #1865). Show each distinct value once.
+        for key, field in (('specimen', 'specimen_type'), ('notes', 'pathologist_notes')):
+            value = (variant.get(field) or '').strip()
+            if value and value not in test.setdefault(key, []):
+                test[key].append(value)
 
     documents = list(PatientDocument.objects.filter(
         person=person, doc_type__in=GENETIC_DOC_LABELS,
@@ -290,6 +318,10 @@ def genetics(person, record) -> dict[str, Any]:
         if 'source' not in test:
             first = next((f['source'] for f in test['findings'] if f.get('source')), None)
             test['source'] = first or source('record', None, None)
+        if 'specimen' in test:
+            test['specimen'] = '; '.join(test['specimen'])
+        if 'notes' in test:
+            test['notes'] = '\n\n'.join(test['notes'])
         items.append({k: v for k, v in test.items() if v is not None})
     items.sort(key=lambda t: t.get('date') or '', reverse=True)
     return {'tests': items}

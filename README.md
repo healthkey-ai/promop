@@ -5,7 +5,7 @@
 
 **PRomop** is an open-source longitudinal patient health record built on the [OMOP CDM v5.4](https://ohdsi.github.io/CommonDataModel/) with FHIR R4 ingestion. Its central feature is `PatientRecord` — a wide denormalized projection (300+ columns) derived automatically from OMOP tables that gives analytics, trial matching, and clinical decision support a single shared substrate, eliminating the repeated re-derivation of patient state across applications.
 
-Deployed across approximately 17,500 real oncology patients, with trial matching against 6,000 actively recruiting trials. Benchmarks show a [~37× speedup](https://arxiv.org/abs/2607.13947) for eligibility screening compared to querying raw OMOP tables directly.
+Deployed across approximately 17,500 real oncology patients, with trial matching against 19,000 actively recruiting trials. Benchmarks show a [~37× speedup](https://arxiv.org/abs/2607.13947) for eligibility screening compared to querying raw OMOP tables directly.
 
 See [paper.md](paper.md) for the full research description.
 
@@ -221,6 +221,8 @@ See **[docs/reproducing-benchmark-results.md](docs/reproducing-benchmark-results
 
 - Backend: `https://promop.onrender.com` (this is just our public example which you can sign up to as demo user, but you cannot deploy to it)
 - Admin credentials: set via `ADMIN_EMAIL` / `ADMIN_PASSWORD` env vars on Render
+
+To deploy your own instance on Google Cloud, see the [Terraform example](docs/terraform/README.md).
 
 ---
 

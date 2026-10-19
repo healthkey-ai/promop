@@ -66,7 +66,16 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 11
+DERIVATION_VERSION = 14
+
+# These PatientRecord columns are projections of PersonLanguageSkill, never
+# independent edits. Older PATCH requests could mark them as user-edited and
+# preserve a value that disagreed with the source rows across refreshes.
+DERIVED_LANGUAGE_FIELDS = frozenset({
+    'languages_skills',
+    'english_speak', 'english_read', 'english_write', 'english_understand',
+    'spanish_speak', 'spanish_read', 'spanish_write', 'spanish_understand',
+})
 
 # Fields that are entirely derived from OMOP tables and must be reset before
 # each refresh so deletions are reflected (not just additions).
@@ -76,6 +85,7 @@ _OMOP_DERIVED_FIELDS = [
     # cleared. date_of_birth is deliberately not cleared: a manually supplied
     # DOB remains useful when Person has only the registration placeholder.
     'patient_age',
+    'blood_type',
     # Person extension fields projected onto PatientRecord for compatibility.
     'email', 'phone_number', 'facility_name', 'validated', 'validated_by',
     'validation_date', 'suppress_demographics_for_others',
@@ -346,9 +356,11 @@ _LOINC_LAB_FIELDS = {
     '51435-6': ('monoclonal_protein_serum',       float),  # M-protein band 1, SPEP
     '33358-3': ('monoclonal_protein_serum',       float),  # M-protein, SPEP (3046299)
     '32730-5': ('monoclonal_protein_urine',       float),  # Urine M-spike 24h
+    '42482-0': ('monoclonal_protein_urine',       float),  # Approved FCM destination
     '33944-8': ('kappa_flc',                      float),  # seeded demo concept only
     '36916-5': ('kappa_flc',                      float),  # Kappa FLC, Serum (3034860)
     '80515-0': ('kappa_flc',                      float),  # Kappa FLC by nephelometry
+    '104544-2': ('kappa_flc',                     float),  # Approved FCM destination
     '33945-5': ('lambda_flc',                     float),  # seeded demo concept only
     '33944-0': ('lambda_flc',                     float),  # Lambda FLC, Serum (3047169)
     '80516-8': ('lambda_flc',                     float),  # Lambda FLC by nephelometry
@@ -358,6 +370,7 @@ _LOINC_LAB_FIELDS = {
     # '26098-4' is "XR Ankle - left Views" in LOINC, so it used to project ankle
     # radiographs into clonal_plasma_cells. '11118-7' is the real marrow code.
     '11118-7': ('clonal_plasma_cells',            float),  # Plasma cells/100 cells in marrow (3003879)
+    '93021-4': ('clonal_plasma_cells',            float),  # Approved FCM destination
 }
 
 # Keyed by field name not by code, so a new LOINC spelling above feeds both the
@@ -756,6 +769,7 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
         .filter(person=person, is_erroneous=False)
         .select_related(
             'measurement_concept', 'value_as_concept',
+            'measurement_source_concept',
             'qualifier_concept', 'measurement_concept__vocabulary',
             'unit_concept',
         )
@@ -928,6 +942,12 @@ def _derived_value_matches(field_name, derived_value, saved_value):
     return derived_value == saved_value
 
 
+def _get_blood_type_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
+    from omop_core.services.blood_type import blood_type_from_measurements
+    rows = snapshot.measurements if snapshot is not None else _build_snapshot(person).measurements
+    return {'blood_type': blood_type_from_measurements(rows)}
+
+
 def refresh_patient_record(person: Person) -> PatientRecord:
     """Derive and upsert PatientRecord from OMOP tables for a given person.
 
@@ -948,7 +968,7 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         # Snapshot user-edited values that may not yet have OMOP backing.
         # After derivation, these are restored when derivation produced nothing
         # for the field (meaning no OMOP fact backs it yet).
-        user_edited = set(patient_info.user_edited_fields or [])
+        user_edited = set(patient_info.user_edited_fields or []) - DERIVED_LANGUAGE_FIELDS
         preserved = {}
         for field in user_edited:
             if hasattr(patient_info, field):
@@ -967,8 +987,10 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             setattr(patient_info, field, value)
 
         # Populate all sections
+        lab_derived_fields = set()
         for section_fn in [
             _get_demographics,
+            _get_blood_type_data,
             _get_location_data,
             _get_disease_data,
             _get_active_condition_data,
@@ -994,13 +1016,20 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             _get_mm_specific_data,
             _get_sct_cytogenetic_data,
         ]:
-            for field, value in section_fn(person, snapshot).items():
+            section_values = section_fn(person, snapshot)
+            if section_fn is _get_laboratory_data:
+                lab_derived_fields = set(section_values)
+            for field, value in section_values.items():
                 setattr(patient_info, field, value)
 
         patient_info.custom_fields = _get_custom_patient_field_data(snapshot)
         from omop_core.services.omop_projection import curated_values_from_snapshot
         for field, value in curated_values_from_snapshot(snapshot).items():
-            setattr(patient_info, field, value)
+            # The lab extractor has already selected the latest code across
+            # canonical and approved-alias results (including unit handling).
+            # An older exact FCM row must not overwrite that latest result.
+            if field not in lab_derived_fields:
+                setattr(patient_info, field, value)
 
         # Pending edits (including explicit clears) win until OMOP actually
         # represents the saved value. A stale fact or a failed projection must
@@ -1257,8 +1286,9 @@ def _get_demographics(person: Person, snapshot: OmopSnapshot = None) -> dict:
     language_rows = list(
         person.language_skills.select_related('language_concept').all())
     language_summary = person.get_language_skills_summary(language_rows)
-    if language_summary:
-        data['languages_skills'] = format_language_skills(language_summary)
+    data['languages_skills'] = (
+        format_language_skills(language_summary) if language_summary else None
+    )
     data.update(_flatten_language_capabilities(
         person.get_language_capabilities_by_code(language_rows)))
 
@@ -3571,6 +3601,43 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
     snapshot = snapshot or _build_snapshot(person)
     measurements = snapshot.measurements
+    # Approved FCM rows define the PatientRecord destination. SCCM supplies
+    # additional source-code spellings for that destination; the checked-in
+    # extractor table is a compatibility fallback for fields not yet backed by
+    # an Athena-resolved FCM (including older test/demo installations).
+    code_fields = dict(_LOINC_LAB_FIELDS)
+    # Do not query curation tables for patients without a LOINC-coded numeric
+    # Measurement. In particular, unrelated measurements must not increase the
+    # full-refresh query budget (#541). Source-only LOINC codes still qualify.
+    has_loinc_lab = any(
+        m.value_as_number is not None and (
+            getattr(m.measurement_concept, 'vocabulary_id', None) == 'LOINC'
+            or bool(_LOINC_CODE_RE.fullmatch(m.measurement_source_value or ''))
+        ) for m in measurements
+    )
+    if has_loinc_lab:
+        from omop_core.models import FieldConceptMapping, SourceCodeConceptMapping
+        field_casts = {field: cast for field, cast in _LOINC_LAB_FIELDS.values()}
+        approved = list(FieldConceptMapping.objects.filter(
+            field_name__in={field for field, _ in _LOINC_LAB_FIELDS.values()},
+            status='approved', vocabulary_id='LOINC', omop_table__iexact='measurement',
+            concept_id__isnull=False,
+        ).values_list('field_name', 'concept_code', 'concept_id'))
+        if approved:
+            field_by_target = {concept_id: field for field, _, concept_id in approved}
+            for field, _, _ in approved:
+                code_fields = {code: entry for code, entry in code_fields.items()
+                               if entry[0] != field}
+            for field, code, _ in approved:
+                if code:
+                    code_fields[code] = (field, field_casts[field])
+            for code, target_id in SourceCodeConceptMapping.objects.filter(
+                organization_id=None, source_vocabulary_id='LOINC',
+                status='approved', omop_table__iexact='measurement',
+                target_concept_id__in=field_by_target,
+            ).values_list('source_code', 'target_concept_id'):
+                field = field_by_target[target_id]
+                code_fields[code] = (field, field_casts[field])
     for field, measurement in _latest_blood_count_measurements(snapshot).items():
         data.update(blood_count_projection(field, measurement))
 
@@ -3609,9 +3676,9 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     wbc_projection_blocked = False
     for m in loinc_ms:
         code = _measurement_code(m)
-        if code not in _LOINC_LAB_FIELDS:
+        if code not in code_fields:
             continue
-        field, cast = _LOINC_LAB_FIELDS[code]
+        field, cast = code_fields[code]
         canonical_value = None
         if code == '6690-2':
             if wbc_projection_blocked:
@@ -3649,7 +3716,7 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             data['white_blood_cell_count_units'] = canonical_wbc_unit(_get_unit_system())
 
     # --- New UI fields via display-name source_value (legacy/generator path) ---
-    unfound = {f for (f, _) in _LOINC_LAB_FIELDS.values() if f not in data}
+    unfound = {f for (f, _) in code_fields.values() if f not in data}
     if unfound:
         for source_value, field in _SOURCE_VALUE_LAB_FIELDS.items():
             if field not in unfound:

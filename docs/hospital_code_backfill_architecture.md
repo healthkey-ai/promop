@@ -119,10 +119,53 @@ Alex's identifiers mix sites, Epic brands and tenants, attached facilities,
 and patient-entered aliases. Treating them all as authoritative hospitals
 would create false organization scope and multiply the mapping queue.
 
-The detail API moves that list to `source_evidence.facilities`; list responses
-remain compact. Edit Mapping shows the names with level and confidence so a
-curator can distinguish, for example, an individual Cerner site from a broad
+For consumers that need a cross-code lookup, `source_system_facility` records
+distinct observed names per exact `source_vocabulary_id`, with the source
+facility identifier, level, confidence, attribution method, and seed
+provenance. It is intentionally many-to-many: one OID can have several sites,
+brands, or aliases, and a name is not verified ownership. The governed seed
+populates the table idempotently alongside SCCM; migration 0291 requeues the
+already-applied v2 seed for asynchronous registry backfill in existing
+deployments. No row creates an `Organization` foreign key or changes mapping
+resolution. Consumers should filter confidence and level for their own display
+needs, and retain the exact FHIR `Coding.system` URI as identity.
+
+Curators can manage associations at **Code Mapping → Source systems /
+hospitals**, or follow the exact FHIR system and observed-facility links in
+Edit Mapping. The system-first page groups every observed facility under its
+exact URI, supports sorting by URI, and includes custom URIs that have source
+codes but no registry association. It filters by exact URI and facility name,
+shows confidence and provenance, and reports the latest hospital seed receipt
+plus the number of codes under an exact system with per-code facility evidence.
+Curators may add a facility association or confirm/reject an imported one.
+These decisions are stored separately from the imported evidence: rejection
+does not delete the original observation, and confirmation does not establish
+verified `Organization` ownership or change mapping resolution. Empty
+registry results do not mean the URI should be replaced with a name: check
+whether the asynchronous seed replay is queued, running, or failed.
+
+The detail API moves that list to `source_evidence.facilities`. Bounded list
+pages expose only a compact `source_system_context` display hint, never the
+full facility list. Edit Mapping shows the names with level and confidence so
+a curator can distinguish, for example, an individual Cerner site from a broad
 Epic tenant or a low-confidence connection alias.
+
+The v2 seed has 690,147 of 691,800 code rows with facility evidence. A
+read-only reconciliation found 568,108 code rows under 8,169 distinct
+`urn:oid:` systems. Of those systems, 3,306 span multiple observed facility
+names (399,989 rows). An OID is therefore not a hospital-name key. The display
+hint is derived **per code row**: a verified PRomop `Organization` takes
+precedence; otherwise exactly one distinct high-confidence site, brand, or
+tenant name is labelled *observed*. Multiple such names are labelled
+*multiple observed facilities*, and alias-only, attached-only, low-confidence,
+or missing evidence is left unverified. The browse column and Source Code
+System picker distinguish these cases and keep the exact FHIR `Coding.system`
+visible. No inferred name changes the persisted system URI, mapping key, or
+`organization_id`.
+
+On that seed, this rule produces one observed name for 498,392 code rows,
+multiple names for 7,408, and no defensible name for 186,000 rows. Those
+counts describe contextual labels, not verified organization assignments.
 
 Nikita's matching unit evidence preserves raw display, raw quantity code and
 system, normalized UCUM when available, validation verdict/reason, and counts.

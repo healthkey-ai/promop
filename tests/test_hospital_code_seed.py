@@ -6,7 +6,9 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 
-from omop_core.models import HospitalCodeImport, SourceCodeConceptMapping
+from omop_core.models import (
+    HospitalCodeImport, SourceCodeConceptMapping, SourceSystemFacility,
+)
 from omop_core.services import hospital_code_seed
 
 
@@ -85,6 +87,76 @@ def test_import_archive_preserves_curator_decision_and_adds_evidence(tmp_path):
     assert mapping.source_metadata['facilities'][0]['name'] == 'University Hospital'
     assert mapping.source_unit_evidence[0]['normalized'] == 'g/dL'
     assert mapping.source_unit_evidence[0]['distribution']['p50'] == 4.1
+    assert SourceSystemFacility.objects.get(
+        source_vocabulary_id=EPIC, facility_name='University Hospital',
+    ).confidence == 'high'
+
+
+def test_registry_keeps_multiple_names_and_weak_aliases_on_exact_system(tmp_path):
+    first = row('A')
+    first['source_metadata']['facilities'] = [
+        {'name': 'University Hospital', 'id': 'H1', 'level': 'site',
+         'confidence': 'high', 'attribution_method': 'connection'},
+        {'name': 'Unverified Alias', 'level': 'unknown', 'confidence': 'low'},
+    ]
+    second = row('B')
+    second['source_metadata']['facilities'] = [
+        {'name': 'University Hospital', 'id': 'H1', 'level': 'site',
+         'confidence': 'high', 'attribution_method': 'connection'},
+        {'name': 'Cancer Center', 'id': 'H2', 'level': 'brand',
+         'confidence': 'high'},
+    ]
+    shared = row('C')
+    shared['source_vocabulary_id'] = 'https://open.epic.com/FHIR'
+    shared['source_metadata']['facilities'] = [
+        {'name': 'Another Hospital', 'level': 'site', 'confidence': 'high'},
+    ]
+    archive, digest = seed_archive(tmp_path, [first, second, shared])
+    job = job_for(archive, digest, expected_rows=3)
+
+    hospital_code_seed.import_archive(archive, job, batch_size=1)
+    hospital_code_seed.import_archive(archive, job, batch_size=1)
+
+    names = list(SourceSystemFacility.objects.filter(
+        source_vocabulary_id=EPIC,
+    ).order_by('facility_name').values_list('facility_name', 'confidence'))
+    assert names == [
+        ('Cancer Center', 'high'),
+        ('University Hospital', 'high'),
+        ('Unverified Alias', 'low'),
+    ]
+    assert SourceSystemFacility.objects.get(facility_name='University Hospital').facility_id == 'H1'
+    assert SourceSystemFacility.objects.filter(
+        source_vocabulary_id='https://open.epic.com/FHIR',
+        facility_name='Another Hospital',
+    ).exists()
+    assert not SourceSystemFacility.objects.filter(
+        source_vocabulary_id=EPIC, facility_name='Another Hospital',
+    ).exists()
+
+
+def test_migration_requeues_only_completed_seed_for_async_registry_fill():
+    migration = importlib.import_module('omop_core.migrations.0291_source_system_facility')
+    applied = HospitalCodeImport.objects.create(
+        source_url='https://example.test', artifact_filename='seed.zip',
+        artifact_identity='healthtree-hospital-seed-20261005-v2',
+        artifact_sha256='a' * 64, expected_rows=691_800,
+        outcome='applied', task_id='old-task',
+    )
+    pending = HospitalCodeImport.objects.create(
+        source_url='https://example.test', artifact_filename='other.zip',
+        artifact_identity='another-import', artifact_sha256='b' * 64,
+        expected_rows=1, outcome='queued',
+    )
+
+    from django.apps import apps
+    migration.queue_registry_backfill(apps, None)
+
+    applied.refresh_from_db()
+    pending.refresh_from_db()
+    assert applied.outcome == 'queued'
+    assert applied.task_id == ''
+    assert pending.outcome == 'queued'
 
 
 def test_validation_rejects_checksum_before_writing(tmp_path):
@@ -196,3 +268,83 @@ def test_corrected_unit_migration_records_new_durable_intent():
         'ad94793ee6f232154db33b9d65debab7d5565299ec382ec39d0923e863635c05'
     )
     download.assert_not_called()
+
+
+def test_dispatch_recovers_stranded_running_import(tmp_path):
+    """A running import with no completed_at is reset to queued and dispatched."""
+    from django.utils import timezone
+
+    archive, digest = seed_archive(tmp_path, [row()])
+    job = HospitalCodeImport.objects.create(
+        source_url='https://example.test/folder',
+        artifact_filename='seed.zip',
+        artifact_identity='stranded-test-v1',
+        artifact_sha256=digest,
+        expected_rows=1,
+        outcome='running',
+        task_id='hospital-code-import-old',
+        started_at=timezone.now(),
+        completed_at=None,
+    )
+
+    with patch('omop_core.tasks.import_hospital_code_seed_task.apply_async') as publish:
+        dispatched = hospital_code_seed.dispatch_queued_imports()
+
+    assert dispatched == 1
+    job.refresh_from_db()
+    assert job.outcome == 'queued'
+    assert job.task_id == f'hospital-code-import-{job.pk}'
+    publish.assert_called_once()
+
+
+def test_dispatch_does_not_recover_if_lock_held(tmp_path):
+    """A running import is left alone when the advisory lock is held."""
+    from django.utils import timezone
+
+    archive, digest = seed_archive(tmp_path, [row()])
+    job = HospitalCodeImport.objects.create(
+        source_url='https://example.test/folder',
+        artifact_filename='seed.zip',
+        artifact_identity='locked-test-v1',
+        artifact_sha256=digest,
+        expected_rows=1,
+        outcome='running',
+        task_id='hospital-code-import-locked',
+        started_at=timezone.now(),
+        completed_at=None,
+    )
+
+    with patch.object(hospital_code_seed, '_acquire_lock', return_value=False):
+        with patch('omop_core.tasks.import_hospital_code_seed_task.apply_async') as publish:
+            dispatched = hospital_code_seed.dispatch_queued_imports()
+
+    assert dispatched == 0
+    job.refresh_from_db()
+    assert job.outcome == 'running'
+    assert job.task_id == 'hospital-code-import-locked'
+
+
+def test_dispatch_skips_completed_running_import(tmp_path):
+    """A running import that has completed_at set is not recovered."""
+    from django.utils import timezone
+
+    archive, digest = seed_archive(tmp_path, [row()])
+    job = HospitalCodeImport.objects.create(
+        source_url='https://example.test/folder',
+        artifact_filename='seed.zip',
+        artifact_identity='completed-test-v1',
+        artifact_sha256=digest,
+        expected_rows=1,
+        outcome='running',
+        task_id='hospital-code-import-done',
+        started_at=timezone.now(),
+        completed_at=timezone.now(),
+    )
+
+    with patch('omop_core.tasks.import_hospital_code_seed_task.apply_async') as publish:
+        dispatched = hospital_code_seed.dispatch_queued_imports()
+
+    assert dispatched == 0
+    job.refresh_from_db()
+    assert job.outcome == 'running'
+    publish.assert_not_called()

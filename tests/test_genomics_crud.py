@@ -342,6 +342,19 @@ def test_absent_finding_writes_parent_and_contextual_components(setup):
     assert not parent.is_erroneous
 
 
+def test_pathologist_notes_round_trip_as_a_linked_observation(setup):
+    """Pathologist notes per genetic test (#1865): long text survives the 60-character column."""
+    person, _, _ = setup
+    notes = ('CD138-selected plasma cells. ' * 20).strip()
+    variant = save_variant(person, {'gene': 'TP53', 'specimen_type': 'Bone marrow aspirate',
+                                    'pathologist_notes': notes})
+    assert variant['pathologist_notes'] == notes
+    assert variant['specimen_type'] == 'Bone marrow aspirate'
+    row = Observation.objects.get(person=person, observation_event_id=variant['id'],
+                                  observation_source_value='genomics:pathologist_notes', is_erroneous=False)
+    assert len(row.value_as_string) <= 60
+
+
 def test_absent_finding_has_no_variant_level_components(setup):
     """Variant-level components are not stored on absent findings."""
     person, _, _ = setup

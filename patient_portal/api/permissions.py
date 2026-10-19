@@ -163,6 +163,10 @@ class ScopedTokenPermission(BasePermission):
             # Staff users retain full access.
             if getattr(request.user, 'is_staff', False):
                 return True
+            # Org admins (direct grant or trust-derived) retain full access.
+            from omop_core.services.access import get_admin_orgs
+            if get_admin_orgs(request.user).exists():
+                return True
             # Regular authenticated users (patients): read + PATCH own data only.
             # POST (sync, bulk upload) and DELETE (visits, measurements, bulk) are denied.
             return request.method in _SAFE_METHODS or request.method == 'PATCH'
@@ -178,6 +182,22 @@ class ScopedTokenPermission(BasePermission):
         if method in _SAFE_METHODS:
             return bool(token_scopes & self.read_scopes)
         return bool(token_scopes & _WRITE_SCOPES)
+
+
+class OrgAdminTokenScopePermission(ScopedTokenPermission):
+    """Require a write scope for bearer-backed organization administration.
+
+    Role checks on the view still decide *who* may administer an organization.
+    Session and partner-auth admins retain their existing POST access; OAuth2
+    and service credentials must additionally carry a write scope. In
+    particular, a delegated read-only SMART token cannot create an org or
+    turn an invitation into a durable org-admin grant.
+    """
+
+    def has_permission(self, request, view):
+        if request.auth is None or isinstance(request.auth, TokenClaims):
+            return bool(request.user and request.user.is_authenticated)
+        return super().has_permission(request, view)
 
 
 class VocabReadPermission(ScopedTokenPermission):

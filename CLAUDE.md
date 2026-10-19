@@ -1017,6 +1017,27 @@ with a qualitative confidence level (high / medium / low, mapped to numeric
 values) and either picks a winner or declines. A declined code stays in the
 queue for the next run.
 
+### Source Metadata is ranker context, nothing more
+
+A description is often missing or generic: the ETL may send "Vitals" for a code
+that is clearly specific, and Epic adds LOINC `8716-3` "Vital signs" to every
+vital sign. The Source Metadata the mapping dialog shows (usually the FHIR
+resource that carried the code) says what it really is, so both rankers get
+that JSON **in full, de-identified**, as `source_metadata` beside the
+description (#1782, #1786, #1791). The dialog sends its row's metadata with
+suggest-one, falling back to this table's SCCM row; batch runs use each queue
+row's own. Retrieval never reads it and no other patient's data is consulted.
+
+`omop_core/mapping/source_metadata.py::deidentify` removes, at any depth, by
+key *and* by shape — FHIR carries identity under many names, such as an
+extension's `valueIdentifier` or a `collector` reference: every Reference,
+Identifier, HumanName, Address, ContactPoint, Annotation and Attachment, any
+Patient/Practitioner/RelatedPerson resource, `id`, `meta`, `fullUrl`, the
+narrative, `valueString`/`valueMarkdown`, and every date or time field
+(case-insensitively). `code.text`, coding displays, Quantity and CodeableConcept
+values stay — they are the point. Over 20,000 characters it trims lists and
+strings, then keeps only the coded fields; it never drops the code.
+
 Where the time goes, per code:
 
 | Stage | Cost |
@@ -1382,7 +1403,7 @@ The five OMOP clinical CRUD endpoints (`conditions`, `drug-exposures`, `measurem
 `observations`, `procedures`) accept a **JSON array** on POST for callers that have
 already parsed FHIR into OMOP rows. Single-dict POSTs are unchanged.
 
-Contract: `201` with `{"created": N, "updated": M, "ids": [...]}`, one id per
+Contract: `201` with `{"created": N, "updated": M, "unattributed_matches": K, "ids": [...]}`, one id per
 request row in request order. One transaction, all-or-nothing. One batch is one
 person (mixed-person → 400). Server assigns PKs via `next_pk_batch`
 (client-supplied PKs → 400). Per-index validation errors. Max 1,000 rows
@@ -1424,6 +1445,43 @@ error line, not 500. The whole batch rolled back, so the caller can retry, and a
 500 reads as "the service is down".
 
 A row with no `source_value` or no date has no identity and is always inserted.
+
+### Source hospital (`X-Provenance-Organization-ID`, #1690)
+
+One ETL credential reads several hospitals, and a hospital-scoped mapping only
+repoints rows whose provenance names that hospital. The five clinical endpoints
+on `/api/v1/` take the hospital as a header; the legacy `/api/` registration
+ignores it. Validation is shared with `code-mappings/lookup/`'s body
+`organization_id` (`patient_portal/api/provenance_org.py`).
+
+- **Validated before any write.** 400 for a malformed, empty, unknown or
+  inactive id, or for a header without a source (`X-Provenance-Source`, or
+  `source` in a single-dict body). 403 when it differs from an org-bound
+  credential's organization, or when the caller is neither a machine credential
+  nor staff.
+- **Attribution, not access.** It is stored on `ProvenanceRecord.organization`.
+  Authorization follows the credential, and `PatientRecord.organization` is
+  never changed.
+- **Hospital-aware matching.** With the header, existing rows are classed by
+  the non-null organizations on their provenance
+  (`omop_core/services/provenance_attribution.py`):
+
+  | Class | Outcome |
+  |---|---|
+  | own (exactly this hospital) | matched as above |
+  | unattributed | left as stored; each input position counts in `unattributed_matches` |
+  | foreign (another hospital, or two) | never touched; the event is inserted when only these hold the key |
+
+  A replay does not add attribution to historical rows. Without the header,
+  matching is unchanged, so ETL sends the header on every write.
+- **Duplicates collapse only within one attribution**, everywhere rows are
+  collapsed: this upsert, `fhir/sync.py`, and `repoint_clinical_rows`. Two
+  hospitals' rows for one event are two facts.
+- **A row's hospital is set once.** `_record_provenance` never replaces a stored
+  organization, and an update that names a second hospital gets 409. The check
+  runs with the clinical row locked, before it is read.
+- **Scoped repoint needs exclusive attribution**: a row naming two hospitals
+  stays where it is.
 
 Three things to know before touching this code:
 

@@ -7,6 +7,7 @@ from .concept_to_code import (
 from rest_framework.routers import DefaultRouter
 from .concept_mint import mint_destination
 from .source_catalog import source_catalog
+from .source_system_facilities import source_system_facilities
 from .supportive_therapies import SupportiveTherapyViewSet, therapy_outcomes
 
 from .views import (
@@ -30,7 +31,7 @@ from .views import (
     vocabulary_list, concept_lookup, concept_search, concept_candidates, concept_list,
     measurement_concept_catalog,
     therapy_regimen_list, therapy_regimen_detail,
-    therapy_component_list, therapy_class_list,
+    therapy_component_list, therapy_component_detail, therapy_class_list,
     mapping_stats,
     therapy_regimen_components, therapy_component_classes,
     disease_therapy_regimen_list, disease_therapy_regimen_detail,
@@ -188,6 +189,7 @@ urlpatterns = [
     path('code-mappings/suggest-runs/latest/', code_mapping_latest_suggest_run, name='v1-code-mapping-latest-suggest-run'),
     path('code-mappings/suggest-runs/<uuid:run_id>/', code_mapping_suggest_run, name='v1-code-mapping-suggest-run'),
     path('code-mappings/source-catalog/', source_catalog, name='v1-source-catalog'),
+    path('code-mappings/source-systems/', source_system_facilities, name='v1-source-system-facilities'),
     path('code-mappings/check-umls/', code_mapping_check_umls, name='v1-code-mapping-check-umls'),
     path('code-mappings/lookup/', code_mapping_lookup, name='v1-code-mapping-lookup'),
     path('code-mappings/accuracy/', code_mapping_accuracy, name='v1-code-mapping-accuracy'),
@@ -214,6 +216,7 @@ urlpatterns = [
     path('therapy-regimens/<str:regimen_code>/components/', therapy_regimen_components, name='v1-therapy-regimen-components'),
     path('therapy-regimens/<str:regimen_code>/components/<str:component_code>/', therapy_regimen_components, name='v1-therapy-regimen-component-detail'),
     path('therapy-components/', therapy_component_list, name='v1-therapy-component-list'),
+    path('therapy-components/<str:code>/', therapy_component_detail, name='v1-therapy-component-detail'),
     path('therapy-components/<str:component_code>/classes/', therapy_component_classes, name='v1-therapy-component-classes'),
     path('therapy-components/<str:component_code>/classes/<str:class_code>/', therapy_component_classes, name='v1-therapy-component-class-detail'),
     path('therapy-classes/', therapy_class_list, name='v1-therapy-class-list'),
