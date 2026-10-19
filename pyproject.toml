@@ -48,3 +48,13 @@ test = ["exact-matching @ git+https://github.com/healthkey-ai/exact@8501802902f0
 
 [tool.setuptools.packages.find]
 include = ["omop_core*", "omop_oncology*", "omop_genomics*"]
+
+[tool.setuptools.package-data]
+# `omop_core` reads these from disk at runtime: `services/genomics_catalog.py`,
+# migration `0224_seed_genomics_mappings`, and the curation loaders. The wheel
+# did not carry them because PROMOP runs from the repository -- only an embedder
+# that installs the package (CancerBot) ever hit the missing file, as
+# `FileNotFoundError: …/omop_core/data/genomics_catalog_v1.json` during migrate.
+# The `data/*/` subdirectories (source catalogs, .jsonl.gz) stay out: commands
+# only, and tens of megabytes.
+omop_core = ["data/*.json"]
