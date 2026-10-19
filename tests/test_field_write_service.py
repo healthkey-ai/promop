@@ -9,7 +9,7 @@ from datetime import date
 
 import pytest
 
-from omop_core.models import Location, Measurement
+from omop_core.models import FieldConceptMapping, Location, Measurement, Observation
 from omop_core.services.field_write_service import apply_field_writes, owned_writable_fields
 from omop_core.services.patient_record_service import refresh_patient_record
 from tests.factories import ConceptFactory, PatientRecordFactory, PersonFactory, VocabularyFactory
@@ -283,6 +283,118 @@ def test_assertion_boolean_field_writes_and_rederives_true_and_false():
 
     apply_field_writes(person, {'contraceptive_use': False}, today=date(2026, 8, 25))
     assert refresh_patient_record(person).contraceptive_use is False  # NOT bool('False')==True
+
+
+def test_inverse_assertion_field_writes_the_source_answer_not_the_field_polarity():
+    """`no_*` fields mean the inverse of the reviewed source question."""
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    _seed_patient_reported_type()
+    concept = ConceptFactory(concept_code='75618-3', concept_name='Mental health disorders')
+    FieldConceptMapping.objects.create(
+        field_name='no_mental_health_disorder_status',
+        concept=concept,
+        omop_table='observation',
+        source_value='75618-3',
+        value_kind='boolean',
+        status='approved',
+    )
+    today = date(2026, 8, 25)
+
+    result = apply_field_writes(
+        person, {'no_mental_health_disorder_status': True}, today=today,
+    )
+
+    assert 'no_mental_health_disorder_status' in result.applied
+    source = Observation.objects.get(person=person, observation_date=today)
+    assert source.value_as_string == 'False'
+    assert refresh_patient_record(person).no_mental_health_disorder_status is True
+
+
+def test_inverse_assertion_field_projects_through_the_patient_patch_path():
+    """`_project_mapped_fields` uses project_single_value, not apply_field_writes."""
+    from omop_core.services.omop_projection import project_single_value
+
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    _seed_patient_reported_type()
+    concept = ConceptFactory(concept_code='75618-3', concept_name='Mental health disorders')
+    projection = {
+        'omop_table': 'observation',
+        'concept_id': concept.concept_id,
+        'type_concept_id': 32865,
+        'source_value': '75618-3',
+        'value_kind': 'boolean',
+    }
+
+    assert project_single_value(
+        person, 'no_mental_health_disorder_status', True, projection,
+        acknowledge_existing=True,
+    )
+    source = Observation.objects.get(person=person)
+    assert source.value_as_number == 0
+    assert refresh_patient_record(person).no_mental_health_disorder_status is True
+
+
+def test_alternative_inverse_mapping_is_not_polarity_inverted():
+    """Only the reviewed inverse assertion code carries inverse polarity."""
+    from omop_core.services.omop_projection import project_single_value
+
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    _seed_patient_reported_type()
+    concept = ConceptFactory(
+        concept_code='13197006', concept_name='No mental health disorder (SNOMED)',
+    )
+    FieldConceptMapping.objects.create(
+        field_name='no_mental_health_disorder_status',
+        concept=concept,
+        omop_table='observation',
+        source_value='13197006',
+        value_kind='boolean',
+        status='approved',
+    )
+    projection = {
+        'omop_table': 'observation',
+        'concept_id': concept.concept_id,
+        'concept_code': concept.concept_code,
+        'type_concept_id': 32865,
+        'source_value': '13197006',
+        'value_kind': 'boolean',
+    }
+
+    assert project_single_value(
+        person, 'no_mental_health_disorder_status', True, projection,
+        acknowledge_existing=True,
+    )
+    assert Observation.objects.get(person=person).value_as_number == 1
+    assert refresh_patient_record(person).no_mental_health_disorder_status is True
+
+
+def test_canonical_inverse_concept_with_custom_source_still_roundtrips():
+    """The assertion reader recognizes the concept code as well as the source."""
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    _seed_patient_reported_type()
+    concept = ConceptFactory(concept_code='75618-3', concept_name='Mental health disorders')
+    FieldConceptMapping.objects.create(
+        field_name='no_mental_health_disorder_status',
+        concept=concept,
+        omop_table='observation',
+        source_value='local:mental-health',
+        value_kind='boolean',
+        status='approved',
+    )
+    today = date(2026, 8, 26)
+
+    result = apply_field_writes(
+        person, {'no_mental_health_disorder_status': True}, today=today,
+    )
+
+    assert 'no_mental_health_disorder_status' in result.applied
+    source = Observation.objects.get(person=person, observation_date=today)
+    assert source.value_as_string == 'False'
+    assert refresh_patient_record(person).no_mental_health_disorder_status is True
 
 
 # --- genetic_mutations: the LIST-diff write path ---------------------------------------------------

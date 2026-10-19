@@ -4,6 +4,7 @@ from datetime import date
 
 import pytest
 
+from omop_core.models import FieldConceptMapping
 from omop_core.services.patient_record_service import (
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
     refresh_patient_record,
@@ -61,6 +62,117 @@ def test_latest_typed_assertions_project_from_observation_and_measurement():
     assert record.no_mental_health_disorder_status is True
     assert record.pregnancy_test_result_value == 'Negative'
     assert record.pregnancy_test_date == date(2026, 2, 3)
+
+
+def _approved_observation_mapping(field_name, concept, value_kind):
+    FieldConceptMapping.objects.create(
+        field_name=field_name,
+        concept=concept,
+        omop_table='observation',
+        source_value=concept.concept_code,
+        value_kind=value_kind,
+        status='approved',
+    )
+
+
+@pytest.mark.parametrize(
+    ('field_name', 'concept_code', 'concept_name'),
+    [
+        ('consent_capability', '75985-6', 'Ability to consent'),
+        ('caregiver_availability_status', '74014-2', 'Caregiver availability'),
+        ('contraceptive_use', '8659-8', 'Contraceptive use'),
+    ],
+)
+def test_older_approved_observation_cannot_overwrite_newer_measurement_answer(
+    field_name, concept_code, concept_name,
+):
+    """An exact approved mapping must not outrank the newer assertion fact.
+
+    ``_get_assertion_data`` owns these fields' cross-table latest-answer
+    semantics.  The curated fallback reads one exact mapping without comparing
+    it to a newer row in the other OMOP table.
+    """
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    concept = ConceptFactory(concept_code=concept_code, concept_name=concept_name)
+    _approved_observation_mapping(field_name, concept, 'boolean')
+
+    ObservationFactory(
+        person=person, observation_concept=concept,
+        observation_source_value=concept_code, observation_date=date(2026, 1, 1),
+        value_as_number=1,
+    )
+    MeasurementFactory(
+        person=person, measurement_concept=concept,
+        measurement_source_value=concept_code, measurement_date=date(2026, 2, 1),
+        value_as_number=0,
+    )
+
+    assert getattr(refresh_patient_record(person), field_name) is False
+
+
+def test_pregnancy_answer_and_date_come_from_the_same_newer_fact():
+    """The older mapped Observation must not supply the answer for a new test."""
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    concept = ConceptFactory(concept_code='2106-3', concept_name='Pregnancy test')
+    _approved_observation_mapping('pregnancy_test_result_value', concept, 'string')
+
+    ObservationFactory(
+        person=person, observation_concept=concept,
+        observation_source_value='2106-3', observation_date=date(2026, 1, 1),
+        value_as_string='Negative',
+    )
+    MeasurementFactory(
+        person=person, measurement_concept=concept,
+        measurement_source_value='2106-3', measurement_date=date(2026, 2, 1),
+        value_as_string='Positive',
+    )
+
+    record = refresh_patient_record(person)
+
+    assert record.pregnancy_test_result_value == 'Positive'
+    assert record.pregnancy_test_date == date(2026, 2, 1)
+
+
+def test_alternative_approved_concept_mapping_still_supplies_an_answer():
+    """A reviewed non-assertion-code mapping is not displaced by an absent assertion row."""
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    concept = ConceptFactory(
+        concept_code='13197004',
+        concept_name='Contraception (SNOMED)',
+    )
+    _approved_observation_mapping('contraceptive_use', concept, 'boolean')
+
+    ObservationFactory(
+        person=person, observation_concept=concept,
+        observation_source_value='13197004', observation_date=date(2026, 1, 1),
+        value_as_number=1,
+    )
+
+    assert refresh_patient_record(person).contraceptive_use is True
+
+
+def test_newer_unparseable_measurement_keeps_field_unknown():
+    """A newer unusable answer is unknown, not an invitation to resurrect an older one."""
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    concept = ConceptFactory(concept_code='8659-8', concept_name='Contraceptive use')
+    _approved_observation_mapping('contraceptive_use', concept, 'boolean')
+
+    ObservationFactory(
+        person=person, observation_concept=concept,
+        observation_source_value='8659-8', observation_date=date(2026, 1, 1),
+        value_as_number=1,
+    )
+    MeasurementFactory(
+        person=person, measurement_concept=concept,
+        measurement_source_value='8659-8', measurement_date=date(2026, 2, 1),
+        value_as_string='perhaps',
+    )
+
+    assert refresh_patient_record(person).contraceptive_use is None
 
 
 def test_invalid_or_erroneous_assertions_do_not_create_projection_values():
