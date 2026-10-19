@@ -9,12 +9,16 @@ the first. Reverse is a no-op: removing reference content can break later work.
 import gzip
 import hashlib
 import json
+import logging
 from pathlib import Path
 
 from django.db import migrations, transaction
 from django.utils import timezone
 
+logger = logging.getLogger(__name__)
+
 SNAPSHOT_DIR = Path(__file__).resolve().parent.parent / 'data' / 'source_catalog_20260920'
+LFS_POINTER_PREFIX = b'version https://git-lfs.github.com/spec/v1'
 MANIFEST_SHA256 = '820aeb56963dca45e4fcfdbe7179d18e28e714dbac93a375f38692a83683ed8e'
 FIELDS = ('code', 'name', 'definition', 'synonyms', 'parents', 'semantic_types',
           'status', 'retired', 'metadata')
@@ -25,11 +29,38 @@ def _digest(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
+def _is_lfs_pointer(path):
+    """True when the file is a Git-LFS pointer instead of the payload.
+
+    A repository checkout smudges these files; a wheel built by `pip install
+    git+…` does not, because that clone never fetches the LFS objects. An
+    embedder installing the wheel therefore sees 133-byte pointers, while
+    PROMOP itself — which runs from the repository — never does.
+    """
+    with path.open('rb') as stream:
+        return stream.read(len(LFS_POINTER_PREFIX)) == LFS_POINTER_PREFIX
+
+
 def load_catalogs(apps, schema_editor):
     manifest_path = SNAPSHOT_DIR / 'manifest.json'
     if _digest(manifest_path) != MANIFEST_SHA256:
         raise ValueError('Publisher source catalog manifest checksum mismatch.')
     manifest = json.loads(manifest_path.read_text())
+    pointers = [
+        entry['filename'] for entry in manifest['catalogs']
+        if _is_lfs_pointer(SNAPSHOT_DIR / entry['filename'])
+    ]
+    if pointers:
+        # Failing here would block every deploy of an embedder that does not
+        # read SourceVocabulary (CancerBot). Skipping is recorded in the log and
+        # the migration is marked applied; the tables stay empty rather than
+        # wrong. A checkout or an LFS-aware release loads them normally.
+        logger.info(
+            'Publisher source catalogs are Git-LFS pointers in this install (%s); '
+            'skipping the load. SourceVocabulary is not read by this host.',
+            ', '.join(pointers),
+        )
+        return
     # Validate every artifact before changing either catalog. A missing/corrupt
     # image artifact must fail deployment, not silently mark the load applied.
     for entry in manifest['catalogs']:
