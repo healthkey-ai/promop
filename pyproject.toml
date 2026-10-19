@@ -55,6 +55,9 @@ include = ["omop_core*", "omop_oncology*", "omop_genomics*"]
 # did not carry them because PROMOP runs from the repository -- only an embedder
 # that installs the package (CancerBot) ever hit the missing file, as
 # `FileNotFoundError: …/omop_core/data/genomics_catalog_v1.json` during migrate.
-# The `data/*/` subdirectories (source catalogs, .jsonl.gz) stay out: commands
-# only, and tens of megabytes.
-omop_core = ["data/*.json"]
+# The subdirectory patterns are deliberately narrow: `data/*/*.json` ships the
+# source-catalog manifest, and `data/*/*.gz` ships the LFS pointer files so
+# migration 0251 can recognise them (see its `_is_lfs_pointer` guard). The
+# multi-megabyte `.jsonl.gz` payloads themselves are never fetched by a wheel
+# build.
+omop_core = ["data/*.json", "data/*/*.json", "data/*/*.gz"]
