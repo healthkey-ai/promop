@@ -6371,6 +6371,12 @@ class PersonViewSet(viewsets.GenericViewSet):
         whose account this is: the address is what a later verified login
         matches on, and the caller keeps its own source id to person id map.
 
+        An address that already names several persons, or one whose person a
+        patient account has claimed, answers **409** and creates nothing
+        (#1913). Both used to mint another person, which left the import on a
+        row the patient never sees and made the address more ambiguous with
+        every run. A conflict is something the caller can act on.
+
         The address is written in the same transaction as the insert. A mint
         followed by a PATCH would leave a window where a login lands on a
         person with no address and forks.
@@ -6400,12 +6406,37 @@ class PersonViewSet(viewsets.GenericViewSet):
         if email is not None:
             # A re-run must not mint a second person for an address it already
             # minted one for, because two would then fork the login instead of
-            # adopting either. An address that already names several persons,
-            # or one whose person has been claimed, is left alone.
-            existing = list(Person.objects.filter(email__iexact=email)[:2])
-            if len(existing) == 1 and not PatientUser.objects.filter(
-                person=existing[0],
-            ).exists():
+            # adopting either.
+            existing = list(
+                Person.objects.filter(email__iexact=email).order_by('person_id')[:2]
+            )
+            if len(existing) > 1:
+                # Minting a third beside two was the old answer, and it made the
+                # address worse every run (#1913). The caller holds its own
+                # source id to person id map, so it can pick; we cannot.
+                return Response(
+                    {
+                        'detail': 'Several persons hold this address. '
+                                  'Resolve them before importing.',
+                        'person_ids': [p.person_id for p in existing],
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if existing and PatientUser.objects.filter(person=existing[0]).exists():
+                # Adopting it would hand an account to whoever the export names,
+                # and minting beside it strands the import on a second person
+                # the patient never sees (#1913). Neither, then: the id is
+                # reported so a caller that may write to it can carry on, and
+                # this grant can already read any person it is given.
+                return Response(
+                    {
+                        'detail': 'A patient account already holds this address.',
+                        'person_id': existing[0].person_id,
+                        'claimed': True,
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if existing:
                 record, _ = PatientRecord.objects.get_or_create(person=existing[0])
                 return Response(
                     {

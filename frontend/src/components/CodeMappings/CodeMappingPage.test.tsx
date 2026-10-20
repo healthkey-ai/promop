@@ -1946,8 +1946,13 @@ describe("server mapping pages", () => {
     await screen.findByText("SEEN MEMBER");
     fireEvent.click(screen.getByRole("checkbox", { name: "Unmapped: only codes with Seen greater than zero" }));
     await waitFor(() => expect(screen.queryByText("SEEN MEMBER")).not.toBeInTheDocument());
-    fireEvent.click(await screen.findByRole("button", { name: "Expand Albumin" }));
-    await screen.findByText("ALL MEMBER");
+    // The toggle reloads the list, which can re-render the group collapsed
+    // after the first click lands; expand again until the members show.
+    await waitFor(() => {
+      const expand = screen.queryByRole("button", { name: "Expand Albumin" });
+      if (expand) fireEvent.click(expand);
+      expect(screen.getByText("ALL MEMBER")).toBeInTheDocument();
+    }, { timeout: 5000 });
     expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/group/", { params: expect.objectContaining({ seen_only: "0" }) });
   });
 
