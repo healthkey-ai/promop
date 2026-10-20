@@ -148,6 +148,14 @@ LOGGING = {
             'level': 'INFO',
             'propagate': False,
         },
+        # Operational messages from audit-adjacent services. A child of `audit`
+        # with its own console handler and no propagation, so these never reach
+        # the JSON audit stream (#1929).
+        'audit.ops': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
         'django.request': {
             'handlers': ['console'],
             'level': 'ERROR',

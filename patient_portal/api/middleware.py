@@ -7,6 +7,10 @@ from email.utils import parsedate_to_datetime
 from django.http import JsonResponse
 
 logger = logging.getLogger('audit')
+# Operational warnings/errors live beside the audit event stream, not inside it:
+# SIEM consumers parse every `audit` record as JSON, so plain messages there are
+# both noise and a broken contract (#1929).
+ops_logger = logging.getLogger('audit.ops')
 
 _SUNSET_DATE = 'Tue, 01 Sep 2026 00:00:00 GMT'
 _SUNSET_DT = parsedate_to_datetime(_SUNSET_DATE)
@@ -27,7 +31,7 @@ class DeprecationWarningMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response
         if datetime.datetime.now(datetime.timezone.utc) > _SUNSET_DT:
-            logger.warning(
+            ops_logger.warning(
                 "DeprecationWarningMiddleware: Sunset date %s has passed — "
                 "remove legacy /api/ URL aliases from ctomop/urls.py (the Django project package).",
                 _SUNSET_DATE,
@@ -184,7 +188,7 @@ class AuditLogMiddleware:
                 'duration_ms': round((time.monotonic() - start) * 1000),
             }
         except Exception:
-            logger.warning("AuditLogMiddleware failed to build audit entry", exc_info=True)
+            ops_logger.warning("AuditLogMiddleware failed to build audit entry", exc_info=True)
             return response
 
         # stdout (SIEM) and DB (review API) are written independently so one
@@ -192,12 +196,12 @@ class AuditLogMiddleware:
         try:
             logger.info(json.dumps(entry))
         except Exception:
-            logger.warning("AuditLogMiddleware stdout write failed", exc_info=True)
+            ops_logger.warning("AuditLogMiddleware stdout write failed", exc_info=True)
 
         try:
             self._persist(entry)
         except Exception:
-            logger.warning("AuditLogMiddleware DB write failed", exc_info=True)
+            ops_logger.warning("AuditLogMiddleware DB write failed", exc_info=True)
 
         return response
 

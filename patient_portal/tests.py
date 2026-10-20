@@ -4807,6 +4807,34 @@ class AuditLogMiddlewareTest(_SmartBase):
         # Response must be returned regardless of logging failure
         self.assertIn(response.status_code, range(200, 600))
 
+    def test_db_write_failure_warning_does_not_enter_audit_stream(self):
+        import logging
+        from unittest.mock import patch as mock_patch
+
+        records = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        capture = _Capture()
+        audit_logger = logging.getLogger('audit')
+        audit_logger.addHandler(capture)
+        _, pi = self._make_person_and_pi(88808)
+        try:
+            with mock_patch(
+                'patient_portal.api.middleware.AuditLogMiddleware._persist',
+                side_effect=RuntimeError('db down'),
+            ):
+                self.write_client.patch(
+                    f'/api/patient-info/{pi.pk}/', {'ecog_status': '1'}, format='json',
+                )
+        finally:
+            audit_logger.removeHandler(capture)
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(json.loads(records[0])['method'], 'PATCH')
+
 
 class PatientNameRenameTest(_SmartBase):
     """Renaming a patient writes Person, the OMOP row — never PatientRecord.

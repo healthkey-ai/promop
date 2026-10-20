@@ -7,7 +7,7 @@ from datetime import date
 from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
 from omop_core.services.pk import next_pk
 
-logger = logging.getLogger('audit')
+logger = logging.getLogger('audit.ops')
 
 RXNAV_BASE = 'https://rxnav.nlm.nih.gov/REST'
 
