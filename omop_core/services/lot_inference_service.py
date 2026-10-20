@@ -31,7 +31,7 @@ from omop_core.services.lot_regimens import (
 from omop_core.services.patient_record_service import refresh_patient_record
 from omop_oncology.models import Episode
 
-logger = logging.getLogger('audit.ops')
+logger = logging.getLogger('omop.ops')
 
 # ── Tuneable parameters ────────────────────────────────────────────────────
 ERA_GAP_DAYS = 30

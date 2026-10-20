@@ -7,10 +7,10 @@ from email.utils import parsedate_to_datetime
 from django.http import JsonResponse
 
 logger = logging.getLogger('audit')
-# Operational warnings/errors live beside the audit event stream, not inside it:
-# SIEM consumers parse every `audit` record as JSON, so plain messages there are
-# both noise and a broken contract (#1929).
-ops_logger = logging.getLogger('audit.ops')
+# Operational warnings/errors stay outside the audit hierarchy: SIEM consumers
+# parse every `audit` record as JSON, and an embedder may configure `audit`
+# without configuring a child logger (#1929).
+ops_logger = logging.getLogger('omop.ops')
 
 _SUNSET_DATE = 'Tue, 01 Sep 2026 00:00:00 GMT'
 _SUNSET_DT = parsedate_to_datetime(_SUNSET_DATE)

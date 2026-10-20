@@ -4835,6 +4835,16 @@ class AuditLogMiddlewareTest(_SmartBase):
         self.assertEqual(len(records), 1)
         self.assertEqual(json.loads(records[0])['method'], 'PATCH')
 
+    def test_audit_and_operational_handlers_use_separate_streams(self):
+        from django.conf import settings
+
+        handlers = settings.LOGGING['handlers']
+        self.assertEqual(handlers['audit_stdout']['stream'], 'ext://sys.stdout')
+        self.assertNotEqual(
+            handlers['console'].get('stream', 'ext://sys.stderr'),
+            handlers['audit_stdout']['stream'],
+        )
+
 
 class PatientNameRenameTest(_SmartBase):
     """Renaming a patient writes Person, the OMOP row — never PatientRecord.

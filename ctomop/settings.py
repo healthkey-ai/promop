@@ -136,10 +136,13 @@ LOGGING = {
         'audit_stdout': {
             'class': 'logging.StreamHandler',
             'formatter': 'audit_json',
+            # The JSON audit stream must not share a sink with operational text.
+            'stream': 'ext://sys.stdout',
         },
         'console': {
             'class': 'logging.StreamHandler',
             'formatter': 'verbose',
+            'stream': 'ext://sys.stderr',
         },
     },
     'loggers': {
@@ -148,10 +151,10 @@ LOGGING = {
             'level': 'INFO',
             'propagate': False,
         },
-        # Operational messages from audit-adjacent services. A child of `audit`
-        # with its own console handler and no propagation, so these never reach
-        # the JSON audit stream (#1929).
-        'audit.ops': {
+        # Operational messages from OMOP services. Deliberately outside the
+        # `audit` hierarchy: embedders may configure `audit` without adding this
+        # key, and a child would then propagate into their JSON handler (#1929).
+        'omop.ops': {
             'handlers': ['console'],
             'level': 'INFO',
             'propagate': False,
