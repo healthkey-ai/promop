@@ -119,7 +119,9 @@ def test_supportive_courses_create_edit_and_do_not_count_as_lines(editor, catalo
         'intent': 'Supportive', 'discontinuation_reason': 'Toxicity'}, format='json')
     assert response.status_code == 201, response.data
     course = response.data['course']
-    assert response.data['patient_info']['therapy_lines_count'] == 0
+    # Supportive care does not establish whether anticancer lines were received.
+    assert response.data['patient_info']['therapy_lines_count'] is None
+    assert response.data['patient_info']['prior_therapy'] is None
     assert response.data['patient_info']['supportive_therapy_courses'][0]['id'] == course['id']
     response = client.patch(f"/api/v1/supportive-therapies/{course['id']}/", {
         'end_date': None, 'intent': 'Palliative', 'discontinuation_reason': ''}, format='json')
@@ -127,7 +129,7 @@ def test_supportive_courses_create_edit_and_do_not_count_as_lines(editor, catalo
     assert response.data['course']['end_date'] is None
     assert response.data['course']['intent'] == 'Palliative'
     assert response.data['course']['discontinuation_reason'] == ''
-    assert refresh_patient_record(record.person).therapy_lines_count == 0
+    assert refresh_patient_record(record.person).therapy_lines_count is None
     assert Observation.objects.filter(person=record.person, observation_source_value__startswith=f"supportive:{course['id']}:").count() == 5
 
 

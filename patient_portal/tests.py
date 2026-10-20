@@ -2655,7 +2655,7 @@ class DrugExposureToPatientRecordTest(_SignalBase):
                 drug_exposure_start_date=date(2021 + idx, 1, 1),
                 drug_type_concept=self.type_concept,
             )
-        self.assertEqual(self._get_pi().therapy_lines_count, 0)
+        self.assertIsNone(self._get_pi().therapy_lines_count)
 
     def test_same_start_date_drugs_do_not_invent_a_line(self):
         # A shared date is not a persisted Episode/EpisodeEvent relationship.
@@ -2673,7 +2673,7 @@ class DrugExposureToPatientRecordTest(_SignalBase):
             drug_exposure_start_date=date(2022, 6, 1),
             drug_type_concept=self.type_concept,
         )
-        self.assertEqual(self._get_pi().therapy_lines_count, 0)
+        self.assertIsNone(self._get_pi().therapy_lines_count)
 
     def test_same_date_drugs_do_not_invent_a_combination_regimen(self):
         # Regimen labels require persisted episodes, not inferred drug names.
@@ -2720,7 +2720,8 @@ class DrugExposureToPatientRecordTest(_SignalBase):
         )
         pi = self._get_pi()
         self.assertIsNone(pi.first_line_therapy)
-        self.assertEqual(pi.prior_therapy, 'None')
+        # Failure to establish a line is not an assertion of no prior therapy.
+        self.assertIsNone(pi.prior_therapy)
 
 
 class MeasurementToPatientRecordTest(_SignalBase):
