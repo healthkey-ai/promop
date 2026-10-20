@@ -1732,6 +1732,7 @@ export default function CodeMappingPage() {
         row={selectedRow}
         reference={reference}
         canApprove={canApprove}
+        sourceExamples
         strategies={strategies}
         rankingModel={rankingModel}
         onStrategiesChange={setStrategies}

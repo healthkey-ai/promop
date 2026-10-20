@@ -283,8 +283,9 @@ export default function EditMappingDialog({
           params: { source_vocabulary_id: exampleVocabulary, source_code: exampleCode, omop_table: exampleTable },
         });
         if (!active) return;
-        setExamples({ status: "ready", examples: data.examples });
-        setExamplePersonId(data.examples[0]?.person_id ?? null);
+        const found = data?.examples ?? [];
+        setExamples({ status: "ready", examples: found });
+        setExamplePersonId(found[0]?.person_id ?? null);
       } catch (err) {
         if (!active) return;
         const forbidden = (err as { response?: { status?: number } })?.response?.status === 403;
@@ -879,10 +880,13 @@ export default function EditMappingDialog({
                   </div>
                 </div>
               </div>
-              {sourceExamples ? (
-                <SourceExamplesBlock state={examples} selected={examplePersonId} onSelect={setExamplePersonId} />
-              ) : (
-                <SourceMetadataBlock metadata={selectedRow?.source_metadata} />
+              {/* The list row omits the mapping's own metadata; the detail
+                  response carries it as source evidence. */}
+              <SourceMetadataBlock metadata={selectedRow?.source_metadata && Object.keys(selectedRow.source_metadata).length
+                ? selectedRow.source_metadata : sourceEvidence?.metadata as Record<string, unknown> | undefined} />
+              {sourceExamples && (
+                <SourceExamplesBlock state={examples} selected={examplePersonId} onSelect={setExamplePersonId}
+                  inventoryPatients={sourceEvidence?.metadata?.patients} />
               )}
             </fieldset>
 
@@ -1382,10 +1386,11 @@ export default function EditMappingDialog({
 
 // ── Source Examples Block ──────────────────────────────────────────
 
-function SourceExamplesBlock({ state, selected, onSelect }: {
+function SourceExamplesBlock({ state, selected, onSelect, inventoryPatients }: {
   state: SourceExamplesState | null;
   selected: number | null;
   onSelect: (personId: number) => void;
+  inventoryPatients?: number | null;
 }) {
   if (!state) return null;
   if (state.status === "loading") {
@@ -1397,6 +1402,7 @@ function SourceExamplesBlock({ state, selected, onSelect }: {
   if (!state.examples.length) {
     return <p className="mt-3 text-xs text-slate-500" data-testid="source-examples-empty">
       No patient you can open has this source code in their source inventory.
+      {inventoryPatients != null && " The patient counts above come from the aggregate source inventory, which has no individual patients."}
     </p>;
   }
   const example = state.examples.find((item) => item.person_id === selected) ?? state.examples[0];
