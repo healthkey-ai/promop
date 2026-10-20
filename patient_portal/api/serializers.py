@@ -717,7 +717,9 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         episode_ids = [e.episode_id for e in episodes_by_line.values()]
         event_ids_by_episode = {}
         if episode_ids:
-            for ee in EpisodeEvent.objects.filter(episode_id__in=episode_ids):
+            from omop_core.services.mappings import CONCEPT_DRUG_EXPOSURE_FIELD
+            for ee in EpisodeEvent.objects.filter(episode_id__in=episode_ids,
+                    episode_event_field_concept_id=CONCEPT_DRUG_EXPOSURE_FIELD):
                 event_ids_by_episode.setdefault(ee.episode_id, []).append(ee.event_id)
         all_event_ids = [
             event_id
@@ -727,7 +729,7 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         drugs_by_id = {
             de.drug_exposure_id: de
             for de in DrugExposure.objects.filter(
-                drug_exposure_id__in=all_event_ids,
+                person=obj.person, is_erroneous=False, drug_exposure_id__in=all_event_ids,
             ).select_related(
                 'drug_concept',
                 'drug_concept__vocabulary',
@@ -746,6 +748,9 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                     continue
                 concept = de.drug_concept
                 drugs.append({
+                    'drug_exposure_id': de.pk,
+                    'start_date': _iso(de.drug_exposure_start_date),
+                    'end_date': _iso(de.drug_exposure_end_date),
                     'concept_id': concept.concept_id,
                     'concept_name': concept.concept_name,
                     'concept_code': concept.concept_code,
@@ -1857,10 +1862,18 @@ class FieldSynonymSerializer(serializers.ModelSerializer):
 class TherapyLineDrugSerializer(serializers.Serializer):
     """One drug given in a line, named by concept."""
 
-    concept_id = serializers.IntegerField()
+    drug_exposure_id = serializers.IntegerField(required=False, min_value=1)
+    concept_id = serializers.IntegerField(min_value=1)
+    start_date = serializers.DateField(required=False)
+    end_date = serializers.DateField(required=False, allow_null=True)
     source_value = serializers.CharField(
         required=False, allow_blank=True, allow_null=True, max_length=50,
     )
+
+    def validate_start_date(self, value):
+        if value > date.today():
+            raise serializers.ValidationError('A future drug administration is planned, not received treatment.')
+        return value
 
 
 class TherapyLineWriteSerializer(serializers.Serializer):
@@ -1911,7 +1924,7 @@ class TherapyLineWriteSerializer(serializers.Serializer):
         # A line with neither drugs nor a named regimen groups nothing, so
         # inference reads it back as an empty line: the write would appear to
         # succeed and change none of the fields the caller was trying to set.
-        if not attrs.get('drugs') and not attrs.get('regimen_concept_id'):
+        if not self.partial and not attrs.get('drugs') and not attrs.get('regimen_concept_id'):
             raise serializers.ValidationError(
                 'Provide at least one drug, or a regimen_concept_id naming the '
                 'regimen. A line with neither groups no drug exposures and no '

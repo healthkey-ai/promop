@@ -33,11 +33,11 @@ from datetime import date
 from typing import Any
 
 from django.core.exceptions import ValidationError
-from django.db import transaction
 
 from omop_core.models import Concept, DrugExposure, Person
 from omop_core.services.episode_service import upsert_therapy_line_episode
 from omop_core.services.disease_episodes import primary_lines
+from omop_core.services.therapy_transactions import lock_therapy_patients, run_therapy_write
 from omop_oncology.models import Episode
 
 
@@ -135,7 +135,7 @@ def validate_artemis_output(payload: Any) -> list[ArtemisEpisode]:
         person = Person.objects.filter(person_id=row["person_id"]).first()
         if person is None:
             raise _error(f"{label}.person_id {row['person_id']} does not exist")
-        exposures = list(DrugExposure.objects.filter(drug_exposure_id__in=exposure_ids))
+        exposures = list(DrugExposure.objects.filter(drug_exposure_id__in=exposure_ids, is_erroneous=False))
         if len(exposures) != len(exposure_ids):
             raise _error(f"{label} references an unknown drug_exposure_id")
         if any(exposure.person_id != person.person_id for exposure in exposures):
@@ -186,36 +186,46 @@ def _is_manual_episode(episode: Episode) -> bool:
 
 def materialize_artemis_output(payload: Any) -> ArtemisMaterializationResult:
     """Validate and atomically materialize ARTEMIS output through episode_service."""
+    return run_therapy_write(lambda: _materialize_artemis_once(payload))
+
+
+def _materialize_artemis_once(payload):
+    episodes = validate_artemis_output(payload)
+    lock_therapy_patients(item.person.pk for item in episodes)
+    # Lock the entire document's facts before inserting even its first link.
+    # The trigger must not introduce reverse-order cycles across LOT rows.
+    fact_ids = {pk for item in episodes for pk in item.drug_exposure_ids}
+    list(DrugExposure.objects.select_for_update(nowait=True).filter(pk__in=fact_ids).order_by('pk'))
+    # A concurrent correction may have committed since initial validation.
     episodes = validate_artemis_output(payload)
     created = updated = skipped_manual = 0
-    with transaction.atomic():
-        for item in episodes:
-            # ARTEMIS writes the primary cancer's lines (it names no cancer), so
-            # the manual line it must not overwrite is the primary one (#1739).
-            existing = primary_lines(item.person).filter(episode_number=item.line_number).first()
-            if existing is not None and _is_manual_episode(existing):
-                skipped_manual += 1
-                continue
-            result = upsert_therapy_line_episode(
-                item.person,
-                line_number=item.line_number,
-                regimen_concept=item.regimen_concept,
-                regimen_source_concept=item.regimen_concept,
-                start_date=item.start_date,
-                end_date=item.end_date,
-                drug_exposure_ids=item.drug_exposure_ids,
-                outcome=item.outcome,
-                source_value=f"ARTEMIS-LOT-{item.line_number}",
-                today=item.start_date,
-                replace_events=True,
-            )
-            if result.episode is None:
-                # The canonical writer has a mandatory CDM concept dependency.
-                # Rolling back makes that absence fail closed rather than producing
-                # an incomplete partial ARTEMIS import.
-                raise _error("required Treatment Regimen concept is not loaded")
-            if result.created:
-                created += 1
-            else:
-                updated += 1
+    for item in episodes:
+        # ARTEMIS writes the primary cancer's lines (it names no cancer), so
+        # the manual line it must not overwrite is the primary one (#1739).
+        existing = primary_lines(item.person).filter(episode_number=item.line_number).first()
+        if existing is not None and _is_manual_episode(existing):
+            skipped_manual += 1
+            continue
+        result = upsert_therapy_line_episode(
+            item.person,
+            line_number=item.line_number,
+            regimen_concept=item.regimen_concept,
+            regimen_source_concept=item.regimen_concept,
+            start_date=item.start_date,
+            end_date=item.end_date,
+            drug_exposure_ids=item.drug_exposure_ids,
+            outcome=item.outcome,
+            source_value=f"ARTEMIS-LOT-{item.line_number}",
+            today=item.start_date,
+            replace_events=True,
+        )
+        if result.episode is None:
+            # The canonical writer has a mandatory CDM concept dependency.
+            # Rolling back makes that absence fail closed rather than producing
+            # an incomplete partial ARTEMIS import.
+            raise _error("required Treatment Regimen concept is not loaded")
+        if result.created:
+            created += 1
+        else:
+            updated += 1
     return ArtemisMaterializationResult(created, updated, skipped_manual)
