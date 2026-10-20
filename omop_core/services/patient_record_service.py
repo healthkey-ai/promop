@@ -3311,18 +3311,28 @@ def _compute_derived_fields(patient_info: PatientRecord) -> None:
     kappa = patient_info.kappa_flc
     lam = patient_info.lambda_flc
 
-    imwg = None
-    if serum_mp is not None and float(serum_mp) >= 0.5:
+    # Keep this in lockstep with CB PatientInfoAttributes.measurable_disease_imwg
+    # (and trials/signals.py): a negative OR is definitive only when all three
+    # components were evaluated; a missing component keeps the result unknown.
+    # The FLC window and thresholds are the reviewed CB rule (CB #858).
+    serum_component = None if serum_mp is None else float(serum_mp) >= 0.5
+    urine_component = None if urine_mp is None else float(urine_mp) >= 200
+    if kappa is None or lam is None or float(lam) == 0:
+        flc_component = None
+    else:
+        ratio = float(kappa) / float(lam)
+        if not (ratio < 0.26 or ratio > 1.65):
+            flc_component = False
+        else:
+            flc_component = float(kappa) >= 100 or float(lam) >= 100
+
+    components = [serum_component, urine_component, flc_component]
+    if any(component is True for component in components):
         imwg = True
-    elif urine_mp is not None and float(urine_mp) >= 200:
-        imwg = True
-    elif kappa is not None and lam is not None and lam > 0:
-        ratio = kappa / lam
-        diff = abs(kappa - lam)
-        if (ratio > 100 or ratio < 0.01) and diff >= 10:
-            imwg = True
-    elif any(v is not None for v in (serum_mp, urine_mp, kappa, lam)):
+    elif all(component is False for component in components):
         imwg = False
+    else:
+        imwg = None
     patient_info.measurable_disease_imwg = imwg
 
     # Use the canonical LOINC-derived column (10³/µL) for the iwCLL 5.0

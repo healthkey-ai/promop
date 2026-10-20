@@ -905,10 +905,31 @@ class RefreshPatientRecordComputedFieldsTest(_OmopBase):
             person=self.person,
             monoclonal_protein_serum=0.1,
             monoclonal_protein_urine=50,
+            kappa_flc=10,
+            lambda_flc=10,
         )
         from omop_core.services.patient_record_service import _compute_derived_fields
         _compute_derived_fields(pi)
         self.assertFalse(pi.measurable_disease_imwg)
+
+    def test_measurable_disease_imwg_none_with_partial_values(self):
+        pi = PatientRecord.objects.create(
+            person=self.person,
+            monoclonal_protein_serum=0.1,
+        )
+        from omop_core.services.patient_record_service import _compute_derived_fields
+        _compute_derived_fields(pi)
+        self.assertIsNone(pi.measurable_disease_imwg)
+
+    def test_measurable_disease_imwg_true_with_abnormal_flc_ratio(self):
+        pi = PatientRecord.objects.create(
+            person=self.person,
+            kappa_flc=150,
+            lambda_flc=75,
+        )
+        from omop_core.services.patient_record_service import _compute_derived_fields
+        _compute_derived_fields(pi)
+        self.assertTrue(pi.measurable_disease_imwg)
 
     def test_measurable_disease_imwg_none_when_no_data(self):
         pi = PatientRecord.objects.create(person=self.person)

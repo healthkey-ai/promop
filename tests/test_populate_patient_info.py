@@ -556,26 +556,93 @@ class TestMeasurableDiseaseImwg:
         _cmd()._compute_derived_fields(pi)
         assert pi.measurable_disease_imwg is True
 
-    def test_serum_m_protein_low_sets_false(self):
-        pi = self._pi(monoclonal_protein_serum=0.3, monoclonal_protein_urine=None,
-                      kappa_flc=None, lambda_flc=None)
+    def test_all_components_low_sets_false(self):
+        pi = self._pi(
+            monoclonal_protein_serum=0.3,
+            monoclonal_protein_urine=50,
+            kappa_flc=10,
+            lambda_flc=10,
+        )
         _cmd()._compute_derived_fields(pi)
         assert pi.measurable_disease_imwg is False
 
+    def test_partial_serum_only_stays_none(self):
+        pi = self._pi(
+            monoclonal_protein_serum=0.3,
+            monoclonal_protein_urine=None,
+            kappa_flc=None,
+            lambda_flc=None,
+        )
+        _cmd()._compute_derived_fields(pi)
+        assert pi.measurable_disease_imwg is None
+
+    def test_partial_missing_one_flc_stays_none(self):
+        pi = self._pi(
+            monoclonal_protein_serum=0.3,
+            monoclonal_protein_urine=50,
+            kappa_flc=10,
+            lambda_flc=None,
+        )
+        _cmd()._compute_derived_fields(pi)
+        assert pi.measurable_disease_imwg is None
+
+    def test_zero_lambda_stays_none(self):
+        pi = self._pi(
+            monoclonal_protein_serum=0.3,
+            monoclonal_protein_urine=50,
+            kappa_flc=10,
+            lambda_flc=0,
+        )
+        _cmd()._compute_derived_fields(pi)
+        assert pi.measurable_disease_imwg is None
+
     def test_urine_m_protein_high_sets_true(self):
-        pi = self._pi(monoclonal_protein_serum=None, monoclonal_protein_urine=250)
+        pi = self._pi(
+            monoclonal_protein_serum=None,
+            monoclonal_protein_urine=250,
+            kappa_flc=None,
+            lambda_flc=None,
+        )
         _cmd()._compute_derived_fields(pi)
         assert pi.measurable_disease_imwg is True
 
-    def test_flc_ratio_abnormal_sets_true(self):
-        pi = self._pi(monoclonal_protein_serum=None, monoclonal_protein_urine=None,
-                      kappa_flc=120, lambda_flc=1)  # ratio=120 >100, diff=119 >=10
+    def test_flc_ratio_above_normal_with_high_kappa_sets_true(self):
+        pi = self._pi(
+            monoclonal_protein_serum=None,
+            monoclonal_protein_urine=None,
+            kappa_flc=150,
+            lambda_flc=75,
+        )  # ratio 2.0 > 1.65; kappa >= 100
         _cmd()._compute_derived_fields(pi)
         assert pi.measurable_disease_imwg is True
+
+    def test_flc_ratio_below_normal_with_high_lambda_sets_true(self):
+        pi = self._pi(
+            monoclonal_protein_serum=None,
+            monoclonal_protein_urine=None,
+            kappa_flc=10,
+            lambda_flc=100,
+        )  # ratio 0.1 < 0.26; lambda >= 100
+        _cmd()._compute_derived_fields(pi)
+        assert pi.measurable_disease_imwg is True
+
+    def test_flc_ratio_normal_with_missing_other_components_stays_none(self):
+        pi = self._pi(
+            monoclonal_protein_serum=None,
+            monoclonal_protein_urine=None,
+            kappa_flc=10,
+            lambda_flc=10,
+        )  # ratio 1.0, normal FLC, but serum/urine are unknown
+        _cmd()._compute_derived_fields(pi)
+        assert pi.measurable_disease_imwg is None
 
     def test_all_none_stays_none(self):
-        pi = self._pi(monoclonal_protein_serum=None, monoclonal_protein_urine=None,
-                      kappa_flc=None, lambda_flc=None)
+        pi = self._pi(
+            monoclonal_protein_serum=None,
+            monoclonal_protein_urine=None,
+            kappa_flc=None,
+            lambda_flc=None,
+        )
         _cmd()._compute_derived_fields(pi)
         assert pi.measurable_disease_imwg is None
 
