@@ -784,6 +784,48 @@ def lexical_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
     ]
 
 
+def priority_lexical_candidates(source_value, domain_id, concept_ids):
+    """Lexical hits among curator-prioritized concepts only (#1914).
+
+    lexical_candidates keeps the best N per code, so a prioritized concept that
+    matches but scores below the Nth is cut before the ranker sees it. This
+    scores just the prioritized set -- a handful of concepts by primary key --
+    at the same MIN_TRIGRAM_SCORE, so priority keeps what retrieval found and
+    never adds a concept it did not.
+    """
+    query = (source_value or '').strip().upper()
+    if len(query) < 3 or not concept_ids:
+        return []
+    concepts = Concept.objects.filter(
+        concept_id__in=concept_ids, standard_concept='S', invalid_reason__isnull=True,
+        **({'domain_id': domain_id} if domain_id else {}),
+    )
+    scores = {
+        c.concept_id: (c, float(c.score))
+        for c in concepts.annotate(score=TrigramSimilarity(Upper('concept_name'), query))
+        .filter(score__gt=MIN_TRIGRAM_SCORE)
+    }
+    synonyms = (
+        ConceptSynonym.objects.filter(concept__in=concepts)
+        .annotate(score=TrigramSimilarity(Upper('concept_synonym_name'), query))
+        .filter(score__gt=MIN_TRIGRAM_SCORE)
+        .values('concept_id').annotate(score=Max('score'))
+    )
+    by_synonym = {row['concept_id']: float(row['score']) + SYNONYM_BONUS for row in synonyms}
+    if by_synonym:
+        for concept in concepts.filter(concept_id__in=list(by_synonym)):
+            score = by_synonym[concept.concept_id]
+            if concept.concept_id not in scores or score > scores[concept.concept_id][1]:
+                scores[concept.concept_id] = (concept, score)
+    ranked = sorted(scores.values(), key=lambda pair: (-pair[1], pair[0].concept_id))
+    return [{
+        'concept_id': c.concept_id, 'concept_name': c.concept_name, 'concept_code': c.concept_code,
+        'vocabulary_id': c.vocabulary_id, 'concept_class_id': c.concept_class_id,
+        'domain_id': c.domain_id, 'standard_concept': c.standard_concept,
+        'lexical_score': round(score, 3), 'retrieval': STRATEGY_LEXICAL,
+    } for c, score in ranked]
+
+
 _RANKING_SCHEMA = {
     'type': 'object',
     'properties': {
@@ -847,6 +889,12 @@ missing or generic -- a panel or category such as "Vitals" -- when the resource
 itself names something specific; then map the specific thing. When the
 metadata names several different things, the code covers all of them: do not
 map it as if it were one.
+
+A candidate may carry curator_priority: its rank (1 is highest) in a list of
+concepts curators want mapped first. It is not evidence of a match. Use it only
+to choose between candidates that are equally good clinical matches; never pick
+a prioritized concept over a better match, and never pick one that is not
+compatible.
 
 Choose only from the supplied candidates. Return null only when the shortlist
 contains no clinically compatible exact or broader concept. Never invent an ID.
@@ -1079,6 +1127,7 @@ def rank_candidates_jev(source_value, candidates, source_description='', *, sour
         criteria[cid] = (
             f"{c.get('vocabulary_id', '')}:{c.get('concept_code', '')} — "
             f"{c.get('concept_name', '')} (OMOP {c['concept_id']})"
+            + (f" [curator priority {c['curator_priority']}]" if c.get('curator_priority') else '')
         )
     criteria['none'] = 'None of the candidates are clinically compatible'
 
@@ -1102,7 +1151,10 @@ def rank_candidates_jev(source_value, candidates, source_description='', *, sour
                 'instructions': (
                     'Which OMOP destination concept is the best clinical match '
                     'for this source code? Select the most specific and '
-                    'clinically equivalent concept.'
+                    'clinically equivalent concept. A [curator priority N] tag '
+                    'marks concepts curators want mapped first; it is not '
+                    'evidence of a match. Prefer a tagged concept only over an '
+                    'equally good untagged match, never over a better one.'
                 ),
                 'criteria': criteria,
             },
@@ -1220,6 +1272,22 @@ def rank_candidates_dispatch(source_value, candidates, source_description='', *,
     When *ranking_model* is ``'both'``, runs Anthropic and Jev concurrently and
     picks the winner with the higher confidence score.
     """
+    result = _rank_dispatch(
+        source_value, candidates, source_description, source_context=source_context,
+        require_model_selection=require_model_selection, ranking_model=ranking_model,
+    )
+    # Say when the winner is a curator-prioritized concept, so a curator can
+    # see that priority may have broken a tie (#1914). The rest passes through
+    # as the ranker returned it.
+    chosen = result[0]
+    if chosen and chosen.get('curator_priority') and len(result) > 1:
+        note = f"{result[1] or ''} Curator priority {chosen['curator_priority']}.".strip()
+        result = (chosen, note, *result[2:])
+    return result
+
+
+def _rank_dispatch(source_value, candidates, source_description, *, source_context,
+                   require_model_selection, ranking_model):
     import time as _time
 
     kwargs = dict(
@@ -1398,6 +1466,24 @@ def retrieval_pool(*, source_code, source_vocabulary_id, source_text, domain_id,
             else:
                 candidates.append(hit)
                 by_id[hit['concept_id']] = hit
+
+    # Curator priority (#1914): keep a prioritized concept the lexical search
+    # matched but cut, and mark every prioritized candidate for the ranker.
+    from omop_core.services.concept_priority import positions as priority_positions
+    ranked = priority_positions(domain_id)
+    if ranked:
+        if STRATEGY_LEXICAL in strategies:
+            present = {c['concept_id'] for c in candidates}
+            retained = timed('priority', lambda: priority_lexical_candidates(
+                source_text or source_code, domain_id, [cid for cid in ranked if cid not in present]))
+            for hit in retained:
+                hit['priority_retained'] = True
+            if retained:
+                report('priority', retained)
+            candidates += retained
+        for candidate in candidates:
+            if candidate['concept_id'] in ranked:
+                candidate['curator_priority'] = ranked[candidate['concept_id']]
 
     logger.info(
         'Retrieval for %s:%s took %s (%d candidates).',

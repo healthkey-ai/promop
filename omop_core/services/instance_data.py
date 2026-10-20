@@ -98,6 +98,7 @@ REFERENCE_FROM_RELEASE: dict[str, str] = {
 
 # Hand-curated reference data with no release behind it, so copying is the only way to move it.
 _REFERENCE_COPIED_EXPLICIT: frozenset[str] = frozenset({
+    'omop_core.ConceptMappingPriority',
     'omop_core.CustomPatientField', 'omop_core.FieldChoice', 'omop_core.FieldChoiceCode',
     'omop_core.FieldConceptMapping', 'omop_core.FieldFormula', 'omop_core.FieldSynonym',
     'omop_core.MappingDestinationCandidate',

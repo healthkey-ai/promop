@@ -4117,6 +4117,36 @@ class FieldConceptMapping(models.Model):
         return f"{self.field_name} → {self.vocabulary_id}:{self.concept_code} ({self.status})"
 
 
+class ConceptMappingPriority(models.Model):
+    """A curator's ranking of a standard concept for code-mapping work (#1914).
+
+    One row per ranked concept; concepts without one are unranked. The Concept
+    to Code list shows ranked concepts first, by position, and Suggest prefers a
+    ranked concept over an equally good unranked match. Positions are global
+    across filters and pages, and `services.concept_priority.move` renumbers
+    them 1..N under a table lock, so they stay dense and unique.
+
+    Reference data: copy_reference_data moves it, matched on the concept's
+    (vocabulary_id, concept_code).
+    """
+    concept = models.OneToOneField(
+        Concept, on_delete=models.CASCADE, related_name='mapping_priority',
+    )
+    position = models.PositiveIntegerField()
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'concept_mapping_priority'
+        ordering = ['position', 'concept_id']
+
+    def __str__(self):
+        return f'{self.position}: concept {self.concept_id}'
+
+
 class CustomPatientField(models.Model):
     """Administrator-defined PatientRecord field backed by ``custom_fields``.
 

@@ -1,5 +1,5 @@
 """Concept-first curation over each installation's vocabulary and SCCM."""
-from django.db.models import Count, Exists, OuterRef, Q, Subquery, Sum, Value
+from django.db.models import Count, Exists, F, OuterRef, Q, Subquery, Sum, Value
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 
@@ -67,6 +67,8 @@ def browse_concepts(params):
     elif params.get('domain'):
         domains = [domain for domain, table in DOMAIN_TO_TABLE.items() if table == params['domain']]
         concepts = concepts.filter(domain_id__in=domains)
+    if str(params.get('prioritized') or '') in ('1', 'true'):
+        concepts = concepts.filter(mapping_priority__isnull=False)
     search = str(params.get('search') or '').strip()
     if search:
         matching_fields = fields.filter(field_name__icontains=search)
@@ -83,7 +85,10 @@ def browse_concepts(params):
         return Coalesce(Subquery(mappings.filter(status=status).order_by().values(
             'target_concept_id').annotate(n=Count('pk')).values('n')), Value(0))
 
-    return concepts.order_by('concept_name', 'pk'), fields, {
+    # Curator priority first (#1914), on every page and under every filter;
+    # unranked concepts keep the alphabetical order after them.
+    concepts = concepts.annotate(priority=F('mapping_priority__position'))
+    return concepts.order_by(F('priority').asc(nulls_last=True), 'concept_name', 'pk'), fields, {
         'approved': count('approved'), 'proposed': count('proposed'), 'rejected': count('rejected'),
         'seen': Coalesce(Subquery(mappings.order_by().values('target_concept_id').annotate(
             n=Sum('occurrence_count')).values('n')), Value(0)),
