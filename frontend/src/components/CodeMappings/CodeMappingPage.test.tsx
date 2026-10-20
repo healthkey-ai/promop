@@ -836,6 +836,38 @@ describe("CodeMappingPage", () => {
       expect(screen.queryByLabelText("Source Concept ID")).not.toBeInTheDocument();
     });
 
+    it("shows an example patient's Source Metadata for the code", async () => {
+      renderPage();
+      const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
+      const originalGet = mockGet.getMockImplementation()!;
+      mockGet.mockImplementation((url: string, config?: unknown) => url === "/v1/concept-to-code/source-examples/"
+        ? Promise.resolve({ data: { examples: [{
+          person_id: 21, omop_table: "measurement", occurrence_count: 3, source_unit: "g/dL",
+          example_quantity: "1.2", source_metadata: { specimen: "serum" }, last_seen: null,
+        }] } })
+        : originalGet(url, config));
+      fireEvent.click(cell.closest("tr")!);
+      await screen.findByText("Edit Mapping");
+      expect(await screen.findByRole("combobox", { name: "Example patient" })).toHaveTextContent("Patient 21 · Seen 3");
+      expect(screen.getByText(/"specimen": "serum"/)).toBeInTheDocument();
+      expect(mockGet).toHaveBeenCalledWith("/v1/concept-to-code/source-examples/", {
+        params: expect.objectContaining({ source_code: "M-PROTEIN, SERUM" }),
+      });
+    });
+
+    it("expands the mapping's own Source Metadata when no patient row carries the code", async () => {
+      renderPage([{ ...proposedRow, source_evidence: {
+        organization: null, occurrence_count: 12, group_occurrence_count: null, units: [],
+        metadata: { patients: 205, codings: 12, specimen: "serum" },
+      } }]);
+      const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
+      fireEvent.click(cell.closest("tr")!);
+      await screen.findByText("Edit Mapping");
+      fireEvent.click(await screen.findByRole("button", { name: /Source Metadata/ }));
+      expect(screen.getByText(/"specimen": "serum"/)).toBeInTheDocument();
+      expect(await screen.findByTestId("source-examples-empty")).toHaveTextContent("aggregate source inventory");
+    });
+
     it("puts Domain first in the source block", async () => {
       await openDialog();
       const labels = Array.from(
