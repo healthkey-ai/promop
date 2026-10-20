@@ -14744,6 +14744,7 @@ class TherapyLineViewSet(viewsets.ViewSet):
 
     def create(self, request):
         from omop_core.services.episode_service import author_therapy_line
+        from omop_core.services.therapy_transactions import TherapyLineWriteConflict
 
         serializer = TherapyLineWriteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -14764,16 +14765,14 @@ class TherapyLineViewSet(viewsets.ViewSet):
                     result = author_therapy_line(
                         person,
                         line_number=data['line_number'],
-                        drugs=data.get('drugs') or (),
-                        start_date=data.get('start_date'),
-                        end_date=data.get('end_date'),
-                        regimen_concept_id=data.get('regimen_concept_id'),
-                        outcome=data.get('outcome') or None,
-                        intent=data.get('intent') or None,
-                        discontinuation_reason=data.get('discontinuation_reason') or None,
-                        source_value=data.get('source_value') or None,
                         disease=data.get('disease') or None,
+                        **{key: data[key] for key in (
+                            'drugs', 'start_date', 'end_date', 'regimen_concept_id',
+                            'outcome', 'intent', 'discontinuation_reason', 'source_value',
+                        ) if key in data},
                     )
+        except TherapyLineWriteConflict as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_409_CONFLICT)
         except ValueError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -14807,6 +14806,7 @@ class TherapyLineViewSet(viewsets.ViewSet):
 
     def partial_update(self, request, pk=None):
         from omop_core.services.episode_service import author_therapy_line
+        from omop_core.services.therapy_transactions import TherapyLineWriteConflict
 
         try:
             episode_id = int(pk)
@@ -14846,16 +14846,7 @@ class TherapyLineViewSet(viewsets.ViewSet):
         payload = dict(request.data)
         payload['person'] = episode.person_id
         payload['line_number'] = episode.episode_number
-        payload.setdefault(
-            'start_date',
-            episode.episode_start_date.isoformat() if episode.episode_start_date else None,
-        )
-        payload.setdefault(
-            'end_date',
-            episode.episode_end_date.isoformat() if episode.episode_end_date else None,
-        )
-
-        serializer = TherapyLineWriteSerializer(data=payload)
+        serializer = TherapyLineWriteSerializer(data=payload, partial=True)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         person = episode.person
@@ -14870,19 +14861,17 @@ class TherapyLineViewSet(viewsets.ViewSet):
                     result = author_therapy_line(
                         person,
                         line_number=episode.episode_number,
-                        drugs=data.get('drugs') or (),
-                        start_date=data.get('start_date'),
-                        end_date=data.get('end_date'),
-                        regimen_concept_id=data.get('regimen_concept_id'),
-                        outcome=data.get('outcome') or None,
-                        intent=data.get('intent') or None,
-                        discontinuation_reason=data.get('discontinuation_reason') or None,
-                        source_value=data.get('source_value') or None,
                         replace=True,
                         # This line, by id: another cancer may have a line with
                         # the same number (#1739).
                         episode=episode,
+                        **{key: data[key] for key in (
+                            'drugs', 'start_date', 'end_date', 'regimen_concept_id',
+                            'outcome', 'intent', 'discontinuation_reason', 'source_value',
+                        ) if key in data},
                     )
+        except TherapyLineWriteConflict as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_409_CONFLICT)
         except ValueError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
