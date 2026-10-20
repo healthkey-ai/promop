@@ -21,9 +21,7 @@ this importer writing about*, as opposed to *who may log in as them*.
 
 ## Why email is not enough
 
-Measured on 2026-10-20 in the **HealthTree Cloud Run deployment** that serves
-promop.healthtree.org (Cloud SQL `ht-phr-staging-db`, database `ctomop`), read
-only. That deployment, not Render staging, is where this ETL imports, so it is
+Measured on 2026-10-20 in the **HealthTree Cloud Run deployment**, read only. That deployment, not Render staging, is where this ETL imports, so it is
 the only place the coverage question can be answered. CLAUDE.md reserves the
 word staging for Render's `promop-staging`, which holds none of this ETL's data
 and which no DSN in this working copy can reach, so it was not measured. Every
