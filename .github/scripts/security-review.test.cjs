@@ -279,8 +279,52 @@ test('an unpublishable status fails the run rather than leaving it green', async
   const { github } = fixture({ labels: [{ name: 'security' }] });
   github.rest.repos.listCommitStatusesForRef = async () => { throw new Error('502 Bad Gateway'); };
   const failures = [];
-  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target' }, core: { warning() {}, setFailed: message => failures.push(message) } });
+  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target', payload: { pull_request: { head: { sha: 'current' } } } }, core: { warning() {}, setFailed: message => failures.push(message) } });
   assert.match(failures[0], /Could not publish a security review status/);
+});
+
+test('an unpublishable status on another pull request does not fail this run', async () => {
+  const { github, statuses } = fixture({ labels: [{ name: 'security' }] });
+  const ours = { ...pr, number: 7, labels: [{ name: 'security' }], title: 'Update', body: '', changed_files: 0, updated_at: 'now', base: { ref: 'dev' }, head: { sha: 'sha-ours' } };
+  const stale = { ...ours, number: 8, head: { sha: 'sha-stale' } };
+  github.rest.pulls.list = async () => [ours, stale];
+  github.rest.pulls.get = async ({ pull_number }) => ({ data: pull_number === 7 ? ours : stale });
+  github.rest.repos.createCommitStatus = async (status) => {
+    if (status.sha === 'sha-stale') {
+      const error = new Error('Validation Failed');
+      error.status = 422;
+      throw error;
+    }
+    statuses.push(status);
+  };
+  const failures = [];
+  const warnings = [];
+  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target', payload: { pull_request: { head: { sha: 'sha-ours' } } } }, core: { warning: message => warnings.push(message), setFailed: message => failures.push(message) } });
+  assert.deepEqual(failures, []);
+  assert.deepEqual(statuses.map(status => [status.sha, status.state]), [['sha-ours', 'pending'], ['sha-ours', 'failure']]);
+  assert.ok(warnings.some(message => message.includes('sha-stale')));
+});
+
+test('a scheduled reconciliation warns about a stale commit without failing', async () => {
+  const { github, statuses } = fixture({ labels: [{ name: 'security' }] });
+  const ours = { ...pr, number: 7, labels: [{ name: 'security' }], title: 'Update', body: '', changed_files: 0, updated_at: 'now', base: { ref: 'dev' }, head: { sha: 'sha-ours' } };
+  const stale = { ...ours, number: 8, head: { sha: 'sha-stale' } };
+  github.rest.pulls.list = async () => [ours, stale];
+  github.rest.pulls.get = async ({ pull_number }) => ({ data: pull_number === 7 ? ours : stale });
+  github.rest.repos.createCommitStatus = async (status) => {
+    if (status.sha === 'sha-stale') {
+      const error = new Error('Validation Failed');
+      error.status = 422;
+      throw error;
+    }
+    statuses.push(status);
+  };
+  const failures = [];
+  const warnings = [];
+  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'schedule' }, core: { warning: message => warnings.push(message), setFailed: message => failures.push(message) } });
+  assert.deepEqual(failures, []);
+  assert.deepEqual(statuses.map(status => [status.sha, status.state]), [['sha-ours', 'pending'], ['sha-ours', 'failure']]);
+  assert.ok(warnings.some(message => message.includes('sha-stale')));
 });
 
 test('a reference to an issue that does not exist cannot pin a PR at failure', async () => {
