@@ -3915,6 +3915,15 @@ class PatientRecord(models.Model):
         if self.later_therapy:
             text_lines += 1
 
+        # `None` means "no evidence either way"; `0` is the assertion "no prior
+        # therapy". Collapsing the former into the latter turns an unknown
+        # history into a clinical claim, and downstream matchers compare it as a
+        # value. Leave both fields unknown when there is nothing to count (#1925).
+        if self.therapy_lines_count is None and text_lines == 0:
+            self.prior_therapy = None
+            self.treatment_refractory_status = 'Unknown'
+            return
+
         self.therapy_lines_count = max(text_lines, self.therapy_lines_count or 0)
         lines_count = self.therapy_lines_count
 
