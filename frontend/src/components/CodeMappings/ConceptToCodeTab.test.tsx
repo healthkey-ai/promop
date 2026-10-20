@@ -135,7 +135,7 @@ describe('concept-first curation', () => {
     fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: 'drug_exposure' } });
     fireEvent.change(screen.getByLabelText('Search standard concepts'), { target: { value: 'codeine' } });
     await waitFor(() => expect(get).toHaveBeenCalledWith('/v1/concept-to-code/', expect.objectContaining({ params: {
-      domain: 'drug_exposure', scope: 'all', search: 'codeine', page: 1,
+      domain: 'drug_exposure', scope: 'all', search: 'codeine', page: 1, page_size: 50,
     } })));
   });
 
@@ -584,5 +584,95 @@ describe('suggestions without a confidence score (#1915)', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Serum albumin' }));
     expect(await screen.findByText('SNOMED:SCORED')).toBeInTheDocument();
     expect(screen.getByText('SNOMED:UNSCORED')).toBeInTheDocument();
+  });
+});
+
+describe('concept priority (#1914)', () => {
+  const named = (id: number, name: string, priority: number | null = null) => ({ ...concept, concept_id: id, concept_name: name, priority });
+  let list: ReturnType<typeof named>[];
+  beforeEach(() => {
+    list = [named(1, 'Albumin', 1), named(2, 'Bilirubin', 2), named(3, 'Calcium'), named(4, 'Creatinine')];
+    get.mockImplementation((url: string) => Promise.resolve({ data: url === '/v1/concept-to-code/'
+      ? { ...page(list), prioritized: 2 } : page([source]) }));
+    post.mockImplementation((_url: string, body: { position: number | null }) => Promise.resolve({ data: { position: body.position } }));
+  });
+  const moved = () => post.mock.calls.filter(([url]) => url === '/v1/concept-to-code/priority/').map(([, body]) => body);
+
+  it('shows each concept\'s priority and ranks one by typing its number', async () => {
+    render(<ConceptToCodeTab canApprove />);
+    const calcium = await screen.findByLabelText('Priority for Calcium');
+    expect(screen.getByLabelText('Priority for Albumin')).toHaveValue(1);
+    expect(calcium).toHaveValue(null);
+
+    fireEvent.change(calcium, { target: { value: '1' } });
+    fireEvent.keyDown(calcium, { key: 'Enter' });
+
+    await waitFor(() => expect(moved()).toEqual([{ concept_id: 3, position: 1 }]));
+    expect(await screen.findByText('Moved Calcium to priority 1.')).toBeInTheDocument();
+    // The list is reloaded in the server's new order.
+    await waitFor(() => expect(get.mock.calls.filter(([url]) => url === '/v1/concept-to-code/').length).toBeGreaterThan(1));
+  });
+
+  it('unranks a concept when its number is cleared, and ignores an invalid number', async () => {
+    render(<ConceptToCodeTab canApprove />);
+    const albumin = await screen.findByLabelText('Priority for Albumin');
+    fireEvent.change(albumin, { target: { value: '0' } });
+    fireEvent.blur(albumin);
+    expect(moved()).toEqual([]);
+    expect(albumin).toHaveValue(1);
+
+    fireEvent.change(albumin, { target: { value: '' } });
+    fireEvent.blur(albumin);
+    await waitFor(() => expect(moved()).toEqual([{ concept_id: 1, position: null }]));
+    expect(await screen.findByText('Removed Albumin from the priority list.')).toBeInTheDocument();
+  });
+
+  it('moves one step with the arrow buttons, and an unranked concept up to the end of the list', async () => {
+    render(<ConceptToCodeTab canApprove />);
+    expect(await screen.findByRole('button', { name: 'Move Albumin up' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Move Bilirubin down' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Move Calcium down' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Move Albumin down' }));
+    await waitFor(() => expect(moved()).toEqual([{ concept_id: 1, position: 2 }]));
+    fireEvent.click(await screen.findByRole('button', { name: 'Move Calcium up' }));
+    await waitFor(() => expect(moved()).toEqual([{ concept_id: 1, position: 2 }, { concept_id: 3, position: 3 }]));
+  });
+
+  it('drops a dragged concept at the position of the ranked concept it lands on', async () => {
+    render(<ConceptToCodeTab canApprove />);
+    const creatinine = await screen.findByTestId('concept-row-4');
+    const albumin = screen.getByTestId('concept-row-1');
+    fireEvent.dragStart(creatinine);
+    fireEvent.dragOver(albumin);
+    fireEvent.drop(albumin);
+    await waitFor(() => expect(moved()).toEqual([{ concept_id: 4, position: 1 }]));
+  });
+
+  it('drops onto an unranked concept at the end of the priority list', async () => {
+    render(<ConceptToCodeTab canApprove />);
+    const albumin = await screen.findByTestId('concept-row-1');
+    fireEvent.dragStart(albumin);
+    fireEvent.drop(screen.getByTestId('concept-row-3'));
+    await waitFor(() => expect(moved()).toEqual([{ concept_id: 1, position: 3 }]));
+  });
+
+  it('shows more concepts per page and only ranked ones on request', async () => {
+    render(<ConceptToCodeTab canApprove />);
+    await screen.findByLabelText('Priority for Albumin');
+    fireEvent.change(screen.getByRole('combobox', { name: 'Concepts per page' }), { target: { value: '250' } });
+    await waitFor(() => expect(get).toHaveBeenCalledWith('/v1/concept-to-code/', expect.objectContaining({
+      params: expect.objectContaining({ page_size: 250, page: 1 }) })));
+    fireEvent.click(screen.getByRole('checkbox', { name: /Ranked only/ }));
+    await waitFor(() => expect(get).toHaveBeenCalledWith('/v1/concept-to-code/', expect.objectContaining({
+      params: expect.objectContaining({ prioritized: '1' }) })));
+  });
+
+  it('reports a failed move and keeps the list as it was', async () => {
+    post.mockRejectedValue({ response: { status: 403, data: { detail: 'Professional access required.' } } });
+    render(<ConceptToCodeTab canApprove />);
+    const calcium = await screen.findByLabelText('Priority for Calcium');
+    fireEvent.change(calcium, { target: { value: '1' } });
+    fireEvent.blur(calcium);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not change the priority of Calcium.');
   });
 });

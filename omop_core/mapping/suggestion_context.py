@@ -126,4 +126,7 @@ def candidate_context(candidate):
         'shared_umls_cuis': candidate.get('umls_cuis', [])[:MAX_EVIDENCE_ITEMS],
         'source_relationships': candidate.get('source_relationships', [])[:MAX_EVIDENCE_ITEMS],
         'generated_search_query': candidate.get('generated_search_query'),
+        # Rank in the curators' Concept to Code priority list (#1914); a
+        # tie-breaker the prompt explains, not evidence.
+        **({'curator_priority': candidate['curator_priority']} if candidate.get('curator_priority') else {}),
     }

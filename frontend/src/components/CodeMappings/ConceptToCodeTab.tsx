@@ -12,6 +12,8 @@ type Concept = {
   concept_class_id?: string; standard_concept?: string | null;
   fields: { field_name: string; status: string; omop_table: string }[];
   sccm_counts: { approved: number; proposed: number; rejected: number };
+  /** Curator priority (1 = map first), or null when unranked (#1914). */
+  priority?: number | null;
 };
 type Source = {
   mapping_id: number | null; source_code: string; source_code_description: string;
@@ -31,6 +33,9 @@ type Run = {
   selection: { limit: number; include_zero_seen: boolean; ranking_model?: string };
   activity: { concept: { concept_id: number }; candidates: Source[] }[];
 };
+/** How many concepts a page may show: more per page lets a curator drag a
+ * concept from what would be a later page into the priority order. */
+const PAGE_SIZES = [50, 100, 250, 500];
 const domains = [
   ['', 'All domains'], ['measurement', 'Measurement'], ['observation', 'Observation'],
   ['condition', 'Condition'], ['drug_exposure', 'Drug'], ['procedure', 'Procedure'],
@@ -73,7 +78,13 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
   const [scope, setScope] = useState('fields');
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
-  const [data, setData] = useState<Page<Concept> | null>(null);
+  const [pageSize, setPageSize] = useState(50);
+  const [rankedOnly, setRankedOnly] = useState(false);
+  const [data, setData] = useState<(Page<Concept> & { prioritized?: number }) | null>(null);
+  const [moving, setMoving] = useState(false);
+  const [moveStatus, setMoveStatus] = useState('');
+  const [dragged, setDragged] = useState<Concept | null>(null);
+  const [dropTarget, setDropTarget] = useState<number | null>(null);
   const [selected, setSelected] = useState<Concept | null>(null);
   const [selectedMode, setSelectedMode] = useState<SourceMode>('linked');
   const selectedTrigger = useRef<HTMLButtonElement | null>(null);
@@ -90,8 +101,9 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
     const timer = window.setTimeout(async () => {
       setLoading(true); setError('');
       try {
-        const response = await api.get<Page<Concept>>('/v1/concept-to-code/', {
-          params: { domain, scope, search, page }, signal: controller.signal,
+        const response = await api.get<Page<Concept> & { prioritized?: number }>('/v1/concept-to-code/', {
+          params: { domain, scope, search, page, page_size: pageSize, ...(rankedOnly ? { prioritized: '1' } : {}) },
+          signal: controller.signal,
         });
         if (active) setData(response.data);
       } catch {
@@ -99,7 +111,34 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
       } finally { if (active) setLoading(false); }
     }, 250);
     return () => { active = false; controller.abort(); window.clearTimeout(timer); };
-  }, [domain, scope, search, page, revision]);
+  }, [domain, scope, search, page, pageSize, rankedOnly, revision]);
+
+  // One concept per move: the server renumbers the global list, so a move
+  // from a filtered or later page needs nothing else from it (#1914).
+  const move = async (concept: Concept, position: number | null) => {
+    if (moving || position === (concept.priority ?? null)) return;
+    setMoving(true); setError('');
+    try {
+      const { data: placed } = await api.post<{ position: number | null }>('/v1/concept-to-code/priority/', {
+        concept_id: concept.concept_id, position,
+      });
+      setMoveStatus(placed.position === null
+        ? `Removed ${concept.concept_name} from the priority list.`
+        : `Moved ${concept.concept_name} to priority ${placed.position}.`);
+      setRevision(value => value + 1);
+    } catch (failure) {
+      setError(`Could not change the priority of ${concept.concept_name}. ${destinationError(failure)}`);
+    } finally { setMoving(false); }
+  };
+  // Dropping onto a ranked concept takes its position; onto an unranked one,
+  // the end of the priority list.
+  const dropOn = (target: Concept) => {
+    const source = dragged;
+    setDragged(null); setDropTarget(null);
+    if (!source || source.concept_id === target.concept_id) return;
+    void move(source, target.priority ?? (data?.prioritized ?? 0) + 1);
+  };
+  const lastPosition = data?.prioritized ?? 0;
 
   useEffect(() => {
     if (!initialConceptId) return;
@@ -145,17 +184,39 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
         onChange={event => { setDomain(event.target.value); setPage(1); }}>
         {domains.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
       </select>
+      <select aria-label="Concepts per page" className={input} disabled={writing} value={pageSize}
+        onChange={event => { setPageSize(Number(event.target.value)); setPage(1); }}>
+        {PAGE_SIZES.map(size => <option key={size} value={size}>{size} per page</option>)}
+      </select>
+      <label className="flex items-center gap-2 text-sm text-slate-700">
+        <input type="checkbox" checked={rankedOnly} disabled={writing}
+          onChange={event => { setRankedOnly(event.target.checked); setPage(1); }} />
+        Ranked only{data?.prioritized ? ` (${data.prioritized})` : ''}
+      </label>
     </div>
+    <p className="text-xs text-slate-500">Ranked concepts are mapped first and come first on every page. Drag a row, or type
+      its priority (1 is first; clear it to unrank). To reach a concept on a later page, show more per page or search for it.</p>
+    {moveStatus && <p role="status" aria-live="polite" className="text-sm text-slate-700">{moveStatus}</p>}
     {error && <p role="alert" className="text-sm text-rose-700">{error}</p>}
     {loading && <p role="status" className="text-sm text-slate-500">Loading concepts…</p>}
     <div className="overflow-x-auto rounded border border-slate-200 bg-white">
       <table aria-label="Standard concept coverage" className="w-full text-left text-sm">
         <thead className="bg-slate-100 text-xs text-slate-600"><tr>
+          <th className="p-3">Priority</th>
           <th className="p-3">Standard concept</th><th className="p-3">Patient fields</th>
           <th className="p-3 text-right">Approved</th><th className="p-3 text-right">Proposed</th><th className="p-3 text-right">Rejected</th>
         </tr></thead>
-        <tbody>{data?.results.map(concept => <tr key={concept.concept_id}
-          className={`border-t border-slate-100 ${selected?.concept_id === concept.concept_id ? 'bg-sky-50' : ''}`}>
+        <tbody>{data?.results.map(concept => <tr key={concept.concept_id} data-testid={`concept-row-${concept.concept_id}`}
+          draggable={!writing && !moving}
+          onDragStart={event => { event.dataTransfer?.setData('text/plain', String(concept.concept_id)); setDragged(concept); }}
+          onDragEnd={() => { setDragged(null); setDropTarget(null); }}
+          onDragOver={event => { if (dragged) { event.preventDefault(); setDropTarget(concept.concept_id); } }}
+          onDragLeave={() => setDropTarget(previous => previous === concept.concept_id ? null : previous)}
+          onDrop={event => { event.preventDefault(); dropOn(concept); }}
+          className={`border-t border-slate-100 ${selected?.concept_id === concept.concept_id ? 'bg-sky-50' : ''} ${
+            dropTarget === concept.concept_id && dragged?.concept_id !== concept.concept_id ? 'outline outline-2 outline-sky-500' : ''}`}>
+          <td className="p-3 align-top"><PriorityCell concept={concept} lastPosition={lastPosition}
+            disabled={writing || moving} onMove={position => void move(concept, position)} /></td>
           <td className="p-3"><button className="text-left font-medium text-slate-950 underline underline-offset-2" disabled={writing}
             aria-haspopup="dialog" aria-expanded={selected?.concept_id === concept.concept_id}
             onClick={event => { selectedTrigger.current = event.currentTarget; setSelectedMode('linked'); setSelected(concept); }}>{concept.concept_name}</button>
@@ -189,6 +250,36 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
       </Dialog.Content>
     </Dialog.Portal>}
   </Dialog.Root>;
+}
+
+/** Drag handle, priority number and one-step moves for one concept row. */
+function PriorityCell({ concept, lastPosition, disabled, onMove }: {
+  concept: Concept; lastPosition: number; disabled: boolean; onMove: (position: number | null) => void;
+}) {
+  const current = concept.priority ?? null;
+  const [draft, setDraft] = useState(current === null ? '' : String(current));
+  const [shown, setShown] = useState(current);
+  // A reload renumbers rows; show the server's number unless one is being typed.
+  if (shown !== current) { setShown(current); setDraft(current === null ? '' : String(current)); }
+  const commit = () => {
+    const text = draft.trim();
+    if (!text) { if (current !== null) onMove(null); return; }
+    const value = Number(text);
+    if (!Number.isInteger(value) || value < 1) { setDraft(current === null ? '' : String(current)); return; }
+    onMove(value);
+  };
+  const small = 'rounded border border-slate-300 px-1.5 text-xs hover:bg-slate-100 disabled:opacity-30';
+  return <div className="flex items-center gap-1 whitespace-nowrap">
+    <span aria-hidden="true" title="Drag to reorder" className={`select-none text-slate-400 ${disabled ? '' : 'cursor-grab'}`}>⠿</span>
+    <input type="number" min={1} inputMode="numeric" aria-label={`Priority for ${concept.concept_name}`}
+      className="w-14 rounded border border-slate-300 px-1.5 py-1 text-sm tabular-nums" placeholder="—" value={draft} disabled={disabled}
+      onChange={event => setDraft(event.target.value)} onBlur={commit}
+      onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); commit(); } }} />
+    <button type="button" className={small} aria-label={`Move ${concept.concept_name} up`} title="Move up"
+      disabled={disabled || current === 1} onClick={() => onMove(current === null ? lastPosition + 1 : current - 1)}>↑</button>
+    <button type="button" className={small} aria-label={`Move ${concept.concept_name} down`} title="Move down"
+      disabled={disabled || current === null || current >= lastPosition} onClick={() => current !== null && onMove(current + 1)}>↓</button>
+  </div>;
 }
 
 type EditTarget = { mode: 'new' | 'edit'; row: CodeMappingRow; source: Source };

@@ -9,7 +9,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from omop_core.models import FieldConceptMapping, SourceCodeConceptMapping, SuggestRun
+from omop_core.models import ConceptMappingPriority, FieldConceptMapping, SourceCodeConceptMapping, SuggestRun
 from omop_core.services.concept_to_code import (
     browse_concepts, concept_payload, eligible_sources, source_payload, standard_destinations,
 )
@@ -17,6 +17,9 @@ from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE, VOCABULARY_O
 from omop_core.services.suggest_jobs import get_dispatcher, InlineDispatcher
 
 PAGE_SIZE = 50
+# The concept list may show more per page, so a curator can drag a concept
+# from what would be a later page into the priority order (#1914).
+CONCEPT_PAGE_SIZES = (50, 100, 250, 500)
 
 
 def _authorize(user):
@@ -25,7 +28,7 @@ def _authorize(user):
         raise PermissionDenied('Professional access required.')
 
 
-def _paginate(queryset, params):
+def _paginate(queryset, params, page_size=PAGE_SIZE):
     try:
         page = int(params.get('page', 1))
         if page < 1:
@@ -33,9 +36,9 @@ def _paginate(queryset, params):
     except (TypeError, ValueError):
         raise ValidationError({'page': 'Enter a positive whole number.'})
     count = queryset.count()
-    page = min(page, max(1, (count + PAGE_SIZE - 1) // PAGE_SIZE))
-    return queryset[(page - 1) * PAGE_SIZE:page * PAGE_SIZE], {
-        'page': page, 'page_size': PAGE_SIZE, 'total': count,
+    page = min(page, max(1, (count + page_size - 1) // page_size))
+    return queryset[(page - 1) * page_size:page * page_size], {
+        'page': page, 'page_size': page_size, 'total': count,
     }
 
 
@@ -50,8 +53,14 @@ def concept_to_code_list(request):
         raise ValidationError({'domain': 'Unknown clinical table.'})
     if params.get('status') and params['status'] not in ('approved', 'proposed'):
         raise ValidationError({'status': 'Choose approved or proposed.'})
+    try:
+        page_size = int(params.get('page_size', PAGE_SIZE))
+    except (TypeError, ValueError):
+        page_size = 0
+    if page_size not in CONCEPT_PAGE_SIZES:
+        raise ValidationError({'page_size': f'Choose one of {", ".join(map(str, CONCEPT_PAGE_SIZES))}.'})
     concepts, fields, annotations = browse_concepts(params)
-    page, paging = _paginate(concepts, params)
+    page, paging = _paginate(concepts, params, page_size)
     page = list(page.annotate(**annotations))
     field_map = {}
     for field in fields.filter(concept_id__in=[concept.pk for concept in page]).order_by('field_name'):
@@ -65,8 +74,33 @@ def concept_to_code_list(request):
         **paging, 'domains': list(domains),
         'results': [{**concept_payload(concept), 'fields': field_map.get(concept.pk, []),
                      'sccm_counts': {key: getattr(concept, key) for key in ('approved', 'proposed', 'rejected')},
-                     'seen': concept.seen} for concept in page],
+                     'seen': concept.seen, 'priority': concept.priority} for concept in page],
+        'prioritized': ConceptMappingPriority.objects.count(),
     })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def concept_to_code_priority(request):
+    """Rank one concept at a position, or unrank it with position null (#1914).
+
+    One concept per request, so a move from a filtered or paged view needs no
+    knowledge of the rest of the list: the server renumbers it.
+    """
+    from omop_core.services import concept_priority
+    _authorize(request.user)
+    data = request.data
+    if not isinstance(data, dict):
+        raise ValidationError({'detail': 'Supply a JSON object.'})
+    concept_id, position = data.get('concept_id'), data.get('position', 'missing')
+    if type(concept_id) is not int or concept_id <= 0:
+        raise ValidationError({'concept_id': 'Supply a positive integer concept ID.'})
+    if position is not None and (type(position) is not int or position < 1):
+        raise ValidationError({'position': 'Supply a position of 1 or more, or null to unrank.'})
+    concept = get_object_or_404(standard_destinations(), pk=concept_id)
+    placed = concept_priority.move(concept, position, request.user)
+    return Response({'concept_id': concept.pk, 'position': placed,
+                     'prioritized': ConceptMappingPriority.objects.count()})
 
 
 @api_view(['GET'])

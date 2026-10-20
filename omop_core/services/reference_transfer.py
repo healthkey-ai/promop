@@ -22,6 +22,7 @@ from django.db.models import Field, Model, Q
 from omop_core.models import (
     Concept,
     ConceptClass,
+    ConceptMappingPriority,
     DiseaseTherapyRegimen,
     Domain,
     MappingDestinationCandidate,
@@ -107,6 +108,9 @@ def copied_tables() -> list[ReferenceTable]:
         ReferenceTable(DiseaseTherapyRegimen, ('disease', 'round', 'regimen')),
         ReferenceTable(TherapyOutcome, ('code',)),
         ReferenceTable(_lab_marker(), ('loinc_code',)),
+        # Curator priority (#1914), matched on the concept's natural key. A
+        # concept not loaded here is skipped with a warning.
+        ReferenceTable(ConceptMappingPriority, ('concept',)),
     ]
 
 
@@ -176,8 +180,8 @@ def apply_reference(payload: ReferencePayload, prune: bool = False, dry_run: boo
 
 
 def _foreign_keys(model: type[Model]) -> list[Field]:
-    """Concrete many-to-one fields of model."""
-    return [f for f in model._meta.concrete_fields if f.many_to_one]
+    """Concrete many-to-one and one-to-one fields of model: every link a row carries."""
+    return [f for f in model._meta.concrete_fields if f.many_to_one or f.one_to_one]
 
 
 def _read_table(table: ReferenceTable, using: str) -> Iterator[ReferenceRow]:

@@ -8,6 +8,17 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Concept mapping priority** — on Code Mapping → Concept to Code, curators
+  rank concepts by dragging rows, typing a priority (1 is first; clear it to
+  unrank) or the up/down buttons. Ranked concepts come first on every page and
+  under every filter; a page-size selector (50/100/250/500) and *Ranked only*
+  bring concepts from later pages within reach. `POST
+  /api/v1/concept-to-code/priority/` moves one concept and renumbers the list.
+  Code-to-concept Suggest keeps a ranked concept that lexical search matched but
+  cut, marks ranked candidates for the ranker as a tie-breaker between equally
+  good matches, and notes when the winner is ranked. `copy_reference_data`
+  carries the ranking by concept key (#1914).
+
 - **Edit Mapping from Concept to Code, with example patients' Source
   Metadata** — every source code listed under a concept opens the Edit Mapping
   dialog (a code with no mapping row opens as a New Mapping), with the concept

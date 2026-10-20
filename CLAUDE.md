@@ -1154,6 +1154,26 @@ one candidate with a code and name to evaluate. A run with neither UMLS nor
 Lexical would report "no candidate concept" for every code. The API rejects
 that combination and the checkbox disables itself.
 
+### Curator priority is a tie-breaker, not evidence
+
+Curators rank concepts on the Concept to Code tab (`ConceptMappingPriority`,
+one global list, positions 1..N kept dense by
+`services.concept_priority.move` under a table lock). The list shows ranked
+concepts first on every page and filter. Suggest uses the ranking in two
+places, both in `retrieval_pool`:
+
+- **Retained, never added.** `priority_lexical_candidates` scores only the
+  prioritized concepts in the code's domain at the same `MIN_TRIGRAM_SCORE`, so
+  a ranked concept the best-N cut dropped comes back (`priority_retained`). A
+  concept retrieval does not match is not added.
+- **Marked for the ranker.** Every prioritized candidate carries
+  `curator_priority`. Both prompts (Anthropic's system prompt, Jev's
+  instructions and criteria tag) say to use it only between equally good
+  matches. A winner that is prioritized gets "Curator priority N." on its note.
+
+The UMLS single-concept shortcut ignores priority: a curated equivalence wins
+without a ranking call either way.
+
 ### Concept embeddings
 
 `semantic_candidates()` searches the `ConceptEmbedding` table by cosine

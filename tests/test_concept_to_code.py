@@ -50,11 +50,12 @@ def test_concepts_are_deduplicated_and_counts_do_not_multiply_by_field(client, c
     source('PROPOSED', target_concept=concept)
     source('APPROVED', target_concept=concept, status='approved')
     source('REJECTED', target_concept=concept, status='rejected')
-    # One page, one field query, one domain summary; no per-concept reads.
+    # One page, one field query, one domain summary, one priority count; no
+    # per-concept reads.
     from patient_portal.api.concept_to_code import concept_to_code_list
     request = APIRequestFactory().get(BASE)
     force_authenticate(request, user=client.user)
-    with django_assert_num_queries(4):
+    with django_assert_num_queries(5):
         response = concept_to_code_list(request)
     assert response.status_code == 200
     assert response.data['total'] == 1
