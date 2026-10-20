@@ -4,7 +4,7 @@ import {
   searchDrugConcepts, authorTherapyLine, updateTherapyLine,
   listTherapyOutcomes, type TherapyOutcomeChoice, THERAPY_INTENT_CHOICES, DISCONTINUATION_REASON_CHOICES,
   searchTherapyRegimens, listTherapyRegimens, getTherapyRegimenDetail,
-  type DrugConcept, type EditableTherapyLine,
+  type DrugConcept, type EditableTherapyLine, type TherapyLineDrug,
 } from '@/api/therapyLines';
 import type { TherapyRegimen } from '@/types/therapy';
 
@@ -21,7 +21,7 @@ interface Props {
   onAuthored: (patientInfo: Record<string, unknown>) => void;
 }
 
-type SelectedDrug = DrugConcept & { source_value?: string | null; class_names?: string[] };
+type SelectedDrug = DrugConcept & TherapyLineDrug & { class_names?: string[] };
 
 /** Map line number to the therapy round code used by the disease-therapy-round table. */
 function lineToRound(lineNumber: number): string {
@@ -244,9 +244,8 @@ export default function TherapyLineDialog({
   }, [onClose]);
 
   const addDrug = (drug: DrugConcept) => {
-    // Adding the same ingredient twice writes one exposure either way, since the
-    // server keys on (source_value, start_date) — but showing it twice would
-    // suggest a dose the form never captured.
+    // Preserve imported repeated administrations by ID. A new ingredient from
+    // search is added once; this form does not invent additional doses.
     setDrugs((prev) =>
       prev.some((d) => d.concept_id === drug.concept_id) ? prev : [...prev, drug],
     );
@@ -258,6 +257,15 @@ export default function TherapyLineDialog({
     setError('');
     if (drugs.length === 0) {
       setError('Add at least one drug. A line with no drugs groups nothing, so no therapy field would follow from it.');
+      return;
+    }
+    if (drugs.some((drug) => drug.start_date === '')) {
+      setError('A drug administration needs its actual start date. Restore it or remove the incorrect entry.');
+      return;
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    if (drugs.some((drug) => drug.start_date && drug.start_date > today)) {
+      setError('A future drug administration is planned, not received treatment.');
       return;
     }
     setSaving(true);
@@ -274,8 +282,12 @@ export default function TherapyLineDialog({
         // regimen — a no-op save must not silently erase a stored concept.
         regimen_concept_id: selectedRegimen?.concept_id ?? line?.regimen_concept_id ?? null,
         drugs: drugs.map((d) => ({
+          ...(d.drug_exposure_id !== undefined ? { drug_exposure_id: d.drug_exposure_id } : {}),
           concept_id: d.concept_id,
-          source_value: (d.source_value || d.concept_name).slice(0, 50),
+          source_value: d.drug_exposure_id !== undefined
+            ? d.source_value : (d.source_value || d.concept_name).slice(0, 50),
+          ...(d.start_date !== undefined ? { start_date: d.start_date } : {}),
+          ...(d.end_date !== undefined ? { end_date: d.end_date } : {}),
         })),
       };
       const result = episodeId !== null
@@ -517,8 +529,8 @@ export default function TherapyLineDialog({
           <span className="mb-1 block text-sm font-medium">Drugs in this line</span>
           {drugs.length > 0 && (
             <ul className="mb-2 space-y-1">
-              {drugs.map((d) => (
-                <li key={d.concept_id} className="flex items-center justify-between rounded border border-border px-2 py-1 text-sm">
+              {drugs.map((d, index) => (
+                <li key={d.drug_exposure_id ?? `new-${d.concept_id}`} className="flex items-center justify-between rounded border border-border px-2 py-1 text-sm">
                   <div className="min-w-0 flex-1">
                     <span>
                       {d.concept_name}
@@ -531,9 +543,33 @@ export default function TherapyLineDialog({
                         {d.class_names.join(', ')}
                       </p>
                     )}
+                    <div className="mt-1 grid grid-cols-2 gap-2">
+                      <label className="text-xs">
+                        Drug start date
+                        <input type="date" value={d.start_date ?? ''}
+                          aria-label={`${d.concept_name} start date (${index + 1})`}
+                          className="block w-full rounded border border-input px-1 py-1"
+                          onChange={(e) => {
+                            const value = e.target.value;
+                            setDrugs((prev) => prev.map((item, i) => i === index
+                              ? { ...item, start_date: value } : item));
+                          }} />
+                      </label>
+                      <label className="text-xs">
+                        Drug end date
+                        <input type="date" value={d.end_date ?? ''}
+                          aria-label={`${d.concept_name} end date (${index + 1})`}
+                          className="block w-full rounded border border-input px-1 py-1"
+                          onChange={(e) => {
+                            const value = e.target.value;
+                            setDrugs((prev) => prev.map((item, i) => i === index
+                              ? { ...item, end_date: value || null } : item));
+                          }} />
+                      </label>
+                    </div>
                   </div>
                   <button
-                    onClick={() => setDrugs((prev) => prev.filter((x) => x.concept_id !== d.concept_id))}
+                    onClick={() => setDrugs((prev) => prev.filter((_, i) => i !== index))}
                     aria-label={`Remove ${d.concept_name}`}
                     className="ml-2 shrink-0 text-muted-foreground hover:text-red-600"
                   >
