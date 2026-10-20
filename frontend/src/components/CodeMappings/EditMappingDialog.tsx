@@ -14,6 +14,8 @@
  *   strategies / rankingModel -- suggest settings from the parent
  *   onSaved / onDeleted -- callbacks after a successful write or delete
  *   onBanner            -- surface informational banners to the parent
+ *   defaultDestination  -- destination to offer when the row has none yet
+ *   sourceExamples      -- show example patients' Source Metadata for the code
  */
 
 import CanonicalUnitEditor from "./CanonicalUnitEditor";
@@ -79,7 +81,31 @@ export interface EditMappingDialogProps {
   onDeleted: (row: CodeMappingRow) => void;
   onBanner?: (message: string | null) => void;
   onSourceCodeUpdated?: () => void;
+  /** Pre-fill this destination when the row has none (Concept to Code). */
+  defaultDestination?: ConceptResult | null;
+  /**
+   * Offer up to three patients whose source inventory carries this exact code,
+   * and show the chosen patient's Source Metadata (#1911). Read-only: unlike
+   * `patientId`, it does not narrow what a save updates.
+   */
+  sourceExamples?: boolean;
 }
+
+/** One patient's inventory row for the code, from /concept-to-code/source-examples/. */
+export interface SourceExample {
+  person_id: number;
+  omop_table: string;
+  occurrence_count: number;
+  source_unit: string;
+  example_quantity: string;
+  source_metadata: Record<string, unknown>;
+  last_seen: string | null;
+}
+
+type SourceExamplesState =
+  | { status: "loading" }
+  | { status: "error"; message: string }
+  | { status: "ready"; examples: SourceExample[] };
 
 // ── Component ───────────────────────────────────────────────────────
 
@@ -99,6 +125,8 @@ export default function EditMappingDialog({
   onDeleted,
   onBanner,
   onSourceCodeUpdated,
+  defaultDestination,
+  sourceExamples = false,
 }: EditMappingDialogProps) {
   // ── refs ────────────────────────────────────────────────────────
   const dialogRequest = useRef(0);
@@ -135,6 +163,8 @@ export default function EditMappingDialog({
   const [sourceSaveMessage, setSourceSaveMessage] = useState("");
   const [unitSelectionAuto, setUnitSelectionAuto] = useState(false);
   const [unitSelectionNeedsReview, setUnitSelectionNeedsReview] = useState(false);
+  const [examples, setExamples] = useState<SourceExamplesState | null>(null);
+  const [examplePersonId, setExamplePersonId] = useState<number | null>(null);
 
   const evidenceFacilities = sourceEvidence?.facilities || [];
 
@@ -156,6 +186,24 @@ export default function EditMappingDialog({
     && String(selectedRow.destination_concept_id || "") !== form.destination_concept_id;
 
   const hasRetrieval = strategies.umls || strategies.lexical || strategies.vectors;
+
+  /** Offer the caller's destination when the row arrives without one. */
+  const withDefaultDestination = useCallback((built: MappingForm): MappingForm => {
+    if (!defaultDestination || built.destination_concept_id) return built;
+    const domainId = built.domain_id || defaultDestination.domain_id || "";
+    return {
+      ...built,
+      domain_id: domainId,
+      destination_concept_id: String(defaultDestination.concept_id),
+      destination_concept_name: defaultDestination.concept_name,
+      destination_concept_code: defaultDestination.concept_code || "",
+      destination_vocabulary_id: defaultDestination.vocabulary_id,
+      destination_concept_class_id: defaultDestination.concept_class_id || "",
+      standard_concept: defaultDestination.standard_concept || "",
+      destination_invalid_reason: defaultDestination.invalid_reason || "",
+      omop_table: built.omop_table || omopTableFor(reference, domainId),
+    };
+  }, [defaultDestination, reference]);
 
   /** Source code systems offered for the chosen domain, blank option first. */
   const sourceCodeSystems = useMemo(() => {
@@ -201,13 +249,13 @@ export default function EditMappingDialog({
         // source identity (code, vocabulary, domain, table) even though no
         // mapping exists yet.  Pre-populate those fields so the curator does
         // not have to re-type them.
-        setForm(selectedRow ? buildEditForm(selectedRow, reference) : { ...emptyForm });
+        setForm(withDefaultDestination(selectedRow ? buildEditForm(selectedRow, reference) : { ...emptyForm }));
         setSearchVocabulary("");
         setSearchScope(DEFAULT_SEARCH_SCOPE);
         setConceptSearchQuery("");
         setConceptResults([]);
       } else if (selectedRow) {
-        setForm(buildEditForm(selectedRow, reference));
+        setForm(withDefaultDestination(buildEditForm(selectedRow, reference)));
         setSearchVocabulary(
           reference.destination_vocabularies.some((v) => v.vocabulary_id === selectedRow.destination_vocabulary_id)
             ? selectedRow.destination_vocabulary_id || ""
@@ -218,7 +266,35 @@ export default function EditMappingDialog({
         setConceptResults([]);
       }
     })();
-  }, [open, mode, selectedRow, reference]);
+  }, [open, mode, selectedRow, reference, withDefaultDestination]);
+
+  // ── Example patients for the source code (#1911) ─────────────────
+  const exampleVocabulary = selectedRow?.source_vocabulary_id ?? "";
+  const exampleCode = selectedRow?.source_code ?? "";
+  const exampleTable = selectedRow?.destination_omop_table || "";
+  useEffect(() => {
+    if (!open || !sourceExamples || !exampleCode) return;
+    let active = true;
+    (async () => {
+      setExamples({ status: "loading" });
+      setExamplePersonId(null);
+      try {
+        const { data } = await api.get<{ examples: SourceExample[] }>("/v1/concept-to-code/source-examples/", {
+          params: { source_vocabulary_id: exampleVocabulary, source_code: exampleCode, omop_table: exampleTable },
+        });
+        if (!active) return;
+        setExamples({ status: "ready", examples: data.examples });
+        setExamplePersonId(data.examples[0]?.person_id ?? null);
+      } catch (err) {
+        if (!active) return;
+        const forbidden = (err as { response?: { status?: number } })?.response?.status === 403;
+        setExamples({ status: "error", message: forbidden
+          ? "Patient Source Metadata is limited to administrators."
+          : "Could not load example patients. Close and reopen this mapping to retry." });
+      }
+    })();
+    return () => { active = false; };
+  }, [open, sourceExamples, exampleVocabulary, exampleCode, exampleTable]);
 
   // ── Acquire edit lock on open ───────────────────────────────────
   useEffect(() => {
@@ -803,7 +879,11 @@ export default function EditMappingDialog({
                   </div>
                 </div>
               </div>
-              <SourceMetadataBlock metadata={selectedRow?.source_metadata} />
+              {sourceExamples ? (
+                <SourceExamplesBlock state={examples} selected={examplePersonId} onSelect={setExamplePersonId} />
+              ) : (
+                <SourceMetadataBlock metadata={selectedRow?.source_metadata} />
+              )}
             </fieldset>
 
             {mode === "edit" && selectedRow?.mapping_id && (
@@ -1300,10 +1380,62 @@ export default function EditMappingDialog({
   );
 }
 
+// ── Source Examples Block ──────────────────────────────────────────
+
+function SourceExamplesBlock({ state, selected, onSelect }: {
+  state: SourceExamplesState | null;
+  selected: number | null;
+  onSelect: (personId: number) => void;
+}) {
+  if (!state) return null;
+  if (state.status === "loading") {
+    return <p role="status" className="mt-3 text-xs text-slate-500">Loading example patients…</p>;
+  }
+  if (state.status === "error") {
+    return <p role="alert" className="mt-3 text-xs text-rose-700">{state.message}</p>;
+  }
+  if (!state.examples.length) {
+    return <p className="mt-3 text-xs text-slate-500" data-testid="source-examples-empty">
+      No patient you can open has this source code in their source inventory.
+    </p>;
+  }
+  const example = state.examples.find((item) => item.person_id === selected) ?? state.examples[0];
+  return (
+    <div className="mt-3 space-y-2" data-testid="source-examples">
+      <label className="flex flex-wrap items-center gap-2 text-xs font-medium text-slate-600">
+        Example patient
+        <select aria-label="Example patient" value={example.person_id}
+          onChange={(event) => onSelect(Number(event.target.value))}
+          className="rounded border border-slate-300 bg-white px-2 py-1 text-xs font-normal text-slate-800">
+          {state.examples.map((item) => (
+            <option key={item.person_id} value={item.person_id}>
+              Patient {item.person_id} · Seen {item.occurrence_count}
+            </option>
+          ))}
+        </select>
+      </label>
+      {(example.source_unit || example.example_quantity) && (
+        <p className="text-xs text-slate-600">
+          {example.example_quantity && <>Quantity <span className="font-mono">{example.example_quantity}</span> </>}
+          {example.source_unit && <>Unit <span className="font-mono">{example.source_unit}</span></>}
+        </p>
+      )}
+      {Object.keys(example.source_metadata).length ? (
+        <SourceMetadataBlock key={example.person_id} metadata={example.source_metadata} defaultExpanded />
+      ) : (
+        <p className="text-xs text-slate-500">This patient's source row carries no metadata.</p>
+      )}
+    </div>
+  );
+}
+
 // ── Source Metadata Block ──────────────────────────────────────────
 
-function SourceMetadataBlock({ metadata }: { metadata?: Record<string, unknown> }) {
-  const [expanded, setExpanded] = useState(false);
+function SourceMetadataBlock({ metadata, defaultExpanded = false }: {
+  metadata?: Record<string, unknown>;
+  defaultExpanded?: boolean;
+}) {
+  const [expanded, setExpanded] = useState(defaultExpanded);
   if (!metadata || Object.keys(metadata).length === 0) return null;
   return (
     <div className="mt-3">

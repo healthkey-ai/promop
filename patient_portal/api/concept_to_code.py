@@ -101,6 +101,90 @@ def concept_to_code_detail(request, concept_id):
                      'results': [source_payload(row) for row in page]})
 
 
+SOURCE_EXAMPLE_LIMIT = 3
+# Candidate inventory rows read before access filtering. A curator who can see
+# few of the patients holding a common code may get fewer than the limit; the
+# bound keeps the per-patient access checks below from growing with the code.
+SOURCE_EXAMPLE_SCAN = 50
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def concept_to_code_source_examples(request):
+    """Up to three patients whose ETL inventory carries this exact source code.
+
+    Each example is that patient's `PatientSourceCode` row: the Source Metadata
+    a curator checks before approving a mapping (#1911). Read-only. Patient
+    source data has the same audience as the patient Source Codes tab --
+    administrators -- and each patient passes the same check as opening their
+    record, so a curator never sees a patient they could not open.
+    """
+    from omop_core.authorization import can_access_patient
+    from omop_core.models import PatientSourceCode
+    from omop_core.services.access import get_admin_orgs
+    from patient_portal.api.permissions import get_request_org
+    from patient_portal.api.views import _is_admin_actor
+
+    _authorize(request.user)
+    if not _is_admin_actor(request):
+        raise PermissionDenied('Only administrators can view patient source metadata.')
+    params = request.query_params
+    vocabulary = str(params.get('source_vocabulary_id') or '').strip()
+    code = str(params.get('source_code') or '').strip()
+    if not code:
+        raise ValidationError({'source_code': 'Supply the source code.'})
+    omop_table = str(params.get('omop_table') or '').strip()
+    if omop_table and omop_table not in DOMAIN_TO_TABLE.values():
+        raise ValidationError({'omop_table': 'Unknown clinical table.'})
+
+    # The ETL posts the system URI it received; mappings store the canonical id.
+    aliases = [vocabulary, *[alias for alias, canonical in VOCABULARY_OID_ALIASES.items()
+                             if canonical == vocabulary]]
+    rows = PatientSourceCode.objects.filter(
+        source_vocabulary_id__in=aliases, source_value=code,
+        person__patient_record__isnull=False,
+    )
+    if omop_table:
+        rows = rows.filter(Q(omop_table=omop_table) | Q(omop_table=''))
+    rows = rows.order_by('-occurrence_count', '-last_seen', 'pk').values(
+        'person_id', 'person__patient_record__organization_id', 'omop_table', 'occurrence_count',
+        'source_unit', 'source_unit_override', 'example_quantity', 'example_quantity_override',
+        'source_metadata', 'last_seen',
+    )[:SOURCE_EXAMPLE_SCAN]
+
+    org = get_request_org(request)
+    staff = bool(getattr(request.user, 'is_staff', False))
+    admin_org_ids = None if staff or org is not None else set(
+        get_admin_orgs(request.user).values_list('id', flat=True))
+
+    def visible(row):
+        organization_id = row['person__patient_record__organization_id']
+        if org is not None:
+            return organization_id == org.pk
+        if staff:
+            return True
+        return organization_id in admin_org_ids or can_access_patient(request.user, row['person_id'])
+
+    examples, seen = [], set()
+    for row in rows:
+        if row['person_id'] in seen or not visible(row):
+            continue
+        seen.add(row['person_id'])
+        examples.append({
+            'person_id': row['person_id'], 'omop_table': row['omop_table'],
+            'occurrence_count': row['occurrence_count'],
+            'source_unit': (row['source_unit_override'] if row['source_unit_override'] is not None
+                            else row['source_unit']),
+            'example_quantity': (row['example_quantity_override'] if row['example_quantity_override'] is not None
+                                 else row['example_quantity']),
+            'source_metadata': row['source_metadata'] or {},
+            'last_seen': row['last_seen'].isoformat() if row['last_seen'] else None,
+        })
+        if len(examples) == SOURCE_EXAMPLE_LIMIT:
+            break
+    return Response({'examples': examples})
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def concept_to_code_suggest(request):

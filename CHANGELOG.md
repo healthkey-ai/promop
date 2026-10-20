@@ -6,6 +6,19 @@ All notable changes to PRomop are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **Edit Mapping from Concept to Code, with example patients' Source
+  Metadata** — every source code listed under a concept opens the Edit Mapping
+  dialog (a code with no mapping row opens as a New Mapping), with the concept
+  offered as the destination when the code has none. The dialog lists up to
+  three patients whose source inventory carries the exact source system and
+  code, and shows the chosen patient's Source Metadata
+  (`GET /api/v1/concept-to-code/source-examples/`, administrators only, limited
+  to patients the curator can open, read-only). After a Suggest run with a
+  ranker, suggestions without a confidence score are hidden; unranked runs and
+  the Existing mappings and Find source codes lists are unchanged (#1915, #1911).
+
 ### Changed
 
 - **Clearer source-code curation evidence** — Edit Mapping now keeps Source

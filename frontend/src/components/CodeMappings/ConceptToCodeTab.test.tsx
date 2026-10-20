@@ -5,7 +5,12 @@ import ConceptToCodeTab from './ConceptToCodeTab';
 
 const get = vi.fn();
 const post = vi.fn();
-vi.mock('@/api/axios', () => ({ default: { get: (...args: unknown[]) => get(...args), post: (...args: unknown[]) => post(...args) } }));
+const remove = vi.fn(() => Promise.resolve({ data: {} }));
+const patch = vi.fn(() => Promise.resolve({ data: {} }));
+vi.mock('@/api/axios', () => ({ default: {
+  get: (...args: unknown[]) => get(...args), post: (...args: unknown[]) => post(...args),
+  delete: (...args: unknown[]) => remove(...args), patch: (...args: unknown[]) => patch(...args),
+} }));
 const concept = {
   concept_id: 123, concept_name: 'Serum albumin', concept_code: 'A1', vocabulary_id: 'LOINC', domain_id: 'Measurement',
   fields: [{ field_name: 'albumin', status: 'approved', omop_table: 'measurement' }],
@@ -436,5 +441,148 @@ describe('opening a linked concept', () => {
   it('opens a concept clicked in the list on its existing mappings', async () => {
     await selectConcept();
     expect(screen.getByRole('button', { name: 'Existing mappings' })).toHaveAttribute('aria-pressed', 'true');
+  });
+});
+
+describe('editing a source code from a concept (#1915)', () => {
+  const mappingRow = {
+    mapping_id: 7, domain_id: 'Measurement', source_vocabulary_id: 'SNOMED', source_code: 'S1',
+    source_code_description: 'Albumin in blood', destination_concept_id: null, destination_concept_name: '',
+    destination_concept_code: '', destination_vocabulary_id: '', destination_concept_class_id: '',
+    destination_omop_table: 'measurement', status: 'proposed', notes: '', origin: '', origin_system: 'HT-One',
+    suggest_strategy: '', umls_cui: '', created_by: '', occurrence_count: 8, destination_count: 0, has_mapping: true,
+  };
+  const examples = [
+    { person_id: 11, omop_table: 'measurement', occurrence_count: 4, source_unit: 'g/dL', example_quantity: '4.1',
+      source_metadata: { category: 'laboratory', specimen: 'serum' }, last_seen: null },
+    { person_id: 12, omop_table: 'measurement', occurrence_count: 2, source_unit: '', example_quantity: '',
+      source_metadata: { category: 'vital-signs', specimen: 'plasma' }, last_seen: null },
+  ];
+  const routes = (overrides: Record<string, () => Promise<unknown>> = {}) => (url: string) => {
+    if (overrides[url]) return overrides[url]();
+    if (url === '/v1/concept-to-code/') return Promise.resolve({ data: page([concept]) });
+    if (url === '/v1/code-mappings/reference/') return Promise.resolve({ data: {} });
+    if (url === '/v1/code-mappings/7/') return Promise.resolve({ data: { ...mappingRow, destination_options: [] } });
+    if (url === '/v1/concept-to-code/source-examples/') return Promise.resolve({ data: { examples } });
+    return Promise.resolve({ data: page([source]) });
+  };
+
+  beforeEach(() => {
+    get.mockImplementation(routes());
+    post.mockResolvedValue({ data: {} });
+  });
+
+  it('opens the code in Edit Mapping with the concept as destination, over the concept dialog', async () => {
+    await selectConcept();
+    fireEvent.click(screen.getByRole('button', { name: 'SNOMED:S1' }));
+
+    const editor = await screen.findByRole('dialog', { name: 'Edit Mapping' });
+    expect(get).toHaveBeenCalledWith('/v1/code-mappings/7/');
+    // The row had no destination: the concept being curated is offered.
+    await waitFor(() => expect(within(editor).getByLabelText('Destination Concept ID')).toHaveValue(123));
+    expect(screen.getByRole('dialog', { name: 'Source codes for Serum albumin' })).toBeInTheDocument();
+
+    fireEvent.click(within(editor).getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Edit Mapping' })).not.toBeInTheDocument());
+    expect(screen.getByRole('dialog', { name: 'Source codes for Serum albumin' })).toBeInTheDocument();
+  });
+
+  it('opens from a click anywhere on the row, but not from its checkbox', async () => {
+    await selectConcept();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select SNOMED S1' }));
+    expect(screen.queryByRole('dialog', { name: 'Edit Mapping' })).not.toBeInTheDocument();
+    expect(get).not.toHaveBeenCalledWith('/v1/code-mappings/7/');
+
+    fireEvent.click(screen.getByText('Albumin in blood'));
+    expect(await screen.findByRole('dialog', { name: 'Edit Mapping' })).toBeInTheDocument();
+  });
+
+  it('shows the selected example patient\'s Source Metadata and switches patients without writing', async () => {
+    await selectConcept();
+    fireEvent.click(screen.getByRole('button', { name: 'SNOMED:S1' }));
+    const editor = await screen.findByRole('dialog', { name: 'Edit Mapping' });
+
+    const picker = await within(editor).findByRole('combobox', { name: 'Example patient' });
+    expect(get).toHaveBeenCalledWith('/v1/concept-to-code/source-examples/', {
+      params: { source_vocabulary_id: 'SNOMED', source_code: 'S1', omop_table: 'measurement' },
+    });
+    expect(within(picker).getAllByRole('option').map(option => option.textContent))
+      .toEqual(['Patient 11 · Seen 4', 'Patient 12 · Seen 2']);
+    expect(within(editor).getByText(/"specimen": "serum"/)).toBeInTheDocument();
+
+    fireEvent.change(picker, { target: { value: '12' } });
+    expect(await within(editor).findByText(/"specimen": "plasma"/)).toBeInTheDocument();
+    expect(within(editor).queryByText(/"specimen": "serum"/)).not.toBeInTheDocument();
+    // Viewing a patient never writes to that patient.
+    expect([...post.mock.calls, ...patch.mock.calls].filter(([url]) => String(url).includes('source-codes'))).toEqual([]);
+  });
+
+  it('says so when no patient carries the code, and when examples are not allowed', async () => {
+    get.mockImplementation(routes({ '/v1/concept-to-code/source-examples/': () => Promise.resolve({ data: { examples: [] } }) }));
+    await selectConcept();
+    fireEvent.click(screen.getByRole('button', { name: 'SNOMED:S1' }));
+    expect(await screen.findByTestId('source-examples-empty')).toBeInTheDocument();
+  });
+
+  it('explains a forbidden example lookup', async () => {
+    get.mockImplementation(routes({
+      '/v1/concept-to-code/source-examples/': () => Promise.reject({ response: { status: 403 } }),
+    }));
+    await selectConcept();
+    fireEvent.click(screen.getByRole('button', { name: 'SNOMED:S1' }));
+    const editor = await screen.findByRole('dialog', { name: 'Edit Mapping' });
+    expect(await within(editor).findByText('Patient Source Metadata is limited to administrators.')).toBeInTheDocument();
+  });
+
+  it('opens a suggested code with no mapping row as a New Mapping for this concept', async () => {
+    post.mockImplementation((url: string) => Promise.resolve({ data: url === '/v1/concept-to-code/suggest/'
+      ? { ...run(), activity: [{ concept: { concept_id: 123 }, candidates: [
+        { ...source, mapping_id: null, source_code: 'NEW1', status: 'unmapped', confidence: 0.9 }] }] }
+      : {} }));
+    await selectConcept();
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'SNOMED:NEW1' }));
+
+    const editor = await screen.findByRole('dialog', { name: 'New Mapping' });
+    expect(get).not.toHaveBeenCalledWith('/v1/code-mappings/null/');
+    await waitFor(() => expect(within(editor).getByLabelText('Destination Concept ID')).toHaveValue(123));
+  });
+});
+
+describe('suggestions without a confidence score (#1915)', () => {
+  const candidates = [
+    { ...source, source_code: 'SCORED', confidence: 0.72 },
+    { ...source, source_code: 'UNSCORED', confidence: null },
+  ];
+  const suggest = (ranking_model: string) => {
+    post.mockResolvedValue({ data: { ...run(), selection: { limit: 25, include_zero_seen: false, ranking_model },
+      activity: [{ concept: { concept_id: 123 }, candidates }] } });
+  };
+
+  it('hides unscored suggestions after a ranked run', async () => {
+    suggest('jev');
+    await selectConcept();
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
+    expect(await screen.findByText('SNOMED:SCORED')).toBeInTheDocument();
+    expect(screen.queryByText('SNOMED:UNSCORED')).not.toBeInTheDocument();
+    expect(screen.getByText(/1 without a confidence score hidden/)).toBeInTheDocument();
+  });
+
+  it('shows every suggestion after an unranked run', async () => {
+    suggest('none');
+    await selectConcept();
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
+    expect(await screen.findByText('SNOMED:SCORED')).toBeInTheDocument();
+    expect(screen.getByText('SNOMED:UNSCORED')).toBeInTheDocument();
+    expect(screen.queryByText(/without a confidence score hidden/)).not.toBeInTheDocument();
+  });
+
+  it('leaves existing mappings visible whether or not they were scored', async () => {
+    get.mockImplementation((url: string) => Promise.resolve({ data: url === '/v1/concept-to-code/'
+      ? page([concept]) : page(candidates) }));
+    render(<ConceptToCodeTab canApprove />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Serum albumin' }));
+    expect(await screen.findByText('SNOMED:SCORED')).toBeInTheDocument();
+    expect(screen.getByText('SNOMED:UNSCORED')).toBeInTheDocument();
   });
 });
