@@ -3919,16 +3919,14 @@ class PatientRecord(models.Model):
         # therapy". Collapsing the former into the latter turns an unknown
         # history into a clinical claim, and downstream matchers compare it as a
         # value. Leave both fields unknown when there is nothing to count (#1925).
-        if self.therapy_lines_count is None and text_lines == 0:
-            self.prior_therapy = None
-            self.treatment_refractory_status = 'Unknown'
-            return
-
-        self.therapy_lines_count = max(text_lines, self.therapy_lines_count or 0)
+        if self.therapy_lines_count is not None or text_lines:
+            self.therapy_lines_count = max(text_lines, self.therapy_lines_count or 0)
         lines_count = self.therapy_lines_count
 
         # Set prior_therapy using the vocabulary expected by EXACT and CB matchers
-        if lines_count == 0:
+        if lines_count is None:
+            self.prior_therapy = None
+        elif lines_count == 0:
             self.prior_therapy = 'None'
         elif lines_count == 1:
             self.prior_therapy = 'One line'
