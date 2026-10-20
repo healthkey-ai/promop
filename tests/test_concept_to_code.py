@@ -432,3 +432,112 @@ def test_permissions_and_forward_run_separation(client, concept, django_user_mod
         assert apply(client, concept, row, status='approved').status_code == 400
     row.refresh_from_db()
     assert row.status == 'proposed'
+
+
+# ── Source examples: patient Source Metadata for a source code (#1915) ──────
+
+EXAMPLES = f'{BASE}source-examples/'
+
+
+def inventory(code, record, **overrides):
+    from omop_core.models import PatientSourceCode
+    return PatientSourceCode.objects.create(**{
+        'person': record.person, 'source_value': code, 'source_vocabulary_id': 'SNOMED',
+        'omop_table': 'measurement', 'occurrence_count': 1,
+        'source_metadata': {'category': 'laboratory', 'person': record.person.person_id},
+        **overrides,
+    })
+
+
+def test_source_examples_return_up_to_three_patients_matching_system_and_code(client):
+    from tests.factories import PatientRecordFactory
+    records = [PatientRecordFactory() for _ in range(5)]
+    for index, record in enumerate(records):
+        inventory('ALB', record, occurrence_count=index + 1)
+    inventory('ALB', PatientRecordFactory(), source_vocabulary_id='LOINC')  # other system
+    inventory('ALBX', PatientRecordFactory())                               # other code
+
+    response = client.get(EXAMPLES, {'source_vocabulary_id': 'SNOMED', 'source_code': 'ALB'})
+
+    assert response.status_code == 200
+    examples = response.data['examples']
+    # Most-seen first, one entry per patient, capped at three.
+    assert [example['person_id'] for example in examples] == [r.person.person_id for r in records[::-1][:3]]
+    assert examples[0]['source_metadata'] == {'category': 'laboratory', 'person': records[-1].person.person_id}
+
+
+def test_source_examples_apply_curator_corrections_and_match_vocabulary_aliases(client):
+    from omop_core.services.source_vocabularies import VOCABULARY_OID_ALIASES
+    from tests.factories import PatientRecordFactory
+    alias, canonical = next(iter(VOCABULARY_OID_ALIASES.items()))
+    inventory('ALB', PatientRecordFactory(), source_vocabulary_id=alias, source_unit='g/dl',
+              source_unit_override='g/dL', example_quantity='4', example_quantity_override=None)
+
+    examples = client.get(EXAMPLES, {'source_vocabulary_id': canonical, 'source_code': 'ALB'}).data['examples']
+
+    assert len(examples) == 1
+    assert examples[0]['source_unit'] == 'g/dL'
+    assert examples[0]['example_quantity'] == '4'
+
+
+def test_source_examples_filter_by_table_but_keep_untabled_inventory(client):
+    from tests.factories import PatientRecordFactory
+    measured, untabled, observed = PatientRecordFactory(), PatientRecordFactory(), PatientRecordFactory()
+    inventory('ALB', measured)
+    inventory('ALB', untabled, omop_table='')
+    inventory('ALB', observed, omop_table='observation')
+
+    examples = client.get(EXAMPLES, {'source_vocabulary_id': 'SNOMED', 'source_code': 'ALB',
+                                     'omop_table': 'measurement'}).data['examples']
+
+    assert {example['person_id'] for example in examples} == {measured.person.person_id, untabled.person.person_id}
+
+
+def test_source_examples_only_show_patients_an_org_admin_administers(django_user_model):
+    from omop_core.models import GroupAccess
+    from tests.factories import OrganizationFactory, PatientRecordFactory
+    org, other = OrganizationFactory(), OrganizationFactory()
+    admin = django_user_model.objects.create_user(email='org-admin@test.com')
+    GroupAccess.objects.create(identity=admin, org=org, role='org_admin')
+    mine, theirs = PatientRecordFactory(organization=org), PatientRecordFactory(organization=other)
+    inventory('ALB', mine)
+    inventory('ALB', theirs, occurrence_count=99)
+    api = APIClient()
+    api.force_authenticate(admin)
+
+    examples = api.get(EXAMPLES, {'source_vocabulary_id': 'SNOMED', 'source_code': 'ALB'}).data['examples']
+
+    assert [example['person_id'] for example in examples] == [mine.person.person_id]
+
+
+def test_source_examples_are_denied_to_non_admin_curators(django_user_model):
+    from omop_core.models import GroupAccess
+    from tests.factories import OrganizationFactory, PatientRecordFactory
+    org = OrganizationFactory()
+    doctor = django_user_model.objects.create_user(email='doctor@test.com')
+    GroupAccess.objects.create(identity=doctor, org=org, role='doctor')
+    inventory('ALB', PatientRecordFactory(organization=org))
+    api = APIClient()
+    api.force_authenticate(doctor)
+
+    response = api.get(EXAMPLES, {'source_vocabulary_id': 'SNOMED', 'source_code': 'ALB'})
+
+    assert response.status_code == 403
+    assert 'examples' not in response.data
+
+
+def test_source_examples_require_authentication_and_a_code(client):
+    assert APIClient().get(EXAMPLES, {'source_vocabulary_id': 'SNOMED', 'source_code': 'ALB'}).status_code in (401, 403)
+    assert client.get(EXAMPLES, {'source_vocabulary_id': 'SNOMED'}).status_code == 400
+    assert client.get(EXAMPLES, {'source_code': 'ALB', 'omop_table': 'nonsense'}).status_code == 400
+
+
+def test_source_examples_do_not_write(client):
+    from omop_core.models import PatientSourceCode
+    from tests.factories import PatientRecordFactory
+    row = inventory('ALB', PatientRecordFactory())
+    before = PatientSourceCode.objects.values().get(pk=row.pk)
+
+    assert client.get(EXAMPLES, {'source_vocabulary_id': 'SNOMED', 'source_code': 'ALB'}).status_code == 200
+    assert client.post(EXAMPLES, {'source_vocabulary_id': 'SNOMED', 'source_code': 'ALB'}, format='json').status_code == 405
+    assert PatientSourceCode.objects.values().get(pk=row.pk) == before

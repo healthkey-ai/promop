@@ -1,12 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import api from '@/api/axios';
 import { destinationError } from './destinationSearch';
 import { confirmUnitOverride, unitConfirmation } from './unitConfirmation';
+import EditMappingDialog from './EditMappingDialog';
+import { type CodeMappingRow, type ConceptResult, type Reference, DOMAIN_TO_TABLE, emptyReference } from './codeMappingTypes';
 
 type Concept = {
   concept_id: number; concept_name: string; concept_code: string;
   vocabulary_id: string; domain_id: string;
+  concept_class_id?: string; standard_concept?: string | null;
   fields: { field_name: string; status: string; omop_table: string }[];
   sccm_counts: { approved: number; proposed: number; rejected: number };
 };
@@ -18,12 +21,14 @@ type Source = {
   evidence?: string[]; verdict?: string; note?: string;
   /** The ranker's confidence (0-1) in this source → concept pairing. */
   confidence?: number | null;
+  /** Saved in the full editor since the preview: no longer a bulk-review row. */
+  edited?: boolean;
 };
 type ConfidenceOrder = '' | '-confidence' | 'confidence';
 type Page<T> = { results: T[]; page: number; page_size: number; total: number };
 type Run = {
   run_id: string; state: string; error: string; done: number; total: number;
-  selection: { limit: number; include_zero_seen: boolean };
+  selection: { limit: number; include_zero_seen: boolean; ranking_model?: string };
   activity: { concept: { concept_id: number }; candidates: Source[] }[];
 };
 const domains = [
@@ -76,6 +81,8 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
   const [loading, setLoading] = useState(false);
   const [revision, setRevision] = useState(0);
   const [writing, setWriting] = useState(false);
+  // The Edit Mapping dialog sits inside this one; Escape must not close both.
+  const [editing, setEditing] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -121,7 +128,7 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialConceptId]);
 
-  return <Dialog.Root open={selected !== null} onOpenChange={open => { if (!open && !writing) setSelected(null); }}>
+  return <Dialog.Root open={selected !== null} onOpenChange={open => { if (!open && !writing && !editing) setSelected(null); }}>
     <section aria-label="Concept to source code" className="space-y-5">
     <div>
       <h2 className="text-lg font-semibold text-slate-950">Source-code coverage</h2>
@@ -165,9 +172,9 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
     </section>
     {selected && <Dialog.Portal>
       <Dialog.Overlay className="fixed inset-0 z-50 bg-slate-950/50" />
-      <Dialog.Content aria-modal="true" className="fixed left-1/2 top-1/2 z-50 max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-7xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-lg bg-white p-5 shadow-xl"
-        onEscapeKeyDown={event => { if (writing) event.preventDefault(); }}
-        onInteractOutside={event => { if (writing) event.preventDefault(); }}
+      <Dialog.Content aria-modal="true" className="fixed inset-0 z-50 m-auto h-fit max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-7xl overflow-y-auto rounded-lg bg-white p-5 shadow-xl"
+        onEscapeKeyDown={event => { if (writing || editing) event.preventDefault(); }}
+        onInteractOutside={event => { if (writing || editing) event.preventDefault(); }}
         onCloseAutoFocus={event => { event.preventDefault(); selectedTrigger.current?.focus(); }}>
         <div className="mb-4 flex items-start justify-between gap-4 border-b border-slate-200 pb-3">
           <div>
@@ -177,14 +184,33 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
           <Dialog.Close className={button} disabled={writing}>Close</Dialog.Close>
         </div>
         <SourceCoverage key={selected.concept_id} concept={selected} canApprove={canApprove} initialMode={selectedMode}
-          onWriting={value => { setWriting(value); onWritingChange?.(value); }} onSaved={() => setRevision(value => value + 1)} />
+          onWriting={value => { setWriting(value); onWritingChange?.(value); }} onSaved={() => setRevision(value => value + 1)}
+          onEditingChange={setEditing} />
       </Dialog.Content>
     </Dialog.Portal>}
   </Dialog.Root>;
 }
 
-function SourceCoverage({ concept, canApprove, onSaved, onWriting, initialMode = 'linked' }: {
+type EditTarget = { mode: 'new' | 'edit'; row: CodeMappingRow; source: Source };
+type RankingModel = 'anthropic' | 'jev' | 'both';
+
+/** A suggested source with no mapping row yet, shaped for the New Mapping form. */
+function newMappingRow(source: Source, concept: Concept): CodeMappingRow {
+  return {
+    mapping_id: null, domain_id: concept.domain_id,
+    source_vocabulary_id: source.source_vocabulary_id, source_code: source.source_code,
+    source_code_description: source.source_code_description,
+    destination_concept_id: null, destination_concept_name: '', destination_concept_code: '',
+    destination_vocabulary_id: '', destination_concept_class_id: '',
+    destination_omop_table: DOMAIN_TO_TABLE[concept.domain_id] ?? '',
+    status: 'proposed', notes: '', origin: '', origin_system: '', suggest_strategy: '', umls_cui: '',
+    created_by: '', occurrence_count: source.occurrence_count, destination_count: 0, has_mapping: false,
+  };
+}
+
+function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChange, initialMode = 'linked' }: {
   concept: Concept; canApprove: boolean; onSaved: () => void; onWriting: (value: boolean) => void;
+  onEditingChange?: (value: boolean) => void;
   initialMode?: SourceMode;
 }) {
   const [mode, setMode] = useState<SourceMode>(initialMode);
@@ -205,6 +231,16 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, initialMode =
   const [progress, setProgress] = useState('');
   const [order, setOrder] = useState<ConfidenceOrder>('');
   const [threshold, setThreshold] = useState(80);
+  const [edit, setEdit] = useState<EditTarget | null>(null);
+  const [opening, setOpening] = useState(false);
+  const [reference, setReference] = useState<Reference | null>(null);
+  const [dialogStrategies, setDialogStrategies] = useState({ umls: true, lexical: true, vectors: true });
+  const [dialogRanking, setDialogRanking] = useState<RankingModel>('jev');
+  const destination = useMemo<ConceptResult>(() => ({
+    concept_id: concept.concept_id, concept_name: concept.concept_name, concept_code: concept.concept_code,
+    vocabulary_id: concept.vocabulary_id, domain_id: concept.domain_id,
+    concept_class_id: concept.concept_class_id ?? '', standard_concept: concept.standard_concept ?? 'S',
+  }), [concept]);
   const writingRef = useRef(false);
   const active = useRef(true);
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
@@ -255,9 +291,14 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, initialMode =
     finally { if (active.current) setStarting(false); }
   };
   const candidates = run?.activity.find(event => event.concept.concept_id === concept.concept_id)?.candidates ?? [];
-  const candidateRows = candidates.filter(row => !seenOnly || row.occurrence_count > 0);
+  // A ranked run scores every source it considers a possible match; one it left
+  // unscored is not a suggestion. An unranked run scores nothing, so it shows all.
+  const ranked = Boolean(run?.selection.ranking_model && run.selection.ranking_model !== 'none');
+  const scored = ranked ? candidates.filter(row => row.confidence != null) : candidates;
+  const unscoredHidden = candidates.length - scored.length;
+  const candidateRows = scored.filter(row => !seenOnly || row.occurrence_count > 0);
   const rows = mode === 'candidates' ? (order ? [...candidateRows].sort(byConfidence(order)) : candidateRows) : data?.results ?? [];
-  const editable = rows.filter(row => (row.status === 'proposed' || (row.status === 'unmapped' && row.mapping_id === null)) && row.origin_system !== 'athena');
+  const editable = rows.filter(row => !row.edited && (row.status === 'proposed' || (row.status === 'unmapped' && row.mapping_id === null)) && row.origin_system !== 'athena');
   const pending = editable.filter(row => selected.has(sourceKey(row)));
   const approvable = pending.filter(row => row.mapping_id !== null);
   const validThreshold = Number.isFinite(threshold) && threshold >= 0 && threshold <= 100;
@@ -323,6 +364,41 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, initialMode =
     } finally { writingRef.current = false; if (active.current) setWriting(false); onWriting(false); }
   };
 
+  const openEditor = async (row: Source) => {
+    if (busy || opening) return;
+    setOpening(true); setError('');
+    try {
+      let current = reference;
+      if (!current) {
+        const { data: loaded } = await api.get<Reference>('/v1/code-mappings/reference/');
+        current = { ...emptyReference, ...(loaded || {}) };
+        if (active.current) setReference(current);
+      }
+      const target: EditTarget = row.mapping_id === null
+        ? { mode: 'new', row: newMappingRow(row, concept), source: row }
+        : { mode: 'edit', row: (await api.get<CodeMappingRow>(`/v1/code-mappings/${row.mapping_id}/`)).data, source: row };
+      if (!active.current) return;
+      if (ranker !== 'none') setDialogRanking(ranker as RankingModel);
+      setEdit(target); onEditingChange?.(true);
+    } catch {
+      if (active.current) setError(`Could not open ${row.source_code} for editing. Refresh to retry.`);
+    } finally { if (active.current) setOpening(false); }
+  };
+  const closeEditor = () => { setEdit(null); onEditingChange?.(false); };
+  const editorSaved = (saved: CodeMappingRow) => {
+    onSaved();
+    if (mode !== 'candidates') { setRevision(value => value + 1); return; }
+    const key = edit ? sourceKey(edit.source) : '';
+    setSelected(previous => { const next = new Set(previous); next.delete(key); return next; });
+    setRun(previous => previous ? { ...previous, activity: previous.activity.map(event => ({ ...event,
+      candidates: event.candidates.map(item => sourceKey(item) === key ? {
+        ...item, edited: true, mapping_id: saved.mapping_id, status: saved.status,
+        destination_concept_id: saved.destination_concept_id, destination_concept_name: saved.destination_concept_name,
+        destination_standard_concept: saved.standard_concept ?? null,
+      } : item),
+    })) } : null);
+  };
+
   const busy = writing || running;
   const refresh = useCallback(() => { setData(null); setSelected(new Set()); setError(''); setRevision(value => value + 1); }, []);
   return <section aria-label={`Source codes for ${concept.concept_name}`} className="space-y-4">
@@ -350,6 +426,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, initialMode =
       {' '}New vocabulary codes have Seen = 0 and must be proposed before approval.</p>
     {run && mode === 'candidates' && <p role="status" className="text-sm text-slate-600">
       {running ? 'Searching local vocabulary evidence…' : `${candidates.length} candidates retrieved (limit ${run.selection.limit}).`}
+      {!running && unscoredHidden > 0 && ` ${unscoredHidden} without a confidence score hidden.`}
       {run.error && ` ${run.error}`}
     </p>}
     {run && mode === 'candidates' && run.selection.include_zero_seen === seenOnly && <p className="text-xs text-amber-800">Run Suggest source codes again to search with the changed Seen filter.</p>}
@@ -387,11 +464,18 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, initialMode =
             title="Order by confidence" onClick={changeOrder}>Status / evidence · Confidence
             <span aria-hidden="true">{order === '-confidence' ? '↓' : order === 'confidence' ? '↑' : '↕'}</span></button></th>
       </tr></thead>
-      <tbody>{rows.map(row => <tr key={sourceKey(row)} className="border-b border-slate-100 align-top">
+      <tbody>{rows.map(row => <tr key={sourceKey(row)} className="cursor-pointer border-b border-slate-100 align-top hover:bg-slate-50"
+        onClick={event => {
+          // The checkbox and the code button act on their own.
+          if ((event.target as HTMLElement).closest('input, button, a, select, label')) return;
+          void openEditor(row);
+        }}>
         <td className="p-2"><input type="checkbox" aria-label={`Select ${row.source_vocabulary_id || 'Uncoded'} ${row.source_code}`}
           disabled={busy || !editable.includes(row)} checked={selected.has(sourceKey(row))}
           onChange={event => setSelected(previous => { const next = new Set(previous); if (event.target.checked) next.add(sourceKey(row)); else next.delete(sourceKey(row)); return next; })} /></td>
-        <td className="p-2 font-mono text-xs">{row.source_vocabulary_id || 'Uncoded'}:{row.source_code}</td>
+        <td className="p-2 font-mono text-xs"><button type="button" className="text-left underline underline-offset-2 hover:text-slate-950 disabled:opacity-40"
+          disabled={busy || opening} aria-haspopup="dialog" title={`Open ${row.source_code} in Edit Mapping`}
+          onClick={() => void openEditor(row)}>{row.source_vocabulary_id || 'Uncoded'}:{row.source_code}</button></td>
         <td className="p-2">{row.source_code_description || '—'}</td><td className="p-2 text-right tabular-nums">{row.occurrence_count}</td>
         <td className="p-2 text-xs">{row.destination_concept_name || 'None'}{row.destination_concept_id && <div className="mt-1 text-slate-500">
           OMOP {row.destination_concept_id} · {row.destination_standard_concept === 'S' ? 'Standard' : 'Nonstandard'}</div>}</td>
@@ -400,11 +484,18 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, initialMode =
           {(row.status === 'proposed' || mode === 'candidates') && <div className="mt-1 text-slate-700">
             Confidence: {row.confidence != null ? <span className="font-medium tabular-nums">{percent(row.confidence)}</span> : <span className="text-slate-500">not scored</span>}</div>}
           {row.verdict === 'supported' && <div className="mt-1 text-sky-800">Model-supported; curator review required</div>}
-          {row.note && <p className="mt-1 max-w-xs text-slate-500">{row.note}</p>}</td>
+          {row.note && <p className="mt-1 max-w-xs text-slate-500">{row.note}</p>}
+          {row.edited && <div className="mt-1 text-slate-700">Saved in the editor</div>}</td>
       </tr>)}</tbody>
     </table></div>
     {!loading && !rows.length && <p className="text-sm text-slate-500">No source codes shown. {seenOnly ? 'Uncheck > 0 only to include zero-Seen codes. ' : ''}
       {mode === 'candidates' ? 'Run Suggest source codes to search.' : mode === 'linked' ? 'Use Find source codes or Suggest source codes to extend coverage.' : 'Try a different source search.'}</p>}
     {mode !== 'candidates' && data && <Pagination data={data} disabled={busy || loading} change={next => { setPage(next); setData(null); setSelected(new Set()); }} />}
+    <EditMappingDialog open={edit !== null} onClose={closeEditor} mode={edit?.mode ?? 'edit'} row={edit?.row ?? null}
+      reference={reference ?? emptyReference} canApprove={canApprove}
+      strategies={dialogStrategies} rankingModel={dialogRanking}
+      onStrategiesChange={setDialogStrategies} onRankingModelChange={setDialogRanking}
+      onSaved={editorSaved} onDeleted={() => { onSaved(); if (mode !== 'candidates') setRevision(value => value + 1); }}
+      defaultDestination={destination} sourceExamples />
   </section>;
 }
