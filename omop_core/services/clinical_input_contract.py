@@ -24,10 +24,12 @@ CLINICAL_INPUT_FIELDS = frozenset(RECIPES)
 
 
 def descriptors():
+    from django.db.models import Q
+
     from omop_core.models import Concept
-    ready = Concept.objects.filter(pk=0).exists() and Concept.objects.filter(
-        pk=32865, vocabulary_id='Type Concept',
-    ).exists()
+    ready = Concept.objects.filter(
+        Q(pk=0) | Q(pk=32865, vocabulary_id='Type Concept'),
+    ).count() == 2
     return {
         field: {
             'kind': 'editable', 'writable': ready, 'target': 'observation',

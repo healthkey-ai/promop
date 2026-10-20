@@ -139,6 +139,118 @@ def test_new_inputs_have_source_provenance(patient):
         assert provenance.source_values == [RECIPES[field][0]]
 
 
+@pytest.mark.parametrize('field,value', [
+    ('prothrombin_time_uln', Decimal('1.25')),
+    ('activated_partial_thromboplastin_time_uln', Decimal('1.75')),
+    ('able_to_swallow_tablets_capsules', True),
+])
+def test_new_inputs_are_traceable_to_their_observation(patient, field, value):
+    from omop_core.services.provenance_service import get_field_provenance
+
+    write_clinical_inputs(patient, {field: value})
+    provenance = get_field_provenance(patient, field)
+
+    assert provenance is not None
+    assert len(provenance['source_rows']) == 1
+    row = provenance['source_rows'][0]
+    assert row['table'] == 'Observation'
+    assert row['id'] == Observation.objects.get(person=patient).observation_id
+
+
+def test_provenance_selected_row_is_the_latest_same_day_input(patient):
+    from omop_core.services.provenance_service import get_field_provenance
+
+    write_clinical_inputs(patient, {'prothrombin_time_uln': Decimal('1.25')})
+    write_clinical_inputs(patient, {'prothrombin_time_uln': Decimal('1.30')})
+
+    provenance = get_field_provenance(patient, 'prothrombin_time_uln')
+
+    assert len(provenance['source_rows']) == 2
+    assert provenance['source_rows'][0]['value'] == Decimal('1.30')
+    assert provenance['source_rows'][0]['selected'] is True
+    assert provenance['source_rows'][1]['selected'] is False
+
+
+def test_clinical_write_is_rejected_when_descriptor_does_not_list_the_field(patient):
+    result = apply_field_writes(
+        patient, {'prothrombin_time_uln': Decimal('1.25')}, descriptor={},
+    )
+
+    assert result.applied == []
+    assert 'prothrombin_time_uln' in result.rejected
+    assert not Observation.objects.filter(person=patient).exists()
+
+
+def test_clinical_write_is_rejected_when_descriptor_marks_it_not_writable(patient):
+    descriptor = {
+        'prothrombin_time_uln': {
+            'kind': 'editable',
+            'writable': False,
+            'reason': 'Not editable in this context.',
+        },
+    }
+
+    result = apply_field_writes(
+        patient, {'prothrombin_time_uln': Decimal('1.25')}, descriptor=descriptor,
+    )
+
+    assert result.applied == []
+    assert result.rejected == {'prothrombin_time_uln': 'Not editable in this context.'}
+    assert not Observation.objects.filter(person=patient).exists()
+
+
+def test_clinical_write_is_rejected_when_descriptor_kind_is_not_editable(patient):
+    descriptor = {
+        'able_to_swallow_tablets_capsules': {'kind': 'profile', 'writable': True},
+    }
+
+    result = apply_field_writes(
+        patient, {'able_to_swallow_tablets_capsules': True}, descriptor=descriptor,
+    )
+
+    assert result.applied == []
+    assert 'able_to_swallow_tablets_capsules' in result.rejected
+    assert not Observation.objects.filter(person=patient).exists()
+
+
+def test_clinical_write_accepts_a_descriptor_that_marks_it_writable(patient):
+    descriptor = {'prothrombin_time_uln': {'kind': 'editable', 'writable': True}}
+
+    result = apply_field_writes(
+        patient, {'prothrombin_time_uln': Decimal('1.25')}, descriptor=descriptor,
+    )
+
+    assert result.applied == ['prothrombin_time_uln']
+    assert not result.rejected
+    assert Observation.objects.filter(person=patient).count() == 1
+
+
+def test_mixed_batch_rolls_back_the_nonclinical_part_when_a_clinical_value_is_invalid(patient):
+    patient.gender_source_value = 'Male'
+    patient.save(update_fields=['gender_source_value'])
+
+    with pytest.raises(ValueError, match='explicit boolean'):
+        apply_field_writes(
+            patient,
+            {'gender': 'Female', 'able_to_swallow_tablets_capsules': 'true'},
+        )
+
+    patient.refresh_from_db()
+    assert patient.gender_source_value == 'Male'
+    assert not Observation.objects.filter(person=patient).exists()
+
+
+def test_mixed_batch_applies_the_nonclinical_and_clinical_parts(patient):
+    result = apply_field_writes(
+        patient,
+        {'gender': 'Female', 'prothrombin_time_uln': Decimal('1.25')},
+    )
+
+    assert set(result.applied) == {'gender', 'prothrombin_time_uln'}
+    assert not result.rejected
+    assert Observation.objects.filter(person=patient).count() == 1
+
+
 @pytest.mark.parametrize('invalid', ['true', 0, 1, [], {}])
 def test_swallowing_requires_an_explicit_boolean_not_a_truthy_value(patient, invalid):
     with pytest.raises(ValueError, match='explicit boolean'):

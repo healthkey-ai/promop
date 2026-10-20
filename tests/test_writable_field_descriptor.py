@@ -181,9 +181,10 @@ class TestCost:
             build_writable_field_descriptor()
 
         # One batch lookup per source table (LOINC codes, UCUM units, attributed
-        # codes) — constant, not one per field. The bound guards the shape, not
-        # the exact number.
-        assert len(ctx) <= 3, [q['sql'][:80] for q in ctx]
+        # codes), plus one readiness probe for the compatible source-input
+        # descriptor concepts (0 and 32865) — constant, not one per field. The
+        # bound guards the shape, not the exact number.
+        assert len(ctx) <= 4, [q['sql'][:80] for q in ctx]
 
 
 class TestEndpoint:
