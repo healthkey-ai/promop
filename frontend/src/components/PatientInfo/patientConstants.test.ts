@@ -40,8 +40,10 @@ describe('disease option lists', () => {
     );
   });
 
-  it('offers the GELF high-tumor-burden value used by the demo record', () => {
-    expect(GELF_OPTIONS).toContain('High tumor burden');
+  it('offers the GELF values the projection can store', () => {
+    expect(GELF_OPTIONS).toEqual(
+      expect.arrayContaining(['High tumor burden', 'Yes', 'No']),
+    );
   });
 
   it('keeps the CLL Binet code as the option value so an API value of B matches', () => {

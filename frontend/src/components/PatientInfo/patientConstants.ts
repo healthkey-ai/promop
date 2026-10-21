@@ -120,7 +120,7 @@ export const HRD_OPTIONS = ['HRD+', 'HRD-', 'Unknown'];
 export const MENOPAUSAL_OPTIONS = ['Pre-menopausal', 'Peri-menopausal', 'Post-menopausal', 'Unknown'];
 export const FLIPI_RISK_OPTIONS = ['Low', 'Intermediate', 'High'];
 export const FLIPI_FACTOR_OPTIONS = ['Age ≥ 60', 'Stage III/IV', 'Hgb < 12 g/dL', 'Nodal areas > 4', 'Elevated LDH'];
-export const GELF_OPTIONS = ['Met', 'Not Met', 'High tumor burden', 'Unknown'];
+export const GELF_OPTIONS = ['Met', 'Not Met', 'Yes', 'No', 'High tumor burden', 'Unknown'];
 export const BONE_LESIONS_OPTIONS = ['Present', 'Absent', 'Unknown'];
 // PROMOP stores the FL grade as an integer/grade code (`2`), while the editable label is prose.
 // Keep the code as the option value so the select matches the API; Field preserves the label.
