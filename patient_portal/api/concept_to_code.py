@@ -223,7 +223,7 @@ def concept_to_code_source_examples(request):
 @permission_classes([IsAuthenticated])
 def concept_to_code_estimate(request, concept_id):
     """How many source codes Suggest could find for one concept, before running it."""
-    from omop_core.mapping.reverse_suggestions import estimate_reverse_pool
+    from omop_core.mapping.reverse_suggestions import estimate_source_count
     _authorize(request.user)
     concept = get_object_or_404(standard_destinations(), pk=concept_id)
     strategies = [s for s in request.query_params.get('strategies', 'umls,lexical').split(',') if s]
@@ -231,9 +231,9 @@ def concept_to_code_estimate(request, concept_id):
         raise ValidationError({'strategies': 'Choose umls, lexical, or both.'})
     include_zero = request.query_params.get('include_zero_seen', '0') == '1'
     try:
-        estimate = estimate_reverse_pool(concept, strategies=strategies, include_zero_seen=include_zero)
+        estimate = estimate_source_count(concept, strategies=strategies, include_zero_seen=include_zero)
     except (TimeoutError, OperationalError):
-        # The search outran its budget; the page says so rather than guessing.
+        # Even the approximation outran its budget; the page says so.
         return Response({'total': None, 'timed_out': True})
     return Response({**estimate, 'timed_out': False})
 
