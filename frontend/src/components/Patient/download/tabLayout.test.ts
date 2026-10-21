@@ -22,7 +22,7 @@ describe('tab layout', () => {
     expect(readFileSync(OUTPUT, 'utf8')).toBe(render(extractAll()));
   });
 
-  it('holds every field the duplicate-field rule sees on the printed tabs', () => {
+  it('holds, tab by tab, every field the duplicate-field rule sees', () => {
     __resetTabFieldState();
     const linter = new Linter();
     const config = {
@@ -35,16 +35,26 @@ describe('tab layout', () => {
     // still has to be accounted for.
     const linted = [...(TAB_FILES as string[]), 'GenomicsTab.tsx'];
     for (const file of linted) {
-      linter.verify(readFileSync(join(TAB_DIR, file), 'utf8'), config as never, join(TAB_DIR, file));
+      const messages = linter.verify(readFileSync(join(TAB_DIR, file), 'utf8'), config as never, join(TAB_DIR, file));
+      // A tab the rule saw no field on, or a field it could not name, is one
+      // this comparison cannot vouch for either: both readers would be blind.
+      expect(messages.map((m) => `${file}: ${m.messageId ?? m.message}`)).toEqual([]);
     }
     const seen = __tabFieldsByFile() as Map<string, Set<string>>;
-    expect(seen.size).toBe(linted.length);
 
-    const printed = new Set<string>([
-      ...Object.values(TAB_LAYOUT).flatMap((sections) => sections.flatMap((s) => s.fields.map(([, n]) => n))),
-      ...ASSEMBLED_FIELDS,
-    ]);
-    const missing = [...seen.values()].flatMap((keys) => [...keys]).filter((k) => !printed.has(k));
+    const missing: string[] = [];
+    for (const file of linted) {
+      const tab = file.replace(/\.tsx$/, '');
+      const keys = seen.get(file);
+      expect(keys?.size, `${file} has no fields the rule can see`).toBeGreaterThan(0);
+      // Per tab, not pooled: a field that left one tab but exists on another
+      // still has to be printed under the tab that shows it.
+      const printed = new Set<string>([
+        ...(TAB_LAYOUT[tab] ?? []).flatMap((s) => s.fields.map(([, n]) => n)),
+        ...ASSEMBLED_FIELDS,
+      ]);
+      for (const key of keys ?? []) if (!printed.has(key)) missing.push(`${tab}.${key}`);
+    }
     expect(missing).toEqual([]);
   });
 

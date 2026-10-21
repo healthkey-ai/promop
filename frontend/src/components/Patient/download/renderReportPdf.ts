@@ -32,6 +32,8 @@ class Layout {
   readonly right = this.pdf.width - MARGIN;
   get width() { return this.right - this.left; }
   private get bottom() { return this.pdf.height - MARGIN - FOOTER; }
+  /** The usable height of a fresh page. */
+  private get pageArea() { return this.bottom - MARGIN; }
 
   constructor() { this.newPage(); }
 
@@ -78,8 +80,10 @@ class Layout {
     // Keep a heading with what it heads: the whole first section when that is
     // short enough to be kept together, otherwise its first few rows.
     this.ensure(34 + (firstBlockHeight <= KEEP_TOGETHER ? firstBlockHeight : 80));
-    this.y += 20;
-    this.pdf.text(this.left, this.y, title, { font: 'bold', size: 14, color: BRAND });
+    for (const line of wrapText(title, 'bold', 14, this.width)) {
+      this.y += 20;
+      this.pdf.text(this.left, this.y, line, { font: 'bold', size: 14, color: BRAND });
+    }
     this.y += 6;
     this.pdf.line(this.left, this.y, this.right, this.y, { color: BRAND, lineWidth: 1 });
     this.y += 8;
@@ -122,6 +126,24 @@ class Layout {
   fields(fields: ReportField[]) {
     const { rows, colWidth, gutter } = this.fieldRows(fields);
     for (const { cells, height } of rows) {
+      if (height > this.pageArea) {
+        // Taller than a page (a very long free-text value): give up the second
+        // column and let the lines flow onto as many pages as they need.
+        for (const cell of cells) {
+          for (const line of cell.label) {
+            this.ensure(LABEL.lead);
+            this.y += LABEL.lead;
+            this.pdf.text(this.left + 6, this.y - 2, line, { size: LABEL.size, color: MUTED });
+          }
+          for (const line of cell.value) {
+            this.ensure(VALUE.lead);
+            this.y += VALUE.lead;
+            this.pdf.text(this.left + 6, this.y - 2, line, { size: VALUE.size, color: INK });
+          }
+          this.y += 7;
+        }
+        continue;
+      }
       this.ensure(height);
       cells.forEach((cell, col) => {
         const x = this.left + 6 + col * (colWidth + gutter + 6);
@@ -182,32 +204,45 @@ class Layout {
 
     const drawRow = (cells: string[], style: typeof CELL, fill?: Rgb) => {
       const wrapped = cells.map((c, i) => wrapText(c ?? '', style.font, style.size, widths[i] - pad * 2));
-      const height = Math.max(1, ...wrapped.map((w) => w.length)) * style.lead + pad * 2;
-      return {
-        height,
-        draw: () => {
-          if (fill) this.pdf.rect(this.left, this.y, this.width, height, { fill });
-          wrapped.forEach((lines, i) => lines.forEach((line, j) => this.pdf.text(
-            xs[i] + pad, this.y + pad + (j + 1) * style.lead - 2.5, line,
-            { font: style.font, size: style.size, color: style === HEAD ? MUTED : INK },
-          )));
-          this.y += height;
-          this.pdf.line(this.left, this.y, this.right, this.y, { color: RULE });
-        },
+      const lineCount = Math.max(1, ...wrapped.map((w) => w.length));
+      const heightOf = (lines: number) => lines * style.lead + pad * 2;
+      /** Draw lines [from, to) of every cell as one band. */
+      const band = (from: number, to: number) => {
+        const height = heightOf(to - from);
+        if (fill) this.pdf.rect(this.left, this.y, this.width, height, { fill });
+        wrapped.forEach((lines, i) => lines.slice(from, to).forEach((line, j) => this.pdf.text(
+          xs[i] + pad, this.y + pad + (j + 1) * style.lead - 2.5, line,
+          { font: style.font, size: style.size, color: style === HEAD ? MUTED : INK },
+        )));
+        this.y += height;
+        this.pdf.line(this.left, this.y, this.right, this.y, { color: RULE });
       };
+      return { height: heightOf(lineCount), lineCount, heightOf, band };
     };
 
     const header = () => drawRow(table.columns.map((c) => c.toUpperCase()), HEAD, BAND);
     const first = header();
-    this.ensure(first.height + drawRow(table.rows[0] ?? [], CELL).height);
-    first.draw();
+    this.ensure(first.height + Math.min(drawRow(table.rows[0] ?? [], CELL).height, 60));
+    first.band(0, first.lineCount);
     table.rows.forEach((row, i) => {
       const r = drawRow(row, CELL, i % 2 ? ZEBRA : undefined);
-      if (this.y + r.height > this.bottom) {
+      if (this.y + r.height > this.bottom && r.height <= this.pageArea - first.height) {
         this.newPage();
-        header().draw();
+        first.band(0, first.lineCount);
       }
-      r.draw();
+      // A row taller than a page continues on the next, under a repeated header.
+      let from = 0;
+      while (from < r.lineCount) {
+        let fit = Math.floor((this.bottom - this.y - 2 * pad) / CELL.lead);
+        if (fit < 1) {
+          this.newPage();
+          first.band(0, first.lineCount);
+          fit = Math.floor((this.bottom - this.y - 2 * pad) / CELL.lead);
+        }
+        const to = Math.min(r.lineCount, from + Math.max(1, fit));
+        r.band(from, to);
+        from = to;
+      }
     });
     this.y += 10;
   }
@@ -223,7 +258,14 @@ class Layout {
 
   footers(report: PatientReport) {
     const total = this.pdf.pageCount;
-    const who = `${report.name || 'Patient'}  ·  #${report.personId}`;
+    // Shortened to its share of the line, or a long name overprints the notice.
+    const room = (this.width - textWidth('Confidential health information', 'regular', 7.5)) / 2 - 12;
+    let who = `${report.name || 'Patient'}  ·  #${report.personId}`;
+    if (textWidth(who, 'regular', 7.5) > room) {
+      let name = report.name;
+      while (name.length > 1 && textWidth(`${name}…  ·  #${report.personId}`, 'regular', 7.5) > room) name = name.slice(0, -1);
+      who = `${name}…  ·  #${report.personId}`;
+    }
     for (let page = 0; page < total; page++) {
       const y = this.pdf.height - MARGIN + 6;
       this.pdf.line(this.left, y - 14, this.right, y - 14, { color: RULE, page });

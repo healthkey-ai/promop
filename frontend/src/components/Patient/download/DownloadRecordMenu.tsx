@@ -46,7 +46,6 @@ export default function DownloadRecordMenu({ personId, patientMode, record, name
   const option = (format: Format, Icon: typeof FileText, title: string, detail: string) => (
     <button
       type="button"
-      role="menuitem"
       onClick={() => { void run(format); }}
       className="flex w-full items-start gap-2.5 rounded-md px-2.5 py-2 text-left hover:bg-[#eef0f4]"
     >
@@ -65,15 +64,14 @@ export default function DownloadRecordMenu({ personId, patientMode, record, name
           <button
             type="button"
             disabled={busy !== null}
-            aria-haspopup="menu"
             className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border px-3 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-[#eef0f4] hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Download className="h-3.5 w-3.5" />
             {busy ? 'Preparing…' : 'Download'}
           </button>
         </PopoverTrigger>
-        <PopoverContent align="start" className="w-64 p-1.5" role="menu" aria-label="Download format">
-          {option('pdf', FileText, 'PDF report', 'A formatted copy of every tab, to read or print.')}
+        <PopoverContent align="start" className="w-64 p-1.5" aria-label="Download format">
+          {option('pdf', FileText, 'PDF report', 'A formatted copy of the record tabs, to read or print.')}
           {option('fhir', FileJson, 'FHIR R4 bundle (JSON)', 'Machine-readable, for another health system or app.')}
         </PopoverContent>
       </Popover>

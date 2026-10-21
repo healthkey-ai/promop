@@ -37,16 +37,16 @@ const renderMenu = (patientMode = false) => render(
 );
 
 const choose = async (option: RegExp) => {
-  fireEvent.click(screen.getByRole('button', { name: /download/i }));
-  fireEvent.click(await screen.findByRole('menuitem', { name: option }));
+  fireEvent.click(screen.getByRole('button', { name: /^download$/i }));
+  fireEvent.click(await screen.findByRole('button', { name: option }));
 };
 
 describe('DownloadRecordMenu', () => {
   it('offers PDF and FHIR', async () => {
     renderMenu();
-    fireEvent.click(screen.getByRole('button', { name: /download/i }));
-    expect(await screen.findByRole('menuitem', { name: /PDF report/ })).toBeInTheDocument();
-    expect(screen.getByRole('menuitem', { name: /FHIR R4 bundle/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /^download$/i }));
+    expect(await screen.findByRole('button', { name: /PDF report/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /FHIR R4 bundle/ })).toBeInTheDocument();
   });
 
   it('saves the signed FHIR export byte for byte', async () => {

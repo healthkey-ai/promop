@@ -120,6 +120,18 @@ const pdfString = (text: string): string =>
     return String.fromCharCode(b);
   }).join('') + ')';
 
+/**
+ * A text string outside a content stream (the Info dictionary). Readers decode
+ * those as PDFDocEncoding, not the font's WinAnsi, so 0x80..0x9F would turn an
+ * em dash into "Š". UTF-16BE with a byte-order mark is read the same everywhere
+ * and keeps the full character set, CJK names included.
+ */
+const textString = (text: string): string => {
+  let hex = 'FEFF';
+  for (let i = 0; i < text.length; i++) hex += text.charCodeAt(i).toString(16).padStart(4, '0').toUpperCase();
+  return `<${hex}>`;
+};
+
 const num = (n: number): string => (Math.round(n * 100) / 100).toString();
 const rgb = ([r, g, b]: Rgb): string => [r, g, b].map((c) => num(c / 255)).join(' ');
 
@@ -201,7 +213,7 @@ export class PdfWriter {
     objects[pagesObj - 1] = `<< /Type /Pages /Kids [${kids.map((k) => `${k} 0 R`).join(' ')}] /Count ${kids.length} >>`;
     const infoEntries = Object.entries({ Title: info.title, Author: info.author, Subject: info.subject, Producer: 'HealthKey' })
       .filter(([, v]) => v)
-      .map(([k, v]) => `/${k} ${pdfString(v as string)}`);
+      .map(([k, v]) => `/${k} ${textString(v as string)}`);
     const infoObj = add(`<< ${infoEntries.join(' ')} >>`);
 
     // The comment's high bytes mark the file as binary to transfer tools.

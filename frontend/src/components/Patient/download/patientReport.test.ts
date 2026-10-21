@@ -107,6 +107,14 @@ describe('buildPatientReport', () => {
     expect(section(report, 'Treatment', 'Immunizations')?.table?.rows[0]).toEqual(['Influenza', formatShortDate('2025-10-01'), '']);
     expect(section(report, 'Genomics', 'Genomic Findings')?.table?.rows[0].slice(0, 3)).toEqual(['TP53', 'R175H', 'Present']);
   });
+
+  it('keeps the allelic frequency unit', () => {
+    const vaf = (unit: string) => section(build({}, {
+      extras: { genomics: { ok: true, rows: [{ id: 1, genomic_feature: 'KRAS', allelic_frequency: 0.42, allelic_frequency_unit: unit }] } },
+    }), 'Genomics', 'Genomic Findings')!.table!.rows[0][5];
+    expect(vaf('1')).toBe('0.42 (fraction)');
+    expect(vaf('%')).toBe('0.42%');
+  });
 });
 
 describe('pdf text', () => {
@@ -140,6 +148,35 @@ describe('renderReportPdf', () => {
     // Parentheses in a value are escaped, or the content stream would end early.
     expect(pdf).toContain('(Hypertension \\(diagnosed 2019\\)) Tj');
     expect(pdf).toContain('(Weight \\(kg\\)) Tj');
+  });
+
+  /** Every text baseline, in PDF (bottom-up) points. */
+  const baselines = (pdf: string) => [...pdf.matchAll(/ ([\d.]+) ([\d.-]+) Td /g)].map((m) => Number(m[2]));
+
+  it('flows content taller than a page onto further pages instead of off the paper', () => {
+    const essay = Array.from({ length: 900 }, (_, i) => `word${i}`).join(' ');
+    const pdf = decode(renderReportPdf(build({
+      preexisting_conditions: essay,
+      lines_of_therapy: [{ line: 1, regimen: essay }],
+    })));
+    expect(Number(/\/Count (\d+)/.exec(pdf)![1])).toBeGreaterThan(2);
+    // The footer sits at 42pt; nothing may be drawn below it.
+    expect(Math.min(...baselines(pdf))).toBeGreaterThanOrEqual(42);
+    // Nothing is lost: the last word of both the field and the table cell is printed.
+    expect(pdf.match(/word899\b/g)).toHaveLength(2);
+  });
+
+  it('shortens a long name in the footer so it cannot overprint the notice', () => {
+    const name = 'Maximiliana Wilhelmina Theodora Konstantinopoulou-Vanderbilt-Featherstonehaugh';
+    const pdf = decode(renderReportPdf(build({}, { name })));
+    expect(pdf).toMatch(/\(Maximiliana[^)]*\\205 {2}\\267 {2}#42\) Tj/);
+  });
+
+  it('writes the document title as UTF-16, which readers decode the same everywhere', () => {
+    const pdf = decode(renderReportPdf(build({}, { name: 'Li Wei 李' })));
+    const title = /\/Title <FEFF([0-9A-F]+)>/.exec(pdf)![1];
+    const text = String.fromCharCode(...title.match(/.{4}/g)!.map((h) => parseInt(h, 16)));
+    expect(text).toBe('Health record — Li Wei 李');
   });
 
   it('flows onto more pages and numbers every one', () => {

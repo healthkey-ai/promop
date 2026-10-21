@@ -181,7 +181,7 @@ function genomicsSection(loaded: Loaded<GenomicFinding>): ReportSection | null {
       String(f.origin || f.genomic_source_class || ''),
       String(f.interpretation || ''),
       f.allelic_frequency != null && f.allelic_frequency !== ''
-        ? `${f.allelic_frequency}${f.allelic_frequency_unit === '1' ? '' : '%'}` : '',
+        ? `${f.allelic_frequency}${f.allelic_frequency_unit === '1' ? ' (fraction)' : '%'}` : '',
       date(f.test_date),
     ]);
 }
