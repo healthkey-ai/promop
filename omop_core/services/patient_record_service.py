@@ -369,8 +369,11 @@ _FLC_FIELDS = frozenset({'kappa_flc', 'lambda_flc'})
 # 'alkaline_phosphatase' were cleared on every refresh and never repopulated.
 # test_no_canonical_is_listed_twice guards the shape.
 _LAB_FIELD_ALIASES = {
-    'serum_calcium_mg_dl':    ['calcium_mg_dl'],
-    'serum_creatinine_mg_dl': ['creatinine_mg_dl'],
+    # The federated widget still binds the pre-#471 display names for these
+    # three chemistry labs. Keep them populated from the same canonical fact;
+    # the widget cannot read the unit-suffixed columns.
+    'serum_calcium_mg_dl':    ['calcium_mg_dl', 'serum_calcium_level'],
+    'serum_creatinine_mg_dl': ['creatinine_mg_dl', 'serum_creatinine_level'],
     'egfr_ml_min_173m2':      ['egfr', 'estimated_glomerular_filtration_rate'],
     'bun_mg_dl':              ['blood_urea_nitrogen'],
     'sodium_meq_l':           ['serum_sodium'],
@@ -384,6 +387,7 @@ _LAB_FIELD_ALIASES = {
     'serum_bilirubin_level_direct': ['serum_bilirubin_level'],
     'ast_u_l': ['liver_enzyme_levels_ast'],
     'alt_u_l': ['liver_enzyme_levels_alt'],
+    'albumin_g_dl': ['albumin_level'],
 }
 
 # A FHIR Condition.stage summary is an asserted clinical fact, but the FHIR
@@ -1920,10 +1924,14 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             data['her2_status'] = status
 
     if 'estrogen_receptor_status' in data and 'progesterone_receptor_status' in data and 'her2_status' in data:
+        def _is_negative(value):
+            text = (value or '').strip().upper()
+            return 'NEGATIVE' in text or text.endswith('-')
+
         data['tnbc_status'] = (
-            data['estrogen_receptor_status'] == 'NEGATIVE'
-            and data['progesterone_receptor_status'] == 'NEGATIVE'
-            and data['her2_status'] == 'NEGATIVE'
+            _is_negative(data['estrogen_receptor_status'])
+            and _is_negative(data['progesterone_receptor_status'])
+            and _is_negative(data['her2_status'])
         )
 
     def _first_m(concept_code):
@@ -3537,13 +3545,23 @@ def _compute_derived_fields(patient_info: PatientRecord) -> None:
         if height_m >= 0.5:  # sanity-check: skip implausible heights
             patient_info.bmi = round(weight_kg / (height_m ** 2), 1)
 
-    # HR status — derived from ER and PR receptor status (HR+ = ER+ or PR+)
+    # HR status — derived from ER and PR receptor status (HR+ = ER+ or PR+).
+    # Receptor results can arrive as `Positive`/`Negative` or as `ER+`/`ER-`
+    # (the widget writes the latter), so recognise both spellings.
+    def _receptor_positive(value):
+        text = (value or '').strip().upper()
+        return 'POSITIVE' in text or text.endswith('+')
+
+    def _receptor_negative(value):
+        text = (value or '').strip().upper()
+        return 'NEGATIVE' in text or text.endswith('-')
+
     er = patient_info.estrogen_receptor_status
     pr = patient_info.progesterone_receptor_status
     if er is not None or pr is not None:
-        if (er and 'positive' in er.lower()) or (pr and 'positive' in pr.lower()):
+        if _receptor_positive(er) or _receptor_positive(pr):
             patient_info.hr_status = 'HR+'
-        elif er == 'NEGATIVE' and pr == 'NEGATIVE':
+        elif _receptor_negative(er) and _receptor_negative(pr):
             patient_info.hr_status = 'HR-'
 
     # Metastatic status — True when M stage is M1

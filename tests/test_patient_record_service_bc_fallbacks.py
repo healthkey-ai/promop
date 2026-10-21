@@ -108,6 +108,87 @@ def test_genomics_pathology_fields_use_dated_loinc_measurements():
     }
 
 
+def test_legacy_lab_alias_fields_are_populated_from_their_canonical_code():
+    """The widget still binds the pre-#471 names for three chemistry labs.
+
+    The canonical LOINC-backed columns were the only ones derivation wrote, so the
+    widget's `serum_creatinine_level` / `serum_calcium_level` / `albumin_level`
+    boxes were permanently blank. The alias map is the backwards-compatibility
+    seam; assert the values actually reach those columns, not just that the map
+    has keys.
+    """
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    for code, value in (
+        ('2160-0', 1.1),   # creatinine, canonical serum_creatinine_mg_dl
+        ('17861-6', 9.4),  # calcium, canonical serum_calcium_mg_dl
+        ('1751-7', 3.9),   # albumin, canonical albumin_g_dl
+    ):
+        MeasurementFactory(
+            person=person,
+            measurement_source_value=code,
+            measurement_date=date(2026, 1, 15),
+            value_as_number=value,
+        )
+
+    record = refresh_patient_record(person)
+
+    assert float(record.serum_creatinine_level) == 1.1
+    assert float(record.serum_calcium_level) == 9.4
+    assert float(record.albumin_level) == 3.9
+
+
+def test_hr_status_recognizes_plus_minus_receptor_results():
+    """A saved ER+/PR+ result must still derive HR+ after the write round-trip.
+
+    The write path stores the widget value (`ER+`), not the word `Positive`.
+    `_compute_derived_fields` only looked for "positive", so HR status was cleared
+    on the next refresh and the demo showed a blank/incorrect field.
+    """
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    for code, value in (
+        ('16112-5', 'ER+'),
+        ('16113-3', 'PR+'),
+        ('48676-1', 'HER2-'),
+    ):
+        MeasurementFactory(
+            person=person,
+            measurement_source_value=code,
+            measurement_date=date(2026, 1, 15),
+            value_as_string=value,
+        )
+
+    record = refresh_patient_record(person)
+
+    assert record.estrogen_receptor_status == 'ER+'
+    assert record.progesterone_receptor_status == 'PR+'
+    assert record.her2_status == 'HER2-'
+    assert record.hr_status == 'HR+'
+    assert record.tnbc_status is False
+
+
+def test_tnbc_status_recognizes_minus_receptor_results():
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    for code, value in (
+        ('16112-5', 'ER-'),
+        ('16113-3', 'PR-'),
+        ('48676-1', 'HER2-'),
+    ):
+        MeasurementFactory(
+            person=person,
+            measurement_source_value=code,
+            measurement_date=date(2026, 1, 15),
+            value_as_string=value,
+        )
+
+    record = refresh_patient_record(person)
+
+    assert record.hr_status == 'HR-'
+    assert record.tnbc_status is True
+
+
 def test_mrd_requires_a_vocabulary_backed_concept():
     person = PersonFactory()
     mrd = ConceptFactory(
