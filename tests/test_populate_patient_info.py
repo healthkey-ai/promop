@@ -142,6 +142,7 @@ class TestCllMeasurements:
         MeasurementFactory(person=person, measurement_concept=concept, value_as_number=4.2)
         data = _cmd().get_cll_data(person)
         assert data['serum_beta2_microglobulin_level'] == pytest.approx(4.2)
+        assert data['beta2_microglobulin'] == pytest.approx(4.2)
 
     def test_qtcf_value(self):
         person = PersonFactory()

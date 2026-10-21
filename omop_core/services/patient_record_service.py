@@ -85,7 +85,7 @@ def _receptor_signal(value) -> int | None:
         signals.add(-1)
     # Only a sign attached to a receptor token is a receptor result. A bare
     # `IHC 2+` or `3+` is an assay score and must stay uninterpreted.
-    for match in re.finditer(r'\b(?:ER|PR|HER2|HR)\s*([+-])', text):
+    for match in re.finditer(r'\b(?:ER|PR|HER2|HR)\s*([+-])(?=$|[\s);,/])', text):
         signals.add(1 if match.group(1) == '+' else -1)
     if len(signals) != 1:
         return None
@@ -1933,10 +1933,10 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             return None
         s = raw.strip().lower()
         positive_signal = 'positive' in s or bool(
-            re.search(r'\b(?:ER|PR|HER2|HR)\s*\+', s, re.IGNORECASE)
+            re.search(r'\b(?:ER|PR|HER2|HR)\s*\+(?=$|[\s);,/])', s, re.IGNORECASE)
         )
         negative_signal = 'negative' in s or bool(
-            re.search(r'\b(?:ER|PR|HER2|HR)\s*-', s, re.IGNORECASE)
+            re.search(r'\b(?:ER|PR|HER2|HR)\s*-(?=$|[\s);,/])', s, re.IGNORECASE)
         )
         # Preserve mixed/ambiguous results before collapsing the unambiguous
         # words. `Negative/Equivocal`, `ER+ / Negative`, and `ER+/-` are not
@@ -3290,7 +3290,13 @@ def _get_cll_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             None,
         )
         if m:
-            data[field] = float(m.value_as_number)
+            value = float(m.value_as_number)
+            data[field] = value
+            # 48094-6 and 1952-1 are the same analyte. The widget reads the
+            # standard beta2_microglobulin field, while older CLL imports use
+            # the serum_* legacy name; keep both projections populated.
+            if field == 'serum_beta2_microglobulin_level':
+                data['beta2_microglobulin'] = value
 
     # A lymph-node size is a distinct clinical meaning from LOINC 21889-1
     # (Size Tumor).  Require the explicit source qualifier so the same row can

@@ -365,6 +365,27 @@ def test_mixed_symbol_and_word_receptor_result_stays_unknown():
     assert record.tnbc_status is None
 
 
+def test_hyphenated_word_receptor_results_are_not_mixed_signs():
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    for code, value in (
+        ('16112-5', 'ER-positive'),
+        ('16113-3', 'PR-negative'),
+        ('48676-1', 'HER2-negative'),
+    ):
+        MeasurementFactory(
+            person=person,
+            measurement_source_value=code,
+            measurement_date=date(2026, 1, 15),
+            value_as_string=value,
+        )
+
+    record = refresh_patient_record(person)
+
+    assert record.hr_status == 'HR+'
+    assert record.tnbc_status is False
+
+
 def test_mixed_symbol_and_word_without_slash_stays_unknown():
     person = PersonFactory()
     PatientRecordFactory(person=person)
