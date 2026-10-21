@@ -302,10 +302,12 @@ def test_concept_list_is_bounded(client):
     assert len(response.data['results']) == 2
 
 
-def test_approval_reuses_clinical_repoint_and_stamps_reviewer(client, concept):
+def test_approval_reuses_clinical_repoint_and_stamps_reviewer(client, concept, django_capture_on_commit_callbacks):
     original = ConceptFactory(standard_concept=None)
     row = source('IMPORTED', target_concept=original, notes='Original import evidence')
-    with patch('patient_portal.api.views.repoint_clinical_rows', side_effect=lambda **kwargs: {'rows_updated': 1, 'person_ids': {7}}) as repoint:
+    with patch('omop_core.services.repoint_jobs.repoint_clinical_rows',
+               side_effect=lambda **kwargs: {'rows_updated': 1, 'rows_collapsed': 0, 'person_ids': {7}}) as repoint, \
+            django_capture_on_commit_callbacks(execute=True):
         response = apply(client, concept, row, status='approved')
     assert response.status_code == 200, response.data
     assert {call.kwargs['old_concept_id'] for call in repoint.call_args_list} == {0, original.pk}
@@ -314,7 +316,7 @@ def test_approval_reuses_clinical_repoint_and_stamps_reviewer(client, concept):
     assert row.reviewer is not None and row.reviewed_at is not None
     assert row.destination_vocabulary_id == concept.vocabulary_id
     assert row.notes == 'Original import evidence'
-    assert response.data['repoint']['persons_marked_stale'] == 1
+    assert response.data['repoint'] == {'queued': True, 'from_concept_ids': sorted([0, original.pk])}
 
 
 def test_proposal_does_not_write_clinical_rows_and_can_be_approved_later(client, concept):
@@ -329,7 +331,8 @@ def test_proposal_does_not_write_clinical_rows_and_can_be_approved_later(client,
 
 
 @pytest.mark.parametrize('propose_first', [False, True])
-def test_approval_moves_stored_imports_and_unresolved_rows_only(client, concept, propose_first):
+def test_approval_moves_stored_imports_and_unresolved_rows_only(client, concept, propose_first,
+                                                               django_capture_on_commit_callbacks):
     original = ConceptFactory(standard_concept=None)
     corrected = ConceptFactory()
     row = source('IMPORTED', target_concept=original, origin='import')
@@ -342,7 +345,8 @@ def test_approval_moves_stored_imports_and_unresolved_rows_only(client, concept,
         row.refresh_from_db()
         stored.refresh_from_db()
         assert stored.measurement_concept_id == original.pk
-    response = apply(client, concept, row, status='approved')
+    with django_capture_on_commit_callbacks(execute=True):
+        response = apply(client, concept, row, status='approved')
     assert response.status_code == 200, response.data
     for fact in (stored, unresolved, unrelated, manual):
         fact.refresh_from_db()
@@ -350,12 +354,13 @@ def test_approval_moves_stored_imports_and_unresolved_rows_only(client, concept,
     assert unresolved.measurement_concept_id == concept.pk
     assert unrelated.measurement_concept_id == original.pk
     assert manual.measurement_concept_id == corrected.pk
-    assert response.data['repoint']['rows_updated'] == 2
+    assert response.data['repoint']['queued'] is True
     row.refresh_from_db()
-    assert row.pending_repoint_concept_ids == []
+    assert row.pending_repoint_concept_ids == [] and row.deferred_repoint_concept_ids == []
 
 
-def test_proposal_history_survives_another_edit_and_approval_in_source_editor(client, concept):
+def test_proposal_history_survives_another_edit_and_approval_in_source_editor(client, concept,
+                                                                            django_capture_on_commit_callbacks):
     original = ConceptFactory(standard_concept=None)
     next_destination = ConceptFactory()
     row = source('IMPORTED', target_concept=original, origin='import')
@@ -371,23 +376,45 @@ def test_proposal_history_survives_another_edit_and_approval_in_source_editor(cl
         'source_code': 'DIFFERENT',
     }, format='json')
     assert response.status_code == 400
-    response = client.patch(f'/api/v1/code-mappings/{row.pk}/', {'status': 'approved'}, format='json')
+    with django_capture_on_commit_callbacks(execute=True):
+        response = client.patch(f'/api/v1/code-mappings/{row.pk}/', {'status': 'approved'}, format='json')
     assert response.status_code == 200, response.data
     row.refresh_from_db(); stored.refresh_from_db()
     assert stored.measurement_concept_id == next_destination.pk
     assert row.pending_repoint_concept_ids == []
 
 
-def test_failed_clinical_update_rolls_back_mapping_approval(client, concept):
+def test_approval_returns_before_rows_move_and_a_failed_job_keeps_the_work(
+        client, concept, django_capture_on_commit_callbacks):
+    """The save writes the mapping; stored rows move after commit, in a job.
+
+    A job that fails leaves the destinations queued on the mapping, and the next
+    run moves them.
+    """
+    from omop_core.services.repoint_jobs import run_repoint
     original = ConceptFactory(standard_concept=None)
     row = source('IMPORTED', target_concept=original)
-    revision = row.updated_at
-    with patch('patient_portal.api.views.repoint_clinical_rows', side_effect=RuntimeError('Database write failed')):
-        with pytest.raises(RuntimeError, match='Database write failed'):
-            apply(client, concept, row, status='approved')
+    stored = MeasurementFactory(measurement_concept=original, measurement_source_value='IMPORTED')
+    with django_capture_on_commit_callbacks() as callbacks:
+        response = apply(client, concept, row, status='approved')
+    assert response.status_code == 200, response.data
+    row.refresh_from_db(); stored.refresh_from_db()
+    # Written, approved, and nothing moved yet.
+    assert row.target_concept_id == concept.pk and row.status == 'approved'
+    assert stored.measurement_concept_id == original.pk
+    assert row.deferred_repoint_concept_ids == sorted([0, original.pk])
+    assert len(callbacks) == 1
+
+    with patch('omop_core.services.repoint_jobs.repoint_clinical_rows', side_effect=RuntimeError('write failed')):
+        with pytest.raises(RuntimeError):
+            run_repoint(row.pk)
     row.refresh_from_db()
-    assert row.target_concept_id == original.pk and row.status == 'proposed'
-    assert row.updated_at == revision and row.reviewer_id is None
+    assert row.deferred_repoint_concept_ids == sorted([0, original.pk])
+
+    assert run_repoint(row.pk)['rows_updated'] == 1
+    row.refresh_from_db(); stored.refresh_from_db()
+    assert stored.measurement_concept_id == concept.pk
+    assert row.deferred_repoint_concept_ids == []
 
 
 def test_json_arrays_are_rejected_without_server_errors(client, concept):

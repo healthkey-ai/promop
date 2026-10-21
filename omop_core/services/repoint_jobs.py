@@ -1,0 +1,136 @@
+"""Move stored clinical rows onto an approved mapping's destination, off the request.
+
+Approving a mapping, or re-pointing an approved one, used to rewrite every
+stored clinical row in the save request. On a common code that is minutes of
+UPDATEs, and the curator waited for all of it.
+
+The save now writes the mapping and records the destinations whose rows still
+have to move in ``deferred_repoint_concept_ids``; a job moves them. That column
+is the queue, not the job: a lost or duplicated task, or a worker restart, is
+answered by the next run reading the same column, and nothing is lost between
+the save and the worker. It is the same column a patient-scoped save already
+uses, so Generate OMOP sees rows still waiting for this job too.
+
+Celery when ``CELERY_BROKER_URL`` is set, inline after commit otherwise, the
+rule ``derivation_jobs`` and ``suggest_jobs`` follow.
+"""
+from __future__ import annotations
+
+import logging
+
+from django.conf import settings
+from django.db import connection, transaction
+
+from omop_core.mapping.code_resolution import NO_MATCHING_CONCEPT_ID, repoint_clinical_rows
+from omop_core.models import SourceCodeConceptMapping
+
+logger = logging.getLogger(__name__)
+
+# A save that lands while a run is moving rows adds destinations the run did
+# not read. The run picks those up before it stops, rather than leaving them
+# for a task that may already have been dropped as a duplicate.
+MAX_PASSES = 5
+# Arbitrary, distinct from any other advisory lock key in this codebase.
+_LOCK_NAMESPACE = 19140021
+
+
+def queue_repoint(mapping, concept_ids):
+    """Record destinations to move off and dispatch the job after commit.
+
+    Must be called inside the transaction that saved the mapping, so the job
+    can never run before the destinations it is meant to read are visible.
+    """
+    pending = sorted(set(mapping.deferred_repoint_concept_ids or []) | set(concept_ids))
+    pending = [concept_id for concept_id in pending if concept_id != mapping.target_concept_id]
+    if not pending:
+        return None
+    mapping.deferred_repoint_concept_ids = pending
+    mapping.save(update_fields=['deferred_repoint_concept_ids'])
+    _after_commit(lambda pk=mapping.pk: dispatch_repoint(pk))
+    return {'queued': True, 'from_concept_ids': pending}
+
+
+def _after_commit(func):
+    # robust: the mapping is already committed, and the column keeps the work
+    # for the next run, so a failed dispatch must not turn the save into a 500.
+    transaction.on_commit(func, robust=True)
+
+
+def dispatch_repoint(mapping_id):
+    if getattr(settings, 'CELERY_BROKER_URL', ''):
+        try:
+            from omop_core.tasks import repoint_mapping_rows_task
+            repoint_mapping_rows_task.delay(mapping_id)
+            return
+        except Exception:  # noqa: BLE001 - a queue outage must not strand the rows
+            logger.warning('Could not queue the re-point of mapping %s; running inline.', mapping_id)
+    run_repoint(mapping_id)
+
+
+def _advisory_lock(mapping_id):
+    """One run per mapping. Session-level so it spans the per-sweep transactions."""
+    if connection.vendor != 'postgresql':
+        return True
+    with connection.cursor() as cursor:
+        cursor.execute('SELECT pg_try_advisory_lock(%s, %s)', [_LOCK_NAMESPACE, mapping_id])
+        return cursor.fetchone()[0]
+
+
+def _advisory_unlock(mapping_id):
+    if connection.vendor == 'postgresql':
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT pg_advisory_unlock(%s, %s)', [_LOCK_NAMESPACE, mapping_id])
+
+
+def run_repoint(mapping_id):
+    """Move this mapping's waiting rows. Returns the summed sweep counts.
+
+    A run that finds another run holding the mapping returns at once: that run
+    re-reads the queue before it stops, so the destinations are not lost.
+    """
+    totals = {'rows_updated': 0, 'persons_marked_stale': 0, 'rows_collapsed': 0}
+    if not _advisory_lock(mapping_id):
+        logger.info('Re-point of mapping %s is already running.', mapping_id)
+        return totals
+    persons = set()
+    try:
+        for _ in range(MAX_PASSES):
+            mapping = SourceCodeConceptMapping.objects.filter(pk=mapping_id).first()
+            # Un-approved, or pointed at nothing, since the save: the rows stay
+            # where they are, and the queue stays for the next approval.
+            if (mapping is None or mapping.status != 'approved'
+                    or mapping.target_concept_id is None
+                    or not mapping.deferred_repoint_concept_ids):
+                break
+            target = mapping.target_concept_id
+            sources = [c for c in mapping.deferred_repoint_concept_ids if c != target]
+            for old_concept_id in sources:
+                outcome = repoint_clinical_rows(
+                    mapping=mapping, old_concept_id=old_concept_id, new_concept_id=target,
+                    # The concept-0 sweep reaches rows this mapping's own import
+                    # never wrote, so it matches the code only -- see
+                    # _source_value_match.
+                    match_description=old_concept_id != NO_MATCHING_CONCEPT_ID,
+                )
+                persons |= outcome.pop('person_ids', set())
+                for key in ('rows_updated', 'rows_collapsed'):
+                    totals[key] += outcome[key]
+            with transaction.atomic():
+                current = SourceCodeConceptMapping.objects.select_for_update().filter(pk=mapping_id).first()
+                if current is None:
+                    break
+                if current.target_concept_id == target:
+                    # Only what this pass moved. A save during the pass may have
+                    # added more, which the next pass reads.
+                    current.deferred_repoint_concept_ids = [
+                        c for c in current.deferred_repoint_concept_ids if c not in sources and c != target
+                    ]
+                    current.save(update_fields=['deferred_repoint_concept_ids'])
+                # Re-pointed again mid-run: the rows this pass moved now sit on
+                # the old target, which that save queued, so the next pass
+                # carries them on to the new one.
+    finally:
+        _advisory_unlock(mapping_id)
+    totals['persons_marked_stale'] = len(persons)
+    logger.info('Re-point of mapping %s finished: %s.', mapping_id, totals)
+    return totals

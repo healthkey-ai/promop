@@ -171,7 +171,8 @@ def test_batch_check_keeps_measurement_query_count_flat(django_assert_num_querie
     assert not any(report['warning'] for report in reports)
 
 
-def test_approval_requires_explicit_confirmation_for_a_mismatch():
+def test_approval_saves_without_a_unit_confirmation():
+    """Stored units no longer gate approval: loading normalizes values (#1952)."""
     destination = loinc_destination()
     row = mapping(destination)
     measurement(destination, 'mmol/L')
@@ -179,102 +180,10 @@ def test_approval_requires_explicit_confirmation_for_a_mismatch():
     client.force_authenticate(Identity.objects.create_user(
         email='unit-curator@example.test', is_staff=True,
     ))
-    url = f'/api/v1/code-mappings/{row.pk}/'
 
-    warning = client.patch(url, {'status': 'approved'}, format='json')
+    approved = client.patch(f'/api/v1/code-mappings/{row.pk}/', {'status': 'approved'}, format='json')
 
-    assert warning.status_code == 409
-    assert warning.data['code'] == 'unit_mismatch_confirmation_required'
-    row.refresh_from_db()
-    assert row.status == 'proposed'
-
-    approved = client.patch(url, {
-        'status': 'approved', 'confirm_unit_mismatch': True,
-    }, format='json')
-    assert approved.status_code == 200
-    row.refresh_from_db()
-    assert row.status == 'approved'
-
-
-def test_concept_first_approval_uses_the_same_confirmation_contract():
-    destination = loinc_destination()
-    row = mapping(destination)
-    measurement(destination, 'mmol/L')
-    client = APIClient()
-    client.force_authenticate(Identity.objects.create_user(
-        email='reverse-unit-curator@example.test', is_staff=True,
-    ))
-    url = f'/api/v1/concept-to-code/{destination.pk}/mappings/{row.pk}/'
-    payload = {'status': 'approved', 'expected_updated_at': row.updated_at.isoformat()}
-
-    warning = client.post(url, payload, format='json')
-
-    assert warning.status_code == 409
-    assert warning.data['code'] == 'unit_mismatch_confirmation_required'
-    approved = client.post(url, {
-        **payload, 'confirm_unit_mismatch': True,
-    }, format='json')
-    assert approved.status_code == 200
-    row.refresh_from_db()
-    assert row.status == 'approved'
-
-
-def test_group_approval_reports_all_mismatching_members_before_queueing():
-    destination = loinc_destination()
-    first = mapping(destination, source_code='ALB-A')
-    second = mapping(destination, source_code='ALB-B')
-    for row in (first, second):
-        MeasurementFactory(
-            measurement_concept=destination,
-            measurement_source_value=row.source_code,
-            unit_source_value='mmol/L', value_as_number=1,
-        )
-    client = APIClient()
-    client.force_authenticate(Identity.objects.create_user(
-        email='group-unit-curator@example.test', is_staff=True,
-    ))
-
-    response = client.post('/api/v1/code-mappings/group/action/', {
-        'label': 'albumin', 'source': 'EPIC', 'action': 'approve',
-        'destination_concept_id': destination.pk, 'seen_only': '0',
-    }, format='json')
-
-    assert response.status_code == 409, response.data
-    assert response.data['unit_consistency']['warning_count'] == 2
-    assert response.data['unit_consistency']['observed_units'] == [
-        {'unit': 'mmol/L', 'count': 2},
-    ]
-    assert response.data['unit_consistency']['observed_unit_count_kind'] == 'mappings'
-    assert not response.data['unit_consistency']['mapping_ids_truncated']
-    assert not SourceCodeConceptMapping.objects.filter(status='approved').exists()
-
-
-def test_patient_scoped_save_skips_unit_consistency_check():
-    """A patient-page save (patient_id present) skips the expensive global
-    Measurement aggregation and approves directly without a 409."""
-    destination = loinc_destination()
-    row = mapping(destination)
-    # A mismatched unit that would normally trigger a 409 confirmation.
-    measurement(destination, 'mmol/L')
-    person = MeasurementFactory._meta.model.objects.filter(
-        measurement_source_value='ALB-1',
-    ).first().person
-    client = APIClient()
-    client.force_authenticate(Identity.objects.create_user(
-        email='patient-unit-curator@example.test', is_staff=True,
-    ))
-    url = f'/api/v1/code-mappings/{row.pk}/'
-
-    # Without patient_id → 409 confirmation required.
-    warning = client.patch(url, {'status': 'approved'}, format='json')
-    assert warning.status_code == 409
-    assert warning.data['code'] == 'unit_mismatch_confirmation_required'
-
-    # With patient_id → unit check skipped, approval succeeds.
-    approved = client.patch(url, {
-        'status': 'approved', 'patient_id': person.person_id,
-    }, format='json')
-    assert approved.status_code == 200
+    assert approved.status_code == 200, approved.data
     row.refresh_from_db()
     assert row.status == 'approved'
 

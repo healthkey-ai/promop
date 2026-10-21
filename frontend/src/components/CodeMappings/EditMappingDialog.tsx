@@ -4,7 +4,7 @@
  * PatientSourceCodesTab can reuse it.
  *
  * The component manages all internal dialog state (form, concept search,
- * suggest-one, destination options, repointing progress) and communicates
+ * suggest-one, destination options) and communicates
  * with its parent through props:
  *
  *   open / onClose      -- visibility
@@ -25,7 +25,6 @@ import { searchDestinationConcepts } from "./destinationSearch";
 import MintConceptDialog from "./MintConceptDialog";
 import ConceptInputDetails from "@/components/UI/ConceptInputDetails";
 import { HelpTip, Field, ReadOnlyField, INPUT_CLASS } from "@/components/UI/MappingFormPrimitives";
-import { confirmUnitOverride, unitConfirmation } from "./unitConfirmation";
 import SourceEvidencePanel, { type SourceEvidence } from "./SourceEvidencePanel";
 import { hospitalContextDetails, hospitalContextText, sourceSystemManagementUrl } from "./sourceSystemContext";
 import api from "@/api/axios";
@@ -148,8 +147,6 @@ export default function EditMappingDialog({
   const [searchingConcepts, setSearchingConcepts] = useState(false);
   const [suggestionMessage, setSuggestionMessage] = useState("");
   const [individualSuggestion, setIndividualSuggestion] = useState<{ request: number; activity: CandidateActivity[]; running: boolean } | null>(null);
-  const [repointing, setRepointing] = useState<{ from: string; to: string } | null>(null);
-  const [repointResult, setRepointResult] = useState<RepointResult | null>(null);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [mintOpen, setMintOpen] = useState(false);
@@ -230,8 +227,6 @@ export default function EditMappingDialog({
       setError("");
       setSearchingConcepts(false);
       setSuggestionMessage("");
-      setRepointResult(null);
-      setRepointing(null);
       setSaving(false);
       setMintOpen(false);
       setIndividualSuggestion(null);
@@ -380,8 +375,6 @@ export default function EditMappingDialog({
       api.delete(`/v1/code-mappings/${selectedRow.mapping_id}/lock/`).catch(() => {});
     }
     setSaving(false);
-    setRepointing(null);
-    setRepointResult(null);
     onClose();
   }, [selectedRow?.mapping_id, onClose]);
 
@@ -605,12 +598,6 @@ export default function EditMappingDialog({
     event.preventDefault();
     setSaving(true);
     setError("");
-    if (willRepoint && selectedRow) {
-      setRepointing({
-        from: String(selectedRow.destination_concept_id || ""),
-        to: form.destination_concept_id,
-      });
-    }
     try {
       if (sourceContextDirty) await persistSourceContext();
       const payload = {
@@ -623,32 +610,11 @@ export default function EditMappingDialog({
         destination_unit_concept_id: form.destination_unit_concept_id
           ? Number(form.destination_unit_concept_id) : null,
       };
-      let resp;
-      try {
-        resp = selectedRow?.mapping_id
-          ? await api.patch(`/v1/code-mappings/${selectedRow.mapping_id}/`, payload)
-          : await api.post("/v1/code-mappings/", payload);
-      } catch (err) {
-        const warning = unitConfirmation(err);
-        if (!warning || !selectedRow?.mapping_id) throw err;
-        if (!confirmUnitOverride(warning)) {
-          setRepointing(null);
-          setSaving(false);
-          return;
-        }
-        resp = await api.patch(`/v1/code-mappings/${selectedRow.mapping_id}/`, {
-          ...payload, confirm_unit_mismatch: true,
-        });
-      }
+      const resp = selectedRow?.mapping_id
+        ? await api.patch(`/v1/code-mappings/${selectedRow.mapping_id}/`, payload)
+        : await api.post("/v1/code-mappings/", payload);
+      // Stored rows move in a background job; the parent says so.
       const repoint: RepointResult | null = resp.data?.repoint ?? null;
-      // Hold the dialog open on a re-point so the curator sees what moved.
-      if (repoint && repoint.rows_updated) {
-        setRepointResult(repoint);
-        setRepointing(null);
-        setSaving(false);
-        onSaved(resp.data, repoint);
-        return;
-      }
       onSaved(resp.data, repoint);
       closeDialog();
     } catch (err) {
@@ -663,7 +629,6 @@ export default function EditMappingDialog({
       setError(message || (sourceContextDirty
         ? "Failed to save source context or code mapping. Please retry."
         : "Failed to save code mapping."));
-      setRepointing(null);
       setSaving(false);
     }
   };
@@ -1267,29 +1232,6 @@ export default function EditMappingDialog({
               />
             </div>
 
-            {repointing && (
-              <div
-                role="status"
-                className="mt-4 rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900"
-              >
-                <div className="flex items-center gap-2 font-medium">
-                  <span className="h-3 w-3 animate-spin rounded-full border-2 border-blue-600 border-t-transparent" />
-                  Updating concept {repointing.from} &rarr; {repointing.to}
-                </div>
-                <p className="mt-1 text-xs text-blue-800">Rewriting clinical rows already stored...</p>
-              </div>
-            )}
-            {repointResult && (
-              <div
-                role="status"
-                className="mt-4 rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-900"
-              >
-                Updated {repointResult.rows_updated} row(s) across{" "}
-                {repointResult.persons_marked_stale} patient(s).
-                {repointResult.rows_collapsed > 0 && ` ${repointResult.rows_collapsed} duplicate(s) collapsed.`}{" "}
-                Patient records queued for re-derivation.
-              </div>
-            )}
           </div>
 
           <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-3 border-t border-slate-200 px-5 py-4">
@@ -1334,7 +1276,7 @@ export default function EditMappingDialog({
                 onClick={closeDialog}
                 className="rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100"
               >
-                {repointResult ? "Close" : "Cancel"}
+                Cancel
               </button>
               <button
                 type="submit"
