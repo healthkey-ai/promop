@@ -419,6 +419,7 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
         <div>
           {activeTab === 0 && (
             <GeneralTab
+              showCoordinates={!federated}
               formData={editedInfo}
               onChange={handleFieldChange}
               editedName={editedName}
