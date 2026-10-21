@@ -32,6 +32,20 @@ All notable changes to PRomop are documented here.
 
 ### Changed
 
+- **Mapping saves return immediately** — approving or re-pointing a code
+  mapping (Concept to Code, Code to Concept, group approve, CSV upload) writes the mapping
+  and returns; the stored clinical rows move to the new concept in a background
+  job (`omop_core.repoint_mapping_rows`, Celery when `CELERY_BROKER_URL` is set,
+  inline after commit otherwise). The destinations still to move are kept in
+  `deferred_repoint_concept_ids`, so a lost or duplicate task loses nothing. The
+  save response's `repoint` is now `{"queued": true, "from_concept_ids": [...]}`
+  rather than row counts. The approval-time unit-mismatch confirmation (`409
+  unit_mismatch_confirmation_required`, `confirm_unit_mismatch`) is removed:
+  values are normalized when clinical rows are loaded from codes. A failed job
+  is retried three times; `manage.py run_queued_repoints <id>…|--all` moves
+  whatever is still queued. A CSV upload queues one job per approved mapping
+  (#1952).
+
 - **Clearer source-code curation evidence** — Edit Mapping now keeps Source
   Code Value beside Source Description, only loads publisher terminology for
   catalogs actually present, makes hospital/organization attribution explicit,

@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import api from '@/api/axios';
 import { destinationError } from './destinationSearch';
-import { confirmUnitOverride, unitConfirmation } from './unitConfirmation';
 import EditMappingDialog from './EditMappingDialog';
 import { type CodeMappingRow, type ConceptResult, type Reference, DOMAIN_TO_TABLE, emptyReference } from './codeMappingTypes';
 
@@ -426,16 +425,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
             const applyPayload = {
               status: approve ? 'approved' : 'proposed', expected_updated_at: row.updated_at,
             };
-            try {
-              ({ data: updated } = await api.post<Source>(applyUrl, applyPayload));
-            } catch (failure) {
-              const warning = unitConfirmation(failure);
-              if (!warning) throw failure;
-              if (!confirmUnitOverride(warning)) continue;
-              ({ data: updated } = await api.post<Source>(applyUrl, {
-                ...applyPayload, confirm_unit_mismatch: true,
-              }));
-            }
+            ({ data: updated } = await api.post<Source>(applyUrl, applyPayload));
           }
           saved += 1;
           if (active.current) {

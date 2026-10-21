@@ -22791,7 +22791,33 @@ class CodeMappingApiTest(TestCase):
         self.assertEqual(set(tables.values()), set(CLINICAL_TABLES))
 
 
-class CodeMappingRepointTest(TestCase):
+class RunsRepointJobsMixin:
+    """Run a mapping save's queued re-point as soon as it is queued.
+
+    The save returns before stored rows move; a job moves them after commit,
+    which never comes inside a TestCase transaction. These tests are about what
+    the move does, so the job runs in place and ``last_repoint`` holds its
+    counts, the numbers the save response used to carry.
+    """
+
+    def _callSetUp(self):
+        from omop_core.services import repoint_jobs
+        self.last_repoint = None
+
+        def run_now(pk):
+            self.last_repoint = repoint_jobs.run_repoint(pk)
+
+        for target, value in (
+            ('omop_core.services.repoint_jobs._after_commit', lambda func: func()),
+            ('omop_core.services.repoint_jobs.dispatch_repoint', run_now),
+        ):
+            patcher = patch(target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        super()._callSetUp()
+
+
+class CodeMappingRepointTest(RunsRepointJobsMixin, TestCase):
     """Approving a re-pointed mapping must rewrite the rows already stored.
 
     Without this, approval only changes what the *next* import produces, so a
@@ -22899,7 +22925,7 @@ class CodeMappingRepointTest(TestCase):
         self.assertEqual(self.row.measurement_concept_id, self.standard.concept_id)
         # One row, not two: the point of the whole exercise.
         self.assertEqual(Measurement.objects.filter(person=self.person).count(), 1)
-        self.assertEqual(resp.data['repoint']['rows_updated'], 1)
+        self.assertEqual(self.last_repoint['rows_updated'], 1)
 
     def test_patient_source_code_save_skips_repoint(self):
         """Saving with patient_id skips repoint entirely — Generate OMOP
@@ -23058,7 +23084,7 @@ class CodeMappingRepointTest(TestCase):
         nothing moves."""
         resp = self._approve_at(self.minted.concept_id)
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
-        self.assertEqual(resp.data['repoint']['rows_updated'], 0)
+        self.assertEqual(self.last_repoint['rows_updated'], 0)
         self.row.refresh_from_db()
         self.assertEqual(self.row.measurement_concept_id, self.minted.concept_id)
 
@@ -23069,7 +23095,7 @@ class CodeMappingRepointTest(TestCase):
             8892003, self.standard.concept_id, date(2026, 8, 12), Decimal('3.2'),
         )
         resp = self._approve_at(self.standard.concept_id)
-        self.assertEqual(resp.data['repoint']['rows_collapsed'], 1)
+        self.assertEqual(self.last_repoint['rows_collapsed'], 1)
         self.assertEqual(
             Measurement.objects.filter(
                 person=self.person, measurement_source_value='M-PROTEIN, SERUM',
@@ -25025,7 +25051,7 @@ class PersonLanguageSkillPatchTest(_SmartBase):
         self.assertTrue(self._record().english_read)
 
 
-class CodeMappingRepointSafetyTest(TestCase):
+class CodeMappingRepointSafetyTest(RunsRepointJobsMixin, TestCase):
     """The re-point must move rows without destroying distinct facts.
 
     Found in review of PR #845: the collapse keyed on (person, date) alone, so
@@ -25115,7 +25141,7 @@ class CodeMappingRepointSafetyTest(TestCase):
         self.assertEqual(
             {r.measurement_concept_id for r in rows}, {self.standard.concept_id},
         )
-        self.assertEqual(resp.data['repoint']['rows_collapsed'], 0)
+        self.assertEqual(self.last_repoint['rows_collapsed'], 0)
 
     def test_genuine_duplicates_still_collapse(self):
         """Same value, same instant: one fact stored twice."""
@@ -25127,7 +25153,7 @@ class CodeMappingRepointSafetyTest(TestCase):
             'destination_concept_id': self.standard.concept_id,
             'status': 'approved',
         }, format='json')
-        self.assertEqual(resp.data['repoint']['rows_collapsed'], 1)
+        self.assertEqual(self.last_repoint['rows_collapsed'], 1)
         self.assertEqual(Measurement.objects.filter(person=self.person).count(), 1)
 
     def test_partial_patch_does_not_blank_the_omop_table(self):
@@ -25144,7 +25170,7 @@ class CodeMappingRepointSafetyTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         self.mapping.refresh_from_db()
         self.assertEqual(self.mapping.omop_table, 'measurement')
-        self.assertEqual(resp.data['repoint']['rows_updated'], 1)
+        self.assertEqual(self.last_repoint['rows_updated'], 1)
 
     def test_approving_a_new_mapping_repoints_rows_sitting_at_concept_zero(self):
         """"New Mapping" on an unresolved code is the most direct curation
@@ -25173,7 +25199,7 @@ class CodeMappingRepointSafetyTest(TestCase):
         resp = self.client.patch(f'/api/v1/code-mappings/{created.data["mapping_id"]}/',
                                  {'status': 'approved'}, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
-        self.assertEqual(resp.data['repoint']['rows_updated'], 1)
+        self.assertEqual(self.last_repoint['rows_updated'], 1)
         self.assertEqual(
             Measurement.objects.get(measurement_id=8893007).measurement_concept_id,
             self.standard.concept_id,
@@ -25201,7 +25227,7 @@ class CodeMappingRepointSafetyTest(TestCase):
         resp = self.client.patch(f'/api/v1/code-mappings/{created.data["mapping_id"]}/',
                                  {'status': 'approved'}, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
-        self.assertEqual(resp.data['repoint']['rows_updated'], 1)
+        self.assertEqual(self.last_repoint['rows_updated'], 1)
 
     def test_collapse_removes_provenance_for_the_rows_it_deletes(self):
         when = timezone.make_aware(datetime(2026, 8, 12, 8, 0))
@@ -25252,7 +25278,7 @@ class CodeMappingRepointSafetyTest(TestCase):
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         self.assertEqual(
-            resp.data['repoint']['rows_updated'], 1,
+            self.last_repoint['rows_updated'], 1,
             'approval reported success but moved no rows',
         )
         self.assertEqual(
@@ -25318,10 +25344,10 @@ class CodeMappingRepointSafetyTest(TestCase):
         self.assertEqual(row_a.measurement_concept_id, self.standard.concept_id)
         self.assertEqual(row_b.measurement_concept_id, self.minted.concept_id)
         self.assertTrue(Measurement.objects.filter(pk=other_org_target.pk).exists())
-        self.assertEqual(response.data['repoint']['rows_updated'], 1)
+        self.assertEqual(self.last_repoint['rows_updated'], 1)
 
 
-class CodeMappingCuratorWorkflowTest(TestCase):
+class CodeMappingCuratorWorkflowTest(RunsRepointJobsMixin, TestCase):
     """Admins can create mappings in any status; approval moves clinical rows."""
 
     @classmethod
@@ -25419,7 +25445,7 @@ class CodeMappingCuratorWorkflowTest(TestCase):
             'status': 'approved',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
-        self.assertEqual(resp.data['repoint']['rows_updated'], 1)
+        self.assertEqual(self.last_repoint['rows_updated'], 1)
         self.row.refresh_from_db()
         self.assertEqual(self.row.measurement_concept_id, self.destination.concept_id)
 
@@ -25431,7 +25457,7 @@ class CodeMappingCuratorWorkflowTest(TestCase):
             'destination_concept_id': self.other.concept_id,
             'status': 'approved',
         }, format='json')
-        self.assertEqual(resp.data['repoint']['rows_updated'], 1)
+        self.assertEqual(self.last_repoint['rows_updated'], 1)
         self.row.refresh_from_db()
         self.assertEqual(self.row.measurement_concept_id, self.other.concept_id)
 
@@ -25474,7 +25500,7 @@ class CodeMappingCuratorWorkflowTest(TestCase):
             'status': 'approved',
         }, format='json')
         self.assertEqual(resp.data['status'], 'approved', 'the mapping was un-approved')
-        self.assertEqual(resp.data['repoint']['rows_updated'], 1)
+        self.assertEqual(self.last_repoint['rows_updated'], 1)
         self.row.refresh_from_db()
         self.assertEqual(self.row.measurement_concept_id, self.other.concept_id)
 

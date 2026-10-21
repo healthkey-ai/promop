@@ -127,10 +127,17 @@ export interface Reference {
   source_vocabulary_tabs?: SourceVocabularyTab[];
 }
 
+/** An approval queued the move of stored clinical rows; a job does it. */
 export interface RepointResult {
-  rows_updated: number;
-  persons_marked_stale: number;
-  rows_collapsed: number;
+  queued: boolean;
+  from_concept_ids: number[];
+}
+
+/** What to tell the curator after a save that queued a re-point, if anything. */
+export function repointBanner(sourceCode: string, repoint: RepointResult | null): string | null {
+  return repoint?.queued
+    ? `${sourceCode}: saved. Patient records with this code are being updated to the new concept in the background.`
+    : null;
 }
 
 export interface MappingForm {

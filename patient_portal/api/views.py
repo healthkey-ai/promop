@@ -12149,36 +12149,6 @@ def _get_destination_concept(data):
         })
 
 
-def _unit_confirmation_requested(data):
-    return str(data.get('confirm_unit_mismatch') or '').strip().lower() in {
-        '1', 'true', 'yes', 'on',
-    }
-
-
-def _unit_confirmation_response(mapping, concept, data):
-    """Return a non-blocking approval warning that requires explicit consent."""
-    requested_status = str(data.get('status') or '').strip()
-    destination_changed = concept is not None and mapping.target_concept_id != concept.pk
-    if (
-        requested_status != 'approved'
-        or (mapping.status == 'approved' and not destination_changed)
-        or _unit_confirmation_requested(data)
-    ):
-        return None
-    from omop_core.services.mapping_unit_consistency import unit_consistency_for_mapping
-    report = unit_consistency_for_mapping(mapping, concept)
-    if not report['warning']:
-        return None
-    return Response({
-        'code': 'unit_mismatch_confirmation_required',
-        'detail': (
-            'Stored measurement units may not fit this LOINC destination. '
-            'Review the unit evidence and confirm to approve anyway.'
-        ),
-        'unit_consistency': report,
-    }, status=status.HTTP_409_CONFLICT)
-
-
 def _mirror_to_concept_relationship(mapping):
     """Write a 'Maps to' (and reverse 'Mapped from') row to concept_relationship.
 
@@ -12257,8 +12227,9 @@ def _mapping_patient_scope(request):
 def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=None):
     """Create or update one mapping. Returns (mapping, repoint_result).
 
-    ``repoint_result`` is non-None when the save moved an approved mapping's
-    destination **and** no ``person_id`` was supplied.  When ``person_id`` is
+    ``repoint_result`` is ``{'queued': True, 'from_concept_ids': [...]}`` when
+    the approval left stored rows to move **and** no ``person_id`` was
+    supplied; the rows move in a background job (``repoint_jobs``).  When ``person_id`` is
     set (a patient-page save), rows are not re-pointed immediately; old
     concept IDs are stored in ``deferred_repoint_concept_ids`` for
     Generate OMOP to apply later.
@@ -12430,8 +12401,9 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
         or (omop_table and omop_table != mapping.omop_table)
     ):
         raise serializers.ValidationError({'detail': (
-            'This source has clinical rows awaiting a destination update. Resolve '
-            'those rows before changing its source identity or clinical table.'
+            'This source has clinical rows still moving to its destination, in a '
+            'background job or waiting for Generate OMOP. Change its source '
+            'identity or clinical table once they have moved.'
         )})
     if (mapping is not None and status_value != 'approved'
             and previous_concept_id is not None
@@ -12648,27 +12620,10 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
                 mapping.deferred_repoint_concept_ids = sorted(sources)
                 mapping.save(update_fields=['deferred_repoint_concept_ids'])
         else:
-            affected_persons = set()
-            for old_concept_id in sorted(sources):
-                outcome = repoint_clinical_rows(
-                    mapping=mapping,
-                    old_concept_id=old_concept_id,
-                    new_concept_id=concept.concept_id,
-                    # The concept-0 sweep reaches rows this mapping's own import
-                    # never wrote, so it matches the code only -- see
-                    # _source_value_match.
-                    match_description=old_concept_id != NO_MATCHING_CONCEPT_ID,
-                )
-                affected_persons |= outcome.pop('person_ids', set())
-                if repoint is None:
-                    repoint = outcome
-                else:
-                    for key, value in outcome.items():
-                        repoint[key] += value
-            if repoint is not None:
-                # Distinct patients, not the sum of each sweep's total: a person
-                # with rows in both would otherwise be reported twice.
-                repoint['persons_marked_stale'] = len(affected_persons)
+            # Moving every stored row is minutes on a common code, so the save
+            # only records what must move and a job moves it after commit.
+            from omop_core.services.repoint_jobs import queue_repoint
+            repoint = queue_repoint(mapping, sources)
 
     # Mirror to concept_relationship when both concepts exist.
     if status_value == 'approved' and mapping.source_concept_id and concept:
@@ -12788,28 +12743,6 @@ def _lock_group_job(request, *, mode, action='', destination=None):
                     'detail': 'You do not administer every organization in this group.',
                     'mapping_ids': forbidden,
                 }, status=403)
-            if (
-                action == 'approve'
-                and destination is not None
-                and not _unit_confirmation_requested(request.data)
-            ):
-                from omop_core.services.mapping_unit_consistency import (
-                    summarize_unit_warnings,
-                    unit_consistency_for_mappings,
-                )
-                unit_summary = summarize_unit_warnings(
-                    unit_consistency_for_mappings(rows, destination=destination)
-                )
-                if unit_summary['warning']:
-                    return None, Response({
-                        'code': 'unit_mismatch_confirmation_required',
-                        'detail': (
-                            'Stored measurement units for some group members may not fit '
-                            'this LOINC destination. Review the unit evidence and confirm '
-                            'to approve anyway.'
-                        ),
-                        'unit_consistency': unit_summary,
-                    }, status=status.HTTP_409_CONFLICT)
             cutoff = timezone.now() - timedelta(minutes=settings.MAPPING_LOCK_TIMEOUT_MINUTES)
             conflicts = [row.pk for row in rows if (
                 row.locked_by_id not in (None, request.user.pk)
@@ -13101,9 +13034,9 @@ def code_mapping_detail(request, mapping_id):
     diagnosis both meaning multiple myeloma), which made the old
     concept-keyed URL ambiguous about which row it addressed.
 
-    A PATCH that approves a re-pointed mapping also rewrites the clinical rows
-    already stored, and reports what it did under ``repoint`` so the dialog can
-    show progress rather than appearing to hang.
+    A PATCH that approves a re-pointed mapping returns once the mapping is
+    written; the clinical rows already stored move in a background job, which
+    ``repoint`` reports as queued.
     """
     if not _can_manage_field_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
@@ -13171,15 +13104,6 @@ def code_mapping_detail(request, mapping_id):
         else mapping.target_concept
     )
     person_id = _mapping_patient_scope(request)
-    # The unit-consistency check aggregates the global Measurement table
-    # (~30-60s on a large dataset).  A patient-page save defers the repoint
-    # entirely, so the warning has no immediate effect — skip it.
-    unit_warning = (
-        _unit_confirmation_response(mapping, concept, data)
-        if person_id is None and _can_approve_mappings(request.user) else None
-    )
-    if unit_warning is not None:
-        return unit_warning
     with transaction.atomic():
         mapping, repoint = _upsert_source_code_mapping(
             concept, data, request.user, mapping=mapping, person_id=person_id)
