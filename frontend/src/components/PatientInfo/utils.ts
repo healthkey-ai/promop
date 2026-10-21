@@ -5,6 +5,20 @@ export function prettyLabel(key: string) {
     .replace(/^./, (s) => s.toUpperCase());
 }
 
+export type DiseaseType = 'breast' | 'lymphoma' | 'mcl' | 'myeloma' | 'cll' | 'other';
+
+// Mantle-cell must win over the broad lymphoma match, otherwise an MCL record
+// is rendered with the follicular-lymphoma section (FLIPI/GELF).
+export function diseaseTypeFor(value: unknown): DiseaseType {
+  const d = String(value ?? '').toLowerCase();
+  if (d.includes('breast')) return 'breast';
+  if (d.includes('mantle') || d.includes('mcl')) return 'mcl';
+  if (d.includes('lymphoma')) return 'lymphoma';
+  if (d.includes('myeloma')) return 'myeloma';
+  if (d.includes('cll') || d.includes('chronic lymphocytic')) return 'cll';
+  return 'other';
+}
+
 export type Option = { value: unknown; label: string };
 
 export function optionKey(v: unknown) {

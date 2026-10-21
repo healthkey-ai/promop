@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deriveTnbcStatus, genderCode, normalizeGender, receptorSign, stringsToOptions } from './utils';
+import { deriveTnbcStatus, diseaseTypeFor, genderCode, normalizeGender, receptorSign, stringsToOptions } from './utils';
 
 describe('stringsToOptions', () => {
   it('turns strings into value/label pairs', () => {
@@ -12,6 +12,20 @@ describe('stringsToOptions', () => {
   it('preserves explicit option objects so a code can carry a richer label', () => {
     const options = [{ value: '20', label: 'Grade 2 (6–15 centroblasts/HPF)' }];
     expect(stringsToOptions(options)).toEqual(options);
+  });
+});
+
+describe('diseaseTypeFor', () => {
+  it.each([
+    ['mantle cell lymphoma', 'mcl'],
+    ['MCL', 'mcl'],
+    ['follicular lymphoma', 'lymphoma'],
+    ['multiple myeloma', 'myeloma'],
+    ['chronic lymphocytic leukemia', 'cll'],
+    ['breast cancer', 'breast'],
+    ['something else', 'other'],
+  ])('routes %o to %o', (disease, expected) => {
+    expect(diseaseTypeFor(disease)).toBe(expected);
   });
 });
 

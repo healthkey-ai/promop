@@ -12,7 +12,7 @@ import LabsTab from "@/components/PatientInfo/tabs/LabsTab";
 import BehaviorTab from "@/components/PatientInfo/tabs/BehaviorTab";
 import WearableTab from "@/components/PatientInfo/tabs/WearableTab";
 import { normalizeGeneticMutations } from "@/components/PatientInfo/patientConstants";
-import { deriveTnbcStatus, normalizeGender } from "@/components/PatientInfo/utils";
+import { deriveTnbcStatus, diseaseTypeFor, normalizeGender } from "@/components/PatientInfo/utils";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
@@ -271,17 +271,7 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated }: Pick<Patien
     }
   }, [handleFieldChange, scheduleAutoSave]);
 
-  const getDiseaseType = (): "breast" | "lymphoma" | "mcl" | "myeloma" | "cll" | "other" => {
-    const d = (typeof editedInfo?.disease === "string" ? editedInfo.disease : "").toLowerCase();
-    if (d.includes("breast")) return "breast";
-    // Mantle cell lymphoma must be matched BEFORE the broad "lymphoma" check — otherwise it fell
-    // through to the Follicular Lymphoma section (FLIPI/GELF fields under a "Follicular Lymphoma" tab).
-    if (d.includes("mantle") || d.includes("mcl")) return "mcl";
-    if (d.includes("lymphoma")) return "lymphoma";
-    if (d.includes("myeloma")) return "myeloma";
-    if (d.includes("cll") || d.includes("chronic lymphocytic")) return "cll";
-    return "other";
-  };
+  const getDiseaseType = () => diseaseTypeFor(editedInfo?.disease);
 
   const getDiseaseTabLabel = () =>
     ({ breast: "Breast Cancer", lymphoma: "Follicular Lymphoma", mcl: "Mantle Cell Lymphoma", myeloma: "Multiple Myeloma", cll: "CLL", other: "Disease Specific" })[getDiseaseType()];
