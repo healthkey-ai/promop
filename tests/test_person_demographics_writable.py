@@ -218,6 +218,18 @@ class TestDescriptor:
         assert entry['fill_if_empty'] is True
 
 
+@pytest.mark.parametrize(
+    'source_value,expected',
+    [('M', 'M'), ('F', 'F'), ('O', 'O'), ('Other', 'O'), ('Male', 'M'), ('Female', 'F')],
+)
+def test_projection_reads_gender_codes_as_well_as_labels(source_value, expected):
+    """Widget writes the OMOP code; derivation must not collapse M/F/O to Unknown."""
+    person = PersonFactory(gender_concept=None, gender_source_value=source_value)
+    PatientRecordFactory(person=person)
+
+    assert refresh_patient_record(person).gender == expected
+
+
 class TestGetGenderConceptDelegation:
     """get_gender_concept resolves by natural key, with unchanged behaviour.
 

@@ -769,10 +769,14 @@ def _get_demographics(person: Person, snapshot: OmopSnapshot = None) -> dict:
     elif person.gender_source_value:
         gender_src = person.gender_source_value.lower()
     if gender_src:
-        if 'male' in gender_src and 'female' not in gender_src:
+        if gender_src in {'m', 'male'} or (
+            'male' in gender_src and 'female' not in gender_src
+        ):
             data['gender'] = 'M'
-        elif 'female' in gender_src:
+        elif gender_src in {'f', 'female'} or 'female' in gender_src:
             data['gender'] = 'F'
+        elif gender_src in {'o', 'other'}:
+            data['gender'] = 'O'
         else:
             data['gender'] = 'U'
 
