@@ -41,6 +41,38 @@ def test_invalid_conversion(value, source, target, prop):
         convert(value, source, target, prop)
 
 
+@pytest.mark.parametrize('spelling', [
+    'gm/dL', 'GM/dL', 'GM/DL', 'Gram/dL', 'Grams/Deciliter', 'gm/dl', 'g/dL-Historical', 'GDL',
+    'G/DL', 'grams per deciliter', 'g/dL (historical)',
+])
+def test_lab_spellings_of_grams_per_decilitre(spelling):
+    # HealthTree's Albumin code: ~16,000 records in these spellings (#1965).
+    from omop_core.services.canonical_units import unit_code
+    assert unit_code(spelling) == 'g/dL'
+    assert convert(Decimal('4'), spelling, 'g/L', 'MCnc') == Decimal('40')
+
+
+@pytest.mark.parametrize('spelling, expected', [
+    ('MG/DL', 'mg/dL'), ('mg per deciliter', 'mg/dL'), ('mcg/mL', 'ug/mL'), ('MMOL/L', 'mmol/L'),
+    ('millimoles/liter', 'mmol/L'), ('ng/ml', 'ng/mL'),
+])
+def test_other_lab_spellings(spelling, expected):
+    from omop_core.services.canonical_units import unit_code
+    assert unit_code(spelling) == expected
+
+
+@pytest.mark.parametrize('unit, expected', [
+    # Case is all a short unit has: millimolar is not millimetre, siemens not seconds.
+    ('mM', 'mM'), ('mm', 'mm'), ('S', 'S'), ('GM', 'GM'),
+    # G/L is giga per litre (an alias); g/l is shared with gram per litre, so not guessed.
+    ('G/L', '10*9/L'), ('g/l', 'g/l'),
+    ('%', '%'), ('foo/bar', 'foo/bar'), ('', ''),
+])
+def test_spellings_that_are_left_alone(unit, expected):
+    from omop_core.services.canonical_units import unit_code
+    assert unit_code(unit) == expected
+
+
 def test_normalize_ranges_and_fail_closed():
     policy = SimpleNamespace(unit='g/dL', property='MCnc', revision=1)
     assert normalize(policy, 20, 'g/L', 10, 30) == {

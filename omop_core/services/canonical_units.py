@@ -120,9 +120,64 @@ def loinc_axes_for_concepts(concepts):
     return {concept_id: LoincAxes(**axes) for concept_id, axes in values.items()}
 
 
+#: Words labs spell units with, and the UCUM symbol each stands for. Matched
+#: whole and case-folded, longest first, so "milligrams" is never read as
+#: "milli" + "grams".
+_UNIT_WORDS = {
+    'milligrams': 'mg', 'milligram': 'mg', 'micrograms': 'ug', 'microgram': 'ug', 'mcg': 'ug',
+    'nanograms': 'ng', 'nanogram': 'ng', 'picograms': 'pg', 'picogram': 'pg',
+    'grams': 'g', 'gram': 'g', 'gms': 'g', 'gm': 'g', 'mgs': 'mg',
+    'deciliters': 'dL', 'deciliter': 'dL', 'decilitres': 'dL', 'decilitre': 'dL',
+    'milliliters': 'mL', 'milliliter': 'mL', 'millilitres': 'mL', 'millilitre': 'mL',
+    'microliters': 'uL', 'microliter': 'uL', 'microlitres': 'uL', 'microlitre': 'uL',
+    'liters': 'L', 'liter': 'L', 'litres': 'L', 'litre': 'L',
+    'millimoles': 'mmol', 'millimole': 'mmol', 'micromoles': 'umol', 'micromole': 'umol',
+    'nanomoles': 'nmol', 'nanomole': 'nmol', 'per': '/',
+}
+_UNIT_WORD = re.compile(r'[a-z]+')
+#: A lab's own annotation after the unit: "g/dL-Historical".
+_ANNOTATION = re.compile(r'[\s\-_(]*historical\)?$')
+
+
+def _spelling_index():
+    """Case-folded (and slashless) spelling -> the one known unit it names.
+
+    A spelling two units share is left out rather than guessed: ``g/l`` is
+    gram per litre, but ``G/L`` (giga per litre) is an alias of ``10*9/L``.
+    """
+    known = {unit for units in UNIT_GROUPS.values() for unit in units} | set(UNIT_ALIASES.values())
+    index = {}
+    for unit in known:
+        for spelling in {unit.casefold(), unit.casefold().replace('/', '')}:
+            index.setdefault(spelling, set()).add(unit)
+    for alias in UNIT_ALIASES:
+        index.setdefault(alias.casefold(), set()).add(UNIT_ALIASES[alias])
+    return {spelling: units.pop() for spelling, units in index.items() if len(units) == 1}
+
+
+_SPELLINGS = None
+
+
 def unit_code(unit):
+    """The UCUM code for a source unit, or the unit unchanged when unknown.
+
+    Exact UCUM and listed aliases first; then the spellings labs send --
+    "gm/dL", "Grams/Deciliter", "GDL", "g/dL-Historical" -- when they name
+    exactly one known unit. One and two character units are left as they
+    are, because case is all they have (mM is not mm, S is not s).
+    """
+    global _SPELLINGS
     unit = (unit or '').strip().replace('µ', 'u').replace('μ', 'u')
-    return UNIT_ALIASES.get(unit, unit)
+    if unit in UNIT_ALIASES:
+        return UNIT_ALIASES[unit]
+    if len(unit) <= 2 or any(unit in units for units in UNIT_GROUPS.values()):
+        return unit
+    if _SPELLINGS is None:
+        _SPELLINGS = _spelling_index()
+    folded = _ANNOTATION.sub('', unit.casefold())
+    spelled = _UNIT_WORD.sub(lambda word: _UNIT_WORDS.get(word.group(), word.group()).casefold(), folded)
+    spelled = re.sub(r'\s+', '', spelled)
+    return _SPELLINGS.get(spelled, unit)
 
 
 def property_for(concept, metadata=None, axes=None):
