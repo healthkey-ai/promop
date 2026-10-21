@@ -40,20 +40,45 @@ def queue_repoint(mapping, concept_ids):
     Must be called inside the transaction that saved the mapping, so the job
     can never run before the destinations it is meant to read are visible.
     """
-    pending = sorted(set(mapping.deferred_repoint_concept_ids or []) | set(concept_ids))
-    pending = [concept_id for concept_id in pending if concept_id != mapping.target_concept_id]
-    if not pending:
+    if not queue_repoints([(mapping, concept_ids)]):
         return None
-    mapping.deferred_repoint_concept_ids = pending
-    mapping.save(update_fields=['deferred_repoint_concept_ids'])
-    _after_commit(lambda pk=mapping.pk: dispatch_repoint(pk))
-    return {'queued': True, 'from_concept_ids': pending}
+    return {'queued': True, 'from_concept_ids': mapping.deferred_repoint_concept_ids}
 
 
 def _after_commit(func):
     # robust: the mapping is already committed, and the column keeps the work
     # for the next run, so a failed dispatch must not turn the save into a 500.
     transaction.on_commit(func, robust=True)
+
+
+def queue_repoints(mappings_with_sources):
+    """``queue_repoint`` for many mappings: one write, one task per mapping.
+
+    One task each rather than one for the batch, so a large upload is not held
+    to a single task's time limit and the worker can run them side by side.
+    """
+    queued = []
+    for mapping, concept_ids in mappings_with_sources:
+        pending = sorted((set(mapping.deferred_repoint_concept_ids or []) | set(concept_ids))
+                         - {mapping.target_concept_id})
+        if pending:
+            mapping.deferred_repoint_concept_ids = pending
+            queued.append(mapping)
+    if not queued:
+        return 0
+    SourceCodeConceptMapping.objects.bulk_update(queued, ['deferred_repoint_concept_ids'], batch_size=1_000)
+    ids = [mapping.pk for mapping in queued]
+    _after_commit(lambda: _dispatch_each(ids))
+    return len(ids)
+
+
+def _dispatch_each(ids):
+    # One mapping that fails inline must not stop the rest; its work stays queued.
+    for pk in ids:
+        try:
+            dispatch_repoint(pk)
+        except Exception:  # noqa: BLE001
+            logger.exception('Re-point of mapping %s failed; it stays queued.', pk)
 
 
 def dispatch_repoint(mapping_id):
