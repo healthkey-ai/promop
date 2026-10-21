@@ -144,6 +144,22 @@ class TestCllMeasurements:
         assert data['serum_beta2_microglobulin_level'] == pytest.approx(4.2)
         assert data['beta2_microglobulin'] == pytest.approx(4.2)
 
+    def test_beta2_uses_the_newest_of_both_loinc_spellings(self):
+        person = PersonFactory()
+        old = _loinc_concept('48094-6', 'Beta-2-microglobulin [Mass/volume] in Serum')
+        new = _loinc_concept('1952-1', 'Beta-2-Microglobulin [Mass/volume] in Serum or Plasma')
+        MeasurementFactory(
+            person=person, measurement_concept=old,
+            measurement_date='2025-01-01', value_as_number=4.2,
+        )
+        MeasurementFactory(
+            person=person, measurement_concept=new,
+            measurement_date='2025-02-01', value_as_number=2.0,
+        )
+        data = _cmd().get_cll_data(person)
+        assert data['beta2_microglobulin'] == pytest.approx(2.0)
+        assert data['serum_beta2_microglobulin_level'] == pytest.approx(2.0)
+
     def test_qtcf_value(self):
         person = PersonFactory()
         concept = _loinc_concept('8632-1', 'QT interval Fridericia corrected')

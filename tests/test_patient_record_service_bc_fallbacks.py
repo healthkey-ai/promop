@@ -229,6 +229,24 @@ def test_unsupported_chemistry_unit_does_not_fall_back_to_an_older_result():
     assert record.serum_creatinine_level is None
 
 
+def test_total_bilirubin_populates_the_widget_alias():
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    MeasurementFactory(
+        person=person,
+        measurement_concept=ConceptFactory(concept_code='1975-2'),
+        measurement_source_value='1975-2',
+        measurement_date=date(2026, 1, 15),
+        value_as_number=1.2,
+        unit_source_value='mg/dL',
+    )
+
+    record = refresh_patient_record(person)
+
+    assert float(record.bilirubin_total_mg_dl) == 1.2
+    assert float(record.serum_bilirubin_level_total) == 1.2
+
+
 def test_hr_status_recognizes_plus_minus_receptor_results():
     """A saved ER+/PR+ result must still derive HR+ after the write round-trip.
 

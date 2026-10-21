@@ -419,6 +419,7 @@ _LAB_FIELD_ALIASES = {
     'ast_u_l': ['liver_enzyme_levels_ast'],
     'alt_u_l': ['liver_enzyme_levels_alt'],
     'albumin_g_dl': ['albumin_level'],
+    'bilirubin_total_mg_dl': ['serum_bilirubin_level_total'],
 }
 
 # A FHIR Condition.stage summary is an asserted clinical fact, but the FHIR
@@ -514,8 +515,8 @@ _LEGACY_LAB_CONCEPT_FIELDS = {
     'creatinine': 'serum_creatinine_mg_dl',
     'creatinine in serum': 'serum_creatinine_mg_dl',
     'calcium': 'serum_calcium_mg_dl',
-    'bilirubin total': 'serum_bilirubin_level_total',
-    'bilirubin.total [mass/volume] in serum or plasma': 'serum_bilirubin_level_total',
+    'bilirubin total': 'bilirubin_total_mg_dl',
+    'bilirubin.total [mass/volume] in serum or plasma': 'bilirubin_total_mg_dl',
     'albumin': 'albumin_g_dl',
 }
 
@@ -3278,7 +3279,6 @@ def _get_cll_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     # _LOINC_LAB_FIELDS.  Deriving absolute_lymphocyte_count here duplicated
     # the value under an ambiguous name (see issue #544).
     loinc_map = {
-        '48094-6': 'serum_beta2_microglobulin_level',
         '8632-1':  'qtcf_value',
         '44996-6': 'spleen_size',
     }
@@ -3290,13 +3290,20 @@ def _get_cll_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             None,
         )
         if m:
-            value = float(m.value_as_number)
-            data[field] = value
-            # 48094-6 and 1952-1 are the same analyte. The widget reads the
-            # standard beta2_microglobulin field, while older CLL imports use
-            # the serum_* legacy name; keep both projections populated.
-            if field == 'serum_beta2_microglobulin_level':
-                data['beta2_microglobulin'] = value
+            data[field] = float(m.value_as_number)
+
+    # Beta-2 microglobulin is reported under a standard LOINC (1952-1) and a
+    # CLL-specific one (48094-6). Pick the newest across both, then populate
+    # both the canonical and legacy projections from that one row.
+    beta2_ms = [
+        m for m in measurements
+        if getattr(m.measurement_concept, 'concept_code', None) in {'1952-1', '48094-6'}
+        and m.value_as_number is not None
+    ]
+    if beta2_ms:
+        value = float(beta2_ms[0].value_as_number)
+        data['beta2_microglobulin'] = value
+        data['serum_beta2_microglobulin_level'] = value
 
     # A lymph-node size is a distinct clinical meaning from LOINC 21889-1
     # (Size Tumor).  Require the explicit source qualifier so the same row can
