@@ -1174,6 +1174,53 @@ places, both in `retrieval_pool`:
 The UMLS single-concept shortcut ignores priority: a curated equivalence wins
 without a ranking call either way.
 
+### The six LOINC axes decide which candidates are the same test
+
+A LOINC code is defined by component, property, time aspect, system, scale and
+method; two tests that differ on any one get different codes. For a source in
+the Measurement or Observation domain, Suggest (`omop_core/mapping/loinc_axes.py`)
+settles the source's axes, then:
+
+- **adds** the LOINC codes whose axes agree, when the component is known
+  (retrieval label `axes`),
+- **drops** every candidate that conflicts with a settled axis, before the
+  ranker sees it, and reports them as `axis_excluded`,
+- **orders** the rest by axes matched, then by compatible axes (`Ser` against
+  `Ser/Plas`), and sends both sides' axes to Anthropic and Jev.
+
+Source axes come from, strongest first: a curator's entry
+(`SourceCodeConceptMapping.loinc_axes`; `null` clears an inferred axis, `''` on
+`method_type` means methodless), the source code itself when it is LOINC, a
+LOINC coding in the resource's `code.coding`, then the metadata -- a UCUM unit
+names a property, `valueQuantity` names scale `Qn`, an exact specimen display
+names a system. Free-text method and `effectivePeriod` are hints only: a wrong
+constraint hides the right answer. Inference reads the metadata *as stored*,
+because de-identification drops `specimen` (a Reference).
+
+The candidate side is `LoincCodeClass`, which holds all six axes from
+`Loinc.csv`. A load that predates those columns counts as stale at the same
+version (`loinc_release._axes_missing`), so the next `sync_loinc_release`
+reloads it.
+
+### One source code, several LOINCs: axis variants
+
+A hospital code reported in mg/dL and mmol/L is two LOINC tests.
+`omop_core/mapping/axis_variants.py` groups a code's units -- stored
+Measurement rows, the imported inventory, per-patient source codes -- by the
+axes they imply. Two or more groups set `axis_variant_count` (the queue's blue
+"n axis values") and become `SourceCodeAxisVariant` rows, each with its own
+destination.
+
+Ingest routes by **unit**, the one per-record value every path has: the lookup
+API (an entry with `source_unit` whose variant is approved comes back keyed
+`vocab|code|unit`) and FHIR sync both take the variant's concept; every other
+record takes the mapping's. Approving a variant re-points only stored rows in
+its units (`repoint_clinical_rows(units=...)`). Specimen variation is reported
+but cannot be routed.
+
+Counts refresh after each source-code upload for codes seen in two or more
+units, and in bulk with `manage.py refresh_axis_variants`.
+
 ### Concept embeddings
 
 `semantic_candidates()` searches the `ConceptEmbedding` table by cosine

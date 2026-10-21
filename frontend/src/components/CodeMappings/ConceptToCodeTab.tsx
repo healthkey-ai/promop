@@ -4,6 +4,7 @@ import api from '@/api/axios';
 import { destinationError } from './destinationSearch';
 import { confirmUnitOverride, unitConfirmation } from './unitConfirmation';
 import EditMappingDialog from './EditMappingDialog';
+import { AxisVariantFlag } from './LoincAxisChips';
 import { type CodeMappingRow, type ConceptResult, type Reference, DOMAIN_TO_TABLE, emptyReference } from './codeMappingTypes';
 
 type Concept = {
@@ -21,6 +22,8 @@ type Source = {
   origin_system: string; updated_at: string; destination_concept_id: number | null;
   destination_concept_name: string; destination_standard_concept: string | null;
   evidence?: string[]; verdict?: string; note?: string;
+  /** How many LOINC axis sets this code's units imply, when the server reports it. */
+  axis_variant_count?: number;
   /** The ranker's confidence (0-1) in this source → concept pairing. */
   confidence?: number | null;
   /** Saved in the full editor since the preview: no longer a bulk-review row. */
@@ -566,7 +569,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
           onChange={event => setSelected(previous => { const next = new Set(previous); if (event.target.checked) next.add(sourceKey(row)); else next.delete(sourceKey(row)); return next; })} /></td>
         <td className="p-2 font-mono text-xs"><button type="button" className="text-left underline underline-offset-2 hover:text-slate-950 disabled:opacity-40"
           disabled={busy || opening} aria-haspopup="dialog" title={`Open ${row.source_code} in Edit Mapping`}
-          onClick={() => void openEditor(row)}>{row.source_vocabulary_id || 'Uncoded'}:{row.source_code}</button></td>
+          onClick={() => void openEditor(row)}>{row.source_vocabulary_id || 'Uncoded'}:{row.source_code}</button><AxisVariantFlag count={row.axis_variant_count} /></td>
         <td className="p-2">{row.source_code_description || '—'}</td><td className="p-2 text-right tabular-nums">{row.occurrence_count}</td>
         <td className="p-2 text-xs">{row.destination_concept_name || 'None'}{row.destination_concept_id && <div className="mt-1 text-slate-500">
           OMOP {row.destination_concept_id} · {row.destination_standard_concept === 'S' ? 'Standard' : 'Nonstandard'}</div>}</td>

@@ -2211,6 +2211,26 @@ class SourceCodeConceptMapping(models.Model):
             'coverage. It informs curation and is not clinical reference data.'
         ),
     )
+    loinc_axes = models.JSONField(
+        default=dict, db_default={}, blank=True,
+        help_text=(
+            "A curator's entries for the six LOINC axes of this source code "
+            '(component, property, time_aspect, system, scale_type, '
+            'method_type). Inferred axes are computed at read time from the '
+            'source code and its metadata; an entry here overrides one, and '
+            'null clears it. Suggest never offers a LOINC that conflicts with '
+            'a settled axis (omop_core.mapping.loinc_axes).'
+        ),
+    )
+    axis_variant_count = models.PositiveSmallIntegerField(
+        default=0, db_default=0,
+        help_text=(
+            'How many distinct sets of LOINC axis values the source units of '
+            'this code imply -- 2 when one hospital code arrives in both mg/dL '
+            'and mmol/L. Two or more means the code needs one LOINC per '
+            'variant (SourceCodeAxisVariant). Refreshed by axis_variants.refresh.'
+        ),
+    )
     source_unit_evidence = models.JSONField(
         default=list, db_default=[], blank=True,
         help_text=(
@@ -2412,6 +2432,66 @@ class MappingDestinationCandidate(models.Model):
         ]
 
 
+class SourceCodeAxisVariant(models.Model):
+    """One set of LOINC axis values a single source code arrives with.
+
+    A hospital lab code is one code to the sender, but when its results come
+    in both mg/dL and mmol/L it is two LOINC tests: mass and substance
+    concentration differ on the property axis, so each needs its own
+    destination. A variant groups the source units that imply the same axis
+    values and carries the destination for records in those units.
+
+    Ingest routes by unit (``axis_variants.variant_for``): a record whose unit
+    belongs to an approved variant takes that variant's concept; any other
+    record takes the mapping's own. Units are the discriminator because they
+    are the one per-record value every ingest path has.
+    """
+
+    STATUS_CHOICES = [
+        ('proposed', 'Proposed'),
+        ('approved', 'Approved'),
+    ]
+
+    mapping = models.ForeignKey(
+        SourceCodeConceptMapping, on_delete=models.CASCADE,
+        related_name='axis_variants',
+    )
+    axis_key = models.CharField(
+        max_length=255,
+        help_text="Canonical form of axis_values, e.g. 'property=SCnc', or 'unit=%' "
+                  'for a unit that implies no single property.',
+    )
+    axis_values = models.JSONField(default=dict, blank=True)
+    units = models.JSONField(
+        default=list, blank=True,
+        help_text='Source units (UCUM-normalized) whose records belong to this variant.',
+    )
+    occurrence_count = models.IntegerField(default=0)
+    target_concept = models.ForeignKey(
+        Concept, on_delete=models.DO_NOTHING, null=True, blank=True,
+        related_name='+', db_constraint=False,
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='proposed')
+    reviewer = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'source_code_axis_variant'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['mapping', 'axis_key'], name='uq_source_code_axis_variant',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.mapping_id} [{self.axis_key}] -> {self.target_concept_id}'
+
+
 class RegimenMappingGap(models.Model):
     """Mapping-gap report for regimen/drug names that could not be matched to a
     validated HemOnc (or other licensed-vocabulary) concept at ingest time.
@@ -2524,7 +2604,14 @@ class LoincClass(models.Model):
 
 
 class LoincCodeClass(models.Model):
-    """Maps LOINC codes to their CLASS value and example units (from Loinc.csv)."""
+    """One LOINC code's CLASS, example units and six axes (from Loinc.csv).
+
+    The six axes -- component, property, time aspect, system, scale and
+    method -- are what define a LOINC code: two tests that differ on any one
+    of them get different codes. Code to Concept Suggest compares them with
+    the source code's axes, so a candidate that disagrees on an axis the
+    source has settled is never offered.
+    """
     loinc_num = models.CharField(max_length=20, primary_key=True)
     loinc_class = models.ForeignKey(
         LoincClass, on_delete=models.CASCADE,
@@ -2535,8 +2622,12 @@ class LoincCodeClass(models.Model):
         help_text='EXAMPLE_UNITS from Loinc.csv; empty when LOINC defines no unit.',
     )
 
+    component = models.CharField(max_length=255, blank=True, default='')
     property = models.CharField(max_length=40, blank=True, default='')
+    time_aspect = models.CharField(max_length=20, blank=True, default='')
+    system = models.CharField(max_length=120, blank=True, default='')
     scale_type = models.CharField(max_length=20, blank=True, default='')
+    method_type = models.CharField(max_length=150, blank=True, default='')
 
     class Meta:
         db_table = 'loinc_code_class'

@@ -261,6 +261,22 @@ describe("CodeMappingPage", () => {
     );
   });
 
+  it("flags a source code whose units imply several LOINC axis sets", async () => {
+    renderPage([
+      { ...proposedRow, axis_variant_count: 2 },
+      { ...proposedRow, mapping_id: 9, source_code: "GLUCOSE", source_code_description: "Glucose", axis_variant_count: 0 },
+    ]);
+    const flag = await screen.findByText("2 axis values");
+    expect(flag).toHaveClass("text-blue-600");
+    expect(flag).toHaveAttribute("title", expect.stringMatching(/imply 2 different LOINC axis sets/));
+    // On the code's own line, right after the code.
+    expect(flag.previousElementSibling).toHaveTextContent(/^M-PROTEIN, SERUM$/);
+    expect(flag.previousElementSibling).toHaveAttribute("data-testid", "source-code");
+    const plain = screen.getByText("GLUCOSE", { selector: '[data-testid=source-code]' });
+    expect(within(plain.parentElement!).queryByText(/axis values/)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/axis values/)).toHaveLength(1);
+  });
+
   it("lets a curator choose a destination inline without opening the edit dialog", async () => {
     renderPage([proposedRow]);
     const previousGet = mockGet.getMockImplementation()!;

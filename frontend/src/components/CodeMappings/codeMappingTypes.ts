@@ -64,6 +64,10 @@ export interface CodeMappingRow {
   example_quantity_override?: string | null;
   source_metadata?: Record<string, unknown>;
   destination_unit_concept_id?: number | null;
+  /** 0, or how many LOINC axis sets this code's units imply (>= 2). */
+  axis_variant_count?: number;
+  /** Curator LOINC axis overrides: a value settles an axis, null lifts it. */
+  loinc_axes?: Partial<Record<"component" | "property" | "time_aspect" | "system" | "scale_type" | "method_type", string | null>>;
 }
 
 export interface ConceptResult {

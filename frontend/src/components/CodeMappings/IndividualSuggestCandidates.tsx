@@ -1,6 +1,8 @@
 import type { CandidateActivity, SuggestCandidate } from "./SuggestCandidates";
+import { AxisChips, AxisExcludedDisclosure, SourceAxesSummary } from "./LoincAxisChips";
+import { applyAxisOrder } from "./loincAxes";
 
-const STRATEGY_LABELS: Record<string, string> = { umls: "U", lexical: "L", vectors: "V", semantic: "V", metadata: "M", additional: "+" };
+const STRATEGY_LABELS: Record<string, string> = { umls: "U", lexical: "L", vectors: "V", semantic: "V", metadata: "M", axes: "X", additional: "+" };
 
 const RANKER_STYLE: Record<string, string> = {
   jev: "bg-indigo-100 text-indigo-700",
@@ -25,11 +27,19 @@ function mergeCandidates(searches: CandidateActivity[], effectiveResult?: Candid
     }
   }
   for (const c of effectiveResult?.candidates ?? []) {
-    if (!byId.has(c.concept_id)) {
+    const existing = byId.get(c.concept_id);
+    if (existing) {
+      if (c.loinc_axes !== undefined) {
+        existing.loinc_axes = c.loinc_axes;
+        existing.axis_match = c.axis_match;
+        existing.axes_matched = c.axes_matched;
+        existing.axes_compatible = c.axes_compatible;
+      }
+    } else {
       byId.set(c.concept_id, { ...c, strategies: new Set(["additional"]) });
     }
   }
-  return [...byId.values()];
+  return applyAxisOrder([...byId.values()], effectiveResult);
 }
 
 export default function IndividualSuggestCandidates({ activity, running, selectedId, onSelect }: {
@@ -57,12 +67,14 @@ export default function IndividualSuggestCandidates({ activity, running, selecte
     <p role="status" className="mt-1 text-xs text-slate-600">
       {running ? "Searching\u2026 Candidates appear as each search finishes. You can choose one now." : "Choose a candidate to fill the destination, then Save your mapping."}
     </p>
+    <SourceAxesSummary sourceAxes={effectiveResult?.source_axes ?? ranked?.source_axes} />
+    <AxisExcludedDisclosure excluded={effectiveResult?.axis_excluded ?? ranked?.axis_excluded} />
     <div className="mt-2 max-h-64 overflow-y-auto">
       {!candidates.length && <p className="text-xs text-slate-500">No matches</p>}
       {candidates.length > 0 && <table className="w-full text-left text-xs">
         <thead><tr className="border-b text-slate-500">
           <th className="pb-1 pr-1 font-medium">Candidate</th>
-          <th className="pb-1 px-1 font-medium" title="U=UMLS, L=Lexical, V=Vectors">Via</th>
+          <th className="pb-1 px-1 font-medium" title="U=UMLS, L=Lexical, V=Vectors, X=LOINC axes">Via</th>
           <th className="pb-1 px-1 font-medium">Conf</th>
           <th className="pb-1 pl-1 font-medium"></th>
         </tr></thead>
@@ -77,6 +89,7 @@ export default function IndividualSuggestCandidates({ activity, running, selecte
               <span className="text-sm">{candidate.concept_name}</span>
               <span className="ml-1 text-slate-500">{candidate.vocabulary_id}:{candidate.concept_code}</span>
               <span className="ml-1 text-slate-400">OMOP {candidate.concept_id}</span>
+              <AxisChips axes={candidate.loinc_axes} verdicts={candidate.axis_match} matched={candidate.axes_matched} />
             </td>
             <td className="py-1 px-1">
               <span className="rounded bg-slate-100 px-1 py-0.5 font-mono" title={[...candidate.strategies].join(", ")}>{strategies}</span>

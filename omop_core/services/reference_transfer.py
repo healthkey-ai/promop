@@ -26,6 +26,7 @@ from omop_core.models import (
     DiseaseTherapyRegimen,
     Domain,
     MappingDestinationCandidate,
+    SourceCodeAxisVariant,
     SourceCodeConceptMapping,
     TherapyComponentClassLink,
     TherapyOutcome,
@@ -76,6 +77,7 @@ class ReferencePayload(TypedDict):
     tables: dict[str, Iterable[ReferenceRow]]
     curation: dict[str, Any]
     candidates: Iterable[ReferenceRow]
+    axis_variants: Iterable[ReferenceRow]
 
 
 @dataclass(frozen=True)
@@ -125,6 +127,8 @@ def _lab_marker() -> type[Model]:
 CANDIDATES = ReferenceTable(
     MappingDestinationCandidate, ('mapping', 'target_vocabulary_id', 'target_concept_code'),
 )
+# After the code mappings too: each variant belongs to one.
+AXIS_VARIANTS = ReferenceTable(SourceCodeAxisVariant, ('mapping', 'axis_key'))
 
 
 @cache
@@ -155,6 +159,7 @@ def read_reference(using: str, stream: bool = False) -> ReferencePayload:
         'tables': {t.label: rows(t) for t in copied_tables()},
         'curation': read_payload(using, tables=CURATION_TABLES, stream=stream),
         'candidates': rows(CANDIDATES),
+        'axis_variants': rows(AXIS_VARIANTS),
     }
 
 
@@ -172,6 +177,7 @@ def apply_reference(payload: ReferencePayload, prune: bool = False, dry_run: boo
                 _apply_table(table, payload['tables'][table.label], stats)
             _merge(stats, apply_payload(payload['curation'], tables=CURATION_TABLES, prune=prune))
             _apply_table(CANDIDATES, payload['candidates'], stats)
+            _apply_table(AXIS_VARIANTS, payload.get('axis_variants', []), stats)
             if dry_run:
                 raise _Rollback
     except _Rollback:

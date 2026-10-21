@@ -20,6 +20,8 @@
 
 import CanonicalUnitEditor from "./CanonicalUnitEditor";
 import IndividualSuggestCandidates from "./IndividualSuggestCandidates";
+import LoincAxesPanel from "./LoincAxesPanel";
+import type { LoincAxisOverrides } from "./loincAxes";
 import SourceVocabularyLookup from "./SourceVocabularyLookup";
 import { searchDestinationConcepts } from "./destinationSearch";
 import MintConceptDialog from "./MintConceptDialog";
@@ -147,7 +149,10 @@ export default function EditMappingDialog({
   const [sourceEvidenceError, setSourceEvidenceError] = useState("");
   const [searchingConcepts, setSearchingConcepts] = useState(false);
   const [suggestionMessage, setSuggestionMessage] = useState("");
-  const [individualSuggestion, setIndividualSuggestion] = useState<{ request: number; activity: CandidateActivity[]; running: boolean } | null>(null);
+  const [individualSuggestion, setIndividualSuggestion] = useState<{ request: number; activity: CandidateActivity[]; running: boolean; axisKey?: string } | null>(null);
+  // LOINC axes (#loinc-axes): the panel's current overrides, sent with Suggest.
+  const [loincAxes, setLoincAxes] = useState<LoincAxisOverrides | null>(null);
+  const [loincAxesReload, setLoincAxesReload] = useState(0);
   const [repointing, setRepointing] = useState<{ from: string; to: string } | null>(null);
   const [repointResult, setRepointResult] = useState<RepointResult | null>(null);
   const [error, setError] = useState("");
@@ -504,11 +509,11 @@ export default function EditMappingDialog({
     }, CONCEPT_SEARCH_DEBOUNCE_MS);
   }, [searchVocabulary, searchScope]);
 
-  const suggestCurrentCode = useCallback(async () => {
+  const suggestCurrentCode = useCallback(async (axisKey?: string) => {
     setSuggestionMessage("");
     const request = ++dialogRequest.current;
     dialogChoice.current = null;
-    setIndividualSuggestion({ request, activity: [], running: true });
+    setIndividualSuggestion({ request, activity: [], running: true, axisKey });
     setError("");
     setSearchingConcepts(true);
     try {
@@ -520,12 +525,14 @@ export default function EditMappingDialog({
         // rankers, and only while it still describes the code being suggested.
         source_metadata: sourceIdentityUnchanged ? selectedRow?.source_metadata || undefined : undefined,
         strategies: enabled, ranking_model: rankingModel, async: true,
+        ...(loincAxes ? { loinc_axes: loincAxes } : {}),
+        ...(axisKey ? { axis_key: axisKey } : {}),
       });
       let current = started;
       const deadline = Date.now() + SUGGEST_POLL_TIMEOUT_MS;
       let failures = 0;
       while (request === dialogRequest.current) {
-        setIndividualSuggestion({ request, activity: current.activity ?? [], running: current.state === "queued" || current.state === "running" });
+        setIndividualSuggestion({ request, activity: current.activity ?? [], running: current.state === "queued" || current.state === "running", axisKey });
         if (current.state !== "queued" && current.state !== "running") break;
         if (Date.now() > deadline) throw new Error("Suggestion timed out");
         await new Promise(resolve => setTimeout(resolve, SUGGEST_POLL_INTERVAL_MS));
@@ -546,7 +553,10 @@ export default function EditMappingDialog({
         return;
       }
       const result = current.activity?.filter(event => event.stage === "result").at(-1);
-      if (result?.suggested && dialogChoice.current !== request) {
+      if (axisKey) {
+        // A variant's winner belongs to the variant, not the mapping's destination.
+        setSuggestionMessage("Variant candidates shown. Choose one to set that variant's destination.");
+      } else if (result?.suggested && dialogChoice.current !== request) {
         applyConcept(result.suggested as ConceptResult);
         setSuggestionMessage("Winner filled in. You can choose another candidate before saving.");
       } else if (!result?.suggested && dialogChoice.current !== request) {
@@ -560,7 +570,7 @@ export default function EditMappingDialog({
         setIndividualSuggestion(cur => cur?.request === request ? { ...cur, running: false } : cur);
       }
     }
-  }, [strategies, rankingModel, form.source_code, form.source_vocabulary_id, form.source_code_description, form.omop_table, selectedRow?.source_metadata, sourceIdentityUnchanged, applyConcept]);
+  }, [strategies, rankingModel, form.source_code, form.source_vocabulary_id, form.source_code_description, form.omop_table, selectedRow?.source_metadata, sourceIdentityUnchanged, applyConcept, loincAxes]);
 
   const sourceContextDirty = Boolean(patientId && selectedRow?.source_code_id && (
     sourceUnit.trim() !== savedSourceUnit
@@ -999,10 +1009,24 @@ export default function EditMappingDialog({
                     </button>
                   </div>
                 </div>
+                {mode === "edit" && selectedRow?.mapping_id && <LoincAxesPanel
+                  key={selectedRow.mapping_id} mappingId={selectedRow.mapping_id} canEdit canApprove={canApprove}
+                  reloadToken={loincAxesReload} onAxesChange={setLoincAxes}
+                  onSuggestVariant={axisKey => void suggestCurrentCode(axisKey)} />}
                 {individualSuggestion?.request === dialogRequest.current && <IndividualSuggestCandidates
                   activity={individualSuggestion.activity} running={individualSuggestion.running}
-                  selectedId={form.destination_concept_id}
+                  selectedId={individualSuggestion.axisKey ? "" : form.destination_concept_id}
                   onSelect={candidate => {
+                    const axisKey = individualSuggestion.axisKey;
+                    if (axisKey && selectedRow?.mapping_id) {
+                      api.post(`/v1/code-mappings/${selectedRow.mapping_id}/axis-variants/`, {
+                        axis_key: axisKey, target_concept_id: candidate.concept_id, approve: false,
+                      }).then(() => {
+                        setLoincAxesReload(n => n + 1);
+                        setSuggestionMessage(`Variant destination set to ${candidate.concept_name}.`);
+                      }).catch(() => setError("Could not set the variant's destination."));
+                      return;
+                    }
                     applyConcept(candidate as ConceptResult);
                     setSuggestionMessage("Candidate selected. Save the mapping to keep your choice.");
                   }} />}

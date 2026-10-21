@@ -2,6 +2,8 @@ import { useRef, useState } from "react";
 import InlineDestinationPicker from "./InlineDestinationPicker";
 import MintConceptDialog from "./MintConceptDialog";
 import { destinationError, saveMappingDestination } from "./destinationSearch";
+import { AxisChips, AxisExcludedDisclosure, SourceAxesSummary } from "./LoincAxisChips";
+import { applyAxisOrder, type AxisExcludedCandidate, type AxisVerdict, type LoincAxis, type SourceAxes } from "./loincAxes";
 
 export type SuggestCandidate = {
   concept_id: number;
@@ -14,6 +16,11 @@ export type SuggestCandidate = {
   semantic_score?: number;
   vector_distance?: number;
   standard_concept?: string | null;
+  /** The candidate's six LOINC axes; null when it is not a loaded LOINC. */
+  loinc_axes?: Partial<Record<LoincAxis, string>> | null;
+  axis_match?: Partial<Record<LoincAxis, AxisVerdict>>;
+  axes_matched?: number;
+  axes_compatible?: number;
 };
 type Alternative = {
   concept_id: number;
@@ -38,6 +45,10 @@ export type CandidateActivity = {
   alternatives?: Alternative[];
   ranking_timings?: Record<string, number>;
   omop_table?: string;
+  /** What the source settles on each LOINC axis (ranked/result events). */
+  source_axes?: SourceAxes;
+  /** Candidates hidden because they conflict with a settled source axis. */
+  axis_excluded?: AxisExcludedCandidate[];
 };
 
 type Props = {
@@ -49,7 +60,7 @@ type Props = {
   domains?: { domain_id: string; label: string }[];
 };
 
-const STRATEGY_LABELS: Record<string, string> = { umls: "U", lexical: "L", vectors: "V", semantic: "V", metadata: "M" };
+const STRATEGY_LABELS: Record<string, string> = { umls: "U", lexical: "L", vectors: "V", semantic: "V", metadata: "M", axes: "X" };
 
 const RANKER_STYLE: Record<string, string> = {
   jev: "bg-indigo-100 text-indigo-700",
@@ -106,14 +117,22 @@ function mergeCandidates(searches: CandidateActivity[], ranked?: CandidateActivi
   }
   // Add any candidates from ranking that weren't in retrieval.
   for (const c of ranked?.candidates ?? []) {
-    if (!byId.has(c.concept_id)) {
+    const existing = byId.get(c.concept_id);
+    if (existing) {
+      if (c.loinc_axes !== undefined) {
+        existing.loinc_axes = c.loinc_axes;
+        existing.axis_match = c.axis_match;
+        existing.axes_matched = c.axes_matched;
+        existing.axes_compatible = c.axes_compatible;
+      }
+    } else {
       byId.set(c.concept_id, { ...c, strategies: new Set(["additional"]) });
     }
   }
   if (winner && !byId.has(winner.concept_id)) {
     byId.set(winner.concept_id, { ...winner, strategies: new Set() });
   }
-  return [...byId.values()];
+  return applyAxisOrder([...byId.values()], ranked);
 }
 
 export default function SuggestCandidates({ activity, finished, onSaved, canApprove = false, vocabularies = [], domains = [] }: Props) {
@@ -302,11 +321,13 @@ export default function SuggestCandidates({ activity, finished, onSaved, canAppr
             {source.source_vocabulary_id || "Uncoded"}:{source.source_code}
             {description && <span className="ml-2 font-normal text-slate-600">{description}</span>}
           </h3>
+          <SourceAxesSummary sourceAxes={(result?.source_axes ?? ranked?.source_axes)} />
+          <AxisExcludedDisclosure excluded={(result?.axis_excluded ?? ranked?.axis_excluded)} />
           {!candidates.length && <p className="mt-1 text-sm text-slate-500">No matches</p>}
           {candidates.length > 0 && <table className="mt-2 w-full text-left text-sm">
             <thead><tr className="border-b text-xs text-slate-500">
               <th className="pb-1 pr-2 font-medium">Candidate</th>
-              <th className="pb-1 px-2 font-medium" title="Retrieval strategies: U=UMLS, L=Lexical, V=Vectors">Found by</th>
+              <th className="pb-1 px-2 font-medium" title="Retrieval strategies: U=UMLS, L=Lexical, V=Vectors, X=LOINC axes">Found by</th>
               <th className="pb-1 px-2 font-medium">Confidence</th>
               <th className="pb-1 pl-2 font-medium">Action</th>
             </tr></thead>
@@ -323,6 +344,7 @@ export default function SuggestCandidates({ activity, finished, onSaved, canAppr
                   <span className="ml-1 text-slate-600">— {candidate.concept_name}</span>
                   <span className="ml-1 text-xs text-slate-400">OMOP {candidate.concept_id}</span>
                   {stdBadge && <span className={`ml-1 rounded px-1 py-0.5 text-xs ${stdBadge.className}`}>{stdBadge.label}</span>}
+                  <AxisChips axes={candidate.loinc_axes} verdicts={candidate.axis_match} matched={candidate.axes_matched} />
                 </td>
                 <td className="py-1.5 px-2">
                   <span className="rounded bg-slate-100 px-1.5 py-0.5 text-xs font-mono" title={[...candidate.strategies].join(", ")}>{strategies}</span>

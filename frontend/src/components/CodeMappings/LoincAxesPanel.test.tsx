@@ -1,0 +1,150 @@
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import LoincAxesPanel from "./LoincAxesPanel";
+import type { LoincAxesPayload } from "./loincAxes";
+
+const { get, put, post } = vi.hoisted(() => ({ get: vi.fn(), put: vi.fn(), post: vi.fn() }));
+vi.mock("@/api/axios", () => ({ default: { get, put, post } }));
+
+const glucose = { concept_id: 3004501, concept_name: "Glucose [Mass/volume] in Serum or Plasma", concept_code: "2345-7", vocabulary_id: "LOINC" };
+
+const payload = (overrides: Partial<LoincAxesPayload> = {}): LoincAxesPayload => ({
+  mapping_id: 7,
+  applies: true,
+  loinc_axes: {},
+  source_axes: {
+    axes: {
+      component: { value: "Glucose", basis: "source_code", evidence: "description = GLUCOSE" },
+      property: { value: "MCnc", basis: "unit", evidence: "valueQuantity.unit = mg/dL" },
+      scale_type: { value: "Qn", basis: "value_type", evidence: "valueQuantity" },
+      method_type: { value: "", basis: "source_code", evidence: "no method in name" },
+    },
+    hints: { system: "Ser/Plas" },
+  },
+  axis_labels: { component: "Component", property: "Property", time_aspect: "Time", system: "System", scale_type: "Scale", method_type: "Method" },
+  axis_variant_count: 0,
+  variants: [],
+  variant_notes: [],
+  ...overrides,
+});
+
+const variantPayload = () => payload({
+  axis_variant_count: 2,
+  variants: [
+    { id: 1, axis_key: "property=MCnc", axis_values: { property: "MCnc", scale_type: "Qn" }, units: ["mg/dL"], occurrence_count: 40,
+      status: "proposed", target_concept: glucose, reviewed_at: null },
+    { id: null, axis_key: "property=SCnc", axis_values: { property: "SCnc", scale_type: "Qn" }, units: ["mmol/L"], occurrence_count: 3,
+      status: "proposed", target_concept: null, reviewed_at: null },
+  ],
+  variant_notes: ["Units mg/dL and mmol/L imply different properties."],
+});
+
+beforeEach(() => {
+  vi.resetAllMocks();
+  get.mockImplementation((url: string) => Promise.resolve({ data: url.includes("axis-values")
+    ? { axis: "system", values: [{ value: "Ser/Plas", codes: 1200 }, { value: "Bld", codes: 900 }] }
+    : url.includes("/concepts/search/") ? { results: [glucose] } : payload() }));
+  put.mockImplementation((_url: string, body: { loinc_axes: Record<string, string | null> }) =>
+    Promise.resolve({ data: payload({ loinc_axes: body.loinc_axes }) }));
+});
+
+describe("LoincAxesPanel", () => {
+  it("shows each axis with its value, basis and evidence, and the metadata hints", async () => {
+    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
+    expect(await screen.findByRole("region", { name: "LOINC axes" })).toBeInTheDocument();
+    expect(get).toHaveBeenCalledWith("/v1/code-mappings/7/loinc-axes/");
+    expect(screen.getByTestId("axis-value-property")).toHaveTextContent("MCnc");
+    expect(screen.getByTestId("axis-why-property")).toHaveTextContent("From unit: valueQuantity.unit = mg/dL");
+    expect(screen.getByTestId("axis-value-method_type")).toHaveTextContent("Methodless");
+    expect(screen.getByTestId("axis-value-system")).toHaveTextContent("—");
+    expect(screen.getByTestId("axis-why-system")).toHaveTextContent("Not settled");
+    expect(screen.getByText(/Metadata says: System — Ser\/Plas/)).toBeInTheDocument();
+    expect(screen.getByText(/Settled axes are constraints/)).toBeInTheDocument();
+    expect(screen.queryByRole("table", { name: "Axis variants" })).not.toBeInTheDocument();
+  });
+
+  it("marks curator-set axes", async () => {
+    get.mockResolvedValue({ data: payload({
+      loinc_axes: { system: "Ser/Plas" },
+      source_axes: { axes: { system: { value: "Ser/Plas", basis: "curator", evidence: "" } }, hints: {} },
+    }) });
+    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
+    expect(await screen.findByTestId("axis-why-system")).toHaveTextContent("Set by curator");
+  });
+
+  it("renders nothing when the domain has no LOINC", async () => {
+    get.mockResolvedValue({ data: payload({ applies: false }) });
+    const { container } = render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
+    await waitFor(() => expect(get).toHaveBeenCalled());
+    await Promise.resolve();
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("reports edits, Clear and Methodless, and saves them as the PUT body", async () => {
+    const onAxesChange = vi.fn();
+    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} onAxesChange={onAxesChange} />);
+    await screen.findByRole("region", { name: "LOINC axes" });
+    expect(onAxesChange).toHaveBeenLastCalledWith({});
+    const system = screen.getByLabelText("System value");
+    fireEvent.focus(system);
+    fireEvent.change(system, { target: { value: "Ser" } });
+    await waitFor(() => expect(get).toHaveBeenCalledWith("/v1/loinc/axis-values/", expect.objectContaining({ params: { axis: "system", q: "Ser" } })));
+    expect(onAxesChange).toHaveBeenLastCalledWith({ system: "Ser" });
+    fireEvent.change(system, { target: { value: "Ser/Plas" } });
+    fireEvent.click(screen.getByRole("button", { name: "Clear Property" }));
+    expect(screen.getByTestId("axis-value-property")).toHaveTextContent("No constraint");
+    fireEvent.click(screen.getByRole("button", { name: "Methodless" }));
+    expect(onAxesChange).toHaveBeenLastCalledWith({ system: "Ser/Plas", property: null, method_type: "" });
+    fireEvent.click(screen.getByRole("button", { name: "Save axes" }));
+    await waitFor(() => expect(put).toHaveBeenCalledWith("/v1/code-mappings/7/loinc-axes/", {
+      loinc_axes: { system: "Ser/Plas", property: null, method_type: "" },
+    }));
+    expect(await screen.findByText("LOINC axes saved.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save axes" })).toBeDisabled();
+  });
+
+  it("hides edit controls when the curator cannot edit", async () => {
+    render(<LoincAxesPanel mappingId={7} canEdit={false} canApprove={false} />);
+    await screen.findByRole("region", { name: "LOINC axes" });
+    expect(screen.queryByLabelText("System value")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save axes" })).not.toBeInTheDocument();
+  });
+
+  it("lists axis variants, suggests per variant, and approves one with its destination", async () => {
+    get.mockImplementation((url: string) => Promise.resolve({ data: url.includes("/concepts/search/") ? { results: [glucose] } : variantPayload() }));
+    post.mockResolvedValue({ data: { ...variantPayload(), repoint: { rows_updated: 40, persons_marked_stale: 5, rows_collapsed: 0 } } });
+    const onSuggestVariant = vi.fn();
+    render(<LoincAxesPanel mappingId={7} canEdit canApprove onSuggestVariant={onSuggestVariant} />);
+    expect(await screen.findByText("2 axis values — this code may need one LOINC per variant")).toBeInTheDocument();
+    expect(screen.getByText("Units mg/dL and mmol/L imply different properties.")).toBeInTheDocument();
+    const table = screen.getByRole("table", { name: "Axis variants" });
+    const first = within(table).getByText("Property MCnc · Scale Qn").closest("tr")!;
+    expect(first).toHaveTextContent("mg/dL");
+    expect(first).toHaveTextContent("40");
+    expect(first).toHaveTextContent("Glucose [Mass/volume] in Serum or Plasma");
+    expect(within(table).getByRole("button", { name: "Approve Property SCnc · Scale Qn" })).toBeDisabled();
+
+    fireEvent.click(within(first).getByRole("button", { name: "Suggest for Property MCnc · Scale Qn" }));
+    expect(onSuggestVariant).toHaveBeenCalledWith("property=MCnc");
+
+    fireEvent.click(within(first).getByRole("button", { name: "Approve Property MCnc · Scale Qn" }));
+    await waitFor(() => expect(post).toHaveBeenCalledWith("/v1/code-mappings/7/axis-variants/", {
+      axis_key: "property=MCnc", target_concept_id: glucose.concept_id, approve: true,
+    }));
+    expect(await screen.findByText(/updated 40 row\(s\)/)).toBeInTheDocument();
+  });
+
+  it("sets a variant's destination from the concept search", async () => {
+    get.mockImplementation((url: string) => Promise.resolve({ data: url.includes("/concepts/search/") ? { results: [glucose] } : variantPayload() }));
+    post.mockResolvedValue({ data: variantPayload() });
+    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
+    const table = await screen.findByRole("table", { name: "Axis variants" });
+    expect(within(table).queryByRole("button", { name: /^Approve/ })).not.toBeInTheDocument();
+    fireEvent.click(within(table).getByRole("button", { name: "Set destination for Property SCnc · Scale Qn" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Search destination for Property SCnc · Scale Qn" }), { target: { value: "glucose" } });
+    fireEvent.click(await screen.findByRole("option", { name: /Glucose \[Mass\/volume\]/ }));
+    await waitFor(() => expect(post).toHaveBeenCalledWith("/v1/code-mappings/7/axis-variants/", {
+      axis_key: "property=SCnc", target_concept_id: glucose.concept_id, approve: false,
+    }));
+  });
+});
