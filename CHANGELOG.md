@@ -93,11 +93,12 @@ All notable changes to PRomop are documented here.
   representative projects its OMOP facts with type 32865 (Patient self-report)
   instead of the recipe's type, which for curated mappings defaults to EHR.
   The patient's own facts also get a `PATIENT_SELF` provenance row, as PHR
-  entries do. Same-day matching is limited to facts of that type, so a patient's
-  answer sits beside a clinical fact recorded the same day instead of
-  overwriting it and taking over its type and provenance. Clinician, staff and
-  service edits are unchanged. Without concept 32865 loaded, the recipe type
-  stands (#1959).
+  entries do. Same-day matching keeps the two apart in both directions: a
+  patient's answer sits beside a clinical fact recorded the same day instead of
+  overwriting it and taking over its type and provenance, and a later clinician,
+  staff or service edit that day writes its own fact rather than the patient's.
+  Their types are otherwise unchanged. Without concept 32865 loaded, the recipe
+  type stands (#1959).
 
 - **Mapping saves return immediately** — approving or re-pointing a code
   mapping (Concept to Code, Code to Concept, group approve, CSV upload) writes the mapping
