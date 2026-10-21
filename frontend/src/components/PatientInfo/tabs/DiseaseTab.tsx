@@ -295,7 +295,7 @@ function CLLSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>
     <>
       <Section title="CLL Disease Characteristics">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field label="Binet Stage" name="binet_stage" type="select" value={binetStageCode(formData?.binet_stage || formData?.stage)} options={BINET_STAGE_OPTIONS} onChange={(name, value) => onChange(name, binetStageCode(value))} />
+          <Field label="Binet Stage" name="binet_stage" type="select" value={binetStageCode(formData?.stage || formData?.binet_stage)} options={BINET_STAGE_OPTIONS} onChange={(_, value) => onChange('stage', binetStageCode(value))} />
           <Field label="Tumor Burden" name="tumor_burden" type="select" value={formData?.tumor_burden} options={TUMOR_BURDEN_OPTIONS} onChange={onChange} />
           <Field label="Disease Activity" name="disease_activity" type="select" value={formData?.disease_activity} options={DISEASE_ACTIVITY_OPTIONS} onChange={onChange} />
           <Field label="Richter Transformation" name="richter_transformation" type="select" value={formData?.richter_transformation} options={RICHTER_TRANSFORMATION_OPTIONS} onChange={onChange} />

@@ -29,18 +29,16 @@ export function receptorSign(value: unknown): -1 | 1 | null {
     return null;
   }
 
-  const positiveWord = text.includes('POSITIVE');
-  const negativeWord = text.includes('NEGATIVE');
-  if (positiveWord && negativeWord) return null;
-  if (positiveWord) return 1;
-  if (negativeWord) return -1;
-
-  const positiveSign = text.endsWith('+') || /\+\s/.test(text);
-  const negativeSign = text.endsWith('-') || /-\s/.test(text);
-  if (positiveSign && negativeSign) return null;
-  if (positiveSign) return 1;
-  if (negativeSign) return -1;
-  return null;
+  const signals = new Set<-1 | 1>();
+  if (text.includes('POSITIVE')) signals.add(1);
+  if (text.includes('NEGATIVE')) signals.add(-1);
+  // Only a sign attached to a receptor token is a receptor result. A bare
+  // assay score such as `IHC 2+` or `3+` must stay uninterpreted.
+  for (const match of text.matchAll(/\b(?:ER|PR|HER2|HR)\s*([+-])/g)) {
+    signals.add(match[1] === '+' ? 1 : -1);
+  }
+  if (signals.size !== 1) return null;
+  return [...signals][0];
 }
 
 export function deriveTnbcStatus(er: unknown, pr: unknown, her2: unknown): boolean | null {
@@ -69,6 +67,30 @@ export function normalizeGender(value: unknown): unknown {
     case 'u':
     case 'unknown':
       return 'Unknown';
+    default:
+      return raw;
+  }
+}
+
+// PATCH the OMOP code, not the display label. PROMOP's resolver treats the
+// literal `Other` as unknown (`U`), which would turn a user's choice into
+// Unknown after refresh; `O` is the correct code.
+export function genderCode(value: unknown): unknown {
+  if (value == null) return '';
+  const raw = String(value).trim();
+  switch (raw.toLowerCase()) {
+    case 'm':
+    case 'male':
+      return 'M';
+    case 'f':
+    case 'female':
+      return 'F';
+    case 'o':
+    case 'other':
+      return 'O';
+    case 'u':
+    case 'unknown':
+      return 'U';
     default:
       return raw;
   }

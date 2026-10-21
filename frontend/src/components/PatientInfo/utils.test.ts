@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deriveTnbcStatus, normalizeGender, receptorSign, stringsToOptions } from './utils';
+import { deriveTnbcStatus, genderCode, normalizeGender, receptorSign, stringsToOptions } from './utils';
 
 describe('stringsToOptions', () => {
   it('turns strings into value/label pairs', () => {
@@ -24,6 +24,9 @@ describe('receptorSign', () => {
     ['Positive', 1],
     ['NEGATIVE', -1],
     ['ER+/-', null],
+    ['ER+ and PR-', null],
+    ['IHC 2+', null],
+    ['HER2 3+', null],
     ['Equivocal', null],
     ['HER2 low', null],
     ['Unknown', null],
@@ -65,5 +68,18 @@ describe('normalizeGender', () => {
 
   it('leaves an unrecognised value alone so it is visible rather than silently dropped', () => {
     expect(normalizeGender('Non-binary')).toBe('Non-binary');
+  });
+});
+
+describe('genderCode', () => {
+  it.each([
+    ['Male', 'M'],
+    ['Female', 'F'],
+    ['Other', 'O'],
+    ['Unknown', 'U'],
+    ['M', 'M'],
+    ['Non-binary', 'Non-binary'],
+  ])('maps the widget label %o back to %o', (raw, expected) => {
+    expect(genderCode(raw)).toBe(expected);
   });
 });

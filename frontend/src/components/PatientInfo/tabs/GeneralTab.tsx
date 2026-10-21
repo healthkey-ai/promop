@@ -1,6 +1,6 @@
 import { useVocabulary } from '@/hooks/useVocabulary';
 import Field from '../Field';
-import { normalizeGender } from '../utils';
+import { genderCode, normalizeGender } from '../utils';
 import Section from '../Section';
 import { Input } from '@/components/shadcn/input';
 import {
@@ -75,7 +75,8 @@ export default function GeneralTab({ formData, onChange, editedName, onNameChang
         </div>
 
         <Field label="Gender" name="gender" type="select"
-          value={normalizeGender(formData?.gender)} options={GENDER_OPTIONS} onChange={onChange} />
+          value={normalizeGender(formData?.gender)} options={GENDER_OPTIONS}
+          onChange={(name, value) => onChange(name, genderCode(value))} />
 
         <div className="sm:col-span-2">
           <Field label="Email" name="email" type="email"
