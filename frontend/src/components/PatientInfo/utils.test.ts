@@ -35,6 +35,8 @@ describe('receptorSign', () => {
     ['ER+ with low expression', 1],
     ['ER+ with high expression', 1],
     ['ER-', -1],
+    ['ER-positive', 1],
+    ['ER-negative', -1],
     ['Positive', 1],
     ['NEGATIVE', -1],
     ['ER+/-', null],

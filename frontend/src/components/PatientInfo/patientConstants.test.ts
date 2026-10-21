@@ -3,9 +3,12 @@ import {
   BINET_STAGE_OPTIONS,
   BONE_LESIONS_OPTIONS,
   DISEASE_OPTIONS,
+  ER_OPTIONS,
   FL_TUMOR_GRADE_OPTIONS,
   GELF_OPTIONS,
+  HER2_OPTIONS,
   ISS_STAGE_OPTIONS,
+  PR_OPTIONS,
   LYMPHOMA_HISTOLOGIC_TYPE_OPTIONS,
   binetStageCode,
 } from './patientConstants';
@@ -22,13 +25,19 @@ describe('disease option lists', () => {
     expect(FL_TUMOR_GRADE_OPTIONS.every((option) => Number.isInteger(Number(option.value)))).toBe(true);
   });
 
-  it('offers the ISS and R-ISS values generated records may store', () => {
+  it('offers the ISS values generated records may store', () => {
     expect(ISS_STAGE_OPTIONS).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ value: 'ISS 2' }),
-        expect.objectContaining({ value: 'R-ISS 2' }),
+        expect.objectContaining({ value: 'ISS II' }),
       ]),
     );
+  });
+
+  it('offers the word receptor values imported records may store', () => {
+    expect(ER_OPTIONS).toEqual(expect.arrayContaining(['Positive', 'Negative']));
+    expect(PR_OPTIONS).toEqual(expect.arrayContaining(['Positive', 'Negative']));
+    expect(HER2_OPTIONS).toEqual(expect.arrayContaining(['Positive', 'Negative']));
   });
 
   it('offers the lymphoma values the projection can store', () => {

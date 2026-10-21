@@ -48,7 +48,7 @@ export function receptorSign(value: unknown): -1 | 1 | null {
   if (text.includes('NEGATIVE')) signals.add(-1);
   // Only a sign attached to a receptor token is a receptor result. A bare
   // assay score such as `IHC 2+` or `3+` must stay uninterpreted.
-  for (const match of text.matchAll(/\b(?:ER|PR|HER2|HR)\s*([+-])/g)) {
+  for (const match of text.matchAll(/\b(?:ER|PR|HER2|HR)\s*([+-])(?=$|[\s);,/])/g)) {
     signals.add(match[1] === '+' ? 1 : -1);
   }
   if (signals.size !== 1) return null;

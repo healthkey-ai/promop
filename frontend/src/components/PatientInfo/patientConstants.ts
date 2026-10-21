@@ -112,9 +112,9 @@ export const STAGING_MODALITIES_OPTIONS = [
   'yp → Pathological after neoadjuvant therapy',
 ];
 
-export const ER_OPTIONS = ['ER+', 'ER-', 'ER+ with low expression', 'ER+ with high expression', 'Unknown'];
-export const PR_OPTIONS = ['PR+', 'PR-', 'PR+ with low expression', 'PR+ with high expression', 'Unknown'];
-export const HER2_OPTIONS = ['HER2+', 'HER2-', 'HER2 low', 'Unknown'];
+export const ER_OPTIONS = ['ER+', 'ER-', 'ER+ with low expression', 'ER+ with high expression', 'Positive', 'Negative', 'Unknown'];
+export const PR_OPTIONS = ['PR+', 'PR-', 'PR+ with low expression', 'PR+ with high expression', 'Positive', 'Negative', 'Unknown'];
+export const HER2_OPTIONS = ['HER2+', 'HER2-', 'HER2 low', 'Positive', 'Negative', 'Unknown'];
 export const HR_OPTIONS = ['HR+', 'HR-', 'HR+ with low expression', 'HR+ with high expression', 'Unknown'];
 export const HRD_OPTIONS = ['HRD+', 'HRD-', 'Unknown'];
 export const MENOPAUSAL_OPTIONS = ['Pre-menopausal', 'Peri-menopausal', 'Post-menopausal', 'Unknown'];
@@ -146,9 +146,11 @@ export const ISS_STAGE_OPTIONS: { value: string; label: string }[] = [
   { value: 'ISS 1', label: 'ISS Stage I' },
   { value: 'ISS 2', label: 'ISS Stage II' },
   { value: 'ISS 3', label: 'ISS Stage III' },
-  { value: 'R-ISS 1', label: 'R-ISS Stage I' },
-  { value: 'R-ISS 2', label: 'R-ISS Stage II' },
-  { value: 'R-ISS 3', label: 'R-ISS Stage III' },
+  { value: 'ISS I', label: 'ISS Stage I' },
+  { value: 'ISS II', label: 'ISS Stage II' },
+  { value: 'ISS III', label: 'ISS Stage III' },
+  // R-ISS is a different source fact (21908-9-riss) that the single `stage`
+  // write path cannot replace; do not offer it as if it round-tripped.
 ];
 export const MRD_STATUS_OPTIONS = [
   'MRD Negative (10⁻⁵)',
