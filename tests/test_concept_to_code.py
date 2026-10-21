@@ -10,7 +10,7 @@ from omop_core.models import (
 )
 from omop_core.mapping.reverse_suggestions import reverse_retrieval_pool, reverse_rank_candidate
 from omop_core.services.suggest_jobs import FakeDispatcher, InlineDispatcher, execute_run, use_dispatcher
-from tests.factories import ConceptFactory, MeasurementFactory
+from tests.factories import ConceptFactory, MeasurementFactory, VocabularyFactory
 
 pytestmark = pytest.mark.django_db
 BASE = '/api/v1/concept-to-code/'
@@ -50,11 +50,12 @@ def test_concepts_are_deduplicated_and_counts_do_not_multiply_by_field(client, c
     source('PROPOSED', target_concept=concept)
     source('APPROVED', target_concept=concept, status='approved')
     source('REJECTED', target_concept=concept, status='rejected')
-    # One page, one field query, one domain summary; no per-concept reads.
+    # One page, one field query, one domain summary, one priority count; no
+    # per-concept reads.
     from patient_portal.api.concept_to_code import concept_to_code_list
     request = APIRequestFactory().get(BASE)
     force_authenticate(request, user=client.user)
-    with django_assert_num_queries(4):
+    with django_assert_num_queries(5):
         response = concept_to_code_list(request)
     assert response.status_code == 200
     assert response.data['total'] == 1
@@ -293,6 +294,99 @@ def test_retrieval_restores_the_callers_statement_timeout(concept):
         assert cursor.fetchone()[0] == before
 
 
+# ── Estimate: how many sources Suggest could find (#1953) ─────────────────────
+
+def test_estimate_counts_every_source_a_run_could_return(client, concept):
+    release = UmlsRelease.objects.create(release_version='test')
+    cui = UmlsConcept.objects.create(cui='C0000001', release=release)
+    for root, code in [('LNC', concept.concept_code), ('SNOMEDCT_US', 'UMLS-ONLY')]:
+        UmlsSourceCode.objects.create(concept=cui, root_source=root, code=code, term_type='PT', name='Albumin')
+    source('UMLS-ONLY', source_code_description='Different label')
+    for index in range(30):
+        source(f'LEX{index:02}', occurrence_count=index + 1)
+    source('ZERO', occurrence_count=0)
+    source('UNRELATED', source_code_description='Bone marrow sampling')
+    source('DONE', target_concept=concept)
+    source('APPROVED', status='approved')
+
+    data = client.get(f'{BASE}{concept.pk}/estimate/').data
+    # More than one run's worth: 30 by name, one by UMLS, none counted twice.
+    assert data == {'total': 31, 'umls': 1, 'lexical': 30, 'capped': False, 'partial': False, 'timed_out': False}
+    assert len(reverse_retrieval_pool(concept, strategies=['umls', 'lexical'], limit=25)) == 25
+    assert client.get(f'{BASE}{concept.pk}/estimate/', {'include_zero_seen': '1'}).data['total'] == 32
+    assert client.get(f'{BASE}{concept.pk}/estimate/', {'strategies': 'umls'}).data['total'] == 1
+    assert not SourceCodeConceptMapping.objects.filter(target_concept=concept).exclude(source_code='DONE').exists()
+
+
+def test_estimate_counts_a_source_found_by_both_strategies_once(client, concept):
+    release = UmlsRelease.objects.create(release_version='test')
+    cui = UmlsConcept.objects.create(cui='C0000001', release=release)
+    for root, code in [('LNC', concept.concept_code), ('SNOMEDCT_US', 'BOTH')]:
+        UmlsSourceCode.objects.create(concept=cui, root_source=root, code=code, term_type='PT', name='Albumin')
+    source('BOTH')
+    data = client.get(f'{BASE}{concept.pk}/estimate/').data
+    assert (data['total'], data['umls'], data['lexical']) == (1, 1, 1)
+
+
+def test_estimate_counts_unregistered_vocabulary_codes_only_with_zero_seen(client, concept):
+    VocabularyFactory(vocabulary_id='SNOMED')
+    ConceptFactory(vocabulary_id='SNOMED', concept_code='VOCAB-ONLY', concept_name='Serum albumin level')
+    ConceptFactory(vocabulary_id='SNOMED', concept_code='REGISTERED', concept_name='Serum albumin measurement')
+    source('REGISTERED', occurrence_count=0)
+    source('DECIDED', status='approved')
+    ConceptFactory(vocabulary_id='SNOMED', concept_code='DECIDED', concept_name='Serum albumin test')
+    assert client.get(f'{BASE}{concept.pk}/estimate/').data['total'] == 0
+    data = client.get(f'{BASE}{concept.pk}/estimate/', {'include_zero_seen': '1'}).data
+    # The registered code is its mapping row, counted once; the decided one is skipped.
+    assert data['total'] == 2 and data['capped'] is False
+    run = {row['source_code'] for row in reverse_retrieval_pool(
+        concept, strategies=['umls', 'lexical'], limit=25, include_zero_seen=True)}
+    assert run == {'VOCAB-ONLY', 'REGISTERED'}
+
+
+def test_estimate_counts_an_open_mapping_row_found_only_by_its_vocabulary_name(client, concept):
+    VocabularyFactory(vocabulary_id='SNOMED')
+    ConceptFactory(vocabulary_id='SNOMED', concept_code='TERSE', concept_name='Serum albumin level')
+    source('TERSE', occurrence_count=0, source_code_description='ALB SER')
+    run = reverse_retrieval_pool(concept, strategies=['lexical'], limit=25, include_zero_seen=True)
+    assert [row['source_code'] for row in run] == ['TERSE']
+    data = client.get(f'{BASE}{concept.pk}/estimate/', {'strategies': 'lexical', 'include_zero_seen': '1'}).data
+    assert (data['total'], data['lexical']) == (1, 1)
+
+
+def test_estimate_reports_a_floor_past_the_catalog_cap(client, concept):
+    VocabularyFactory(vocabulary_id='SNOMED')
+    for index in range(4):
+        ConceptFactory(vocabulary_id='SNOMED', concept_code=f'VOCAB-{index}', concept_name=f'Serum albumin {index}')
+    with patch('omop_core.mapping.reverse_catalog.CATALOG_CAP', 3):
+        data = client.get(f'{BASE}{concept.pk}/estimate/', {'include_zero_seen': '1'}).data
+    assert data['capped'] is True and data['total'] == 3
+
+
+def test_estimate_keeps_registered_counts_when_the_vocabulary_search_runs_out_of_time(client, concept):
+    source('SEEN')
+    source('ZERO', occurrence_count=0)
+    with patch('omop_core.mapping.reverse_suggestions.catalog_keys', side_effect=TimeoutError('Budget exhausted')):
+        data = client.get(f'{BASE}{concept.pk}/estimate/', {'include_zero_seen': '1'}).data
+    assert data['total'] == 2 and data['capped'] is True and data['partial'] is True
+
+
+def test_estimate_says_when_it_ran_out_of_time(client, concept):
+    with patch('omop_core.mapping.reverse_suggestions._estimate', side_effect=TimeoutError('Budget exhausted')):
+        response = client.get(f'{BASE}{concept.pk}/estimate/')
+    assert response.status_code == 200
+    assert response.data == {'total': None, 'timed_out': True}
+
+
+def test_estimate_validates_and_requires_curator_access(client, concept, django_user_model):
+    assert client.get(f'{BASE}{concept.pk}/estimate/', {'strategies': 'vectors'}).status_code == 400
+    assert client.get(f'{BASE}{ConceptFactory(standard_concept=None).pk}/estimate/').status_code == 404
+    client.force_authenticate(django_user_model.objects.create_user(email='estimate-patient@test.com'))
+    assert client.get(f'{BASE}{concept.pk}/estimate/').status_code == 403
+    client.force_authenticate(None)
+    assert client.get(f'{BASE}{concept.pk}/estimate/').status_code in (401, 403)
+
+
 def test_concept_list_is_bounded(client):
     for index in range(52):
         ConceptFactory(concept_name=f'Paged {index:02}')
@@ -301,10 +395,12 @@ def test_concept_list_is_bounded(client):
     assert len(response.data['results']) == 2
 
 
-def test_approval_reuses_clinical_repoint_and_stamps_reviewer(client, concept):
+def test_approval_reuses_clinical_repoint_and_stamps_reviewer(client, concept, django_capture_on_commit_callbacks):
     original = ConceptFactory(standard_concept=None)
     row = source('IMPORTED', target_concept=original, notes='Original import evidence')
-    with patch('patient_portal.api.views.repoint_clinical_rows', side_effect=lambda **kwargs: {'rows_updated': 1, 'person_ids': {7}}) as repoint:
+    with patch('omop_core.services.repoint_jobs.repoint_clinical_rows',
+               side_effect=lambda **kwargs: {'rows_updated': 1, 'rows_collapsed': 0, 'person_ids': {7}}) as repoint, \
+            django_capture_on_commit_callbacks(execute=True):
         response = apply(client, concept, row, status='approved')
     assert response.status_code == 200, response.data
     assert {call.kwargs['old_concept_id'] for call in repoint.call_args_list} == {0, original.pk}
@@ -313,7 +409,7 @@ def test_approval_reuses_clinical_repoint_and_stamps_reviewer(client, concept):
     assert row.reviewer is not None and row.reviewed_at is not None
     assert row.destination_vocabulary_id == concept.vocabulary_id
     assert row.notes == 'Original import evidence'
-    assert response.data['repoint']['persons_marked_stale'] == 1
+    assert response.data['repoint'] == {'queued': True, 'from_concept_ids': sorted([0, original.pk])}
 
 
 def test_proposal_does_not_write_clinical_rows_and_can_be_approved_later(client, concept):
@@ -328,7 +424,8 @@ def test_proposal_does_not_write_clinical_rows_and_can_be_approved_later(client,
 
 
 @pytest.mark.parametrize('propose_first', [False, True])
-def test_approval_moves_stored_imports_and_unresolved_rows_only(client, concept, propose_first):
+def test_approval_moves_stored_imports_and_unresolved_rows_only(client, concept, propose_first,
+                                                               django_capture_on_commit_callbacks):
     original = ConceptFactory(standard_concept=None)
     corrected = ConceptFactory()
     row = source('IMPORTED', target_concept=original, origin='import')
@@ -341,7 +438,8 @@ def test_approval_moves_stored_imports_and_unresolved_rows_only(client, concept,
         row.refresh_from_db()
         stored.refresh_from_db()
         assert stored.measurement_concept_id == original.pk
-    response = apply(client, concept, row, status='approved')
+    with django_capture_on_commit_callbacks(execute=True):
+        response = apply(client, concept, row, status='approved')
     assert response.status_code == 200, response.data
     for fact in (stored, unresolved, unrelated, manual):
         fact.refresh_from_db()
@@ -349,12 +447,13 @@ def test_approval_moves_stored_imports_and_unresolved_rows_only(client, concept,
     assert unresolved.measurement_concept_id == concept.pk
     assert unrelated.measurement_concept_id == original.pk
     assert manual.measurement_concept_id == corrected.pk
-    assert response.data['repoint']['rows_updated'] == 2
+    assert response.data['repoint']['queued'] is True
     row.refresh_from_db()
-    assert row.pending_repoint_concept_ids == []
+    assert row.pending_repoint_concept_ids == [] and row.deferred_repoint_concept_ids == []
 
 
-def test_proposal_history_survives_another_edit_and_approval_in_source_editor(client, concept):
+def test_proposal_history_survives_another_edit_and_approval_in_source_editor(client, concept,
+                                                                            django_capture_on_commit_callbacks):
     original = ConceptFactory(standard_concept=None)
     next_destination = ConceptFactory()
     row = source('IMPORTED', target_concept=original, origin='import')
@@ -370,23 +469,45 @@ def test_proposal_history_survives_another_edit_and_approval_in_source_editor(cl
         'source_code': 'DIFFERENT',
     }, format='json')
     assert response.status_code == 400
-    response = client.patch(f'/api/v1/code-mappings/{row.pk}/', {'status': 'approved'}, format='json')
+    with django_capture_on_commit_callbacks(execute=True):
+        response = client.patch(f'/api/v1/code-mappings/{row.pk}/', {'status': 'approved'}, format='json')
     assert response.status_code == 200, response.data
     row.refresh_from_db(); stored.refresh_from_db()
     assert stored.measurement_concept_id == next_destination.pk
     assert row.pending_repoint_concept_ids == []
 
 
-def test_failed_clinical_update_rolls_back_mapping_approval(client, concept):
+def test_approval_returns_before_rows_move_and_a_failed_job_keeps_the_work(
+        client, concept, django_capture_on_commit_callbacks):
+    """The save writes the mapping; stored rows move after commit, in a job.
+
+    A job that fails leaves the destinations queued on the mapping, and the next
+    run moves them.
+    """
+    from omop_core.services.repoint_jobs import run_repoint
     original = ConceptFactory(standard_concept=None)
     row = source('IMPORTED', target_concept=original)
-    revision = row.updated_at
-    with patch('patient_portal.api.views.repoint_clinical_rows', side_effect=RuntimeError('Database write failed')):
-        with pytest.raises(RuntimeError, match='Database write failed'):
-            apply(client, concept, row, status='approved')
+    stored = MeasurementFactory(measurement_concept=original, measurement_source_value='IMPORTED')
+    with django_capture_on_commit_callbacks() as callbacks:
+        response = apply(client, concept, row, status='approved')
+    assert response.status_code == 200, response.data
+    row.refresh_from_db(); stored.refresh_from_db()
+    # Written, approved, and nothing moved yet.
+    assert row.target_concept_id == concept.pk and row.status == 'approved'
+    assert stored.measurement_concept_id == original.pk
+    assert row.deferred_repoint_concept_ids == sorted([0, original.pk])
+    assert len(callbacks) == 1
+
+    with patch('omop_core.services.repoint_jobs.repoint_clinical_rows', side_effect=RuntimeError('write failed')):
+        with pytest.raises(RuntimeError):
+            run_repoint(row.pk)
     row.refresh_from_db()
-    assert row.target_concept_id == original.pk and row.status == 'proposed'
-    assert row.updated_at == revision and row.reviewer_id is None
+    assert row.deferred_repoint_concept_ids == sorted([0, original.pk])
+
+    assert run_repoint(row.pk)['rows_updated'] == 1
+    row.refresh_from_db(); stored.refresh_from_db()
+    assert stored.measurement_concept_id == concept.pk
+    assert row.deferred_repoint_concept_ids == []
 
 
 def test_json_arrays_are_rejected_without_server_errors(client, concept):
@@ -432,3 +553,112 @@ def test_permissions_and_forward_run_separation(client, concept, django_user_mod
         assert apply(client, concept, row, status='approved').status_code == 400
     row.refresh_from_db()
     assert row.status == 'proposed'
+
+
+# ── Source examples: patient Source Metadata for a source code (#1915) ──────
+
+EXAMPLES = f'{BASE}source-examples/'
+
+
+def inventory(code, record, **overrides):
+    from omop_core.models import PatientSourceCode
+    return PatientSourceCode.objects.create(**{
+        'person': record.person, 'source_value': code, 'source_vocabulary_id': 'SNOMED',
+        'omop_table': 'measurement', 'occurrence_count': 1,
+        'source_metadata': {'category': 'laboratory', 'person': record.person.person_id},
+        **overrides,
+    })
+
+
+def test_source_examples_return_up_to_three_patients_matching_system_and_code(client):
+    from tests.factories import PatientRecordFactory
+    records = [PatientRecordFactory() for _ in range(5)]
+    for index, record in enumerate(records):
+        inventory('ALB', record, occurrence_count=index + 1)
+    inventory('ALB', PatientRecordFactory(), source_vocabulary_id='LOINC')  # other system
+    inventory('ALBX', PatientRecordFactory())                               # other code
+
+    response = client.get(EXAMPLES, {'source_vocabulary_id': 'SNOMED', 'source_code': 'ALB'})
+
+    assert response.status_code == 200
+    examples = response.data['examples']
+    # Most-seen first, one entry per patient, capped at three.
+    assert [example['person_id'] for example in examples] == [r.person.person_id for r in records[::-1][:3]]
+    assert examples[0]['source_metadata'] == {'category': 'laboratory', 'person': records[-1].person.person_id}
+
+
+def test_source_examples_apply_curator_corrections_and_match_vocabulary_aliases(client):
+    from omop_core.services.source_vocabularies import VOCABULARY_OID_ALIASES
+    from tests.factories import PatientRecordFactory
+    alias, canonical = next(iter(VOCABULARY_OID_ALIASES.items()))
+    inventory('ALB', PatientRecordFactory(), source_vocabulary_id=alias, source_unit='g/dl',
+              source_unit_override='g/dL', example_quantity='4', example_quantity_override=None)
+
+    examples = client.get(EXAMPLES, {'source_vocabulary_id': canonical, 'source_code': 'ALB'}).data['examples']
+
+    assert len(examples) == 1
+    assert examples[0]['source_unit'] == 'g/dL'
+    assert examples[0]['example_quantity'] == '4'
+
+
+def test_source_examples_filter_by_table_but_keep_untabled_inventory(client):
+    from tests.factories import PatientRecordFactory
+    measured, untabled, observed = PatientRecordFactory(), PatientRecordFactory(), PatientRecordFactory()
+    inventory('ALB', measured)
+    inventory('ALB', untabled, omop_table='')
+    inventory('ALB', observed, omop_table='observation')
+
+    examples = client.get(EXAMPLES, {'source_vocabulary_id': 'SNOMED', 'source_code': 'ALB',
+                                     'omop_table': 'measurement'}).data['examples']
+
+    assert {example['person_id'] for example in examples} == {measured.person.person_id, untabled.person.person_id}
+
+
+def test_source_examples_only_show_patients_an_org_admin_administers(django_user_model):
+    from omop_core.models import GroupAccess
+    from tests.factories import OrganizationFactory, PatientRecordFactory
+    org, other = OrganizationFactory(), OrganizationFactory()
+    admin = django_user_model.objects.create_user(email='org-admin@test.com')
+    GroupAccess.objects.create(identity=admin, org=org, role='org_admin')
+    mine, theirs = PatientRecordFactory(organization=org), PatientRecordFactory(organization=other)
+    inventory('ALB', mine)
+    inventory('ALB', theirs, occurrence_count=99)
+    api = APIClient()
+    api.force_authenticate(admin)
+
+    examples = api.get(EXAMPLES, {'source_vocabulary_id': 'SNOMED', 'source_code': 'ALB'}).data['examples']
+
+    assert [example['person_id'] for example in examples] == [mine.person.person_id]
+
+
+def test_source_examples_are_denied_to_non_admin_curators(django_user_model):
+    from omop_core.models import GroupAccess
+    from tests.factories import OrganizationFactory, PatientRecordFactory
+    org = OrganizationFactory()
+    doctor = django_user_model.objects.create_user(email='doctor@test.com')
+    GroupAccess.objects.create(identity=doctor, org=org, role='doctor')
+    inventory('ALB', PatientRecordFactory(organization=org))
+    api = APIClient()
+    api.force_authenticate(doctor)
+
+    response = api.get(EXAMPLES, {'source_vocabulary_id': 'SNOMED', 'source_code': 'ALB'})
+
+    assert response.status_code == 403
+    assert 'examples' not in response.data
+
+
+def test_source_examples_require_authentication_and_a_code(client):
+    assert APIClient().get(EXAMPLES, {'source_vocabulary_id': 'SNOMED', 'source_code': 'ALB'}).status_code in (401, 403)
+    assert client.get(EXAMPLES, {'source_vocabulary_id': 'SNOMED'}).status_code == 400
+    assert client.get(EXAMPLES, {'source_code': 'ALB', 'omop_table': 'nonsense'}).status_code == 400
+
+
+def test_source_examples_do_not_write(client):
+    from omop_core.models import PatientSourceCode
+    from tests.factories import PatientRecordFactory
+    row = inventory('ALB', PatientRecordFactory())
+    before = PatientSourceCode.objects.values().get(pk=row.pk)
+
+    assert client.get(EXAMPLES, {'source_vocabulary_id': 'SNOMED', 'source_code': 'ALB'}).status_code == 200
+    assert client.post(EXAMPLES, {'source_vocabulary_id': 'SNOMED', 'source_code': 'ALB'}, format='json').status_code == 405
+    assert PatientSourceCode.objects.values().get(pk=row.pk) == before

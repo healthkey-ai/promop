@@ -6,7 +6,57 @@ All notable changes to PRomop are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **Download a patient record as PDF or FHIR** — the patient record view has a
+  Download button beside the patient's name and number, for every role that can
+  open the record (patients included; it used to be patient-only and FHIR-only).
+  *PDF report* prints the tabs in order under their own labels, holding only
+  fields with a value, plus therapy lines, supportive therapy, genomic findings
+  and, for a patient's own copy, allergies and immunizations. It is generated in
+  the browser from the loaded record, so it reflects unsaved edits and needs no
+  new endpoint or dependency. Its layout is extracted from the tab components
+  (`node scripts/tab-layout.mjs`), and a test fails when the generated layout is
+  stale or misses a field the tabs render. *FHIR R4 bundle* now saves the signed
+  export byte for byte, keeping its digest and signature valid (#1961).
+
+- **Concept mapping priority** — on Code Mapping → Concept to Code, curators
+  rank concepts by dragging rows, typing a priority (1 is first; clear it to
+  unrank) or the up/down buttons. Ranked concepts come first on every page and
+  under every filter; a page-size selector (50/100/250/500) and *Ranked only*
+  bring concepts from later pages within reach. `POST
+  /api/v1/concept-to-code/priority/` moves one concept and renumbers the list.
+  Code-to-concept Suggest keeps a ranked concept that lexical search matched but
+  cut, marks ranked candidates for the ranker as a tie-breaker between equally
+  good matches, and notes when the winner is ranked. `copy_reference_data`
+  carries the ranking by concept key (#1914).
+
+- **Edit Mapping from Concept to Code, with example patients' Source
+  Metadata** — every source code listed under a concept opens the Edit Mapping
+  dialog (a code with no mapping row opens as a New Mapping), with the concept
+  offered as the destination when the code has none. The dialog lists up to
+  three patients whose source inventory carries the exact source system and
+  code, and shows the chosen patient's Source Metadata
+  (`GET /api/v1/concept-to-code/source-examples/`, administrators only, limited
+  to patients the curator can open, read-only). After a Suggest run with a
+  ranker, suggestions without a confidence score are hidden; unranked runs and
+  the Existing mappings and Find source codes lists are unchanged (#1915, #1911).
+
 ### Changed
+
+- **Mapping saves return immediately** — approving or re-pointing a code
+  mapping (Concept to Code, Code to Concept, group approve, CSV upload) writes the mapping
+  and returns; the stored clinical rows move to the new concept in a background
+  job (`omop_core.repoint_mapping_rows`, Celery when `CELERY_BROKER_URL` is set,
+  inline after commit otherwise). The destinations still to move are kept in
+  `deferred_repoint_concept_ids`, so a lost or duplicate task loses nothing. The
+  save response's `repoint` is now `{"queued": true, "from_concept_ids": [...]}`
+  rather than row counts. The approval-time unit-mismatch confirmation (`409
+  unit_mismatch_confirmation_required`, `confirm_unit_mismatch`) is removed:
+  values are normalized when clinical rows are loaded from codes. A failed job
+  is retried three times; `manage.py run_queued_repoints <id>…|--all` moves
+  whatever is still queued. A CSV upload queues one job per approved mapping
+  (#1952).
 
 - **Clearer source-code curation evidence** — Edit Mapping now keeps Source
   Code Value beside Source Description, only loads publisher terminology for

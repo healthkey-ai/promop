@@ -120,14 +120,38 @@ def _visible_orgs(user):
     return get_admin_orgs(user)
 
 
-def _find_identity_by_email(email):
-    identities = list(Identity.objects.filter(email__iexact=email).order_by('id'))
+def _identities_for_email(email: str) -> list[Identity]:
+    return list(Identity.objects.filter(email__iexact=email).order_by('id'))
+
+
+def _local_identity(identities: list[Identity]) -> Identity | None:
+    """The email/password account, preferring one that already has a password."""
     return (
-        next((identity for identity in identities if identity.issuer != 'urn:local'), None)
-        or next((identity for identity in identities if identity.issuer == 'urn:local' and identity.has_usable_password()), None)
-        or next((identity for identity in identities if identity.issuer == 'urn:local'), None)
-        or None
+        next((identity for identity in identities if identity.is_local and identity.has_usable_password()), None)
+        or next((identity for identity in identities if identity.is_local), None)
     )
+
+
+def _federated_identity(identities: list[Identity]) -> Identity | None:
+    return next((identity for identity in identities if not identity.is_local), None)
+
+
+def _find_identity_by_email(email: str) -> Identity | None:
+    identities = _identities_for_email(email)
+    return _federated_identity(identities) or _local_identity(identities)
+
+
+def _invitation_needs_password(invitation, identities: list[Identity]) -> bool:
+    """Whether accepting this invitation has to set a local password.
+
+    `EmailBackend` authenticates `urn:local` accounts only, so a federated account
+    on the same address is not a credential the login form can use. The patient
+    role has its own invite flow and is left alone here.
+    """
+    if invitation.role == 'patient':
+        return False
+    local = _local_identity(identities)
+    return local is None or not local.has_usable_password() or not local.has_verified_email
 
 
 def _get_or_create_invitee_identity(email):
@@ -502,59 +526,71 @@ def confirm_invitation(request):
     if invitation.status == OrgInvitation.STATUS_EXPIRED:
         return Response({'error': 'Invitation has expired.'}, status=status.HTTP_400_BAD_REQUEST)
 
-    # Prefer a local-auth identity; fall back to any identity with this email
-    # so that OIDC/SSO users can also confirm invitations.
-    identity = _find_identity_by_email(invitation.email)
+    identities = _identities_for_email(invitation.email)
+    federated = _federated_identity(identities)
+    local = _local_identity(identities)
+    identity = federated or local
 
     # Mirror the patient-invite flow for professional-role invitees: someone with
     # no account, or a local placeholder that has never set a password, sets one
-    # here. SSO/OIDC users (non-local issuer) authenticate via their provider and
-    # need no local password. The patient role has its own dedicated invite flow,
-    # so it is left untouched here.
-    needs_password = (
-        invitation.role != 'patient'
-        and (
-            identity is None
-            or (identity.is_local and (not identity.has_usable_password() or not identity.has_verified_email))
-        )
-    )
-    if needs_password:
+    # here. The patient role has its own dedicated invite flow, so it is left
+    # untouched. A federated account next to the same address is not a credential
+    # the login form accepts, so it does not remove the need for a password.
+    needs_password = _invitation_needs_password(invitation, identities)
+    # A federated invitee may accept without one and keep signing in through their
+    # provider. With no such fallback the invitation is their only way in, so an
+    # unusable password is refused rather than dropped behind a 200 (#1935).
+    set_local_password = needs_password and bool(password or federated is None)
+    if set_local_password:
         from patient_portal.services import password_validation_errors
         pw_errors = password_validation_errors(password, email=invitation.email)
         if pw_errors:
             return Response({'error': ' '.join(pw_errors)}, status=status.HTTP_400_BAD_REQUEST)
 
     with transaction.atomic():
-        if needs_password:
+        if set_local_password:
             from patient_portal.services import record_password
-            if identity is None:
-                identity = Identity.objects.create_user(email=invitation.email, password=password)
-                record_password(identity)
+            if local is None:
+                local = Identity.objects.create_user(email=invitation.email, password=password)
             else:
                 # Claim the placeholder account created at invite time.
-                identity.set_password(password)
-                identity.is_active = True
-                identity.save(update_fields=['password', 'is_active'])
-                record_password(identity)
+                local.set_password(password)
+                local.is_active = True
+                local.save(update_fields=['password', 'is_active'])
+            record_password(local)
+
+        if identity is None:
+            identity = local or _get_or_create_invitee_identity(invitation.email)
+
+        # Authorization keys on the identity row, so every account the invitee can
+        # arrive with needs the grant: the local one for the login form, the
+        # federated one for the host app's token.
+        if invitation.role == 'patient':
+            grant_targets = [identity]
+        else:
+            grant_targets = [target for target in (local, federated) if target is not None] or [identity]
 
         # The token reached the invited mailbox, so holding it proves the address
         # -- for the account it was sent to, not for a differently-addressed one.
-        if identity is None:
-            identity = _get_or_create_invitee_identity(invitation.email)
-        if (identity.email or '').lower() == invitation.email.lower():
-            identity.mark_email_verified()
+        for target in grant_targets:
+            if (target.email or '').lower() == invitation.email.lower():
+                target.mark_email_verified()
 
         # Grant access — use get_or_create rather than update_or_create to avoid
         # silently downgrading an existing higher-privilege role (e.g. org_admin → doctor).
         # If the grant already exists, leave it unchanged; the invitation is still
         # marked confirmed so it can't be replayed.
-        grant = _grant_org_access(
-            identity,
-            invitation.org,
-            invitation.role,
-            invitation.invited_by,
-            redirect_url=invitation.redirect_url,
-        )
+        grants = [
+            _grant_org_access(
+                target,
+                invitation.org,
+                invitation.role,
+                invitation.invited_by,
+                redirect_url=invitation.redirect_url,
+            )
+            for target in grant_targets
+        ]
+        grant = grants[0]
 
         # For patient invites, create the PatientUser link
         if invitation.role == 'patient':
@@ -624,14 +660,7 @@ def org_invitation_lookup(request):
     if invitation.status == OrgInvitation.STATUS_EXPIRED:
         return Response({'error': 'Invitation has expired.'}, status=status.HTTP_400_BAD_REQUEST)
 
-    identity = _find_identity_by_email(invitation.email)
-    needs_password = (
-        invitation.role != 'patient'
-        and (
-            identity is None
-            or (identity.is_local and (not identity.has_usable_password() or not identity.has_verified_email))
-        )
-    )
+    needs_password = _invitation_needs_password(invitation, _identities_for_email(invitation.email))
     return Response({
         'email': invitation.email,
         'org_name': invitation.org.name,

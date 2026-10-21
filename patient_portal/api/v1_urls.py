@@ -1,8 +1,12 @@
 from .canonical_units import canonical_unit
 from django.urls import include, path
+from .loinc_axes import (
+    code_mapping_axis_variant, code_mapping_loinc_axes, code_mapping_snomed_attributes, loinc_axis_values,
+)
 from .concept_to_code import (
     concept_to_code_list, concept_to_code_detail, concept_to_code_suggest,
     concept_to_code_run, concept_to_code_apply, concept_to_code_propose,
+    concept_to_code_source_examples, concept_to_code_priority, concept_to_code_estimate,
 )
 from rest_framework.routers import DefaultRouter
 from .concept_mint import mint_destination
@@ -174,8 +178,11 @@ urlpatterns = [
     path('concept-to-code/', concept_to_code_list, name='v1-concept-to-code-list'),
     path('concept-to-code/suggest/', concept_to_code_suggest, name='v1-concept-to-code-suggest'),
     path('concept-to-code/suggest-runs/<uuid:run_id>/', concept_to_code_run, name='v1-concept-to-code-run'),
+    path('concept-to-code/priority/', concept_to_code_priority, name='v1-concept-to-code-priority'),
+    path('concept-to-code/source-examples/', concept_to_code_source_examples, name='v1-concept-to-code-source-examples'),
     path('concept-to-code/<int:concept_id>/', concept_to_code_detail, name='v1-concept-to-code-detail'),
     path('concept-to-code/<int:concept_id>/mappings/<int:mapping_id>/', concept_to_code_apply, name='v1-concept-to-code-apply'),
+    path('concept-to-code/<int:concept_id>/estimate/', concept_to_code_estimate, name='v1-concept-to-code-estimate'),
     path('concept-to-code/<int:concept_id>/mappings/', concept_to_code_propose, name='v1-concept-to-code-propose'),
     path('code-mappings/', code_mapping_list, name='v1-code-mapping-list'),
     path('code-mappings/upload/', code_mapping_upload, name='v1-code-mapping-upload'),
@@ -198,6 +205,10 @@ urlpatterns = [
     path('code-mappings/vocabularies/', code_mapping_vocabularies, name='v1-code-mapping-vocabularies'),
     path('code-mappings/<int:mapping_id>/', code_mapping_detail, name='v1-code-mapping-detail'),
     path('code-mappings/<int:mapping_id>/lock/', code_mapping_lock, name='v1-code-mapping-lock'),
+    path('code-mappings/<int:mapping_id>/loinc-axes/', code_mapping_loinc_axes, name='v1-code-mapping-loinc-axes'),
+    path('code-mappings/<int:mapping_id>/axis-variants/', code_mapping_axis_variant, name='v1-code-mapping-axis-variant'),
+    path('code-mappings/<int:mapping_id>/snomed-attributes/', code_mapping_snomed_attributes, name='v1-code-mapping-snomed-attributes'),
+    path('loinc/axis-values/', loinc_axis_values, name='v1-loinc-axis-values'),
     path('custom-patient-fields/', custom_patient_field_list, name='v1-custom-patient-field-list'),
     path('field-mappings/propose-all/', propose_all_mappings, name='v1-field-mapping-propose-all'),
     path('field-mappings/<int:pk>/', field_mapping_detail, name='v1-field-mapping-detail'),

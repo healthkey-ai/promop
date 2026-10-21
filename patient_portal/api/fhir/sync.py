@@ -596,6 +596,44 @@ class FhirSyncView(APIView):
                 person, rollups, ehr_type, cache, source_user_id, org, skipped)
         return ids
 
+    def _axis_variant_concept(self, codeable, unit, cache):
+        """The concept an approved LOINC axis variant gives this unit, or None.
+
+        One hospital code reported in mg/dL and mmol/L is two LOINC tests, so
+        the code alone does not settle the concept (see
+        omop_core/mapping/axis_variants). Cached per code and unit, like
+        _lookup's answers.
+        """
+        if not unit:
+            return None
+        from omop_core.mapping.axis_variants import variant_for
+        from omop_core.mapping.code_resolution import _mapping_scope
+        from omop_core.models import SourceCodeConceptMapping
+
+        # One query per sync while no code has variants, which is the usual
+        # deployment: a per-code probe would add a query for every lab code.
+        if ('axis-variant-any',) not in cache:
+            cache[('axis-variant-any',)] = SourceCodeConceptMapping.objects.filter(
+                axis_variant_count__gt=0).exists()
+        if not cache[('axis-variant-any',)]:
+            return None
+
+        organization = getattr(self, '_mapping_organization', None)
+        for coding in _codings(codeable):
+            code = coding.get('code')
+            if not code:
+                continue
+            vocab = fhir_source_vocabulary(coding.get('system', ''))
+            key = ('axis-variant', vocab, code, unit)
+            if key not in cache:
+                mapping = (_mapping_scope(vocab, code, organization)
+                           .filter(axis_variant_count__gt=0).first())
+                variant = variant_for(mapping, unit)
+                cache[key] = variant.target_concept if variant is not None else None
+            if cache[key] is not None:
+                return cache[key]
+        return None
+
     def _parse_obs(self, obs, cache):
         """Pull the fields one Observation maps onto a Measurement."""
         effective = obs.get('effectiveDateTime') or (obs.get('effectivePeriod') or {}).get('start')
@@ -603,6 +641,8 @@ class FhirSyncView(APIView):
         interpretation = _first_codeable(obs.get('interpretation'))
         interpretation_concept = self._lookup(interpretation, cache)
         qty = obs.get('valueQuantity') or {}
+        concept = self._axis_variant_concept(
+            obs.get('code'), qty.get('code') or qty.get('unit'), cache) or concept
         return {
             'date': _parse_date(effective),
             'dt': _parse_datetime(effective),
