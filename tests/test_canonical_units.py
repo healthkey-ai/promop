@@ -67,6 +67,8 @@ def test_other_lab_spellings(spelling, expected):
     # G/L is giga per litre (an alias); g/l is shared with gram per litre, so not guessed.
     ('G/L', '10*9/L'), ('g/l', 'g/l'),
     ('%', '%'), ('foo/bar', 'foo/bar'), ('', ''),
+    # Longer than any unit: passed through, not read.
+    ('g' + '\t' * 5000 + 'historical', 'g' + '\t' * 5000 + 'historical'),
 ])
 def test_spellings_that_are_left_alone(unit, expected):
     from omop_core.services.canonical_units import unit_code

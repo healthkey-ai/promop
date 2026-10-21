@@ -136,7 +136,18 @@ _UNIT_WORDS = {
 }
 _UNIT_WORD = re.compile(r'[a-z]+')
 #: A lab's own annotation after the unit: "g/dL-Historical".
-_ANNOTATION = re.compile(r'[\s\-_(]*historical\)?$')
+_ANNOTATIONS = ('historical)', 'historical')
+#: Longer than any unit; such text is passed through without being read.
+_MAX_UNIT_LENGTH = 40
+
+
+def _without_annotation(folded):
+    # String operations, not a regex: units come from uploads, and a pattern
+    # with a repeated separator class backtracks on long runs of whitespace.
+    for annotation in _ANNOTATIONS:
+        if folded.endswith(annotation):
+            return folded[:-len(annotation)].rstrip(' \t-_(')
+    return folded
 
 
 def _spelling_index():
@@ -170,11 +181,11 @@ def unit_code(unit):
     unit = (unit or '').strip().replace('µ', 'u').replace('μ', 'u')
     if unit in UNIT_ALIASES:
         return UNIT_ALIASES[unit]
-    if len(unit) <= 2 or any(unit in units for units in UNIT_GROUPS.values()):
+    if len(unit) <= 2 or len(unit) > _MAX_UNIT_LENGTH or any(unit in units for units in UNIT_GROUPS.values()):
         return unit
     if _SPELLINGS is None:
         _SPELLINGS = _spelling_index()
-    folded = _ANNOTATION.sub('', unit.casefold())
+    folded = _without_annotation(unit.casefold())
     spelled = _UNIT_WORD.sub(lambda word: _UNIT_WORDS.get(word.group(), word.group()).casefold(), folded)
     spelled = re.sub(r'\s+', '', spelled)
     return _SPELLINGS.get(spelled, unit)
