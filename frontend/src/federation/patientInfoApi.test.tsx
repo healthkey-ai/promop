@@ -42,7 +42,7 @@ describe("usePatchPatientInfo — cache update strategy (issue #113)", () => {
     });
 
     // Seed existing cache data so setQueryData has something to merge into
-    qc.setQueryData(["patient-info", "me"], {
+    qc.setQueryData(["patient-info", "me", "/api"], {
       patient_info: { disease: null, id: 1 },
       user: { email: "test@test.com" },
       patient_name: "Test Patient",
@@ -62,12 +62,12 @@ describe("usePatchPatientInfo — cache update strategy (issue #113)", () => {
 
     // Must NOT invalidate (that would refetch and potentially return null disease)
     expect(invalidateSpy).not.toHaveBeenCalledWith(
-      expect.objectContaining({ queryKey: ["patient-info", "me"] }),
+      expect.objectContaining({ queryKey: ["patient-info", "me", "/api"] }),
     );
 
     // MUST update the cache directly so the mutation result is visible immediately
     expect(setDataSpy).toHaveBeenCalledWith(
-      ["patient-info", "me"],
+      ["patient-info", "me", "/api"],
       expect.any(Function),
     );
   });
@@ -83,7 +83,7 @@ describe("usePatchPatientInfo — cache update strategy (issue #113)", () => {
       user: { email: "test@test.com" },
       patient_name: "Test Patient",
     };
-    qc.setQueryData(["patient-info", "me"], initial);
+    qc.setQueryData(["patient-info", "me", "/api"], initial);
 
     const { result } = renderHook(
       () => usePatchPatientInfo(client, "/api"),
@@ -94,7 +94,7 @@ describe("usePatchPatientInfo — cache update strategy (issue #113)", () => {
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
-    const cached = qc.getQueryData<typeof initial>(["patient-info", "me"]);
+    const cached = qc.getQueryData<typeof initial>(["patient-info", "me", "/api"]);
     // Updated fields from PATCH response
     expect(cached?.patient_info.disease).toBe("Follicular Lymphoma");
     expect(cached?.patient_info.stage).toBe("II");
@@ -112,7 +112,7 @@ describe("usePatchPatientInfo — cache update strategy (issue #113)", () => {
       },
     });
 
-    qc.setQueryData(["patient-info", "me"], {
+    qc.setQueryData(["patient-info", "me", "/api"], {
       patient_info: { disease: null, id: 1 },
       user: {},
       patient_name: "",
@@ -128,7 +128,7 @@ describe("usePatchPatientInfo — cache update strategy (issue #113)", () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
     const cached = qc.getQueryData<{ patient_info: Record<string, unknown> }>(
-      ["patient-info", "me"],
+      ["patient-info", "me", "/api"],
     );
     expect(cached?.patient_info.disease).toBe("Multiple Myeloma");
     // previous_values must not leak into patient_info

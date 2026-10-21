@@ -33,6 +33,7 @@ function getTherapyOptions(diseaseType: string, line: 'first' | 'second' | 'late
     case 'lymphoma':
     // MCL reuses the B-cell NHL regimen lists (R-CHOP / BR / rituximab overlap) until a curated
     // mantle-cell list exists — correct-adjacent, and far better than the generic 'Other'.
+    // falls through
     case 'mcl':
       if (line === 'first') return LYMPHOMA_FIRST_LINE;
       if (line === 'second') return LYMPHOMA_SECOND_LINE;

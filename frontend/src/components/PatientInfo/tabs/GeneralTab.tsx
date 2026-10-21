@@ -1,11 +1,12 @@
 import { useVocabulary } from '@/hooks/useVocabulary';
 import Field from '../Field';
+import { normalizeGender } from '../utils';
 import Section from '../Section';
 import { Input } from '@/components/shadcn/input';
 import {
   GENDER_OPTIONS, COUNTRY_OPTIONS, US_STATES, RACE_OPTIONS, ETHNICITY_OPTIONS,
   DISEASE_OPTIONS, STAGE_OPTIONS, HISTOLOGIC_TYPE_OPTIONS,
-  ECOG_OPTIONS, KARNOFSKY_OPTIONS,
+  ECOG_OPTIONS, KARNOFSKY_OPTIONS, ISS_STAGE_OPTIONS, BINET_STAGE_OPTIONS,
 } from '../patientConstants';
 
 interface Props {
@@ -36,7 +37,27 @@ export default function GeneralTab({ formData, onChange, editedName, onNameChang
   const { options: histologicOptions, source: histologicSource } = useVocabulary('histologic-type', 'title');
 
   const age = formData?.date_of_birth ? calculateAge(formData.date_of_birth as string) : null;
-  const histOptions = histologicOptions.length ? histologicOptions.map((o: { value: string }) => o.value) : HISTOLOGIC_TYPE_OPTIONS;
+  const histOptions = histologicOptions.length ? histologicOptions : HISTOLOGIC_TYPE_OPTIONS;
+
+  // `stage` is Ann Arbor/TNM for most diseases, ISS for myeloma and Binet for CLL. The projection
+  // stores CLL as the short code (`B`); map it to the Binet label for display and back on edit.
+  const stageOptions = diseaseType === 'myeloma'
+    ? ISS_STAGE_OPTIONS
+    : diseaseType === 'cll'
+      ? BINET_STAGE_OPTIONS
+      : STAGE_OPTIONS;
+  const binetCode = (value: unknown) => {
+    const raw = String(value ?? '').trim();
+    const match = raw.match(/^Binet Stage ([ABC])\b/i);
+    return match ? match[1].toUpperCase() : raw;
+  };
+  const binetLabel = (value: unknown) => {
+    const code = binetCode(value);
+    return BINET_STAGE_OPTIONS.find((o) => o.startsWith(`Binet Stage ${code}`)) ?? String(value ?? '');
+  };
+  const stageValue = diseaseType === 'cll' ? binetLabel(formData?.stage) : formData?.stage;
+  const onStageChange = (name: string, value: unknown) =>
+    onChange(name, diseaseType === 'cll' ? binetCode(value) : value);
 
   return (
     <div>
@@ -59,7 +80,7 @@ export default function GeneralTab({ formData, onChange, editedName, onNameChang
         </div>
 
         <Field label="Gender" name="gender" type="select"
-          value={formData?.gender} options={GENDER_OPTIONS} onChange={onChange} />
+          value={normalizeGender(formData?.gender)} options={GENDER_OPTIONS} onChange={onChange} />
 
         <div className="sm:col-span-2">
           <Field label="Email" name="email" type="email"
@@ -112,8 +133,8 @@ export default function GeneralTab({ formData, onChange, editedName, onNameChang
             onChange={onChange} vocabSource={diseaseSource} />
 
           <Field label="Stage" name="stage" type="select"
-            value={formData?.stage} options={STAGE_OPTIONS}
-            onChange={onChange} vocabSource={cancerStageSource} />
+            value={stageValue} options={stageOptions}
+            onChange={onStageChange} vocabSource={cancerStageSource} />
 
           {(!diseaseType || diseaseType === 'breast' || diseaseType === 'other') && (
             <div className="sm:col-span-2">

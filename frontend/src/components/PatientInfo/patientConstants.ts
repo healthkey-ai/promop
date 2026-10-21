@@ -18,6 +18,21 @@ export const RACE_OPTIONS = [
 export const ETHNICITY_OPTIONS = ['Hispanic or Latino', 'Not Hispanic or Latino', 'Unknown'];
 export const DISEASE_OPTIONS = ['Breast Cancer', 'Follicular Lymphoma', 'Multiple Myeloma', 'Chronic Lymphocytic Leukemia (CLL)', 'Lung Cancer', 'Colon Cancer', 'Other'];
 export const STAGE_OPTIONS = ['0', 'I', 'IA', 'IB', 'II', 'IIA', 'IIB', 'III', 'IIIA', 'IIIB', 'IIIC', 'IV', 'Unknown'];
+export const LYMPHOMA_HISTOLOGIC_TYPE_OPTIONS = [
+  'Unknown',
+  'Follicular lymphoma',
+  'Follicular lymphoma, grade 1',
+  'Follicular lymphoma, grade 2',
+  'Follicular lymphoma, grade 3',
+  'Follicular lymphoma, grade 3A',
+  'Follicular lymphoma, grade 3B',
+  'Mantle cell lymphoma',
+  'Diffuse large B-cell lymphoma (DLBCL)',
+  'Marginal zone lymphoma',
+  'Burkitt lymphoma',
+  'Chronic lymphocytic leukemia / small lymphocytic lymphoma',
+];
+
 export const HISTOLOGIC_TYPE_OPTIONS = [
   'Unknown',
   'Infiltrating ductal carcinoma (IDC)',
@@ -93,12 +108,15 @@ export const HRD_OPTIONS = ['HRD+', 'HRD-', 'Unknown'];
 export const MENOPAUSAL_OPTIONS = ['Pre-menopausal', 'Peri-menopausal', 'Post-menopausal', 'Unknown'];
 export const FLIPI_RISK_OPTIONS = ['Low', 'Intermediate', 'High'];
 export const FLIPI_FACTOR_OPTIONS = ['Age ≥ 60', 'Stage III/IV', 'Hgb < 12 g/dL', 'Nodal areas > 4', 'Elevated LDH'];
-export const GELF_OPTIONS = ['Met', 'Not Met', 'Unknown'];
-export const FL_TUMOR_GRADE_OPTIONS = [
-  'Grade 1 (0–5 centroblasts/HPF)',
-  'Grade 2 (6–15 centroblasts/HPF)',
-  'Grade 3a (>15 centroblasts/HPF, centrocytes present)',
-  'Grade 3b (solid sheets of centroblasts)',
+export const GELF_OPTIONS = ['Met', 'Not Met', 'High tumor burden', 'Unknown'];
+// PROMOP stores the FL grade as an integer/grade code (`2`), while the editable label is prose.
+// Keep the code as the option value so the select matches the API; Field preserves the label.
+export const FL_TUMOR_GRADE_OPTIONS: { value: string; label: string }[] = [
+  { value: '1', label: 'Grade 1 (0–5 centroblasts/HPF)' },
+  { value: '2', label: 'Grade 2 (6–15 centroblasts/HPF)' },
+  { value: '3', label: 'Grade 3 (not otherwise specified)' },
+  { value: '3a', label: 'Grade 3a (>15 centroblasts/HPF, centrocytes present)' },
+  { value: '3b', label: 'Grade 3b (solid sheets of centroblasts)' },
 ];
 export const MYELOMA_TYPE_OPTIONS = [
   'IgG Kappa', 'IgG Lambda', 'IgA Kappa', 'IgA Lambda',

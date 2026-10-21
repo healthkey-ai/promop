@@ -7,14 +7,14 @@ import Section from '../Section';
 import SelectControl from '../controls/SelectControl';
 import { stringsToOptions } from '../utils';
 import {
-  STAGE_OPTIONS, HISTOLOGIC_TYPE_OPTIONS,
+  STAGE_OPTIONS, HISTOLOGIC_TYPE_OPTIONS, LYMPHOMA_HISTOLOGIC_TYPE_OPTIONS,
   MENOPAUSAL_OPTIONS, TUMOR_STAGE_OPTIONS, NODES_STAGE_OPTIONS,
   STAGING_MODALITIES_OPTIONS, DISTANT_METASTASIS_STAGE_OPTIONS,
-  YES_NO_OPTIONS, ER_OPTIONS, PR_OPTIONS, HER2_OPTIONS, HR_OPTIONS, HRD_OPTIONS,
+  YES_NO_OPTIONS, POSITIVE_NEGATIVE_OPTIONS, ER_OPTIONS, PR_OPTIONS, HER2_OPTIONS, HR_OPTIONS, HRD_OPTIONS,
   DISEASE_OPTIONS,
-  FLIPI_RISK_OPTIONS, FLIPI_FACTOR_OPTIONS, GELF_OPTIONS, FL_TUMOR_GRADE_OPTIONS,
+  FLIPI_FACTOR_OPTIONS, GELF_OPTIONS, FL_TUMOR_GRADE_OPTIONS,
   ISS_STAGE_OPTIONS, MM_PROGRESSION_OPTIONS, STEM_CELL_TRANSPLANT_OPTIONS, SCT_ELIGIBILITY_OPTIONS, MYELOMA_TYPE_OPTIONS,
-  MRD_STATUS_OPTIONS, CYTOGENETIC_RISK_OPTIONS,
+  MRD_STATUS_OPTIONS,
   BINET_STAGE_OPTIONS, TUMOR_BURDEN_OPTIONS, DISEASE_ACTIVITY_OPTIONS,
   RICHTER_TRANSFORMATION_OPTIONS, PROTEIN_EXPRESSION_OPTIONS,
   GENE_OPTIONS, MUTATION_OPTIONS, ORIGIN_OPTIONS, INTERPRETATION_OPTIONS,
@@ -42,7 +42,7 @@ function BreastCancerSection({ formData, onChange, onMutationAdd, onMutationRemo
   const { source: stagingModalitySource } = useVocabulary('staging-modality', 'title');
   const { options: histologicOptions, source: histologicSource } = useVocabulary('histologic-type', 'title');
 
-  const histOptions = histologicOptions.length ? histologicOptions.map((o: { value: string }) => o.value) : HISTOLOGIC_TYPE_OPTIONS;
+  const histOptions = histologicOptions.length ? histologicOptions : HISTOLOGIC_TYPE_OPTIONS;
   // genetic_mutations are already adapted to the UI shape (variant→mutation, canonical casing) at load
   // by normalizeGeneticMutations in PatientInfo's initialInfo, so read them directly here.
   const mutations = (formData?.genetic_mutations || []) as UiMutation[];
@@ -77,7 +77,7 @@ function BreastCancerSection({ formData, onChange, onMutationAdd, onMutationRemo
           <Field label="HER2 Status" name="her2_status" type="select" value={formData?.her2_status} options={HER2_OPTIONS} onChange={onChange} vocabSource={her2Source} />
           <Field label="HR Status" name="hr_status" type="select" value={formData?.hr_status} options={HR_OPTIONS} onChange={onChange} vocabSource={hrSource} />
           <Field label="HRD Status" name="hrd_status" type="select" value={formData?.hrd_status} options={HRD_OPTIONS} onChange={onChange} vocabSource={hrdSource} />
-          <Field label="Androgen Receptor Status" name="androgen_receptor_status" type="select" value={formData?.androgen_receptor_status} options={ER_OPTIONS} onChange={onChange} />
+          <Field label="Androgen Receptor Status" name="androgen_receptor_status" type="select" value={formData?.androgen_receptor_status} options={POSITIVE_NEGATIVE_OPTIONS} onChange={onChange} />
           <div className="space-y-1.5">
             <label className="text-sm font-medium text-portal-text-primary">Triple Negative Status (Computed)</label>
             <div className="flex h-9 w-full items-center rounded-md border border-input bg-portal-bg-secondary px-3 py-2 text-sm text-portal-text-tertiary">
@@ -91,7 +91,9 @@ function BreastCancerSection({ formData, onChange, onMutationAdd, onMutationRemo
       <Section title="Additional Biomarkers">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <Field label="Ki-67 Proliferation Index (%)" name="ki67_proliferation_index" type="number" value={formData?.ki67_proliferation_index} onChange={onChange} />
-          <Field label="PD-L1 Status (%)" name="pd_l1_tumor_cells" type="number" value={formData?.pd_l1_tumor_cells} onChange={onChange} />
+          <Field label="PD-L1 Tumor Cells (%)" name="pd_l1_tumor_cells" type="number" value={formData?.pd_l1_tumor_cells} onChange={onChange} />
+          <Field label="PD-L1 Immune Cell (%) " name="pd_l1_ic_percentage" type="number" value={formData?.pd_l1_ic_percentage} onChange={onChange} />
+          <Field label="PD-L1 Combined Positive Score" name="pd_l1_combined_positive_score" type="number" value={formData?.pd_l1_combined_positive_score} onChange={onChange} />
           <Field label="Oncotype DX Score" name="oncotype_dx_score" type="number" value={formData?.oncotype_dx_score} onChange={onChange} />
         </div>
       </Section>
@@ -183,29 +185,26 @@ function BreastCancerSection({ formData, onChange, onMutationAdd, onMutationRemo
 
 function LymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>) {
   const { source: gelfSource }    = useVocabulary('gelf-criteria', 'title');
-  const { source: flipiSource }   = useVocabulary('flipi-score', 'code');
   const { source: flGradeSource } = useVocabulary('follicular-lymphoma-grade', 'title');
   const { options: txOutcomeOptions, source: txOutcomeSource } = useVocabulary('post-transformation-outcome', 'title');
-  const { options: histologicOptions, source: histologicSource } = useVocabulary('histologic-type', 'title');
-  const histOptions = histologicOptions.length ? histologicOptions.map((o: { value: string }) => o.value) : HISTOLOGIC_TYPE_OPTIONS;
+  // The authenticated histologic-type vocabulary is breast-specific, so using it for lymphoma
+  // showed only breast options (and a FL/MCL value rendered blank). Use the lymphoma fallback.
+  const histOptions = LYMPHOMA_HISTOLOGIC_TYPE_OPTIONS;
 
   return (
     <>
       <Section title="Disease Characteristics">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <div className="sm:col-span-2">
-            <Field label="Histologic Subtype" name="histologic_type" type="select" value={formData?.histologic_type} options={histOptions} onChange={onChange} vocabSource={histologicSource} />
+            <Field label="Histologic Subtype" name="histologic_type" type="select" value={formData?.histologic_type} options={histOptions} onChange={onChange} />
           </div>
           <Field label="Ann Arbor Stage" name="stage" type="select" value={formData?.stage} options={STAGE_OPTIONS} onChange={onChange} />
-          <Field label="Tumor Grade" name="tumor_grade" type="select" value={formData?.tumor_grade} options={FL_TUMOR_GRADE_OPTIONS} onChange={onChange} vocabSource={flGradeSource} />
+          <Field label="Tumor Grade" name="tumor_grade" type="select" value={formData?.tumor_grade == null ? '' : String(formData.tumor_grade)} options={FL_TUMOR_GRADE_OPTIONS} onChange={(name, value) => onChange(name, value === '' ? '' : Number(value))} vocabSource={flGradeSource} />
           <Field label="GELF Criteria" name="gelf_criteria_status" type="select" value={formData?.gelf_criteria_status} options={GELF_OPTIONS} onChange={onChange} vocabSource={gelfSource} />
           <Field label="FLIPI Score" name="flipi_score" type="number" value={formData?.flipi_score} onChange={onChange} />
-          <Field label="FLIPI Risk Category" name="flipi_risk_category" type="select" value={formData?.flipi_risk_category} options={FLIPI_RISK_OPTIONS} onChange={onChange} vocabSource={flipiSource} />
           <div className="sm:col-span-2">
             <Field label="FLIPI Risk Factors" name="flipi_score_options" type="multiselect" value={formData?.flipi_score_options} options={FLIPI_FACTOR_OPTIONS} onChange={onChange} />
           </div>
-          <Field label="Bulky Disease" name="bulky_disease" type="select" value={formData?.bulky_disease} options={YES_NO_OPTIONS} onChange={onChange} />
-          <Field label="B Symptoms" name="b_symptoms" type="select" value={formData?.b_symptoms} options={YES_NO_OPTIONS} onChange={onChange} />
         </div>
       </Section>
 
@@ -221,9 +220,8 @@ function LymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onCha
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <Field label="LDH Level (U/L)" name="ldh_level" type="number" value={formData?.ldh_level} onChange={onChange} />
           <Field label="Beta-2 Microglobulin (mg/L)" name="beta2_microglobulin" type="number" value={formData?.beta2_microglobulin} onChange={onChange} />
-          <Field label="Bone Marrow Involvement" name="bone_marrow_involvement" type="select" value={formData?.bone_marrow_involvement} options={YES_NO_OPTIONS} onChange={onChange} />
+          <Field label="Bone Marrow Involvement" name="bone_marrow_involvement" type="boolean" value={formData?.bone_marrow_involvement} onChange={onChange} />
           <Field label="Clonal Bone Marrow B Lymphocytes (%)" name="clonal_bone_marrow_b_lymphocytes" type="number" value={formData?.clonal_bone_marrow_b_lymphocytes} onChange={onChange} />
-          <Field label="Number of Nodal Sites" name="number_of_nodal_sites" type="number" value={formData?.number_of_nodal_sites} onChange={onChange} />
         </div>
       </Section>
     </>
@@ -236,34 +234,35 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
   const { options: sctEligibilityOptions, source: sctEligibilitySource } = useVocabulary('sct-eligibility', 'title');
   const { options: myelomaTypeOptions, source: myelomaTypeSource } = useVocabulary('myeloma-type', 'title');
 
+  const sctTypes = sctTypeOptions.length ? sctTypeOptions : STEM_CELL_TRANSPLANT_OPTIONS;
+  const sctEligibility = sctEligibilityOptions.length ? sctEligibilityOptions : SCT_ELIGIBILITY_OPTIONS;
+  const myelomaTypes = myelomaTypeOptions.length ? myelomaTypeOptions : MYELOMA_TYPE_OPTIONS;
+
   return (
     <>
       <Section title="Disease Characteristics">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field label="Myeloma Type" name="myeloma_type" type="select" value={formData?.myeloma_type} options={myelomaTypeOptions.length ? myelomaTypeOptions.map((o: { value: string }) => o.value) : MYELOMA_TYPE_OPTIONS} onChange={onChange} vocabSource={myelomaTypeSource} />
+          <Field label="Myeloma Type" name="myeloma_type" type="select" value={formData?.myeloma_type} options={myelomaTypes} onChange={onChange} vocabSource={myelomaTypeSource} />
           <Field label="ISS Stage" name="stage" type="select" value={formData?.stage} options={ISS_STAGE_OPTIONS} onChange={onChange} />
-          <Field label="R-ISS Stage" name="r_iss_stage" type="select" value={formData?.r_iss_stage} options={ISS_STAGE_OPTIONS} onChange={onChange} />
-          <Field label="Durie-Salmon Stage" name="durie_salmon_stage" type="text" value={formData?.durie_salmon_stage} onChange={onChange} />
           <Field label="Progression Status" name="progression" type="select" value={formData?.progression} options={MM_PROGRESSION_OPTIONS} onChange={onChange} vocabSource={progressionSource} />
           <Field label="Measurable Disease (IMWG)" name="measurable_disease_imwg" type="boolean" value={formData?.measurable_disease_imwg} onChange={onChange} />
           <Field label="MRD Status" name="mrd_status" type="select" value={formData?.mrd_status} options={MRD_STATUS_OPTIONS} onChange={onChange} />
           <Field label="Meets CRAB Criteria" name="meets_crab" type="boolean" value={formData?.meets_crab} onChange={onChange} readOnly />
           <Field label="Meets SLiM Criteria" name="meets_slim" type="boolean" value={formData?.meets_slim} onChange={onChange} readOnly />
           <div className="sm:col-span-2">
-            <Field label="Prior SCT Type" name="stem_cell_transplant_history" type="multiselect" value={formData?.stem_cell_transplant_history} options={sctTypeOptions.length ? sctTypeOptions.map((o: { value: string }) => o.value) : STEM_CELL_TRANSPLANT_OPTIONS} onChange={onChange} vocabSource={sctTypeSource} />
+            <Field label="Prior SCT Type" name="stem_cell_transplant_history" type="multiselect" value={formData?.stem_cell_transplant_history} options={sctTypes} onChange={onChange} vocabSource={sctTypeSource} />
           </div>
           <Field label="SCT Date" name="sct_date" type="date" value={formData?.sct_date} onChange={onChange} />
           <div className="sm:col-span-2">
-            <Field label="SCT Eligibility" name="sct_eligibility" type="multiselect" value={formData?.sct_eligibility} options={sctEligibilityOptions.length ? sctEligibilityOptions.map((o: { value: string }) => o.value) : SCT_ELIGIBILITY_OPTIONS} onChange={onChange} vocabSource={sctEligibilitySource} />
+            <Field label="SCT Eligibility" name="sct_eligibility" type="multiselect" value={formData?.sct_eligibility} options={sctEligibility} onChange={onChange} vocabSource={sctEligibilitySource} />
           </div>
         </div>
       </Section>
 
       <Section title="Myeloma Markers">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field label="M-Protein Type" name="m_protein_type" type="text" value={formData?.m_protein_type} onChange={onChange} />
-          <Field label="Serum M-Protein (g/dL)" name="serum_m_protein" type="number" value={formData?.serum_m_protein} onChange={onChange} />
-          <Field label="Urine M-Protein (mg/24h)" name="urine_m_protein" type="number" value={formData?.urine_m_protein} onChange={onChange} />
+          <Field label="Serum M-Protein (g/dL)" name="monoclonal_protein_serum" type="number" value={formData?.monoclonal_protein_serum} onChange={onChange} />
+          <Field label="Urine M-Protein (mg/24h)" name="monoclonal_protein_urine" type="number" value={formData?.monoclonal_protein_urine} onChange={onChange} />
           <Field label="Free Light Chain Ratio" name="free_light_chain_ratio" type="number" value={formData?.free_light_chain_ratio} onChange={onChange} />
           <Field label="Beta-2 Microglobulin (mg/L)" name="beta2_microglobulin" type="number" value={formData?.beta2_microglobulin} onChange={onChange} />
           <Field label="LDH Level (U/L)" name="ldh_level" type="number" value={formData?.ldh_level} onChange={onChange} />
@@ -273,18 +272,14 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
       <Section title="Complications">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <Field label="Bone Lesions" name="bone_lesions" type="select" value={formData?.bone_lesions} options={YES_NO_OPTIONS} onChange={onChange} />
-          <Field label="Hypercalcemia" name="hypercalcemia" type="select" value={formData?.hypercalcemia} options={YES_NO_OPTIONS} onChange={onChange} />
-          <Field label="Renal Impairment" name="renal_impairment" type="select" value={formData?.renal_impairment} options={YES_NO_OPTIONS} onChange={onChange} />
-          <Field label="Anemia" name="anemia" type="select" value={formData?.anemia} options={YES_NO_OPTIONS} onChange={onChange} />
-          <Field label="Plasma Cell Percentage (%)" name="plasma_cell_percentage" type="number" value={formData?.plasma_cell_percentage} onChange={onChange} />
+          <Field label="Plasma Cell Percentage (%)" name="clonal_plasma_cells" type="number" value={formData?.clonal_plasma_cells} onChange={onChange} />
         </div>
       </Section>
 
       <Section title="Cytogenetics">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field label="Cytogenetic Risk" name="cytogenetic_risk" type="select" value={formData?.cytogenetic_risk} options={CYTOGENETIC_RISK_OPTIONS} onChange={onChange} />
           <div className="sm:col-span-2">
-            <Field label="Cytogenetic Abnormalities" name="cytogenetic_abnormalities" type="text" value={formData?.cytogenetic_abnormalities} onChange={onChange} />
+            <Field label="Cytogenetic Abnormalities" name="cytogenic_markers" type="text" value={formData?.cytogenic_markers} onChange={onChange} />
           </div>
           <div className="sm:col-span-2">
             <Field label="Genetic Mutations" name="genetic_mutations" type="text" value={formData?.genetic_mutations} onChange={onChange} />
@@ -312,9 +307,9 @@ function CLLSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>
 
       <Section title="Laboratory Markers">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field label="Absolute Lymphocyte Count (×10⁹/L)" name="absolute_lymphocyte_count" type="number" value={formData?.absolute_lymphocyte_count} onChange={onChange} />
+          <Field label="Absolute Lymphocyte Count (×10⁹/L)" name="alc_thousand_per_ul" type="number" value={formData?.alc_thousand_per_ul} onChange={onChange} />
           <Field label="Lymphocyte Doubling Time (months)" name="lymphocyte_doubling_time" type="number" value={formData?.lymphocyte_doubling_time} onChange={onChange} />
-          <Field label="Serum Beta-2 Microglobulin (mg/L)" name="serum_beta2_microglobulin_level" type="number" value={formData?.serum_beta2_microglobulin_level} onChange={onChange} />
+          <Field label="Serum Beta-2 Microglobulin (mg/L)" name="beta2_microglobulin" type="number" value={formData?.beta2_microglobulin} onChange={onChange} />
           <Field label="Clonal B-Lymphocyte Count" name="clonal_b_lymphocyte_count" type="number" value={formData?.clonal_b_lymphocyte_count} onChange={onChange} />
           <Field label="Clonal Bone Marrow B-Lymphocytes (%)" name="clonal_bone_marrow_b_lymphocytes" type="number" value={formData?.clonal_bone_marrow_b_lymphocytes} onChange={onChange} />
           <Field label="QTcF Value (ms)" name="qtcf_value" type="number" value={formData?.qtcf_value} onChange={onChange} />
@@ -341,8 +336,7 @@ function CLLSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>
 }
 
 function MantleCellLymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>) {
-  const { options: histologicOptions, source: histologicSource } = useVocabulary('histologic-type', 'title');
-  const histOptions = histologicOptions.length ? histologicOptions.map((o: { value: string }) => o.value) : HISTOLOGIC_TYPE_OPTIONS;
+  const histOptions = LYMPHOMA_HISTOLOGIC_TYPE_OPTIONS;
 
   // MCL previously fell through `getDiseaseType()`'s broad `includes("lymphoma")` into the Follicular
   // Lymphoma section, so a mantle-cell patient saw FLIPI/GELF fields under a "Follicular Lymphoma" tab.
@@ -354,11 +348,12 @@ function MantleCellLymphomaSection({ formData, onChange }: Pick<Props, 'formData
       <Section title="Disease Characteristics">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <div className="sm:col-span-2">
-            <Field label="Histologic Subtype" name="histologic_type" type="select" value={formData?.histologic_type} options={histOptions} onChange={onChange} vocabSource={histologicSource} />
+            <Field label="Histologic Subtype" name="histologic_type" type="select" value={formData?.histologic_type} options={histOptions} onChange={onChange} />
           </div>
           <Field label="Ann Arbor Stage" name="stage" type="select" value={formData?.stage} options={STAGE_OPTIONS} onChange={onChange} />
           <Field label="Ki-67 Proliferation Index (%)" name="ki67_proliferation_index" type="number" value={formData?.ki67_proliferation_index} onChange={onChange} />
           <Field label="Tumor Burden" name="tumor_burden" type="select" value={formData?.tumor_burden} options={TUMOR_BURDEN_OPTIONS} onChange={onChange} />
+          <Field label="Disease Activity" name="disease_activity" type="select" value={formData?.disease_activity} options={DISEASE_ACTIVITY_OPTIONS} onChange={onChange} />
           <Field label="TP53 Disruption" name="tp53_disruption" type="boolean" value={formData?.tp53_disruption} onChange={onChange} />
         </div>
       </Section>
@@ -367,7 +362,7 @@ function MantleCellLymphomaSection({ formData, onChange }: Pick<Props, 'formData
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <Field label="LDH Level (U/L)" name="ldh_level" type="number" value={formData?.ldh_level} onChange={onChange} />
           <Field label="Beta-2 Microglobulin (mg/L)" name="beta2_microglobulin" type="number" value={formData?.beta2_microglobulin} onChange={onChange} />
-          <Field label="Bone Marrow Involvement" name="bone_marrow_involvement" type="select" value={formData?.bone_marrow_involvement} options={YES_NO_OPTIONS} onChange={onChange} />
+          <Field label="Bone Marrow Involvement" name="bone_marrow_involvement" type="boolean" value={formData?.bone_marrow_involvement} onChange={onChange} />
         </div>
       </Section>
 
@@ -376,6 +371,7 @@ function MantleCellLymphomaSection({ formData, onChange }: Pick<Props, 'formData
           <Field label="Largest Lymph Node Size (cm)" name="largest_lymph_node_size" type="number" value={formData?.largest_lymph_node_size} onChange={onChange} />
           <Field label="Spleen Size (cm)" name="spleen_size" type="number" value={formData?.spleen_size} onChange={onChange} />
           <Field label="Splenomegaly" name="splenomegaly" type="boolean" value={formData?.splenomegaly} onChange={onChange} />
+          <Field label="Hepatomegaly" name="hepatomegaly" type="boolean" value={formData?.hepatomegaly} onChange={onChange} />
           <Field label="Lymphadenopathy" name="lymphadenopathy" type="boolean" value={formData?.lymphadenopathy} onChange={onChange} />
         </div>
       </Section>
@@ -385,7 +381,7 @@ function MantleCellLymphomaSection({ formData, onChange }: Pick<Props, 'formData
 
 function OtherSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>) {
   const { options: histologicOptions, source: histologicSource } = useVocabulary('histologic-type', 'title');
-  const histOptions = histologicOptions.length ? histologicOptions.map((o: { value: string }) => o.value) : HISTOLOGIC_TYPE_OPTIONS;
+  const histOptions = histologicOptions.length ? histologicOptions : HISTOLOGIC_TYPE_OPTIONS;
 
   return (
     <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
@@ -396,7 +392,7 @@ function OtherSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange
       </div>
       <div className="sm:col-span-2">
         <p className="text-sm text-portal-text-secondary">
-          Disease-specific fields are available for Breast Cancer, Follicular Lymphoma, Multiple Myeloma, and CLL.
+          Disease-specific fields are available for Breast Cancer, Follicular Lymphoma, Mantle Cell Lymphoma, Multiple Myeloma, and CLL.
         </p>
       </div>
     </div>
