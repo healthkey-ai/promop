@@ -8,6 +8,18 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Download a patient record as PDF or FHIR** — the patient record view has a
+  Download button beside the patient's name and number, for every role that can
+  open the record (patients included; it used to be patient-only and FHIR-only).
+  *PDF report* prints the tabs in order under their own labels, holding only
+  fields with a value, plus therapy lines, supportive therapy, genomic findings
+  and, for a patient's own copy, allergies and immunizations. It is generated in
+  the browser from the loaded record, so it reflects unsaved edits and needs no
+  new endpoint or dependency. Its layout is extracted from the tab components
+  (`node scripts/tab-layout.mjs`), and a test fails when the generated layout is
+  stale or misses a field the tabs render. *FHIR R4 bundle* now saves the signed
+  export byte for byte, keeping its digest and signature valid (#1961).
+
 - **Concept mapping priority** — on Code Mapping → Concept to Code, curators
   rank concepts by dragging rows, typing a priority (1 is first; clear it to
   unrank) or the up/down buttons. Ranked concepts come first on every page and
