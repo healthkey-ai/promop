@@ -112,7 +112,7 @@ describe("LoincAxesPanel", () => {
 
   it("lists axis variants, suggests per variant, and approves one with its destination", async () => {
     get.mockImplementation((url: string) => Promise.resolve({ data: url.includes("/concepts/search/") ? { results: [glucose] } : variantPayload() }));
-    post.mockResolvedValue({ data: { ...variantPayload(), repoint: { rows_updated: 40, persons_marked_stale: 5, rows_collapsed: 0 } } });
+    post.mockResolvedValue({ data: { ...variantPayload(), variant_status: "approved", repoint: { rows_updated: 40, persons_marked_stale: 5, rows_collapsed: 0 } } });
     const onSuggestVariant = vi.fn();
     render(<LoincAxesPanel mappingId={7} canEdit canApprove onSuggestVariant={onSuggestVariant} />);
     expect(await screen.findByText("2 axis values — this code may need one LOINC per variant")).toBeInTheDocument();
@@ -131,7 +131,32 @@ describe("LoincAxesPanel", () => {
     await waitFor(() => expect(post).toHaveBeenCalledWith("/v1/code-mappings/7/axis-variants/", {
       axis_key: "property=MCnc", target_concept_id: glucose.concept_id, approve: true,
     }));
-    expect(await screen.findByText(/updated 40 row\(s\)/)).toBeInTheDocument();
+    expect(await screen.findByText(/Variant approved: moved 40 row\(s\)/)).toBeInTheDocument();
+  });
+
+  it("reopens an approved variant explicitly, and says so", async () => {
+    const approved = variantPayload();
+    approved.variants[0] = { ...approved.variants[0], status: "approved" };
+    get.mockResolvedValue({ data: approved });
+    post.mockResolvedValue({ data: { ...variantPayload(), variant_status: "proposed",
+      repoint: { rows_updated: 40, persons_marked_stale: 5, rows_collapsed: 0 } } });
+    render(<LoincAxesPanel mappingId={7} canEdit canApprove />);
+    const table = await screen.findByRole("table", { name: "Axis variants" });
+    fireEvent.click(within(table).getByRole("button", { name: "Reopen Property MCnc · Scale Qn" }));
+    await waitFor(() => expect(post).toHaveBeenCalledWith("/v1/code-mappings/7/axis-variants/", {
+      axis_key: "property=MCnc", target_concept_id: glucose.concept_id, approve: false, reopen: true,
+    }));
+    expect(await screen.findByText(/Variant reopened: moved 40 row\(s\)/)).toBeInTheDocument();
+  });
+
+  it("hides Set destination on an approved variant from a curator who cannot approve", async () => {
+    const approved = variantPayload();
+    approved.variants[0] = { ...approved.variants[0], status: "approved" };
+    get.mockResolvedValue({ data: approved });
+    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
+    const table = await screen.findByRole("table", { name: "Axis variants" });
+    expect(within(table).queryByRole("button", { name: "Set destination for Property MCnc · Scale Qn" })).toBeNull();
+    expect(within(table).getByRole("button", { name: "Set destination for Property SCnc · Scale Qn" })).toBeInTheDocument();
   });
 
   it("sets a variant's destination from the concept search", async () => {

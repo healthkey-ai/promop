@@ -56,8 +56,8 @@ MATCH, COMPATIBLE, CONFLICT, UNKNOWN = 'match', 'compatible', 'conflict', 'unkno
 LOINC_VOCABULARIES = {'LOINC', 'http://loinc.org', '2.16.840.1.113883.6.1',
                       'urn:oid:2.16.840.1.113883.6.1'}
 
-#: UCUM units that name exactly one LOINC property. ``%`` and ``IU/L`` are
-#: deliberately absent: each fits more than one.
+#: UCUM units that name exactly one LOINC property. Units that fit more than
+#: one are in AMBIGUOUS_UNITS instead and never settle a property.
 _EXTRA_UNIT_PROPERTIES = {
     'mEq/L': 'SCnc', 'meq/L': 'SCnc',
     'mm[Hg]': 'Pres', 'mmHg': 'Pres',
@@ -67,22 +67,66 @@ _EXTRA_UNIT_PROPERTIES = {
     'mg/dl': 'MCnc', 'g/dl': 'MCnc', 'g/l': 'MCnc', 'mg/l': 'MCnc', 'ug/ml': 'MCnc',
     'ng/ml': 'MCnc', 'pg/ml': 'MCnc', 'ug/l': 'MCnc',
     'mmol/l': 'SCnc', 'umol/l': 'SCnc', 'nmol/l': 'SCnc', 'meq/l': 'SCnc',
-    'u/l': 'CCnc',
 }
+#: Real units that fit more than one LOINC property: "%" is mass, number or
+#: volume fraction; "U/mL" is catalytic (an enzyme) or arbitrary (CA-125,
+#: 10334-1, is ACnc) concentration. UNIT_GROUPS lists convertible units, not
+#: unambiguous ones, so these are taken back out of it.
+AMBIGUOUS_UNITS = frozenset({
+    '%', 'U/L', 'U/mL', 'u/l', 'u/mL', 'IU/L', 'IU/mL', '[IU]/L', '[IU]/mL',
+    'mIU/L', 'mIU/mL', 'kU/L', 'g/g', '{ratio}', '1',
+})
 UNIT_PROPERTIES = {
-    **{unit: prop for prop, units in UNIT_GROUPS.items() for unit in units},
-    **_EXTRA_UNIT_PROPERTIES,
+    unit: prop
+    for unit, prop in {
+        **{unit: prop for prop, units in UNIT_GROUPS.items() for unit in units},
+        **_EXTRA_UNIT_PROPERTIES,
+    }.items()
+    if unit not in AMBIGUOUS_UNITS
 }
+
+
+def _fold_unambiguous():
+    """Case-folded spellings that still name one property. UCUM is
+    case-sensitive -- ``mM`` (millimolar) is not ``mm`` (millimetre) -- so a
+    folded spelling two units share is dropped rather than guessed."""
+    folded = {}
+    for unit, prop in UNIT_PROPERTIES.items():
+        folded.setdefault(unit.casefold(), set()).add(prop)
+    clashing = {unit.casefold() for unit in UNIT_PROPERTIES} & {
+        a.casefold() for a in UNIT_PROPERTIES for b in UNIT_PROPERTIES
+        if a != b and a.casefold() == b.casefold() and UNIT_PROPERTIES[a] != UNIT_PROPERTIES[b]}
+    return {unit: props.pop() for unit, props in folded.items()
+            if len(props) == 1 and unit not in clashing}
+
+
+_FOLDED_UNIT_PROPERTIES = _fold_unambiguous()
 
 def unit_property(unit):
     """The LOINC property a source unit implies, or ``''``.
 
-    Case-sensitive, as UCUM is: ``mM`` (millimolar) and ``mm`` (millimetre)
-    are different units, so no case folding -- the common lower-case lab
-    spellings are listed explicitly instead.
+    Case-sensitive first, as UCUM is; a case-folded spelling is accepted only
+    when no two units collide on it (``mM``/``mm`` do, ``MG/DL`` does not).
     """
     normalized = unit_code(unit)
-    return UNIT_PROPERTIES.get(normalized, '') if normalized else ''
+    if not normalized or normalized in AMBIGUOUS_UNITS:
+        return ''
+    if normalized in UNIT_PROPERTIES:
+        return UNIT_PROPERTIES[normalized]
+    if normalized.casefold() in {u.casefold() for u in AMBIGUOUS_UNITS}:
+        return ''
+    # A short unit is all case: S (siemens) is not s (seconds).
+    if len(normalized) <= 2:
+        return ''
+    return _FOLDED_UNIT_PROPERTIES.get(normalized.casefold(), '')
+
+
+def unit_is_recognised(unit):
+    """Whether a unit is one LOINC inference knows: one property, or known
+    to fit several. A misspelling or unlisted unit is neither."""
+    normalized = unit_code(unit)
+    return bool(normalized) and (bool(unit_property(normalized)) or normalized in AMBIGUOUS_UNITS
+                                 or normalized.casefold() in {u.casefold() for u in AMBIGUOUS_UNITS})
 
 
 #: FHIR specimen display -> LOINC system. Exact phrases only: "blood" inside
@@ -225,7 +269,8 @@ def infer(source_vocabulary_id, source_code, metadata, *, observed_units=None):
                 break
 
     unit, where, observed = _unit(metadata, resource)
-    units = sorted({u for u in observed_units or [] if u})
+    # Only units inference recognises: a misspelling is not a second property.
+    units = sorted({u for u in observed_units or [] if u and unit_is_recognised(u)})
     properties = {unit_property(u) for u in units}
     mixed = len(properties) > 1
     shown = ', '.join(units[:4]) + ('…' if len(units) > 4 else '')

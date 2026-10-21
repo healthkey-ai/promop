@@ -116,21 +116,22 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
     }
   };
 
-  const postVariant = async (variant: AxisVariant, targetConceptId: number | null, approve: boolean) => {
+  const postVariant = async (variant: AxisVariant, targetConceptId: number | null, approve: boolean, reopen = false) => {
     setVariantBusy(variant.axis_key);
     setError("");
     setMessage("");
     try {
       const { data } = await api.post<LoincAxesPayload>(`/v1/code-mappings/${mappingId}/axis-variants/`, {
-        axis_key: variant.axis_key, target_concept_id: targetConceptId, approve,
+        axis_key: variant.axis_key, target_concept_id: targetConceptId, approve, ...(reopen ? { reopen: true } : {}),
       });
       setPayload(data);
       setPickingVariant(null);
-      if (data.repoint) {
-        setMessage(`Variant approved: updated ${data.repoint.rows_updated} row(s), ${data.repoint.persons_marked_stale} patient record(s) marked for refresh.`);
-      } else {
-        setMessage(approve ? "Variant approved." : "Variant destination saved.");
-      }
+      // Say what the server did, not what was asked: reopening also moves rows.
+      const what = data.variant_status === "approved" ? "Variant approved"
+        : reopen ? "Variant reopened" : "Variant destination saved";
+      setMessage(data.repoint
+        ? `${what}: moved ${data.repoint.rows_updated} row(s), ${data.repoint.persons_marked_stale} patient record(s) marked for refresh.`
+        : `${what}.`);
     } catch (failure) {
       setError(`Could not update the variant. ${destinationError(failure)}`);
     } finally {
@@ -251,7 +252,7 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
               <div className="flex flex-wrap gap-1">
                 {onSuggestVariant && <button type="button" className={BUTTON} disabled={busy}
                   aria-label={`Suggest for ${description}`} onClick={() => onSuggestVariant(variant.axis_key)}>Suggest</button>}
-                {canEdit && <button type="button" className={BUTTON} disabled={busy}
+                {canEdit && (variant.status !== "approved" || canApprove) && <button type="button" className={BUTTON} disabled={busy}
                   aria-label={`Set destination for ${description}`}
                   onClick={() => setPickingVariant(current => current === variant.axis_key ? null : variant.axis_key)}>Set destination</button>}
                 {canEdit && canApprove && variant.status !== "approved" && <button type="button"
@@ -261,10 +262,16 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
                   onClick={() => void postVariant(variant, variant.target_concept!.concept_id, true)}>
                   {variantBusy === variant.axis_key ? "Saving…" : "Approve"}
                 </button>}
+                {canEdit && canApprove && variant.status === "approved" && <button type="button" className={BUTTON}
+                  disabled={busy} aria-label={`Reopen ${description}`}
+                  title="Stop routing to this variant and move its stored rows back to the code's destination"
+                  onClick={() => void postVariant(variant, variant.target_concept?.concept_id ?? null, false, true)}>
+                  Reopen
+                </button>}
               </div>
               {pickingVariant === variant.axis_key && <VariantDestinationSearch label={description} disabled={busy}
                 onCancel={() => setPickingVariant(null)}
-                onChoose={concept => void postVariant(variant, concept.concept_id, false)} />}
+                onChoose={concept => void postVariant(variant, concept.concept_id, variant.status === "approved")} />}
             </td>
           </tr>;
         })}</tbody>

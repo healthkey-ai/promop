@@ -899,8 +899,7 @@ each LOINC candidate carries its own loinc_axes and an axis_match verdict per
 axis (match, compatible, or unknown). Prefer the candidate that matches the
 most axes, and when an axis is unknown on the source, prefer the candidate
 whose value for it is the usual default (a methodless code, a point in time)
-unless the metadata says otherwise. loinc_axis_hints are what the metadata
-says about an axis without settling it.
+unless the metadata says otherwise.
 
 The source context may carry snomed: the SNOMED concepts the source means at
 least (references, from the source code or its "Maps to"), its hierarchy and
@@ -1643,11 +1642,10 @@ def _prepare(*, source_code, source_vocabulary_id, source_text, domain_id,
     )
     if source_axes is not None:
         candidates, axis_excluded = loinc_axes.apply(candidates, source_axes)
-        source_context = {
-            **source_context,
-            'loinc_axes': loinc_axes.values(source_axes),
-            **({'loinc_axis_hints': axis_hints} if axis_hints else {}),
-        }
+        # Hints stay out: they quote the metadata as stored (a specimen
+        # display, a method text), which the rankers only ever get
+        # de-identified. Curators see them; the external model does not.
+        source_context = {**source_context, 'loinc_axes': loinc_axes.values(source_axes)}
     if snomed_source is not None:
         candidates, snomed_excluded = snomed_attributes.apply(candidates, snomed_source)
         axis_excluded = axis_excluded + snomed_excluded
@@ -2035,6 +2033,11 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
     jobs = []
     rank_pool = ThreadPoolExecutor(max_workers=RANK_CONCURRENCY) if use_pool else None
     rank_futures: dict[int, 'Future'] = {}  # id(job) -> Future
+    # Unit evidence for the LOINC axes, read once for the run: per code it is
+    # a Measurement aggregate, and fifty of those would eat the run's budget.
+    unit_evidence = axis_variants.unit_counts_for([
+        m for m in mappings if m.omop_table in ('measurement', 'observation')
+    ])
     for mapping in mappings:
         emit('retrieving', **source(mapping))
         source_concept = mapping.source_concept or _find_source_concept(
@@ -2049,8 +2052,8 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
             domain_id=row_domain, source_vocabulary_id=mapping.source_vocabulary_id,
             source_code=mapping.source_code, metadata=mapping.source_metadata,
             overrides=mapping.loinc_axes,
-            observed_units=(axis_variants.observed_units(mapping)
-                            if row_domain in LOINC_AXIS_DOMAINS else None),
+            observed_units=(axis_variants.observed_units(mapping, unit_evidence.get(mapping.pk))
+                            if row_domain in LOINC_AXIS_DOMAINS and mapping.pk in unit_evidence else None),
         )
         job = _prepare(
             source_code=mapping.source_code,

@@ -54,29 +54,51 @@ def axis_key(values):
 
 def _unit_counts(mapping):
     """``Counter`` of normalized units for one mapping, from every evidence source."""
+    return unit_counts_for([mapping]).get(mapping.pk, Counter())
+
+
+def unit_counts_for(mappings):
+    """``{mapping_id: Counter}`` of normalized units, in a fixed number of queries.
+
+    The Measurement read is the approval unit check's own batched aggregate
+    (one query, plus one per hospital), so a 50-code Suggest run pays for one
+    scan, not fifty. Per-patient source codes are one query for the batch.
+    """
+    from django.db.models import Q
+
     from omop_core.models import PatientSourceCode
     from omop_core.services.mapping_unit_consistency import (
         _imported_unit_counts, _unit_counts as live_unit_counts,
     )
 
-    counts = Counter()
-    if mapping.omop_table == 'measurement':
-        # Union, not sum: the inventory and the stored rows can describe the
-        # same records, as the approval unit check documents.
-        counts = (live_unit_counts([mapping]).get(mapping.pk, Counter())
-                  | _imported_unit_counts([mapping]).get(mapping.pk, Counter()))
-    patient_units = Counter()
-    rows = PatientSourceCode.objects.filter(
-        source_value=mapping.source_code,
-        source_vocabulary_id=mapping.source_vocabulary_id,
-    )
-    if mapping.omop_table:
-        rows = rows.filter(omop_table=mapping.omop_table)
-    for unit, override, count in rows.values_list('source_unit', 'source_unit_override', 'occurrence_count'):
+    mappings = [m for m in mappings if m is not None]
+    if not mappings:
+        return {}
+    measured = [m for m in mappings if m.omop_table == 'measurement']
+    # Union, not sum: the inventory and the stored rows can describe the same
+    # records, as the approval unit check documents.
+    live = live_unit_counts(measured) if measured else {}
+    imported = _imported_unit_counts(measured) if measured else {}
+    result = {m.pk: live.get(m.pk, Counter()) | imported.get(m.pk, Counter()) for m in mappings}
+
+    match = Q()
+    for m in mappings:
+        match |= Q(source_value=m.source_code, source_vocabulary_id=m.source_vocabulary_id,
+                   **({'omop_table': m.omop_table} if m.omop_table else {}))
+    by_key = defaultdict(list)
+    for m in mappings:
+        by_key[(m.source_vocabulary_id, m.source_code)].append(m)
+    patient = defaultdict(Counter)
+    for vocab, code, table, unit, override, count in PatientSourceCode.objects.filter(match).values_list(
+            'source_vocabulary_id', 'source_value', 'omop_table', 'source_unit',
+            'source_unit_override', 'occurrence_count'):
         normalized = unit_code(override if override is not None else unit)
-        if normalized:
-            patient_units[normalized] += max(1, count or 0)
-    return counts | patient_units
+        if not normalized:
+            continue
+        for m in by_key.get((vocab, code), ()):
+            if not m.omop_table or m.omop_table == table:
+                patient[m.pk][normalized] += max(1, count or 0)
+    return {pk: counts | patient.get(pk, Counter()) for pk, counts in result.items()}
 
 
 def _specimen_systems(mapping):
@@ -97,7 +119,7 @@ def _specimen_systems(mapping):
     return systems
 
 
-def detect(mapping, unit_counts=None):
+def detect(mapping, unit_counts=None, notes=True):
     """``(variants, notes)`` for one mapping.
 
     ``variants`` is a list of ``{axis_key, axis_values, units, occurrence_count}``
@@ -107,7 +129,13 @@ def detect(mapping, unit_counts=None):
     """
     groups = defaultdict(lambda: {'units': Counter(), 'axis_values': {}})
     counts = unit_counts if unit_counts is not None else _unit_counts(mapping)
+    unrecognised = Counter()
     for unit, count in counts.items():
+        if not loinc_axes.unit_is_recognised(unit):
+            # A misspelling or unlisted unit says nothing about the axes; a
+            # variant of its own would flag one test as two.
+            unrecognised[unit] += count
+            continue
         prop = unit_property(unit)
         # A unit with no single property is still a quantity, but nothing says
         # which group it joins, so it is a variant of its own, keyed by unit.
@@ -126,7 +154,12 @@ def detect(mapping, unit_counts=None):
     ]
     variants.sort(key=lambda v: (-v['occurrence_count'], v['axis_key']))
 
+    if not notes:
+        return variants, []
     notes = []
+    if unrecognised:
+        notes.append('Units not recognised, so not grouped: '
+                     + ', '.join(f'{unit} ×{count}' for unit, count in unrecognised.most_common(8)) + '.')
     systems = _specimen_systems(mapping)
     if len(systems) >= 2:
         notes.append(
@@ -138,7 +171,7 @@ def detect(mapping, unit_counts=None):
 
 
 @transaction.atomic
-def refresh(mapping):
+def refresh(mapping, unit_counts=None):
     """Store the detected variants and the count the queue flags.
 
     Existing variants keep their destination and status: a re-detection must
@@ -148,7 +181,7 @@ def refresh(mapping):
     """
     from omop_core.models import SourceCodeAxisVariant
 
-    variants, _notes = detect(mapping)
+    variants, _notes = detect(mapping, unit_counts, notes=False)
     existing = {v.axis_key: v for v in mapping.axis_variants.all()}
     if len(variants) >= FLAG_THRESHOLD:
         for variant in variants:
@@ -191,9 +224,11 @@ def refresh_codes(keys):
     for vocab, code in keys:
         match |= Q(source_vocabulary_id=vocab, source_code=code)
     refreshed = 0
-    for mapping in SourceCodeConceptMapping.objects.filter(match):
+    mappings = list(SourceCodeConceptMapping.objects.filter(match))
+    counts = unit_counts_for(mappings)
+    for mapping in mappings:
         try:
-            refresh(mapping)
+            refresh(mapping, counts.get(mapping.pk, Counter()))
             refreshed += 1
         except Exception:  # noqa: BLE001 - evidence must not fail ingest
             logging.getLogger(__name__).warning(
@@ -253,25 +288,30 @@ def serialize(variant):
     }
 
 
-def set_destination(variant, concept, *, approve, user):
+def set_destination(variant, concept, *, approve, user, reopen=False):
     """Point a variant at ``concept``; approving re-points its stored rows.
 
     Only rows in the variant's units move, and only off the concept they would
     otherwise carry (the mapping's own destination): records in other units
     belong to other variants.
 
-    Reopening an approved variant (``approve=False``) moves its rows back to
-    the mapping's destination, because ingest stops routing to it: leaving
-    them would put two concepts on one code and one unit.
+    Reopening an approved variant (``approve=False, reopen=True``) moves its
+    rows back to the mapping's destination (concept 0 when it has none),
+    because ingest stops routing to it: leaving them would put two concepts on
+    one code and one unit. Without ``reopen`` an approved variant refuses
+    ``approve=False``, so picking a new destination cannot reopen it silently.
     """
     from omop_core.mapping.code_resolution import repoint_clinical_rows
 
     previous = variant.target_concept_id if variant.status == 'approved' else None
     mapping = variant.mapping
-    if previous is not None and not approve and mapping.target_concept_id is None:
+    if previous is not None and not approve and not reopen:
         raise ValueError(
-            "This variant is approved and the code has no destination of its own "
-            "to move its records back to. Approve a new destination instead.")
+            'This variant is approved. Approve its new destination, or reopen it '
+            'first -- reopening moves its records back to the code\'s destination.')
+    # A code with no destination of its own stored these records at concept
+    # 0, OMOP's "No matching concept"; that is where they move off and back to.
+    fallback = mapping.target_concept_id if mapping.target_concept_id is not None else 0
     variant.target_concept = concept
     variant.status = 'approved' if approve else 'proposed'
     if approve:
@@ -280,14 +320,14 @@ def set_destination(variant, concept, *, approve, user):
     variant.save()
     result = None
     if approve and concept is not None:
-        old = previous if previous is not None else mapping.target_concept_id
+        old = previous if previous is not None else fallback
         result = repoint_clinical_rows(
             mapping=mapping, old_concept_id=old, new_concept_id=concept.concept_id,
             units=variant.units,
         )
     elif not approve and previous is not None:
         result = repoint_clinical_rows(
-            mapping=mapping, old_concept_id=previous, new_concept_id=mapping.target_concept_id,
+            mapping=mapping, old_concept_id=previous, new_concept_id=fallback,
             units=variant.units,
         )
     if approve and not mapping.axis_variant_count:

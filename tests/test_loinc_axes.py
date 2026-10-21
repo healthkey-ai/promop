@@ -597,18 +597,76 @@ def test_reopening_an_approved_variant_moves_its_rows_back(two_unit_code, glucos
     row.refresh_from_db()
     assert row.measurement_concept_id == glucose['14749-6'].pk
 
-    axis_variants.set_destination(variant, glucose['14749-6'], approve=False, user=None)
+    axis_variants.set_destination(variant, glucose['14749-6'], approve=False, user=None, reopen=True)
     row.refresh_from_db()
     assert row.measurement_concept_id == glucose['2345-7'].pk
 
 
-def test_reopening_is_refused_when_the_code_has_no_destination(two_unit_code, glucose):
+def test_an_approved_variant_is_not_reopened_by_picking_a_destination(two_unit_code, glucose):
     variant = {v.axis_key: v for v in axis_variants.refresh(two_unit_code)}['property=SCnc|scale_type=Qn']
     axis_variants.set_destination(variant, glucose['14749-6'], approve=True, user=None)
-    SourceCodeConceptMapping.objects.filter(pk=two_unit_code.pk).update(target_concept=None)
+    with pytest.raises(ValueError, match='reopen'):
+        axis_variants.set_destination(variant, glucose['2345-7'], approve=False, user=None)
     variant.refresh_from_db()
-    with pytest.raises(ValueError, match='no destination'):
-        axis_variants.set_destination(variant, glucose['14749-6'], approve=False, user=None)
+    assert (variant.status, variant.target_concept_id) == ('approved', glucose['14749-6'].pk)
+
+
+def test_without_a_code_destination_rows_move_off_and_back_to_concept_0(two_unit_code, glucose):
+    from tests.factories import ConceptFactory as CF
+    zero = CF(concept_id=0, concept_name='No matching concept', concept_code='No matching concept')
+    SourceCodeConceptMapping.objects.filter(pk=two_unit_code.pk).update(target_concept=None)
+    two_unit_code.refresh_from_db()
+    row = MeasurementFactory(measurement_concept=zero, measurement_source_value='GLU',
+                             unit_source_value='mmol/L', value_as_number=5.4)
+    variant = {v.axis_key: v for v in axis_variants.refresh(two_unit_code)}['property=SCnc|scale_type=Qn']
+
+    result = axis_variants.set_destination(variant, glucose['14749-6'], approve=True, user=None)
+    row.refresh_from_db()
+    assert result['rows_updated'] == 1 and row.measurement_concept_id == glucose['14749-6'].pk
+
+    axis_variants.set_destination(variant, glucose['14749-6'], approve=False, user=None, reopen=True)
+    row.refresh_from_db()
+    assert row.measurement_concept_id == 0
+
+
+def test_an_unrecognised_unit_spelling_is_a_note_not_a_variant(glucose):
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='GLU3', omop_table='measurement')
+    for unit in ('mg/dL', 'MG/DL', 'mg/100mL'):
+        PatientSourceCode.objects.create(person=PersonFactory(), source_value='GLU3',
+                                         source_vocabulary_id=LAB, omop_table='measurement', source_unit=unit)
+    variants, notes = axis_variants.detect(mapping)
+    assert [v['axis_key'] for v in variants] == ['property=MCnc|scale_type=Qn']
+    assert notes and 'mg/100mL' in notes[0]
+    axes, _ = loinc_axes.infer(LAB, 'GLU3', {}, observed_units=['mg/dL', 'mg/100mL'])
+    assert axes['property']['value'] == 'MCnc'
+
+
+@pytest.mark.parametrize('unit', ['U/mL', 'U/L', 'IU/L', '%'])
+def test_a_unit_that_fits_several_properties_settles_none(unit):
+    axes, _ = loinc_axes.infer(LAB, 'CA125', {'fhir': {'valueQuantity': {'value': 35, 'unit': unit}}})
+    assert 'property' not in axes and axes['scale_type']['value'] == 'Qn'
+
+
+def test_unit_evidence_is_read_once_for_a_batch(two_unit_code, monkeypatch):
+    from omop_core.services import mapping_unit_consistency as muc
+    calls = []
+    real = muc._unit_counts
+    monkeypatch.setattr(muc, '_unit_counts', lambda mappings: calls.append(len(mappings)) or real(mappings))
+    other = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='K', omop_table='measurement')
+    counts = axis_variants.unit_counts_for([two_unit_code, other])
+    assert calls == [2]
+    assert set(counts[two_unit_code.pk]) == {'mg/dL', 'mmol/L'}
+
+
+def test_metadata_hints_do_not_reach_the_ranker(pipeline):
+    suggest_one_mapping('GLU', LAB, 'measurement', source_description='Glucose', row_metadata={'fhir': {
+        'specimen': {'display': 'Specimen 23-SP-0042 for Jane Doe'}, 'method': {'text': 'Jane'}}})
+    # The hints quote the stored metadata; what the ranker gets of it is the
+    # de-identified source_metadata, which has its own rules.
+    assert 'loinc_axis_hints' not in pipeline['context']
+    assert 'specimen = ' not in str(pipeline['context'])
 
 
 def test_the_sample_unit_does_not_settle_property_when_record_units_disagree():
@@ -659,3 +717,26 @@ class TestReviewFixesApi:
         results = response.data['mappings']
         assert results[f'{LAB}|GLU']['target_concept_code'] == '14749-6'
         assert results[f'{LAB}|GLU|mmol/L']['target_concept_code'] == '14749-6'
+
+
+
+def test_suggest_one_never_borrows_another_hospitals_axes(pipeline, glucose):
+    from patient_portal.models import Identity
+    from tests.factories import OrganizationFactory
+    client = APIClient()
+    client.force_authenticate(Identity.objects.create_user(
+        email='orgs@example.test', is_staff=True, is_superuser=True))
+    a = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='GLU', omop_table='measurement',
+        organization=OrganizationFactory(slug='org-a'))
+    SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='GLU', omop_table='measurement',
+        organization=OrganizationFactory(slug='org-b'), loinc_axes={'property': 'SCnc'})
+    body = {'source_code': 'GLU', 'source_vocabulary_id': LAB, 'omop_table': 'measurement',
+            'source_code_description': 'Glucose'}
+
+    assert client.post('/api/v1/code-mappings/suggest-one/', body, format='json').status_code == 200
+    assert 'property' not in pipeline['context'].get('loinc_axes', {})
+    assert client.post('/api/v1/code-mappings/suggest-one/', {**body, 'mapping_id': a.pk},
+                       format='json').status_code == 200
+    assert 'property' not in pipeline['context'].get('loinc_axes', {})

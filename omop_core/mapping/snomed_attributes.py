@@ -145,6 +145,7 @@ def concept_facts(concept_ids):
             .order_by('concept_1_id', 'relationship_id', 'concept_2_id')
             .values_list('concept_1_id', 'relationship_id', 'concept_2_id', 'concept_2__concept_name'))
     sites = defaultdict(set)
+    sides = defaultdict(set)
     for cid, rel, value_id, value_name in rows:
         if rel == 'Has status':
             facts[cid]['status'] = value_name
@@ -162,7 +163,12 @@ def concept_facts(concept_ids):
             if side not in LATERALITIES:
                 continue
             for cid in sites[site_id]:
-                facts[cid]['laterality'] = side
+                sides[cid].add(side)
+    # A concept sited on both a left and a right structure is bilateral.
+    for cid, found in sides.items():
+        facts[cid]['laterality'] = (
+            'Right and left' if 'Right and left' in found or {'Left', 'Right'} <= found
+            else found.pop() if len(found) == 1 else 'Right and left')
     for fact in facts.values():
         fact['attributes'] = dict(fact['attributes'])
     return facts
@@ -234,9 +240,11 @@ def clean_overrides(raw):
             raise ValueError(f'hierarchy must be one of {", ".join(HIERARCHY_TAGS)}.')
         cleaned['hierarchy'] = raw['hierarchy'] or None
     if 'laterality' in raw:
-        if raw['laterality'] not in (None, '', 'none') and raw['laterality'] not in LATERALITIES:
+        side = raw['laterality']
+        if side not in (None, '', 'none') and side not in LATERALITIES:
             raise ValueError(f'laterality must be one of {", ".join(LATERALITIES)}, or none.')
-        cleaned['laterality'] = raw['laterality'] or None
+        # "none" is the spelled-out form of null: no side, not a side named "none".
+        cleaned['laterality'] = None if side in (None, '', 'none') else side
     return cleaned
 
 
@@ -362,6 +370,7 @@ def apply(candidates, source):
     snomed = [c for c in candidates if c.get('vocabulary_id') == 'SNOMED']
     if not snomed:
         return list(candidates), []
+    describe_only = not has_evidence(source)
     reference_ids = {r['concept_id'] for r in source['references']}
     facts = concept_facts([c['concept_id'] for c in snomed])
     involved = set(reference_ids) | {c['concept_id'] for c in snomed}
@@ -461,6 +470,10 @@ def apply(candidates, source):
                     1 if source_side and not side else 0, -matched,
                     levels if relation == GENERAL else 99)
             eligible.append((position, annotated, rank))
+    if describe_only:
+        # Nothing to judge against: describe each SNOMED candidate and keep
+        # the order the earlier stages (retrieval, LOINC axes) set.
+        return [candidate for _, candidate, _ in eligible], excluded
     eligible.sort(key=lambda item: (item[2], item[0]))
     return [candidate for _, candidate, _ in eligible], excluded
 

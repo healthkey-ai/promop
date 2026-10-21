@@ -13584,11 +13584,22 @@ def code_mapping_suggest_one(request):
     # row's. A variant's axis values override both -- suggesting for the
     # mmol/L variant of a code means suggesting a substance concentration.
     from omop_core.mapping import axis_variants as axis_variants_module, loinc_axes as axes_module
-    # The row the dialog shows: this code, in this table.
-    axes_mapping = SourceCodeConceptMapping.objects.filter(
+    # The row the dialog shows. Hospital codes have one mapping per
+    # organization, so the dialog names its row; without that, only an
+    # unambiguous match is used -- never another hospital's axes or variants.
+    same_code = SourceCodeConceptMapping.objects.filter(
         source_vocabulary_id=source_vocabulary_id, source_code=source_code[:SOURCE_CODE_MAX],
         omop_table=omop_table,
-    ).first()
+    )
+    raw_mapping_id = request.data.get('mapping_id')
+    if raw_mapping_id not in (None, ''):
+        try:
+            axes_mapping = same_code.filter(pk=int(raw_mapping_id)).first()
+        except (TypeError, ValueError):
+            return Response({'mapping_id': 'Must be a mapping id.'}, status=status.HTTP_400_BAD_REQUEST)
+    else:
+        candidates = list(same_code[:2])
+        axes_mapping = candidates[0] if len(candidates) == 1 else None
     try:
         axis_overrides = (
             axes_module.clean_overrides(request.data.get('loinc_axes'))

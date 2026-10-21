@@ -75,6 +75,8 @@ export interface LoincAxesPayload {
   variants: AxisVariant[];
   variant_notes: string[];
   repoint?: { rows_updated: number; persons_marked_stale: number; rows_collapsed: number };
+  /** The variant's status after an axis-variants POST. */
+  variant_status?: "proposed" | "approved";
 }
 
 export function axisLabel(axis: string, labels?: Record<string, string>): string {

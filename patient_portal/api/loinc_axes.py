@@ -115,6 +115,7 @@ def code_mapping_axis_variant(request, mapping_id):
         except views.MappingLocked as exc:
             return exc.as_response()
         approve = request.data.get('approve') is True
+        reopen = request.data.get('reopen') is True
         if approve and not views._can_approve_mappings(request.user):
             return Response({'detail': 'Approving a mapping requires approver access.'},
                             status=status.HTTP_403_FORBIDDEN)
@@ -137,16 +138,22 @@ def code_mapping_axis_variant(request, mapping_id):
         if approve and concept is None:
             return Response({'target_concept_id': 'Choose a destination before approving.'},
                             status=status.HTTP_400_BAD_REQUEST)
+        if reopen and not views._can_approve_mappings(request.user):
+            # Reopening rewrites stored rows, like approving.
+            return Response({'detail': 'Reopening an approved variant requires approver access.'},
+                            status=status.HTTP_403_FORBIDDEN)
         stored = {v.axis_key: v for v in axis_variants.refresh(mapping)}
         variant = stored.get(axis_key)
         if variant is None:
             return Response({'axis_key': 'This code has no such axis variant.'},
                             status=status.HTTP_400_BAD_REQUEST)
         try:
-            repoint = axis_variants.set_destination(variant, concept, approve=approve, user=request.user)
+            repoint = axis_variants.set_destination(variant, concept, approve=approve,
+                                                    user=request.user, reopen=reopen)
         except ValueError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
     payload = _payload(mapping)
+    payload['variant_status'] = variant.status
     if repoint is not None:
         payload['repoint'] = {key: value for key, value in repoint.items() if key != 'person_ids'}
     return Response(payload)

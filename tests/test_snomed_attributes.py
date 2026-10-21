@@ -335,3 +335,26 @@ class TestApi:
         client = APIClient()
         client.force_authenticate(Identity.objects.create_user(email='p@example.test'))
         assert client.get(self.url).status_code == 403
+
+
+
+def test_without_evidence_the_order_is_left_alone(snomed):
+    loinc = {'concept_id': 1, 'concept_name': 'Glucose [Mass/volume]', 'concept_code': '2345-7',
+             'vocabulary_id': 'LOINC', 'concept_class_id': 'Lab Test', 'domain_id': 'Measurement'}
+    pool = [loinc, candidate(snomed['fl']), candidate(snomed['pneumonia'])]
+    eligible, excluded = sa.apply(pool, sa.resolve_source(source_concept=None, description='glucose'))
+    assert [c['concept_id'] for c in eligible] == [1, snomed['fl'].pk, snomed['pneumonia'].pk]
+    assert not excluded and 'snomed' in eligible[1]
+
+
+def test_a_concept_sited_left_and_right_is_bilateral(snomed):
+    both = ConceptFactory(concept_id=4199999, concept_name='Bilateral osteoarthritis of knees',
+                          concept_code='4199999', vocabulary=snomed['oa_knee'].vocabulary,
+                          domain=snomed['oa_knee'].domain, concept_class=snomed['oa_knee'].concept_class)
+    relate(both, 'Has finding site', snomed['left_knee'])
+    relate(both, 'Has finding site', snomed['right_knee'])
+    assert sa.concept_facts([both.pk])[both.pk]['laterality'] == 'Right and left'
+
+
+def test_none_as_laterality_means_no_side():
+    assert sa.clean_overrides({'laterality': 'none'}) == {'laterality': None}

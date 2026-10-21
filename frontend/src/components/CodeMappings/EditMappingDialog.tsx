@@ -25,7 +25,7 @@ import type { LoincAxisOverrides } from "./loincAxes";
 import SnomedEvidencePanel from "./SnomedEvidencePanel";
 import type { SnomedSettings } from "./snomed";
 import SourceVocabularyLookup from "./SourceVocabularyLookup";
-import { searchDestinationConcepts } from "./destinationSearch";
+import { destinationError as describeDestinationError, searchDestinationConcepts } from "./destinationSearch";
 import MintConceptDialog from "./MintConceptDialog";
 import ConceptInputDetails from "@/components/UI/ConceptInputDetails";
 import { HelpTip, Field, ReadOnlyField, INPUT_CLASS } from "@/components/UI/MappingFormPrimitives";
@@ -531,6 +531,9 @@ export default function EditMappingDialog({
         // rankers, and only while it still describes the code being suggested.
         source_metadata: sourceIdentityUnchanged ? selectedRow?.source_metadata || undefined : undefined,
         strategies: enabled, ranking_model: rankingModel, async: true,
+        // The row this dialog shows, so the server never takes another
+        // hospital's mapping of the same code for its axes and variants.
+        ...(sourceIdentityUnchanged && selectedRow?.mapping_id ? { mapping_id: selectedRow.mapping_id } : {}),
         ...(loincAxes && sourceIdentityUnchanged && loincAxes.mappingId === selectedRow?.mapping_id
           ? { loinc_axes: loincAxes.overrides } : {}),
         ...(snomedSettings && sourceIdentityUnchanged && snomedSettings.mappingId === selectedRow?.mapping_id
@@ -1037,7 +1040,7 @@ export default function EditMappingDialog({
                       }).then(() => {
                         setLoincAxesReload(n => n + 1);
                         setSuggestionMessage(`Variant destination set to ${candidate.concept_name}.`);
-                      }).catch(() => setError("Could not set the variant's destination."));
+                      }).catch(failure => setError(`Could not set the variant's destination. ${describeDestinationError(failure)}`));
                       return;
                     }
                     applyConcept(candidate as ConceptResult);
