@@ -8,6 +8,16 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **The therapy editor's endpoints ship in the package** — `omop_core.api`
+  serves the five calls the patient widget makes (`therapy-lines`,
+  `therapy-outcomes`, `therapy-regimens` list and detail, `concepts/search`)
+  from the installed wheel, so an embedding host can run the editor instead of
+  only deriving from data it cannot author. Host policy stays out: permissions,
+  the per-person write check and the `PatientRecord` payload shape are seams a
+  host overrides. The in-place API now imports the same serializers, queries and
+  viewset, so the two surfaces cannot drift. Requires the `api` extra
+  (`djangorestframework`) (#1924).
+
 - **Download a patient record as PDF or FHIR** — the patient record view has a
   Download button beside the patient's name and number, for every role that can
   open the record (patients included; it used to be patient-only and FHIR-only).
