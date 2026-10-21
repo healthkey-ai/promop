@@ -138,6 +138,40 @@ def test_legacy_lab_alias_fields_are_populated_from_their_canonical_code():
     assert float(record.albumin_level) == 3.9
 
 
+def test_newer_legacy_named_lab_beats_an_older_canonical_alias():
+    """Alias projection must not copy an older canonical result over a newer fact.
+
+    A legacy feed can supply the same analyte under its display name after the
+    canonical LOINC row. The newest result wins, and its unit travels with it.
+    """
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    MeasurementFactory(
+        person=person,
+        measurement_concept=ConceptFactory(concept_code='2160-0'),
+        measurement_source_value='2160-0',
+        measurement_date=date(2025, 1, 1),
+        value_as_number=1.1,
+        unit_source_value='mg/dL',
+    )
+    MeasurementFactory(
+        person=person,
+        measurement_concept=ConceptFactory(
+            concept_code='LEGACY-CREATININE', concept_name='Creatinine',
+        ),
+        measurement_source_value='Creatinine',
+        measurement_date=date(2025, 2, 1),
+        value_as_number=2.4,
+        unit_source_value='mg/dL',
+    )
+
+    record = refresh_patient_record(person)
+
+    assert float(record.serum_creatinine_mg_dl) == 2.4
+    assert float(record.serum_creatinine_level) == 2.4
+    assert record.serum_creatinine_level_units == 'mg/dL'
+
+
 def test_hr_status_recognizes_plus_minus_receptor_results():
     """A saved ER+/PR+ result must still derive HR+ after the write round-trip.
 
@@ -209,6 +243,69 @@ def test_hr_and_tnbc_recognize_expression_qualified_positive_receptors():
     assert record.estrogen_receptor_status == 'ER+ WITH LOW EXPRESSION'
     assert record.hr_status == 'HR+'
     assert record.tnbc_status is False
+
+
+def test_definite_positive_receptor_excludes_tnbc_when_another_result_is_unknown():
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    for code, value in (
+        ('16112-5', 'ER+'),
+        ('16113-3', 'Unknown'),
+        ('48676-1', 'HER2-'),
+    ):
+        MeasurementFactory(
+            person=person,
+            measurement_source_value=code,
+            measurement_date=date(2026, 1, 15),
+            value_as_string=value,
+        )
+
+    record = refresh_patient_record(person)
+
+    assert record.hr_status == 'HR+'
+    assert record.tnbc_status is False
+
+
+def test_assay_score_is_not_treated_as_a_positive_receptor():
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    for code, value in (
+        ('16112-5', 'ER-'),
+        ('16113-3', 'PR-'),
+        ('48676-1', 'IHC 2+'),
+    ):
+        MeasurementFactory(
+            person=person,
+            measurement_source_value=code,
+            measurement_date=date(2026, 1, 15),
+            value_as_string=value,
+        )
+
+    record = refresh_patient_record(person)
+
+    assert record.tnbc_status is None
+
+
+def test_mixed_receptor_result_is_preserved_and_stays_unknown():
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    for code, value in (
+        ('16112-5', 'Negative/Equivocal'),
+        ('16113-3', 'PR-'),
+        ('48676-1', 'HER2-'),
+    ):
+        MeasurementFactory(
+            person=person,
+            measurement_source_value=code,
+            measurement_date=date(2026, 1, 15),
+            value_as_string=value,
+        )
+
+    record = refresh_patient_record(person)
+
+    assert record.estrogen_receptor_status == 'NEGATIVE/EQUIVOCAL'
+    assert record.hr_status is None
+    assert record.tnbc_status is None
 
 
 def test_ambiguous_receptor_sign_does_not_derive_hr_or_tnbc():

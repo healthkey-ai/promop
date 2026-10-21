@@ -77,27 +77,18 @@ def _receptor_signal(value) -> int | None:
     if '/' in text or 'EQUIVOCAL' in text or text in {'UNKNOWN', 'NOT ASSESSED'}:
         return None
 
-    has_positive_word = 'POSITIVE' in text
-    has_negative_word = 'NEGATIVE' in text
-    if has_positive_word and has_negative_word:
+    signals = set()
+    if 'POSITIVE' in text:
+        signals.add(1)
+    if 'NEGATIVE' in text:
+        signals.add(-1)
+    # Only a sign attached to a receptor token is a receptor result. A bare
+    # `IHC 2+` or `3+` is an assay score and must stay uninterpreted.
+    for match in re.finditer(r'\b(?:ER|PR|HER2|HR)\s*([+-])', text):
+        signals.add(1 if match.group(1) == '+' else -1)
+    if len(signals) != 1:
         return None
-    if has_positive_word:
-        return 1
-    if has_negative_word:
-        return -1
-
-    # `ER+ with low expression` and `ER-` use a sign next to the receptor or
-    # before an expression qualifier.  The space/end guard avoids treating the
-    # hyphen in `low-expression` itself as a negative result.
-    positive_sign = text.endswith('+') or bool(re.search(r'\+\s', text))
-    negative_sign = text.endswith('-') or bool(re.search(r'-\s', text))
-    if positive_sign and negative_sign:
-        return None
-    if positive_sign:
-        return 1
-    if negative_sign:
-        return -1
-    return None
+    return signals.pop()
 
 
 # Bump this whenever aggregation or computation logic changes in any section
@@ -519,12 +510,12 @@ _LEGACY_LAB_CONCEPT_FIELDS = {
     'hemoglobin': 'hemoglobin_level',
     'hemoglobin measurement': 'hemoglobin_level',
     'platelet count': 'platelet_count',
-    'creatinine': 'serum_creatinine_level',
-    'creatinine in serum': 'serum_creatinine_level',
-    'calcium': 'serum_calcium_level',
+    'creatinine': 'serum_creatinine_mg_dl',
+    'creatinine in serum': 'serum_creatinine_mg_dl',
+    'calcium': 'serum_calcium_mg_dl',
     'bilirubin total': 'serum_bilirubin_level_total',
     'bilirubin.total [mass/volume] in serum or plasma': 'serum_bilirubin_level_total',
-    'albumin': 'albumin_level',
+    'albumin': 'albumin_g_dl',
 }
 
 _BEHAVIOR_MEASUREMENT_FIELDS = {
@@ -1936,12 +1927,14 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         if not raw:
             return None
         s = raw.strip().lower()
+        # Preserve mixed/ambiguous results before collapsing the unambiguous
+        # words. `Negative/Equivocal` is not a negative receptor result.
+        if 'equivocal' in s or ('positive' in s and 'negative' in s):
+            return raw.strip().upper()
         if 'positive' in s:
             return 'POSITIVE'
         if 'negative' in s:
             return 'NEGATIVE'
-        if 'equivocal' in s:
-            return 'EQUIVOCAL'
         return raw.strip().upper()
 
     er_measurement = next((m for m in measurements if _measurement_code(m) == '16112-5'), None)
@@ -1968,10 +1961,13 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             _receptor_signal(data['progesterone_receptor_status']),
             _receptor_signal(data['her2_status']),
         ]
-        # TNBC is true only when all three are unambiguously negative.  An
-        # ambiguous sign or an equivocal result leaves the verdict unknown.
-        if all(signal is not None for signal in signals):
-            data['tnbc_status'] = all(signal == -1 for signal in signals)
+        # A definite positive receptor rules out TNBC even if another result
+        # is unknown; otherwise all three must be negative. Mixed/ambiguous
+        # values leave the verdict unknown.
+        if any(signal == 1 for signal in signals):
+            data['tnbc_status'] = False
+        elif all(signal == -1 for signal in signals):
+            data['tnbc_status'] = True
 
     def _first_m(concept_code):
         """Return the most recent Measurement for a LOINC code, checking concept first then source_value."""
@@ -2965,6 +2961,45 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     # snapshot.measurements already ordered -date -id, non-erroneous, select_related
     measurements = snapshot.measurements
 
+    # Resolve every unit-conversion-free lab in one chronological pass. The
+    # same analyte can arrive under a LOINC code, a source display name, or a
+    # historic concept name; taking the first (newest) representation per field
+    # prevents an older canonical row from overwriting a newer legacy fact (and
+    # vice versa). FLC values need unit conversion and WBC needs its own unit
+    # gate, so both stay in their dedicated passes below.
+    lab_units = {}
+    for measurement in measurements:
+        if measurement.value_as_number is None:
+            continue
+        code = _measurement_code(measurement)
+        loinc_field = _LOINC_LAB_FIELDS.get(code)
+        if loinc_field:
+            field, cast = loinc_field
+        else:
+            field = _SOURCE_VALUE_LAB_FIELDS.get(measurement.measurement_source_value)
+            cast = float
+            if field is None:
+                concept_name = (
+                    measurement.measurement_concept.concept_name.casefold().strip()
+                    if measurement.measurement_concept else ''
+                )
+                field = _LEGACY_LAB_CONCEPT_FIELDS.get(concept_name)
+        if (
+            not field
+            or field in _FLC_FIELDS
+            or field in {'wbc_count_thousand_per_ul', 'white_blood_cell_count'}
+            or code == '6690-2'
+        ):
+            continue
+        if field in data:
+            continue
+        data[field] = cast(measurement.value_as_number)
+        if measurement.unit_source_value:
+            lab_units[field] = measurement.unit_source_value
+            units_field = f'{field}_units'
+            if hasattr(PatientRecord, units_field):
+                data[units_field] = measurement.unit_source_value
+
     # --- Legacy fields via exact historic concept-name matching ---
     for measurement in measurements:
         if not measurement.measurement_concept or measurement.value_as_number is None:
@@ -3062,8 +3097,12 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     for canonical, aliases in _LAB_FIELD_ALIASES.items():
         value = data.get(canonical)
         if value is not None:
+            unit = lab_units.get(canonical)
             for alias in aliases:
                 data[alias] = value
+                units_field = f'{alias}_units'
+                if unit and hasattr(PatientRecord, units_field):
+                    data[units_field] = unit
 
     return data
 
