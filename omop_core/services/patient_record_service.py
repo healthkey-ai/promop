@@ -12,7 +12,7 @@ import math
 import statistics
 from collections import defaultdict
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from django.db import models
 from django.db.models import DateTimeField, Q
 from django.db.models.functions import Cast, Coalesce
@@ -2815,6 +2815,7 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     # --- New UI fields via LOINC concept code (primary path) ---
     loinc_ms = [m for m in measurements if m.value_as_number is not None]
     wbc_projection_blocked = False
+    flc_projection_blocked = set()
     for m in loinc_ms:
         code = _measurement_code(m)
         if code not in _LOINC_LAB_FIELDS:
@@ -2835,20 +2836,23 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
                 )
                 continue
         if field in _FLC_FIELDS:
+            if field in flc_projection_blocked:
+                continue
             canonical_flc = flc_to_canonical(m.value_as_number, m.unit_source_value)
             if canonical_flc is None:
-                # Unlike WBC this still projects: blanking thousands of patients
-                # is worse than the lab's own unit. The SLiM threshold refuses
-                # it instead, which is where a 10x error changes the answer.
+                # Do not project the raw number as if it were mg/L: that can
+                # satisfy the IMWG absolute >=100 threshold with a 10x unit
+                # error. Block older rows for this field too — the latest result
+                # is unknown, not an invitation to use a stale one.
+                flc_projection_blocked.add(field)
                 logger.warning(
-                    'FLC projected without unit conversion for person_id=%s: '
-                    'unit_source_value=%r is not convertible to mg/L',
+                    'FLC skipped for person_id=%s: unit_source_value=%r is not '
+                    'convertible to mg/L',
                     person.person_id, m.unit_source_value,
                 )
-            else:
-                if field not in data:
-                    data[field] = cast(canonical_flc)
-                continue
+            elif field not in data:
+                data[field] = cast(canonical_flc)
+            continue
         if field not in data:
             if code != '6690-2' or canonical_value is not None:
                 data[field] = cast(canonical_value if code == '6690-2' else m.value_as_number)
@@ -2874,7 +2878,23 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             if field == 'wbc_count_thousand_per_ul' and wbc_projection_blocked:
                 continue
             if field and field not in data:
-                data[field] = float(m.value_as_number)
+                if field in _FLC_FIELDS:
+                    if field in flc_projection_blocked:
+                        continue
+                    canonical_flc = flc_to_canonical(
+                        m.value_as_number, m.unit_source_value,
+                    )
+                    if canonical_flc is None:
+                        flc_projection_blocked.add(field)
+                        logger.warning(
+                            'FLC display-name row skipped for person_id=%s: '
+                            'unit_source_value=%r is not convertible to mg/L',
+                            person.person_id, m.unit_source_value,
+                        )
+                        continue
+                    data[field] = canonical_flc
+                else:
+                    data[field] = float(m.value_as_number)
 
     # --- Copy canonical values to legacy aliases (issue #471) ---
     for canonical, aliases in _LAB_FIELD_ALIASES.items():
@@ -3319,7 +3339,16 @@ def _compute_derived_fields(patient_info: PatientRecord) -> None:
     # (not float) is required so exact boundary ratios such as 100.65/61.00
     # (1.65) and 33.80/130.00 (0.26) stay inside the normal window.
     def _decimal(value):
-        return Decimal(str(value))
+        # Invalid/non-finite/negative concentrations are unknown, not a
+        # positive result. Comparisons on NaN would otherwise raise and abort
+        # the whole refresh.
+        try:
+            number = Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return None
+        if not number.is_finite() or number < 0:
+            return None
+        return number
 
     serum_threshold = Decimal('0.5')
     urine_threshold = Decimal('200')
@@ -3327,12 +3356,14 @@ def _compute_derived_fields(patient_info: PatientRecord) -> None:
     flc_high = Decimal('1.65')
     flc_high_absolute = Decimal('100')
 
-    serum_component = None if serum_mp is None else _decimal(serum_mp) >= serum_threshold
-    urine_component = None if urine_mp is None else _decimal(urine_mp) >= urine_threshold
-    if kappa is None or lam is None or _decimal(lam) == 0:
+    serum_dec = _decimal(serum_mp)
+    urine_dec = _decimal(urine_mp)
+    serum_component = None if serum_dec is None else serum_dec >= serum_threshold
+    urine_component = None if urine_dec is None else urine_dec >= urine_threshold
+    kappa_dec, lam_dec = _decimal(kappa), _decimal(lam)
+    if kappa_dec is None or lam_dec is None or lam_dec == 0:
         flc_component = None
     else:
-        kappa_dec, lam_dec = _decimal(kappa), _decimal(lam)
         ratio = kappa_dec / lam_dec
         if not (ratio < flc_low or ratio > flc_high):
             flc_component = False

@@ -650,6 +650,26 @@ class TestMeasurableDiseaseImwg:
         _cmd()._compute_derived_fields(pi)
         assert pi.measurable_disease_imwg is False
 
+    def test_negative_flc_values_are_unknown_not_true(self):
+        pi = self._pi(
+            monoclonal_protein_serum=0.3,
+            monoclonal_protein_urine=50,
+            kappa_flc=-1,
+            lambda_flc=150,
+        )
+        _cmd()._compute_derived_fields(pi)
+        assert pi.measurable_disease_imwg is None
+
+    def test_nan_flc_does_not_abort_and_serum_true_still_counts(self):
+        pi = self._pi(
+            monoclonal_protein_serum=0.6,
+            monoclonal_protein_urine=None,
+            kappa_flc='NaN',
+            lambda_flc=100,
+        )
+        _cmd()._compute_derived_fields(pi)
+        assert pi.measurable_disease_imwg is True
+
     def test_flc_ratio_normal_with_missing_other_components_stays_none(self):
         pi = self._pi(
             monoclonal_protein_serum=None,

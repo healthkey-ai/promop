@@ -56,7 +56,9 @@ def _measure(
 @pytest.mark.parametrize('code', ['36916-5', '80515-0'])
 def test_real_world_kappa_codes_project_to_kappa_flc(code):
     person = PersonFactory()
-    _measure(person, code, 1.87, source_value='Free Kappa Light Chains')
+    _measure(
+        person, code, 1.87, source_value='Free Kappa Light Chains', unit='mg/L',
+    )
 
     assert float(_get_laboratory_data(person)['kappa_flc']) == pytest.approx(1.87)
 
@@ -64,7 +66,9 @@ def test_real_world_kappa_codes_project_to_kappa_flc(code):
 @pytest.mark.parametrize('code', ['33944-0', '80516-8'])
 def test_real_world_lambda_codes_project_to_lambda_flc(code):
     person = PersonFactory()
-    _measure(person, code, 0.92, source_value='Free Lambda Light Chains')
+    _measure(
+        person, code, 0.92, source_value='Free Lambda Light Chains', unit='mg/L',
+    )
 
     assert float(_get_laboratory_data(person)['lambda_flc']) == pytest.approx(0.92)
 
@@ -72,8 +76,8 @@ def test_real_world_lambda_codes_project_to_lambda_flc(code):
 def test_seeded_kappa_and_real_lambda_codes_are_not_confused():
     """One character apart and opposite analytes."""
     person = PersonFactory()
-    _measure(person, '33944-8', 5.0)
-    _measure(person, '33944-0', 7.0)
+    _measure(person, '33944-8', 5.0, unit='mg/L')
+    _measure(person, '33944-0', 7.0, unit='mg/L')
 
     data = _get_laboratory_data(person)
 
@@ -114,8 +118,8 @@ def test_second_m_protein_spep_code_projects():
 def test_fractional_results_survive_the_projection():
     """These were IntegerField, which truncated 1.87 to 1."""
     person = PersonFactory()
-    _measure(person, '36916-5', 1.87)
-    _measure(person, '33944-0', 0.42)
+    _measure(person, '36916-5', 1.87, unit='mg/L')
+    _measure(person, '33944-0', 0.42, unit='mg/L')
     _measure(person, '11118-7', 4.2)
 
     data = _get_laboratory_data(person)
@@ -157,12 +161,50 @@ def test_flc_projection_preserves_exact_boundary_ratios(
     assert data['kappa_flc'] / data['lambda_flc'] == Decimal(expected_ratio)
 
 
-def test_flc_with_an_unknown_unit_is_projected_unconverted():
-    """Blanking the field is worse than keeping the lab's own unit."""
+def test_flc_with_an_unknown_unit_is_not_projected_as_mg_l():
+    """An unknown unit cannot stand in for mg/L and satisfy the absolute threshold."""
     person = PersonFactory()
     _measure(person, '36916-5', 42.0, unit=None)
 
-    assert float(_get_laboratory_data(person)['kappa_flc']) == pytest.approx(42.0)
+    assert 'kappa_flc' not in _get_laboratory_data(person)
+
+
+def test_latest_unconvertible_flc_blocks_older_canonical_row():
+    """An unknown latest unit must not resurrect an older mg/L result."""
+    person = PersonFactory()
+    _measure(person, '36916-5', 150.0, date='2023-01-01', unit='mg/L')
+    _measure(person, '36916-5', 10.0, date='2024-06-01', unit=None)
+    _measure(person, '33944-0', 10.0, date='2024-06-01', unit='mg/L')
+
+    data = _get_laboratory_data(person)
+
+    assert 'kappa_flc' not in data
+    assert data['lambda_flc'] == Decimal('10.0')
+
+
+def test_display_name_flc_values_are_converted_to_mg_l():
+    """The legacy/generator display-name path must apply the same unit conversion."""
+    person = PersonFactory()
+    concept = ConceptFactory(
+        concept_code='0', concept_name='No matching concept',
+        vocabulary=VocabularyFactory(vocabulary_id='LOINC'),
+    )
+    MeasurementFactory(
+        person=person, measurement_concept=concept,
+        measurement_source_value='Kappa free light chains',
+        value_as_number=Decimal('10.23'), unit_source_value='mg/dL',
+    )
+    MeasurementFactory(
+        person=person, measurement_concept=concept,
+        measurement_source_value='Lambda free light chains',
+        value_as_number=Decimal('6.2'), unit_source_value='mg/dL',
+    )
+
+    data = _get_laboratory_data(person)
+
+    assert data['kappa_flc'] == Decimal('102.3')
+    assert data['lambda_flc'] == Decimal('62.0')
+    assert data['kappa_flc'] / data['lambda_flc'] == Decimal('1.65')
 
 
 # ---------------------------------------------------------------------------
