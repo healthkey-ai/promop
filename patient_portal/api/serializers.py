@@ -740,7 +740,7 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         def _editable_drugs(line_number):
             episode = episodes_by_line.get(line_number)
             if episode is None:
-                return None, []
+                return None, [], False
             drugs = []
             for event_id in event_ids_by_episode.get(episode.episode_id, []):
                 de = drugs_by_id.get(event_id)
@@ -759,7 +759,10 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                     'standard_concept': concept.standard_concept,
                     'source_value': de.drug_source_value,
                 })
-            return episode.episode_id, drugs
+            # An asserted line may have no recorded drug at all (#1924). Say so
+            # explicitly, so a consumer does not read "no drugs listed" as "no
+            # drugs were given".
+            return episode.episode_id, drugs, bool(event_ids_by_episode.get(episode.episode_id))
 
         def _line(n, regimen, cid, prov_field, comp, start, end,
                   outcome, intent, disc, later_aggregate=False,
@@ -779,7 +782,7 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                 origin = None
             elif origin is None:
                 origin = 'inferred'
-            episode_id, editable_drugs = _editable_drugs(n)
+            episode_id, editable_drugs, composition_known = _editable_drugs(n)
             entry = {
                 'line': n,
                 'episode_id': episode_id,
@@ -788,6 +791,7 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                 'regimen_source': origin,
                 'release_id': _prov(prov_field, 'release_id'),
                 'drugs': editable_drugs,
+                'composition_known': composition_known,
                 'component_ids': comp or [],
                 # Therapy-class ("type") concept_ids for the line (ADR 0002),
                 # derived from component_ids; parity with the flat

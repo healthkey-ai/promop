@@ -76,6 +76,7 @@ from omop_oncology.models import (
     EpisodeEvent,
     Histology,
     StemTable,
+    TherapyLineAssertion,
     TherapyLineExposure,
 )
 from patient_portal.models import BreakGlassGrant, PatientInvitation, PatientStatement, PatientUser
@@ -147,6 +148,7 @@ PATIENT_TABLES: tuple[PatientTable, ...] = (
     # Which exposures a line authored. Copied with the line, so an edit on the
     # copy corrects the copy's own facts rather than leaving them unowned.
     PatientTable(TherapyLineExposure, 'episode_id__in', parent=Episode),
+    PatientTable(TherapyLineAssertion, 'episode_id__in', parent=Episode),
     PatientTable(CancerModifier, 'person_id'),
     PatientTable(StemTable, 'person_id'),
     PatientTable(Histology, 'person_id'),

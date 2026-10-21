@@ -41,6 +41,18 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **A known line of therapy is no longer lost when its drugs are unknown** —
+  the canonical writer now records that a line happened, independently of the
+  exposures that describe it. A line named without a drug list (a mapped
+  regimen, or a patient-reported line whose drugs were never recorded) counts
+  as one prior line instead of reading as "no prior therapy", and reports an
+  unknown composition rather than an empty one: the per-line payload now says
+  `composition_known: false`. A header row that no writer asserted is still
+  ignored, so a partial import cannot invent treatment. Retracting a line
+  entered in error withdraws it without deleting imported exposures, and saving
+  the line again restores it; clearing composition keeps the line with unknown
+  drugs (#1924).
+
 - **Editing a line of therapy no longer rewrites unrelated administrations** —
   every drug exposure now belongs to one line and is addressed by its own id,
   with its own dates, instead of being re-identified by patient, drug name and
