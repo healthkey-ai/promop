@@ -463,7 +463,8 @@ SERVICE_AUTH_TOKENS = parse_service_tokens(os.environ.get("SERVICE_AUTH_TOKENS",
 SERVICE_AUTH_TOKEN = os.environ.get("SERVICE_AUTH_TOKEN", "")
 # The legacy credential is read-only by default. ``system/etl.write`` is a
 # narrow compatibility capability accepted only on explicitly approved ETL
-# endpoints, and never for DELETE.
+# endpoints, and never for DELETE. Deleting clinical rows is the separate
+# ``system/etl.delete`` grant.
 SERVICE_AUTH_SCOPES = os.environ.get("SERVICE_AUTH_SCOPES", "patient/*.read")
 service_credentials(SERVICE_AUTH_TOKENS, SERVICE_AUTH_TOKEN, SERVICE_AUTH_SCOPES)
 

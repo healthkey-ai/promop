@@ -1622,8 +1622,10 @@ be used to tell an absent id from somebody else's.
 `POST`, not `DELETE`, because a `DELETE` with a body gets stripped by
 intermediaries. That makes the permission class matter: the viewsets use
 `PatientCrudPermission`, which grants a session patient `POST` but denies them
-`DELETE`, so the action overrides it with the base `ScopedTokenPermission`.
-Evaluated on a `POST` that class reproduces the `DELETE` rule. Per-person write
+`DELETE`, so the action overrides it with `EtlDeletePermission`: the base
+`ScopedTokenPermission`, which evaluated on a `POST` reproduces the `DELETE`
+rule, plus the `system/etl.delete` service scope that the row level `DELETE`
+also accepts (#1947). `system/etl.write` reaches neither. Per-person write
 access is `_authorize_person_write`, shared with the bulk create path.
 
 Three things that are easy to get wrong:

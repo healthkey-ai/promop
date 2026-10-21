@@ -610,7 +610,9 @@ The legacy staging ETL additionally uses `system/etl.write`. This is not a broad
 SMART patient-write scope: only ETL-specific permission classes on the approved
 person, clinical import, and code-mapping endpoints accept it, and only for
 POST, PUT, or PATCH. Destructive actions retain the ordinary permission and
-reject it, including bulk-delete actions transported over POST.
+reject it, including bulk-delete actions transported over POST. Retracting
+clinical rows needs the separate `system/etl.delete` grant, accepted only on
+clinical row DELETE and `bulk_delete` (#1947).
 
 This legacy grant applies to every holder of the shared token. Named grants in
 `SERVICE_AUTH_TOKENS` provide distinct identities and scopes for each service.

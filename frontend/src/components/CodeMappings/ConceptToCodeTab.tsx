@@ -287,19 +287,31 @@ function PriorityCell({ concept, lastPosition, disabled, onMove }: {
 const loadFailed = 'Could not load source codes.';
 
 type EditTarget = { mode: 'new' | 'edit'; row: CodeMappingRow; source: Source };
-/** How many sources Suggest could find, by the same retrieval as a run. */
-type Estimate = { total: number | null; umls?: number; lexical?: number; capped?: boolean; partial?: boolean; timed_out: boolean };
+/** How many sources Suggest could find, by the same retrieval as a run.
+ * ``approximate`` is set when the exact count ran out of time: ``earlier`` is
+ * the last exact count for these settings, ``sample`` a scaled-up sample. */
+type Estimate = {
+  total: number | null; umls?: number; lexical?: number; capped?: boolean; partial?: boolean;
+  approximate?: 'earlier' | 'sample' | null; timed_out: boolean;
+};
 
 function estimateText(estimate: Estimate, limit: number) {
   if (estimate.total === null) return 'Could not estimate how many source codes Suggest could find: the search took too long.';
-  if (estimate.total === 0) return 'Suggest source codes would find no candidate source codes with these settings.';
+  const sampled = estimate.approximate === 'sample';
+  if (estimate.total === 0) {
+    return sampled
+      ? 'A sample found no candidate source codes; the full count took too long, so there may be a few.'
+      : 'Suggest source codes would find no candidate source codes with these settings.';
+  }
   const plus = estimate.capped ? '+' : '';
   const evidence = [estimate.lexical ? `${estimate.lexical.toLocaleString()}${plus} by name` : '',
     estimate.umls ? `${estimate.umls.toLocaleString()}${plus} by UMLS` : ''].filter(Boolean).join(', ');
   const runs = Number.isInteger(limit) && limit > 0 ? Math.ceil(estimate.total / limit) : null;
-  return `About ${estimate.total.toLocaleString()}${plus} candidate source codes${evidence ? ` (${evidence})` : ''}`
+  return `${sampled ? 'Roughly' : 'About'} ${estimate.total.toLocaleString()}${plus} candidate source codes${evidence ? ` (${evidence})` : ''}`
     + (runs ? ` · about ${runs.toLocaleString()}${plus} ${runs === 1 && !plus ? 'run' : 'runs'} of ${limit}` : '') + '.'
-    + (estimate.partial ? ' Vocabulary codes never seen were not all counted in time.' : '');
+    + (sampled ? ' Estimated from a sample: the full count took too long.' : '')
+    + (estimate.approximate === 'earlier' ? ' From an earlier count: this one took too long, so codes handled since may still be counted.' : '')
+    + (estimate.partial ? ` Vocabulary codes never seen were not ${sampled ? '' : 'all '}counted${sampled ? '' : ' in time'}.` : '');
 }
 type RankingModel = 'anthropic' | 'jev' | 'both';
 

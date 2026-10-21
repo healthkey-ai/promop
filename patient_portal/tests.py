@@ -10813,6 +10813,48 @@ class ServiceTokenOmopAccessTest(TestCase):
 
     @override_settings(
         SERVICE_AUTH_TOKEN='test-service-secret',
+        SERVICE_AUTH_SCOPES='patient/*.read system/etl.write system/etl.delete',
+    )
+    def test_etl_delete_grant_deletes_clinical_rows(self):
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION='Bearer test-service-secret')
+        response = client.delete(f'/api/measurements/{self.m_a.pk}/')
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(Measurement.objects.filter(pk=self.m_a.pk).exists())
+        response = client.post(
+            '/api/v1/measurements/bulk_delete/',
+            {'ids': [self.m_b.pk, 999999999]}, format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data, {'deleted': 1, 'missing': [999999999]})
+        self.assertFalse(Measurement.objects.filter(pk=self.m_b.pk).exists())
+
+    @override_settings(
+        SERVICE_AUTH_TOKEN='test-service-secret',
+        SERVICE_AUTH_SCOPES='system/etl.delete',
+    )
+    def test_etl_delete_grant_reaches_nothing_else(self):
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION='Bearer test-service-secret')
+        url = f'/api/measurements/{self.m_a.pk}/'
+        self.assertEqual(client.get(url).status_code, 403)
+        response = client.patch(url, {'value_as_number': 8.5}, format='json')
+        self.assertEqual(response.status_code, 403)
+        response = client.delete(
+            f'/api/v1/patient-records/{self.person_a.person_id}/admin-delete/',
+            {'confirm': 'DELETE'}, format='json',
+        )
+        self.assertEqual(response.status_code, 403)
+        response = client.delete(
+            '/api/patient-info/bulk_delete/',
+            {'person_ids': [self.person_a.person_id]}, format='json',
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(Person.objects.filter(pk=self.person_a.pk).exists())
+        self.assertTrue(Measurement.objects.filter(pk=self.m_a.pk).exists())
+
+    @override_settings(
+        SERVICE_AUTH_TOKEN='test-service-secret',
         SERVICE_AUTH_SCOPES='patient/*.read system/etl.write',
     )
     def test_etl_grant_can_refresh_patient_record(self):
