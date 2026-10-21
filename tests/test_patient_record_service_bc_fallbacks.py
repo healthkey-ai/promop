@@ -365,6 +365,48 @@ def test_mixed_symbol_and_word_receptor_result_stays_unknown():
     assert record.tnbc_status is None
 
 
+def test_mixed_symbol_and_word_without_slash_stays_unknown():
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    for code, value in (
+        ('16112-5', 'ER+; Negative'),
+        ('16113-3', 'PR-'),
+        ('48676-1', 'HER2-'),
+    ):
+        MeasurementFactory(
+            person=person,
+            measurement_source_value=code,
+            measurement_date=date(2026, 1, 15),
+            value_as_string=value,
+        )
+
+    record = refresh_patient_record(person)
+
+    assert record.estrogen_receptor_status == 'ER+; NEGATIVE'
+    assert record.hr_status is None
+    assert record.tnbc_status is None
+
+
+def test_positive_receptor_excludes_tnbc_when_another_receptor_is_absent():
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    for code, value in (
+        ('16112-5', 'ER+'),
+        ('48676-1', 'HER2-'),
+    ):
+        MeasurementFactory(
+            person=person,
+            measurement_source_value=code,
+            measurement_date=date(2026, 1, 15),
+            value_as_string=value,
+        )
+
+    record = refresh_patient_record(person)
+
+    assert record.hr_status == 'HR+'
+    assert record.tnbc_status is False
+
+
 def test_mixed_receptor_result_is_preserved_and_stays_unknown():
     person = PersonFactory()
     PatientRecordFactory(person=person)

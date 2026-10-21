@@ -1933,10 +1933,10 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             return None
         s = raw.strip().lower()
         positive_signal = 'positive' in s or bool(
-            re.search(r'\b(?:ER|PR|HER2|HR)\s*\+', s)
+            re.search(r'\b(?:ER|PR|HER2|HR)\s*\+', s, re.IGNORECASE)
         )
         negative_signal = 'negative' in s or bool(
-            re.search(r'\b(?:ER|PR|HER2|HR)\s*-', s)
+            re.search(r'\b(?:ER|PR|HER2|HR)\s*-', s, re.IGNORECASE)
         )
         # Preserve mixed/ambiguous results before collapsing the unambiguous
         # words. `Negative/Equivocal`, `ER+ / Negative`, and `ER+/-` are not
@@ -1967,19 +1967,18 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         if status:
             data['her2_status'] = status
 
-    if 'estrogen_receptor_status' in data and 'progesterone_receptor_status' in data and 'her2_status' in data:
-        signals = [
-            _receptor_signal(data['estrogen_receptor_status']),
-            _receptor_signal(data['progesterone_receptor_status']),
-            _receptor_signal(data['her2_status']),
-        ]
-        # A definite positive receptor rules out TNBC even if another result
-        # is unknown; otherwise all three must be negative. Mixed/ambiguous
-        # values leave the verdict unknown.
-        if any(signal == 1 for signal in signals):
-            data['tnbc_status'] = False
-        elif all(signal == -1 for signal in signals):
-            data['tnbc_status'] = True
+    signals = [
+        _receptor_signal(data.get('estrogen_receptor_status')),
+        _receptor_signal(data.get('progesterone_receptor_status')),
+        _receptor_signal(data.get('her2_status')),
+    ]
+    # A definite positive receptor rules out TNBC even if another result is
+    # missing or unknown; otherwise all three must be negative. Mixed/ambiguous
+    # values leave the verdict unknown.
+    if any(signal == 1 for signal in signals):
+        data['tnbc_status'] = False
+    elif all(signal == -1 for signal in signals):
+        data['tnbc_status'] = True
 
     def _first_m(concept_code):
         """Return the most recent Measurement for a LOINC code, checking concept first then source_value."""
