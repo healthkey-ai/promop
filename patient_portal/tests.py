@@ -9541,6 +9541,84 @@ class OrgInvitationFlowTest(TestCase):
         self.assertEqual(resp.status_code, 200, resp.data)
         self.assertFalse(resp.data['needs_password'])
 
+    # --- a federated account on the address is not a login credential (#1935) ---
+
+    def _federated_identity(self, email, sub='federated-sub'):
+        identity = Identity.objects.create(
+            issuer='https://securetoken.google.com/project',
+            sub=sub,
+            email=email,
+            email_verified_at=timezone.now(),
+        )
+        identity.set_unusable_password()
+        identity.save()
+        return identity
+
+    def test_confirm_sets_a_local_password_beside_a_federated_account(self):
+        """The login form authenticates urn:local only, so accepting with a
+        password has to create that account even when an SSO one exists."""
+        from django.contrib.auth import authenticate
+        federated = self._federated_identity('sso-invitee@example.com')
+        invitation = self._invite('sso-invitee@example.com', role='org_admin')
+
+        resp = APIClient().post('/api/orgs/confirm-invitation/',
+                                {'token': invitation.token, 'password': 'Str0ng-pass-42'})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        local = Identity.objects.get(email='sso-invitee@example.com', issuer='urn:local')
+        self.assertTrue(local.check_password('Str0ng-pass-42'))
+        self.assertEqual(authenticate(username='sso-invitee@example.com', password='Str0ng-pass-42'), local)
+        federated.refresh_from_db()
+        self.assertFalse(federated.has_usable_password())
+
+    def test_confirm_grants_the_role_to_both_of_an_invitees_accounts(self):
+        """Authorization keys on the identity row, so the federated account must
+        keep the grant the host app's token relies on."""
+        federated = self._federated_identity('sso-both@example.com')
+        invitation = self._invite('sso-both@example.com', role='org_admin')
+
+        resp = APIClient().post('/api/orgs/confirm-invitation/',
+                                {'token': invitation.token, 'password': 'Str0ng-pass-42'})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        local = Identity.objects.get(email='sso-both@example.com', issuer='urn:local')
+        for identity in (local, federated):
+            self.assertTrue(
+                GroupAccess.objects.filter(identity=identity, org=self.org, role='org_admin').exists(),
+                f'no grant for {identity.issuer}',
+            )
+
+    def test_confirm_without_a_password_leaves_a_federated_invitee_on_sso(self):
+        federated = self._federated_identity('sso-only@example.com')
+        invitation = self._invite('sso-only@example.com', role='doctor')
+
+        resp = APIClient().post('/api/orgs/confirm-invitation/', {'token': invitation.token})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertFalse(Identity.objects.filter(email='sso-only@example.com', issuer='urn:local').exists())
+        self.assertTrue(
+            GroupAccess.objects.filter(identity=federated, org=self.org, role='doctor').exists()
+        )
+
+    def test_confirm_rejects_a_weak_password_beside_a_federated_account(self):
+        self._federated_identity('sso-weak@example.com')
+        invitation = self._invite('sso-weak@example.com')
+
+        resp = APIClient().post('/api/orgs/confirm-invitation/',
+                                {'token': invitation.token, 'password': 'short'})
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(Identity.objects.filter(email='sso-weak@example.com', issuer='urn:local').exists())
+        invitation.refresh_from_db()
+        self.assertIsNone(invitation.confirmed_at)
+
+    def test_lookup_reports_needs_password_for_a_federated_only_account(self):
+        self._federated_identity('sso-lookup@example.com')
+        invitation = self._invite('sso-lookup@example.com')
+        resp = APIClient().get('/api/v1/orgs/invitation-lookup/', {'token': invitation.token})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertTrue(resp.data['needs_password'])
+
     def test_invite_analyst_allows_custom_redirect_url(self):
         resp = self.client.post('/api/orgs/invite-org/invite/', {
             'email': 'analyst-custom@example.com',
