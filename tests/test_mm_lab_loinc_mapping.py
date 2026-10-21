@@ -8,6 +8,7 @@ from omop_core.models import Concept, Measurement, Person
 from omop_core.services.patient_record_service import (
     _get_laboratory_data,
     _get_mm_specific_data,
+    refresh_patient_record,
 )
 from tests.factories import (
     ConceptFactory,
@@ -203,6 +204,53 @@ def test_newer_display_name_flc_beats_older_unconvertible_loinc():
     assert data['kappa_flc'] == Decimal('100.0')
 
 
+def test_flc_pair_requires_the_same_lab_event():
+    """Kappa from one draw and lambda from another cannot form a ratio."""
+    person = PersonFactory()
+    _measure(person, '36916-5', 150.0, date='2023-01-01', unit='mg/L')
+    _measure(person, '33944-0', 75.0, date='2024-06-01', unit='mg/L')
+
+    data = _get_laboratory_data(person)
+
+    assert data['_flc_pair'] is None
+    assert data['kappa_flc'] == Decimal('150.0')
+    assert data['lambda_flc'] == Decimal('75.0')
+
+
+def test_flc_pair_uses_the_same_lab_event():
+    person = PersonFactory()
+    _measure(person, '36916-5', 150.0, date='2024-06-01', unit='mg/L')
+    _measure(person, '33944-0', 75.0, date='2024-06-01', unit='mg/L')
+
+    assert _get_laboratory_data(person)['_flc_pair'] == (
+        Decimal('150.0'), Decimal('75.0'),
+    )
+
+
+def test_refresh_does_not_pair_flc_from_different_events():
+    person = PersonFactory()
+    _measure(person, '33358-3', 0.1)
+    _measure(person, '32730-5', 50.0)
+    _measure(person, '36916-5', 150.0, date='2023-01-01', unit='mg/L')
+    _measure(person, '33944-0', 75.0, date='2024-06-01', unit='mg/L')
+
+    patient = refresh_patient_record(person)
+
+    assert patient.measurable_disease_imwg is None
+
+
+def test_refresh_uses_a_same_event_flc_pair():
+    person = PersonFactory()
+    _measure(person, '33358-3', 0.1)
+    _measure(person, '32730-5', 50.0)
+    _measure(person, '36916-5', 150.0, date='2024-06-01', unit='mg/L')
+    _measure(person, '33944-0', 75.0, date='2024-06-01', unit='mg/L')
+
+    patient = refresh_patient_record(person)
+
+    assert patient.measurable_disease_imwg is True
+
+
 def test_display_name_flc_values_are_converted_to_mg_l():
     """The legacy/generator display-name path must apply the same unit conversion."""
     person = PersonFactory()
@@ -317,6 +365,15 @@ def test_slim_falls_back_to_dividing_two_separate_results():
     _measure(person, '33944-0', 1.0, unit='mg/L')
 
     assert _get_mm_specific_data(person)['meets_slim'] is True
+
+
+def test_slim_does_not_combine_flc_from_different_lab_events():
+    """A high ratio built from two draws is not a SLiM light-chain criterion."""
+    person = PersonFactory()
+    _measure(person, '36916-5', 300.0, date='2023-01-01', unit='mg/L')
+    _measure(person, '33944-0', 1.0, date='2024-06-01', unit='mg/L')
+
+    assert _get_mm_specific_data(person)['meets_slim'] is False
 
 
 def test_slim_uses_the_latest_flc_pair_not_an_arbitrary_row():

@@ -12,6 +12,8 @@ Covers:
   - _compute_derived_fields: measurable_disease_imwg, tp53_disruption
 """
 
+from decimal import Decimal
+
 import pytest
 from django.contrib.contenttypes.models import ContentType
 from omop_core.management.commands.populate_patient_record import Command
@@ -667,6 +669,28 @@ class TestMeasurableDiseaseImwg:
             kappa_flc='NaN',
             lambda_flc=100,
         )
+        _cmd()._compute_derived_fields(pi)
+        assert pi.measurable_disease_imwg is True
+
+    def test_unpaired_flc_values_do_not_establish_imwg(self):
+        pi = self._pi(
+            monoclonal_protein_serum=0.3,
+            monoclonal_protein_urine=50,
+            kappa_flc=150,
+            lambda_flc=75,
+        )
+        pi._flc_pair = None
+        _cmd()._compute_derived_fields(pi)
+        assert pi.measurable_disease_imwg is None
+
+    def test_paired_flc_values_establish_imwg(self):
+        pi = self._pi(
+            monoclonal_protein_serum=0.3,
+            monoclonal_protein_urine=50,
+            kappa_flc=0,
+            lambda_flc=0,
+        )
+        pi._flc_pair = (Decimal('150'), Decimal('75'))
         _cmd()._compute_derived_fields(pi)
         assert pi.measurable_disease_imwg is True
 

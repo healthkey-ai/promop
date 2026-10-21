@@ -2550,6 +2550,87 @@ def _get_infection_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
 _SLIM_FLC_RATIO = 100.0
 _SLIM_INVOLVED_FLC_MG_L = 100.0
 
+# Sentinel for "no projection provided this refresh". Direct callers of
+# _compute_derived_fields (unit tests, legacy call sites) did not have a chance
+# to attach the FLC pair, so they keep the old field-based behaviour.
+_FLC_PAIR_UNSET = object()
+
+
+def _flc_field_for_measurement(measurement):
+    """Return kappa_flc/lambda_flc for either LOINC or display-name rows."""
+    code = _measurement_code(measurement)
+    field = _LOINC_LAB_FIELDS.get(code, (None, None))[0]
+    if field not in _FLC_FIELDS:
+        field = _SOURCE_VALUE_LAB_FIELDS.get(measurement.measurement_source_value)
+    return field
+
+
+def _flc_event_key(measurement):
+    """Group FLC rows by the best available specimen/lab-event identity.
+
+    OMOP Measurement has no specimen_id in this schema. Prefer an explicit
+    measurement_event_id, then a visit + timestamp, then a visit + date, then
+    the timestamp/date alone. Rows without any key cannot prove they belong to
+    the same draw and are never paired.
+    """
+    event_id = getattr(measurement, 'measurement_event_id', None)
+    if event_id is not None:
+        return ('event', event_id)
+
+    visit_id = getattr(measurement, 'visit_occurrence_id', None)
+    event_at = getattr(measurement, 'measurement_datetime', None)
+    event_date = getattr(measurement, 'measurement_date', None)
+    if visit_id is not None:
+        if event_at is not None:
+            return ('visit_datetime', visit_id, event_at)
+        if event_date is not None:
+            return ('visit_date', visit_id, event_date)
+    if event_at is not None:
+        return ('datetime', event_at)
+    if event_date is not None:
+        return ('date', event_date)
+    return None
+
+
+def _select_flc_pair(measurements):
+    """Return the newest complete kappa/lambda pair from one lab event.
+
+    A ratio must not combine kappa from one draw with lambda from another. The
+    newest event that contains both chains decides; if its units cannot be
+    converted, the pair is unknown rather than falling back to an older event.
+    Events with only one chain are skipped because they cannot form a ratio.
+    """
+    events = {}
+    for measurement in measurements:
+        if measurement.value_as_number is None:
+            continue
+        field = _flc_field_for_measurement(measurement)
+        if field not in _FLC_FIELDS:
+            continue
+        key = _flc_event_key(measurement)
+        if key is None:
+            continue
+        event = events.setdefault(key, {})
+        event.setdefault(field, measurement)
+
+    for event in events.values():
+        kappa_row = event.get('kappa_flc')
+        lambda_row = event.get('lambda_flc')
+        if kappa_row is None or lambda_row is None:
+            continue
+        kappa = flc_to_canonical(
+            kappa_row.value_as_number, kappa_row.unit_source_value,
+        )
+        lam = flc_to_canonical(
+            lambda_row.value_as_number, lambda_row.unit_source_value,
+        )
+        if kappa is None or lam is None:
+            return None
+        if not kappa.is_finite() or not lam.is_finite() or kappa < 0 or lam < 0:
+            return None
+        return kappa, lam
+    return None
+
 
 def _meets_flc_criterion(
     kappas: list[tuple[float, str | None]],
@@ -2677,9 +2758,15 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
                 (float(m.value_as_number), m.unit_source_value))
 
     plasma_pcts = [v for v, _unit in slim_vals.get('clonal_plasma_cells', [])]
-    kappas = slim_vals.get('kappa_flc', [])
-    lambdas = slim_vals.get('lambda_flc', [])
-    ratios = [v for v, _unit in slim_vals.get('free_light_chain_ratio', [])]
+    flc_pair = _select_flc_pair(snapshot.measurements)
+    if flc_pair is None:
+        # A reported ratio without a same-event involved chain cannot prove
+        # the absolute >=100 mg/L half of the SLiM criterion.
+        kappas, lambdas, ratios = [], [], []
+    else:
+        kappas = [(float(flc_pair[0]), 'mg/L')]
+        lambdas = [(float(flc_pair[1]), 'mg/L')]
+        ratios = []
 
     meets_slim = False
     # Sixty criterion: any plasma cells measurement ≥60%
@@ -2836,6 +2923,11 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             )
             continue
         data[field] = canonical_flc
+
+    # The ratio-bearing values must come from one lab event, not the newest
+    # kappa and the newest lambda independently. The individual fields above
+    # remain useful for display; this transient pair is what IMWG/SLiM consume.
+    data['_flc_pair'] = _select_flc_pair(measurements)
 
     # --- New UI fields via LOINC concept code (primary path) ---
     loinc_ms = [m for m in measurements if m.value_as_number is not None]
@@ -3321,8 +3413,16 @@ def _compute_derived_fields(patient_info: PatientRecord) -> None:
     """Compute fields that depend on other PatientRecord fields being set."""
     serum_mp = patient_info.monoclonal_protein_serum
     urine_mp = patient_info.monoclonal_protein_urine
-    kappa = patient_info.kappa_flc
-    lam = patient_info.lambda_flc
+    flc_pair = getattr(patient_info, '_flc_pair', _FLC_PAIR_UNSET)
+    if flc_pair is _FLC_PAIR_UNSET:
+        # Direct callers/tests construct PatientRecord without a projection.
+        kappa = patient_info.kappa_flc
+        lam = patient_info.lambda_flc
+    else:
+        # A refresh always supplies the pair, including None when no two chains
+        # came from the same lab event. Never reconstruct a ratio from fields
+        # that may belong to different draws.
+        kappa, lam = flc_pair if flc_pair else (None, None)
 
     # Keep this in lockstep with CB PatientInfoAttributes.measurable_disease_imwg
     # (and trials/signals.py): a negative OR is definitive only when all three
