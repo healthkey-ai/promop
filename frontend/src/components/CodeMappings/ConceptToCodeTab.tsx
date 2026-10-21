@@ -157,7 +157,7 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
         const notFound = (failure as { response?: { status?: number } })?.response?.status === 404;
         setError(notFound
           ? `Concept ${initialConceptId} is not a current standard concept in a clinical domain, so it has no source codes to review.`
-          : `Could not open concept ${initialConceptId}. Refresh to retry.`);
+          : `Could not open concept ${initialConceptId}. Reload the page to retry.`);
       }
       if (active) onInitialConceptHandled?.();
     })();
@@ -281,7 +281,23 @@ function PriorityCell({ concept, lastPosition, disabled, onMove }: {
   </div>;
 }
 
+const loadFailed = 'Could not load source codes.';
+
 type EditTarget = { mode: 'new' | 'edit'; row: CodeMappingRow; source: Source };
+/** How many sources Suggest could find, by the same retrieval as a run. */
+type Estimate = { total: number | null; umls?: number; lexical?: number; capped?: boolean; partial?: boolean; timed_out: boolean };
+
+function estimateText(estimate: Estimate, limit: number) {
+  if (estimate.total === null) return 'Could not estimate how many source codes Suggest could find: the search took too long.';
+  if (estimate.total === 0) return 'Suggest source codes would find no candidate source codes with these settings.';
+  const plus = estimate.capped ? '+' : '';
+  const evidence = [estimate.lexical ? `${estimate.lexical.toLocaleString()}${plus} by name` : '',
+    estimate.umls ? `${estimate.umls.toLocaleString()}${plus} by UMLS` : ''].filter(Boolean).join(', ');
+  const runs = Number.isInteger(limit) && limit > 0 ? Math.ceil(estimate.total / limit) : null;
+  return `About ${estimate.total.toLocaleString()}${plus} candidate source codes${evidence ? ` (${evidence})` : ''}`
+    + (runs ? ` · about ${runs.toLocaleString()}${plus} ${runs === 1 && !plus ? 'run' : 'runs'} of ${limit}` : '') + '.'
+    + (estimate.partial ? ' Vocabulary codes never seen were not all counted in time.' : '');
+}
 type RankingModel = 'anthropic' | 'jev' | 'both';
 
 /** A suggested source with no mapping row yet, shaped for the New Mapping form. */
@@ -326,6 +342,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   const [reference, setReference] = useState<Reference | null>(null);
   const [dialogStrategies, setDialogStrategies] = useState({ umls: true, lexical: true, vectors: true });
   const [dialogRanking, setDialogRanking] = useState<RankingModel>('jev');
+  const [estimate, setEstimate] = useState<Estimate | null>(null);
   const destination = useMemo<ConceptResult>(() => ({
     concept_id: concept.concept_id, concept_name: concept.concept_name, concept_code: concept.concept_code,
     vocabulary_id: concept.vocabulary_id, domain_id: concept.domain_id,
@@ -348,11 +365,30 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
         });
         if (current) { setData(response.data); setSelected(new Set()); }
       } catch {
-        if (current) setError('Could not load source codes. Refresh to retry.');
+        if (current) setError(loadFailed);
       } finally { if (current) setLoading(false); }
     }, 250);
     return () => { current = false; controller.abort(); window.clearTimeout(timer); };
   }, [concept.concept_id, mode, search, seenOnly, page, order, revision]);
+
+  // Re-estimated after every write: a proposed source leaves the pool, so the
+  // next run reaches codes the last one did not show.
+  const strategyKey = (['umls', 'lexical'] as const).filter(key => strategies[key]).join(',');
+  useEffect(() => {
+    let current = true;
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setEstimate(null);
+      if (!strategyKey) return;
+      try {
+        const response = await api.get<Estimate>(`/v1/concept-to-code/${concept.concept_id}/estimate/`, {
+          params: { strategies: strategyKey, include_zero_seen: seenOnly ? '0' : '1' }, signal: controller.signal,
+        });
+        if (current) setEstimate(response.data);
+      } catch { /* The estimate is a guide; Suggest works without it. */ }
+    }, 250);
+    return () => { current = false; controller.abort(); window.clearTimeout(timer); };
+  }, [concept.concept_id, strategyKey, seenOnly, revision]);
 
   useEffect(() => {
     if (!run || !['queued', 'running'].includes(run.state)) return;
@@ -440,7 +476,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
         setProgress(`${approve ? 'Approved' : 'Proposed'} ${saved} of ${batch.length} selected mappings.`);
         setSelected(new Set());
         if (failures.length) setError(failures.join(' '));
-        if (saved) { onSaved(); if (mode !== 'candidates') setRevision(value => value + 1); }
+        if (saved) { onSaved(); setRevision(value => value + 1); }
       }
     } finally { writingRef.current = false; if (active.current) setWriting(false); onWriting(false); }
   };
@@ -462,13 +498,14 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
       if (ranker !== 'none') setDialogRanking(ranker as RankingModel);
       setEdit(target); onEditingChange?.(true);
     } catch {
-      if (active.current) setError(`Could not open ${row.source_code} for editing. Refresh to retry.`);
+      if (active.current) setError(`Could not open ${row.source_code} for editing. Click it again to retry.`);
     } finally { if (active.current) setOpening(false); }
   };
   const closeEditor = () => { setEdit(null); onEditingChange?.(false); };
   const editorSaved = (saved: CodeMappingRow) => {
     onSaved();
-    if (mode !== 'candidates') { setRevision(value => value + 1); return; }
+    setRevision(value => value + 1);
+    if (mode !== 'candidates') return;
     const key = edit ? sourceKey(edit.source) : '';
     setSelected(previous => { const next = new Set(previous); next.delete(key); return next; });
     setRun(previous => previous ? { ...previous, activity: previous.activity.map(event => ({ ...event,
@@ -481,7 +518,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   };
 
   const busy = writing || running;
-  const refresh = useCallback(() => { setData(null); setSelected(new Set()); setError(''); setRevision(value => value + 1); }, []);
+  const retry = useCallback(() => { setData(null); setSelected(new Set()); setError(''); setRevision(value => value + 1); }, []);
   return <section aria-label={`Source codes for ${concept.concept_name}`} className="space-y-4">
     <div role="group" aria-label="Source code views" className="flex flex-wrap gap-2">
       {([['linked', 'Existing mappings'], ['available', 'Find source codes'], ['candidates', 'Suggested source codes']] as const).map(([key, label]) =>
@@ -499,9 +536,11 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
         <option value="both">Both rankers</option><option value="none">Curator review</option>
       </select>
       <input type="number" aria-label="Maximum source candidates" className={`${input} w-20`} value={limit} min={1} max={100} disabled={busy} onChange={event => setLimit(Number(event.target.value))} />
-      <button className={button} disabled={busy || (!strategies.umls && !strategies.lexical) || !Number.isInteger(limit) || limit < 1 || limit > 100}
-        onClick={() => void start()}>{running ? 'Searching…' : 'Suggest source codes'}</button>
-      {mode !== 'candidates' && <button className={button} disabled={busy} onClick={refresh}>Refresh</button>}
+      <div className="flex flex-col gap-1">
+        <button className={`${button} self-start`} disabled={busy || (!strategies.umls && !strategies.lexical) || !Number.isInteger(limit) || limit < 1 || limit > 100}
+          onClick={() => void start()}>{running ? 'Searching…' : 'Suggest source codes'}</button>
+        {estimate && <p data-testid="source-estimate" className="text-xs text-slate-600">{estimateText(estimate, limit)}</p>}
+      </div>
     </div>
     <p className="text-xs text-slate-500">Review clinical meaning before selecting codes. Suggestions do not change mappings; approval updates the mapping and matching stored clinical rows.
       {' '}New vocabulary codes have Seen = 0 and must be proposed before approval.</p>
@@ -511,7 +550,8 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
       {run.error && ` ${run.error}`}
     </p>}
     {run && mode === 'candidates' && run.selection.include_zero_seen === seenOnly && <p className="text-xs text-amber-800">Run Suggest source codes again to search with the changed Seen filter.</p>}
-    {error && <p role="alert" className="text-sm text-rose-700">{error}</p>}
+    {error && <p role="alert" className="text-sm text-rose-700">{error}
+      {error === loadFailed && <button type="button" className="ml-2 underline" onClick={retry}>Retry</button>}</p>}
     {progress && <p role="status" className="text-sm font-medium text-slate-800">{progress}</p>}
     {loading && <p role="status" className="text-sm text-slate-500">Loading source codes…</p>}
     <div className="flex flex-wrap items-center gap-3">
@@ -576,7 +616,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
       reference={reference ?? emptyReference} canApprove={canApprove}
       strategies={dialogStrategies} rankingModel={dialogRanking}
       onStrategiesChange={setDialogStrategies} onRankingModelChange={setDialogRanking}
-      onSaved={editorSaved} onDeleted={() => { onSaved(); if (mode !== 'candidates') setRevision(value => value + 1); }}
+      onSaved={editorSaved} onDeleted={() => { onSaved(); setRevision(value => value + 1); }}
       defaultDestination={destination} sourceExamples />
   </section>;
 }

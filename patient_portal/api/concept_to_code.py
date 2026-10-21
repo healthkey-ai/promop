@@ -1,7 +1,7 @@
 """Concept-first review using the existing SCCM approval semantics."""
 from uuid import UUID
 
-from django.db import transaction
+from django.db import OperationalError, transaction
 from django.db.models import Count, F, Q
 from django.shortcuts import get_object_or_404
 from rest_framework.decorators import api_view, permission_classes
@@ -217,6 +217,25 @@ def concept_to_code_source_examples(request):
         if len(examples) == SOURCE_EXAMPLE_LIMIT:
             break
     return Response({'examples': examples})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def concept_to_code_estimate(request, concept_id):
+    """How many source codes Suggest could find for one concept, before running it."""
+    from omop_core.mapping.reverse_suggestions import estimate_reverse_pool
+    _authorize(request.user)
+    concept = get_object_or_404(standard_destinations(), pk=concept_id)
+    strategies = [s for s in request.query_params.get('strategies', 'umls,lexical').split(',') if s]
+    if not strategies or any(s not in ('umls', 'lexical') for s in strategies):
+        raise ValidationError({'strategies': 'Choose umls, lexical, or both.'})
+    include_zero = request.query_params.get('include_zero_seen', '0') == '1'
+    try:
+        estimate = estimate_reverse_pool(concept, strategies=strategies, include_zero_seen=include_zero)
+    except (TimeoutError, OperationalError):
+        # The search outran its budget; the page says so rather than guessing.
+        return Response({'total': None, 'timed_out': True})
+    return Response({**estimate, 'timed_out': False})
 
 
 @api_view(['POST'])
