@@ -182,6 +182,27 @@ def test_latest_unconvertible_flc_blocks_older_canonical_row():
     assert data['lambda_flc'] == Decimal('10.0')
 
 
+def test_newer_display_name_flc_beats_older_unconvertible_loinc():
+    """Mixed representations must still choose the newest convertible result."""
+    person = PersonFactory()
+    _measure(person, '36916-5', 150.0, date='2023-01-01', unit='mg/L')
+    concept = ConceptFactory(
+        concept_code='0', concept_name='No matching concept',
+        vocabulary=VocabularyFactory(vocabulary_id='LOINC'),
+    )
+    MeasurementFactory(
+        person=person, measurement_concept=concept,
+        measurement_source_value='Kappa free light chains',
+        measurement_date='2024-06-01',
+        value_as_number=Decimal('10.0'), unit_source_value='mg/dL',
+    )
+    _measure(person, '33944-0', 10.0, date='2024-06-01', unit='mg/L')
+
+    data = _get_laboratory_data(person)
+
+    assert data['kappa_flc'] == Decimal('100.0')
+
+
 def test_display_name_flc_values_are_converted_to_mg_l():
     """The legacy/generator display-name path must apply the same unit conversion."""
     person = PersonFactory()

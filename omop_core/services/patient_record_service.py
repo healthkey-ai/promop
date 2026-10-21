@@ -2812,15 +2812,41 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         if measurement.unit_source_value:
             data[f'{field_name}_units'] = measurement.unit_source_value
 
+    # --- FLC values: one chronological pass across both representations ---
+    # Measurements are newest-first. The first kappa/lambda row decides: if its
+    # unit cannot be converted, an older row must not resurrect a stale value
+    # that could satisfy the IMWG absolute threshold.
+    flc_blocked = set()
+    for m in measurements:
+        if m.value_as_number is None:
+            continue
+        code = _measurement_code(m)
+        field = _LOINC_LAB_FIELDS.get(code, (None, None))[0]
+        if field not in _FLC_FIELDS:
+            field = _SOURCE_VALUE_LAB_FIELDS.get(m.measurement_source_value)
+        if field not in _FLC_FIELDS or field in data or field in flc_blocked:
+            continue
+        canonical_flc = flc_to_canonical(m.value_as_number, m.unit_source_value)
+        if canonical_flc is None:
+            flc_blocked.add(field)
+            logger.warning(
+                'FLC skipped for person_id=%s: unit_source_value=%r is not '
+                'convertible to mg/L',
+                person.person_id, m.unit_source_value,
+            )
+            continue
+        data[field] = canonical_flc
+
     # --- New UI fields via LOINC concept code (primary path) ---
     loinc_ms = [m for m in measurements if m.value_as_number is not None]
     wbc_projection_blocked = False
-    flc_projection_blocked = set()
     for m in loinc_ms:
         code = _measurement_code(m)
         if code not in _LOINC_LAB_FIELDS:
             continue
         field, cast = _LOINC_LAB_FIELDS[code]
+        if field in _FLC_FIELDS:
+            continue
         canonical_value = None
         if code == '6690-2':
             if wbc_projection_blocked:
@@ -2835,24 +2861,6 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
                     'unit_source_value=%r', person.person_id, m.unit_source_value,
                 )
                 continue
-        if field in _FLC_FIELDS:
-            if field in flc_projection_blocked:
-                continue
-            canonical_flc = flc_to_canonical(m.value_as_number, m.unit_source_value)
-            if canonical_flc is None:
-                # Do not project the raw number as if it were mg/L: that can
-                # satisfy the IMWG absolute >=100 threshold with a 10x unit
-                # error. Block older rows for this field too — the latest result
-                # is unknown, not an invitation to use a stale one.
-                flc_projection_blocked.add(field)
-                logger.warning(
-                    'FLC skipped for person_id=%s: unit_source_value=%r is not '
-                    'convertible to mg/L',
-                    person.person_id, m.unit_source_value,
-                )
-            elif field not in data:
-                data[field] = cast(canonical_flc)
-            continue
         if field not in data:
             if code != '6690-2' or canonical_value is not None:
                 data[field] = cast(canonical_value if code == '6690-2' else m.value_as_number)
@@ -2877,24 +2885,8 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             field = _SOURCE_VALUE_LAB_FIELDS.get(m.measurement_source_value)
             if field == 'wbc_count_thousand_per_ul' and wbc_projection_blocked:
                 continue
-            if field and field not in data:
-                if field in _FLC_FIELDS:
-                    if field in flc_projection_blocked:
-                        continue
-                    canonical_flc = flc_to_canonical(
-                        m.value_as_number, m.unit_source_value,
-                    )
-                    if canonical_flc is None:
-                        flc_projection_blocked.add(field)
-                        logger.warning(
-                            'FLC display-name row skipped for person_id=%s: '
-                            'unit_source_value=%r is not convertible to mg/L',
-                            person.person_id, m.unit_source_value,
-                        )
-                        continue
-                    data[field] = canonical_flc
-                else:
-                    data[field] = float(m.value_as_number)
+            if field and field not in data and field not in _FLC_FIELDS:
+                data[field] = float(m.value_as_number)
 
     # --- Copy canonical values to legacy aliases (issue #471) ---
     for canonical, aliases in _LAB_FIELD_ALIASES.items():
