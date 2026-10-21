@@ -344,6 +344,16 @@ def test_estimate_counts_unregistered_vocabulary_codes_only_with_zero_seen(clien
     assert run == {'VOCAB-ONLY', 'REGISTERED'}
 
 
+def test_estimate_counts_an_open_mapping_row_found_only_by_its_vocabulary_name(client, concept):
+    VocabularyFactory(vocabulary_id='SNOMED')
+    ConceptFactory(vocabulary_id='SNOMED', concept_code='TERSE', concept_name='Serum albumin level')
+    source('TERSE', occurrence_count=0, source_code_description='ALB SER')
+    run = reverse_retrieval_pool(concept, strategies=['lexical'], limit=25, include_zero_seen=True)
+    assert [row['source_code'] for row in run] == ['TERSE']
+    data = client.get(f'{BASE}{concept.pk}/estimate/', {'strategies': 'lexical', 'include_zero_seen': '1'}).data
+    assert (data['total'], data['lexical']) == (1, 1)
+
+
 def test_estimate_reports_a_floor_past_the_catalog_cap(client, concept):
     VocabularyFactory(vocabulary_id='SNOMED')
     for index in range(4):

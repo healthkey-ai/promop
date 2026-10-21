@@ -142,9 +142,9 @@ def _registered(keys, evaluate):
 def catalog_keys(concept, *, strategies, terms, evaluate):
     """Unregistered (vocabulary, code) keys a run could propose, by evidence.
 
-    A registered code is a mapping row: the caller counts the eligible ones
-    from the mapping table, and the rest are decisions a run skips.
-    Returns ({evidence: keys}, capped).
+    A registered code is its mapping rows instead: a run proposes those when
+    all of them are still open, and skips a decided one. Returns
+    ({evidence: unregistered keys}, {evidence: open mapping row ids}, capped).
     """
     found = {'umls': set(), 'lexical': set()}
     capped = False
@@ -155,12 +155,25 @@ def catalog_keys(concept, *, strategies, terms, evaluate):
         capped = capped or len(keys) >= CATALOG_CAP
         found[evidence].update(key for key in keys if key[1] and len(key[1]) <= limit
                                and key != (concept.vocabulary_id, concept.concept_code))
+    rows = {evidence: set() for evidence in found}
     every = set().union(*found.values())
     if every:
-        registered = {(canonical_source_vocabulary(row.source_vocabulary_id), row.source_code)
-                      for row in _registered(every, evaluate)}
-        found = {evidence: keys - registered for evidence, keys in found.items()}
-    return found, capped
+        registered = {}
+        for row in _registered(every, evaluate):
+            registered.setdefault((canonical_source_vocabulary(row.source_vocabulary_id), row.source_code), []).append(row)
+        for evidence, keys in found.items():
+            for key in keys & registered.keys():
+                if _open(registered[key], concept):
+                    rows[evidence].update(row.pk for row in registered[key])
+        found = {evidence: keys - registered.keys() for evidence, keys in found.items()}
+    return found, rows, capped
+
+
+def _open(rows, concept):
+    """Whether a run may propose a registered code: none of its rows is decided."""
+    return not any(row.status != 'proposed' or row.origin_system == 'athena' or row.target_concept_id == concept.pk
+                   or row.domain_id not in ('', concept.domain_id)
+                   or row.omop_table not in ('', DOMAIN_TO_TABLE[concept.domain_id]) for row in rows)
 
 
 def catalog_candidates(concept, *, strategies, terms, limit, evaluate):
@@ -203,9 +216,7 @@ def catalog_candidates(concept, *, strategies, terms, limit, evaluate):
         if not existing:
             candidates.append(candidate)
             continue
-        if any(row.status != 'proposed' or row.origin_system == 'athena' or row.target_concept_id == concept.pk
-               or row.domain_id not in ('', concept.domain_id)
-               or row.omop_table not in ('', DOMAIN_TO_TABLE[concept.domain_id]) for row in existing):
+        if not _open(existing, concept):
             continue
         for row in existing:
             candidates.append({**source_payload(row), 'evidence': candidate['evidence'],

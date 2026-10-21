@@ -163,6 +163,7 @@ def _estimate(concept, *, strategies, include_zero_seen, evaluate):
     terms = _lexical_terms(concept, evaluate) if 'lexical' in strategies else []
     counts = {'umls': evaluate(umls.count) if umls is not None else 0, 'lexical': 0}
     both = 0
+    lexical = None
     with transaction.atomic():
         _similarity_threshold()
         if terms:
@@ -181,13 +182,21 @@ def _estimate(concept, *, strategies, include_zero_seen, evaluate):
         try:
             with transaction.atomic():
                 _similarity_threshold()
-                found, capped = catalog_keys(concept, strategies=strategies, terms=terms, evaluate=evaluate)
+                found, registered, capped = catalog_keys(
+                    concept, strategies=strategies, terms=terms, evaluate=evaluate)
+                # Open mapping rows the vocabulary search reached by a name or
+                # synonym their own description does not match.
+                ids = set().union(*registered.values())
+                counted = set()
+                for query in (umls, lexical):
+                    if ids and query is not None:
+                        counted.update(evaluate(query.filter(pk__in=ids).values_list('pk', flat=True)))
         except (TimeoutError, OperationalError):
             capped = partial = True
         else:
             for evidence, keys in found.items():
-                counts[evidence] += len(keys)
-            total += len(set().union(*found.values()))
+                counts[evidence] += len(keys) + len(registered[evidence] - counted)
+            total += len(set().union(*found.values())) + len(ids - counted)
     return {'total': total, **counts, 'capped': capped, 'partial': partial}
 
 
