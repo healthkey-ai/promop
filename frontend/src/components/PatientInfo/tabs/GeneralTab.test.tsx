@@ -77,6 +77,7 @@ beforeEach(() => {
 function renderTab(
   formData: Record<string, unknown> = {},
   onChange: (field: string, value: unknown) => void = vi.fn(),
+  showCoordinates = true,
 ) {
   return render(
     <GeneralTab
@@ -85,6 +86,7 @@ function renderTab(
       editedName="Alishia Howell"
       onNameChange={vi.fn()}
       onZipcodeChange={vi.fn()}
+      showCoordinates={showCoordinates}
     />,
   );
 }
@@ -282,4 +284,34 @@ it('allows correcting the death date', async () => {
   renderTab({ death_date: '2025-02-01' });
   await waitFor(() => expect(screen.getByText('Death Date').parentElement?.parentElement?.querySelector('input')).toBeEnabled());
   expect(screen.getByText('Death Date').parentElement?.parentElement?.querySelector('input')).toHaveValue('2025-02-01');
+});
+
+
+describe('GeneralTab — coordinates', () => {
+  // Distinct person ids: the descriptor cache is keyed by patient, and reusing
+  // one leaks an empty descriptor into the tests above.
+  const COORDS = {
+    city: { kind: 'profile', writable: true, target: 'person', payload_field: 'city' },
+    latitude: { kind: 'profile', writable: true, target: 'person', payload_field: 'latitude', value_kind: 'number' },
+    longitude: { kind: 'profile', writable: true, target: 'person', payload_field: 'longitude', value_kind: 'number' },
+  };
+  beforeEach(() => {
+    __resetWritableFieldsCache();
+    mockGet.mockResolvedValue({ data: COORDS });
+  });
+
+  it('offers the coordinate inputs by default', async () => {
+    renderTab({ city: 'Boston', person_id: 991 });
+    expect(await screen.findByText(/^latitude$/i)).toBeInTheDocument();
+    expect(screen.getByText(/^longitude$/i)).toBeInTheDocument();
+  });
+
+  it('hides precise coordinates when the host withholds them', async () => {
+    // A federated host that does not send latitude/longitude must not offer a
+    // field whose save it would refuse.
+    renderTab({ city: 'Boston', person_id: 992 }, vi.fn(), false);
+    expect(await screen.findByText(/^city$/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^latitude$/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^longitude$/i)).not.toBeInTheDocument();
+  });
 });
