@@ -172,6 +172,63 @@ def test_newer_legacy_named_lab_beats_an_older_canonical_alias():
     assert record.serum_creatinine_level_units == 'mg/dL'
 
 
+def test_legacy_chemistry_si_units_are_converted_before_renal_adequacy():
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    for concept_name, value, unit in (
+        ('Creatinine', 100, 'umol/L'),
+        ('Calcium', 2.5, 'mmol/L'),
+        ('Albumin', 40, 'g/L'),
+    ):
+        MeasurementFactory(
+            person=person,
+            measurement_concept=ConceptFactory(
+                concept_code=f'LEGACY-{concept_name.upper()}',
+                concept_name=concept_name,
+            ),
+            measurement_source_value=concept_name,
+            measurement_date=date(2026, 1, 15),
+            value_as_number=value,
+            unit_source_value=unit,
+        )
+
+    record = refresh_patient_record(person)
+
+    assert float(record.serum_creatinine_mg_dl) == pytest.approx(1.131, abs=0.001)
+    assert record.serum_creatinine_level_units == 'mg/dL'
+    assert float(record.serum_calcium_mg_dl) == pytest.approx(10.02, abs=0.01)
+    assert float(record.albumin_g_dl) == pytest.approx(4.0, abs=0.01)
+    assert record.renal_adequacy_status is True
+
+
+def test_unsupported_chemistry_unit_does_not_fall_back_to_an_older_result():
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    MeasurementFactory(
+        person=person,
+        measurement_concept=ConceptFactory(concept_code='2160-0'),
+        measurement_source_value='2160-0',
+        measurement_date=date(2025, 1, 1),
+        value_as_number=1.1,
+        unit_source_value='mg/dL',
+    )
+    MeasurementFactory(
+        person=person,
+        measurement_concept=ConceptFactory(
+            concept_code='LEGACY-CREATININE', concept_name='Creatinine',
+        ),
+        measurement_source_value='Creatinine',
+        measurement_date=date(2025, 2, 1),
+        value_as_number=100,
+        unit_source_value='banana',
+    )
+
+    record = refresh_patient_record(person)
+
+    assert record.serum_creatinine_mg_dl is None
+    assert record.serum_creatinine_level is None
+
+
 def test_hr_status_recognizes_plus_minus_receptor_results():
     """A saved ER+/PR+ result must still derive HR+ after the write round-trip.
 
@@ -283,6 +340,28 @@ def test_assay_score_is_not_treated_as_a_positive_receptor():
 
     record = refresh_patient_record(person)
 
+    assert record.tnbc_status is None
+
+
+def test_mixed_symbol_and_word_receptor_result_stays_unknown():
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    for code, value in (
+        ('16112-5', 'ER+ / Negative'),
+        ('16113-3', 'PR-'),
+        ('48676-1', 'HER2-'),
+    ):
+        MeasurementFactory(
+            person=person,
+            measurement_source_value=code,
+            measurement_date=date(2026, 1, 15),
+            value_as_string=value,
+        )
+
+    record = refresh_patient_record(person)
+
+    assert record.estrogen_receptor_status == 'ER+ / NEGATIVE'
+    assert record.hr_status is None
     assert record.tnbc_status is None
 
 

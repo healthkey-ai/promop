@@ -30,7 +30,8 @@ from omop_core.services.mappings import (
     WEARABLE_TREND_IMPROVING_PCT, WEARABLE_TREND_DECLINING_PCT,
 )
 from omop_core.services.clinical_units import (
-    canonical_wbc_unit, flc_to_canonical, wbc_to_canonical,
+    CHEMISTRY_CANONICAL_FIELDS, canonical_wbc_unit, chemistry_to_canonical,
+    flc_to_canonical, wbc_to_canonical,
 )
 from omop_core.services.lot_regimens import (
     get_regimen_concept_id,
@@ -1931,9 +1932,16 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         if not raw:
             return None
         s = raw.strip().lower()
+        positive_signal = 'positive' in s or bool(
+            re.search(r'\b(?:ER|PR|HER2|HR)\s*\+', s)
+        )
+        negative_signal = 'negative' in s or bool(
+            re.search(r'\b(?:ER|PR|HER2|HR)\s*-', s)
+        )
         # Preserve mixed/ambiguous results before collapsing the unambiguous
-        # words. `Negative/Equivocal` is not a negative receptor result.
-        if 'equivocal' in s or ('positive' in s and 'negative' in s):
+        # words. `Negative/Equivocal`, `ER+ / Negative`, and `ER+/-` are not
+        # negative receptor results.
+        if 'equivocal' in s or '/' in s or (positive_signal and negative_signal):
             return raw.strip().upper()
         if 'positive' in s:
             return 'POSITIVE'
@@ -2972,6 +2980,7 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     # vice versa). FLC values need unit conversion and WBC needs its own unit
     # gate, so both stay in their dedicated passes below.
     lab_units = {}
+    lab_blocked = set()
     for measurement in measurements:
         if measurement.value_as_number is None:
             continue
@@ -2995,14 +3004,28 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             or code == '6690-2'
         ):
             continue
-        if field in data:
+        if field in data or field in lab_blocked:
             continue
-        data[field] = cast(measurement.value_as_number)
-        if measurement.unit_source_value:
-            lab_units[field] = measurement.unit_source_value
+        value = measurement.value_as_number
+        unit = measurement.unit_source_value
+        if field in CHEMISTRY_CANONICAL_FIELDS:
+            value, unit = chemistry_to_canonical(field, value, unit)
+            if value is None:
+                # The newest result has a unit we cannot convert. Do not fall
+                # back to an older result in a different unit.
+                lab_blocked.add(field)
+                logger.warning(
+                    'Chemistry lab skipped for person_id=%s field=%s: '
+                    'unit_source_value=%r is not supported',
+                    person.person_id, field, measurement.unit_source_value,
+                )
+                continue
+        data[field] = cast(value)
+        if unit:
+            lab_units[field] = unit
             units_field = f'{field}_units'
             if hasattr(PatientRecord, units_field):
-                data[units_field] = measurement.unit_source_value
+                data[units_field] = unit
 
     # --- Legacy fields via exact historic concept-name matching ---
     for measurement in measurements:
@@ -3010,7 +3033,7 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             continue
         concept_name = measurement.measurement_concept.concept_name.casefold().strip()
         field_name = _LEGACY_LAB_CONCEPT_FIELDS.get(concept_name)
-        if not field_name or field_name in data:
+        if not field_name or field_name in data or field_name in lab_blocked:
             continue
         data[field_name] = measurement.value_as_number
         if measurement.unit_source_value:
@@ -3070,7 +3093,7 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
                     'unit_source_value=%r', person.person_id, m.unit_source_value,
                 )
                 continue
-        if field not in data:
+        if field not in data and field not in lab_blocked:
             if code != '6690-2' or canonical_value is not None:
                 data[field] = cast(canonical_value if code == '6690-2' else m.value_as_number)
         if code == '6690-2' and canonical_value is not None and 'white_blood_cell_count' not in data:
@@ -3094,7 +3117,10 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             field = _SOURCE_VALUE_LAB_FIELDS.get(m.measurement_source_value)
             if field == 'wbc_count_thousand_per_ul' and wbc_projection_blocked:
                 continue
-            if field and field not in data and field not in _FLC_FIELDS:
+            if (
+                field and field not in data and field not in _FLC_FIELDS
+                and field not in lab_blocked
+            ):
                 data[field] = float(m.value_as_number)
 
     # --- Copy canonical values to legacy aliases (issue #471) ---
