@@ -76,6 +76,7 @@ from omop_oncology.models import (
     EpisodeEvent,
     Histology,
     StemTable,
+    TherapyLineExposure,
 )
 from patient_portal.models import BreakGlassGrant, PatientInvitation, PatientStatement, PatientUser
 from prolog_surveys.models import (
@@ -143,6 +144,9 @@ PATIENT_TABLES: tuple[PatientTable, ...] = (
     PatientTable(DoseEra, 'person_id'),
     PatientTable(Episode, 'person_id'),
     PatientTable(EpisodeEvent, 'episode_id__in', parent=Episode),
+    # Which exposures a line authored. Copied with the line, so an edit on the
+    # copy corrects the copy's own facts rather than leaving them unowned.
+    PatientTable(TherapyLineExposure, 'episode_id__in', parent=Episode),
     PatientTable(CancerModifier, 'person_id'),
     PatientTable(StemTable, 'person_id'),
     PatientTable(Histology, 'person_id'),

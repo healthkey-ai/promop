@@ -50,6 +50,23 @@ class EpisodeEvent(models.Model):
         return f"Episode {self.episode_id} Event {self.event_id}"
 
 
+class TherapyLineExposure(models.Model):
+    """Private authoring ownership, not inferred from an EpisodeEvent link.
+
+    Historical/imported exposures are deliberately not adopted. Only the
+    canonical writer creates these rows, when it creates the corresponding fact.
+    """
+    episode = models.ForeignKey(Episode, on_delete=models.CASCADE, related_name='authored_exposures')
+    drug_exposure = models.OneToOneField('omop_core.DrugExposure', on_delete=models.CASCADE)
+    source_value = models.CharField(max_length=50)
+
+    class Meta:
+        db_table = 'therapy_line_exposure'
+        indexes = [models.Index(
+            fields=['episode', 'source_value'], name='therapy_exposure_source_idx',
+        )]
+
+
 class CancerModifier(models.Model):
     """OMOP Oncology Extension Cancer Modifier table - cancer-specific modifiers."""
     cancer_modifier_id = models.BigIntegerField(primary_key=True)

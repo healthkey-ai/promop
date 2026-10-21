@@ -65,6 +65,23 @@ All notable changes to PRomop are documented here.
   categories, and labels grouped section totals and same-description record
   counts explicitly (#1691).
 
+### Fixed
+
+- **Editing a line of therapy no longer rewrites unrelated administrations** —
+  every drug exposure now belongs to one line and is addressed by its own id,
+  with its own dates, instead of being re-identified by patient, drug name and
+  date. Correcting a drug or its dates updates only the exposure the line owns;
+  exposures shared with another line or imported from an EHR are copied before
+  an edit and never retracted. Saving the form again, or editing only the
+  outcome, keeps the existing ids and individual administration periods, and a
+  line's dates no longer overwrite them. Repeated administrations of the same
+  drug are preserved, an ambiguous legacy name is refused instead of guessed,
+  and a future-dated administration is refused because the history records
+  treatment received rather than planned. The write is one transaction with a
+  bounded retry on lock contention, so a concurrent bulk edit cannot leave a
+  partially written line; ARTEMIS materialization uses the same boundary
+  (#1926).
+
 ### Added
 
 - **Source evidence in Edit Mapping** — the dialog now shows the hospital

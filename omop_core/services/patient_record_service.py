@@ -27,6 +27,7 @@ from omop_core.models import (
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc
 from omop_core.services.mappings import (
     CONCEPT_DISEASE_FIRST_OCCURRENCE,
+    CONCEPT_DRUG_EXPOSURE_FIELD,
     WEARABLE_CONCEPT_CODE, WEARABLE_ARTIFACT_BOUNDS, WEARABLE_MIN_VALID_DAYS,
     WEARABLE_TREND_IMPROVING_PCT, WEARABLE_TREND_DECLINING_PCT,
 )
@@ -811,7 +812,7 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
     )
     drug_exposures = list(
         DrugExposure.objects
-        .filter(person=person)
+        .filter(person=person, is_erroneous=False)
         .select_related('drug_concept')
         .order_by('drug_exposure_start_date', 'drug_exposure_id')
     )
@@ -2080,13 +2081,17 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
     all_episode_ids = [e.episode_id for e in episodes]
 
     ee_by_episode: dict = {}
-    for ee in EpisodeEvent.objects.filter(episode_id__in=all_episode_ids).values('episode_id', 'event_id'):
+    for ee in EpisodeEvent.objects.filter(
+        episode_id__in=all_episode_ids,
+        episode_event_field_concept_id=CONCEPT_DRUG_EXPOSURE_FIELD,
+    ).values('episode_id', 'event_id'):
         ee_by_episode.setdefault(ee['episode_id'], []).append(ee['event_id'])
 
     all_event_ids = [eid for ids in ee_by_episode.values() for eid in ids]
     de_by_id: dict = {
         de.drug_exposure_id: de
-        for de in DrugExposure.objects.filter(drug_exposure_id__in=all_event_ids).select_related('drug_concept')
+        for de in DrugExposure.objects.filter(person=person, is_erroneous=False,
+                                              drug_exposure_id__in=all_event_ids).select_related('drug_concept')
     } if all_event_ids else {}
 
     # ── First pass: compute drug name sets and regimen concept_ids ─────────
@@ -2101,6 +2106,8 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
         if not event_ids:
             continue
         drugs_in_episode = [de_by_id[eid] for eid in event_ids if eid in de_by_id]
+        if not drugs_in_episode:
+            continue
 
         drug_name_set = {
             normalize_drug_name(n)

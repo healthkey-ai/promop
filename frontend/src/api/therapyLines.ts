@@ -11,8 +11,12 @@ export interface DrugConcept {
 }
 
 export interface TherapyLineDrug {
+  /** Existing administration, scoped by the server to the edited line. */
+  drug_exposure_id?: number;
   concept_id: number;
   source_value?: string | null;
+  start_date?: string;
+  end_date?: string | null;
 }
 
 export interface TherapyLinePayload {
@@ -46,7 +50,7 @@ export interface EditableTherapyLine {
   discontinuation_reason?: string | null;
   regimen?: string | null;
   regimen_concept_id?: number | null;
-  drugs?: Array<DrugConcept & { source_value?: string | null }>;
+  drugs?: Array<DrugConcept & TherapyLineDrug>;
 }
 
 export interface TherapyOutcomeChoice { code: string; value: string; label: string }
