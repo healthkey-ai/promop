@@ -267,7 +267,9 @@ def _sampled(concept, *, strategies, include_zero_seen, evaluate):
 
         def count():
             with connection.cursor() as cursor:
-                cursor.execute(f'SELECT count(*) FROM ({sampled}) sample', params)
+                # Django's own compiled query, its values still bound as
+                # params; the only text added is the integer SAMPLE_PERCENT.
+                cursor.execute(f'SELECT count(*) FROM ({sampled}) sample', params)  # nosec B608
                 return cursor.fetchone()[0]
 
         counts['lexical'] = _two_figures(evaluate(count) * 100 / SAMPLE_PERCENT)
