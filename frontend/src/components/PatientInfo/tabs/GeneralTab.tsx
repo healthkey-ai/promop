@@ -130,6 +130,7 @@ export default function GeneralTab({ formData, onChange, editedName, onNameChang
 
           <Field label="Stage" name="stage" type="select"
             value={stageValue} options={stageOptions}
+            disabled={diseaseType === 'myeloma' && /^R-ISS\b/i.test(String(formData?.stage ?? ''))}
             onChange={onStageChange} vocabSource={cancerStageSource} />
 
           {(!diseaseType || diseaseType === 'breast' || diseaseType === 'other') && (

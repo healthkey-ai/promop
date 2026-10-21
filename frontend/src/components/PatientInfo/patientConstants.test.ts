@@ -30,6 +30,7 @@ describe('disease option lists', () => {
       expect.arrayContaining([
         expect.objectContaining({ value: 'ISS 2' }),
         expect.objectContaining({ value: 'ISS II' }),
+        expect.objectContaining({ value: 'R-ISS II' }),
       ]),
     );
   });

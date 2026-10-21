@@ -22,6 +22,8 @@ describe('diseaseTypeFor', () => {
     ['follicular lymphoma', 'lymphoma'],
     ['multiple myeloma', 'myeloma'],
     ['chronic lymphocytic leukemia', 'cll'],
+    ['Chronic lymphocytic leukemia / small lymphocytic lymphoma', 'cll'],
+    ['small lymphocytic lymphoma', 'cll'],
     ['breast cancer', 'breast'],
     ['something else', 'other'],
   ])('routes %o to %o', (disease, expected) => {

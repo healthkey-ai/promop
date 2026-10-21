@@ -13,9 +13,10 @@ export function diseaseTypeFor(value: unknown): DiseaseType {
   const d = String(value ?? '').toLowerCase();
   if (d.includes('breast')) return 'breast';
   if (d.includes('mantle') || d.includes('mcl')) return 'mcl';
+  // CLL/SLL is a lymphoma but must use the CLL section, not FLIPI/GELF.
+  if (d.includes('cll') || d.includes('chronic lymphocytic') || d.includes('small lymphocytic')) return 'cll';
   if (d.includes('lymphoma')) return 'lymphoma';
   if (d.includes('myeloma')) return 'myeloma';
-  if (d.includes('cll') || d.includes('chronic lymphocytic')) return 'cll';
   return 'other';
 }
 

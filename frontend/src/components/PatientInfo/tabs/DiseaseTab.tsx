@@ -243,7 +243,7 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
       <Section title="Disease Characteristics">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <Field label="Myeloma Type" name="myeloma_type" type="select" value={formData?.myeloma_type} options={myelomaTypes} onChange={onChange} vocabSource={myelomaTypeSource} />
-          <Field label="ISS Stage" name="stage" type="select" value={formData?.stage} options={ISS_STAGE_OPTIONS} onChange={onChange} />
+          <Field label="ISS Stage" name="stage" type="select" value={formData?.stage} options={ISS_STAGE_OPTIONS} disabled={/^R-ISS\b/i.test(String(formData?.stage ?? ''))} onChange={onChange} />
           <Field label="Progression Status" name="progression" type="select" value={formData?.progression} options={MM_PROGRESSION_OPTIONS} onChange={onChange} vocabSource={progressionSource} />
           <Field label="Measurable Disease (IMWG)" name="measurable_disease_imwg" type="boolean" value={formData?.measurable_disease_imwg} onChange={onChange} />
           <Field label="MRD Status" name="mrd_status" type="select" value={formData?.mrd_status} options={MRD_STATUS_OPTIONS} onChange={onChange} />

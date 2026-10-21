@@ -149,8 +149,15 @@ export const ISS_STAGE_OPTIONS: { value: string; label: string }[] = [
   { value: 'ISS I', label: 'ISS Stage I' },
   { value: 'ISS II', label: 'ISS Stage II' },
   { value: 'ISS III', label: 'ISS Stage III' },
-  // R-ISS is a different source fact (21908-9-riss) that the single `stage`
-  // write path cannot replace; do not offer it as if it round-tripped.
+  // R-ISS is a separate source fact (21908-9-riss). It is shown for generated
+  // records but the single `stage` write path cannot replace it, so the field
+  // is disabled for R-ISS values rather than offering a no-op edit.
+  { value: 'R-ISS 1', label: 'R-ISS Stage I' },
+  { value: 'R-ISS 2', label: 'R-ISS Stage II' },
+  { value: 'R-ISS 3', label: 'R-ISS Stage III' },
+  { value: 'R-ISS I', label: 'R-ISS Stage I' },
+  { value: 'R-ISS II', label: 'R-ISS Stage II' },
+  { value: 'R-ISS III', label: 'R-ISS Stage III' },
 ];
 export const MRD_STATUS_OPTIONS = [
   'MRD Negative (10⁻⁵)',
