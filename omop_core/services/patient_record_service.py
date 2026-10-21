@@ -2602,6 +2602,18 @@ def _flc_event_key(measurement):
     return None
 
 
+def _flc_event_observed_at(measurement):
+    """Sort key for the collection time, falling back to the measurement date."""
+    event_at = getattr(measurement, 'measurement_datetime', None)
+    if event_at is not None:
+        return (
+            event_at.date(), event_at.hour, event_at.minute,
+            event_at.second, event_at.microsecond, 1,
+        )
+    event_date = getattr(measurement, 'measurement_date', None) or date.min
+    return (event_date, 0, 0, 0, 0, 0)
+
+
 def _select_flc_pair_with_ratio(measurements):
     """Return the newest complete kappa/lambda pair and its same-event ratio.
 
@@ -2610,6 +2622,10 @@ def _select_flc_pair_with_ratio(measurements):
     converted, the pair is unknown rather than falling back to an older event.
     Events with only one chain are skipped because they cannot form a ratio.
     The reported ratio is included only when it belongs to the selected event.
+
+    The snapshot is ordered by date and row id, not collection time. Sort the
+    grouped events explicitly so a later draw on the same day wins even when
+    its rows were inserted first.
     """
     events = {}
     for measurement in measurements:
@@ -2621,12 +2637,21 @@ def _select_flc_pair_with_ratio(measurements):
         key = _flc_event_key(measurement)
         if key is None:
             continue
-        event = events.setdefault(key, {})
-        event.setdefault(field, measurement)
+        event = events.setdefault(
+            key, {'observed_at': _flc_event_observed_at(measurement), 'rows': {}},
+        )
+        event['observed_at'] = max(
+            event['observed_at'], _flc_event_observed_at(measurement),
+        )
+        event['rows'].setdefault(field, measurement)
 
-    for event in events.values():
-        kappa_row = event.get('kappa_flc')
-        lambda_row = event.get('lambda_flc')
+    ordered_events = sorted(
+        events.values(), key=lambda event: event['observed_at'], reverse=True,
+    )
+    for event in ordered_events:
+        rows = event['rows']
+        kappa_row = rows.get('kappa_flc')
+        lambda_row = rows.get('lambda_flc')
         if kappa_row is None or lambda_row is None:
             continue
         kappa = flc_to_canonical(
@@ -2641,7 +2666,7 @@ def _select_flc_pair_with_ratio(measurements):
             return None
 
         ratio = None
-        ratio_row = event.get('free_light_chain_ratio')
+        ratio_row = rows.get('free_light_chain_ratio')
         if ratio_row is not None:
             try:
                 candidate = Decimal(str(ratio_row.value_as_number))

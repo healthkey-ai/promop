@@ -34,6 +34,7 @@ def _measure(
     source_value: str | None = None,
     date: str = '2024-01-15',
     unit: str | None = None,
+    at: str | None = None,
 ) -> Measurement:
     """A Measurement coded the way an EHR export codes it.
 
@@ -45,6 +46,7 @@ def _measure(
         measurement_concept=_loinc(code),
         measurement_source_value=source_value if source_value is not None else f'Lab {code}',
         measurement_date=date,
+        measurement_datetime=at,
         value_as_number=value,
         unit_source_value=unit,
     )
@@ -224,6 +226,24 @@ def test_flc_pair_uses_the_same_lab_event():
 
     assert _get_laboratory_data(person)['_flc_pair'] == (
         Decimal('150.0'), Decimal('75.0'),
+    )
+
+
+def test_flc_pair_uses_collection_time_not_row_order():
+    """The newest draw wins even when its rows were inserted first."""
+    person = PersonFactory()
+    # Evening draw is inserted first, so the morning draw has the higher IDs.
+    _measure(person, '36916-5', 2.0, date='2024-06-01', unit='mg/L',
+             at='2024-06-01T20:00:00+00:00')
+    _measure(person, '33944-0', 1.0, date='2024-06-01', unit='mg/L',
+             at='2024-06-01T20:00:00+00:00')
+    _measure(person, '36916-5', 300.0, date='2024-06-01', unit='mg/L',
+             at='2024-06-01T08:00:00+00:00')
+    _measure(person, '33944-0', 1.0, date='2024-06-01', unit='mg/L',
+             at='2024-06-01T08:00:00+00:00')
+
+    assert _get_laboratory_data(person)['_flc_pair'] == (
+        Decimal('2.0'), Decimal('1.0'),
     )
 
 
