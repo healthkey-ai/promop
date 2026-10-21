@@ -714,6 +714,44 @@ def test_an_unrecognised_unit_spelling_is_a_note_not_a_variant(glucose):
     assert axes['property']['value'] == 'MCnc'
 
 
+def test_lab_spellings_group_with_their_unit_and_route_with_it(two_unit_code, glucose):
+    # #1965: "gm/dL" was unrecognised, so its records were a note, not grouped.
+    for unit in ('gm/dL', 'Grams/Deciliter', 'GDL'):
+        PatientSourceCode.objects.create(person=PersonFactory(), source_value='GLU', source_vocabulary_id=LAB,
+                                         omop_table='measurement', source_unit=unit, occurrence_count=2)
+    variants, notes = axis_variants.detect(two_unit_code)
+    assert [(v['axis_key'], v['occurrence_count']) for v in variants] == [
+        ('property=MCnc|scale_type=Qn', 16), ('property=SCnc|scale_type=Qn', 4)]
+    assert notes == []
+    stored = axis_variants.refresh(two_unit_code)
+    mass = next(v for v in stored if v.axis_key == 'property=MCnc|scale_type=Qn')
+    axis_variants.set_destination(mass, glucose['2345-7'], approve=True, user=None)
+    assert axis_variants.variant_for(two_unit_code, 'gm/dL').pk == mass.pk
+
+
+def test_a_lab_spelling_can_make_a_code_multi_property(glucose):
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='GLU4', omop_table='measurement')
+    for unit in ('gm/dL', 'mmol/L'):
+        PatientSourceCode.objects.create(person=PersonFactory(), source_value='GLU4', source_vocabulary_id=LAB,
+                                         omop_table='measurement', source_unit=unit)
+    assert axis_variants.refresh_all() == 1
+    mapping.refresh_from_db()
+    assert mapping.axis_variant_count == 2
+
+
+def test_migration_0301_regroups_stored_variants(two_unit_code):
+    import importlib
+
+    backfill = importlib.import_module('omop_core.migrations.0301_regroup_axis_variant_unit_spellings').backfill
+    axis_variants.refresh(two_unit_code)
+    PatientSourceCode.objects.create(person=PersonFactory(), source_value='GLU', source_vocabulary_id=LAB,
+                                     omop_table='measurement', source_unit='GM/DL', occurrence_count=5)
+    backfill(None, None)
+    mass = SourceCodeAxisVariant.objects.get(mapping=two_unit_code, axis_key='property=MCnc|scale_type=Qn')
+    assert mass.occurrence_count == 15
+
+
 @pytest.mark.parametrize('unit', ['U/mL', 'U/L', 'IU/L', '%'])
 def test_a_unit_that_fits_several_properties_settles_none(unit):
     axes, _ = loinc_axes.infer(LAB, 'CA125', {'fhir': {'valueQuantity': {'value': 35, 'unit': unit}}})
