@@ -30,13 +30,14 @@ def _payload(mapping):
 
     domain = mapping.domain_id or {'measurement': 'Measurement', 'observation': 'Observation'}.get(
         mapping.omop_table, '')
+    counts = axis_variants.unit_counts(mapping)
     axes, hints = source_loinc_axes(
         domain_id=domain, source_vocabulary_id=mapping.source_vocabulary_id,
         source_code=mapping.source_code, metadata=mapping.source_metadata,
         overrides=mapping.loinc_axes,
-        observed_units=axis_variants.observed_units(mapping),
+        observed_units=axis_variants.observed_units(mapping, counts),
     )
-    detected, notes = axis_variants.detect(mapping)
+    detected, notes = axis_variants.detect(mapping, counts)
     stored = {v.axis_key: v for v in mapping.axis_variants.select_related('target_concept')}
     variants = []
     for variant in detected:
@@ -128,6 +129,11 @@ def code_mapping_axis_variant(request, mapping_id):
             if concept is None:
                 return Response({'target_concept_id': 'No valid concept with that id.'},
                                 status=status.HTTP_400_BAD_REQUEST)
+            if not axis_variants.usable_destination(concept, mapping):
+                return Response({'target_concept_id': (
+                    'A variant destination must be an active standard concept'
+                    + (f' in the {mapping.domain_id} domain.' if mapping.domain_id else '.')
+                )}, status=status.HTTP_400_BAD_REQUEST)
         if approve and concept is None:
             return Response({'target_concept_id': 'Choose a destination before approving.'},
                             status=status.HTTP_400_BAD_REQUEST)
@@ -136,7 +142,10 @@ def code_mapping_axis_variant(request, mapping_id):
         if variant is None:
             return Response({'axis_key': 'This code has no such axis variant.'},
                             status=status.HTTP_400_BAD_REQUEST)
-        repoint = axis_variants.set_destination(variant, concept, approve=approve, user=request.user)
+        try:
+            repoint = axis_variants.set_destination(variant, concept, approve=approve, user=request.user)
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
     payload = _payload(mapping)
     if repoint is not None:
         payload['repoint'] = {key: value for key, value in repoint.items() if key != 'person_ids'}

@@ -96,7 +96,11 @@ def test_a_load_without_axes_is_stale_at_the_same_version():
     LoincRelease.objects.create(release_version='2.83', release_url='https://x')
     with mock.patch.object(lr, 'current_release', return_value=published('2.83')):
         assert lr.is_out_of_date()[0] is False
+        # One stray row the reload never touched is not a stale release...
         LoincCodeClass.objects.filter(loinc_num='718-7').update(component='')
+        assert lr.is_out_of_date()[0] is False
+        # ...a load from before the column existed is.
+        LoincCodeClass.objects.update(component='')
         assert lr.is_out_of_date()[0] is True
 
 

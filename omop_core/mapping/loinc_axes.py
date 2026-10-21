@@ -62,21 +62,27 @@ _EXTRA_UNIT_PROPERTIES = {
     'mEq/L': 'SCnc', 'meq/L': 'SCnc',
     'mm[Hg]': 'Pres', 'mmHg': 'Pres',
     '/min': 'NRat', '{beats}/min': 'NRat', '{breaths}/min': 'NRat',
+    'mM': 'SCnc', 'uM': 'SCnc', 'nM': 'SCnc',
+    # Lower-case spellings labs send; listed rather than case-folded (above).
+    'mg/dl': 'MCnc', 'g/dl': 'MCnc', 'g/l': 'MCnc', 'mg/l': 'MCnc', 'ug/ml': 'MCnc',
+    'ng/ml': 'MCnc', 'pg/ml': 'MCnc', 'ug/l': 'MCnc',
+    'mmol/l': 'SCnc', 'umol/l': 'SCnc', 'nmol/l': 'SCnc', 'meq/l': 'SCnc',
+    'u/l': 'CCnc',
 }
 UNIT_PROPERTIES = {
     **{unit: prop for prop, units in UNIT_GROUPS.items() for unit in units},
     **_EXTRA_UNIT_PROPERTIES,
 }
 
-_UNIT_PROPERTIES_FOLDED = {unit.casefold(): prop for unit, prop in UNIT_PROPERTIES.items()}
-
-
 def unit_property(unit):
-    """The LOINC property a source unit implies, or ``''``."""
+    """The LOINC property a source unit implies, or ``''``.
+
+    Case-sensitive, as UCUM is: ``mM`` (millimolar) and ``mm`` (millimetre)
+    are different units, so no case folding -- the common lower-case lab
+    spellings are listed explicitly instead.
+    """
     normalized = unit_code(unit)
-    if not normalized:
-        return ''
-    return UNIT_PROPERTIES.get(normalized) or _UNIT_PROPERTIES_FOLDED.get(normalized.casefold(), '')
+    return UNIT_PROPERTIES.get(normalized, '') if normalized else ''
 
 
 #: FHIR specimen display -> LOINC system. Exact phrases only: "blood" inside
@@ -86,7 +92,8 @@ SPECIMEN_SYSTEMS = {
     'plasma': 'Plas',
     'serum or plasma': 'Ser/Plas',
     'serum/plasma': 'Ser/Plas',
-    'blood': 'Bld',
+    # Not plain "blood": venous blood is drawn for serum tests, so a "Blood"
+    # specimen would exclude every Ser/Plas code. It stays a hint.
     'whole blood': 'Bld',
     'arterial blood': 'BldA',
     'venous blood': 'BldV',
@@ -190,8 +197,10 @@ def infer(source_vocabulary_id, source_code, metadata, *, observed_units=None):
     are settled. *observed_units* are the units the code's records arrived in
     across patients; they settle the property only when every one implies the
     same property, because a code seen in mg/dL and mmol/L is two tests
-    (``axis_variants``), not one with a property. ``hints`` is ``{axis: text}`` for what the metadata says about
-    an axis without settling it.
+    (``axis_variants``), not one with a property -- and then the one sample
+    unit in the metadata does not settle it either. ``hints`` is
+    ``{axis: text}`` for what the metadata says about an axis without
+    settling it.
     """
     axes, hints = {}, {}
     resource = _resource(metadata)
@@ -217,15 +226,19 @@ def infer(source_vocabulary_id, source_code, metadata, *, observed_units=None):
 
     unit, where, observed = _unit(metadata, resource)
     units = sorted({u for u in observed_units or [] if u})
+    properties = {unit_property(u) for u in units}
+    mixed = len(properties) > 1
+    shown = ', '.join(units[:4]) + ('…' if len(units) > 4 else '')
+    if mixed:
+        hints['property'] = (f'Records arrive in units implying different properties ({shown}): '
+                             'one LOINC per axis variant')
     if not unit and units:
-        properties = {unit_property(u) for u in units}
-        shown = ', '.join(units[:4]) + ('…' if len(units) > 4 else '')
         if len(properties) == 1 and '' not in properties:
-            settle({'property': properties.pop()}, BASIS_UNIT, f'every record unit implies it ({shown})')
+            settle({'property': next(iter(properties))}, BASIS_UNIT, f'every record unit implies it ({shown})')
         settle({'scale_type': 'Qn'}, BASIS_VALUE_TYPE, f'records carry units ({shown})')
     if unit:
         prop = unit_property(unit)
-        if prop:
+        if prop and not mixed:
             settle({'property': prop}, BASIS_UNIT, f'{where} = {unit}')
         if observed:
             settle({'scale_type': 'Qn'}, BASIS_VALUE_TYPE, f'{where} = {unit}')

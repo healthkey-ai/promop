@@ -541,3 +541,121 @@ def test_the_panel_infers_from_patients_units_when_the_code_has_no_metadata(two_
         email='units@example.test', is_staff=True, is_superuser=True))
     axes = client.get(f'/api/v1/code-mappings/{two_unit_code.pk}/loinc-axes/').data['source_axes']['axes']
     assert axes['scale_type']['value'] == 'Qn' and 'property' not in axes
+
+
+# --- review fixes (#1950) -------------------------------------------------------
+
+def test_copying_a_mapping_keeps_its_axes_and_variant_count(two_unit_code):
+    from omop_core.services.field_curation_transfer import apply_payload, read_payload
+
+    two_unit_code.loinc_axes = {'component': 'Glucose'}
+    two_unit_code.save()
+    axis_variants.refresh(two_unit_code)
+    payload = read_payload('default', tables=('code_mappings',))
+    SourceCodeConceptMapping.objects.update(loinc_axes={}, axis_variant_count=0)
+    apply_payload(payload, tables=('code_mappings',))
+    two_unit_code.refresh_from_db()
+    assert (two_unit_code.loinc_axes, two_unit_code.axis_variant_count) == ({'component': 'Glucose'}, 2)
+
+
+def test_a_payload_written_before_the_axis_fields_still_applies(two_unit_code):
+    from omop_core.services.field_curation_transfer import apply_payload, read_payload
+
+    payload = read_payload('default', tables=('code_mappings',))
+    for row in payload['code_mappings']:
+        row.pop('loinc_axes'), row.pop('axis_variant_count')
+    apply_payload(payload, tables=('code_mappings',))
+    two_unit_code.refresh_from_db()
+    assert two_unit_code.loinc_axes == {}
+
+
+def test_an_approved_variant_keeps_routing_when_its_units_leave_the_evidence(two_unit_code, glucose):
+    variant = {v.axis_key: v for v in axis_variants.refresh(two_unit_code)}['property=SCnc|scale_type=Qn']
+    axis_variants.set_destination(variant, glucose['14749-6'], approve=True, user=None)
+    PatientSourceCode.objects.filter(source_unit='mmol/L').delete()
+
+    axis_variants.refresh(two_unit_code)
+    two_unit_code.refresh_from_db()
+    assert two_unit_code.axis_variant_count == 2
+    assert resolve_source_code(source_vocabulary_id=LAB, source_code='GLU', omop_table='measurement',
+                               source_unit='mmol/L')[0] == glucose['14749-6']
+
+
+def test_a_retired_or_non_standard_variant_concept_is_not_routed(two_unit_code, glucose):
+    variant = {v.axis_key: v for v in axis_variants.refresh(two_unit_code)}['property=SCnc|scale_type=Qn']
+    axis_variants.set_destination(variant, glucose['14749-6'], approve=True, user=None)
+    glucose['14749-6'].__class__.objects.filter(pk=glucose['14749-6'].pk).update(standard_concept=None)
+    two_unit_code.refresh_from_db()
+    assert axis_variants.variant_for(two_unit_code, 'mmol/L') is None
+
+
+def test_reopening_an_approved_variant_moves_its_rows_back(two_unit_code, glucose):
+    row = MeasurementFactory(measurement_concept=glucose['2345-7'], measurement_source_value='GLU',
+                             unit_source_value='mmol/L', value_as_number=5.4)
+    variant = {v.axis_key: v for v in axis_variants.refresh(two_unit_code)}['property=SCnc|scale_type=Qn']
+    axis_variants.set_destination(variant, glucose['14749-6'], approve=True, user=None)
+    row.refresh_from_db()
+    assert row.measurement_concept_id == glucose['14749-6'].pk
+
+    axis_variants.set_destination(variant, glucose['14749-6'], approve=False, user=None)
+    row.refresh_from_db()
+    assert row.measurement_concept_id == glucose['2345-7'].pk
+
+
+def test_reopening_is_refused_when_the_code_has_no_destination(two_unit_code, glucose):
+    variant = {v.axis_key: v for v in axis_variants.refresh(two_unit_code)}['property=SCnc|scale_type=Qn']
+    axis_variants.set_destination(variant, glucose['14749-6'], approve=True, user=None)
+    SourceCodeConceptMapping.objects.filter(pk=two_unit_code.pk).update(target_concept=None)
+    variant.refresh_from_db()
+    with pytest.raises(ValueError, match='no destination'):
+        axis_variants.set_destination(variant, glucose['14749-6'], approve=False, user=None)
+
+
+def test_the_sample_unit_does_not_settle_property_when_record_units_disagree():
+    axes, hints = loinc_axes.infer(
+        LAB, 'A1C', {'fhir': {'valueQuantity': {'value': 5.4, 'unit': 'mg/dL'}}},
+        observed_units=['mg/dL', '%'])
+    assert loinc_axes.values(axes) == {'scale_type': 'Qn'}
+    assert 'different properties' in hints['property']
+
+
+@pytest.mark.parametrize('unit, prop', [
+    ('mM', 'SCnc'), ('mm', 'Len'), ('mg/dl', 'MCnc'), ('mmol/l', 'SCnc'), ('S', ''),
+])
+def test_units_are_case_sensitive_with_common_lab_spellings_listed(unit, prop):
+    assert loinc_axes.unit_property(unit) == prop
+
+
+def test_a_blood_specimen_is_a_hint_because_serum_is_drawn_from_blood():
+    axes, hints = loinc_axes.infer(LAB, 'GLU', {'fhir': {'specimen': {'display': 'Blood'}}})
+    assert 'system' not in axes and hints['system'] == 'specimen = Blood'
+
+
+class TestReviewFixesApi:
+    @pytest.fixture(autouse=True)
+    def _client(self, two_unit_code):
+        from patient_portal.models import Identity
+        self.client = APIClient()
+        self.client.force_authenticate(Identity.objects.create_user(
+            email='review@example.test', is_staff=True, is_superuser=True))
+        self.mapping = two_unit_code
+
+    def test_a_non_standard_destination_is_refused(self, glucose):
+        source_only = ConceptFactory(vocabulary=glucose['2345-7'].vocabulary,
+                                     domain=glucose['2345-7'].domain, standard_concept=None)
+        response = self.client.post(f'/api/v1/code-mappings/{self.mapping.pk}/axis-variants/', {
+            'axis_key': 'property=SCnc|scale_type=Qn', 'target_concept_id': source_only.pk,
+        }, format='json')
+        assert response.status_code == 400
+        assert 'standard' in response.data['target_concept_id']
+
+    def test_a_routed_lookup_answer_keeps_the_old_key_too(self, glucose):
+        variant = {v.axis_key: v for v in axis_variants.refresh(self.mapping)}['property=SCnc|scale_type=Qn']
+        axis_variants.set_destination(variant, glucose['14749-6'], approve=True, user=None)
+        response = self.client.post('/api/v1/code-mappings/lookup/', {'codes': [
+            {'source_vocabulary_id': LAB, 'source_code': 'GLU', 'omop_table': 'measurement',
+             'source_unit': 'mmol/L'},
+        ]}, format='json')
+        results = response.data['mappings']
+        assert results[f'{LAB}|GLU']['target_concept_code'] == '14749-6'
+        assert results[f'{LAB}|GLU|mmol/L']['target_concept_code'] == '14749-6'

@@ -151,7 +151,9 @@ export default function EditMappingDialog({
   const [suggestionMessage, setSuggestionMessage] = useState("");
   const [individualSuggestion, setIndividualSuggestion] = useState<{ request: number; activity: CandidateActivity[]; running: boolean; axisKey?: string } | null>(null);
   // LOINC axes (#loinc-axes): the panel's current overrides, sent with Suggest.
-  const [loincAxes, setLoincAxes] = useState<LoincAxisOverrides | null>(null);
+  // Keyed by mapping: overrides belong to the code they were made for, and
+  // must never ride along with a Suggest for another row or an edited code.
+  const [loincAxes, setLoincAxes] = useState<{ mappingId: number; overrides: LoincAxisOverrides } | null>(null);
   const [loincAxesReload, setLoincAxesReload] = useState(0);
   const [repointing, setRepointing] = useState<{ from: string; to: string } | null>(null);
   const [repointResult, setRepointResult] = useState<RepointResult | null>(null);
@@ -525,7 +527,8 @@ export default function EditMappingDialog({
         // rankers, and only while it still describes the code being suggested.
         source_metadata: sourceIdentityUnchanged ? selectedRow?.source_metadata || undefined : undefined,
         strategies: enabled, ranking_model: rankingModel, async: true,
-        ...(loincAxes ? { loinc_axes: loincAxes } : {}),
+        ...(loincAxes && sourceIdentityUnchanged && loincAxes.mappingId === selectedRow?.mapping_id
+          ? { loinc_axes: loincAxes.overrides } : {}),
         ...(axisKey ? { axis_key: axisKey } : {}),
       });
       let current = started;
@@ -570,7 +573,7 @@ export default function EditMappingDialog({
         setIndividualSuggestion(cur => cur?.request === request ? { ...cur, running: false } : cur);
       }
     }
-  }, [strategies, rankingModel, form.source_code, form.source_vocabulary_id, form.source_code_description, form.omop_table, selectedRow?.source_metadata, sourceIdentityUnchanged, applyConcept, loincAxes]);
+  }, [strategies, rankingModel, form.source_code, form.source_vocabulary_id, form.source_code_description, form.omop_table, selectedRow?.source_metadata, selectedRow?.mapping_id, sourceIdentityUnchanged, applyConcept, loincAxes]);
 
   const sourceContextDirty = Boolean(patientId && selectedRow?.source_code_id && (
     sourceUnit.trim() !== savedSourceUnit
@@ -1011,7 +1014,8 @@ export default function EditMappingDialog({
                 </div>
                 {mode === "edit" && selectedRow?.mapping_id && <LoincAxesPanel
                   key={selectedRow.mapping_id} mappingId={selectedRow.mapping_id} canEdit canApprove={canApprove}
-                  reloadToken={loincAxesReload} onAxesChange={setLoincAxes}
+                  reloadToken={loincAxesReload}
+                  onAxesChange={overrides => setLoincAxes({ mappingId: selectedRow.mapping_id!, overrides })}
                   onSuggestVariant={axisKey => void suggestCurrentCode(axisKey)} />}
                 {individualSuggestion?.request === dialogRequest.current && <IndividualSuggestCandidates
                   activity={individualSuggestion.activity} running={individualSuggestion.running}

@@ -13583,20 +13583,25 @@ def code_mapping_suggest_one(request):
     # row's. A variant's axis values override both -- suggesting for the
     # mmol/L variant of a code means suggesting a substance concentration.
     from omop_core.mapping import axis_variants as axis_variants_module, loinc_axes as axes_module
+    # The row the dialog shows: this code, in this table.
+    axes_mapping = SourceCodeConceptMapping.objects.filter(
+        source_vocabulary_id=source_vocabulary_id, source_code=source_code[:SOURCE_CODE_MAX],
+        omop_table=omop_table,
+    ).first()
     try:
         axis_overrides = (
             axes_module.clean_overrides(request.data.get('loinc_axes'))
             if 'loinc_axes' in request.data
-            else (existing.loinc_axes or {}) if existing else {}
+            else (axes_mapping.loinc_axes or {}) if axes_mapping else {}
         )
     except ValueError as exc:
         return Response({'loinc_axes': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
     axis_key = str(request.data.get('axis_key') or '')
     if axis_key:
-        variant = existing.axis_variants.filter(axis_key=axis_key).first() if existing else None
+        variant = axes_mapping.axis_variants.filter(axis_key=axis_key).first() if axes_mapping else None
         if variant is None:
             from omop_core.mapping.axis_variants import detect
-            detected = {v['axis_key']: v for v in detect(existing)[0]} if existing else {}
+            detected = {v['axis_key']: v for v in detect(axes_mapping)[0]} if axes_mapping else {}
             values = (detected.get(axis_key) or {}).get('axis_values')
         else:
             values = variant.axis_values
@@ -13611,7 +13616,8 @@ def code_mapping_suggest_one(request):
         'omop_table': omop_table,
         'axis_overrides': axis_overrides,
         'observed_units': (
-            axis_variants_module.observed_units(existing) if existing and omop_table == 'measurement' else None
+            axis_variants_module.observed_units(axes_mapping) if axes_mapping and omop_table == 'measurement'
+            else None
         ),
         'source_description': str(request.data.get('source_code_description') or ''),
         # The dialog's Source Metadata, else this table's mapping's own:
@@ -14050,7 +14056,8 @@ def code_mapping_lookup(request):
     variant in that unit (one hospital code reported in both mg/dL and
     mmol/L) resolves to the variant's concept, keyed ``"vocab|code|unit"`` and
     carrying ``axis_variant_id``: the same code means a different LOINC per
-    unit, so one key per code cannot hold both answers.
+    unit, so one key per code cannot hold both answers. The answer is also
+    under ``"vocab|code"`` when no unrouted entry for that code holds it.
     """
     codes = request.data.get('codes')
     if not codes or not isinstance(codes, list):
@@ -14134,6 +14141,7 @@ def code_mapping_lookup(request):
     unresolved = 0
     from omop_core.mapping.code_resolution import resolve_source_code_variant
     entry_keys = []
+    routed_keys = {}   # "vocab|code|unit" -> "vocab|code"
     for idx, (vocab, code, table, source_text) in enumerate(lookup_entries):
         concept, mapping, variant = resolve_source_code_variant(
             source_vocabulary_id=vocab,
@@ -14149,6 +14157,8 @@ def code_mapping_lookup(request):
         # other entry keeps the "vocab|code" key existing callers read.
         key = f'{vocab}|{code}|{unit_inputs[idx][0]}' if variant is not None else f'{vocab}|{code}'
         entry_keys.append(key)
+        if variant is not None:
+            routed_keys[key] = f'{vocab}|{code}'
         if concept is not None:
             result[key] = {
                 'status': mapping.status if mapping else 'direct',
@@ -14215,7 +14225,11 @@ def code_mapping_lookup(request):
             if key not in resolved_entries:
                 continue
             concept, mapping = resolved_entries[key]
-            dest_unit_concept = unit_concepts.get(mapping.id) if mapping else None
+            # The mapping's destination unit was chosen for the mapping's own
+            # LOINC; a variant's concept has another property, so it takes
+            # that concept's canonical unit instead.
+            dest_unit_concept = (unit_concepts.get(mapping.id)
+                                 if mapping and key not in routed_keys else None)
             conversion = resolve_mapping_conversion(
                 concept,
                 destination_unit_concept=dest_unit_concept,
@@ -14223,6 +14237,13 @@ def code_mapping_lookup(request):
                 quantity=qty,
             )
             result[key]['unit_conversion'] = conversion
+
+    # A client written before variants reads "vocab|code" whatever unit it
+    # sent. Mirror a routed answer there unless an entry that was not routed
+    # already answers it, so that key never goes missing.
+    for routed, base in routed_keys.items():
+        if base not in result and routed in result:
+            result[base] = result[routed]
 
     response = Response({
         'mappings': result,

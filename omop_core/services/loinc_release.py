@@ -141,12 +141,18 @@ def _axes_missing():
     The version alone cannot say: the 2.83 load that filled class, units,
     property and scale left component, time aspect, system and method empty
     once they were added, exactly as #1624 left property and scale empty.
-    Every LOINC code has a component, so one loaded row without it means the
-    load ran before the column existed.
+    Every LOINC code has a component, so a load that ran before the column
+    existed leaves nearly every row without one. A threshold, not "any row":
+    a row the reload never touches -- a code dropped for an unknown class --
+    keeps an empty component for good, and "any" would then re-download the
+    ~92MB archive on every boot with no way to clear it.
     """
     from omop_core.models import LoincCodeClass
 
-    return LoincCodeClass.objects.filter(component='').exists()
+    total = LoincCodeClass.objects.count()
+    if not total:
+        return False
+    return LoincCodeClass.objects.filter(component='').count() * 2 > total
 
 
 def stream_archive(download_url):

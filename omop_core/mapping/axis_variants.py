@@ -35,9 +35,17 @@ FLAG_THRESHOLD = 2
 unit_property = loinc_axes.unit_property
 
 
-def observed_units(mapping):
+def observed_units(mapping, unit_counts=None):
     """Every normalized unit the code's records arrived in, commonest first."""
-    return [unit for unit, _ in _unit_counts(mapping).most_common()] if mapping else []
+    if not mapping:
+        return []
+    counts = unit_counts if unit_counts is not None else _unit_counts(mapping)
+    return [unit for unit, _ in counts.most_common()]
+
+
+def unit_counts(mapping):
+    """The unit evidence :func:`detect` and :func:`observed_units` read, once."""
+    return _unit_counts(mapping)
 
 
 def axis_key(values):
@@ -89,7 +97,7 @@ def _specimen_systems(mapping):
     return systems
 
 
-def detect(mapping):
+def detect(mapping, unit_counts=None):
     """``(variants, notes)`` for one mapping.
 
     ``variants`` is a list of ``{axis_key, axis_values, units, occurrence_count}``
@@ -98,7 +106,8 @@ def detect(mapping):
     codes look like. ``notes`` describes variation that cannot be routed.
     """
     groups = defaultdict(lambda: {'units': Counter(), 'axis_values': {}})
-    for unit, count in _unit_counts(mapping).items():
+    counts = unit_counts if unit_counts is not None else _unit_counts(mapping)
+    for unit, count in counts.items():
         prop = unit_property(unit)
         # A unit with no single property is still a quantity, but nothing says
         # which group it joins, so it is a variant of its own, keyed by unit.
@@ -140,9 +149,8 @@ def refresh(mapping):
     from omop_core.models import SourceCodeAxisVariant
 
     variants, _notes = detect(mapping)
-    count = len(variants) if len(variants) >= FLAG_THRESHOLD else 0
     existing = {v.axis_key: v for v in mapping.axis_variants.all()}
-    if count:
+    if len(variants) >= FLAG_THRESHOLD:
         for variant in variants:
             row = existing.get(variant['axis_key'])
             if row is None:
@@ -151,6 +159,13 @@ def refresh(mapping):
             row.units = variant['units']
             row.occurrence_count = variant['occurrence_count']
             row.save()
+            existing[variant['axis_key']] = row
+    # An approved variant routes ingest, so its count must not drop to 0 just
+    # because the latest evidence lost its units -- routing is gated on it,
+    # and the rows its approval re-pointed would disagree with new records.
+    detected = len(variants) if len(variants) >= FLAG_THRESHOLD else 0
+    approved = any(v.status == 'approved' for v in existing.values())
+    count = max(detected, len(existing)) if approved else detected
     if mapping.axis_variant_count != count:
         mapping.axis_variant_count = count
         mapping.save(update_fields=['axis_variant_count'])
@@ -186,14 +201,29 @@ def refresh_codes(keys):
     return refreshed
 
 
+def usable_destination(concept, mapping=None):
+    """Whether ``concept`` may be a variant's destination: active, standard,
+    and in the mapping's domain when it has one -- what the mapping-level
+    resolver also requires of a destination."""
+    if concept is None or concept.invalid_reason or concept.standard_concept != 'S':
+        return False
+    domain = getattr(mapping, 'domain_id', '') if mapping is not None else ''
+    return not domain or concept.domain_id == domain
+
+
 def variant_for(mapping, source_unit):
-    """The approved variant a record in ``source_unit`` belongs to, or None."""
+    """The approved variant a record in ``source_unit`` belongs to, or None.
+
+    A variant whose concept has since been retired or made non-standard by a
+    vocabulary load is skipped, so the record falls back to the mapping.
+    """
     if mapping is None or not getattr(mapping, 'axis_variant_count', 0) or not source_unit:
         return None
     unit = unit_code(source_unit)
     prop = unit_property(unit)
     approved = [v for v in mapping.axis_variants.filter(status='approved', target_concept__isnull=False)
-                                                  .select_related('target_concept')]
+                                                  .select_related('target_concept')
+                if usable_destination(v.target_concept, mapping)]
     for variant in approved:
         if unit in (variant.units or []):
             return variant
@@ -229,10 +259,19 @@ def set_destination(variant, concept, *, approve, user):
     Only rows in the variant's units move, and only off the concept they would
     otherwise carry (the mapping's own destination): records in other units
     belong to other variants.
+
+    Reopening an approved variant (``approve=False``) moves its rows back to
+    the mapping's destination, because ingest stops routing to it: leaving
+    them would put two concepts on one code and one unit.
     """
     from omop_core.mapping.code_resolution import repoint_clinical_rows
 
     previous = variant.target_concept_id if variant.status == 'approved' else None
+    mapping = variant.mapping
+    if previous is not None and not approve and mapping.target_concept_id is None:
+        raise ValueError(
+            "This variant is approved and the code has no destination of its own "
+            "to move its records back to. Approve a new destination instead.")
     variant.target_concept = concept
     variant.status = 'approved' if approve else 'proposed'
     if approve:
@@ -241,12 +280,20 @@ def set_destination(variant, concept, *, approve, user):
     variant.save()
     result = None
     if approve and concept is not None:
-        mapping = variant.mapping
         old = previous if previous is not None else mapping.target_concept_id
         result = repoint_clinical_rows(
             mapping=mapping, old_concept_id=old, new_concept_id=concept.concept_id,
             units=variant.units,
         )
+    elif not approve and previous is not None:
+        result = repoint_clinical_rows(
+            mapping=mapping, old_concept_id=previous, new_concept_id=mapping.target_concept_id,
+            units=variant.units,
+        )
+    if approve and not mapping.axis_variant_count:
+        # Routing is gated on the count; an approval must switch it on.
+        mapping.axis_variant_count = max(FLAG_THRESHOLD, mapping.axis_variants.count())
+        mapping.save(update_fields=['axis_variant_count'])
     return result
 
 
