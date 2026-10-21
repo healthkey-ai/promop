@@ -349,6 +349,78 @@ def test_upload_hook_refreshes_only_multi_unit_codes(two_unit_code):
     assert (two_unit_code.axis_variant_count, single.axis_variant_count) == (2, 0)
 
 
+@pytest.fixture()
+def second_two_unit_code(two_unit_code):
+    """Another multi-unit code, and a stale flag on a code that stopped varying."""
+    other = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='GLU2', omop_table='measurement')
+    for unit in ('mg/dL', 'mmol/L'):
+        PatientSourceCode.objects.create(person=PersonFactory(), source_value='GLU2',
+                                         source_vocabulary_id=LAB, omop_table='measurement',
+                                         source_unit=unit)
+    stale = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='OLD', omop_table='measurement', axis_variant_count=2)
+    return two_unit_code, other, stale
+
+
+def _counts(*mappings):
+    for mapping in mappings:
+        mapping.refresh_from_db()
+    return [m.axis_variant_count for m in mappings]
+
+
+def test_refresh_all_works_through_every_candidate_in_batches(second_two_unit_code):
+    assert axis_variants.multi_unit_keys() == {(LAB, 'GLU'), (LAB, 'GLU2'), (LAB, 'OLD')}
+    assert axis_variants.refresh_all(batch_size=1) == 3
+    assert _counts(*second_two_unit_code) == [2, 2, 0]
+
+
+def test_one_failing_code_does_not_stop_the_rest(second_two_unit_code):
+    real = axis_variants.refresh
+
+    def refresh(mapping, *args, **kwargs):
+        if mapping.source_code == 'GLU':
+            # A database error, which would abort the batch without a savepoint.
+            SourceCodeConceptMapping.objects.raw('SELECT * FROM no_such_table')[0]
+        return real(mapping, *args, **kwargs)
+
+    with patch.object(axis_variants, 'refresh', refresh):
+        assert axis_variants.refresh_all() == 2
+    assert _counts(*second_two_unit_code) == [0, 2, 0]
+
+
+def _backfill():
+    import importlib
+
+    return importlib.import_module('omop_core.migrations.0300_backfill_axis_variants').backfill
+
+
+def test_the_migration_backfills_existing_codes(second_two_unit_code):
+    _backfill()(None, None)
+    assert _counts(*second_two_unit_code) == [2, 2, 0]
+
+
+def test_the_migration_does_not_block_a_deploy_on_a_database_error(two_unit_code):
+    from django.db import ProgrammingError
+
+    with patch.object(axis_variants, 'refresh_all', side_effect=ProgrammingError('no column')):
+        _backfill()(None, None)
+    assert _counts(two_unit_code) == [0]
+
+
+def test_the_command_reports_and_refreshes(second_two_unit_code):
+    from io import StringIO
+
+    from django.core.management import call_command
+
+    out = StringIO()
+    call_command('refresh_axis_variants', '--dry-run', stdout=out)
+    assert '3 source codes have more than one unit.' in out.getvalue()
+    assert _counts(*second_two_unit_code) == [0, 0, 2]
+    call_command('refresh_axis_variants', stdout=out)
+    assert 'Refreshed 3 mappings; 2 now have axis variants.' in out.getvalue()
+
+
 def test_specimen_variation_is_reported_but_not_routed(glucose):
     mapping = SourceCodeConceptMapping.objects.create(
         source_vocabulary_id=LAB, source_code='GLU2', omop_table='measurement')

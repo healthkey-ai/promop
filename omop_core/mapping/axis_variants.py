@@ -31,6 +31,8 @@ from omop_core.services.canonical_units import unit_code
 
 #: Codes with this many variants or more are flagged in the queue.
 FLAG_THRESHOLD = 2
+# Keys per transaction in refresh_all.
+REFRESH_BATCH = 500
 
 unit_property = loinc_axes.unit_property
 
@@ -228,11 +230,79 @@ def refresh_codes(keys):
     counts = unit_counts_for(mappings)
     for mapping in mappings:
         try:
-            refresh(mapping, counts.get(mapping.pk, Counter()))
+            # A savepoint each, so one failed row cannot abort the rest.
+            with transaction.atomic():
+                refresh(mapping, counts.get(mapping.pk, Counter()))
             refreshed += 1
         except Exception:  # noqa: BLE001 - evidence must not fail ingest
             logging.getLogger(__name__).warning(
                 'Axis variant refresh failed for mapping %s.', mapping.pk, exc_info=True)
+    return refreshed
+
+
+def multi_unit_keys():
+    """Every ``(source_vocabulary_id, source_code)`` that may have variants.
+
+    The codes with two or more units in any evidence source -- imported unit
+    evidence, per-patient source codes, stored Measurement rows -- plus every
+    code already flagged, so a code that stopped varying is cleared.
+    """
+    from django.db.models import Count, F, Func, IntegerField
+
+    from omop_core.models import Measurement, PatientSourceCode, SourceCodeConceptMapping
+
+    class JsonLength(Func):
+        function = 'jsonb_array_length'
+        output_field = IntegerField()
+
+    keys = set(
+        SourceCodeConceptMapping.objects
+        .annotate(units=JsonLength(F('source_unit_evidence')))
+        .filter(units__gte=FLAG_THRESHOLD)
+        .values_list('source_vocabulary_id', 'source_code')
+    )
+    keys |= set(
+        SourceCodeConceptMapping.objects.filter(axis_variant_count__gt=0)
+        .values_list('source_vocabulary_id', 'source_code')
+    )
+    keys |= set(
+        PatientSourceCode.objects.exclude(source_unit='')
+        .values('source_vocabulary_id', 'source_value')
+        .annotate(units=Count('source_unit', distinct=True))
+        .filter(units__gte=FLAG_THRESHOLD)
+        .values_list('source_vocabulary_id', 'source_value')
+    )
+    # Stored rows carry no vocabulary, so their source values are matched
+    # against measurement mappings by code.
+    multi_unit_values = set(
+        Measurement.objects.exclude(unit_source_value__isnull=True)
+        .exclude(unit_source_value='')
+        .values('measurement_source_value')
+        .annotate(units=Count('unit_source_value', distinct=True))
+        .filter(units__gte=FLAG_THRESHOLD)
+        .values_list('measurement_source_value', flat=True)
+    )
+    if multi_unit_values:
+        keys |= set(
+            SourceCodeConceptMapping.objects
+            .filter(omop_table='measurement', source_code__in=multi_unit_values)
+            .values_list('source_vocabulary_id', 'source_code')
+        )
+    return keys
+
+
+def refresh_all(keys=None, batch_size=REFRESH_BATCH):
+    """Refresh ``keys`` (default :func:`multi_unit_keys`) a batch at a time.
+
+    One transaction per batch: the whole backlog in one would hold its locks
+    for minutes, and one OR over every key makes a statement the planner
+    chokes on. Returns the number of mappings refreshed.
+    """
+    keys = sorted(multi_unit_keys() if keys is None else keys, key=lambda k: (k[0] or '', k[1] or ''))
+    refreshed = 0
+    for start in range(0, len(keys), batch_size):
+        with transaction.atomic():
+            refreshed += refresh_codes(keys[start:start + batch_size])
     return refreshed
 
 
