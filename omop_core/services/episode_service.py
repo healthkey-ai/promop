@@ -27,7 +27,7 @@ from omop_core.services.mappings import (
 )
 from omop_oncology.models import Episode, EpisodeEvent
 
-logger = logging.getLogger('audit')
+logger = logging.getLogger('omop.ops')
 
 
 class TherapyLineEpisodeResult:

@@ -57,12 +57,12 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
   CMD curl -f http://localhost:${PORT:-8000}/api/health/ || exit 1
 
 # Run migrations and start gunicorn
-CMD python manage.py migrate && \
+CMD python manage.py migrate >&2 && \
     gunicorn ctomop.wsgi:application \
     --bind 0.0.0.0:$PORT \
     --workers 4 \
     --threads 2 \
     --timeout 120 \
-    --access-logfile - \
-    --error-logfile - \
+    --access-logfile /dev/stderr \
+    --error-logfile /dev/stderr \
     --log-level info

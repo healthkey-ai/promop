@@ -44,5 +44,5 @@ CMD ["gunicorn", "ctomop.wsgi:application", \
      "--workers", "2", \
      "--threads", "2", \
      "--timeout", "120", \
-     "--access-logfile", "-", \
-     "--error-logfile", "-"]
+     "--access-logfile", "/dev/stderr", \
+     "--error-logfile", "/dev/stderr"]

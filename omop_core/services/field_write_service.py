@@ -35,7 +35,7 @@ from omop_core.services.write_descriptor import (
     KIND_PROFILE,
 )
 
-logger = logging.getLogger('audit')
+logger = logging.getLogger('omop.ops')
 
 # KIND_PROFILE groups this applier writes directly on Person (the rest — email/phone/
 # validated/… — are identity/admin fields it leaves for result.profile).
