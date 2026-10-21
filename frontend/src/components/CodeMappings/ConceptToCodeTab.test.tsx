@@ -695,6 +695,23 @@ describe('concept priority (#1914)', () => {
     await waitFor(() => expect(screen.getByTestId('source-estimate')).toHaveTextContent(/search took too long/));
   });
 
+  it('labels an earlier or sampled estimate as approximate', async () => {
+    let response: Record<string, unknown> = { total: 6767, umls: 0, lexical: 6767, capped: false, partial: false, approximate: 'earlier', timed_out: false };
+    get.mockImplementation((url: string) => url === '/v1/concept-to-code/' ? Promise.resolve({ data: page([concept]) })
+      : url.endsWith('/estimate/') ? Promise.resolve({ data: response }) : Promise.resolve({ data: page([source]) }));
+    await selectConcept();
+    expect(await screen.findByTestId('source-estimate')).toHaveTextContent(
+      'About 6,767 candidate source codes (6,767 by name) · about 271 runs of 25. From an earlier count: this one took too long, so codes handled since may still be counted.');
+    response = { total: 6400, umls: 0, lexical: 6400, capped: false, partial: true, approximate: 'sample', timed_out: false };
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Only source codes with Seen greater than zero' }));
+    await waitFor(() => expect(screen.getByTestId('source-estimate')).toHaveTextContent(
+      'Roughly 6,400 candidate source codes (6,400 by name) · about 256 runs of 25. Estimated from a sample: the full count took too long. Vocabulary codes never seen were not counted.'));
+    response = { total: 0, umls: 0, lexical: 0, capped: false, partial: false, approximate: 'sample', timed_out: false };
+    fireEvent.click(screen.getByRole('checkbox', { name: 'UMLS' }));
+    await waitFor(() => expect(screen.getByTestId('source-estimate'))
+      .toHaveTextContent('A sample found no candidate source codes; the full count took too long, so there may be a few.'));
+  });
+
   it('has no Refresh button; a failed load offers Retry', async () => {
     let fail = true;
     get.mockImplementation((url: string) => url === '/v1/concept-to-code/' ? Promise.resolve({ data: page([concept]) })

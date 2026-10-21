@@ -296,6 +296,15 @@ def test_retrieval_restores_the_callers_statement_timeout(concept):
 
 # ── Estimate: how many sources Suggest could find (#1953) ─────────────────────
 
+@pytest.fixture(autouse=True)
+def _fresh_estimate_cache():
+    # Exact estimates are cached as the fallback for a timed-out count (#1963).
+    from django.core.cache import cache
+    cache.clear()
+    yield
+    cache.clear()
+
+
 def test_estimate_counts_every_source_a_run_could_return(client, concept):
     release = UmlsRelease.objects.create(release_version='test')
     cui = UmlsConcept.objects.create(cui='C0000001', release=release)
@@ -311,7 +320,8 @@ def test_estimate_counts_every_source_a_run_could_return(client, concept):
 
     data = client.get(f'{BASE}{concept.pk}/estimate/').data
     # More than one run's worth: 30 by name, one by UMLS, none counted twice.
-    assert data == {'total': 31, 'umls': 1, 'lexical': 30, 'capped': False, 'partial': False, 'timed_out': False}
+    assert data == {'total': 31, 'umls': 1, 'lexical': 30, 'capped': False, 'partial': False,
+                    'approximate': None, 'timed_out': False}
     assert len(reverse_retrieval_pool(concept, strategies=['umls', 'lexical'], limit=25)) == 25
     assert client.get(f'{BASE}{concept.pk}/estimate/', {'include_zero_seen': '1'}).data['total'] == 32
     assert client.get(f'{BASE}{concept.pk}/estimate/', {'strategies': 'umls'}).data['total'] == 1
@@ -371,8 +381,59 @@ def test_estimate_keeps_registered_counts_when_the_vocabulary_search_runs_out_of
     assert data['total'] == 2 and data['capped'] is True and data['partial'] is True
 
 
-def test_estimate_says_when_it_ran_out_of_time(client, concept):
+def test_a_timed_out_estimate_falls_back_to_the_last_exact_count(client, concept):
+    for index in range(30):
+        source(f'LEX{index:02}')
+    assert client.get(f'{BASE}{concept.pk}/estimate/').data['total'] == 30
+    source('LEX30')
     with patch('omop_core.mapping.reverse_suggestions._estimate', side_effect=TimeoutError('Budget exhausted')):
+        data = client.get(f'{BASE}{concept.pk}/estimate/').data
+    # The earlier count, off by what changed since, and said to be approximate.
+    assert (data['total'], data['approximate'], data['timed_out']) == (30, 'earlier', False)
+    # Only for the same settings: Seen > 0 off is a different count.
+    with patch('omop_core.mapping.reverse_suggestions._estimate', side_effect=TimeoutError('Budget exhausted')), \
+            patch('omop_core.mapping.reverse_suggestions.SAMPLE_PERCENT', 100):
+        other = client.get(f'{BASE}{concept.pk}/estimate/', {'include_zero_seen': '1'}).data
+    assert other['approximate'] == 'sample'
+
+
+def test_a_timed_out_estimate_with_no_earlier_count_is_sampled(client, concept):
+    release = UmlsRelease.objects.create(release_version='test')
+    cui = UmlsConcept.objects.create(cui='C0000001', release=release)
+    for root, code in [('LNC', concept.concept_code), ('SNOMEDCT_US', 'UMLS-ONLY')]:
+        UmlsSourceCode.objects.create(concept=cui, root_source=root, code=code, term_type='PT', name='Albumin')
+    source('UMLS-ONLY', source_code_description='Different label')
+    for index in range(30):
+        source(f'LEX{index:02}')
+    source('UNRELATED', source_code_description='Bone marrow sampling')
+    # A sample of every page counts what the exact query counts.
+    with patch('omop_core.mapping.reverse_suggestions._estimate', side_effect=TimeoutError('Budget exhausted')), \
+            patch('omop_core.mapping.reverse_suggestions.SAMPLE_PERCENT', 100):
+        data = client.get(f'{BASE}{concept.pk}/estimate/').data
+        zero_seen = client.get(f'{BASE}{concept.pk}/estimate/', {'include_zero_seen': '1'}).data
+    assert data == {'total': 31, 'umls': 1, 'lexical': 30, 'capped': False, 'partial': False,
+                    'approximate': 'sample', 'timed_out': False}
+    # Never-seen vocabulary codes are not sampled, so that total is a floor.
+    assert zero_seen['partial'] is True
+
+
+@pytest.mark.parametrize('value, rounded', [(0, 0), (37, 37), (6460, 6500), (1040, 1000), (123456, 120000)])
+def test_a_sampled_count_is_rounded_to_two_figures(value, rounded):
+    from omop_core.mapping.reverse_suggestions import _two_figures
+    assert _two_figures(value) == rounded
+
+
+def test_estimate_survives_an_unreachable_cache(client, concept):
+    source('SEEN')
+    with patch('omop_core.mapping.reverse_suggestions.cache') as down:
+        down.get.side_effect = down.set.side_effect = ConnectionError('cache down')
+        data = client.get(f'{BASE}{concept.pk}/estimate/').data
+    assert (data['total'], data['approximate']) == (1, None)
+
+
+def test_estimate_says_when_it_ran_out_of_time(client, concept):
+    with patch('omop_core.mapping.reverse_suggestions._estimate', side_effect=TimeoutError('Budget exhausted')), \
+            patch('omop_core.mapping.reverse_suggestions._sampled', side_effect=TimeoutError('Budget exhausted')):
         response = client.get(f'{BASE}{concept.pk}/estimate/')
     assert response.status_code == 200
     assert response.data == {'total': None, 'timed_out': True}
