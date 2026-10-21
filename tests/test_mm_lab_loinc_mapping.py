@@ -1,5 +1,7 @@
 """Myeloma disease burden labs: LOINC spellings, units and SLiM derivation."""
 
+from decimal import Decimal
+
 import pytest
 
 from omop_core.models import Concept, Measurement, Person
@@ -136,6 +138,23 @@ def test_flc_in_canonical_units_is_left_alone():
     _measure(person, '36916-5', 30.0, unit='mg/L')
 
     assert float(_get_laboratory_data(person)['kappa_flc']) == pytest.approx(30.0)
+
+
+@pytest.mark.parametrize(
+    'kappa_mg_dl,lambda_mg_dl,expected_ratio',
+    [('10.23', '6.2', '1.65'), ('3.38', '13.0', '0.26')],
+)
+def test_flc_projection_preserves_exact_boundary_ratios(
+    kappa_mg_dl, lambda_mg_dl, expected_ratio,
+):
+    """mg/dL -> mg/L must not turn an inclusive boundary into a float outlier."""
+    person = PersonFactory()
+    _measure(person, '36916-5', Decimal(kappa_mg_dl), unit='mg/dL')
+    _measure(person, '33944-0', Decimal(lambda_mg_dl), unit='mg/dL')
+
+    data = _get_laboratory_data(person)
+
+    assert data['kappa_flc'] / data['lambda_flc'] == Decimal(expected_ratio)
 
 
 def test_flc_with_an_unknown_unit_is_projected_unconverted():

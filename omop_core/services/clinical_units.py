@@ -42,22 +42,25 @@ def wbc_to_canonical(
 FLC_CANONICAL_UNIT = 'mg/L'
 
 _FLC_FACTOR_TO_MG_L = {
-    'mg/l': 1.0,
-    'mg/dl': 10.0,       # 1 mg/dL = 10 mg/L
-    'mg/100ml': 10.0,
-    'ug/ml': 1.0,        # 1 ug/mL = 1 mg/L
-    'mcg/ml': 1.0,
-    'g/l': 1000.0,
+    'mg/l': Decimal('1'),
+    'mg/dl': Decimal('10'),       # 1 mg/dL = 10 mg/L
+    'mg/100ml': Decimal('10'),
+    'ug/ml': Decimal('1'),        # 1 ug/mL = 1 mg/L
+    'mcg/ml': Decimal('1'),
+    'g/l': Decimal('1000'),
 }
 
 
 def flc_to_canonical(
     value: Decimal | float | None, source_unit: str | None,
-) -> float | None:
+) -> Decimal | None:
     """Convert a free light chain result to mg/L, None if the unit is unknown.
 
     None means "cannot be established", not "zero". Labs report these in mg/L
-    and mg/dL, so guessing is a 10x error half the time.
+    and mg/dL, so guessing is a 10x error half the time. Decimal arithmetic is
+    deliberate: the IMWG window is inclusive at 0.26/1.65, and a binary-float
+    conversion such as 10.23 mg/dL -> 102.30000000000001 would move an exact
+    boundary result outside that window.
     """
     if value is None:
         return None
@@ -68,4 +71,4 @@ def flc_to_canonical(
     factor = _FLC_FACTOR_TO_MG_L.get(normalized)
     if factor is None:
         return None
-    return float(value) * factor
+    return Decimal(str(value)) * factor

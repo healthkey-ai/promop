@@ -626,6 +626,30 @@ class TestMeasurableDiseaseImwg:
         _cmd()._compute_derived_fields(pi)
         assert pi.measurable_disease_imwg is True
 
+    def test_flc_ratio_at_upper_boundary_is_normal(self):
+        # 100.65 / 61.00 is exactly 1.65; the reviewed window is
+        # 0.26 <= ratio <= 1.65, so this must not be flagged as abnormal.
+        pi = self._pi(
+            monoclonal_protein_serum=0.3,
+            monoclonal_protein_urine=50,
+            kappa_flc=100.65,
+            lambda_flc=61.00,
+        )
+        _cmd()._compute_derived_fields(pi)
+        assert pi.measurable_disease_imwg is False
+
+    def test_flc_ratio_at_lower_boundary_is_normal(self):
+        # 33.80 / 130.00 is exactly 0.26; the reviewed window is
+        # 0.26 <= ratio <= 1.65, so this must not be flagged as abnormal.
+        pi = self._pi(
+            monoclonal_protein_serum=0.3,
+            monoclonal_protein_urine=50,
+            kappa_flc=33.80,
+            lambda_flc=130.00,
+        )
+        _cmd()._compute_derived_fields(pi)
+        assert pi.measurable_disease_imwg is False
+
     def test_flc_ratio_normal_with_missing_other_components_stays_none(self):
         pi = self._pi(
             monoclonal_protein_serum=None,

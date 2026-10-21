@@ -12,6 +12,7 @@ import math
 import statistics
 from collections import defaultdict
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from django.db import models
 from django.db.models import DateTimeField, Q
 from django.db.models.functions import Cast, Coalesce
@@ -62,7 +63,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 5
+DERIVATION_VERSION = 6
 
 # Fields that are entirely derived from OMOP tables and must be reset before
 # each refresh so deletions are reflected (not just additions).
@@ -328,15 +329,15 @@ _LOINC_LAB_FIELDS = {
     '51435-6': ('monoclonal_protein_serum',       float),  # M-protein band 1, SPEP
     '33358-3': ('monoclonal_protein_serum',       float),  # M-protein, SPEP (3046299)
     '32730-5': ('monoclonal_protein_urine',       float),  # Urine M-spike 24h
-    '33944-8': ('kappa_flc',                      float),  # seeded demo concept only
-    '36916-5': ('kappa_flc',                      float),  # Kappa FLC, Serum (3034860)
-    '80515-0': ('kappa_flc',                      float),  # Kappa FLC by nephelometry
-    '33945-5': ('lambda_flc',                     float),  # seeded demo concept only
-    '33944-0': ('lambda_flc',                     float),  # Lambda FLC, Serum (3047169)
-    '80516-8': ('lambda_flc',                     float),  # Lambda FLC by nephelometry
-    '48378-4': ('free_light_chain_ratio',         float),  # Kappa/lambda ratio (3053209)
-    '80517-6': ('free_light_chain_ratio',         float),  # ratio by nephelometry
-    '104546-7': ('free_light_chain_ratio',        float),  # ratio, newer LOINC
+    '33944-8': ('kappa_flc',                      Decimal),  # seeded demo concept only
+    '36916-5': ('kappa_flc',                      Decimal),  # Kappa FLC, Serum (3034860)
+    '80515-0': ('kappa_flc',                      Decimal),  # Kappa FLC by nephelometry
+    '33945-5': ('lambda_flc',                     Decimal),  # seeded demo concept only
+    '33944-0': ('lambda_flc',                     Decimal),  # Lambda FLC, Serum (3047169)
+    '80516-8': ('lambda_flc',                     Decimal),  # Lambda FLC by nephelometry
+    '48378-4': ('free_light_chain_ratio',         Decimal),  # Kappa/lambda ratio (3053209)
+    '80517-6': ('free_light_chain_ratio',         Decimal),  # ratio by nephelometry
+    '104546-7': ('free_light_chain_ratio',        Decimal),  # ratio, newer LOINC
     # '26098-4' is "XR Ankle - left Views" in LOINC, so it used to project ankle
     # radiographs into clonal_plasma_cells. '11118-7' is the real marrow code.
     '11118-7': ('clonal_plasma_cells',            float),  # Plasma cells/100 cells in marrow (3003879)
@@ -3314,17 +3315,29 @@ def _compute_derived_fields(patient_info: PatientRecord) -> None:
     # Keep this in lockstep with CB PatientInfoAttributes.measurable_disease_imwg
     # (and trials/signals.py): a negative OR is definitive only when all three
     # components were evaluated; a missing component keeps the result unknown.
-    # The FLC window and thresholds are the reviewed CB rule (CB #858).
-    serum_component = None if serum_mp is None else float(serum_mp) >= 0.5
-    urine_component = None if urine_mp is None else float(urine_mp) >= 200
-    if kappa is None or lam is None or float(lam) == 0:
+    # The FLC window and thresholds are the reviewed CB rule (CB #858). Decimal
+    # (not float) is required so exact boundary ratios such as 100.65/61.00
+    # (1.65) and 33.80/130.00 (0.26) stay inside the normal window.
+    def _decimal(value):
+        return Decimal(str(value))
+
+    serum_threshold = Decimal('0.5')
+    urine_threshold = Decimal('200')
+    flc_low = Decimal('0.26')
+    flc_high = Decimal('1.65')
+    flc_high_absolute = Decimal('100')
+
+    serum_component = None if serum_mp is None else _decimal(serum_mp) >= serum_threshold
+    urine_component = None if urine_mp is None else _decimal(urine_mp) >= urine_threshold
+    if kappa is None or lam is None or _decimal(lam) == 0:
         flc_component = None
     else:
-        ratio = float(kappa) / float(lam)
-        if not (ratio < 0.26 or ratio > 1.65):
+        kappa_dec, lam_dec = _decimal(kappa), _decimal(lam)
+        ratio = kappa_dec / lam_dec
+        if not (ratio < flc_low or ratio > flc_high):
             flc_component = False
         else:
-            flc_component = float(kappa) >= 100 or float(lam) >= 100
+            flc_component = kappa_dec >= flc_high_absolute or lam_dec >= flc_high_absolute
 
     components = [serum_component, urine_component, flc_component]
     if any(component is True for component in components):
