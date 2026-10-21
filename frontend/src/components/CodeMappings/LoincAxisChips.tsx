@@ -3,6 +3,7 @@ import {
   AXIS_BASIS_LABELS, LOINC_AXES, LOINC_AXIS_LABELS, axisVariantTitle,
   type AxisExcludedCandidate, type AxisVerdict, type LoincAxis, type SourceAxes,
 } from "./loincAxes";
+import { isSnomedExcluded } from "./snomed";
 
 const VERDICT_STYLE: Record<AxisVerdict, string> = {
   match: "bg-green-100 text-green-800",
@@ -61,8 +62,10 @@ export function SourceAxesSummary({ sourceAxes }: { sourceAxes?: SourceAxes | nu
 }
 
 /** "k candidates hidden: conflict on System, Property", expandable. */
-export function AxisExcludedDisclosure({ excluded }: { excluded?: AxisExcludedCandidate[] }) {
+export function AxisExcludedDisclosure({ excluded: all }: { excluded?: AxisExcludedCandidate[] }) {
   const [open, setOpen] = useState(false);
+  // SNOMED entries have their own disclosure (SnomedExcludedDisclosure).
+  const excluded = all?.filter(candidate => !isSnomedExcluded(candidate));
   if (!excluded?.length) return null;
   const axes = LOINC_AXES.filter(axis => excluded.some(c => c.axis_conflicts?.includes(axis)));
   const n = excluded.length;

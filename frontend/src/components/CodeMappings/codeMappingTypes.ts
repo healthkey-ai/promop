@@ -68,6 +68,8 @@ export interface CodeMappingRow {
   axis_variant_count?: number;
   /** Curator LOINC axis overrides: a value settles an axis, null lifts it. */
   loinc_axes?: Partial<Record<"component" | "property" | "time_aspect" | "system" | "scale_type" | "method_type", string | null>>;
+  /** Curator SNOMED settings: key absent = inferred, null = do not constrain / no side. */
+  snomed_attributes?: { reference_concept_id?: number; hierarchy?: string | null; laterality?: string | null };
 }
 
 export interface ConceptResult {

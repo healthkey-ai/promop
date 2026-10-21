@@ -4,6 +4,8 @@ import MintConceptDialog from "./MintConceptDialog";
 import { destinationError, saveMappingDestination } from "./destinationSearch";
 import { AxisChips, AxisExcludedDisclosure, SourceAxesSummary } from "./LoincAxisChips";
 import { applyAxisOrder, type AxisExcludedCandidate, type AxisVerdict, type LoincAxis, type SourceAxes } from "./loincAxes";
+import { SnomedExcludedDisclosure, SnomedLine, SourceSnomedSummary } from "./SnomedChips";
+import type { SnomedCandidateInfo, SourceSnomed } from "./snomed";
 
 export type SuggestCandidate = {
   concept_id: number;
@@ -21,6 +23,8 @@ export type SuggestCandidate = {
   axis_match?: Partial<Record<LoincAxis, AxisVerdict>>;
   axes_matched?: number;
   axes_compatible?: number;
+  /** How a SNOMED candidate stands against the source's reference concept. */
+  snomed?: SnomedCandidateInfo | null;
 };
 type Alternative = {
   concept_id: number;
@@ -49,6 +53,8 @@ export type CandidateActivity = {
   source_axes?: SourceAxes;
   /** Candidates hidden because they conflict with a settled source axis. */
   axis_excluded?: AxisExcludedCandidate[];
+  /** What the source means at least, in SNOMED terms (ranked/result events). */
+  source_snomed?: SourceSnomed | null;
 };
 
 type Props = {
@@ -60,7 +66,7 @@ type Props = {
   domains?: { domain_id: string; label: string }[];
 };
 
-const STRATEGY_LABELS: Record<string, string> = { umls: "U", lexical: "L", vectors: "V", semantic: "V", metadata: "M", axes: "X" };
+const STRATEGY_LABELS: Record<string, string> = { umls: "U", lexical: "L", vectors: "V", semantic: "V", metadata: "M", axes: "X", hierarchy: "H" };
 
 const RANKER_STYLE: Record<string, string> = {
   jev: "bg-indigo-100 text-indigo-700",
@@ -125,6 +131,7 @@ function mergeCandidates(searches: CandidateActivity[], ranked?: CandidateActivi
         existing.axes_matched = c.axes_matched;
         existing.axes_compatible = c.axes_compatible;
       }
+      if (c.snomed !== undefined) existing.snomed = c.snomed;
     } else {
       byId.set(c.concept_id, { ...c, strategies: new Set(["additional"]) });
     }
@@ -322,12 +329,14 @@ export default function SuggestCandidates({ activity, finished, onSaved, canAppr
             {description && <span className="ml-2 font-normal text-slate-600">{description}</span>}
           </h3>
           <SourceAxesSummary sourceAxes={(result?.source_axes ?? ranked?.source_axes)} />
+          <SourceSnomedSummary sourceSnomed={result?.source_snomed ?? ranked?.source_snomed} />
           <AxisExcludedDisclosure excluded={(result?.axis_excluded ?? ranked?.axis_excluded)} />
+          <SnomedExcludedDisclosure excluded={(result?.axis_excluded ?? ranked?.axis_excluded)} />
           {!candidates.length && <p className="mt-1 text-sm text-slate-500">No matches</p>}
           {candidates.length > 0 && <table className="mt-2 w-full text-left text-sm">
             <thead><tr className="border-b text-xs text-slate-500">
               <th className="pb-1 pr-2 font-medium">Candidate</th>
-              <th className="pb-1 px-2 font-medium" title="Retrieval strategies: U=UMLS, L=Lexical, V=Vectors, X=LOINC axes">Found by</th>
+              <th className="pb-1 px-2 font-medium" title="Retrieval strategies: U=UMLS, L=Lexical, V=Vectors, X=LOINC axes, H=SNOMED hierarchy">Found by</th>
               <th className="pb-1 px-2 font-medium">Confidence</th>
               <th className="pb-1 pl-2 font-medium">Action</th>
             </tr></thead>
@@ -345,6 +354,7 @@ export default function SuggestCandidates({ activity, finished, onSaved, canAppr
                   <span className="ml-1 text-xs text-slate-400">OMOP {candidate.concept_id}</span>
                   {stdBadge && <span className={`ml-1 rounded px-1 py-0.5 text-xs ${stdBadge.className}`}>{stdBadge.label}</span>}
                   <AxisChips axes={candidate.loinc_axes} verdicts={candidate.axis_match} matched={candidate.axes_matched} />
+                  <SnomedLine snomed={candidate.snomed} />
                 </td>
                 <td className="py-1.5 px-2">
                   <span className="rounded bg-slate-100 px-1.5 py-0.5 text-xs font-mono" title={[...candidate.strategies].join(", ")}>{strategies}</span>

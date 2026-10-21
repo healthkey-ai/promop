@@ -763,6 +763,30 @@ describe("CodeMappingPage", () => {
       expect(screen.getByLabelText("Destination Concept ID")).toHaveValue(proposedRow.destination_concept_id);
     });
 
+    it("sends the SNOMED evidence settings with Suggest only while the source is unchanged", async () => {
+      renderPage();
+      const originalGet = mockGet.getMockImplementation()!;
+      mockGet.mockImplementation((url: string, ...rest: unknown[]) => url === "/v1/code-mappings/7/snomed-attributes/"
+        ? Promise.resolve({ data: { mapping_id: 7, applies: true, snomed_attributes: { laterality: "Left" }, source: null,
+          hierarchies: { Disorder: "disorder" }, lateralities: ["Left", "Right", "Right and left"] } })
+        : originalGet(url, ...rest));
+      fireEvent.click((await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' })).closest("tr")!);
+      const panel = await screen.findByRole("region", { name: "SNOMED evidence" });
+      fireEvent.change(within(panel).getByLabelText("Hierarchy"), { target: { value: "__none__" } });
+      mockPost.mockResolvedValue({ data: suggestRun({ activity: [] }) });
+      const dialog = within(screen.getByRole("dialog"));
+      fireEvent.click(dialog.getByRole("button", { name: "Suggest", exact: true }));
+      await waitFor(() => expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/suggest-one/", expect.objectContaining({
+        snomed_attributes: { laterality: "Left", hierarchy: null } })));
+      mockPost.mockClear();
+      mockPost.mockResolvedValue({ data: suggestRun({ activity: [] }) });
+      fireEvent.change(screen.getByLabelText("Source Code Value"), { target: { value: "CHANGED" } });
+      fireEvent.click(dialog.getByRole("button", { name: "Suggest", exact: true }));
+      await waitFor(() => expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/suggest-one/", expect.anything()));
+      const body = mockPost.mock.calls.find(([url]) => url === "/v1/code-mappings/suggest-one/")![1];
+      expect(body).not.toHaveProperty("snomed_attributes");
+    });
+
     it("highlights imported alternatives and saves the curator's selected destination", async () => {
       renderPage([{ ...proposedRow, destination_count: 3 }]);
       const originalGet = mockGet.getMockImplementation()!;

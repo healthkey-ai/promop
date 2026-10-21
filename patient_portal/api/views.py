@@ -12114,6 +12114,7 @@ def _axis_fields(mapping):
     return {
         'axis_variant_count': mapping.axis_variant_count if mapping else 0,
         'loinc_axes': (mapping.loinc_axes or {}) if mapping else {},
+        'snomed_attributes': (mapping.snomed_attributes or {}) if mapping else {},
     }
 
 
@@ -13609,12 +13610,22 @@ def code_mapping_suggest_one(request):
             return Response({'axis_key': 'This code has no such axis variant.'},
                             status=status.HTTP_400_BAD_REQUEST)
         axis_overrides = {**axis_overrides, **values}
+    from omop_core.mapping import snomed_attributes as snomed_module
+    try:
+        snomed_overrides = (
+            snomed_module.clean_overrides(request.data.get('snomed_attributes'))
+            if 'snomed_attributes' in request.data
+            else (axes_mapping.snomed_attributes or {}) if axes_mapping else {}
+        )
+    except ValueError as exc:
+        return Response({'snomed_attributes': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
     params = {
         'source_code': source_code,
         'source_vocabulary_id': source_vocabulary_id,
         'omop_table': omop_table,
         'axis_overrides': axis_overrides,
+        'snomed_overrides': snomed_overrides,
         'observed_units': (
             axis_variants_module.observed_units(axes_mapping) if axes_mapping and omop_table == 'measurement'
             else None

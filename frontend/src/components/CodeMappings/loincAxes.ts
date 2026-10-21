@@ -2,6 +2,7 @@
  * The six LOINC axes, as the code-to-LOINC Suggest and the LOINC axes panel
  * see them. Order and labels mirror omop_core/mapping/loinc_axes.py.
  */
+import type { SnomedCandidateInfo } from "./snomed";
 
 export const LOINC_AXES = ["component", "property", "time_aspect", "system", "scale_type", "method_type"] as const;
 export type LoincAxis = typeof LOINC_AXES[number];
@@ -45,6 +46,11 @@ export interface AxisExcludedCandidate {
   axis_match?: Partial<Record<LoincAxis, AxisVerdict>>;
   axis_conflicts?: LoincAxis[];
   retrieval?: string | string[];
+  /** SNOMED entries only: why it was held back. LOINC entries are conflicts. */
+  exclusion_reason?: "conflict" | "more_specific";
+  /** SNOMED entries only: what it contradicts, e.g. ["Hierarchy"], ["Lineage", "Finding site"]. */
+  snomed_conflicts?: string[];
+  snomed?: SnomedCandidateInfo | null;
 }
 
 export interface AxisVariant {
@@ -91,7 +97,7 @@ export const axisVariantTitle = (n: number) =>
   `This source code's units imply ${n} different LOINC axis sets; it may need one destination per variant.`;
 
 /**
- * Drop retrieval candidates the axes filter hid, and follow the ranked event's
+ * Drop retrieval candidates the axes (or SNOMED) filter hid, and follow the ranked event's
  * order (axes matched first) once one has arrived. Retrieval events stream
  * before the filter runs, so they still carry the conflicting candidates.
  */
@@ -101,7 +107,8 @@ export function applyAxisOrder<T extends { concept_id: number }>(
 ): T[] {
   const hidden = new Set((ranked?.axis_excluded ?? []).map(c => c.concept_id));
   const kept = hidden.size ? merged.filter(c => !hidden.has(c.concept_id)) : merged;
-  if (!ranked?.axis_excluded && !(ranked?.candidates ?? []).some(c => "loinc_axes" in c)) return kept;
+  // SNOMED candidates are ranked too: exact, then same side, then nearest ancestor.
+  if (!ranked?.axis_excluded && !(ranked?.candidates ?? []).some(c => "loinc_axes" in c || "snomed" in c)) return kept;
   const order = new Map((ranked?.candidates ?? []).map((c, index) => [c.concept_id, index]));
   return kept.map((c, index) => ({ c, index }))
     .sort((a, b) => (order.get(a.c.concept_id) ?? order.size + a.index) - (order.get(b.c.concept_id) ?? order.size + b.index))

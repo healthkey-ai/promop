@@ -322,3 +322,41 @@ describe("LOINC axes in suggestion candidates", () => {
     expect(hidden.querySelector('[data-verdict="conflict"]')).toHaveTextContent("SCnc");
   });
 });
+
+describe("SNOMED candidates in a batch run", () => {
+  it("shows the source meaning, chips, laterality warning and split disclosure without Use anyway", () => {
+    const exact = { concept_id: 31, concept_name: "Fracture of right femur", concept_code: "1000001", vocabulary_id: "SNOMED",
+      snomed: { hierarchy: "Disorder", semantic_tag: "disorder", status: "Defined" as const, laterality: "Right" as const, relation: "exact" as const, levels: 0,
+        attributes: [{ relationship_id: "Has finding site", label: "Finding site", values: ["Right femur"], verdict: "match" as const }] } };
+    const general = { concept_id: 32, concept_name: "Fracture of femur", concept_code: "71620000", vocabulary_id: "SNOMED",
+      snomed: { hierarchy: "Disorder", semantic_tag: "disorder", status: "Primitive" as const, laterality: null, relation: "general" as const, levels: 2,
+        laterality_not_captured: "Right", attributes: [] } };
+    const specific = { concept_id: 33, concept_name: "Fracture of neck of right femur", concept_code: "1000002", vocabulary_id: "SNOMED" };
+    const other = { concept_id: 34, concept_name: "Femur structure", concept_code: "71341001", vocabulary_id: "SNOMED" };
+    const activity: CandidateActivity[] = [
+      { ...source, stage: "candidates", strategy: "hierarchy", candidates: [general, exact, specific, other] },
+      { ...source, stage: "ranked", suggested: exact, candidates: [exact, general],
+        source_snomed: { references: [{ concept_id: 32, concept_name: "Fracture of femur", concept_code: "71620000" }], reference_basis: "curator",
+          hierarchy: { value: "Disorder", basis: "curator" }, laterality: { value: "Right", basis: "text" }, attributes: [] },
+        axis_excluded: [
+          { ...other, exclusion_reason: "conflict", snomed_conflicts: ["Hierarchy"] },
+          { ...specific, exclusion_reason: "more_specific" },
+        ] },
+      { ...source, stage: "result", suggested: exact, updated: true },
+    ];
+    render(<SuggestCandidates activity={activity} finished />);
+    expect(screen.getByLabelText("Source SNOMED meaning")).toHaveTextContent("Fracture of femur (chosen by curator) · Disorder · Right");
+    const rows = within(screen.getByRole("table")).getAllByRole("row").slice(1);
+    expect(rows.map(row => row.textContent)).toEqual([expect.stringContaining("Fracture of right femur"), expect.stringContaining("Fracture of femur")]);
+    expect(rows[0].querySelector('[data-relation="exact"]')).toBeInTheDocument();
+    expect(rows[0].querySelector('[data-attribute="Has finding site"]')).toHaveAttribute("data-verdict", "match");
+    expect(rows[1].querySelector('[data-relation="general"]')).toHaveTextContent("↑ 2 more general");
+    expect(within(rows[1]).getByRole("note")).toHaveTextContent("Source says Right; this concept has no side");
+    fireEvent.click(screen.getByRole("button", { name: "1 contradict the source: Hierarchy" }));
+    expect(screen.getByRole("list", { name: "SNOMED candidates that contradict the source" })).toHaveTextContent("Femur structure");
+    fireEvent.click(screen.getByRole("button", { name: /1 more specific than the source supports/ }));
+    const held = screen.getByRole("list", { name: "SNOMED candidates more specific than the source" });
+    expect(held).toHaveTextContent("Fracture of neck of right femur");
+    expect(within(held).queryByRole("button", { name: /anyway/ })).not.toBeInTheDocument();
+  });
+});

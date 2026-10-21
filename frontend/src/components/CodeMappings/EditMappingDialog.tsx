@@ -22,6 +22,8 @@ import CanonicalUnitEditor from "./CanonicalUnitEditor";
 import IndividualSuggestCandidates from "./IndividualSuggestCandidates";
 import LoincAxesPanel from "./LoincAxesPanel";
 import type { LoincAxisOverrides } from "./loincAxes";
+import SnomedEvidencePanel from "./SnomedEvidencePanel";
+import type { SnomedSettings } from "./snomed";
 import SourceVocabularyLookup from "./SourceVocabularyLookup";
 import { searchDestinationConcepts } from "./destinationSearch";
 import MintConceptDialog from "./MintConceptDialog";
@@ -155,6 +157,8 @@ export default function EditMappingDialog({
   // must never ride along with a Suggest for another row or an edited code.
   const [loincAxes, setLoincAxes] = useState<{ mappingId: number; overrides: LoincAxisOverrides } | null>(null);
   const [loincAxesReload, setLoincAxesReload] = useState(0);
+  // SNOMED evidence: the panel's current settings, under the same guard.
+  const [snomedSettings, setSnomedSettings] = useState<{ mappingId: number; settings: SnomedSettings } | null>(null);
   const [repointing, setRepointing] = useState<{ from: string; to: string } | null>(null);
   const [repointResult, setRepointResult] = useState<RepointResult | null>(null);
   const [error, setError] = useState("");
@@ -529,6 +533,8 @@ export default function EditMappingDialog({
         strategies: enabled, ranking_model: rankingModel, async: true,
         ...(loincAxes && sourceIdentityUnchanged && loincAxes.mappingId === selectedRow?.mapping_id
           ? { loinc_axes: loincAxes.overrides } : {}),
+        ...(snomedSettings && sourceIdentityUnchanged && snomedSettings.mappingId === selectedRow?.mapping_id
+          ? { snomed_attributes: snomedSettings.settings } : {}),
         ...(axisKey ? { axis_key: axisKey } : {}),
       });
       let current = started;
@@ -573,7 +579,7 @@ export default function EditMappingDialog({
         setIndividualSuggestion(cur => cur?.request === request ? { ...cur, running: false } : cur);
       }
     }
-  }, [strategies, rankingModel, form.source_code, form.source_vocabulary_id, form.source_code_description, form.omop_table, selectedRow?.source_metadata, selectedRow?.mapping_id, sourceIdentityUnchanged, applyConcept, loincAxes]);
+  }, [strategies, rankingModel, form.source_code, form.source_vocabulary_id, form.source_code_description, form.omop_table, selectedRow?.source_metadata, selectedRow?.mapping_id, sourceIdentityUnchanged, applyConcept, loincAxes, snomedSettings]);
 
   const sourceContextDirty = Boolean(patientId && selectedRow?.source_code_id && (
     sourceUnit.trim() !== savedSourceUnit
@@ -1017,6 +1023,9 @@ export default function EditMappingDialog({
                   reloadToken={loincAxesReload}
                   onAxesChange={overrides => setLoincAxes({ mappingId: selectedRow.mapping_id!, overrides })}
                   onSuggestVariant={axisKey => void suggestCurrentCode(axisKey)} />}
+                {mode === "edit" && selectedRow?.mapping_id && <SnomedEvidencePanel
+                  key={`snomed-${selectedRow.mapping_id}`} mappingId={selectedRow.mapping_id} canEdit
+                  onSettingsChange={settings => setSnomedSettings({ mappingId: selectedRow.mapping_id!, settings })} />}
                 {individualSuggestion?.request === dialogRequest.current && <IndividualSuggestCandidates
                   activity={individualSuggestion.activity} running={individualSuggestion.running}
                   selectedId={individualSuggestion.axisKey ? "" : form.destination_concept_id}

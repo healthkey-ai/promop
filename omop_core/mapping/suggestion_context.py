@@ -133,4 +133,7 @@ def candidate_context(candidate):
         # (omop_core.mapping.loinc_axes); only when the source domain has them.
         **({'loinc_axes': candidate['loinc_axes']} if candidate.get('loinc_axes') else {}),
         **({'axis_match': candidate['axis_match']} if candidate.get('axis_match') else {}),
+        # SNOMED hierarchy, defining attributes with verdicts, and subsumption
+        # relative to the source's reference concept (mapping.snomed_attributes).
+        **({'snomed': candidate['snomed']} if candidate.get('snomed') else {}),
     }

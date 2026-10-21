@@ -94,6 +94,7 @@ _CODE_MAPPING_FIELDS = (
 _CODE_MAPPING_OPTIONAL_FIELDS: dict[str, object] = {
     # LOINC axis entries and the variant count variant routing is gated on.
     'loinc_axes': dict,
+    'snomed_attributes': dict,
     'axis_variant_count': 0,
 }
 _CODE_MAPPING_CONCEPT_FKS = (

@@ -173,3 +173,66 @@ def loinc_axis_values(request):
     return Response({'axis': axis, 'values': [
         {'value': row[axis], 'codes': row['codes']} for row in values
     ]})
+
+
+def _snomed_payload(mapping):
+    from omop_core.mapping import snomed_attributes
+    from omop_core.mapping.suggestions import _find_source_concept, source_snomed
+
+    domain = mapping.domain_id or {
+        'condition_occurrence': 'Condition', 'procedure_occurrence': 'Procedure',
+        'observation': 'Observation', 'measurement': 'Measurement',
+    }.get(mapping.omop_table, '')
+    source_concept = mapping.source_concept or _find_source_concept(
+        mapping.source_vocabulary_id, mapping.source_code)
+    source = source_snomed(
+        domain_id=domain, source_concept=source_concept,
+        description=mapping.source_code_description, metadata=mapping.source_metadata,
+        overrides=mapping.snomed_attributes,
+    )
+    return {
+        'mapping_id': mapping.pk,
+        'applies': source is not None,
+        'snomed_attributes': mapping.snomed_attributes or {},
+        'source': snomed_attributes.source_summary(source) if source is not None else None,
+        'hierarchies': snomed_attributes.HIERARCHY_TAGS,
+        'lateralities': list(snomed_attributes.LATERALITIES),
+    }
+
+
+@api_view(['GET', 'PUT'])
+@permission_classes([IsAuthenticated])
+def code_mapping_snomed_attributes(request, mapping_id):
+    """A source code's SNOMED evidence; ``PUT`` saves the curator's settings
+    ``{reference_concept_id, hierarchy, laterality}``."""
+    from omop_core.mapping import snomed_attributes
+
+    views = _views()
+    if not views._can_manage_field_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    mapping = SourceCodeConceptMapping.objects.filter(pk=mapping_id).first()
+    if mapping is None:
+        return Response({'detail': 'Mapping not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'GET':
+        return Response(_snomed_payload(mapping))
+
+    if not views._can_administer_code_mapping(request.user, mapping):
+        return Response({'detail': 'You do not administer this mapping organization.'},
+                        status=status.HTTP_403_FORBIDDEN)
+    try:
+        views._check_mapping_lock(mapping, request.user)
+    except views.MappingLocked as exc:
+        return exc.as_response()
+    try:
+        settings_ = snomed_attributes.clean_overrides(request.data.get('snomed_attributes'))
+    except ValueError as exc:
+        return Response({'snomed_attributes': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    reference = settings_.get('reference_concept_id')
+    if reference and not Concept.objects.filter(
+            pk=reference, vocabulary_id='SNOMED', standard_concept='S', invalid_reason__isnull=True).exists():
+        return Response({'snomed_attributes': 'The reference must be an active standard SNOMED concept.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    mapping.snomed_attributes = settings_
+    mapping.updated_by = request.user
+    mapping.save(update_fields=['snomed_attributes', 'updated_by', 'updated_at'])
+    return Response(_snomed_payload(mapping))

@@ -39,3 +39,65 @@ describe("IndividualSuggestCandidates LOINC axes", () => {
     expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ concept_id: 11 }));
   });
 });
+
+const fracture = { concept_id: 21, concept_name: "Fracture of right femur", concept_code: "1000001", vocabulary_id: "SNOMED",
+  snomed: { hierarchy: "Disorder", semantic_tag: "disorder", status: "Defined" as const, laterality: "Right" as const,
+    relation: "exact" as const, levels: 0, lateralised: true as const,
+    attributes: [{ relationship_id: "Has finding site", label: "Finding site", values: ["Right femur"], verdict: "match" as const }] } };
+const femurFx = { concept_id: 22, concept_name: "Fracture of femur", concept_code: "71620000", vocabulary_id: "SNOMED",
+  snomed: { hierarchy: "Disorder", semantic_tag: "disorder", status: "Primitive" as const, laterality: null, relation: "general" as const, levels: 1,
+    laterality_not_captured: "Right",
+    attributes: [
+      { relationship_id: "Has finding site", label: "Finding site", values: ["Femur"], verdict: "general" as const },
+      { relationship_id: "Has asso morph", label: "Morphology", values: [], verdict: "unknown" as const, primitive_gap: true as const },
+    ] } };
+const neckFx = { concept_id: 23, concept_name: "Fracture of neck of right femur", concept_code: "1000002", vocabulary_id: "SNOMED" };
+const leftFx = { concept_id: 24, concept_name: "Fracture of left femur", concept_code: "1000003", vocabulary_id: "SNOMED" };
+const snomedActivity: CandidateActivity[] = [
+  { stage: "candidates", strategy: "hierarchy", candidates: [femurFx, fracture, neckFx, leftFx] },
+  { stage: "ranked", suggested: fracture, candidates: [fracture, femurFx],
+    source_snomed: { references: [{ concept_id: 22, concept_name: "Fracture of femur", concept_code: "71620000", hierarchy: "Disorder" }],
+      reference_basis: "maps_to", hierarchy: { value: "Disorder", basis: "reference" }, laterality: { value: "Right", basis: "text" }, attributes: [] },
+    axis_excluded: [
+      { ...leftFx, exclusion_reason: "conflict", snomed_conflicts: ["Laterality"] },
+      { ...neckFx, exclusion_reason: "more_specific", snomed_conflicts: [],
+        snomed: { hierarchy: "Disorder", semantic_tag: "disorder", status: "Defined", laterality: "Right", relation: "specific", levels: 1, attributes: [] } },
+    ] },
+];
+
+describe("IndividualSuggestCandidates SNOMED", () => {
+  it("shows tag, relation, attribute chips, laterality warning and the split disclosure with Use anyway", () => {
+    const onSelect = vi.fn();
+    render(<IndividualSuggestCandidates activity={snomedActivity} running={false} selectedId="" onSelect={onSelect} />);
+    expect(screen.getByLabelText("Source SNOMED meaning")).toHaveTextContent("Source means at least: Fracture of femur (maps to) · Disorder · Right");
+    const rows = within(screen.getByRole("table")).getAllByRole("row").slice(1);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent("Fracture of right femur");
+    expect(rows[0]).toHaveTextContent("H");
+    const exact = within(rows[0]).getByLabelText("SNOMED evidence");
+    expect(exact).toHaveTextContent("(disorder)");
+    expect(exact.querySelector('[data-relation="exact"]')).toHaveTextContent("exact");
+    expect(exact).toHaveTextContent("lateralised");
+    expect(exact.querySelector('[data-attribute="Has finding site"]')).toHaveAttribute("data-verdict", "match");
+    const general = within(rows[1]).getByLabelText("SNOMED evidence");
+    expect(general.querySelector('[data-relation="general"]')).toHaveTextContent("↑ 1 more general");
+    expect(general).toHaveTextContent("primitive");
+    expect(general.querySelector('[data-attribute="Has finding site"]')).toHaveAttribute("data-verdict", "general");
+    expect(general.querySelector('[data-attribute="Has asso morph"]')).toHaveAttribute("title", "Primitive concept: attribute not defined, not a mismatch");
+    expect(within(rows[1]).getByRole("note")).toHaveTextContent("Source says Right; this concept has no side — record laterality separately.");
+    // SNOMED exclusions do not use the LOINC wording.
+    expect(screen.queryByRole("button", { name: /candidates? hidden: conflict on/ })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "1 contradict the source: Laterality" }));
+    const contradict = screen.getByRole("list", { name: "SNOMED candidates that contradict the source" });
+    expect(contradict).toHaveTextContent("Fracture of left femur");
+    expect(contradict).toHaveTextContent("conflict on Laterality");
+    expect(within(contradict).queryByRole("button", { name: /anyway/ })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "1 more specific than the source supports — need curator evidence" }));
+    const specific = screen.getByRole("list", { name: "SNOMED candidates more specific than the source" });
+    expect(specific.querySelector('[data-relation="specific"]')).toHaveTextContent("more specific");
+    fireEvent.click(within(specific).getByRole("button", { name: "Use Fracture of neck of right femur anyway" }));
+    expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ concept_id: 23 }));
+  });
+});

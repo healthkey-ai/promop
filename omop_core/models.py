@@ -2222,6 +2222,16 @@ class SourceCodeConceptMapping(models.Model):
             'a settled axis (omop_core.mapping.loinc_axes).'
         ),
     )
+    snomed_attributes = models.JSONField(
+        default=dict, db_default={}, blank=True,
+        help_text=(
+            "A curator's SNOMED evidence for this source code: "
+            '{reference_concept_id, hierarchy, laterality}. The reference '
+            'concept is what the source means at least; Suggest offers it and '
+            'its ancestors, never a descendant the evidence does not support '
+            '(omop_core.mapping.snomed_attributes).'
+        ),
+    )
     axis_variant_count = models.PositiveSmallIntegerField(
         default=0, db_default=0,
         help_text=(

@@ -96,7 +96,7 @@ from omop_core.models import (
 
 from omop_core.mapping.search_expansion import generate_search_query
 from omop_core.mapping.source_text import narrowing_text
-from omop_core.mapping import axis_variants, loinc_axes, source_metadata
+from omop_core.mapping import axis_variants, loinc_axes, snomed_attributes, source_metadata
 from omop_core.mapping.suggestion_context import (
     build_source_context, candidate_context, enrich_candidates,
 )
@@ -902,6 +902,18 @@ whose value for it is the usual default (a methodless code, a point in time)
 unless the metadata says otherwise. loinc_axis_hints are what the metadata
 says about an axis without settling it.
 
+The source context may carry snomed: the SNOMED concepts the source means at
+least (references, from the source code or its "Maps to"), its hierarchy and
+laterality. Each SNOMED candidate carries snomed with its hierarchy (semantic
+tag), definition status, defining attributes with a verdict each (match,
+general, unknown), its relation to the reference (exact, or general with the
+levels up) and laterality_not_captured when the source names a side the
+concept cannot carry. Candidates in another hierarchy, contradicting an
+attribute or the side, or more specific than the evidence supports have
+already been removed. Choose the most specific candidate the source evidence
+supports: an exact one first; otherwise the closest general one. An unknown
+attribute on a primitive concept is a gap in its definition, not a mismatch.
+
 A candidate may carry curator_priority: its rank (1 is highest) in a list of
 concepts curators want mapped first. It is not evidence of a match. Use it only
 to choose between candidates that are equally good clinical matches; never pick
@@ -1092,6 +1104,16 @@ def _axes_text(axes):
     )
 
 
+def _snomed_text(snomed):
+    parts = [f"({snomed.get('semantic_tag')})"]
+    if snomed.get('relation') == 'exact':
+        parts.append('same concept as the source')
+    elif snomed.get('relation') == 'general':
+        parts.append(f"more general than the source by {snomed.get('levels')} level(s)")
+    parts += [f"{a['label']}={', '.join(a['values']) or '?'}" for a in snomed.get('attributes', [])]
+    return '; '.join(parts)
+
+
 def rank_candidates_jev(source_value, candidates, source_description='', *, source_context=None,
                         require_model_selection=False):
     """Select from the candidate pool using the Jev (Typesafe) ranking API.
@@ -1148,6 +1170,7 @@ def rank_candidates_jev(source_value, candidates, source_description='', *, sour
             f"{c.get('concept_name', '')} (OMOP {c['concept_id']})"
             + (f" [curator priority {c['curator_priority']}]" if c.get('curator_priority') else '')
             + (f" [LOINC axes: {_axes_text(c['loinc_axes'])}]" if c.get('loinc_axes') else '')
+            + (f" [SNOMED: {_snomed_text(c['snomed'])}]" if c.get('snomed') else '')
         )
     criteria['none'] = 'None of the candidates are clinically compatible'
 
@@ -1156,6 +1179,13 @@ def rank_candidates_jev(source_value, candidates, source_description='', *, sour
         ' Source metadata from the sending system (de-identified FHIR JSON): '
         f"{json.dumps(metadata, ensure_ascii=False, default=str)}."
         if metadata else ''
+    )
+    snomed = source_info.get('snomed') or {}
+    snomed_note = (
+        " The source means at least "
+        + ', '.join(r['concept_name'] for r in snomed.get('references', []))
+        + "; prefer the most specific candidate that evidence supports."
+        if snomed.get('references') else ''
     )
     axes = source_info.get('loinc_axes') or {}
     axes_note = (
@@ -1168,7 +1198,7 @@ def rank_candidates_jev(source_value, candidates, source_description='', *, sour
         'state': (
             f"Source code: {source_info.get('code', source_value)} — "
             f"{source_info.get('original_description', source_description)}."
-            f"{metadata_note}{axes_note} "
+            f"{metadata_note}{axes_note}{snomed_note} "
             f"Map this to the best OMOP CDM standard vocabulary concept."
         ),
         'model': 'jev-latest',
@@ -1537,18 +1567,35 @@ def source_loinc_axes(*, domain_id, source_vocabulary_id, source_code, metadata,
                               observed_units=observed_units)
 
 
+def source_snomed(*, domain_id, source_concept, description='', metadata=None, overrides=None):
+    """The source's SNOMED evidence, or ``None`` when the domain's
+    destinations are not SNOMED (see :mod:`snomed_attributes`)."""
+    if domain_id not in snomed_attributes.SNOMED_DOMAINS:
+        return None
+    return snomed_attributes.resolve_source(
+        source_concept=source_concept, description=description,
+        metadata=metadata, overrides=overrides,
+    )
+
+
 def _axis_note(job):
     excluded = job.get('axis_excluded') or []
     if not excluded or job['candidates']:
         return ''
-    axes = sorted({axis for c in excluded for axis in c.get('axis_conflicts', [])})
-    return (f"All {len(excluded)} candidates conflicted with the source's LOINC "
-            f"axes ({', '.join(loinc_axes.AXIS_LABELS[a] for a in axes)}).")
+    reasons = sorted({axis for c in excluded for axis in c.get('axis_conflicts', [])}
+                     | {f'SNOMED {name}' for c in excluded for name in c.get('snomed_conflicts', [])})
+    labels = [loinc_axes.AXIS_LABELS.get(r, r) for r in reasons]
+    specific = sum(c.get('exclusion_reason') == snomed_attributes.REASON_SPECIFIC for c in excluded)
+    note = f"All {len(excluded)} candidates conflicted with the source's evidence"
+    note += f" ({', '.join(labels)})" if labels else ''
+    if specific:
+        note += f"; {specific} more specific than the source supports"
+    return note + '.'
 
 
 def _prepare(*, source_code, source_vocabulary_id, source_text, domain_id,
              strategies, lexical_limit, source_context=None, on_candidates=None,
-             source_axes=None, axis_hints=None):
+             source_axes=None, axis_hints=None, snomed_source=None):
     """Everything for one source code that needs the database, and nothing more.
 
     Split out so the ranking that follows is pure network work and can be run
@@ -1557,6 +1604,9 @@ def _prepare(*, source_code, source_vocabulary_id, source_text, domain_id,
     *source_axes* (from :func:`source_loinc_axes`) adds LOINC codes found by
     their axes, drops every candidate that conflicts with a settled axis, and
     orders the rest by axes matched. ``None`` leaves the pool alone.
+
+    *snomed_source* (from :func:`source_snomed`) does the same for SNOMED
+    candidates by hierarchy, defining attributes and subsumption.
     """
     candidates, umls_cui, definitive = retrieval_pool(
         source_code=source_code, source_vocabulary_id=source_vocabulary_id,
@@ -1580,6 +1630,13 @@ def _prepare(*, source_code, source_vocabulary_id, source_text, domain_id,
         if by_axes and on_candidates is not None:
             on_candidates(loinc_axes.RETRIEVAL_AXES, [dict(hit) for hit in by_axes])
         candidates = by_axes + candidates
+    if snomed_source is not None and snomed_attributes.has_evidence(snomed_source):
+        seen = {c['concept_id'] for c in candidates}
+        by_hierarchy = [hit for hit in snomed_attributes.hierarchy_candidates(snomed_source, domain_id)
+                        if hit['concept_id'] not in seen]
+        if by_hierarchy and on_candidates is not None:
+            on_candidates(snomed_attributes.RETRIEVAL_HIERARCHY, [dict(hit) for hit in by_hierarchy])
+        candidates = by_hierarchy + candidates
     candidates = enrich_candidates(
         candidates, source_text or source_code, loaded_source.get('concept_id'),
         min_similarity=MIN_TRIGRAM_SCORE,
@@ -1591,6 +1648,12 @@ def _prepare(*, source_code, source_vocabulary_id, source_text, domain_id,
             'loinc_axes': loinc_axes.values(source_axes),
             **({'loinc_axis_hints': axis_hints} if axis_hints else {}),
         }
+    if snomed_source is not None:
+        candidates, snomed_excluded = snomed_attributes.apply(candidates, snomed_source)
+        axis_excluded = axis_excluded + snomed_excluded
+        if snomed_attributes.has_evidence(snomed_source):
+            source_context = {**source_context,
+                              'snomed': snomed_attributes.source_summary(snomed_source)}
     job = {
         'candidates': candidates,
         'umls_cui': umls_cui,
@@ -1608,6 +1671,7 @@ def _prepare(*, source_code, source_vocabulary_id, source_text, domain_id,
         'source_axes': source_axes,
         'axis_hints': axis_hints or {},
         'axis_excluded': axis_excluded,
+        'snomed_source': snomed_source,
     }
     # UMLS candidates carry umls_score=1.0 so the ranker sees the signal,
     # but we no longer short-circuit — let the ranking model weigh all
@@ -1616,18 +1680,24 @@ def _prepare(*, source_code, source_vocabulary_id, source_text, domain_id,
 
 
 def _axis_activity(job):
-    """The LOINC axis fields a ``ranked`` event and a result carry."""
-    if job.get('source_axes') is None:
+    """The LOINC axis and SNOMED fields a ``ranked`` event and a result carry."""
+    if job.get('source_axes') is None and job.get('snomed_source') is None:
         return {}
-    return {
-        'source_axes': loinc_axes.source_summary(job['source_axes'], job.get('axis_hints') or {}),
+    activity = {
         'axis_excluded': [
             {key: c.get(key) for key in ('concept_id', 'concept_name', 'concept_code',
                                          'vocabulary_id', 'loinc_axes', 'axis_match',
-                                         'axis_conflicts', 'retrieval')}
+                                         'axis_conflicts', 'retrieval', 'snomed',
+                                         'exclusion_reason', 'snomed_conflicts')
+             if key in c}
             for c in job.get('axis_excluded') or []
         ],
     }
+    if job.get('source_axes') is not None:
+        activity['source_axes'] = loinc_axes.source_summary(job['source_axes'], job.get('axis_hints') or {})
+    if job.get('snomed_source') is not None:
+        activity['source_snomed'] = snomed_attributes.source_summary(job['snomed_source'])
+    return activity
 
 
 def rank_jobs(jobs, on_ranked=None, ranking_model=DEFAULT_RANKING_MODEL):
@@ -1750,10 +1820,13 @@ def _query_expand_failed_jobs(jobs, on_ranked=None, ranking_model=DEFAULT_RANKIN
         if job.get('source_axes') is not None:
             new_hits, excluded = loinc_axes.apply(new_hits, job['source_axes'])
             job['axis_excluded'] = job.get('axis_excluded', []) + excluded
-            if not new_hits:
-                job['note'] += (f" Search expanded with {query!r}; every new candidate "
-                                f"conflicted with the source's LOINC axes.")
-                continue
+        if job.get('snomed_source') is not None:
+            new_hits, excluded = snomed_attributes.apply(new_hits, job['snomed_source'])
+            job['axis_excluded'] = job.get('axis_excluded', []) + excluded
+        if not new_hits:
+            job['note'] += (f" Search expanded with {query!r}; every new candidate "
+                            f"conflicted with the source's evidence.")
+            continue
         for hit in new_hits:
             hit['generated_search_query'] = query
         job['candidates'] += new_hits
@@ -1985,6 +2058,10 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
             source_text=description,
             domain_id=row_domain,
             source_axes=source_axes, axis_hints=axis_hints,
+            snomed_source=source_snomed(
+                domain_id=row_domain, source_concept=source_concept, description=description,
+                metadata=mapping.source_metadata, overrides=mapping.snomed_attributes,
+            ),
             strategies=strategies,
             lexical_limit=lexical_limit,
             on_candidates=lambda strategy, candidates: emit(
@@ -2255,7 +2332,7 @@ def suggest_one_mapping(source_code, source_vocabulary_id, omop_table, *,
                         source_description='', row_metadata=None, strategies=None,
                         lexical_limit=CANDIDATE_LIMIT, activity=None,
                         ranking_model=DEFAULT_RANKING_MODEL, axis_overrides=None,
-                        observed_units=None):
+                        observed_units=None, snomed_overrides=None):
     """Run the shared retrieval and ranking pipeline for one dialog row.
 
     *row_metadata* is the Source Metadata the dialog shows for the row. The
@@ -2294,6 +2371,10 @@ def suggest_one_mapping(source_code, source_vocabulary_id, omop_table, *,
         source_code=source_code, source_vocabulary_id=source_vocabulary_id,
         source_text=description, domain_id=domain_id,
         source_axes=source_axes, axis_hints=axis_hints,
+        snomed_source=source_snomed(
+            domain_id=domain_id, source_concept=source_concept, description=description,
+            metadata=metadata, overrides=snomed_overrides,
+        ),
         strategies=strategies, lexical_limit=lexical_limit,
         on_candidates=lambda strategy, candidates: emit(
             "candidates", strategy=strategy, candidates=candidates,
