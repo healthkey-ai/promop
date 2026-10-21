@@ -13,19 +13,31 @@ from rest_framework.routers import SimpleRouter
 
 from omop_core.api import views
 
-router = SimpleRouter()
-router.register(r'v1/therapy-lines', views.TherapyLineViewSet, basename='therapy-lines')
 
-_read = api_view(['GET'])
-_read_only = permission_classes([IsAuthenticated])
+def urlpatterns_for(therapy_line_viewset=None):
+    """The widget's URLs, with an optional host viewset override.
 
-urlpatterns = [
-    path('v1/therapy-outcomes/', _read(_read_only(views.therapy_outcomes)),
-         name='therapy-outcomes'),
-    path('v1/therapy-regimens/', _read(_read_only(views.therapy_regimen_list)),
-         name='therapy-regimens'),
-    path('v1/therapy-regimens/<str:code>/', _read(_read_only(views.therapy_regimen_detail)),
-         name='therapy-regimen-detail'),
-    path('v1/concepts/search/', _read(_read_only(views.concept_search)),
-         name='concept-search'),
-] + router.urls
+    A host mounts ``include(urlpatterns_for(MyViewSet))``. Without the override it
+    gets the packaged viewset, whose only policy is "authenticated" -- suitable
+    only when the host has already scoped the request to the caller's record.
+    """
+    viewset = therapy_line_viewset or views.TherapyLineViewSet
+    router = SimpleRouter()
+    router.register(r'v1/therapy-lines', viewset, basename='therapy-lines')
+
+    read = api_view(['GET'])
+    authenticated = permission_classes([IsAuthenticated])
+
+    return [
+        path('v1/therapy-outcomes/', read(authenticated(views.therapy_outcomes)),
+             name='therapy-outcomes'),
+        path('v1/therapy-regimens/', read(authenticated(views.therapy_regimen_list)),
+             name='therapy-regimens'),
+        path('v1/therapy-regimens/<str:code>/', read(authenticated(views.therapy_regimen_detail)),
+             name='therapy-regimen-detail'),
+        path('v1/concepts/search/', read(authenticated(views.concept_search)),
+             name='concept-search'),
+    ] + router.urls
+
+
+urlpatterns = urlpatterns_for()
