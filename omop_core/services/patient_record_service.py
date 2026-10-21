@@ -1801,6 +1801,19 @@ def _latest_published_release_id():
         return None
 
 
+def _asserted_line_name(episode):
+    """The human name a caller gave an asserted line that records no drugs.
+
+    'LOT-{n}' is the mirror the writer uses when nobody named the line, so it is
+    not a name. Returning None keeps the projection honest instead of inventing
+    "Unknown" as if it were a regimen.
+    """
+    value = (episode.episode_source_value or '').strip()
+    if not value or value.upper() == f'LOT-{episode.episode_number}':
+        return None
+    return value
+
+
 def _is_asserted_regimen(concept) -> bool:
     """True only for a source-asserted HemOnc *regimen* concept — the one case a
     consumer is told it may trust without re-verifying.
@@ -2069,6 +2082,16 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
     ).values('episode_id', 'event_id'):
         ee_by_episode.setdefault(ee['episode_id'], []).append(ee['event_id'])
 
+    # #1924: a line whose composition is unknown is still a line. Only the
+    # canonical writer asserts one, so a dangling header from a partial import
+    # or a direct caller is still ignored rather than counted as treatment.
+    from omop_oncology.models import TherapyLineAssertion
+    assertion_states = dict(
+        TherapyLineAssertion.objects
+        .filter(episode_id__in=all_episode_ids)
+        .values_list('episode_id', 'state')
+    )
+
     all_event_ids = [eid for ids in ee_by_episode.values() for eid in ids]
     de_by_id: dict = {
         de.drug_exposure_id: de
@@ -2083,12 +2106,20 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
 
     for episode in episodes:
         event_ids = ee_by_episode.get(episode.episode_id, [])
-        # An Episode only represents a therapy line once its backing events are
-        # persisted.  Do not project a dangling header row into PatientRecord.
-        if not event_ids:
+        # An Episode only represents a therapy line when the canonical writer
+        # asserted it, or when its backing events are persisted. A dangling
+        # header row is neither (#1924).
+        state = assertion_states.get(episode.episode_id)
+        if state == TherapyLineAssertion.RETRACTED:
+            # Retracted: the patient or clinician withdrew the claim that this
+            # line happened. Any exposures it linked are not deleted, but they
+            # no longer make it a therapy line.
+            continue
+        asserted = state == TherapyLineAssertion.ASSERTED
+        if not event_ids and not asserted:
             continue
         drugs_in_episode = [de_by_id[eid] for eid in event_ids if eid in de_by_id]
-        if not drugs_in_episode:
+        if not drugs_in_episode and not asserted:
             continue
 
         drug_name_set = {
@@ -2201,6 +2232,10 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
 
         if concept_id:
             drug_names = concept_name_map[concept_id]
+        elif not drugs_in_episode:
+            # An asserted line with no recorded drugs: its name is what the
+            # caller wrote, not a drug list it never supplied (#1924).
+            drug_names = _asserted_line_name(episode) or 'Unknown'
         else:
             # Try regimen name resolution: drug concept names first, then source values
             from omop_core.services.lot_regimens import get_regimen_name

@@ -135,6 +135,8 @@ PATIENT: frozenset[str] = frozenset({
     # Which exposures a line authored: kept with the patient so an edit on a
     # copy corrects that copy's own facts instead of leaving them unowned.
     'omop_oncology.TherapyLineExposure',
+    # Whether a line happened, and whether that claim was retracted (#1924).
+    'omop_oncology.TherapyLineAssertion',
     'prolog_surveys.MintedParticipant', 'prolog_surveys.SurveyAnswer',
     'prolog_surveys.SurveyConsent', 'prolog_surveys.SurveyResponse',
     # An address kept beside a response, and the consents given with one:

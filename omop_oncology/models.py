@@ -67,6 +67,37 @@ class TherapyLineExposure(models.Model):
         )]
 
 
+class TherapyLineAssertion(models.Model):
+    """That a line of therapy happened, independent of its composition (#1924).
+
+    An Episode alone is not evidence: a header row can be created by a partial
+    import or a direct caller and carry no clinical fact. This row is written by
+    the canonical authoring writer, so the projection can tell an asserted line
+    whose composition is unknown from a dangling header.
+
+    Composition is not stored here. It is read from the line's typed links, so
+    "no drugs recorded" stays unknown rather than becoming "no drugs given".
+    ``state='retracted'`` withdraws the assertion itself (a line entered in
+    error); clearing the composition keeps the assertion and drops the links.
+    """
+    ASSERTED, RETRACTED = 'asserted', 'retracted'
+    STATES = [(ASSERTED, 'Asserted'), (RETRACTED, 'Retracted')]
+
+    episode = models.OneToOneField(Episode, on_delete=models.CASCADE, related_name='assertion')
+    state = models.CharField(max_length=10, choices=STATES, default=ASSERTED)
+    # Who supplied the assertion: the patient-facing authoring path, a reverse
+    # sync from an embedding product, or an import. Kept for provenance only.
+    source = models.CharField(max_length=20, default='authoring')
+    asserted_at = models.DateTimeField(auto_now_add=True)
+    retracted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'therapy_line_assertion'
+
+    def __str__(self):
+        return f'Episode {self.episode_id} therapy line {self.state}'
+
+
 class CancerModifier(models.Model):
     """OMOP Oncology Extension Cancer Modifier table - cancer-specific modifiers."""
     cancer_modifier_id = models.BigIntegerField(primary_key=True)
