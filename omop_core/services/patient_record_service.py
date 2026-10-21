@@ -9,6 +9,7 @@ Usage:
 import dataclasses
 import logging
 import math
+import re
 import statistics
 from collections import defaultdict
 from datetime import date, datetime, timedelta
@@ -61,9 +62,47 @@ def _usable_concept_name(concept) -> str | None:
         return None
     return name
 
+
+def _receptor_signal(value) -> int | None:
+    """Classify a stored receptor result as positive (+1), negative (-1), or unknown.
+
+    The widget offers both word values (`Positive`/`Negative`) and receptor
+    codes (`ER+`, `ER+ with low expression`, `HER2-`).  A value that carries
+    both signs (`ER+/-`) or a slash-separated composite is ambiguous and must
+    stay unknown rather than being treated as either result.
+    """
+    text = str(value or '').strip().upper()
+    if not text:
+        return None
+    if '/' in text or 'EQUIVOCAL' in text or text in {'UNKNOWN', 'NOT ASSESSED'}:
+        return None
+
+    has_positive_word = 'POSITIVE' in text
+    has_negative_word = 'NEGATIVE' in text
+    if has_positive_word and has_negative_word:
+        return None
+    if has_positive_word:
+        return 1
+    if has_negative_word:
+        return -1
+
+    # `ER+ with low expression` and `ER-` use a sign next to the receptor or
+    # before an expression qualifier.  The space/end guard avoids treating the
+    # hyphen in `low-expression` itself as a negative result.
+    positive_sign = text.endswith('+') or bool(re.search(r'\+\s', text))
+    negative_sign = text.endswith('-') or bool(re.search(r'-\s', text))
+    if positive_sign and negative_sign:
+        return None
+    if positive_sign:
+        return 1
+    if negative_sign:
+        return -1
+    return None
+
+
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 6
+DERIVATION_VERSION = 7
 
 # Fields that are entirely derived from OMOP tables and must be reset before
 # each refresh so deletions are reflected (not just additions).
@@ -1924,15 +1963,15 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             data['her2_status'] = status
 
     if 'estrogen_receptor_status' in data and 'progesterone_receptor_status' in data and 'her2_status' in data:
-        def _is_negative(value):
-            text = (value or '').strip().upper()
-            return 'NEGATIVE' in text or text.endswith('-')
-
-        data['tnbc_status'] = (
-            _is_negative(data['estrogen_receptor_status'])
-            and _is_negative(data['progesterone_receptor_status'])
-            and _is_negative(data['her2_status'])
-        )
+        signals = [
+            _receptor_signal(data['estrogen_receptor_status']),
+            _receptor_signal(data['progesterone_receptor_status']),
+            _receptor_signal(data['her2_status']),
+        ]
+        # TNBC is true only when all three are unambiguously negative.  An
+        # ambiguous sign or an equivocal result leaves the verdict unknown.
+        if all(signal is not None for signal in signals):
+            data['tnbc_status'] = all(signal == -1 for signal in signals)
 
     def _first_m(concept_code):
         """Return the most recent Measurement for a LOINC code, checking concept first then source_value."""
@@ -3546,23 +3585,14 @@ def _compute_derived_fields(patient_info: PatientRecord) -> None:
             patient_info.bmi = round(weight_kg / (height_m ** 2), 1)
 
     # HR status — derived from ER and PR receptor status (HR+ = ER+ or PR+).
-    # Receptor results can arrive as `Positive`/`Negative` or as `ER+`/`ER-`
-    # (the widget writes the latter), so recognise both spellings.
-    def _receptor_positive(value):
-        text = (value or '').strip().upper()
-        return 'POSITIVE' in text or text.endswith('+')
-
-    def _receptor_negative(value):
-        text = (value or '').strip().upper()
-        return 'NEGATIVE' in text or text.endswith('-')
-
-    er = patient_info.estrogen_receptor_status
-    pr = patient_info.progesterone_receptor_status
-    if er is not None or pr is not None:
-        if _receptor_positive(er) or _receptor_positive(pr):
-            patient_info.hr_status = 'HR+'
-        elif _receptor_negative(er) and _receptor_negative(pr):
-            patient_info.hr_status = 'HR-'
+    # Receptor results can arrive as `Positive`/`Negative`, as `ER+`/`ER-`,
+    # or as expression-qualified values such as `ER+ with low expression`.
+    er_signal = _receptor_signal(patient_info.estrogen_receptor_status)
+    pr_signal = _receptor_signal(patient_info.progesterone_receptor_status)
+    if er_signal == 1 or pr_signal == 1:
+        patient_info.hr_status = 'HR+'
+    elif er_signal == -1 and pr_signal == -1:
+        patient_info.hr_status = 'HR-'
 
     # Metastatic status — True when M stage is M1
     m_stage = patient_info.distant_metastasis_stage

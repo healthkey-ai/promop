@@ -189,6 +189,49 @@ def test_tnbc_status_recognizes_minus_receptor_results():
     assert record.tnbc_status is True
 
 
+def test_hr_and_tnbc_recognize_expression_qualified_positive_receptors():
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    for code, value in (
+        ('16112-5', 'ER+ with low expression'),
+        ('16113-3', 'PR-'),
+        ('48676-1', 'HER2-'),
+    ):
+        MeasurementFactory(
+            person=person,
+            measurement_source_value=code,
+            measurement_date=date(2026, 1, 15),
+            value_as_string=value,
+        )
+
+    record = refresh_patient_record(person)
+
+    assert record.estrogen_receptor_status == 'ER+ WITH LOW EXPRESSION'
+    assert record.hr_status == 'HR+'
+    assert record.tnbc_status is False
+
+
+def test_ambiguous_receptor_sign_does_not_derive_hr_or_tnbc():
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    for code, value in (
+        ('16112-5', 'ER+/-'),
+        ('16113-3', 'PR-'),
+        ('48676-1', 'HER2-'),
+    ):
+        MeasurementFactory(
+            person=person,
+            measurement_source_value=code,
+            measurement_date=date(2026, 1, 15),
+            value_as_string=value,
+        )
+
+    record = refresh_patient_record(person)
+
+    assert record.hr_status is None
+    assert record.tnbc_status is None
+
+
 def test_mrd_requires_a_vocabulary_backed_concept():
     person = PersonFactory()
     mrd = ConceptFactory(
