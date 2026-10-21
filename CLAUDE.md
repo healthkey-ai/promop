@@ -1174,6 +1174,84 @@ places, both in `retrieval_pool`:
 The UMLS single-concept shortcut ignores priority: a curated equivalence wins
 without a ranking call either way.
 
+### The six LOINC axes decide which candidates are the same test
+
+A LOINC code is defined by component, property, time aspect, system, scale and
+method; two tests that differ on any one get different codes. For a source in
+the Measurement or Observation domain, Suggest (`omop_core/mapping/loinc_axes.py`)
+settles the source's axes, then:
+
+- **adds** the LOINC codes whose axes agree, when the component is known
+  (retrieval label `axes`),
+- **drops** every candidate that conflicts with a settled axis, before the
+  ranker sees it, and reports them as `axis_excluded`,
+- **orders** the rest by axes matched, then by compatible axes (`Ser` against
+  `Ser/Plas`), and sends both sides' axes to Anthropic and Jev.
+
+Source axes come from, strongest first: a curator's entry
+(`SourceCodeConceptMapping.loinc_axes`; `null` clears an inferred axis, `''` on
+`method_type` means methodless), the source code itself when it is LOINC, a
+LOINC coding in the resource's `code.coding`, then the metadata -- a UCUM unit
+names a property, `valueQuantity` names scale `Qn`, an exact specimen display
+names a system. Free-text method and `effectivePeriod` are hints only: a wrong
+constraint hides the right answer. Inference reads the metadata *as stored*,
+because de-identification drops `specimen` (a Reference).
+
+The candidate side is `LoincCodeClass`, which holds all six axes from
+`Loinc.csv`. A load that predates those columns counts as stale at the same
+version (`loinc_release._axes_missing`), so the next `sync_loinc_release`
+reloads it.
+
+### SNOMED destinations: hierarchy, attributes and subsumption
+
+SNOMED has no fixed six-part name; a concept is its hierarchy (the semantic
+tag -- in OMOP `concept_class_id`) plus defining attributes that differ by
+hierarchy ("Has finding site", "Has asso morph", "Has method", ... in
+`concept_relationship`), and Athena records "Has status" Defined/Primitive.
+`omop_core/mapping/snomed_attributes.py` judges SNOMED candidates for the
+Condition, Procedure, Observation and Measurement domains against the
+source's **reference concept** -- what the source means at least: a curator's
+choice (`SourceCodeConceptMapping.snomed_attributes`), the source code itself
+when it is standard SNOMED, else its "Maps to" SNOMED target (ICD-10-CM).
+
+Because SNOMED has subsumption, the rule is not LOINC's "any mismatch is
+wrong":
+
+| Candidate vs reference | Outcome |
+|---|---|
+| the same concept | eligible, first |
+| an ancestor | eligible, ranked lower per level |
+| a descendant | held back as `more_specific` -- needs curator evidence |
+| another hierarchy, a contradicting attribute or side, or outside the reference's lineage (a sibling) | excluded as `conflict` |
+
+A primitive concept's missing attribute is *unknown*, never a conflict.
+Laterality lives on body structures; `"Side"` means *lateralisable* and is
+not a side. Athena often maps a lateral code to an unlateralised concept
+(M17.11 "right knee" -> "Osteoarthritis of knee"), so laterality is also read
+from the source text: a one-level child that differs by exactly that side
+counts as the reference, and a concept that cannot carry the side is kept but
+flagged `laterality_not_captured`. Retrieval adds the reference and its
+ancestors up to three levels (label `hierarchy`).
+
+### One source code, several LOINCs: axis variants
+
+A hospital code reported in mg/dL and mmol/L is two LOINC tests.
+`omop_core/mapping/axis_variants.py` groups a code's units -- stored
+Measurement rows, the imported inventory, per-patient source codes -- by the
+axes they imply. Two or more groups set `axis_variant_count` (the queue's blue
+"n axis values") and become `SourceCodeAxisVariant` rows, each with its own
+destination.
+
+Ingest routes by **unit**, the one per-record value every path has: the lookup
+API (an entry with `source_unit` whose variant is approved comes back keyed
+`vocab|code|unit`) and FHIR sync both take the variant's concept; every other
+record takes the mapping's. Approving a variant re-points only stored rows in
+its units (`repoint_clinical_rows(units=...)`). Specimen variation is reported
+but cannot be routed.
+
+Counts refresh after each source-code upload for codes seen in two or more
+units, and in bulk with `manage.py refresh_axis_variants`.
+
 ### Concept embeddings
 
 `semantic_candidates()` searches the `ConceptEmbedding` table by cosine

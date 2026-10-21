@@ -261,6 +261,22 @@ describe("CodeMappingPage", () => {
     );
   });
 
+  it("flags a source code whose units imply several LOINC axis sets", async () => {
+    renderPage([
+      { ...proposedRow, axis_variant_count: 2 },
+      { ...proposedRow, mapping_id: 9, source_code: "GLUCOSE", source_code_description: "Glucose", axis_variant_count: 0 },
+    ]);
+    const flag = await screen.findByText("2 axis values");
+    expect(flag).toHaveClass("text-blue-600");
+    expect(flag).toHaveAttribute("title", expect.stringMatching(/imply 2 different LOINC axis sets/));
+    // On the code's own line, right after the code.
+    expect(flag.previousElementSibling).toHaveTextContent(/^M-PROTEIN, SERUM$/);
+    expect(flag.previousElementSibling).toHaveAttribute("data-testid", "source-code");
+    const plain = screen.getByText("GLUCOSE", { selector: '[data-testid=source-code]' });
+    expect(within(plain.parentElement!).queryByText(/axis values/)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/axis values/)).toHaveLength(1);
+  });
+
   it("lets a curator choose a destination inline without opening the edit dialog", async () => {
     renderPage([proposedRow]);
     const previousGet = mockGet.getMockImplementation()!;
@@ -719,6 +735,30 @@ describe("CodeMappingPage", () => {
       fireEvent.change(screen.getByLabelText("Source Code Value"), { target: { value: "CHANGED" } });
       expect(screen.queryByRole("region", { name: "Individual suggestion candidates" })).not.toBeInTheDocument();
       expect(screen.getByLabelText("Destination Concept ID")).toHaveValue(proposedRow.destination_concept_id);
+    });
+
+    it("sends the SNOMED evidence settings with Suggest only while the source is unchanged", async () => {
+      renderPage();
+      const originalGet = mockGet.getMockImplementation()!;
+      mockGet.mockImplementation((url: string, ...rest: unknown[]) => url === "/v1/code-mappings/7/snomed-attributes/"
+        ? Promise.resolve({ data: { mapping_id: 7, applies: true, snomed_attributes: { laterality: "Left" }, source: null,
+          hierarchies: { Disorder: "disorder" }, lateralities: ["Left", "Right", "Right and left"] } })
+        : originalGet(url, ...rest));
+      fireEvent.click((await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' })).closest("tr")!);
+      const panel = await screen.findByRole("region", { name: "SNOMED evidence" });
+      fireEvent.change(within(panel).getByLabelText("Hierarchy"), { target: { value: "__none__" } });
+      mockPost.mockResolvedValue({ data: suggestRun({ activity: [] }) });
+      const dialog = within(screen.getByRole("dialog"));
+      fireEvent.click(dialog.getByRole("button", { name: "Suggest", exact: true }));
+      await waitFor(() => expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/suggest-one/", expect.objectContaining({
+        snomed_attributes: { laterality: "Left", hierarchy: null } })));
+      mockPost.mockClear();
+      mockPost.mockResolvedValue({ data: suggestRun({ activity: [] }) });
+      fireEvent.change(screen.getByLabelText("Source Code Value"), { target: { value: "CHANGED" } });
+      fireEvent.click(dialog.getByRole("button", { name: "Suggest", exact: true }));
+      await waitFor(() => expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/suggest-one/", expect.anything()));
+      const body = mockPost.mock.calls.find(([url]) => url === "/v1/code-mappings/suggest-one/")![1];
+      expect(body).not.toHaveProperty("snomed_attributes");
     });
 
     it("highlights imported alternatives and saves the curator's selected destination", async () => {

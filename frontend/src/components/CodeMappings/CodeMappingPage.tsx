@@ -11,6 +11,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowLeft, ChevronDown, ChevronRight, Download, Pencil, Plus, Search, Sparkles, Upload } from "lucide-react";
 import api from "@/api/axios";
 import { useAuth } from "@/hooks/useAuth";
+import { AxisVariantFlag } from "./LoincAxisChips";
 import {
   type CodeMappingRow,
   type Reference,
@@ -296,6 +297,8 @@ type GroupEntry = {
   source_units?: string[];
   suggested_action?: string;
   mapping_id: number | null;
+  /** Most LOINC axis variants any member's units imply (the blue flag). */
+  axis_variant_count?: number;
 };
 
 /** The key the members endpoint takes: a label, or ':<pk>' for an unlabelled row. */
@@ -1088,7 +1091,7 @@ export default function CodeMappingPage() {
           >
             <td className="px-4 py-3">
               {row.locked_by_username && <span title={`Locked by ${row.locked_by_username}`} className="mr-1 text-amber-500">&#128274;</span>}
-              <div data-testid="source-code" className="font-mono text-xs text-slate-900">{row.source_code}</div>
+              <div className="font-mono text-xs text-slate-900"><span data-testid="source-code">{row.source_code}</span><AxisVariantFlag count={row.axis_variant_count} /></div>
               {row.source_code_description && <div className="text-xs text-slate-700">{row.source_code_description}</div>}
               {row.source_vocabulary_id && <div className="text-xs text-slate-500">{systemLabel(row)}</div>}
             </td>
@@ -1181,6 +1184,7 @@ export default function CodeMappingPage() {
                           {entry.members === 1 ? "1 code" : `${entry.members.toLocaleString()} codes`}
                         </span>
                       </button>
+                      <AxisVariantFlag count={entry.axis_variant_count} />
                       {entry.description && <div className="mt-0.5 text-xs text-slate-700">{entry.description}</div>}
                     </td>
                     <td className="px-4 py-3" />

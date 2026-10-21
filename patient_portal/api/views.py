@@ -6012,6 +6012,14 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                     upload_id, person.person_id, deleted,
                 )
 
+        # A code that now arrives in two units may imply two LOINC tests; the
+        # queue flags it. Evidence only, so a failure here never fails the upload.
+        try:
+            from omop_core.mapping.axis_variants import refresh_multi_unit_codes
+            refresh_multi_unit_codes({(svid, sv) for sv, svid, _ot in request_keys})
+        except Exception:  # noqa: BLE001
+            logger.warning('Axis variant refresh after source-code upload failed.', exc_info=True)
+
         result: dict = {'created': created, 'updated': updated}
         if replace or final:
             result['deleted'] = deleted
@@ -12012,6 +12020,7 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
             'locked_by_username': _user_display(mapping.locked_by) if mapping and mapping.locked_by_id else None,
             'locked_at': (mapping.locked_at.isoformat() if mapping and mapping.locked_at else None),
         }
+        payload.update(_axis_fields(mapping))
         if include_source_evidence:
             payload['source_evidence'] = source_evidence
         return payload
@@ -12092,9 +12101,21 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
         'locked_by_username': _user_display(mapping.locked_by) if mapping and mapping.locked_by_id else None,
         'locked_at': (mapping.locked_at.isoformat() if mapping and mapping.locked_at else None),
     }
+    payload.update(_axis_fields(mapping))
     if include_source_evidence:
         payload['source_evidence'] = source_evidence
     return payload
+
+
+def _axis_fields(mapping):
+    """LOINC axis state every queue row carries: the curator's axis entries,
+    and how many axis variants the code's units imply (the queue's blue
+    "n axis values" flag)."""
+    return {
+        'axis_variant_count': mapping.axis_variant_count if mapping else 0,
+        'loinc_axes': (mapping.loinc_axes or {}) if mapping else {},
+        'snomed_attributes': (mapping.snomed_attributes or {}) if mapping else {},
+    }
 
 
 def _clean_required(data, field_name):
@@ -13483,10 +13504,67 @@ def code_mapping_suggest_one(request):
         except MappingLocked as exc:
             return exc.as_response()
 
+    # The curator's LOINC axis entries: the dialog's unsaved ones, else the
+    # row's. A variant's axis values override both -- suggesting for the
+    # mmol/L variant of a code means suggesting a substance concentration.
+    from omop_core.mapping import axis_variants as axis_variants_module, loinc_axes as axes_module
+    # The row the dialog shows. Hospital codes have one mapping per
+    # organization, so the dialog names its row; without that, only an
+    # unambiguous match is used -- never another hospital's axes or variants.
+    same_code = SourceCodeConceptMapping.objects.filter(
+        source_vocabulary_id=source_vocabulary_id, source_code=source_code[:SOURCE_CODE_MAX],
+        omop_table=omop_table,
+    )
+    raw_mapping_id = request.data.get('mapping_id')
+    if raw_mapping_id not in (None, ''):
+        try:
+            axes_mapping = same_code.filter(pk=int(raw_mapping_id)).first()
+        except (TypeError, ValueError):
+            return Response({'mapping_id': 'Must be a mapping id.'}, status=status.HTTP_400_BAD_REQUEST)
+    else:
+        candidates = list(same_code[:2])
+        axes_mapping = candidates[0] if len(candidates) == 1 else None
+    try:
+        axis_overrides = (
+            axes_module.clean_overrides(request.data.get('loinc_axes'))
+            if 'loinc_axes' in request.data
+            else (axes_mapping.loinc_axes or {}) if axes_mapping else {}
+        )
+    except ValueError as exc:
+        return Response({'loinc_axes': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    axis_key = str(request.data.get('axis_key') or '')
+    if axis_key:
+        variant = axes_mapping.axis_variants.filter(axis_key=axis_key).first() if axes_mapping else None
+        if variant is None:
+            from omop_core.mapping.axis_variants import detect
+            detected = {v['axis_key']: v for v in detect(axes_mapping)[0]} if axes_mapping else {}
+            values = (detected.get(axis_key) or {}).get('axis_values')
+        else:
+            values = variant.axis_values
+        if values is None:
+            return Response({'axis_key': 'This code has no such axis variant.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        axis_overrides = {**axis_overrides, **values}
+    from omop_core.mapping import snomed_attributes as snomed_module
+    try:
+        snomed_overrides = (
+            snomed_module.clean_overrides(request.data.get('snomed_attributes'))
+            if 'snomed_attributes' in request.data
+            else (axes_mapping.snomed_attributes or {}) if axes_mapping else {}
+        )
+    except ValueError as exc:
+        return Response({'snomed_attributes': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
     params = {
         'source_code': source_code,
         'source_vocabulary_id': source_vocabulary_id,
         'omop_table': omop_table,
+        'axis_overrides': axis_overrides,
+        'snomed_overrides': snomed_overrides,
+        'observed_units': (
+            axis_variants_module.observed_units(axes_mapping) if axes_mapping and omop_table == 'measurement'
+            else None
+        ),
         'source_description': str(request.data.get('source_code_description') or ''),
         # The dialog's Source Metadata, else this table's mapping's own:
         # ranker context only.
@@ -13919,6 +13997,13 @@ def code_mapping_lookup(request):
           "resolved": 1,
           "unresolved": 1
         }
+
+    An entry carrying ``source_unit`` for a code with an approved LOINC axis
+    variant in that unit (one hospital code reported in both mg/dL and
+    mmol/L) resolves to the variant's concept, keyed ``"vocab|code|unit"`` and
+    carrying ``axis_variant_id``: the same code means a different LOINC per
+    unit, so one key per code cannot hold both answers. The answer is also
+    under ``"vocab|code"`` when no unrouted entry for that code holds it.
     """
     codes = request.data.get('codes')
     if not codes or not isinstance(codes, list):
@@ -14000,16 +14085,26 @@ def code_mapping_lookup(request):
     resolved_entries = {}   # key -> (concept, mapping)
     resolved = 0
     unresolved = 0
+    from omop_core.mapping.code_resolution import resolve_source_code_variant
+    entry_keys = []
+    routed_keys = {}   # "vocab|code|unit" -> "vocab|code"
     for idx, (vocab, code, table, source_text) in enumerate(lookup_entries):
-        key = f'{vocab}|{code}'
-        concept, mapping = resolve_source_code(
+        concept, mapping, variant = resolve_source_code_variant(
             source_vocabulary_id=vocab,
             source_code=code,
             source_text=source_text,
             omop_table=table,
             source_system=source_system,
             organization=request_organization,
+            source_unit=unit_inputs[idx][0] or None,
         )
+        # A code with LOINC axis variants means a different concept per unit,
+        # so a routed entry is keyed by its unit too: "vocab|code|unit". Every
+        # other entry keeps the "vocab|code" key existing callers read.
+        key = f'{vocab}|{code}|{unit_inputs[idx][0]}' if variant is not None else f'{vocab}|{code}'
+        entry_keys.append(key)
+        if variant is not None:
+            routed_keys[key] = f'{vocab}|{code}'
         if concept is not None:
             result[key] = {
                 'status': mapping.status if mapping else 'direct',
@@ -14022,6 +14117,8 @@ def code_mapping_lookup(request):
                 'omop_table': mapping.omop_table if mapping else table,
                 'mapping_id': mapping.id if mapping else None,
                 'organization_id': mapping.organization_id if mapping else None,
+                **({'axis_variant_id': variant.pk, 'axis_values': variant.axis_values}
+                   if variant is not None else {}),
             }
             resolved_entries[key] = (concept, mapping)
             resolved += 1
@@ -14067,14 +14164,18 @@ def code_mapping_lookup(request):
                 unit_concepts[sccm.id] = sccm.destination_unit_concept
 
         for idx, (vocab, code, _table, _source_text) in enumerate(lookup_entries):
-            key = f'{vocab}|{code}'
+            key = entry_keys[idx]
             src_unit, qty = unit_inputs[idx]
             if not src_unit:
                 continue
             if key not in resolved_entries:
                 continue
             concept, mapping = resolved_entries[key]
-            dest_unit_concept = unit_concepts.get(mapping.id) if mapping else None
+            # The mapping's destination unit was chosen for the mapping's own
+            # LOINC; a variant's concept has another property, so it takes
+            # that concept's canonical unit instead.
+            dest_unit_concept = (unit_concepts.get(mapping.id)
+                                 if mapping and key not in routed_keys else None)
             conversion = resolve_mapping_conversion(
                 concept,
                 destination_unit_concept=dest_unit_concept,
@@ -14082,6 +14183,13 @@ def code_mapping_lookup(request):
                 quantity=qty,
             )
             result[key]['unit_conversion'] = conversion
+
+    # A client written before variants reads "vocab|code" whatever unit it
+    # sent. Mirror a routed answer there unless an entry that was not routed
+    # already answers it, so that key never goes missing.
+    for routed, base in routed_keys.items():
+        if base not in result and routed in result:
+            result[base] = result[routed]
 
     response = Response({
         'mappings': result,

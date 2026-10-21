@@ -10,8 +10,8 @@ rows with nothing able to say so. See #1624.
 Both files come from one archive, which is the thing that makes an API-only
 source possible:
 
-* ``LoincTable/Loinc.csv`` -- ``LoincCodeClass``: class, example units,
-  property, scale type.
+* ``LoincTable/Loinc.csv`` -- ``LoincCodeClass``: class, example units and
+  the six axes (component, property, time aspect, system, scale, method).
 * ``AccessoryFiles/PartFile/Part.csv`` filtered to ``PartTypeName == 'CLASS'``
   -- ``LoincClass``. LOINC models CLASS as a Part, which is why the archive has
   no file named after classes. Verified on 2.83: 476 CLASS parts covering all
@@ -38,6 +38,17 @@ VERSION_URL = f'{API_BASE}/Loinc'
 #: Members we read, by their path inside the release archive.
 LOINC_TABLE_MEMBER = 'LoincTable/Loinc.csv'
 PART_FILE_MEMBER = 'AccessoryFiles/PartFile/Part.csv'
+
+#: Loinc.csv column -> ``LoincCodeClass`` field, for the six axes that define
+#: a LOINC code.
+AXIS_COLUMNS = {
+    'COMPONENT': 'component',
+    'PROPERTY': 'property',
+    'TIME_ASPCT': 'time_aspect',
+    'SYSTEM': 'system',
+    'SCALE_TYP': 'scale_type',
+    'METHOD_TYP': 'method_type',
+}
 
 #: `GET /Loinc` is small; the archive is ~92MB over a rate-limited endpoint.
 VERSION_TIMEOUT = 30
@@ -121,7 +132,27 @@ def is_out_of_date():
     to date" and "could not tell".
     """
     published = current_release()
-    return published['version'] != loaded_version(), published
+    return (published['version'] != loaded_version() or _axes_missing()), published
+
+
+def _axes_missing():
+    """Whether a load predates the axis columns, so the same version must reload.
+
+    The version alone cannot say: the 2.83 load that filled class, units,
+    property and scale left component, time aspect, system and method empty
+    once they were added, exactly as #1624 left property and scale empty.
+    Every LOINC code has a component, so a load that ran before the column
+    existed leaves nearly every row without one. A threshold, not "any row":
+    a row the reload never touches -- a code dropped for an unknown class --
+    keeps an empty component for good, and "any" would then re-download the
+    ~92MB archive on every boot with no way to clear it.
+    """
+    from omop_core.models import LoincCodeClass
+
+    total = LoincCodeClass.objects.count()
+    if not total:
+        return False
+    return LoincCodeClass.objects.filter(component='').count() * 2 > total
 
 
 def stream_archive(download_url):
@@ -211,7 +242,7 @@ def load_from_archive(chunks, stdout=None):
     LoincCodeClass.objects.bulk_create(
         [LoincCodeClass(**row) for row in code_rows],
         update_conflicts=True, unique_fields=['loinc_num'],
-        update_fields=['loinc_class_id', 'example_units', 'property', 'scale_type'],
+        update_fields=['loinc_class_id', 'example_units', *AXIS_COLUMNS.values()],
         batch_size=2000,
     )
     return len(classes), len(code_rows)
@@ -272,8 +303,8 @@ def _read_loinc_rows(member_chunks):
             'loinc_num': loinc_num,
             'loinc_class_id': loinc_class,
             'example_units': (row.get('EXAMPLE_UNITS') or '').strip(),
-            'property': (row.get('PROPERTY') or '').strip(),
-            'scale_type': (row.get('SCALE_TYP') or '').strip(),
+            **{field: (row.get(column) or '').strip()
+               for column, field in AXIS_COLUMNS.items()},
         }
 
 
