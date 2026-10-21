@@ -10,9 +10,9 @@ import {
   STAGE_OPTIONS, HISTOLOGIC_TYPE_OPTIONS, LYMPHOMA_HISTOLOGIC_TYPE_OPTIONS,
   MENOPAUSAL_OPTIONS, TUMOR_STAGE_OPTIONS, NODES_STAGE_OPTIONS,
   STAGING_MODALITIES_OPTIONS, DISTANT_METASTASIS_STAGE_OPTIONS,
-  YES_NO_OPTIONS, POSITIVE_NEGATIVE_OPTIONS, ER_OPTIONS, PR_OPTIONS, HER2_OPTIONS, HR_OPTIONS, HRD_OPTIONS,
+  POSITIVE_NEGATIVE_OPTIONS, ER_OPTIONS, PR_OPTIONS, HER2_OPTIONS, HR_OPTIONS, HRD_OPTIONS,
   DISEASE_OPTIONS,
-  FLIPI_FACTOR_OPTIONS, GELF_OPTIONS, FL_TUMOR_GRADE_OPTIONS,
+  FLIPI_FACTOR_OPTIONS, GELF_OPTIONS, FL_TUMOR_GRADE_OPTIONS, BONE_LESIONS_OPTIONS,
   ISS_STAGE_OPTIONS, MM_PROGRESSION_OPTIONS, STEM_CELL_TRANSPLANT_OPTIONS, SCT_ELIGIBILITY_OPTIONS, MYELOMA_TYPE_OPTIONS,
   MRD_STATUS_OPTIONS,
   BINET_STAGE_OPTIONS, TUMOR_BURDEN_OPTIONS, DISEASE_ACTIVITY_OPTIONS,
@@ -271,7 +271,7 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
 
       <Section title="Complications">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field label="Bone Lesions" name="bone_lesions" type="select" value={formData?.bone_lesions} options={YES_NO_OPTIONS} onChange={onChange} />
+          <Field label="Bone Lesions" name="bone_lesions" type="select" value={formData?.bone_lesions} options={BONE_LESIONS_OPTIONS} onChange={onChange} />
           <Field label="Plasma Cell Percentage (%)" name="clonal_plasma_cells" type="number" value={formData?.clonal_plasma_cells} onChange={onChange} />
         </div>
       </Section>

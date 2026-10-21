@@ -16,7 +16,19 @@ export const RACE_OPTIONS = [
   'Unknown',
 ];
 export const ETHNICITY_OPTIONS = ['Hispanic or Latino', 'Not Hispanic or Latino', 'Unknown'];
-export const DISEASE_OPTIONS = ['Breast Cancer', 'Follicular Lymphoma', 'Multiple Myeloma', 'Chronic Lymphocytic Leukemia (CLL)', 'Lung Cancer', 'Colon Cancer', 'Other'];
+// The projection stores the condition name in lower case. Keep the stored value intact for the
+// CLL and mantle-cell options instead of relying on the select's case-insensitive display match,
+// which cannot bridge "chronic lymphocytic leukemia" and "Chronic Lymphocytic Leukemia (CLL)".
+export const DISEASE_OPTIONS = [
+  'Breast Cancer',
+  'Follicular Lymphoma',
+  'Multiple Myeloma',
+  { value: 'chronic lymphocytic leukemia', label: 'Chronic Lymphocytic Leukemia (CLL)' },
+  { value: 'mantle cell lymphoma', label: 'Mantle Cell Lymphoma' },
+  'Lung Cancer',
+  'Colon Cancer',
+  'Other',
+];
 export const STAGE_OPTIONS = ['0', 'I', 'IA', 'IB', 'II', 'IIA', 'IIB', 'III', 'IIIA', 'IIIB', 'IIIC', 'IV', 'Unknown'];
 export const LYMPHOMA_HISTOLOGIC_TYPE_OPTIONS = [
   'Unknown',
@@ -109,6 +121,7 @@ export const MENOPAUSAL_OPTIONS = ['Pre-menopausal', 'Peri-menopausal', 'Post-me
 export const FLIPI_RISK_OPTIONS = ['Low', 'Intermediate', 'High'];
 export const FLIPI_FACTOR_OPTIONS = ['Age ≥ 60', 'Stage III/IV', 'Hgb < 12 g/dL', 'Nodal areas > 4', 'Elevated LDH'];
 export const GELF_OPTIONS = ['Met', 'Not Met', 'High tumor burden', 'Unknown'];
+export const BONE_LESIONS_OPTIONS = ['Present', 'Absent', 'Unknown'];
 // PROMOP stores the FL grade as an integer/grade code (`2`), while the editable label is prose.
 // Keep the code as the option value so the select matches the API; Field preserves the label.
 export const FL_TUMOR_GRADE_OPTIONS: { value: string; label: string }[] = [

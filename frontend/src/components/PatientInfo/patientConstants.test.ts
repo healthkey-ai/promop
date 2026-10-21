@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   BINET_STAGE_OPTIONS,
+  BONE_LESIONS_OPTIONS,
+  DISEASE_OPTIONS,
   FL_TUMOR_GRADE_OPTIONS,
   GELF_OPTIONS,
   LYMPHOMA_HISTOLOGIC_TYPE_OPTIONS,
@@ -28,5 +30,27 @@ describe('disease option lists', () => {
 
   it('renders a CLL Binet code as a labelled option', () => {
     expect(BINET_STAGE_OPTIONS.find((option) => option.startsWith('Binet Stage B'))).toBeDefined();
+  });
+
+  it('has a disease option whose value matches the stored CLL value', () => {
+    expect(DISEASE_OPTIONS).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ value: 'chronic lymphocytic leukemia' }),
+      ]),
+    );
+  });
+
+  it('has a disease option whose value matches the stored mantle-cell value', () => {
+    expect(DISEASE_OPTIONS).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ value: 'mantle cell lymphoma' }),
+      ]),
+    );
+  });
+
+  it('offers the present/absent bone-lesion values the projection stores', () => {
+    expect(BONE_LESIONS_OPTIONS).toEqual(
+      expect.arrayContaining(['Present', 'Absent']),
+    );
   });
 });
