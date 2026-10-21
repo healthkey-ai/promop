@@ -18,6 +18,18 @@ const activity: CandidateActivity[] = [
       loinc_axes: { ...axes, system: "Urine" }, axis_match: { system: "conflict" }, axis_conflicts: ["system"], retrieval: "lexical" }] },
 ];
 
+describe("IndividualSuggestCandidates LOINC preference for labs", () => {
+  it("says LOINC is preferred and why, even with no axis settled", () => {
+    render(<IndividualSuggestCandidates running={false} selectedId="" onSelect={vi.fn()} activity={[
+      { stage: "ranked", suggested: mass, candidates: [mass, snomed],
+        source_axes: { axes: {}, hints: {}, expected_vocabulary: {
+          vocabulary_id: "LOINC", reason: "The sending system filed it as a laboratory result" } } },
+    ]} />);
+    expect(screen.getByTestId("expected-vocabulary")).toHaveTextContent(
+      "LOINC preferred: The sending system filed it as a laboratory result");
+  });
+});
+
 describe("IndividualSuggestCandidates LOINC axes", () => {
   it("orders by axes matched, shows chips, and discloses the conflicting candidates", () => {
     const onSelect = vi.fn();

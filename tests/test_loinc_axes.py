@@ -740,3 +740,60 @@ def test_suggest_one_never_borrows_another_hospitals_axes(pipeline, glucose):
     assert client.post('/api/v1/code-mappings/suggest-one/', {**body, 'mapping_id': a.pk},
                        format='json').status_code == 200
     assert 'property' not in pipeline['context'].get('loinc_axes', {})
+
+
+# --- LOINC preferred for labs ---------------------------------------------------
+
+@pytest.mark.parametrize('vocab, metadata, reason', [
+    ('LOINC', {}, 'The source code is LOINC'),
+    (LAB, {'fhir': {'code': {'coding': [{'system': 'http://loinc.org', 'code': '2345-7'}]}}}, 'LOINC coding'),
+    (LAB, {'fhir': {'category': [{'coding': [{'code': 'laboratory'}]}]}}, 'laboratory result'),
+    (LAB, {'category': {'top': 'laboratory', 'mix': ''}}, 'laboratory result'),
+    (LAB, {'fhir': {'valueQuantity': {'value': 5, 'unit': 'mmol/L'}}}, 'property is settled'),
+])
+def test_a_lab_signal_names_its_evidence(vocab, metadata, reason):
+    axes, _ = loinc_axes.infer(vocab, 'X', metadata)
+    assert reason in loinc_axes.lab_signal(vocab, metadata, axes)
+
+
+def test_free_text_with_no_lab_evidence_is_not_a_lab_signal():
+    assert loinc_axes.lab_signal(LAB, {'fhir': {'code': {'text': 'Glucose'}}}, {}) is None
+
+
+def test_a_lab_puts_loinc_ahead_of_snomed_and_tells_the_ranker(pipeline, glucose, monkeypatch):
+    snomed_measurement = ConceptFactory(
+        concept_name='Glucose measurement, serum', concept_code='22569008',
+        vocabulary=VocabularyFactory(vocabulary_id='SNOMED'), domain=glucose['2345-7'].domain)
+    snomed_hit = candidate(snomed_measurement)
+    monkeypatch.setattr('omop_core.mapping.suggestions.lexical_candidates',
+                        lambda *a, **k: [snomed_hit, candidate(glucose['2345-7'])])
+    suggest_one_mapping('GLU', LAB, 'measurement', source_description='Glucose', row_metadata={
+        'fhir': {'category': [{'coding': [{'code': 'laboratory'}]}]}})
+
+    assert [c['vocabulary_id'] for c in pipeline['candidates']] == ['LOINC', 'SNOMED']
+    assert pipeline['context']['expected_vocabulary']['vocabulary_id'] == 'LOINC'
+
+
+def test_without_a_lab_signal_the_order_is_untouched(pipeline, glucose, monkeypatch):
+    snomed_measurement = ConceptFactory(
+        concept_name='Heart rate', concept_code='364075005',
+        vocabulary=VocabularyFactory(vocabulary_id='SNOMED'), domain=glucose['2345-7'].domain)
+    monkeypatch.setattr('omop_core.mapping.suggestions.lexical_candidates',
+                        lambda *a, **k: [candidate(snomed_measurement), candidate(glucose['2345-7'])])
+    suggest_one_mapping('HR', LAB, 'measurement', source_description='Heart rate')
+
+    assert [c['vocabulary_id'] for c in pipeline['candidates']] == ['SNOMED', 'LOINC']
+    assert 'expected_vocabulary' not in pipeline['context']
+
+
+def test_jev_is_told_loinc_is_expected(settings):
+    from omop_core.mapping.suggestions import rank_candidates_jev
+
+    settings.JEV_API_KEY = 'key'
+    with patch('requests.post') as post:
+        post.return_value.json.return_value = {'answers': {'best_match': {'choice': 'none'}}}
+        rank_candidates_jev('GLU', [{'concept_id': 1, 'concept_code': '2345-7', 'concept_name': 'Glucose',
+                                     'vocabulary_id': 'LOINC'}],
+                            source_context={'code': 'GLU', 'expected_vocabulary': {
+                                'vocabulary_id': 'LOINC', 'reason': 'filed as a laboratory result'}})
+    assert 'laboratory-style test (filed as a laboratory result): prefer a LOINC' in post.call_args.kwargs['json']['state']

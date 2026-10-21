@@ -46,8 +46,12 @@ export function SourceAxesSummary({ sourceAxes }: { sourceAxes?: SourceAxes | nu
   if (!sourceAxes) return null;
   const settled = LOINC_AXES.filter(axis => sourceAxes.axes?.[axis]);
   const hints = LOINC_AXES.filter(axis => sourceAxes.hints?.[axis]);
-  if (!settled.length && !hints.length) return null;
+  const expected = sourceAxes.expected_vocabulary;
+  if (!settled.length && !hints.length && !expected) return null;
   return <div className="mt-1 text-xs text-slate-600" aria-label="Source LOINC axes">
+    {expected && <div className="text-blue-700" data-testid="expected-vocabulary">
+      <span className="font-medium">{expected.vocabulary_id} preferred:</span> {expected.reason}
+    </div>}
     <span className="font-medium text-slate-700">Source axes: </span>
     {settled.length ? settled.map((axis, index) => {
       const entry = sourceAxes.axes[axis]!;

@@ -459,6 +459,48 @@ def axis_candidates(source_axes, domain_id, limit=AXIS_RETRIEVAL_LIMIT):
     ]
 
 
+def _lab_category(metadata, resource):
+    """Whether the sender filed the record as a laboratory result."""
+    for category in resource.get('category') or []:
+        if not isinstance(category, dict):
+            continue
+        codes = [c.get('code') for c in category.get('coding') or [] if isinstance(c, dict)]
+        if 'laboratory' in codes or _norm(category.get('text') or '') == 'laboratory':
+            return True
+    aggregate = metadata.get('category') if isinstance(metadata, dict) else None
+    if isinstance(aggregate, dict):
+        return 'laboratory' in _norm(aggregate.get('top') or '')
+    return False
+
+
+def lab_signal(source_vocabulary_id, metadata, axes):
+    """Why this source is a lab-style measurement LOINC should name, or None.
+
+    OHDSI's convention is LOINC for lab tests, but SNOMED has standard
+    Measurement-domain concepts too ("Glucose measurement, serum"), so without
+    a preference one can outrank LOINC 2345-7. Each signal is something the
+    source itself says; none is inferred from the candidates.
+    """
+    if is_loinc(source_vocabulary_id):
+        return 'The source code is LOINC'
+    resource = _resource(metadata)
+    if any(is_loinc(c.get('system')) for c in _codings(resource)):
+        return 'The sending system attached a LOINC coding'
+    if _lab_category(metadata, resource):
+        return 'The sending system filed it as a laboratory result'
+    for axis in ('property', 'scale_type'):
+        entry = (axes or {}).get(axis)
+        if entry and entry['basis'] in (BASIS_UNIT, BASIS_VALUE_TYPE):
+            return f"Its {AXIS_LABELS[axis].lower()} is settled ({entry['evidence']})"
+    return None
+
+
+def prefer_loinc(candidates):
+    """LOINC candidates first, each group keeping its order (axis rank)."""
+    return ([c for c in candidates if c.get('vocabulary_id') == 'LOINC']
+            + [c for c in candidates if c.get('vocabulary_id') != 'LOINC'])
+
+
 def source_summary(axes, hints):
     """The JSON a curator and the ranker see for the source's axes."""
     return {

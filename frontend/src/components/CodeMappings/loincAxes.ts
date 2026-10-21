@@ -35,6 +35,8 @@ export type LoincAxisOverrides = Partial<Record<LoincAxis, string | null>>;
 export interface SourceAxes {
   axes: Partial<Record<LoincAxis, { value: string; basis: AxisBasis | string; evidence: string }>>;
   hints: Partial<Record<LoincAxis, string>>;
+  /** Set when the source is a lab-style test: LOINC candidates go first. */
+  expected_vocabulary?: { vocabulary_id: string; reason: string };
 }
 
 export interface AxisExcludedCandidate {

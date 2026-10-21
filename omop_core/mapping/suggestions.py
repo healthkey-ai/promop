@@ -901,6 +901,12 @@ most axes, and when an axis is unknown on the source, prefer the candidate
 whose value for it is the usual default (a methodless code, a point in time)
 unless the metadata says otherwise.
 
+The source context may carry expected_vocabulary: the source is a lab-style
+test, LOINC is the expected destination vocabulary (OHDSI convention for
+laboratory results), and reason says what in the source shows it. Prefer a
+LOINC candidate that fits; choose a SNOMED or other concept only when no LOINC
+candidate is clinically compatible.
+
 The source context may carry snomed: the SNOMED concepts the source means at
 least (references, from the source code or its "Maps to"), its hierarchy and
 laterality. Each SNOMED candidate carries snomed with its hierarchy (semantic
@@ -1186,6 +1192,12 @@ def rank_candidates_jev(source_value, candidates, source_description='', *, sour
         + "; prefer the most specific candidate that evidence supports."
         if snomed.get('references') else ''
     )
+    expected = source_info.get('expected_vocabulary') or {}
+    expected_note = (
+        f" This is a laboratory-style test ({expected.get('reason')}): prefer a LOINC "
+        "candidate that fits; choose another vocabulary only if none does."
+        if expected else ''
+    )
     axes = source_info.get('loinc_axes') or {}
     axes_note = (
         f" The source's settled LOINC axes are {_axes_text(axes)}; two tests that "
@@ -1197,7 +1209,7 @@ def rank_candidates_jev(source_value, candidates, source_description='', *, sour
         'state': (
             f"Source code: {source_info.get('code', source_value)} — "
             f"{source_info.get('original_description', source_description)}."
-            f"{metadata_note}{axes_note}{snomed_note} "
+            f"{metadata_note}{axes_note}{snomed_note}{expected_note} "
             f"Map this to the best OMOP CDM standard vocabulary concept."
         ),
         'model': 'jev-latest',
@@ -1594,7 +1606,7 @@ def _axis_note(job):
 
 def _prepare(*, source_code, source_vocabulary_id, source_text, domain_id,
              strategies, lexical_limit, source_context=None, on_candidates=None,
-             source_axes=None, axis_hints=None, snomed_source=None):
+             source_axes=None, axis_hints=None, snomed_source=None, lab_reason=None):
     """Everything for one source code that needs the database, and nothing more.
 
     Split out so the ranking that follows is pure network work and can be run
@@ -1606,6 +1618,11 @@ def _prepare(*, source_code, source_vocabulary_id, source_text, domain_id,
 
     *snomed_source* (from :func:`source_snomed`) does the same for SNOMED
     candidates by hierarchy, defining attributes and subsumption.
+
+    *lab_reason* (from :func:`loinc_axes.lab_signal`) says a Measurement
+    source is a lab-style test: LOINC candidates then go first and the rankers
+    are told LOINC is expected. A preference, not a filter -- a vital-sign
+    panel or an observable can rightly be SNOMED.
     """
     candidates, umls_cui, definitive = retrieval_pool(
         source_code=source_code, source_vocabulary_id=source_vocabulary_id,
@@ -1652,6 +1669,11 @@ def _prepare(*, source_code, source_vocabulary_id, source_text, domain_id,
         if snomed_attributes.has_evidence(snomed_source):
             source_context = {**source_context,
                               'snomed': snomed_attributes.source_summary(snomed_source)}
+    lab_reason = lab_reason if domain_id == 'Measurement' else None
+    if lab_reason:
+        candidates = loinc_axes.prefer_loinc(candidates)
+        source_context = {**source_context, 'expected_vocabulary': {
+            'vocabulary_id': 'LOINC', 'reason': lab_reason}}
     job = {
         'candidates': candidates,
         'umls_cui': umls_cui,
@@ -1670,6 +1692,7 @@ def _prepare(*, source_code, source_vocabulary_id, source_text, domain_id,
         'axis_hints': axis_hints or {},
         'axis_excluded': axis_excluded,
         'snomed_source': snomed_source,
+        'lab_reason': lab_reason,
     }
     # UMLS candidates carry umls_score=1.0 so the ranker sees the signal,
     # but we no longer short-circuit — let the ranking model weigh all
@@ -1693,6 +1716,9 @@ def _axis_activity(job):
     }
     if job.get('source_axes') is not None:
         activity['source_axes'] = loinc_axes.source_summary(job['source_axes'], job.get('axis_hints') or {})
+        if job.get('lab_reason'):
+            activity['source_axes']['expected_vocabulary'] = {
+                'vocabulary_id': 'LOINC', 'reason': job['lab_reason']}
     if job.get('snomed_source') is not None:
         activity['source_snomed'] = snomed_attributes.source_summary(job['snomed_source'])
     return activity
@@ -1825,6 +1851,8 @@ def _query_expand_failed_jobs(jobs, on_ranked=None, ranking_model=DEFAULT_RANKIN
             job['note'] += (f" Search expanded with {query!r}; every new candidate "
                             f"conflicted with the source's evidence.")
             continue
+        if job.get('lab_reason'):
+            new_hits = loinc_axes.prefer_loinc(new_hits)
         for hit in new_hits:
             hit['generated_search_query'] = query
         job['candidates'] += new_hits
@@ -2065,6 +2093,8 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
                 domain_id=row_domain, source_concept=source_concept, description=description,
                 metadata=mapping.source_metadata, overrides=mapping.snomed_attributes,
             ),
+            lab_reason=loinc_axes.lab_signal(
+                mapping.source_vocabulary_id, mapping.source_metadata, source_axes),
             strategies=strategies,
             lexical_limit=lexical_limit,
             on_candidates=lambda strategy, candidates: emit(
@@ -2378,6 +2408,7 @@ def suggest_one_mapping(source_code, source_vocabulary_id, omop_table, *,
             domain_id=domain_id, source_concept=source_concept, description=description,
             metadata=metadata, overrides=snomed_overrides,
         ),
+        lab_reason=loinc_axes.lab_signal(source_vocabulary_id, metadata, source_axes),
         strategies=strategies, lexical_limit=lexical_limit,
         on_candidates=lambda strategy, candidates: emit(
             "candidates", strategy=strategy, candidates=candidates,
