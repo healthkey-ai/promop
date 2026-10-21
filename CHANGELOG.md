@@ -8,6 +8,18 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **The patient-info widget ships with the therapy editor** — `npm run
+  build:widget` produces the self-contained bundle a host on another React
+  version mounts, and that bundle now includes the treatment editor, so a
+  federated patient can author and correct lines instead of reading a
+  read-only history. The build entry exposes `mount`/`unmount` with
+  `{apiBase, token, readOnly}`, hands the base to the clinical transport and
+  hides tabs whose endpoints only the standalone product provides. The
+  treatment tab withholds its authoring controls when the host mounts
+  read-only, instead of offering a write the server will refuse. Structured
+  `lines_of_therapy` moved into `omop_core.api` so a host can project the same
+  per-line payload the standalone record uses (#1924).
+
 - **The therapy editor's endpoints ship in the package** — `omop_core.api`
   serves the five calls the patient widget makes (`therapy-lines`,
   `therapy-outcomes`, `therapy-regimens` list and detail, `concepts/search`)

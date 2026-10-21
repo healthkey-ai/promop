@@ -76,7 +76,7 @@ function PatientInfoSkeleton() {
   );
 }
 
-function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pick<PatientInfoProps, "readOnly" | "onPatientUpdated" | "showHeading">) {
+function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading = true }: Pick<PatientInfoProps, "readOnly" | "federated" | "onPatientUpdated" | "showHeading">) {
   const { data, isLoading, isError, error } = usePatientInfoMe();
   const patchMutation = usePatchPatientInfo();
 
@@ -345,19 +345,33 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
 
   const diseaseType = getDiseaseType();
   const showDiseaseTab = diseaseType !== "other";
-  const tabLabels = [
-    "General",
-    ...(showDiseaseTab ? [getDiseaseTabLabel()] : []),
-    "Treatment", "Labs", "Behavior", "Wearable", "Genomics", "History",
+  // Keyed rather than positional: a host that cannot serve wearable uploads
+  // drops that tab, and arithmetic indices would silently shift every tab after it.
+  const TAB_LABELS: Record<string, string> = {
+    general: "General",
+    treatment: "Treatment",
+    labs: "Labs",
+    behavior: "Behavior",
+    wearable: "Wearable",
+    genomics: "Genomics",
+    history: "History",
+  };
+  const tabKeys = [
+    "general",
+    ...(showDiseaseTab ? ["disease"] : []),
+    "treatment", "labs", "behavior",
+    ...(federated ? [] : ["wearable"]),
+    "genomics", "history",
   ];
+  const tabLabels = tabKeys.map((key) => key === "disease" ? getDiseaseTabLabel() : TAB_LABELS[key]);
 
-  const diseaseIdx = showDiseaseTab ? 1 : -1;
-  const treatmentIdx = showDiseaseTab ? 2 : 1;
-  const labsIdx = treatmentIdx + 1;
-  const behaviorIdx = labsIdx + 1;
-  const wearableIdx = behaviorIdx + 1;
-  const genomicsIdx = wearableIdx + 1;
-  const historyIdx = genomicsIdx + 1;
+  const diseaseIdx = tabKeys.indexOf("disease");
+  const treatmentIdx = tabKeys.indexOf("treatment");
+  const labsIdx = tabKeys.indexOf("labs");
+  const behaviorIdx = tabKeys.indexOf("behavior");
+  const wearableIdx = tabKeys.indexOf("wearable");
+  const genomicsIdx = tabKeys.indexOf("genomics");
+  const historyIdx = tabKeys.indexOf("history");
 
   const tabDescriptions: Record<number, string> = {
     0: "Keep patient details up to date for accurate personalisation.",
@@ -424,6 +438,7 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
               formData={editedInfo}
               onChange={handleFieldChange}
               diseaseType={diseaseType}
+              readOnly={readOnly}
               onRecordRefreshed={(info) => {
                 setEditedInfo(info);
                 serverInfoRef.current = { ...info };
@@ -432,7 +447,7 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
           )}
           {activeTab === labsIdx && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
           {activeTab === behaviorIdx && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} />}
-          {activeTab === wearableIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} />}
+          {wearableIdx >= 0 && activeTab === wearableIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} />}
           {activeTab === genomicsIdx && <GenomicsTab formData={editedInfo} readOnly={readOnly} />}
           {activeTab === historyIdx && <ClinicalSummaryTab formData={editedInfo} onNavigateToLabs={() => setActiveTab(labsIdx)} />}
         </div>
@@ -448,6 +463,7 @@ export function PatientInfo({
   className,
   theme,
   readOnly,
+  federated,
   onPatientUpdated,
   showHeading,
 }: PatientInfoProps) {
@@ -459,7 +475,7 @@ export function PatientInfo({
       theme={theme}
       className={className}
     >
-      <PatientInfoInner readOnly={readOnly} onPatientUpdated={onPatientUpdated} showHeading={showHeading} />
+      <PatientInfoInner readOnly={readOnly} federated={federated} onPatientUpdated={onPatientUpdated} showHeading={showHeading} />
     </PatientInfoProvider>
   );
 }
