@@ -49,7 +49,7 @@ export default function GeneralTab({ formData, onChange, editedName, onNameChang
       : STAGE_OPTIONS;
   // General `stage` is the selected column, but older/partial CLL records may
   // only carry the prose `binet_stage`. Fall back to it before normalising.
-  const cllStageSource = formData?.stage ?? formData?.binet_stage;
+  const cllStageSource = String(formData?.stage ?? '').trim() || formData?.binet_stage;
   const stageValue = diseaseType === 'cll' ? binetStageCode(cllStageSource) : formData?.stage;
   const onStageChange = (name: string, value: unknown) =>
     onChange(name, diseaseType === 'cll' ? binetStageCode(value) : value);
