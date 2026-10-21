@@ -203,7 +203,10 @@ def test_unowned_linked_import_is_not_mutated_or_retracted_on_replace(setup):
 
 
 @pytest.mark.parametrize('wrong_person', [False, True])
-def test_wrong_table_or_patient_events_do_not_establish_treatment(setup, wrong_person):
+def test_wrong_table_or_patient_events_never_become_composition(setup, wrong_person):
+    # Since #1924 the writer's assertion makes the line exist on its own. A link
+    # that names the wrong table or another patient must still contribute no drug
+    # and no component: the line stays asserted with an unknown composition.
     from omop_core.services.patient_record_service import refresh_patient_record
     from tests.factories import PersonFactory
 
@@ -218,8 +221,12 @@ def test_wrong_table_or_patient_events_do_not_establish_treatment(setup, wrong_p
     EpisodeEvent.objects.create(episode_id=original.episode.pk, event_id=event_id,
                                episode_event_field_concept_id=field)
     record = refresh_patient_record(setup[0])
-    assert not record.therapy_lines_count
-    assert record.first_line_therapy is None
+    assert record.therapy_lines_count == 1
+    assert record.first_line_component_ids == []
+    # 'Unknown' is the projection's marker for a line whose regimen it cannot
+    # name; the point is that neither a foreign drug nor a component leaks in.
+    assert record.first_line_therapy == 'Unknown'
+    assert record.first_line_therapy_id is None
 
 
 def test_same_drug_and_date_in_two_cancers_have_distinct_owned_facts():

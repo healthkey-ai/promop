@@ -94,6 +94,8 @@ def upsert_therapy_line_episode(
     episode=None,
     preserve_end_date_when_none=False,
     overwrite_source_concept=False,
+    assert_line=True,
+    asserted_by='authoring',
 ):
     """Upsert one line-of-therapy Episode and its links; return the Episode.
 
@@ -127,6 +129,11 @@ def upsert_therapy_line_episode(
         today: fallback for episode_start_date when start_date is None.
         replace_events: when True, the supplied drug_exposure_ids are the full
             membership of the episode and stale EpisodeEvent links are removed.
+        assert_line: record that this line happened, even when no composition
+            is supplied (#1924). Every canonical authoring path keeps the default;
+            a caller that only maintains an existing header may turn it off.
+        asserted_by: provenance of the assertion ('authoring', 'reverse-sync',
+            'import'), stored, never used for clinical decisions.
 
     Returns a TherapyLineEpisodeResult; result.episode is None if the required
     Treatment Regimen concept is absent.
@@ -210,6 +217,9 @@ def upsert_therapy_line_episode(
         if dirty:
             episode.save(update_fields=dirty)
 
+    if assert_line:
+        _assert_therapy_line(episode, asserted_by)
+
     field_concept = _concept(CONCEPT_DRUG_EXPOSURE_FIELD) or tx_regimen_concept
     event_ids = []
     desired_exposure_ids = {de_id for de_id in drug_exposure_ids if de_id is not None}
@@ -257,6 +267,56 @@ def upsert_therapy_line_episode(
         _delete_line_observation(person, line_number, 'discontinuation', line=episode, adopt=adopts_unparented)
 
     return TherapyLineEpisodeResult(episode, created, event_ids)
+
+
+def _assert_therapy_line(episode, source):
+    """Record that this Episode is a therapy line that happened (#1924).
+
+    Saving the line again undoes a retraction: the writer is asserting it now.
+    Composition is deliberately not recorded here; it is read from the line's
+    typed links, so an unstated composition stays unknown.
+    """
+    from django.utils import timezone
+    from omop_oncology.models import TherapyLineAssertion
+
+    assertion, created = TherapyLineAssertion.objects.get_or_create(
+        episode=episode, defaults={'source': source},
+    )
+    if created:
+        return assertion
+    updates = {}
+    if assertion.state != TherapyLineAssertion.ASSERTED:
+        updates = {'state': TherapyLineAssertion.ASSERTED, 'retracted_at': None}
+    if source and assertion.source != source:
+        updates['source'] = source
+    if updates:
+        for field, value in updates.items():
+            setattr(assertion, field, value)
+        assertion.save(update_fields=list(updates))
+    return assertion
+
+
+def retract_therapy_line(person, episode):
+    """Withdraw the assertion that this line happened, keeping the row for audit.
+
+    A patient or clinician correcting a line entered in error retracts it; the
+    composition may also be cleared without retracting, when treatment happened
+    but the drugs are unknown. Retracting does not delete exposures: they may be
+    imported facts that outlive this line's claim about them.
+    """
+    from django.utils import timezone
+    from omop_oncology.models import TherapyLineAssertion
+
+    if episode is None or episode.person_id != person.pk:
+        raise ValueError('The therapy line must belong to this patient.')
+    assertion, _ = TherapyLineAssertion.objects.get_or_create(
+        episode=episode, defaults={'source': 'authoring'},
+    )
+    if assertion.state != TherapyLineAssertion.RETRACTED:
+        assertion.state = TherapyLineAssertion.RETRACTED
+        assertion.retracted_at = timezone.now()
+        assertion.save(update_fields=['state', 'retracted_at'])
+    return assertion
 
 
 def _line_parent(person, disease, episode):
