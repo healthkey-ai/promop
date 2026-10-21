@@ -137,7 +137,8 @@ from patient_portal.api.bulk_upload import (
     upload_organization, upload_actor_id,
 )
 from .permissions import (
-    EtlPatientCrudPermission, EtlWritePermission, PatientCrudPermission, GenomicsCrudPermission,
+    EtlDeletePermission, EtlPatientCrudPermission, EtlWritePermission,
+    PatientCrudPermission, GenomicsCrudPermission,
     PatientDeletePermission, PatientSelfScopePermission, ScopedTokenPermission,
     VocabReadPermission, LabSyncPermission, EtlProvisionPermission,
     get_request_org, is_service_token, is_machine_request,
@@ -8405,14 +8406,12 @@ class _OmopBulkUpdateMixin:
 class _OmopBulkDeleteMixin:
     """Delete many clinical rows of one person in a single request."""
 
-    # POST, because a DELETE with a body gets stripped by intermediaries. That
-    # makes the permission class matter: the parent viewsets accept the ETL
-    # capability and grant a session patient POST, but this action deliberately
-    # restores ScopedTokenPermission. Evaluated as POST, it requires the broad
-    # patient write scope and rejects both the ETL capability and session users,
-    # so the batch grants nothing the row-level DELETE refuses.
+    # POST, because a DELETE with a body gets stripped by intermediaries. So the
+    # parent viewset's class would let etl.write and session patients in here.
+    # EtlDeletePermission instead takes etl.delete, as the row level DELETE
+    # does, or the base rules, which refuse etl.write and session patients.
     @action(detail=False, methods=['post'], url_path='bulk_delete',
-            permission_classes=[ScopedTokenPermission])
+            permission_classes=[EtlDeletePermission])
     def bulk_delete(self, request: Request, *args: Any, **kwargs: Any) -> Response:
         """Delete the rows named by an id list, ignoring ids that match nothing."""
         oversized: Response | None = _bulk_body_too_large(request)

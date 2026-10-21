@@ -8,7 +8,7 @@ from django.core.exceptions import ImproperlyConfigured, ValidationError
 
 ALLOWED_SCOPES = frozenset({
     'patient/*.read', 'patient/*.write', 'user/*.read', 'user/*.write',
-    'system/*.read', 'system/etl.write',
+    'system/*.read', 'system/etl.write', 'system/etl.delete',
 })
 
 
