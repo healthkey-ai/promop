@@ -2547,8 +2547,8 @@ def _get_infection_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
 
 
 #: IMWG 2014: involved/uninvolved ratio >= 100 with involved chain >= 100 mg/L.
-_SLIM_FLC_RATIO = 100.0
-_SLIM_INVOLVED_FLC_MG_L = 100.0
+_SLIM_FLC_RATIO = Decimal('100')
+_SLIM_INVOLVED_FLC_MG_L = Decimal('100')
 
 # Sentinel for "no projection provided this refresh". Direct callers of
 # _compute_derived_fields (unit tests, legacy call sites) did not have a chance
@@ -2556,26 +2556,36 @@ _SLIM_INVOLVED_FLC_MG_L = 100.0
 _FLC_PAIR_UNSET = object()
 
 
-def _flc_field_for_measurement(measurement):
-    """Return kappa_flc/lambda_flc for either LOINC or display-name rows."""
+def _lab_field_for_measurement(measurement):
+    """Return the target lab field for either LOINC or display-name rows."""
     code = _measurement_code(measurement)
     field = _LOINC_LAB_FIELDS.get(code, (None, None))[0]
-    if field not in _FLC_FIELDS:
+    if field is None:
         field = _SOURCE_VALUE_LAB_FIELDS.get(measurement.measurement_source_value)
     return field
+
+
+def _flc_field_for_measurement(measurement):
+    """Return kappa_flc/lambda_flc for either LOINC or display-name rows."""
+    field = _lab_field_for_measurement(measurement)
+    return field if field in _FLC_FIELDS else None
 
 
 def _flc_event_key(measurement):
     """Group FLC rows by the best available specimen/lab-event identity.
 
     OMOP Measurement has no specimen_id in this schema. Prefer an explicit
-    measurement_event_id, then a visit + timestamp, then a visit + date, then
-    the timestamp/date alone. Rows without any key cannot prove they belong to
-    the same draw and are never paired.
+    measurement_event_id qualified by the field concept it points at, then a
+    visit + timestamp, then a visit + date, then the timestamp/date alone.
+    Rows without any key cannot prove they belong to the same draw and are
+    never paired.
     """
     event_id = getattr(measurement, 'measurement_event_id', None)
-    if event_id is not None:
-        return ('event', event_id)
+    event_domain = getattr(measurement, 'meas_event_field_concept_id', None)
+    if event_id is not None and event_domain is not None:
+        # measurement_event_id alone may point at another domain's event. OMOP
+        # requires meas_event_field_concept_id to interpret the reference.
+        return ('event', event_domain, event_id)
 
     visit_id = getattr(measurement, 'visit_occurrence_id', None)
     event_at = getattr(measurement, 'measurement_datetime', None)
@@ -2592,20 +2602,21 @@ def _flc_event_key(measurement):
     return None
 
 
-def _select_flc_pair(measurements):
-    """Return the newest complete kappa/lambda pair from one lab event.
+def _select_flc_pair_with_ratio(measurements):
+    """Return the newest complete kappa/lambda pair and its same-event ratio.
 
     A ratio must not combine kappa from one draw with lambda from another. The
     newest event that contains both chains decides; if its units cannot be
     converted, the pair is unknown rather than falling back to an older event.
     Events with only one chain are skipped because they cannot form a ratio.
+    The reported ratio is included only when it belongs to the selected event.
     """
     events = {}
     for measurement in measurements:
         if measurement.value_as_number is None:
             continue
-        field = _flc_field_for_measurement(measurement)
-        if field not in _FLC_FIELDS:
+        field = _lab_field_for_measurement(measurement)
+        if field not in _FLC_FIELDS and field != 'free_light_chain_ratio':
             continue
         key = _flc_event_key(measurement)
         if key is None:
@@ -2628,54 +2639,57 @@ def _select_flc_pair(measurements):
             return None
         if not kappa.is_finite() or not lam.is_finite() or kappa < 0 or lam < 0:
             return None
-        return kappa, lam
+
+        ratio = None
+        ratio_row = event.get('free_light_chain_ratio')
+        if ratio_row is not None:
+            try:
+                candidate = Decimal(str(ratio_row.value_as_number))
+            except (InvalidOperation, TypeError, ValueError):
+                candidate = None
+            if candidate is not None and candidate.is_finite() and candidate > 0:
+                ratio = candidate
+        return kappa, lam, ratio
     return None
 
 
+def _select_flc_pair(measurements):
+    """Return the newest complete kappa/lambda pair from one lab event."""
+    selected = _select_flc_pair_with_ratio(measurements)
+    return selected[:2] if selected is not None else None
+
+
 def _meets_flc_criterion(
-    kappas: list[tuple[float, str | None]],
-    lambdas: list[tuple[float, str | None]],
-    ratios: list[float],
-    person: Person,
+    kappa: Decimal | None,
+    lam: Decimal | None,
+    reported_ratio: Decimal | None,
 ) -> bool:
     """Whether the SLiM light chain criterion is established.
 
-    Chains are (value, unit_source_value) in date order. Both halves must hold,
-    and the absolute half needs mg/L, so a ratio with no chain result is
-    unproven rather than satisfied.
+    ``kappa`` and ``lam`` are a same-event pair already converted to mg/L.
+    Both halves must hold, so a reported ratio without that pair is unproven
+    rather than satisfied. Ratios use Decimal to keep an exact 100 inclusive.
     """
-    if not kappas or not lambdas:
+    if kappa is None or lam is None:
         return False
 
-    k_raw, k_unit = kappas[-1]
-    lam_raw, lam_unit = lambdas[-1]
-
-    # A reported ratio beats one divided out of two results that may come from
-    # different draws.
-    ratio = None
-    if ratios:
-        ratio = ratios[-1]
-    elif lam_raw > 0 and k_raw > 0:
-        ratio = k_raw / lam_raw
-    if ratio is None or ratio <= 0:
+    if reported_ratio is not None:
+        ratio = reported_ratio
+    elif lam > 0:
+        ratio = kappa / lam
+    else:
+        return False
+    if ratio <= 0:
         return False
 
     if ratio >= _SLIM_FLC_RATIO:
-        involved, involved_unit = k_raw, k_unit
+        involved = kappa
     elif ratio <= 1 / _SLIM_FLC_RATIO:
-        involved, involved_unit = lam_raw, lam_unit
+        involved = lam
     else:
         return False
 
-    involved_mg_l = flc_to_canonical(involved, involved_unit)
-    if involved_mg_l is None:
-        logger.warning(
-            'SLiM light-chain criterion left unproven for person_id=%s: involved '
-            'free light chain has unit_source_value=%r, which is not convertible '
-            'to mg/L', getattr(person, 'person_id', None), involved_unit,
-        )
-        return False
-    return involved_mg_l >= _SLIM_INVOLVED_FLC_MG_L
+    return involved >= _SLIM_INVOLVED_FLC_MG_L
 
 
 def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
@@ -2758,15 +2772,7 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
                 (float(m.value_as_number), m.unit_source_value))
 
     plasma_pcts = [v for v, _unit in slim_vals.get('clonal_plasma_cells', [])]
-    flc_pair = _select_flc_pair(snapshot.measurements)
-    if flc_pair is None:
-        # A reported ratio without a same-event involved chain cannot prove
-        # the absolute >=100 mg/L half of the SLiM criterion.
-        kappas, lambdas, ratios = [], [], []
-    else:
-        kappas = [(float(flc_pair[0]), 'mg/L')]
-        lambdas = [(float(flc_pair[1]), 'mg/L')]
-        ratios = []
+    flc_pair = _select_flc_pair_with_ratio(snapshot.measurements)
 
     meets_slim = False
     # Sixty criterion: any plasma cells measurement ≥60%
@@ -2775,7 +2781,7 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
     # Ratio alone is not enough. A patient with both chains low reaches a ratio
     # of 100 without the absolute burden, and this decides a myeloma defining
     # event.
-    elif _meets_flc_criterion(kappas, lambdas, ratios, person):
+    elif flc_pair is not None and _meets_flc_criterion(*flc_pair):
         meets_slim = True
 
     data['meets_slim'] = meets_slim

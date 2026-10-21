@@ -367,6 +367,48 @@ def test_slim_falls_back_to_dividing_two_separate_results():
     assert _get_mm_specific_data(person)['meets_slim'] is True
 
 
+def test_slim_uses_decimal_arithmetic_at_the_ratio_boundary():
+    """Float division turns an exact 100 ratio into 99.99999999999999."""
+    person = PersonFactory()
+    _measure(person, '36916-5', Decimal('10.01300'), date='2024-06-01', unit='mg/dL')
+    _measure(person, '33944-0', Decimal('0.10013'), date='2024-06-01', unit='mg/dL')
+
+    assert _get_mm_specific_data(person)['meets_slim'] is True
+
+
+def test_slim_preserves_a_reported_ratio_from_the_same_event():
+    """A rounded reported ratio is more authoritative than dividing the chains."""
+    person = PersonFactory()
+    _measure(person, '36916-5', 150.0, date='2024-06-01', unit='mg/L')
+    _measure(person, '33944-0', 1.5, date='2024-06-01', unit='mg/L')
+    _measure(person, '48378-4', 99.9, date='2024-06-01', unit=None)
+
+    assert _get_mm_specific_data(person)['meets_slim'] is False
+
+
+def test_flc_pair_does_not_cross_unrelated_event_domains():
+    """measurement_event_id is qualified by the referenced field concept."""
+    person = PersonFactory()
+    domain_a = ConceptFactory()
+    domain_b = ConceptFactory()
+    MeasurementFactory(
+        person=person, measurement_concept=_loinc('36916-5'),
+        measurement_source_value='Lab 36916-5',
+        measurement_date='2024-06-01',
+        value_as_number=Decimal('150.0'), unit_source_value='mg/L',
+        measurement_event_id=7, meas_event_field_concept=domain_a,
+    )
+    MeasurementFactory(
+        person=person, measurement_concept=_loinc('33944-0'),
+        measurement_source_value='Lab 33944-0',
+        measurement_date='2024-06-01',
+        value_as_number=Decimal('75.0'), unit_source_value='mg/L',
+        measurement_event_id=7, meas_event_field_concept=domain_b,
+    )
+
+    assert _get_laboratory_data(person)['_flc_pair'] is None
+
+
 def test_slim_does_not_combine_flc_from_different_lab_events():
     """A high ratio built from two draws is not a SLiM light-chain criterion."""
     person = PersonFactory()
