@@ -15,7 +15,7 @@ import {
   FLIPI_FACTOR_OPTIONS, GELF_OPTIONS, FL_TUMOR_GRADE_OPTIONS, BONE_LESIONS_OPTIONS,
   ISS_STAGE_OPTIONS, MM_PROGRESSION_OPTIONS, STEM_CELL_TRANSPLANT_OPTIONS, SCT_ELIGIBILITY_OPTIONS, MYELOMA_TYPE_OPTIONS,
   MRD_STATUS_OPTIONS,
-  BINET_STAGE_OPTIONS, TUMOR_BURDEN_OPTIONS, DISEASE_ACTIVITY_OPTIONS,
+  BINET_STAGE_OPTIONS, TUMOR_BURDEN_OPTIONS, DISEASE_ACTIVITY_OPTIONS, binetStageCode,
   RICHTER_TRANSFORMATION_OPTIONS, PROTEIN_EXPRESSION_OPTIONS,
   GENE_OPTIONS, MUTATION_OPTIONS, ORIGIN_OPTIONS, INTERPRETATION_OPTIONS,
   type UiMutation,
@@ -81,7 +81,7 @@ function BreastCancerSection({ formData, onChange, onMutationAdd, onMutationRemo
           <div className="space-y-1.5">
             <label className="text-sm font-medium text-portal-text-primary">Triple Negative Status (Computed)</label>
             <div className="flex h-9 w-full items-center rounded-md border border-input bg-portal-bg-secondary px-3 py-2 text-sm text-portal-text-tertiary">
-              {formData?.tnbc_status ? 'Yes' : 'No'}
+              {formData?.tnbc_status == null ? 'Unknown' : formData.tnbc_status ? 'Yes' : 'No'}
             </div>
             <p className="text-xs text-portal-text-tertiary">Automatically computed from ER, PR, and HER2 status</p>
           </div>
@@ -295,7 +295,7 @@ function CLLSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>
     <>
       <Section title="CLL Disease Characteristics">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field label="Binet Stage" name="binet_stage" type="select" value={formData?.binet_stage} options={BINET_STAGE_OPTIONS} onChange={onChange} />
+          <Field label="Binet Stage" name="binet_stage" type="select" value={binetStageCode(formData?.binet_stage)} options={BINET_STAGE_OPTIONS} onChange={(name, value) => onChange(name, binetStageCode(value))} />
           <Field label="Tumor Burden" name="tumor_burden" type="select" value={formData?.tumor_burden} options={TUMOR_BURDEN_OPTIONS} onChange={onChange} />
           <Field label="Disease Activity" name="disease_activity" type="select" value={formData?.disease_activity} options={DISEASE_ACTIVITY_OPTIONS} onChange={onChange} />
           <Field label="Richter Transformation" name="richter_transformation" type="select" value={formData?.richter_transformation} options={RICHTER_TRANSFORMATION_OPTIONS} onChange={onChange} />

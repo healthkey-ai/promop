@@ -12,7 +12,7 @@ import LabsTab from "@/components/PatientInfo/tabs/LabsTab";
 import BehaviorTab from "@/components/PatientInfo/tabs/BehaviorTab";
 import WearableTab from "@/components/PatientInfo/tabs/WearableTab";
 import { normalizeGeneticMutations } from "@/components/PatientInfo/patientConstants";
-import { normalizeGender } from "@/components/PatientInfo/utils";
+import { deriveTnbcStatus, normalizeGender } from "@/components/PatientInfo/utils";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
@@ -101,11 +101,16 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated }: Pick<Patien
       d.genetic_mutations = normalizeGeneticMutations(d.genetic_mutations);
     if (d.ecog_performance_status != null)
       d.ecog_performance_status = String(d.ecog_performance_status);
-    if (d.estrogen_receptor_status && d.progesterone_receptor_status && d.her2_status) {
-      const erNeg = ["Negative", "ER-"].includes(String(d.estrogen_receptor_status));
-      const prNeg = ["Negative", "PR-"].includes(String(d.progesterone_receptor_status));
-      const her2Neg = ["Negative", "HER2-"].includes(String(d.her2_status));
-      d.tnbc_status = erNeg && prNeg && her2Neg;
+    // Keep the server's verdict. The widget only fills a missing value locally
+    // (older records) and never turns a server `true` into `false` because the
+    // stored statuses use different casing or receptor spellings.
+    if (d.tnbc_status == null) {
+      const derived = deriveTnbcStatus(
+        d.estrogen_receptor_status,
+        d.progesterone_receptor_status,
+        d.her2_status,
+      );
+      if (derived !== null) d.tnbc_status = derived;
     }
     return d;
   }, [data]);
@@ -183,12 +188,10 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated }: Pick<Patien
     dirtyFieldsRef.current.add(field);
 
     if (["estrogen_receptor_status", "progesterone_receptor_status", "her2_status"].includes(field)) {
-      const er = String(field === "estrogen_receptor_status" ? value : updated.estrogen_receptor_status ?? "");
-      const pr = String(field === "progesterone_receptor_status" ? value : updated.progesterone_receptor_status ?? "");
-      const her2 = String(field === "her2_status" ? value : updated.her2_status ?? "");
-      const neg = (v: string) => ["Negative", "ER-", "PR-", "HER2-"].includes(v);
-      if (neg(er) && neg(pr) && neg(her2)) updated.tnbc_status = true;
-      else if (er || pr || her2) updated.tnbc_status = false;
+      const er = field === "estrogen_receptor_status" ? value : updated.estrogen_receptor_status;
+      const pr = field === "progesterone_receptor_status" ? value : updated.progesterone_receptor_status;
+      const her2 = field === "her2_status" ? value : updated.her2_status;
+      updated.tnbc_status = deriveTnbcStatus(er, pr, her2);
     }
 
     setEditedInfo(updated);

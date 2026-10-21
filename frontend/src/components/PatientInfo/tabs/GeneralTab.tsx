@@ -7,6 +7,7 @@ import {
   GENDER_OPTIONS, COUNTRY_OPTIONS, US_STATES, RACE_OPTIONS, ETHNICITY_OPTIONS,
   DISEASE_OPTIONS, STAGE_OPTIONS, HISTOLOGIC_TYPE_OPTIONS,
   ECOG_OPTIONS, KARNOFSKY_OPTIONS, ISS_STAGE_OPTIONS, BINET_STAGE_OPTIONS,
+  binetStageCode,
 } from '../patientConstants';
 
 interface Props {
@@ -46,18 +47,12 @@ export default function GeneralTab({ formData, onChange, editedName, onNameChang
     : diseaseType === 'cll'
       ? BINET_STAGE_OPTIONS
       : STAGE_OPTIONS;
-  const binetCode = (value: unknown) => {
-    const raw = String(value ?? '').trim();
-    const match = raw.match(/^Binet Stage ([ABC])\b/i);
-    return match ? match[1].toUpperCase() : raw;
-  };
-  const binetLabel = (value: unknown) => {
-    const code = binetCode(value);
-    return BINET_STAGE_OPTIONS.find((o) => o.startsWith(`Binet Stage ${code}`)) ?? String(value ?? '');
-  };
-  const stageValue = diseaseType === 'cll' ? binetLabel(formData?.stage) : formData?.stage;
+  // General `stage` is the selected column, but older/partial CLL records may
+  // only carry the prose `binet_stage`. Fall back to it before normalising.
+  const cllStageSource = formData?.stage ?? formData?.binet_stage;
+  const stageValue = diseaseType === 'cll' ? binetStageCode(cllStageSource) : formData?.stage;
   const onStageChange = (name: string, value: unknown) =>
-    onChange(name, diseaseType === 'cll' ? binetCode(value) : value);
+    onChange(name, diseaseType === 'cll' ? binetStageCode(value) : value);
 
   return (
     <div>

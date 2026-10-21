@@ -127,9 +127,7 @@ export const BONE_LESIONS_OPTIONS = ['Present', 'Absent', 'Unknown'];
 export const FL_TUMOR_GRADE_OPTIONS: { value: string; label: string }[] = [
   { value: '1', label: 'Grade 1 (0–5 centroblasts/HPF)' },
   { value: '2', label: 'Grade 2 (6–15 centroblasts/HPF)' },
-  { value: '3', label: 'Grade 3 (not otherwise specified)' },
-  { value: '3a', label: 'Grade 3a (>15 centroblasts/HPF, centrocytes present)' },
-  { value: '3b', label: 'Grade 3b (solid sheets of centroblasts)' },
+  { value: '3', label: 'Grade 3 (includes 3a/3b; not otherwise specified)' },
 ];
 export const MYELOMA_TYPE_OPTIONS = [
   'IgG Kappa', 'IgG Lambda', 'IgA Kappa', 'IgA Lambda',
@@ -138,7 +136,20 @@ export const MYELOMA_TYPE_OPTIONS = [
   'Light Chain Only (Kappa)', 'Light Chain Only (Lambda)',
   'Non-secretory', 'Biclonal',
 ];
-export const ISS_STAGE_OPTIONS = ['Stage I', 'Stage II', 'Stage III'];
+// The demo widget writes the human-readable Stage labels, while generated
+// records may carry the ISS/R-ISS code verbatim. Keep both as explicit values
+// so neither source renders as a blank select.
+export const ISS_STAGE_OPTIONS: { value: string; label: string }[] = [
+  { value: 'Stage I', label: 'Stage I' },
+  { value: 'Stage II', label: 'Stage II' },
+  { value: 'Stage III', label: 'Stage III' },
+  { value: 'ISS 1', label: 'ISS Stage I' },
+  { value: 'ISS 2', label: 'ISS Stage II' },
+  { value: 'ISS 3', label: 'ISS Stage III' },
+  { value: 'R-ISS 1', label: 'R-ISS Stage I' },
+  { value: 'R-ISS 2', label: 'R-ISS Stage II' },
+  { value: 'R-ISS 3', label: 'R-ISS Stage III' },
+];
 export const MRD_STATUS_OPTIONS = [
   'MRD Negative (10⁻⁵)',
   'MRD Negative (10⁻⁶)',
@@ -228,11 +239,23 @@ export function normalizeGeneticMutations(raw: unknown): UiMutation[] {
   });
 }
 
-export const BINET_STAGE_OPTIONS = [
-  'Binet Stage A (<3 lymphoid areas involved)',
-  'Binet Stage B (≥3 lymphoid areas involved)',
-  'Binet Stage C (Anemia or Thrombocytopenia)',
+// The General tab's `stage` column stores the short code (A/B/C), while the
+// CLL section's `binet_stage` column may store the full prose label. Use the
+// code as the option value and normalise both shapes before rendering; a
+// blank value must stay blank instead of matching the first (Stage A) option.
+export const BINET_STAGE_OPTIONS: { value: string; label: string }[] = [
+  { value: 'A', label: 'Binet Stage A (<3 lymphoid areas involved)' },
+  { value: 'B', label: 'Binet Stage B (≥3 lymphoid areas involved)' },
+  { value: 'C', label: 'Binet Stage C (Anemia or Thrombocytopenia)' },
 ];
+
+export function binetStageCode(value: unknown): string {
+  const raw = String(value ?? '').trim();
+  if (!raw) return '';
+  const match = raw.match(/^Binet Stage ([ABC])\b/i);
+  if (match) return match[1].toUpperCase();
+  return ['A', 'B', 'C'].includes(raw.toUpperCase()) ? raw.toUpperCase() : raw;
+}
 
 export const PROTEIN_EXPRESSION_OPTIONS = [
   'CD38 +ve', 'CD38 -ve', 'ZAP-70 +ve', 'ZAP-70 -ve',
