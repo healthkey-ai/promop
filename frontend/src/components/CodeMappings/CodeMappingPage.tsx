@@ -11,12 +11,12 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowLeft, ChevronDown, ChevronRight, Download, Pencil, Plus, Search, Sparkles, Upload } from "lucide-react";
 import api from "@/api/axios";
 import { useAuth } from "@/hooks/useAuth";
-import { confirmUnitOverride, unitConfirmation } from "./unitConfirmation";
 import { AxisVariantFlag } from "./LoincAxisChips";
 import {
   type CodeMappingRow,
   type Reference,
   type RepointResult,
+  repointBanner,
   type SuggestRunProgress,
   emptyReference,
   STRATEGY_LABELS,
@@ -736,17 +736,7 @@ export default function CodeMappingPage() {
       const endpoint = action === "suggest"
         ? "/v1/code-mappings/group/suggest/"
         : "/v1/code-mappings/group/action/";
-      let started: SuggestRunProgress;
-      try {
-        ({ data: started } = await api.post<SuggestRunProgress>(endpoint, payload));
-      } catch (err) {
-        const warning = unitConfirmation(err);
-        if (!warning) throw err;
-        if (!confirmUnitOverride(warning)) return;
-        ({ data: started } = await api.post<SuggestRunProgress>(endpoint, {
-          ...payload, confirm_unit_mismatch: true,
-        }));
-      }
+      const { data: started } = await api.post<SuggestRunProgress>(endpoint, payload);
       suggestRunRef.current = started.run_id;
       setSuggestRun(started);
       const finished = await pollSuggestRun(started);
@@ -1009,28 +999,12 @@ export default function CodeMappingPage() {
         status: row.status === "approved" ? "proposed" : "approved",
         notes: row.notes,
       };
-      let resp;
-      try {
-        resp = await api.patch(`/v1/code-mappings/${row.mapping_id}/`, payload);
-      } catch (err) {
-        const warning = unitConfirmation(err);
-        if (!warning) throw err;
-        if (!confirmUnitOverride(warning)) return;
-        resp = await api.patch(`/v1/code-mappings/${row.mapping_id}/`, {
-          ...payload, confirm_unit_mismatch: true,
-        });
-      }
+      const resp = await api.patch(`/v1/code-mappings/${row.mapping_id}/`, payload);
       const repoint: RepointResult | null = resp.data?.repoint ?? null;
       applySavedMapping(resp.data);
       void refreshCurrent.current();
-      if (repoint && repoint.rows_updated) {
-        setBanner(
-          `${row.source_code}: updated ${repoint.rows_updated} row(s) across `
-          + `${repoint.persons_marked_stale} patient(s)`
-          + (repoint.rows_collapsed ? `, ${repoint.rows_collapsed} duplicate(s) collapsed` : "")
-          + ". Patient records queued for re-derivation.",
-        );
-      }
+      const message = repointBanner(row.source_code, repoint);
+      if (message) setBanner(message);
     } catch (err) {
       const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       setError(detail || "Failed to update code mapping status.");
@@ -1041,14 +1015,8 @@ export default function CodeMappingPage() {
   const handleDialogSaved = (saved: CodeMappingRow, repoint: RepointResult | null) => {
     applySavedMapping(saved);
     void refreshCurrent.current();
-    if (repoint && repoint.rows_updated) {
-      setBanner(
-        `${saved.source_code}: updated ${repoint.rows_updated} row(s) across `
-        + `${repoint.persons_marked_stale} patient(s)`
-        + (repoint.rows_collapsed ? `, ${repoint.rows_collapsed} duplicate(s) collapsed` : "")
-        + ". Patient records queued for re-derivation.",
-      );
-    }
+    const message = repointBanner(saved.source_code, repoint);
+    if (message) setBanner(message);
   };
 
   /** Callback for EditMappingDialog onDeleted — remove the row from local state. */

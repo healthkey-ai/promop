@@ -13,6 +13,7 @@ import {
   type Reference,
   type RepointResult,
   emptyReference,
+  repointBanner,
 } from "../CodeMappings/codeMappingTypes";
 
 type Props = { personId: string };
@@ -239,12 +240,9 @@ export default function PatientSourceCodesTab({ personId }: Props) {
 
   const handleDialogSaved = (saved: CodeMappingRow, repoint: RepointResult | null) => {
     handleDialogClose();
-    if (repoint && repoint.rows_updated) {
-      setBanner(
-        `Updated ${repoint.rows_updated} row(s) for this patient`
-        + (repoint.rows_collapsed ? `, ${repoint.rows_collapsed} duplicate(s) collapsed` : "")
-        + ". Patient records queued for re-derivation.",
-      );
+    const message = repointBanner(saved.source_code, repoint);
+    if (message) {
+      setBanner(message);
     } else if (saved.status === "approved") {
       setBanner("Mapping approved. Run Generate OMOP to apply to clinical rows.");
     } else {

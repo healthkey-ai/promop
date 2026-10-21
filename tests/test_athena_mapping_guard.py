@@ -47,9 +47,9 @@ def test_edit_and_approval_cannot_duplicate_athena(athena, status, method, monke
     mapping = SourceCodeConceptMapping.objects.create(
         source_vocabulary_id='ICD10CM', source_code='A02.1', target_concept=other,
     )
-    def unexpected_repoint(**kwargs):
+    def unexpected_repoint(*args, **kwargs):
         pytest.fail('Rejected duplicates must not repoint clinical rows')
-    monkeypatch.setattr('patient_portal.api.views.repoint_clinical_rows', unexpected_repoint)
+    monkeypatch.setattr('omop_core.services.repoint_jobs.queue_repoint', unexpected_repoint)
     response = request_mapping(method, {
         'mapping_id': mapping.pk, 'source_vocabulary_id': 'ICD10CM', 'source_code': 'A02.0',
         'destination_concept_id': athena.target_concept_id, 'status': status,

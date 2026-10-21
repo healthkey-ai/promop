@@ -148,18 +148,19 @@ def test_a_new_source_must_be_proposed_before_a_separate_guarded_approval(client
     candidate = run['activity'][0]['candidates'][0]
     assert propose(client, albumin, run, candidate, status='approved').status_code == 400
     assert not SourceCodeConceptMapping.objects.exists()
-    with patch('patient_portal.api.views.repoint_clinical_rows') as repoint:
+    with patch('omop_core.services.repoint_jobs.queue_repoint') as repoint:
         response = propose(client, albumin, run, candidate)
     assert response.status_code == 201, response.data
     repoint.assert_not_called()
     row = SourceCodeConceptMapping.objects.get(pk=response.data['mapping_id'])
     assert row.status == 'proposed' and row.target_concept_id == albumin.pk
     assert row.source_concept_id == source.pk
-    with patch('patient_portal.api.views.repoint_clinical_rows', return_value={'rows_updated': 0, 'person_ids': set()}):
+    with patch('omop_core.services.repoint_jobs.queue_repoint', return_value=None) as queued:
         approved = client.post(f'{BASE}{albumin.pk}/mappings/{row.pk}/', {
             'status': 'approved', 'expected_updated_at': response.data['updated_at'],
         }, format='json')
     assert approved.status_code == 200, approved.data
+    queued.assert_called_once()
     row.refresh_from_db()
     assert row.status == 'approved' and row.reviewer_id is not None
     assert propose(client, albumin, run, candidate).status_code == 409
