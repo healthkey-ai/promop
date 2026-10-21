@@ -11,6 +11,7 @@ from omop_core.models import (
     PatientRecord, Person, ProcedureOccurrence,
 )
 from omop_core.services.breast_mapping_safety import wrong_breast_field_mappings
+from omop_core.services.mappings import CONCEPT_PATIENT_REPORTED_TYPE
 from omop_core.services.pk import next_pk
 
 logger = logging.getLogger(__name__)
@@ -19,7 +20,7 @@ logger = logging.getLogger(__name__)
 CLEAR_VALUE = 'PatientRecord:cleared'
 
 # OMOP type concept "Patient self-report" (Type Concept vocabulary).
-PATIENT_SELF_REPORT_TYPE = 32865
+PATIENT_SELF_REPORT_TYPE = CONCEPT_PATIENT_REPORTED_TYPE
 
 _TARGET_CONFIG = {
     'measurement': (
@@ -239,9 +240,11 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
     type: 32865 when a patient or their representative is the author. It then
     also narrows matching to facts of that type, so a patient's answer never
     updates a clinical fact in place and takes over its type and provenance;
-    it sits beside it as its own fact. *patient_user_id* (``issuer|sub``)
-    records a PATIENT_SELF provenance row when the patient themselves writes,
-    the same row the PHR entry endpoints record.
+    it sits beside it as its own fact. The rule holds the other way too: an
+    edit by anyone else never updates a patient's self-report fact, unless the
+    recipe itself is typed self-report. *patient_user_id* (``issuer|sub``)
+    records a PATIENT_SELF provenance row whenever the patient themselves
+    writes, the same row the PHR entry endpoints record.
 
     Normally returns whether a fact changed. Direct saves can acknowledge an
     identical existing fact too, so it is not mistaken for a failed projection.
@@ -282,6 +285,8 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
             )
             if type_concept_id is not None:
                 candidates = candidates.filter(**{type_field: type_concept_id})
+            elif fact_type != PATIENT_SELF_REPORT_TYPE:
+                candidates = candidates.exclude(**{type_field: PATIENT_SELF_REPORT_TYPE})
             if after_pk is not None:
                 candidates = candidates.filter(pk__gt=after_pk)
             instance = candidates.order_by('-' + pk_field).first()
@@ -321,7 +326,7 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
                 return acknowledge_existing
             instance._skip_patient_record_refresh = True
             instance.save()
-            if patient_user_id and not existing:
+            if patient_user_id:
                 _record_patient_provenance(instance, patient_user_id)
         return True
     except Exception:

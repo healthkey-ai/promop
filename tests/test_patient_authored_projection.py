@@ -1,9 +1,10 @@
 """A patient's own PatientRecord edits project as patient self-report (#1959).
 
 The recipe's type describes the fact a clinician or import would record. When
-the patient or their representative is the author, the fact is typed 32865,
-matches only facts of that type, and the patient's own gets PATIENT_SELF
-provenance, as the PHR entry endpoints record.
+the patient or their representative is the author, the fact is typed 32865 and
+matches only facts of that type; anyone else's edit never matches a patient's
+fact. The patient's own writes get PATIENT_SELF provenance, as the PHR entry
+endpoints record.
 """
 import pytest
 from django.contrib.contenttypes.models import ContentType
@@ -156,3 +157,24 @@ def test_without_the_self_report_concept_the_patient_edit_still_saves(settings):
     PatientUser.objects.create(identity=identity, person=record.person)
     _patch(identity, '/api/patient-info/me/')
     assert _facts(record, concept).get().observation_type_concept_id == EHR
+
+
+def test_a_later_clinical_edit_today_does_not_take_over_the_patients_fact(record, concept):
+    project_single_value(record.person, 'planned_therapies', 'R-CHOP next', _recipe(concept),
+                         type_concept_id=PATIENT_SELF_REPORT_TYPE, patient_user_id='urn:local|abc')
+    project_single_value(record.person, 'planned_therapies', 'watch and wait', _recipe(concept))
+    patient = _facts(record, concept).get(observation_type_concept_id=PATIENT_SELF_REPORT_TYPE)
+    clinical = _facts(record, concept).get(observation_type_concept_id=EHR)
+    assert patient.value_as_string == 'R-CHOP next'
+    assert clinical.value_as_string == 'watch and wait'
+    assert _patient_provenance(patient).exists() and not _patient_provenance(clinical).exists()
+
+
+def test_patient_editing_their_representatives_fact_today_records_their_provenance(record, concept):
+    project_single_value(record.person, 'planned_therapies', 'R-CHOP next', _recipe(concept),
+                         type_concept_id=PATIENT_SELF_REPORT_TYPE)
+    project_single_value(record.person, 'planned_therapies', 'BR next', _recipe(concept),
+                         type_concept_id=PATIENT_SELF_REPORT_TYPE, patient_user_id='urn:local|abc')
+    row = _facts(record, concept).get()
+    assert row.value_as_string == 'BR next'
+    assert list(_patient_provenance(row).values_list('source_user_id', flat=True)) == ['urn:local|abc']

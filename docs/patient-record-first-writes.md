@@ -139,9 +139,11 @@ LOINC/SNOMED recipes and approved curated mappings, to call
   the recipe's type, and same-day matching considers only facts of that type:
   a patient's answer is its own fact beside a clinical one, never an update
   that takes over the clinical fact's type and provenance. The patient's own
-  facts also get a `PATIENT_SELF` `ProvenanceRecord`, as PHR entries do.
+  writes also get a `PATIENT_SELF` `ProvenanceRecord`, as PHR entries do.
   Other editors keep the recipe's type (curated recipes default to EHR,
-  32817). Without concept 32865 loaded, the recipe's type stands (#1959).
+  32817) and never update a patient's self-report fact, unless the recipe is
+  itself typed self-report. Without concept 32865 loaded, the recipe's type
+  stands (#1959).
 - Serializes same-day writes with database locks. Projection uses a savepoint,
   so a failed projection leaves the PatientRecord edit pending.
 - A cleared Measurement or Observation stores null answer columns with
