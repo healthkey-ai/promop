@@ -83,13 +83,15 @@ def project_field_to_omop_task(mapping_pk: int) -> dict[str, Any]:
     return {'mapping_pk': mapping_pk}
 
 
-@shared_task(name='omop_core.repoint_mapping_rows')
+@shared_task(name='omop_core.repoint_mapping_rows', autoretry_for=(Exception,),
+             retry_backoff=60, max_retries=3)
 def repoint_mapping_rows_task(mapping_id: int) -> dict[str, Any]:
     """Move stored clinical rows onto an approved mapping's destination.
 
     Dispatched by a mapping save, which returns as soon as the mapping is
     written. Idempotent: the work lives on the mapping row, so a duplicate run
-    finds nothing left to move.
+    finds nothing left to move. A failure is retried; past that, the
+    destinations stay queued for ``manage.py run_queued_repoints``.
     """
     from omop_core.services.repoint_jobs import run_repoint
 

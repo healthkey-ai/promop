@@ -12401,8 +12401,9 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
         or (omop_table and omop_table != mapping.omop_table)
     ):
         raise serializers.ValidationError({'detail': (
-            'This source has clinical rows awaiting a destination update. Resolve '
-            'those rows before changing its source identity or clinical table.'
+            'This source has clinical rows still moving to its destination, in a '
+            'background job or waiting for Generate OMOP. Change its source '
+            'identity or clinical table once they have moved.'
         )})
     if (mapping is not None and status_value != 'approved'
             and previous_concept_id is not None

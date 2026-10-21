@@ -92,7 +92,7 @@ def run_repoint(mapping_id):
     if not _advisory_lock(mapping_id):
         logger.info('Re-point of mapping %s is already running.', mapping_id)
         return totals
-    persons = set()
+    persons, moved_ids = set(), set()
     try:
         for _ in range(MAX_PASSES):
             mapping = SourceCodeConceptMapping.objects.filter(pk=mapping_id).first()
@@ -113,6 +113,7 @@ def run_repoint(mapping_id):
                     match_description=old_concept_id != NO_MATCHING_CONCEPT_ID,
                 )
                 persons |= outcome.pop('person_ids', set())
+                moved_ids.add(old_concept_id)
                 for key in ('rows_updated', 'rows_collapsed'):
                     totals[key] += outcome[key]
             with transaction.atomic():
@@ -133,4 +134,19 @@ def run_repoint(mapping_id):
         _advisory_unlock(mapping_id)
     totals['persons_marked_stale'] = len(persons)
     logger.info('Re-point of mapping %s finished: %s.', mapping_id, totals)
+    _redispatch_late_arrivals(mapping_id, moved_ids)
     return totals
+
+
+def _redispatch_late_arrivals(mapping_id, moved_ids):
+    """Catch a save that committed after this run's last read.
+
+    That save's own task found the lock held and returned, trusting this run to
+    pick its destinations up. Only destinations this run never moved count, so
+    a run cannot keep re-dispatching itself over the same work.
+    """
+    mapping = SourceCodeConceptMapping.objects.filter(pk=mapping_id, status='approved').first()
+    if mapping is None:
+        return
+    if set(mapping.deferred_repoint_concept_ids) - moved_ids - {mapping.target_concept_id}:
+        dispatch_repoint(mapping_id)

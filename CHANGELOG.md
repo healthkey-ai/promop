@@ -41,8 +41,10 @@ All notable changes to PRomop are documented here.
   save response's `repoint` is now `{"queued": true, "from_concept_ids": [...]}`
   rather than row counts. The approval-time unit-mismatch confirmation (`409
   unit_mismatch_confirmation_required`, `confirm_unit_mismatch`) is removed:
-  values are normalized when clinical rows are loaded from codes. The CSV
-  upload's approvals still move rows in the request (#1952).
+  values are normalized when clinical rows are loaded from codes. A failed job
+  is retried three times; `manage.py run_queued_repoints <id>…|--all` moves
+  whatever is still queued. The CSV upload's approvals still move rows in the
+  request (#1952).
 
 - **Clearer source-code curation evidence** — Edit Mapping now keeps Source
   Code Value beside Source Description, only loads publisher terminology for

@@ -110,3 +110,39 @@ def test_a_duplicate_run_finds_nothing_left_to_move():
 
     assert repoint_jobs.run_repoint(row.pk)['rows_updated'] == 1
     assert repoint_jobs.run_repoint(row.pk)['rows_updated'] == 0
+
+
+def test_a_save_that_lands_after_the_last_read_is_dispatched_again():
+    old, new = ConceptFactory(), ConceptFactory()
+    late = ConceptFactory()
+    row = mapping(new, deferred_repoint_concept_ids=[old.pk])
+    # The save commits between the run's last read and its unlock.
+    with patch.object(repoint_jobs, '_advisory_unlock',
+                         side_effect=lambda pk: SourceCodeConceptMapping.objects.filter(pk=pk).update(
+                             deferred_repoint_concept_ids=[late.pk])), \
+            patch.object(repoint_jobs, 'dispatch_repoint') as dispatch:
+        repoint_jobs.run_repoint(row.pk)
+    dispatch.assert_called_once_with(row.pk)
+
+
+def test_a_finished_run_does_not_dispatch_itself_again():
+    old, new = ConceptFactory(), ConceptFactory()
+    row = mapping(new, deferred_repoint_concept_ids=[old.pk])
+    with patch.object(repoint_jobs, 'dispatch_repoint') as dispatch:
+        repoint_jobs.run_repoint(row.pk)
+    dispatch.assert_not_called()
+
+
+def test_the_command_runs_named_or_all_queued_mappings():
+    from django.core.management import CommandError, call_command
+    old, new = ConceptFactory(), ConceptFactory()
+    row = mapping(new, deferred_repoint_concept_ids=[old.pk])
+    stored = MeasurementFactory(measurement_concept=old, measurement_source_value='GLU')
+    with pytest.raises(CommandError):
+        call_command('run_queued_repoints')
+    call_command('run_queued_repoints', '--all', '--dry-run')
+    stored.refresh_from_db()
+    assert stored.measurement_concept_id == old.pk
+    call_command('run_queued_repoints', str(row.pk))
+    stored.refresh_from_db(); row.refresh_from_db()
+    assert stored.measurement_concept_id == new.pk and row.deferred_repoint_concept_ids == []
