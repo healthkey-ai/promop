@@ -44,9 +44,9 @@ beforeEach(() => {
   mockGet.mockImplementation((url: string) => Promise.resolve({ data: url.includes('writable-fields') ? DESCRIPTORS : [] }));
 });
 
-function renderTab(formData: Record<string, unknown> = {}) {
+function renderTab(formData: Record<string, unknown> = {}, readOnly = false) {
   return render(
-    <TreatmentTab formData={formData} onChange={vi.fn()} diseaseType="myeloma" />,
+    <TreatmentTab formData={formData} onChange={vi.fn()} diseaseType="myeloma" readOnly={readOnly} />,
   );
 }
 
@@ -147,6 +147,19 @@ describe('TreatmentTab', () => {
  * The tab offers the one write that moves the fields it displays.
  */
 describe('TreatmentTab - authoring a line', () => {
+  it('withholds the authoring controls when the host mounts it read-only', async () => {
+    // A federated host whose writes are disabled must not offer a button whose
+    // request the server would refuse.
+    renderTab({ ...THREE_LINES, person_id: 262, lines_of_therapy: STRUCTURED_LINES }, true);
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    expect(screen.queryByRole('button', { name: /add therapy line/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^edit$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /add supportive therapy/i })).not.toBeInTheDocument();
+    // The history itself is still shown.
+    expect(screen.getByText(/Line 1: VRd/i)).toBeInTheDocument();
+  });
+
   it('offers the add-line action', async () => {
     renderTab({ ...THREE_LINES, person_id: 262 });
     await waitFor(() => expect(mockGet).toHaveBeenCalled());

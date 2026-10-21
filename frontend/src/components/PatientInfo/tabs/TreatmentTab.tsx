@@ -16,6 +16,9 @@ interface Props {
   /** Receives the re-derived record after a line is authored. Without it the tab
    *  still writes correctly but shows stale values until the next refetch. */
   onRecordRefreshed?: (patientInfo: Record<string, unknown>) => void;
+  /** The host's write gate. A federated host may mount the widget read-only, and
+   *  offering an authoring button there would only produce a refused write. */
+  readOnly?: boolean;
 }
 
 type TherapyDialogState =
@@ -56,7 +59,7 @@ function diseaseToDiseaseCode(
   return TYPE_TO_CODE[diseaseType];
 }
 
-export default function TreatmentTab({ formData, onChange, diseaseType, onRecordRefreshed }: Props) {
+export default function TreatmentTab({ formData, onChange, diseaseType, onRecordRefreshed, readOnly = false }: Props) {
   // person_id rides in the record the tab already receives, so neither the
   // descriptor nor authoring needs an extra prop threaded through both hosts.
   const personId = Number(formData?.person_id ?? formData?.person ?? 0) || null;
@@ -125,13 +128,15 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
     <div>
       {personId !== null && (
         <div className="mb-5 space-y-3">
-          <button
-            onClick={() => setDialogState({ mode: 'add' })}
-            className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium hover:bg-muted"
-          >
-            <Plus size={14} />
-            Add therapy line
-          </button>
+          {!readOnly && (
+            <button
+              onClick={() => setDialogState({ mode: 'add' })}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium hover:bg-muted"
+            >
+              <Plus size={14} />
+              Add therapy line
+            </button>
+          )}
           {therapyLines.length > 0 && (
             <ul className="divide-y divide-border rounded-md border border-border">
               {therapyLines.map((line) => (
@@ -161,7 +166,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
                       )}
                     </p>
                   </div>
-                  <button
+                  {!readOnly && <button
                     type="button"
                     disabled={typeof line.episode_id !== 'number'}
                     onClick={() => setDialogState({ mode: 'edit', line })}
@@ -169,7 +174,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
                   >
                     <Pencil size={13} />
                     Edit
-                  </button>
+                  </button>}
                 </li>
               ))}
             </ul>
@@ -202,7 +207,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
       </Section>
 
       <Section title="Supportive Therapy">
-        {personId !== null && <button type="button" onClick={() => setSupportiveDialog({})}
+        {personId !== null && !readOnly && <button type="button" onClick={() => setSupportiveDialog({})}
           className="mb-3 inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted">
           <Plus size={14} /> Add supportive therapy
         </button>}
@@ -212,11 +217,11 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
               <p className="font-medium">{course.regimen_title}{course.intent && <span className="ml-2 font-normal">{course.intent}</span>}</p>
               <p className="text-xs text-muted-foreground">{course.start_date || 'No start date'} to {course.end_date || 'present'}{course.discontinuation_reason && ` · Reason: ${course.discontinuation_reason}`}</p>
             </div>
-            <button type="button" aria-label={`Edit ${course.regimen_title}`} onClick={() => setSupportiveDialog({ course })} className="rounded-md border px-2.5 py-1.5">Edit</button>
+            {!readOnly && <button type="button" aria-label={`Edit ${course.regimen_title}`} onClick={() => setSupportiveDialog({ course })} className="rounded-md border px-2.5 py-1.5">Edit</button>}
           </li>)}
         </ul> : <p className="text-sm text-muted-foreground">{String(formData.supportive_therapies || 'No supportive therapies recorded.')}</p>}
       </Section>
-      {supportiveDialog && personId !== null && <SupportiveTherapyDialog
+      {supportiveDialog && personId !== null && !readOnly && <SupportiveTherapyDialog
         personId={personId} diseaseCode={diseaseCode} course={supportiveDialog.course}
         onClose={() => setSupportiveDialog(null)} onSaved={(info) => onRecordRefreshed?.(info)}
       />}

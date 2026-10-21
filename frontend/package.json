@@ -8,6 +8,7 @@
     "dev:remote": "vite --config vite.remote.config.ts",
     "build": "tsc -b && vite build",
     "build:remote": "tsc -b && vite build --config vite.remote.config.ts",
+    "build:widget": "tsc -b && vite build --config vite.widget.config.ts",
     "preview": "vite preview",
     "lint": "eslint .",
     "test": "vitest run",
