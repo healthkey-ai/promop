@@ -10,7 +10,7 @@ from omop_core.models import (
 )
 from omop_core.mapping.reverse_suggestions import reverse_retrieval_pool, reverse_rank_candidate
 from omop_core.services.suggest_jobs import FakeDispatcher, InlineDispatcher, execute_run, use_dispatcher
-from tests.factories import ConceptFactory, MeasurementFactory
+from tests.factories import ConceptFactory, MeasurementFactory, VocabularyFactory
 
 pytestmark = pytest.mark.django_db
 BASE = '/api/v1/concept-to-code/'
@@ -292,6 +292,89 @@ def test_retrieval_restores_the_callers_statement_timeout(concept):
     with connection.cursor() as cursor:
         cursor.execute('SHOW statement_timeout')
         assert cursor.fetchone()[0] == before
+
+
+# ── Estimate: how many sources Suggest could find (#1953) ─────────────────────
+
+def test_estimate_counts_every_source_a_run_could_return(client, concept):
+    release = UmlsRelease.objects.create(release_version='test')
+    cui = UmlsConcept.objects.create(cui='C0000001', release=release)
+    for root, code in [('LNC', concept.concept_code), ('SNOMEDCT_US', 'UMLS-ONLY')]:
+        UmlsSourceCode.objects.create(concept=cui, root_source=root, code=code, term_type='PT', name='Albumin')
+    source('UMLS-ONLY', source_code_description='Different label')
+    for index in range(30):
+        source(f'LEX{index:02}', occurrence_count=index + 1)
+    source('ZERO', occurrence_count=0)
+    source('UNRELATED', source_code_description='Bone marrow sampling')
+    source('DONE', target_concept=concept)
+    source('APPROVED', status='approved')
+
+    data = client.get(f'{BASE}{concept.pk}/estimate/').data
+    # More than one run's worth: 30 by name, one by UMLS, none counted twice.
+    assert data == {'total': 31, 'umls': 1, 'lexical': 30, 'capped': False, 'partial': False, 'timed_out': False}
+    assert len(reverse_retrieval_pool(concept, strategies=['umls', 'lexical'], limit=25)) == 25
+    assert client.get(f'{BASE}{concept.pk}/estimate/', {'include_zero_seen': '1'}).data['total'] == 32
+    assert client.get(f'{BASE}{concept.pk}/estimate/', {'strategies': 'umls'}).data['total'] == 1
+    assert not SourceCodeConceptMapping.objects.filter(target_concept=concept).exclude(source_code='DONE').exists()
+
+
+def test_estimate_counts_a_source_found_by_both_strategies_once(client, concept):
+    release = UmlsRelease.objects.create(release_version='test')
+    cui = UmlsConcept.objects.create(cui='C0000001', release=release)
+    for root, code in [('LNC', concept.concept_code), ('SNOMEDCT_US', 'BOTH')]:
+        UmlsSourceCode.objects.create(concept=cui, root_source=root, code=code, term_type='PT', name='Albumin')
+    source('BOTH')
+    data = client.get(f'{BASE}{concept.pk}/estimate/').data
+    assert (data['total'], data['umls'], data['lexical']) == (1, 1, 1)
+
+
+def test_estimate_counts_unregistered_vocabulary_codes_only_with_zero_seen(client, concept):
+    VocabularyFactory(vocabulary_id='SNOMED')
+    ConceptFactory(vocabulary_id='SNOMED', concept_code='VOCAB-ONLY', concept_name='Serum albumin level')
+    ConceptFactory(vocabulary_id='SNOMED', concept_code='REGISTERED', concept_name='Serum albumin measurement')
+    source('REGISTERED', occurrence_count=0)
+    source('DECIDED', status='approved')
+    ConceptFactory(vocabulary_id='SNOMED', concept_code='DECIDED', concept_name='Serum albumin test')
+    assert client.get(f'{BASE}{concept.pk}/estimate/').data['total'] == 0
+    data = client.get(f'{BASE}{concept.pk}/estimate/', {'include_zero_seen': '1'}).data
+    # The registered code is its mapping row, counted once; the decided one is skipped.
+    assert data['total'] == 2 and data['capped'] is False
+    run = {row['source_code'] for row in reverse_retrieval_pool(
+        concept, strategies=['umls', 'lexical'], limit=25, include_zero_seen=True)}
+    assert run == {'VOCAB-ONLY', 'REGISTERED'}
+
+
+def test_estimate_reports_a_floor_past_the_catalog_cap(client, concept):
+    VocabularyFactory(vocabulary_id='SNOMED')
+    for index in range(4):
+        ConceptFactory(vocabulary_id='SNOMED', concept_code=f'VOCAB-{index}', concept_name=f'Serum albumin {index}')
+    with patch('omop_core.mapping.reverse_catalog.CATALOG_CAP', 3):
+        data = client.get(f'{BASE}{concept.pk}/estimate/', {'include_zero_seen': '1'}).data
+    assert data['capped'] is True and data['total'] == 3
+
+
+def test_estimate_keeps_registered_counts_when_the_vocabulary_search_runs_out_of_time(client, concept):
+    source('SEEN')
+    source('ZERO', occurrence_count=0)
+    with patch('omop_core.mapping.reverse_suggestions.catalog_keys', side_effect=TimeoutError('Budget exhausted')):
+        data = client.get(f'{BASE}{concept.pk}/estimate/', {'include_zero_seen': '1'}).data
+    assert data['total'] == 2 and data['capped'] is True and data['partial'] is True
+
+
+def test_estimate_says_when_it_ran_out_of_time(client, concept):
+    with patch('omop_core.mapping.reverse_suggestions._estimate', side_effect=TimeoutError('Budget exhausted')):
+        response = client.get(f'{BASE}{concept.pk}/estimate/')
+    assert response.status_code == 200
+    assert response.data == {'total': None, 'timed_out': True}
+
+
+def test_estimate_validates_and_requires_curator_access(client, concept, django_user_model):
+    assert client.get(f'{BASE}{concept.pk}/estimate/', {'strategies': 'vectors'}).status_code == 400
+    assert client.get(f'{BASE}{ConceptFactory(standard_concept=None).pk}/estimate/').status_code == 404
+    client.force_authenticate(django_user_model.objects.create_user(email='estimate-patient@test.com'))
+    assert client.get(f'{BASE}{concept.pk}/estimate/').status_code == 403
+    client.force_authenticate(None)
+    assert client.get(f'{BASE}{concept.pk}/estimate/').status_code in (401, 403)
 
 
 def test_concept_list_is_bounded(client):

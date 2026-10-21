@@ -3,7 +3,7 @@ from django.urls import include, path
 from .concept_to_code import (
     concept_to_code_list, concept_to_code_detail, concept_to_code_suggest,
     concept_to_code_run, concept_to_code_apply, concept_to_code_propose,
-    concept_to_code_source_examples, concept_to_code_priority,
+    concept_to_code_source_examples, concept_to_code_priority, concept_to_code_estimate,
 )
 from rest_framework.routers import DefaultRouter
 from .concept_mint import mint_destination
@@ -179,6 +179,7 @@ urlpatterns = [
     path('concept-to-code/source-examples/', concept_to_code_source_examples, name='v1-concept-to-code-source-examples'),
     path('concept-to-code/<int:concept_id>/', concept_to_code_detail, name='v1-concept-to-code-detail'),
     path('concept-to-code/<int:concept_id>/mappings/<int:mapping_id>/', concept_to_code_apply, name='v1-concept-to-code-apply'),
+    path('concept-to-code/<int:concept_id>/estimate/', concept_to_code_estimate, name='v1-concept-to-code-estimate'),
     path('concept-to-code/<int:concept_id>/mappings/', concept_to_code_propose, name='v1-concept-to-code-propose'),
     path('code-mappings/', code_mapping_list, name='v1-code-mapping-list'),
     path('code-mappings/upload/', code_mapping_upload, name='v1-code-mapping-upload'),
