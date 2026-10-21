@@ -9325,10 +9325,8 @@ def concept_graph_batch(request):
 # GET /api/v1/concepts/?domain_id=Measurement&concept_class_id=Lab+Test
 # =============================================================================
 
-class ConceptPagination(PageNumberPagination):
-    page_size = 25
-    page_size_query_param = 'page_size'
-    max_page_size = 100
+from omop_core.api.concepts import ConceptPagination  # noqa: E402  (packaged config)
+from omop_core.api.views import TherapyLineViewSet as _PackagedTherapyLineViewSet  # noqa: E402
 
 
 class MeasurementConceptPagination(CursorPagination):
@@ -9347,31 +9345,17 @@ _CONCEPT_FILTER_PARAMS = ('vocabulary_id', 'domain_id', 'concept_class_id', 'sta
 _CONCEPT_SELECTIVE_PARAMS = ('vocabulary_id', 'domain_id', 'concept_class_id')
 
 
-def _apply_concept_filters(queryset, query_params):
-    for param in _CONCEPT_FILTER_PARAMS:
-        value = query_params.get(param)
-        if value:
-            queryset = queryset.filter(**{param: value})
-    return queryset
-
-
-def _concept_name_search_filter(query):
-    """Match a concept name by its literal text or its meaningful tokens.
-
-    A literal ``icontains`` remains the fast path and preserves exact phrase
-    semantics.  The token fallback makes a curator's ordinary punctuation and
-    spacing variations useful too: ``Non hod`` can find ``Non-Hodgkin``.  Each
-    token is still at least part of the submitted three-character query, so we
-    avoid introducing an unbounded one-character search.
-    """
-    tokens = re.findall(r'[^\W_]+', query, flags=re.UNICODE)
-    if len(tokens) < 2:
-        return Q(concept_name__icontains=query)
-
-    token_match = Q()
-    for token in tokens:
-        token_match &= Q(concept_name__icontains=token)
-    return Q(concept_name__icontains=query) | token_match
+# The concept search pipeline is packaged (omop_core.api.concepts) so an
+# embedding host's drug/regimen search cannot drift from the curator's.
+from omop_core.api.concepts import (  # noqa: E402
+    CONCEPT_FILTER_PARAMS as _CONCEPT_FILTER_PARAMS,
+    ConceptPagination as _PackagedConceptPagination,
+    apply_concept_filters as _apply_concept_filters,
+    concept_match_ordering as _concept_match_ordering,
+    concept_name_search_filter as _concept_name_search_filter,
+    destination_concepts as _destination_concepts,
+    serialize_concept_base as _serialize_concept_base,
+)
 
 
 def _serialize_concept_base(concept, versions=None):
@@ -9428,66 +9412,6 @@ def _set_measurement_concept_etag(response, etag):
 
 def _truthy_param(query_params, name):
     return (query_params.get(name) or '').strip().lower() in ('1', 'true', 'yes')
-
-
-def _destination_concepts(queryset, query_params):
-    """Narrow a concept search to what may be a mapping destination (#1465).
-
-    Search used to return every concept in the vocabulary. Two thirds of SNOMED
-    is retired, so that is mostly what a curator was offered, and picking one is
-    how retired concepts became approved destinations.
-
-    Active only, unless `include_retired`. Standard only, unless
-    `include_non_standard` -- "standard" rather than "a different code system
-    from the source", because LOINC->LOINC and SNOMED->SNOMED are correct
-    mappings while ICD-10, CPT4 and MedDRA hold no standard concepts at all, so
-    this rule excludes them as destinations without naming them. Concepts
-    authored here (`source='HealthKey'`, the HK-* buckets) are non-standard by
-    construction and are what imports point at, so they stay searchable.
-
-    An explicit `standard_concept` filter is the caller choosing, and wins.
-    """
-    if not _truthy_param(query_params, 'include_retired'):
-        # Athena writes NULL for an active concept; a hand-made row may hold ''.
-        queryset = queryset.filter(Q(invalid_reason__isnull=True) | Q(invalid_reason=''))
-    if not (
-        _truthy_param(query_params, 'include_non_standard')
-        or query_params.get('standard_concept')
-    ):
-        queryset = queryset.filter(Q(standard_concept='S') | Q(source='HealthKey'))
-    return queryset
-
-
-def _concept_match_ordering(query, concept_id):
-    """Order search hits by how well they match, best first (#1466).
-
-    Ordering by pk put whatever Athena numbered first at the top, so the 25-row
-    page a curator sees was arbitrary and "lymphoma" opened on obscure
-    morphology codes. Rank instead: an exact code or id, then an exact name,
-    then a name that starts with the query, then any other match; standard
-    concepts ahead of non-standard within a rank, shorter names (the more
-    general concept) ahead of longer ones.
-
-    The sort runs over the matched set only, which the indexes have already
-    narrowed. It also takes `ORDER BY concept_id LIMIT n` away from the planner,
-    which for a rare term chose to walk the whole primary key looking for 25
-    matches that did not exist (~2s on staging).
-    """
-    best = Q(concept_code__iexact=query)
-    if concept_id is not None:
-        best |= Q(concept_id=concept_id)
-    return (
-        Case(
-            When(best, then=0),
-            When(concept_name__iexact=query, then=1),
-            When(concept_name__istartswith=query, then=2),
-            default=3,
-            output_field=IntegerField(),
-        ),
-        Case(When(standard_concept='S', then=0), default=1, output_field=IntegerField()),
-        Length('concept_name'),
-        'concept_id',
-    )
 
 
 def _paginated_concept_response(queryset, request, ordering=('concept_id',)):
@@ -9905,30 +9829,10 @@ def therapy_regimen_list(request):
         regimen = TherapyRegimen.objects.create(code=code, title=title, concept_id=concept_id)
         return Response({'code': regimen.code, 'title': regimen.title, 'concept_id': regimen.concept_id}, status=status.HTTP_201_CREATED)
 
-    qs = TherapyRegimen.objects.all().order_by('title')
-
-    disease_code = request.query_params.get('disease')
-    round_code = request.query_params.get('round')
-    search = request.query_params.get('search', '').strip()
-
-    if disease_code or round_code:
-        dtr_qs = DiseaseTherapyRegimen.objects.all()
-        if disease_code:
-            from omop_core.services.treatment_catalog import disease_filter
-            dtr_qs = dtr_qs.filter(disease_filter(disease_code))
-        if round_code:
-            dtr_qs = dtr_qs.filter(round__code=round_code)
-        regimen_ids = dtr_qs.values_list('regimen_id', flat=True)
-        qs = qs.filter(id__in=regimen_ids)
-
-    if search:
-        qs = qs.filter(title__icontains=search)
-
-    values = qs.values('code', 'title', 'concept_id')
-    # A disease/round picker needs the complete available list. Search remains
-    # bounded, but alphabetical truncation must not hide valid supportive care.
-    items = list(values if round_code and not search else values[:50])
-    return Response(items)
+    # Reads are packaged (omop_core.api.regimens) so an embedding host cannot
+    # drift from this list; curation writes stay here.
+    from omop_core.api.regimens import regimen_list_payload
+    return Response(regimen_list_payload(request.query_params))
 
 
 @api_view(['GET', 'PATCH', 'DELETE'])
@@ -9965,41 +9869,8 @@ def therapy_regimen_detail(request, code):
         regimen.save()
         # Fall through to return the updated detail
 
-    component_links = TherapyRegimenComponent.objects.filter(
-        regimen=regimen,
-    ).select_related('component', 'component__concept').prefetch_related(
-        Prefetch(
-            'component__component_classes',
-            queryset=TherapyComponentClassLink.objects.select_related('therapy_class'),
-        )
-    )
-
-    components = []
-    for link in component_links:
-        comp = link.component
-        concept = comp.concept
-        classes = [
-            {'code': cl.therapy_class.code, 'title': cl.therapy_class.title, 'concept_id': cl.therapy_class.concept_id}
-            for cl in comp.component_classes.all()
-        ]
-        components.append({
-            'code': comp.code,
-            'title': comp.title,
-            'concept_id': comp.concept_id,
-            'concept_name': concept.concept_name if concept else comp.title,
-            'concept_code': concept.concept_code if concept else comp.code,
-            'vocabulary_id': concept.vocabulary_id if concept else None,
-            'standard_concept': concept.standard_concept if concept else None,
-            'invalid_reason': concept.invalid_reason if concept else None,
-            'classes': classes,
-        })
-
-    return Response({
-        'code': regimen.code,
-        'title': regimen.title,
-        'concept_id': regimen.concept_id,
-        'components': components,
-    })
+    from omop_core.api.regimens import regimen_detail_payload
+    return Response(regimen_detail_payload(regimen.code))
 
 
 @api_view(['GET', 'POST'])
@@ -14661,34 +14532,22 @@ def field_formula_detail(request, pk):
     return Response(serializer.data)
 
 
-class TherapyLineViewSet(viewsets.ViewSet):
-    """Author a line of therapy.
+class TherapyLineViewSet(_PackagedTherapyLineViewSet):
+    """Author a line of therapy, under PROMOP's own permissions.
 
-    ``POST /api/v1/therapy-lines/``
-
-    Every therapy field on ``PatientRecord`` is derived: a line of therapy is a
-    set of DrugExposures grouped by an Episode through EpisodeEvent, and
-    ``first_line_therapy``, ``therapy_lines_count``, the intents, the outcomes
-    and ``treatment_refractory_status`` are all inferred back out of that
-    grouping. None of them is a column an editor can write, which is why the
-    treatment tab is read-only.
-
-    Writing one directly means three POSTs -- the exposures, the episode, the
-    links -- carrying ``episode_concept=32531``, an
-    ``episode_type_concept``, an ``episode_object_concept`` and a
-    client-supplied ``episode_id``. That is CDM knowledge a browser should not
-    hold, and getting any of it wrong produces a line that stores cleanly and
-    infers wrongly.
-
-    So the caller sends what a clinician knows and the server does the rest,
-    through the same ``upsert_therapy_line_episode`` every other path uses, so
-    the tagging cannot drift. One transaction; the record is re-derived once at
-    the end rather than per row.
+    The clinical write and its payload are packaged (``omop_core.api``) so an
+    embedding host serves the same contract. What stays here is host policy:
+    which roles may write, the organization check object-level permissions do
+    not apply on create, and the record payload this product's client expects.
     """
 
     permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
 
     def _check_person_write_permission(self, request, person):
+        """Kept as the name other patient-portal code calls."""
+        return self.patient_write_denied(request, person)
+
+    def patient_write_denied(self, request, person):
         # Same create-time check the single-row clinical writes use: object-level
         # permissions do not fire on create, so the queryset scoping that
         # protects reads is not protecting this.
@@ -14711,159 +14570,5 @@ class TherapyLineViewSet(viewsets.ViewSet):
                     )
         return None
 
-    def create(self, request):
-        from omop_core.services.episode_service import author_therapy_line
-        from omop_core.services.therapy_transactions import TherapyLineWriteConflict
-
-        serializer = TherapyLineWriteSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        data = serializer.validated_data
-        person = data['person']
-
-        denied = self._check_person_write_permission(request, person)
-        if denied is not None:
-            return denied
-
-        try:
-            with transaction.atomic():
-                # The exposures fire post_save, and each one would re-derive the
-                # whole record. Derive once, after the episode exists -- before
-                # it, the exposures are ungrouped and inference would read a line
-                # that is half-written.
-                with suppress_patient_record_refresh():
-                    result = author_therapy_line(
-                        person,
-                        line_number=data['line_number'],
-                        disease=data.get('disease') or None,
-                        **{key: data[key] for key in (
-                            'drugs', 'start_date', 'end_date', 'regimen_concept_id',
-                            'outcome', 'intent', 'discontinuation_reason', 'source_value',
-                        ) if key in data},
-                    )
-        except TherapyLineWriteConflict as exc:
-            return Response({'detail': str(exc)}, status=status.HTTP_409_CONFLICT)
-        except ValueError as exc:
-            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-
-        if result.episode is None:
-            # upsert_therapy_line_episode returns no episode when the Treatment
-            # Regimen concept is absent, which means the vocabulary is not
-            # loaded. Reporting 201 over a line that was not grouped would be a
-            # lie -- nothing would have been inferred from it.
-            return Response(
-                {'detail': (
-                    'Treatment Regimen concept (32531) is not loaded, so the '
-                    'therapy line could not be grouped. Load the Episode '
-                    'vocabulary and retry.'
-                )},
-                status=status.HTTP_409_CONFLICT,
-            )
-
-        person.refresh_from_db()
-        record = refresh_patient_record(person)
-        return Response(
-            {
-                'episode_id': result.episode.episode_id,
-                'line_number': data['line_number'],
-                'created': result.created,
-                'drug_exposure_ids': result.drug_exposure_ids,
-                'drugs_created': result.drugs_created,
-                'patient_info': PatientRecordSerializer(record).data,
-            },
-            status=status.HTTP_201_CREATED,
-        )
-
-    def partial_update(self, request, pk=None):
-        from omop_core.services.episode_service import author_therapy_line
-        from omop_core.services.therapy_transactions import TherapyLineWriteConflict
-
-        try:
-            episode_id = int(pk)
-        except (TypeError, ValueError):
-            return Response(
-                {'detail': 'Invalid therapy line episode_id.'},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
-        episode = Episode.objects.filter(episode_id=episode_id).select_related('person').first()
-        if episode is None:
-            return Response(
-                {'detail': 'Therapy line not found.'},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-        if episode.episode_number is None:
-            return Response(
-                {'detail': 'Therapy line has no episode_number to edit.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        requested_line = request.data.get('line_number')
-        if requested_line is not None:
-            try:
-                requested_line = int(requested_line)
-            except (TypeError, ValueError):
-                return Response(
-                    {'detail': 'line_number must be an integer.'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            if requested_line != episode.episode_number:
-                return Response(
-                    {'detail': 'Editing a therapy line cannot change its line_number.'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-        payload = dict(request.data)
-        payload['person'] = episode.person_id
-        payload['line_number'] = episode.episode_number
-        serializer = TherapyLineWriteSerializer(data=payload, partial=True)
-        serializer.is_valid(raise_exception=True)
-        data = serializer.validated_data
-        person = episode.person
-
-        denied = self._check_person_write_permission(request, person)
-        if denied is not None:
-            return denied
-
-        try:
-            with transaction.atomic():
-                with suppress_patient_record_refresh():
-                    result = author_therapy_line(
-                        person,
-                        line_number=episode.episode_number,
-                        replace=True,
-                        # This line, by id: another cancer may have a line with
-                        # the same number (#1739).
-                        episode=episode,
-                        **{key: data[key] for key in (
-                            'drugs', 'start_date', 'end_date', 'regimen_concept_id',
-                            'outcome', 'intent', 'discontinuation_reason', 'source_value',
-                        ) if key in data},
-                    )
-        except TherapyLineWriteConflict as exc:
-            return Response({'detail': str(exc)}, status=status.HTTP_409_CONFLICT)
-        except ValueError as exc:
-            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-
-        if result.episode is None:
-            return Response(
-                {'detail': (
-                    'Treatment Regimen concept (32531) is not loaded, so the '
-                    'therapy line could not be grouped. Load the Episode '
-                    'vocabulary and retry.'
-                )},
-                status=status.HTTP_409_CONFLICT,
-            )
-
-        person.refresh_from_db()
-        record = refresh_patient_record(person)
-        return Response(
-            {
-                'episode_id': result.episode.episode_id,
-                'line_number': episode.episode_number,
-                'created': result.created,
-                'drug_exposure_ids': result.drug_exposure_ids,
-                'drugs_created': result.drugs_created,
-                'patient_info': PatientRecordSerializer(record).data,
-            },
-            status=status.HTTP_200_OK,
-        )
+    def patient_info_payload(self, record):
+        return PatientRecordSerializer(record).data

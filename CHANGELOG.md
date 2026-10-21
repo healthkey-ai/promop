@@ -8,6 +8,16 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **The therapy editor's endpoints ship in the package** — `omop_core.api`
+  serves the five calls the patient widget makes (`therapy-lines`,
+  `therapy-outcomes`, `therapy-regimens` list and detail, `concepts/search`)
+  from the installed wheel, so an embedding host can run the editor instead of
+  only deriving from data it cannot author. Host policy stays out: permissions,
+  the per-person write check and the `PatientRecord` payload shape are seams a
+  host overrides. The in-place API now imports the same serializers, queries and
+  viewset, so the two surfaces cannot drift. Requires the `api` extra
+  (`djangorestframework`) (#1924).
+
 - **Concept mapping priority** — on Code Mapping → Concept to Code, curators
   rank concepts by dragging rows, typing a priority (1 is first; clear it to
   unrank) or the up/down buttons. Ranked concepts come first on every page and
