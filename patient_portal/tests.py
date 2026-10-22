@@ -19059,6 +19059,62 @@ class BulkOmopWriteTest(TestCase):
         self.assertIn('measurement_id', resp.data[1])
         self.assertFalse(Measurement.objects.filter(measurement_id=999999).exists())
 
+    def test_sparse_validation_errors_stay_aligned_on_all_bulk_resources(self):
+        from rest_framework.settings import api_settings
+
+        # Do not restore the old format globally to make the endpoint pass.
+        self.assertTrue(api_settings.LIST_SERIALIZER_ERRORS_AS_DICT)
+        cases = [
+            ('conditions', ConditionOccurrence, 'condition_start_date', {
+                'condition_concept': self.m_concept.concept_id,
+                'condition_type_concept': self.type_concept.concept_id,
+            }),
+            ('drug-exposures', DrugExposure, 'drug_exposure_start_date', {
+                'drug_concept': self.drug_concept.concept_id,
+                'drug_type_concept': self.type_concept.concept_id,
+            }),
+            ('measurements', Measurement, 'measurement_date', {
+                'measurement_concept': self.m_concept.concept_id,
+                'measurement_type_concept': self.type_concept.concept_id,
+            }),
+            ('observations', Observation, 'observation_date', {
+                'observation_concept': self.m_concept.concept_id,
+                'observation_type_concept': self.type_concept.concept_id,
+            }),
+            ('procedures', ProcedureOccurrence, 'procedure_date', {
+                'procedure_concept': self.m_concept.concept_id,
+                'procedure_type_concept': self.type_concept.concept_id,
+            }),
+        ]
+        for prefix in ('/api', '/api/v1'):
+            for route, model, date_field, fields in cases:
+                with self.subTest(prefix=prefix, route=route):
+                    before = model.objects.count()
+                    rows = [dict(fields, person=self.person.person_id,
+                                 **{date_field: '2024-01-01'}) for _ in range(3)]
+                    del rows[0][date_field]
+                    del rows[2][date_field]
+                    resp = self.client.post(f'{prefix}/{route}/', rows, format='json')
+                    self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+                    self.assertIsInstance(resp.data, list)
+                    self.assertEqual(len(resp.data), 3)
+                    self.assertIn(date_field, resp.data[0])
+                    self.assertEqual(resp.data[1], {})
+                    self.assertIn(date_field, resp.data[2])
+                    self.assertEqual(model.objects.count(), before)
+
+    def test_bulk_list_level_validation_errors_are_not_expanded(self):
+        from rest_framework.exceptions import ValidationError
+        from unittest.mock import patch
+
+        before = Measurement.objects.count()
+        with patch('rest_framework.serializers.ListSerializer.validate',
+                   side_effect=ValidationError({'non_field_errors': ['Invalid batch.']})):
+            resp = self.client.post('/api/v1/measurements/', self._rows(3), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(resp.data, {'non_field_errors': ['Invalid batch.']})
+        self.assertEqual(Measurement.objects.count(), before)
+
     def test_mixed_person_batch_is_rejected(self):
         """One batch is one person; a mixed batch is a client bug, not a merge."""
         rows = self._rows(2) + self._rows(1, person=self.other_person, start_day=5)
