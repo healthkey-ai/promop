@@ -15,22 +15,27 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from omop_core.models import GroupAccess
+from omop_core.models import GroupAccess, PatientRecord
 from patient_portal.models import BreakGlassGrant
 from .permissions import is_service_token
 
 
-def _may_break_glass(request) -> bool:
-    """Only professional/staff callers may break glass — never a plain patient."""
+def _may_break_glass(request, person_id: int) -> bool:
+    """Require a patient/org nexus unless an explicit emergency policy applies."""
     user = request.user
-    if is_service_token(request) or getattr(user, 'is_staff', False):
+    if is_service_token(request):
+        return bool(getattr(settings, 'BREAK_GLASS_ALLOW_SERVICE', False))
+    if getattr(user, 'is_superuser', False):
         return True
     from django.db.models import Q
     now = timezone.now()
-    return GroupAccess.objects.filter(identity=user).exclude(
+    org_ids = GroupAccess.objects.filter(identity=user).exclude(
         role='patient',
     ).filter(
         Q(expires_at__isnull=True) | Q(expires_at__gt=now)
+    ).exclude(org_id__isnull=True).values_list('org_id', flat=True)
+    return PatientRecord.objects.filter(
+        person_id=person_id, organization_id__in=org_ids,
     ).exists()
 
 
@@ -38,12 +43,6 @@ def _may_break_glass(request) -> bool:
 @permission_classes([IsAuthenticated])
 def break_glass(request):
     """POST /api/v1/break-glass/ {person_id, reason} — authorize emergency audit access."""
-    if not _may_break_glass(request):
-        return Response(
-            {'error': 'You are not permitted to invoke break-glass access.'},
-            status=status.HTTP_403_FORBIDDEN,
-        )
-
     reason = (request.data.get('reason') or '').strip()
     if not reason:
         return Response({'error': 'A reason is required for break-glass access.'},
@@ -53,6 +52,12 @@ def break_glass(request):
     except (TypeError, ValueError):
         return Response({'error': 'A valid person_id is required.'},
                         status=status.HTTP_400_BAD_REQUEST)
+
+    if not _may_break_glass(request, person_id):
+        return Response(
+            {'error': 'You are not permitted to invoke break-glass access.'},
+            status=status.HTTP_403_FORBIDDEN,
+        )
 
     expires_at = timezone.now() + timezone.timedelta(seconds=settings.BREAK_GLASS_TTL_SECONDS)
     grant = BreakGlassGrant.objects.create(

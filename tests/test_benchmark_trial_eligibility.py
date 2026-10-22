@@ -46,9 +46,9 @@ def _seed_trial_eligibility_patient(org):
         ast_u_l=18,
         alt_u_l=21,
         albumin_g_dl=4.0,
-        her2_status='NEGATIVE',
-        estrogen_receptor_status='POSITIVE',
-        progesterone_receptor_status='POSITIVE',
+        her2_status='Negative',
+        estrogen_receptor_status='Positive',
+        progesterone_receptor_status='Positive',
     )
 
     ConditionOccurrenceFactory(
@@ -85,12 +85,14 @@ def _seed_trial_eligibility_patient(org):
         measurement_concept=ConceptFactory(concept_name='Platelet count', concept_code='777-3'),
         measurement_source_value='777-3',
         value_as_number=180.0,
+        unit_source_value='10*3/uL',
     )
     MeasurementFactory(
         person=person,
         measurement_concept=ConceptFactory(concept_name='Absolute neutrophil count', concept_code='751-8'),
         measurement_source_value='751-8',
         value_as_number=2.1,
+        unit_source_value='10*3/uL',
     )
     MeasurementFactory(
         person=person,
@@ -191,4 +193,3 @@ class TestBenchmarkTrialEligibility:
     def test_empty_cohort_raises_command_error(self):
         with pytest.raises(CommandError):
             call_command('benchmark_trial_eligibility', person_ids='999999999')
-

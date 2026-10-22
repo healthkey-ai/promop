@@ -3,10 +3,8 @@
 How Apple Watch and Garmin metrics are normalized into OMOP CDM v5.4 `measurement` and
 `observation` rows, and what still needs to be built.
 
-Companion documents:
-- [concept-mapping.md](concept-mapping.md) — general LOINC/SNOMED/HemOnc → OMOP concept resolution
-- [apple-wearable-patientinfo-fields.md](apple-wearable-patientinfo-fields.md) — the original
-  issue proposing the derived `PatientRecord` summary columns that sit *above* this layer
+See [concept-mapping.md](concept-mapping.md) for general LOINC/SNOMED/HemOnc → OMOP
+concept resolution.
 
 ---
 

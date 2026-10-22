@@ -30,9 +30,13 @@ def build_trusting_map(org_list) -> 'dict[int, set[int]]':
     # Domain trusts: find email domains of each org's users via GroupAccess
     org_user_domains: dict[int, set[str]] = {oid: set() for oid in org_ids}
 
+    # Only addresses the account has proved it owns count toward a domain
+    # trust -- the same rule get_accessible_orgs applies to one user.
+    verified = Q(identity__email_verified_at__isnull=False)
+
     # org_admin grants have a direct org FK
     for row in GroupAccess.objects.filter(
-        org_id__in=org_ids,
+        verified, org_id__in=org_ids,
     ).values('org_id', 'identity__email'):
         email = row['identity__email'] or ''
         if '@' in email:
@@ -40,7 +44,7 @@ def build_trusting_map(org_list) -> 'dict[int, set[int]]':
 
     # group-member grants go through group__organization
     for row in GroupAccess.objects.filter(
-        group__organization_id__in=org_ids,
+        verified, group__organization_id__in=org_ids,
     ).values('group__organization_id', 'identity__email'):
         org_id = row['group__organization_id']
         email = row['identity__email'] or ''
@@ -113,11 +117,12 @@ def get_visible_orgs(user) -> QuerySet:
     ) if direct_ids else set()
 
     # Domain trusts: active orgs that trust the user's email domain
-    email = (getattr(user, 'email', '') or '')
-    user_domain = email.split('@')[1] if '@' in email else ''
+    # Verified only: a domain trust hands out another organization's patients,
+    # and self-signup lets anyone type any address.
+    user_domain = getattr(user, 'verified_email_domain', '')
     trusted_by_domain = set(
         OrgTrust.objects.filter(
-            trusted_domain=user_domain,
+            trusted_domain__iexact=user_domain,
             granting_org__is_active=True,
         ).values_list('granting_org_id', flat=True)
     ) if user_domain else set()
@@ -137,77 +142,58 @@ def get_visible_orgs(user) -> QuerySet:
     return Organization.objects.filter(id__in=all_ids)
 
 
-def get_admin_orgs(user) -> QuerySet:
-    """Return orgs the user may administer.
+def get_admin_access_paths(user):
+    """Explain each explicit or trust-derived organization-admin grant.
 
-    Admin access is granted via:
-      - is_staff → all orgs
-      - direct org_admin grants
-      - OrgTrust expansion (org-to-org or domain trust) of professional-role
-        grants (org_admin, doctor, analyst).  Patients are excluded from
-        trust expansion — a ``role='patient'`` grant at Org A does NOT
-        confer admin access to Org B even if B trusts A.
-
-    Public aggregated-data visibility does not confer admin rights.
+    These paths are also used for authorization, so the profile reports the
+    same scope that endpoints enforce. Staff's platform scope is handled by
+    get_admin_orgs rather than expanded to one row per organization.
     """
+    now = timezone.now()
+    active = list(GroupAccess.objects.filter(identity=user).filter(
+        Q(expires_at__isnull=True) | Q(expires_at__gt=now),
+    ).select_related('org'))
+    paths = []
+    professional = {}
+    org_grants = [grant for grant in active if grant.org_id]
+    for grant in org_grants:
+        if grant.role == 'org_admin':
+            paths.append({'org': grant.org, 'source': 'org_grant',
+                          'expires_at': grant.expires_at})
+        if grant.role != 'patient':
+            professional[grant.org_id] = grant
+    for trust in OrgTrust.objects.filter(
+        trusted_org_id__in=professional, granting_org__is_active=True,
+    ).select_related('granting_org', 'trusted_org').order_by('id'):
+        grant = professional[trust.trusted_org_id]
+        paths.append({
+            'org': trust.granting_org, 'source': 'organization_trust',
+            'source_org_name': trust.trusted_org.name,
+            'source_org_slug': trust.trusted_org.slug,
+            'expires_at': grant.expires_at,
+        })
+    # Preserve domain-trust policy: patient-only organization memberships do
+    # not inherit admin authority just because their email matches a domain.
+    # Verified only -- see get_accessible_orgs.
+    domain = getattr(user, 'verified_email_domain', '')
+    if domain and not (org_grants and not professional):
+        for trust in OrgTrust.objects.filter(
+            trusted_domain__iexact=domain, granting_org__is_active=True,
+        ).select_related('granting_org').order_by('id'):
+            paths.append({
+                'org': trust.granting_org, 'source': 'domain_trust',
+                'source_domain': trust.trusted_domain, 'expires_at': None,
+            })
+    return paths
+
+
+def get_admin_orgs(user) -> QuerySet:
+    """Staff administer all orgs; other users follow scoped grants and trusts."""
     if getattr(user, 'is_staff', False):
         return Organization.objects.all()
-
-    now = timezone.now()
-    active = GroupAccess.objects.filter(
-        identity=user,
-    ).filter(
-        Q(expires_at__isnull=True) | Q(expires_at__gt=now)
+    return Organization.objects.filter(
+        id__in={path['org'].pk for path in get_admin_access_paths(user)},
     )
-
-    # Direct org_admin grants (needed to always include the user's directly-
-    # administered orgs even if no trust relationships exist).
-    admin_ids = set(
-        active.filter(
-            role='org_admin',
-            org__isnull=False,
-        ).values_list('org_id', flat=True)
-    )
-
-    # All non-patient org-level grants — used only for trust expansion.
-    professional_ids = set(
-        active.exclude(role='patient').filter(
-            org__isnull=False,
-        ).values_list('org_id', flat=True)
-    )
-
-    # Org-to-org trusts: active orgs that trust any org the user has a
-    # professional role in.
-    trusted_by_org = set(
-        OrgTrust.objects.filter(
-            trusted_org_id__in=professional_ids,
-            granting_org__is_active=True,
-        ).values_list('granting_org_id', flat=True)
-    ) if professional_ids else set()
-
-    # Domain trusts: active orgs that trust the user's email domain.
-    # Suppressed when the user's only grants are patient-role (a patient who
-    # happens to share a trusted domain must not gain admin access).
-    email = (getattr(user, 'email', '') or '')
-    user_domain = email.split('@')[1] if '@' in email else ''
-    is_patient_only = (
-        active.filter(org__isnull=False).exists()
-        and not active.exclude(role='patient').filter(org__isnull=False).exists()
-    )
-    trusted_by_domain = set()
-    if user_domain and not is_patient_only:
-        trusted_by_domain = set(
-            OrgTrust.objects.filter(
-                trusted_domain=user_domain,
-                granting_org__is_active=True,
-            ).values_list('granting_org_id', flat=True)
-        )
-
-    all_ids = admin_ids | trusted_by_org | trusted_by_domain
-    if not all_ids:
-        return Organization.objects.none()
-
-    return Organization.objects.filter(id__in=all_ids)
 
 
 def has_org_admin_access(user, slug: str | None = None) -> bool:
@@ -216,3 +202,35 @@ def has_org_admin_access(user, slug: str | None = None) -> bool:
     if slug is None:
         return admin_orgs.exists()
     return admin_orgs.filter(slug=slug).exists()
+
+
+def has_explicit_org_admin_access(user, slug: str) -> bool:
+    """Access administration requires a direct organization-level admin grant.
+
+    Trusts provide access to data, but must not let their members delegate
+    access to others. Group-scoped grants do not administer an entire org.
+    """
+    if getattr(user, 'is_staff', False):
+        return True
+    return GroupAccess.objects.filter(
+        identity=user, org__slug=slug, org__is_active=True, role='org_admin',
+    ).filter(
+        Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()),
+    ).exists()
+
+
+def has_professional_access(user) -> bool:
+    """Return True when the user holds any professional role (org_admin, doctor, analyst).
+
+    Used to gate access to mapping curation pages — any professional can
+    propose mappings, but only org admins and staff can approve them.
+    """
+    if getattr(user, 'is_staff', False):
+        return True
+    now = timezone.now()
+    return GroupAccess.objects.filter(
+        identity=user,
+        role__in=('org_admin', 'doctor', 'analyst'),
+    ).filter(
+        Q(expires_at__isnull=True) | Q(expires_at__gt=now),
+    ).exists()

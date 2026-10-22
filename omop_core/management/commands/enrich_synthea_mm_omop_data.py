@@ -25,6 +25,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError
+from omop_core.services.sample_patient_stage import ensure_sample_patient_stage
+from omop_core.services.sample_patient_disease_status import ensure_sample_patient_disease_status
 from django.db import close_old_connections, connection, transaction
 
 from omop_core.models import (
@@ -563,6 +565,10 @@ class Command(BaseCommand):
                 bundle_key = _patient_key_from_person(person)
                 source = bundle_by_key.get(bundle_key)
                 if source is None:
+                    ensure_sample_patient_stage(record, disease='MM', dry_run=dry_run)
+                    ensure_sample_patient_disease_status(record, dry_run=dry_run)
+                    if not dry_run:
+                        touched_person_ids.append(person.person_id)
                     self.stdout.write(
                         f'  [{idx}/{len(cohort)}] person_id={person.person_id} skipped (no bundle match)'
                     )
@@ -573,6 +579,12 @@ class Command(BaseCommand):
                 if diagnosis_date is None:
                     diagnosis_date = datetime.utcnow().date()
                 condition_resource = source['conditions'][0] if source['conditions'] else None
+                stage_summaries = [s.get('summary', {}) for s in (condition_resource or {}).get('stage', [])]
+                stage_labels = [s.get('text') or next((c.get('display') for c in s.get('coding', [])
+                                                     if c.get('display')), '') for s in stage_summaries]
+                asserted_stage = next((s for s in stage_labels if s.upper().startswith('R-ISS')),
+                                      next((s for s in stage_labels if s), None))
+                ensure_sample_patient_stage(record, disease='MM', asserted_stage=asserted_stage, dry_run=dry_run)
                 condition_date = None
                 condition_code = None
                 condition_name = 'Multiple Myeloma'
@@ -728,6 +740,7 @@ class Command(BaseCommand):
                     person, therapy_lines, ehr_type, dry_run=dry_run,
                 )
 
+                ensure_sample_patient_disease_status(record, dry_run=dry_run)
                 touched_person_ids.append(person.person_id)
                 self.stdout.write(
                     f'  [{idx}/{len(cohort)}] person_id={person.person_id} '
@@ -758,6 +771,12 @@ class Command(BaseCommand):
                 self.stderr.write(self.style.WARNING(f'  person_id={person_id} refresh failed: {exc}'))
         if refresh_failed:
             self.stderr.write(self.style.WARNING(f'{refresh_failed} patient(s) failed to refresh.'))
+
+        from django.core.management import call_command
+        sample_slugs = list(PatientRecord.objects.filter(person_id__in=touched_person_ids).exclude(organization=None).values_list('organization__slug', flat=True).distinct())
+        if sample_slugs:
+            call_command('backfill_sample_disease_profiles', org_slugs=','.join(sample_slugs), disease='MM',
+                         person_ids=','.join(str(pk) for pk in touched_person_ids), confirm=True)
 
         # ----------------------------------------------------------------
         # Completeness validation: report null critical fields per patient

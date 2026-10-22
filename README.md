@@ -9,9 +9,14 @@ Deployed across approximately 17,500 real oncology patients, with trial matching
 
 See [paper.md](paper.md) for the full research description.
 
+**Architecture and documentation:** [Read the overview](docs/README.md) for the data flow, current contracts, and a guided route through the documentation.
+
+Field concept mapping: [implemented architecture](docs/field_concept_mapping_architecture.md)
+and [enhancements plan](docs/field_concept_mapping_plan.md).
+
 **New here?** → [**Load and query patient data in 10 minutes**](docs/quickstart.md)
 
-Not on a Mac? See the [Linux setup guide](docs/linux-setup.md). Prefer Docker? See [BUILDING_WITH_DOCKER.md](BUILDING_WITH_DOCKER.md).
+Not on a Mac? See the [Linux setup guide](docs/linux-setup.md). Prefer Docker? See [BUILDING_WITH_DOCKER.md](docs/BUILDING_WITH_DOCKER.md).
 
 ---
 
@@ -19,7 +24,7 @@ Not on a Mac? See the [Linux setup guide](docs/linux-setup.md). Prefer Docker? S
 
 - **FHIR R4 ingestion** — Bundle uploads mapped to OMOP tables (observations → `Measurement`, conditions → `ConditionOccurrence`, medications → `DrugExposure` + `Episode`)
 - **PatientRecord projection** — 300+ column decision-ready view, auto-rebuilt via signal chain on every OMOP write
-- **Versioned REST API** — `/api/v1/` with [OpenAPI 3.0 schema](API_SURFACE.md) and Swagger UI at `/api/v1/docs/`
+- **Versioned REST API** — `/api/v1/` with [OpenAPI 3.0 schema](docs/API_SURFACE.md) and Swagger UI at `/api/v1/docs/`
 - **Multi-tenant access control** — OAuth2 and SMART on FHIR authorization, org-scoped role-based access
 - **Synthetic FHIR generator** — reproducible patient bundles for multiple diseases (MM, FL, breast cancer)
 
@@ -29,7 +34,8 @@ Not on a Mac? See the [Linux setup guide](docs/linux-setup.md). Prefer Docker? S
 
 - Interactive Swagger UI: `http://localhost:8000/api/v1/docs/`
 - OpenAPI schema: `GET /api/v1/schema/`
-- Full API surface reference: **[API_SURFACE.md](API_SURFACE.md)**
+- SODAP role hierarchy and privileges: **[docs/application-roles.md](docs/application-roles.md)**
+- Full API surface reference: **[API_SURFACE.md](docs/API_SURFACE.md)**
 - LOINC / SNOMED / HemOnc concept mapping: **[docs/concept-mapping.md](docs/concept-mapping.md)**
 - Required Athena vocabulary download and selection scope: **[docs/vocabularies.md](docs/vocabularies.md)**
 
@@ -68,37 +74,58 @@ PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U postgres -d postgres \
   -c "CREATE DATABASE promop_test OWNER postgres;"
 ```
 
-### 3. Apply migrations
+### 3. Prepare the schema for the Athena vocabulary
+
+Production and clinical environments must load the **full** Athena vocabulary
+before applying migrations after `omop_core` migration `0200`. In particular,
+migration `0201` creates approved HK-Labs-to-LOINC mappings and requires its
+LOINC destination concepts to exist. Do not use the retired
+`seed_omop_concepts` development fixture in a deployed environment.
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
-  .venv/bin/python manage.py migrate
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
+  .venv/bin/python manage.py migrate omop_core 0200 --noinput
 ```
 
-### 4. Create a superuser
+### 4. Load the full Athena vocabulary
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
-  .venv/bin/python manage.py setup_admin
-```
-
-### 5. Load the Athena vocabulary
-
-PRomop needs the Athena vocabulary tables before clinical code resolution is
-useful. The easiest path is the prepared zipped vocabulary in Google Drive:
-
-```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py load_athena_vocabularies --gdrive
 ```
 
 `--gdrive` defaults to the shared PRomop vocabulary folder. See
-[docs/vocabularies.md](docs/vocabularies.md) for the selected vocabulary scope
-and other load options, including `--archive` for a downloaded Athena zip,
-`--path` for an extracted Athena directory, and `--bucket` for GCS-backed
-deployments.
+[docs/vocabularies.md](docs/vocabularies.md) for the required Athena selection
+scope and other load options, including `--archive` for a downloaded Athena
+zip, `--path` for an extracted Athena directory, and `--bucket` for
+GCS-backed deployments.
 
-### 6. Run the backend
+#### Render deployment requirement
+
+Set `ATHENA_VOCABULARY_GDRIVE_URL` to the folder containing the **full** Athena
+export before deploying. The production startup script fails closed when it is
+missing, migrates the schema through `0200`, loads that export, and then runs
+the remaining migrations. This ordering is required; it prevents migration
+`0201` from creating null-target HK-Labs-to-LOINC mappings.
+
+### 5. Apply the remaining migrations
+
+Only after the vocabulary load succeeds, apply the migrations that seed and
+validate mappings against those concepts:
+
+```bash
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
+  .venv/bin/python manage.py migrate --noinput
+```
+
+### 6. Create a superuser
+
+```bash
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
+  .venv/bin/python manage.py setup_admin
+```
+
+### 7. Run the backend
 
 ```bash
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
@@ -108,7 +135,7 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
 
 The API is available at `http://localhost:8000/api/v1/`.
 
-### 7. Run the frontend
+### 8. Run the frontend
 
 ```bash
 cd frontend
@@ -122,7 +149,7 @@ The UI is available at `http://localhost:5173`.
 
 ## Docker
 
-See [BUILDING_WITH_DOCKER.md](BUILDING_WITH_DOCKER.md) for the full guide including dev mode,
+See [BUILDING_WITH_DOCKER.md](docs/BUILDING_WITH_DOCKER.md) for the full guide including dev mode,
 common tasks, environment variables, and troubleshooting. The short version:
 
 ```bash
@@ -140,7 +167,7 @@ invisible to it. Run both.
 
 ```bash
 # Backend — Django runner (omop_core + patient_portal)
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" DEBUG=True \
   .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput
 
 # Backend — pytest (the tests/ package)
@@ -166,7 +193,7 @@ PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U postgres -d template1 \
 
 ## Populating Sample Patient Data
 
-See [docs/sample-patient-data.md](docs/sample-patient-data.md) for instructions on generating and loading synthetic FHIR patient bundles for multiple disease types.
+See [Synthetic patient generation](docs/SYNTHETIC_PATIENT_GENERATION.md) for instructions on generating and loading synthetic FHIR patient bundles for multiple disease types.
 
 ---
 
@@ -190,9 +217,9 @@ See **[docs/reproducing-benchmark-results.md](docs/reproducing-benchmark-results
 
 ## Deployment (Render)
 
-`start.sh` runs `migrate` and `setup_admin` on every deploy. Push to `main` to trigger a Render deploy.
+`start.sh` runs `scripts/prepare-deployment.sh`, which migrates and runs `setup_admin`, on every deploy. Push to `main` to trigger a Render deploy.
 
-- Backend: `https://promop.onrender.com`
+- Backend: `https://promop.onrender.com` (this is just our public example which you can sign up to as demo user, but you cannot deploy to it)
 - Admin credentials: set via `ADMIN_EMAIL` / `ADMIN_PASSWORD` env vars on Render
 
 ---
@@ -212,4 +239,24 @@ This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.
 
 ## Citation
 
+The concept-mapping **Semantic retrieval** strategy and search-expansion fallback adapt
+[Lettuce](https://github.com/Health-Informatics-UoN/lettuce)'s approach, developed
+by University of Nottingham Health Informatics under the MIT License. See
+[third-party acknowledgments and license notices](THIRD_PARTY_NOTICES.md) and
+[semantic retrieval setup](docs/semantic-retrieval.md).
+
 If you use PRomop in research, please cite it using [CITATION.cff](CITATION.cff) or via GitHub's "Cite this repository" button.
+
+## Project package and deployment compatibility
+
+`promop` is the canonical Django project package. Use `promop.settings`,
+`gunicorn promop.wsgi:application`, and `celery -A promop worker` for new
+configuration. The `ctomop` modules remain compatibility aliases to the same
+settings, URL configuration, WSGI/ASGI applications and Celery app, so existing
+deployment commands and imports continue to work without duplicate applications.
+Database tables, Django app labels and migration history are unchanged.
+
+Render staging, Render production and Google Cloud Run staging remain supported.
+The unused legacy Render web service has been retired. Existing OAuth client IDs,
+bridge environment variables, and Cloud Run service/image/bucket identifiers are
+preserved; a Python package rename does not migrate external integration IDs.

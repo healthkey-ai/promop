@@ -597,14 +597,41 @@ Patient requests deletion (via host app UI or admin action)
 
 ## Cross-Service Communication
 
-Services communicate via REST APIs. The caller identifies itself and/or the
-target user using the `(issuer, sub)` tuple:
+### Shared Service Token Scopes
 
-| Pattern | Payload Fields | Example |
+`SERVICE_AUTH_TOKEN` authenticates the legacy shared bearer credential.
+`SERVICE_AUTH_SCOPES` is a space-separated SMART scope grant enforced by
+`ScopedTokenPermission` and its subclasses. It defaults to read-only
+(`patient/*.read`); an empty grant denies all requests guarded by these
+permissions. Write scopes do not imply read scopes, and `system/*.read` permits
+vocabulary reads only.
+
+The legacy staging ETL additionally uses `system/etl.write`. This is not a broad
+SMART patient-write scope: only ETL-specific permission classes on the approved
+person, clinical import, and code-mapping endpoints accept it, and only for
+POST, PUT, or PATCH. Destructive actions retain the ordinary permission and
+reject it, including bulk-delete actions transported over POST.
+
+This legacy grant applies to every holder of the shared token. Named grants in
+`SERVICE_AUTH_TOKENS` provide distinct identities and scopes for each service.
+Service credentials cannot assert a user through `actor_iss`/`actor_sub`; user
+attribution requires end-user authentication. See
+[the service credential migration guide](service-token-migration.md) for token
+generation, caller changes, and rollout ordering. Use organization-linked OAuth2
+service clients when row-level organization isolation is required.
+The complete interim threat model and rollout are in
+[`bearer_token_security.md`](bearer_token_security.md).
+
+### Request Identity
+
+Services communicate via REST APIs. Authentication establishes the acting
+identity; unsigned body fields never prove an end-user identity:
+
+| Pattern | Credentials and target | Example |
 |---|---|---|
-| Self-service (user acts on own data) | `actor_iss`, `actor_sub` | Patient uploads own labs |
-| On-behalf-of (actor writes for another) | `actor_iss`, `actor_sub`, `person_id` | Navigator uploads for patient |
-| Service-to-service (no user context) | `Authorization: Bearer <service-token>` | Scheduled sync job |
+| Self-service (user acts on own data) | Verified end-user bearer; target resolved from authenticated identity | Patient uploads own labs |
+| On-behalf-of (actor writes for another) | Verified end-user bearer plus `person_id`; patient write access required | Navigator uploads for patient |
+| Service-to-service (no user context) | Individual service bearer plus explicit `person_id`; omit actor fields | Scheduled sync job |
 
 The receiving service always resolves identity locally. No shared database,
 no token exchange, no identity service dependency.
@@ -620,11 +647,11 @@ no token exchange, no identity service dependency.
 
 ## Open Questions
 
-1. **ServiceTokenAuthentication** ... service-to-service auth uses a pre-shared
-   Bearer token mapped to a superuser. Options:
-   - Keep as-is (service tokens are not user identities)
-   - Create a service Identity with `iss="urn:service:<name>"`, `sub="<role>"`
-   - Use OAuth2 client_credentials flow (existing in promop)
+1. **ServiceTokenAuthentication** ... individual configured Bearer tokens map
+   to `issuer="urn:service"`, `sub="<service-id>"` identities with explicit scopes
+   and no staff privileges. OAuth2 client credentials remain available for
+   organization-scoped clients. Admin-managed token lifecycle is a possible
+   follow-up to the current environment-managed configuration.
 
 2. **Shared library scope** ... What goes in `healthkey-identity` vs stays
    per-service? Candidates: Identity model, IdentityManager, TokenProvider

@@ -1,3 +1,4 @@
+import PageTitle from '@/components/Branding/PageTitle';
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { publicApi } from "@/api/publicAxios";
@@ -101,7 +102,7 @@ export default function OrgSignup() {
     return (
       <div className="flex min-h-screen items-center justify-center bg-muted/40">
         <div className="w-full max-w-md space-y-4 rounded-lg bg-background p-8 shadow-lg text-center">
-          <h2 className="text-2xl font-semibold text-foreground">{orgName}</h2>
+          <PageTitle className="text-2xl font-semibold text-foreground">{orgName}</PageTitle>
           <p className="text-sm text-muted-foreground">
             Direct signup is not available for this organization.
           </p>
@@ -120,9 +121,9 @@ export default function OrgSignup() {
     <div className="flex min-h-screen items-center justify-center bg-muted/40">
       <div className="w-full max-w-md space-y-8 rounded-lg bg-background p-8 shadow-lg">
         <div>
-          <h2 className="mt-6 text-center text-3xl font-extrabold text-foreground">
+          <PageTitle className="text-left text-3xl font-extrabold text-foreground">
             {orgName}
-          </h2>
+          </PageTitle>
           <p className="mt-2 text-center text-sm text-muted-foreground">
             Create your patient account
           </p>

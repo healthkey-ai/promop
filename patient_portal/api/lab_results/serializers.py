@@ -7,6 +7,7 @@ class UploadProvenanceSerializer(serializers.Serializer):
 
 
 class LabValueSerializer(serializers.Serializer):
+    normalized = serializers.JSONField(required=False, allow_null=True)
     measurement_id = serializers.IntegerField()
     value = serializers.DecimalField(max_digits=15, decimal_places=5, allow_null=True)
     value_string = serializers.CharField(allow_null=True)

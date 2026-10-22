@@ -82,8 +82,14 @@ def request_password_reset(request):
 
     success_msg = {'detail': 'If an account exists with that email, a reset link has been sent.'}
     try:
-        identity = Identity.objects.get(email__iexact=email)
+        # Email is not globally unique: a local login and federated identities
+        # can legitimately share it. Match the email/password login account.
+        identity = Identity.objects.get(email__iexact=email, issuer='urn:local', is_active=True)
     except Identity.DoesNotExist:
+        return Response(success_msg)
+    except Identity.MultipleObjectsReturned:
+        # Never choose an arbitrary account when local identities are ambiguous.
+        logger.warning('Password reset skipped: multiple active local identities match.')
         return Response(success_msg)
 
     if not identity.has_usable_password():
@@ -130,4 +136,9 @@ def reset_password(request):
         return Response({'error': reuse_error}, status=status.HTTP_400_BAD_REQUEST)
 
     set_new_password(identity, new, must_change=False)
+    # The reset link only ever goes to the account's own address, so completing
+    # it is the same proof a verification link gives.
+    identity.mark_email_verified()
+    from patient_portal.api.email_verification import promote_trusted_domain_grants
+    promote_trusted_domain_grants(identity)
     return Response({'detail': 'Password has been reset. You can now sign in.'})

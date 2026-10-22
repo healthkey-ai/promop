@@ -1,0 +1,478 @@
+{
+  "branches": {
+    "dev": {
+      "assessment": {
+        "all_ruleset_sources_captured": true,
+        "code_owner_review_required": false,
+        "direct_pushes_blocked": false,
+        "independent_review_enforced": false,
+        "required_approvals": 0,
+        "required_checks": [
+          "Backend tests",
+          "Frontend lint & build",
+          "Security gates"
+        ],
+        "required_ci_enforced": false
+      },
+      "codeowners_errors": [],
+      "effective_rules": [
+        {
+          "ruleset_id": 8217318,
+          "ruleset_source": "healthkey-ai/promop",
+          "ruleset_source_type": "Repository",
+          "type": "non_fast_forward"
+        },
+        {
+          "parameters": {
+            "allowed_merge_methods": [
+              "merge",
+              "squash",
+              "rebase"
+            ],
+            "dismiss_stale_reviews_on_push": false,
+            "dismissal_restriction": {
+              "allowed_actors": [],
+              "enabled": false
+            },
+            "require_code_owner_review": false,
+            "require_extra_approval_for_unattributed_changes": false,
+            "require_last_push_approval": false,
+            "required_approving_review_count": 0,
+            "required_review_thread_resolution": true,
+            "required_reviewers": []
+          },
+          "ruleset_id": 8217318,
+          "ruleset_source": "healthkey-ai/promop",
+          "ruleset_source_type": "Repository",
+          "type": "pull_request"
+        },
+        {
+          "ruleset_id": 8217318,
+          "ruleset_source": "healthkey-ai/promop",
+          "ruleset_source_type": "Repository",
+          "type": "required_signatures"
+        },
+        {
+          "ruleset_id": 8217318,
+          "ruleset_source": "healthkey-ai/promop",
+          "ruleset_source_type": "Repository",
+          "type": "required_linear_history"
+        },
+        {
+          "parameters": {
+            "do_not_enforce_on_create": true,
+            "required_status_checks": [
+              {
+                "context": "Backend tests"
+              },
+              {
+                "context": "Frontend lint & build"
+              },
+              {
+                "context": "Security gates"
+              }
+            ],
+            "strict_required_status_checks_policy": false
+          },
+          "ruleset_id": 8217318,
+          "ruleset_source": "healthkey-ai/promop",
+          "ruleset_source_type": "Repository",
+          "type": "required_status_checks"
+        }
+      ],
+      "head": "dd9d1ab7c41f80fd9578c31210ead814fe910772"
+    },
+    "main": {
+      "assessment": {
+        "all_ruleset_sources_captured": true,
+        "code_owner_review_required": false,
+        "direct_pushes_blocked": false,
+        "independent_review_enforced": false,
+        "required_approvals": 0,
+        "required_checks": [
+          "Backend tests",
+          "Frontend lint & build",
+          "Security gates"
+        ],
+        "required_ci_enforced": false
+      },
+      "codeowners_errors": [],
+      "effective_rules": [
+        {
+          "ruleset_id": 8217318,
+          "ruleset_source": "healthkey-ai/promop",
+          "ruleset_source_type": "Repository",
+          "type": "non_fast_forward"
+        },
+        {
+          "parameters": {
+            "allowed_merge_methods": [
+              "merge",
+              "squash",
+              "rebase"
+            ],
+            "dismiss_stale_reviews_on_push": false,
+            "dismissal_restriction": {
+              "allowed_actors": [],
+              "enabled": false
+            },
+            "require_code_owner_review": false,
+            "require_extra_approval_for_unattributed_changes": false,
+            "require_last_push_approval": false,
+            "required_approving_review_count": 0,
+            "required_review_thread_resolution": true,
+            "required_reviewers": []
+          },
+          "ruleset_id": 8217318,
+          "ruleset_source": "healthkey-ai/promop",
+          "ruleset_source_type": "Repository",
+          "type": "pull_request"
+        },
+        {
+          "ruleset_id": 8217318,
+          "ruleset_source": "healthkey-ai/promop",
+          "ruleset_source_type": "Repository",
+          "type": "required_signatures"
+        },
+        {
+          "ruleset_id": 8217318,
+          "ruleset_source": "healthkey-ai/promop",
+          "ruleset_source_type": "Repository",
+          "type": "required_linear_history"
+        },
+        {
+          "parameters": {
+            "do_not_enforce_on_create": true,
+            "required_status_checks": [
+              {
+                "context": "Backend tests"
+              },
+              {
+                "context": "Frontend lint & build"
+              },
+              {
+                "context": "Security gates"
+              }
+            ],
+            "strict_required_status_checks_policy": false
+          },
+          "ruleset_id": 8217318,
+          "ruleset_source": "healthkey-ai/promop",
+          "ruleset_source_type": "Repository",
+          "type": "required_status_checks"
+        }
+      ],
+      "head": "f8730186d54bf297e7aab9435bb12c938af9ee8f"
+    }
+  },
+  "captured_at": "2026-09-12T14:27:58.236695+00:00",
+  "default_branch": "dev",
+  "environments": {
+    "environments": [
+      {
+        "can_admins_bypass": true,
+        "created_at": "2026-08-21T12:05:12Z",
+        "deployment_branch_policy": null,
+        "html_url": "https://github.com/healthkey-ai/promop/deployments/activity_log?environments_filter=cancerbot-prod",
+        "id": 20326080530,
+        "name": "cancerbot-prod",
+        "node_id": "EN_kwDOPw6uhc8AAAAEu4dgEg",
+        "protection_rules": [],
+        "updated_at": "2026-08-21T12:05:12Z",
+        "url": "https://api.github.com/repos/healthkey-ai/promop/environments/cancerbot-prod"
+      },
+      {
+        "can_admins_bypass": true,
+        "created_at": "2025-09-16T11:49:38Z",
+        "deployment_branch_policy": null,
+        "html_url": "https://github.com/healthkey-ai/promop/deployments/activity_log?environments_filter=copilot",
+        "id": 8737623982,
+        "name": "copilot",
+        "node_id": "EN_kwDOPw6uhc8AAAACCM2Prg",
+        "protection_rules": [],
+        "updated_at": "2025-09-16T11:49:38Z",
+        "url": "https://api.github.com/repos/healthkey-ai/promop/environments/copilot"
+      },
+      {
+        "can_admins_bypass": true,
+        "created_at": "2026-01-20T15:50:45Z",
+        "deployment_branch_policy": null,
+        "html_url": "https://github.com/healthkey-ai/promop/deployments/activity_log?environments_filter=ctomop+%2F+production",
+        "id": 11415253143,
+        "name": "ctomop / production",
+        "node_id": "EN_kwDOPw6uhc8AAAACqGbwlw",
+        "protection_rules": [],
+        "updated_at": "2026-01-20T15:50:45Z",
+        "url": "https://api.github.com/repos/healthkey-ai/promop/environments/ctomop / production"
+      },
+      {
+        "can_admins_bypass": true,
+        "created_at": "2026-09-09T08:45:49Z",
+        "deployment_branch_policy": null,
+        "html_url": "https://github.com/healthkey-ai/promop/deployments/activity_log?environments_filter=dev+-+promop-db",
+        "id": 21547524891,
+        "name": "dev - promop-db",
+        "node_id": "EN_kwDOPw6uhc8AAAAFBFUjGw",
+        "protection_rules": [],
+        "updated_at": "2026-09-09T08:45:49Z",
+        "url": "https://api.github.com/repos/healthkey-ai/promop/environments/dev - promop-db"
+      },
+      {
+        "can_admins_bypass": true,
+        "created_at": "2026-09-09T08:48:10Z",
+        "deployment_branch_policy": null,
+        "html_url": "https://github.com/healthkey-ai/promop/deployments/activity_log?environments_filter=dev+-+promop-staging-worker",
+        "id": 21547678852,
+        "name": "dev - promop-staging-worker",
+        "node_id": "EN_kwDOPw6uhc8AAAAFBFd8hA",
+        "protection_rules": [],
+        "updated_at": "2026-09-09T08:48:10Z",
+        "url": "https://api.github.com/repos/healthkey-ai/promop/environments/dev - promop-staging-worker"
+      },
+      {
+        "can_admins_bypass": true,
+        "created_at": "2026-09-09T08:48:10Z",
+        "deployment_branch_policy": null,
+        "html_url": "https://github.com/healthkey-ai/promop/deployments/activity_log?environments_filter=dev+-+promop-worker",
+        "id": 21547679079,
+        "name": "dev - promop-worker",
+        "node_id": "EN_kwDOPw6uhc8AAAAFBFd9Zw",
+        "protection_rules": [],
+        "updated_at": "2026-09-09T08:48:10Z",
+        "url": "https://api.github.com/repos/healthkey-ai/promop/environments/dev - promop-worker"
+      },
+      {
+        "can_admins_bypass": true,
+        "created_at": "2026-01-20T15:39:43Z",
+        "deployment_branch_policy": null,
+        "html_url": "https://github.com/healthkey-ai/promop/deployments/activity_log?environments_filter=handsome-prosperity+%2F+production",
+        "id": 11414918620,
+        "name": "handsome-prosperity / production",
+        "node_id": "EN_kwDOPw6uhc8AAAACqGHV3A",
+        "protection_rules": [],
+        "updated_at": "2026-01-20T15:39:43Z",
+        "url": "https://api.github.com/repos/healthkey-ai/promop/environments/handsome-prosperity / production"
+      },
+      {
+        "can_admins_bypass": true,
+        "created_at": "2026-01-20T15:37:56Z",
+        "deployment_branch_policy": null,
+        "html_url": "https://github.com/healthkey-ai/promop/deployments/activity_log?environments_filter=superb-strength+%2F+production",
+        "id": 11414868185,
+        "name": "superb-strength / production",
+        "node_id": "EN_kwDOPw6uhc8AAAACqGEQ2Q",
+        "protection_rules": [],
+        "updated_at": "2026-01-20T15:37:56Z",
+        "url": "https://api.github.com/repos/healthkey-ai/promop/environments/superb-strength / production"
+      }
+    ],
+    "total_count": 8
+  },
+  "repository": "healthkey-ai/promop",
+  "rulesets": [
+    {
+      "_links": {
+        "html": {
+          "href": "https://github.com/healthkey-ai/promop/rules/8217318"
+        },
+        "self": {
+          "href": "https://api.github.com/repos/healthkey-ai/promop/rulesets/8217318"
+        }
+      },
+      "bypass_actors": [
+        {
+          "actor_id": 5,
+          "actor_type": "RepositoryRole",
+          "bypass_mode": "always"
+        }
+      ],
+      "conditions": {
+        "ref_name": {
+          "exclude": [],
+          "include": [
+            "~DEFAULT_BRANCH",
+            "refs/heads/main"
+          ]
+        }
+      },
+      "created_at": "2025-09-18T12:47:25.261+01:00",
+      "current_user_can_bypass": "always",
+      "enforcement": "active",
+      "id": 8217318,
+      "name": "main-protection",
+      "node_id": "RRS_lACqUmVwb3NpdG9yec4_Dq6FzgB9YuY",
+      "rules": [
+        {
+          "type": "non_fast_forward"
+        },
+        {
+          "parameters": {
+            "allowed_merge_methods": [
+              "merge",
+              "squash",
+              "rebase"
+            ],
+            "dismiss_stale_reviews_on_push": false,
+            "dismissal_restriction": {
+              "allowed_actors": [],
+              "enabled": false
+            },
+            "require_code_owner_review": false,
+            "require_extra_approval_for_unattributed_changes": false,
+            "require_last_push_approval": false,
+            "required_approving_review_count": 0,
+            "required_review_thread_resolution": true,
+            "required_reviewers": []
+          },
+          "type": "pull_request"
+        },
+        {
+          "type": "required_signatures"
+        },
+        {
+          "type": "required_linear_history"
+        },
+        {
+          "parameters": {
+            "do_not_enforce_on_create": true,
+            "required_status_checks": [
+              {
+                "context": "Backend tests"
+              },
+              {
+                "context": "Frontend lint & build"
+              },
+              {
+                "context": "Security gates"
+              }
+            ],
+            "strict_required_status_checks_policy": false
+          },
+          "type": "required_status_checks"
+        }
+      ],
+      "source": "healthkey-ai/promop",
+      "source_type": "Repository",
+      "target": "branch",
+      "updated_at": "2026-09-12T10:13:31.934+01:00"
+    }
+  ],
+  "scope": {
+    "github_settings": "Observed through authenticated read-only GitHub API calls.",
+    "historical_operation": "Not established by this configuration snapshot; retain PR and deployment records.",
+    "render_settings": "Not captured. GitHub environments do not prove Render approval gates."
+  },
+  "workflows": {
+    "total_count": 9,
+    "workflows": [
+      {
+        "badge_url": "https://github.com/healthkey-ai/promop/workflows/CI/badge.svg",
+        "created_at": "2026-05-13T10:39:20.000+01:00",
+        "html_url": "https://github.com/healthkey-ai/promop/blob/dev/.github/workflows/ci.yml",
+        "id": 275932039,
+        "name": "CI",
+        "node_id": "W_kwDOPw6uhc4QcmOH",
+        "path": ".github/workflows/ci.yml",
+        "state": "active",
+        "updated_at": "2026-05-13T10:39:20.000+01:00",
+        "url": "https://api.github.com/repos/healthkey-ai/promop/actions/workflows/275932039"
+      },
+      {
+        "badge_url": "https://github.com/healthkey-ai/promop/workflows/Deploy%20to%20cancerbot%20host/badge.svg",
+        "created_at": "2026-08-21T12:45:36.000+01:00",
+        "html_url": "https://github.com/healthkey-ai/promop/blob/dev/.github/workflows/deploy-cancerbot.yml",
+        "id": 339334511,
+        "name": "Deploy to cancerbot host",
+        "node_id": "W_kwDOPw6uhc4UOdVv",
+        "path": ".github/workflows/deploy-cancerbot.yml",
+        "state": "active",
+        "updated_at": "2026-08-21T12:45:36.000+01:00",
+        "url": "https://api.github.com/repos/healthkey-ai/promop/actions/workflows/339334511"
+      },
+      {
+        "badge_url": "https://github.com/healthkey-ai/promop/workflows/Deploy%20to%20Staging/badge.svg",
+        "created_at": "2026-05-25T22:08:35.000+01:00",
+        "html_url": "https://github.com/healthkey-ai/promop/blob/dev/.github/workflows/deploy-staging.yml",
+        "id": 283103255,
+        "name": "Deploy to Staging",
+        "node_id": "W_kwDOPw6uhc4Q39AX",
+        "path": ".github/workflows/deploy-staging.yml",
+        "state": "active",
+        "updated_at": "2026-05-25T22:09:48.000+01:00",
+        "url": "https://api.github.com/repos/healthkey-ai/promop/actions/workflows/283103255"
+      },
+      {
+        "badge_url": "https://github.com/healthkey-ai/promop/workflows/.github/workflows/draft-pdf.yml/badge.svg",
+        "created_at": "2026-07-04T16:23:17.000+01:00",
+        "html_url": "https://github.com/healthkey-ai/promop/blob/dev/.github/workflows/draft-pdf.yml",
+        "id": 307156910,
+        "name": ".github/workflows/draft-pdf.yml",
+        "node_id": "W_kwDOPw6uhc4STteu",
+        "path": ".github/workflows/draft-pdf.yml",
+        "state": "active",
+        "updated_at": "2026-07-04T16:23:17.000+01:00",
+        "url": "https://api.github.com/repos/healthkey-ai/promop/actions/workflows/307156910"
+      },
+      {
+        "badge_url": "https://github.com/healthkey-ai/promop/actions/workflows/agents/copilot-pull-request-reviewer/badge.svg",
+        "created_at": "2026-05-29T13:36:18.000+01:00",
+        "html_url": "https://github.com/healthkey-ai/promop/actions/workflows/agents/copilot-pull-request-reviewer",
+        "id": 285537426,
+        "name": "Copilot",
+        "node_id": "W_kwDOPw6uhc4RBPSS",
+        "path": "dynamic/agents/copilot-pull-request-reviewer",
+        "state": "active",
+        "updated_at": "2026-05-29T13:36:18.000+01:00",
+        "url": "https://api.github.com/repos/healthkey-ai/promop/actions/workflows/285537426"
+      },
+      {
+        "badge_url": "https://github.com/healthkey-ai/promop/actions/workflows/copilot-swe-agent/copilot/badge.svg",
+        "created_at": "2025-09-16T12:49:33.000+01:00",
+        "html_url": "https://github.com/healthkey-ai/promop/actions/workflows/copilot-swe-agent/copilot",
+        "id": 189712198,
+        "name": "Copilot cloud agent",
+        "node_id": "W_kwDOPw6uhc4LTsdG",
+        "path": "dynamic/copilot-swe-agent/copilot",
+        "state": "active",
+        "updated_at": "2026-05-12T11:16:44.000+01:00",
+        "url": "https://api.github.com/repos/healthkey-ai/promop/actions/workflows/189712198"
+      },
+      {
+        "badge_url": "https://github.com/healthkey-ai/promop/actions/workflows/dependabot/dependabot-updates/badge.svg",
+        "created_at": "2026-08-26T10:04:22.000+01:00",
+        "html_url": "https://github.com/healthkey-ai/promop/actions/workflows/dependabot/dependabot-updates",
+        "id": 342775441,
+        "name": "Dependabot Updates",
+        "node_id": "W_kwDOPw6uhc4UblaR",
+        "path": "dynamic/dependabot/dependabot-updates",
+        "state": "active",
+        "updated_at": "2026-08-26T10:04:22.000+01:00",
+        "url": "https://api.github.com/repos/healthkey-ai/promop/actions/workflows/342775441"
+      },
+      {
+        "badge_url": "https://github.com/healthkey-ai/promop/actions/workflows/dependabot/update-graph/badge.svg",
+        "created_at": "2026-05-25T22:09:53.000+01:00",
+        "html_url": "https://github.com/healthkey-ai/promop/actions/workflows/dependabot/update-graph",
+        "id": 283103704,
+        "name": "Dependency Graph",
+        "node_id": "W_kwDOPw6uhc4Q39HY",
+        "path": "dynamic/dependabot/update-graph",
+        "state": "active",
+        "updated_at": "2026-05-25T22:09:53.000+01:00",
+        "url": "https://api.github.com/repos/healthkey-ai/promop/actions/workflows/283103704"
+      },
+      {
+        "badge_url": "https://github.com/healthkey-ai/promop/actions/workflows/github-code-scanning/codeql/badge.svg",
+        "created_at": "2026-08-26T10:06:42.000+01:00",
+        "html_url": "https://github.com/healthkey-ai/promop/actions/workflows/github-code-scanning/codeql",
+        "id": 342776971,
+        "name": "CodeQL",
+        "node_id": "W_kwDOPw6uhc4UblyL",
+        "path": "dynamic/github-code-scanning/codeql",
+        "state": "active",
+        "updated_at": "2026-08-26T10:06:42.000+01:00",
+        "url": "https://api.github.com/repos/healthkey-ai/promop/actions/workflows/342776971"
+      }
+    ]
+  }
+}

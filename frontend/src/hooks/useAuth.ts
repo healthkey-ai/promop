@@ -4,7 +4,25 @@ import api from "@/api/axios";
 interface OrgAccess {
   org_name: string;
   org_slug: string;
-  role: string;
+  role: string | null;
+  expires_at: string | null;
+  access_via?: Array<"invitation" | "explicit_grant" | "invitation_pending" | "trusted_domain" | "organization_trust" | "domain_trust">;
+  pending_role?: string;
+  group_name?: string | null;
+}
+
+export interface EffectiveRole {
+  role: 'staff' | 'org_admin' | 'doctor' | 'analyst' | 'patient';
+  scope: 'platform' | 'organization' | 'group' | 'patient';
+  source: 'staff_flag' | 'patient_link' | 'org_grant' | 'group_grant' | 'organization_trust' | 'domain_trust';
+  source_org_name?: string;
+  source_org_slug?: string;
+  source_domain?: string;
+  org_name?: string;
+  org_slug?: string;
+  group_id?: number | null;
+  group_name?: string | null;
+  person_id?: number;
   expires_at: string | null;
 }
 
@@ -17,6 +35,8 @@ export interface User {
   is_superuser?: boolean;
   is_org_admin?: boolean;
   org_accesses?: OrgAccess[];
+  effective_roles?: EffectiveRole[];
+  patient_delegations?: Array<{ person_id: number; relationship: string }>;
   // PHR Account Holder (patient) role — see PHR-S FM PH.1. When is_patient is
   // true, person_id is the patient's own record and the UI runs in patient mode.
   is_patient?: boolean;
@@ -25,6 +45,9 @@ export interface User {
   // refuses every /api/ request except change-password until the password is
   // reset, and the SPA shows a blocking change-password screen.
   must_change_password?: boolean;
+  // False until a self-signed-up account follows its emailed link. Access that
+  // depends on the address (a trusted email domain) is off meanwhile.
+  email_verified?: boolean;
 }
 
 export const useAuth = () => {
