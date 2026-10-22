@@ -133,7 +133,16 @@ def apply_field_writes(person, changes, today=None, descriptor=None):
 
     result = FieldWriteResult()
     from omop_core.services.clinical_input_contract import CLINICAL_INPUT_FIELDS, write_clinical_inputs
-    clinical_fields = [field for field in changes if field in CLINICAL_INPUT_FIELDS]
+    # A curated DIRECT descriptor owns the generic projection path (the SCT
+    # fields are the production example). Let it fall through instead of
+    # rejecting it for not being the contract's editable shape: callers that
+    # pass a restricted descriptor still cannot write a contract field that
+    # descriptor omits or marks read-only.
+    clinical_fields = [
+        field for field in changes
+        if field in CLINICAL_INPUT_FIELDS
+        and (descriptor.get(field) or {}).get('kind') != KIND_DIRECT
+    ]
     if clinical_fields:
         # The descriptor is the write contract for every field, including the
         # #5440 source inputs. A caller that passes a restricted descriptor must
@@ -154,7 +163,7 @@ def apply_field_writes(person, changes, today=None, descriptor=None):
         from django.db import transaction
         with transaction.atomic():
             other = apply_field_writes(
-                person, {field: value for field, value in changes.items() if field not in CLINICAL_INPUT_FIELDS},
+                person, {field: value for field, value in changes.items() if field not in clinical_fields},
                 today=today, descriptor=descriptor,
             )
             result.applied = other.applied

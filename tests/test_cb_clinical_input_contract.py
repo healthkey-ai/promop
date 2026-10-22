@@ -36,6 +36,7 @@ def patient():
     ('activated_partial_thromboplastin_time_uln', Decimal('1.5')),
     ('able_to_swallow_tablets_capsules', False),
     ('able_to_swallow_tablets_capsules', True),
+    ('sct_date', date.today()),
 ])
 def test_host_and_field_applier_round_trip_and_clear(patient, field, value):
     d = build_writable_field_descriptor()[field]
@@ -53,6 +54,33 @@ def test_host_and_field_applier_round_trip_and_clear(patient, field, value):
     assert Observation.objects.filter(person=patient).count() == 2
     fact.refresh_from_db()
     assert fact.value_source_value is None
+
+
+def test_mixed_batch_keeps_a_direct_sct_descriptor_on_the_projection_path(patient):
+    """A curated direct descriptor must not be rejected just because its field is
+    also a contract input. The contract stays the default; an explicit direct
+    descriptor keeps writing through its own mapping (and its clear rules)."""
+    descriptor = build_writable_field_descriptor()
+    descriptor['sct_date'] = {
+        'kind': 'direct', 'writable': True, 'target': 'patient_record',
+        'value_kind': 'date',
+        'projection': {
+            'omop_table': 'observation', 'concept_id': 32865,
+            'source_value': 'mm-sct-date', 'type_concept_id': 32817,
+        },
+    }
+    result = apply_field_writes(
+        patient,
+        {'prothrombin_time_uln': Decimal('1.2'), 'sct_date': date.today()},
+        descriptor=descriptor,
+    )
+    assert set(result.applied) == {'prothrombin_time_uln', 'sct_date'}
+    assert Observation.objects.get(
+        person=patient, observation_source_value='cb:pt-uln',
+    ).observation_concept_id == 0
+    assert Observation.objects.get(
+        person=patient, observation_source_value='mm-sct-date',
+    ).observation_concept_id == 32865
 
 
 def test_missing_fact_is_unknown_not_default_true(patient):
@@ -126,16 +154,22 @@ def test_smallest_positive_ratio_keeps_decimal_precision(patient):
 def test_only_explicit_contract_fields_are_writable_here(patient):
     with pytest.raises(ValueError, match='Unsupported'):
         write_clinical_inputs(patient, {'hepatic_adequacy_status': True})
-    assert len(CLINICAL_INPUT_FIELDS) == 3
+    assert CLINICAL_INPUT_FIELDS == {
+        'prothrombin_time_uln', 'activated_partial_thromboplastin_time_uln',
+        'able_to_swallow_tablets_capsules', 'sct_date',
+    }
 
 
 def test_new_inputs_have_source_provenance(patient):
     from omop_core.services.provenance_registry import get_registry
     registry = get_registry()
-    for field in CLINICAL_INPUT_FIELDS:
+    for field in CLINICAL_INPUT_FIELDS - {'sct_date'}:
         provenance = registry[field]
         assert provenance.omop_table == 'Observation'
         assert provenance.source_values == [RECIPES[field][0]]
+    # sct_date is an existing input with its own FHIR-extension provenance, so
+    # it is not part of the three new source recipes.
+    assert registry['sct_date'].omop_table == 'Observation'
 
 
 @pytest.mark.parametrize('field,value', [

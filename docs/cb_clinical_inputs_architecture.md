@@ -5,13 +5,16 @@ This branch extends the exact PROMOP schema pinned by CancerBot
 deletion or federation schema changes. It is a compatible source candidate, not
 authorization to deploy integration history or waive immutable-pin provenance.
 
-`clinical_input_contract.py` publishes version 1 of the three-field source contract:
-two positive decimal PT/aPTT ratios to laboratory ULN and nullable swallowing ability.
-The three columns are added by `0280_cb_clinical_inputs.py`. The SDK's fourth input,
-`sct_date`, is not in the contract: since the back-merge of `dev` (#1813) it already
-writes through its `mm-sct-date` FieldConceptMapping on the PatientRecord-first path. Unknown is not yes. Ratios are neither INR nor seconds;
+`clinical_input_contract.py` publishes version 1 of the four-field source contract:
+two positive decimal PT/aPTT ratios to laboratory ULN, nullable swallowing ability,
+and the existing SCT date. The three new columns are added by
+`0280_cb_clinical_inputs.py`; the SDK has four inputs because `sct_date` already
+exists in the pinned schema. Unknown is not yes. Ratios are neither INR nor seconds;
 their explicit reviewed local Observation source keys use concept 0 rather than
-inventing a standard clinical code. The descriptor requires real concept 0 and self-report type vocabulary.
+inventing a standard clinical code. SCT retains `mm-sct-date`, matching existing
+imports, and stays in the contract because the generic field applier refuses clears:
+a patient clearing a transplant date must append a tombstone instead of leaving the
+old fact current. The descriptor requires real concept 0 and self-report type vocabulary.
 
 The host SDK validates all inputs, locks Person then projection in the same order
 as the existing field applier, appends dated self-reported facts, and refreshes the
@@ -22,8 +25,10 @@ prevents the requested value from round-tripping rejects and rolls back the writ
 Five decimal places match OMOP numeric storage; excess precision/nonfinite data
 is rejected rather than silently rounded. Boolean false and null are distinct.
 
-The descriptor-driven field applier routes these three fields through the same
-SDK, including equal-value retries and clears. The integration schema still does
+The descriptor-driven field applier routes these four fields through the same
+SDK, including equal-value retries and clears. A caller that supplies a curated
+DIRECT descriptor for `sct_date` keeps the generic projection path instead; the
+contract descriptor is the default. The integration schema still does
 not accept arbitrary direct clinical projection PATCHes. Computed verdicts stay
 read-only. Other facts, therapy inference, lab mappings and schema retain their
 existing contracts. No patient_portal application is required by the plugin SDK.

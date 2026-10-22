@@ -17,8 +17,11 @@ RECIPES = {
     'prothrombin_time_uln': ('cb:pt-uln', 'number', '1'),
     'activated_partial_thromboplastin_time_uln': ('cb:aptt-uln', 'number', '1'),
     'able_to_swallow_tablets_capsules': ('cb:swallow-tablets', 'boolean', None),
-    # The SDK's fourth input, sct_date, is not here: it already writes through
-    # its FieldConceptMapping (mm-sct-date) on the PatientRecord-first path.
+    # Same source as the existing FHIR SCT date, so derivation and imports agree.
+    # It stays in this contract rather than moving to the generic field applier:
+    # the applier refuses clears, and a patient clearing a transplant date must
+    # append a tombstone instead of leaving the old fact current.
+    'sct_date': ('mm-sct-date', 'date', None),
 }
 CLINICAL_INPUT_FIELDS = frozenset(RECIPES)
 
