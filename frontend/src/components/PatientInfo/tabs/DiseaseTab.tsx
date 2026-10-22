@@ -264,8 +264,8 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <Field label="Serum M-Protein (g/dL)" name="monoclonal_protein_serum" type="number" value={formData?.monoclonal_protein_serum} resultDate={resultDates.monoclonal_protein_serum} onChange={onChange} />
           <Field label="Urine M-Protein (mg/24h)" name="monoclonal_protein_urine" type="number" value={formData?.monoclonal_protein_urine} resultDate={resultDates.monoclonal_protein_urine} onChange={onChange} />
-          <Field label="Kappa Free Light Chains" name="kappa_flc" type="number" value={formData?.kappa_flc} resultDate={resultDates.kappa_flc} onChange={onChange} />
-          <Field label="Lambda Free Light Chains" name="lambda_flc" type="number" value={formData?.lambda_flc} resultDate={resultDates.lambda_flc} onChange={onChange} />
+          <Field label="Kappa Free Light Chains (mg/L)" name="kappa_flc" type="number" value={formData?.kappa_flc} resultDate={resultDates.kappa_flc} onChange={onChange} />
+          <Field label="Lambda Free Light Chains (mg/L)" name="lambda_flc" type="number" value={formData?.lambda_flc} resultDate={resultDates.lambda_flc} onChange={onChange} />
           <Field label="Kappa/Lambda Ratio" name="free_light_chain_ratio" type="number" value={formData?.free_light_chain_ratio} resultDate={resultDates.free_light_chain_ratio} onChange={onChange} />
           <Field label="Beta-2 Microglobulin (mg/L)" name="beta2_microglobulin" type="number" value={formData?.beta2_microglobulin} onChange={onChange} />
           <Field label="LDH Level (U/L)" name="ldh_level" type="number" value={formData?.ldh_level} onChange={onChange} />

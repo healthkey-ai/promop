@@ -134,8 +134,8 @@ describe('MyelomaSection — labels and marker fields', () => {
 
   it('renders individual kappa and lambda free light chains', () => {
     renderMyeloma({ kappa_flc: 1.87, lambda_flc: 0.92 });
-    expect(screen.getByText('Kappa Free Light Chains')).toBeInTheDocument();
-    expect(screen.getByText('Lambda Free Light Chains')).toBeInTheDocument();
+    expect(screen.getByText('Kappa Free Light Chains (mg/L)')).toBeInTheDocument();
+    expect(screen.getByText('Lambda Free Light Chains (mg/L)')).toBeInTheDocument();
     expect(screen.getByDisplayValue('1.87')).toBeInTheDocument();
     expect(screen.getByDisplayValue('0.92')).toBeInTheDocument();
     expect(screen.getByText('Kappa/Lambda Ratio')).toBeInTheDocument();
