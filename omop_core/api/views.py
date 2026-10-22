@@ -20,6 +20,30 @@ from omop_oncology.models import Episode
 logger = logging.getLogger(__name__)
 
 
+def _therapy_line_error_field(exc):
+    """A static field hint for a known authoring validation failure.
+
+    The exception text is used only for classification; it never reaches the
+    response. Clients get the field name to highlight, not internal detail.
+    """
+    message = str(exc)
+    if 'end_date' in message:
+        return 'end_date'
+    if 'line_number' in message:
+        return 'line_number'
+    if 'start_date' in message or 'future therapy line' in message:
+        return 'start_date'
+    if ('Unknown drug concept_id' in message
+            or 'Duplicate drug source_value' in message
+            or 'drug_exposure_id' in message):
+        return 'drugs'
+    if 'regimen' in message:
+        return 'regimen_concept_id'
+    if 'diagnosis' in message or 'disease' in message:
+        return 'disease'
+    return None
+
+
 class TherapyLineViewSet(viewsets.ViewSet):
     """Author or edit one line of therapy.
 
@@ -90,10 +114,16 @@ class TherapyLineViewSet(viewsets.ViewSet):
                 'Therapy line write rejected (%s); details withheld from the client',
                 type(exc).__name__,
             )
-            return Response(
-                {'detail': 'The therapy line could not be saved as submitted.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            detail = {'detail': 'The therapy line could not be saved as submitted.'}
+            field = _therapy_line_error_field(exc)
+            if field is not None:
+                detail['field'] = field
+            if field == 'drugs':
+                detail['concept_ids'] = [
+                    drug.get('concept_id') for drug in data.get('drugs') or []
+                    if isinstance(drug, dict)
+                ]
+            return Response(detail, status=status.HTTP_400_BAD_REQUEST)
 
         if result.episode is None:
             return Response(
