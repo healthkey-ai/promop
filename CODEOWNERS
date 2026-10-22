@@ -32,6 +32,45 @@
 /patient_portal/service_tokens/     @larsburgess
 /patient_portal/service_applications.py @larsburgess
 /patient_portal/service_applications/   @larsburgess
+# The staff API that calls issue_token and discloses the secret once. The two
+# files share a name in different packages; gating only the definitions was an
+# accident of that, not a decision.
+/patient_portal/api/service_applications.py @larsburgess
+/patient_portal/api/service_applications/   @larsburgess
+# The password backend: authenticate(), the lockout threshold, and the timing
+# equalisation that resists account enumeration.
+/patient_portal/backends.py         @larsburgess
+/patient_portal/backends/           @larsburgess
+# Who may act as an org administrator: get_admin_orgs, has_org_admin_access...
+/omop_core/services/access.py       @larsburgess
+/omop_core/services/access/         @larsburgess
+# ...and the only module that writes the GroupAccess rows they read, including
+# role 'org_admin'. Five AllowAny endpoints; one sets a password.
+/patient_portal/api/org_views.py    @larsburgess
+/patient_portal/api/org_views/      @larsburgess
+# Proxy authorization: who may act for a patient.
+/patient_portal/api/representatives.py  @larsburgess
+/patient_portal/api/representatives/    @larsburgess
+# The credential lifecycle of a patient account — each mints or consumes
+# something that stands in for a password. patient_invitations.py carries two
+# public endpoints, and accept sets a password.
+/patient_portal/api/password_reset.py      @larsburgess
+/patient_portal/api/password_reset/        @larsburgess
+/patient_portal/api/email_verification.py  @larsburgess
+/patient_portal/api/email_verification/    @larsburgess
+/patient_portal/api/patient_signup.py      @larsburgess
+/patient_portal/api/patient_signup/        @larsburgess
+/patient_portal/api/patient_invitations.py @larsburgess
+/patient_portal/api/patient_invitations/   @larsburgess
+# The audit trail's read API: the evidence the other controls are audited by,
+# and it branches on privilege.
+/patient_portal/api/audit_views.py  @larsburgess
+/patient_portal/api/audit_views/    @larsburgess
+# The two commands that create accounts with standing privilege. setup_admin
+# runs from start.sh on every deploy. No directory form: a Django management
+# command must be a module under commands/.
+/omop_core/management/commands/create_staff_user.py  @larsburgess
+/omop_core/management/commands/setup_admin.py        @larsburgess
 
 # ── The two Django project packages, whole ──────────────────────────────────
 # Mirrors the gate's `promop/**` / `ctomop/**` in .github/scripts/security-review.cjs.
@@ -85,6 +124,9 @@
 # ── Security documentation and the commands that issue credentials ───────────
 /docs/*security*.md                 @larsburgess
 /patient_portal/management/commands/*service_token*.py  @larsburgess
+# The other two credential-minting commands, missed by that glob on the name.
+/patient_portal/management/commands/create_service_client.py  @larsburgess
+/patient_portal/management/commands/create_smart_app.py       @larsburgess
 
 # ── CI and the security gates themselves ──────────────────────────────────────
 # A change that weakens a gate should be as visible as a change that trips it.
