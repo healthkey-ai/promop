@@ -46,6 +46,11 @@ class TherapyLineWriteSerializer(serializers.Serializer):
     start_date = serializers.DateField(required=False, allow_null=True)
     end_date = serializers.DateField(required=False, allow_null=True)
     drugs = TherapyLineDrugSerializer(many=True, required=False)
+    #: The line happened; which drugs were given is not known. Distinct from an
+    #: omitted ``drugs`` (leave composition alone) and from an explicit empty list
+    #: (the line's composition is being cleared). Only a caller that says so can
+    #: create a line with no composition (#1924).
+    composition_unknown = serializers.BooleanField(required=False, default=False)
     regimen_concept_id = serializers.IntegerField(required=False, allow_null=True)
     outcome = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     intent = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=50)
@@ -67,14 +72,16 @@ class TherapyLineWriteSerializer(serializers.Serializer):
         if start and end and end < start:
             raise serializers.ValidationError(
                 {'end_date': 'end_date cannot precede start_date.'})
-        # A line with neither drugs nor a named regimen groups nothing, so
-        # inference reads it back as an empty line (#1924 adds a supported
-        # assertion path for that; until then the editor must send one).
-        if not self.partial and not attrs.get('drugs') and not attrs.get('regimen_concept_id'):
+        # A line with neither drugs nor a named regimen asserts only that a line
+        # happened. That is a real clinical statement (#1924) but it must be
+        # deliberate: without the flag, an accidental empty payload is still
+        # refused rather than recorded as unknown composition.
+        if (not self.partial and not attrs.get('drugs')
+                and not attrs.get('regimen_concept_id')
+                and not attrs.get('composition_unknown')):
             raise serializers.ValidationError(
-                'Provide at least one drug, or a regimen_concept_id naming the '
-                'regimen. A line with neither groups no drug exposures and no '
-                'therapy field would follow from it.',
+                'Provide at least one drug, a regimen_concept_id naming the '
+                'regimen, or composition_unknown=true to record the line alone.',
             )
         if attrs.get('outcome'):
             from omop_core.services.treatment_catalog import outcomes_for_disease

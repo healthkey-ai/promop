@@ -463,3 +463,26 @@ it('loads disease-specific outcomes and submits the selected response', async ()
   fireEvent.click(screen.getByRole('button', { name: /record line/i }));
   await waitFor(() => expect(mockPost).toHaveBeenCalledWith('/v1/therapy-lines/', expect.objectContaining({ outcome: 'Very Good Partial Response' })));
 });
+
+
+describe('TherapyLineDialog — unknown composition', () => {
+  it('records the line without drugs when the clinician says they are unknown', async () => {
+    open();
+    fireEvent.click(screen.getByLabelText('Drugs unknown'));
+    fireEvent.change(screen.getByLabelText(/^start date$/i), { target: { value: '2025-03-01' } });
+    fireEvent.click(screen.getByRole('button', { name: /record line/i }));
+
+    await waitFor(() => expect(mockPost).toHaveBeenCalled());
+    const [, body] = mockPost.mock.calls.at(-1)!;
+    expect(body).toMatchObject({ drugs: [], composition_unknown: true, start_date: '2025-03-01' });
+  });
+
+  it('still refuses an empty line when the clinician has not said so', async () => {
+    open();
+    fireEvent.change(screen.getByLabelText(/^start date$/i), { target: { value: '2025-03-01' } });
+    fireEvent.click(screen.getByRole('button', { name: /record line/i }));
+
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(mockPost).not.toHaveBeenCalled();
+  });
+});

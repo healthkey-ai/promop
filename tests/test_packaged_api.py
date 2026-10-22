@@ -135,3 +135,67 @@ def test_packaged_endpoint_rederives_the_record(api, person):
     }, format='json')
     record = refresh_patient_record(person)
     assert record.first_line_start_date == str(START)
+
+
+@override_settings(**PACKAGED)
+def test_recording_a_line_without_its_composition(api, person):
+    # "This line happened; I don't know which drugs" is a real statement (#1924).
+    response = api.post('/federation/v1/therapy-lines/', {
+        'person': person.pk, 'line_number': 1, 'start_date': START.isoformat(),
+        'drugs': [], 'composition_unknown': True,
+    }, format='json')
+
+    assert response.status_code == 201, response.data
+    record = refresh_patient_record(person)
+    assert record.therapy_lines_count == 1
+    from omop_core.api.lines import lines_of_therapy
+    line = lines_of_therapy(record)[0]
+    assert line['composition_known'] is False
+    assert line['drugs'] == []
+
+
+@override_settings(**PACKAGED)
+def test_an_accidentally_empty_payload_is_still_refused(api, person):
+    response = api.post('/federation/v1/therapy-lines/', {
+        'person': person.pk, 'line_number': 1, 'start_date': START.isoformat(), 'drugs': [],
+    }, format='json')
+    assert response.status_code == 400, response.data
+    assert not Episode.objects.filter(person=person).exists()
+
+
+@override_settings(**PACKAGED)
+def test_retracting_a_line_removes_it_from_history_but_keeps_its_drugs(api, person):
+    drug = ConceptFactory(concept_name='Bortezomib')
+    created = api.post('/federation/v1/therapy-lines/', {
+        'person': person.pk, 'line_number': 1, 'start_date': START.isoformat(),
+        'drugs': [{'concept_id': drug.pk, 'source_value': 'bortezomib'}],
+    }, format='json')
+    assert created.status_code == 201, created.data
+
+    deleted = api.delete(f"/federation/v1/therapy-lines/{created.data['episode_id']}/")
+    assert deleted.status_code == 200, deleted.data
+    record = refresh_patient_record(person)
+    assert not record.therapy_lines_count
+    assert DrugExposure.objects.filter(person=person).exists()   # the fact is not ours to delete
+
+
+@override_settings(**PACKAGED)
+def test_clearing_composition_keeps_the_line(api, person):
+    drug = ConceptFactory(concept_name='Bortezomib')
+    created = api.post('/federation/v1/therapy-lines/', {
+        'person': person.pk, 'line_number': 1, 'start_date': START.isoformat(),
+        'drugs': [{'concept_id': drug.pk, 'source_value': 'bortezomib'}],
+    }, format='json')
+
+    cleared = api.patch(f"/federation/v1/therapy-lines/{created.data['episode_id']}/",
+                        {'drugs': [], 'composition_unknown': True}, format='json')
+    assert cleared.status_code == 200, cleared.data
+    record = refresh_patient_record(person)
+    assert record.therapy_lines_count == 1
+    from omop_core.api.lines import lines_of_therapy
+    assert lines_of_therapy(record)[0]['composition_known'] is False
+
+
+@override_settings(**PACKAGED)
+def test_retracting_an_unknown_line_is_404(api):
+    assert api.delete('/federation/v1/therapy-lines/999999/').status_code == 404

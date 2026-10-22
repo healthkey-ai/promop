@@ -112,6 +112,40 @@ class TherapyLineViewSet(viewsets.ViewSet):
             data=serializer.validated_data,
         )
 
+    def destroy(self, request, pk=None):
+        """Retract the line: withdraw the claim that this treatment happened.
+
+        Distinct from clearing composition, which keeps the line and drops its
+        links. Exposures are never deleted here -- they can be imported facts.
+        """
+        from omop_core.services.episode_service import retract_therapy_line
+        from omop_core.services.patient_record_service import refresh_patient_record
+
+        try:
+            episode_id = int(pk)
+        except (TypeError, ValueError):
+            return Response({'detail': 'Invalid therapy line episode_id.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        episode = Episode.objects.filter(episode_id=episode_id).select_related('person').first()
+        if episode is None:
+            return Response({'detail': 'Therapy line not found.'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        denied = self.patient_write_denied(request, episode.person)
+        if denied is not None:
+            return denied
+        try:
+            retract_therapy_line(episode.person, episode)
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        record = refresh_patient_record(episode.person)
+        return Response({
+            'episode_id': episode.episode_id,
+            'retracted': True,
+            'patient_info': self.patient_info_payload(record),
+        })
+
     def partial_update(self, request, pk=None):
         try:
             episode_id = int(pk)
