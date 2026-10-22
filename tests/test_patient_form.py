@@ -47,6 +47,31 @@ def test_crab_navigation_uses_readable_canonical_clearance_without_lifting_gate(
     assert 'clinical review' in crab['compatibility_reason']
 
 
+def test_mcl_dependency_graph_resolves_without_exposing_host_withheld_age():
+    inputs = {'date_of_birth', 'ecog_performance_status', 'ldh_u_l',
+              'ldh_upper_limit_normal', 'wbc_count_thousand_per_ul',
+              'ki67_proliferation_index'}
+    descriptors = patient_form_descriptors({
+        name: {'kind': 'direct', 'writable': True, 'target': 'patient_record'}
+        for name in inputs | {'patient_age'}
+    }, readable_fields=inputs)
+    assert 'patient_age' not in descriptors
+    for root in ('mipi_risk', 'mipi_c_risk', 'high_risk_mcl_criteria'):
+        pending = [(root, set())]
+        while pending:
+            name, ancestors = pending.pop()
+            assert name not in ancestors
+            assert name in descriptors
+            entry = descriptors[name]
+            if entry.get('inputs'):
+                assert entry['writable'] is False
+                assert entry['compatibility_reason']
+                pending.extend((child, ancestors | {name}) for child in entry['inputs'])
+    for name in ('mipi_risk', 'mipi_c_risk'):
+        assert 'date_of_birth' in descriptors[name]['inputs']
+        assert 'ldh_upper_limit_normal' in descriptors[name]['inputs']
+
+
 def test_unsupported_projectors_and_special_assertions_are_not_advertised():
     descriptor = patient_form_descriptors({
         'a': {'kind': 'direct', 'writable': True, 'target': 'patient_record',

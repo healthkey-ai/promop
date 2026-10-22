@@ -50,7 +50,9 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
           <Dialog.Portal><Dialog.Overlay className="fixed inset-0 z-[60] bg-black/40" />
             <Dialog.Content className="promop-root fixed left-1/2 top-1/2 z-[61] max-h-[85vh] w-[min(32rem,calc(100%-2rem))] -translate-x-1/2 -translate-y-1/2 space-y-4 overflow-y-auto rounded-xl bg-background p-6 shadow-xl">
               <Dialog.Title className="font-semibold">{label}</Dialog.Title>
-              <Dialog.Description className="text-sm text-muted-foreground">Computed from the inputs below. Save their values to update this result.</Dialog.Description>
+              <Dialog.Description className="text-sm text-muted-foreground">{readOnly || field.compatibility_reason
+                ? 'These inputs are read-only in this view. Saving or updating this result is unavailable here.'
+                : 'Computed from the inputs below. Save their values to update this result.'}</Dialog.Description>
               {field.compatibility_reason && <p role="alert">{field.compatibility_reason}</p>}
               {inputs.map((input) => <PatientFieldEditor key={input} store={store} name={input}
                 readOnly={readOnly || Boolean(field.compatibility_reason)} infoHref={infoHref}

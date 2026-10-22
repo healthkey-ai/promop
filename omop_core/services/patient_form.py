@@ -63,8 +63,11 @@ FORM_INPUTS = {
                    'serum_creatinine_mg_dl', 'hemoglobin_g_dl', 'bone_lesions'],
     'tnbc_status': ['estrogen_receptor_status', 'progesterone_receptor_status', 'her2_status'],
     'hr_status': ['estrogen_receptor_status', 'progesterone_receptor_status'],
-    'mipi_risk': ['patient_age', 'ecog_performance_status', 'ldh_u_l', 'ldh_uln', 'wbc_count_thousand_per_ul'],
-    'mipi_c_risk': ['patient_age', 'ecog_performance_status', 'ldh_u_l', 'ldh_uln',
+    # Navigate to existing source controls; never expose a host-withheld age
+    # value or invent an LDH-ULN alias. These lists do not calculate MIPI, whose
+    # separate input/result compatibility gate remains in force.
+    'mipi_risk': ['date_of_birth', 'ecog_performance_status', 'ldh_u_l', 'ldh_upper_limit_normal', 'wbc_count_thousand_per_ul'],
+    'mipi_c_risk': ['date_of_birth', 'ecog_performance_status', 'ldh_u_l', 'ldh_upper_limit_normal',
                     'wbc_count_thousand_per_ul', 'ki67_proliferation_index'],
     'high_risk_mcl_criteria': ['mipi_risk', 'mipi_c_risk', 'ki67_proliferation_index'],
 }

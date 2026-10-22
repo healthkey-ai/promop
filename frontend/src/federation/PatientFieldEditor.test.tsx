@@ -51,7 +51,30 @@ describe('computed patient field input dialogs', () => {
     render(<PatientFieldEditor store={store} name="slim" />);
     fireEvent.click(screen.getByRole('button', { name: 'Edit SLiM inputs' }));
     expect(screen.getByRole('alert')).toHaveTextContent('Clinical equivalence review required.');
+    expect(screen.getByRole('dialog')).not.toHaveTextContent('Save their values');
     expect(screen.queryByDisplayValue('60')).not.toBeInTheDocument();
+    expect(patch).not.toHaveBeenCalled();
+  });
+  it('keeps DOB and ULN navigable but read-only through nested MCL and MIPI gates', async () => {
+    const { store, patch } = await setup({
+      high_risk_mcl_criteria: { label: 'MCL', writable: false, inputs: ['mipi_risk'],
+        compatibility_reason: 'MCL clinical review required.' },
+      // No child gate here: the ancestor alone must prevent source writes.
+      mipi_risk: { label: 'MIPI', writable: false, inputs: ['date_of_birth', 'ldh_upper_limit_normal'] },
+      date_of_birth: { label: 'Date of birth', writable: true, target: 'patient_record', control: 'date' },
+      ldh_upper_limit_normal: { label: 'LDH upper limit normal', writable: true, target: 'patient_record', control: 'number' },
+    });
+    render(<PatientFieldEditor store={store} name="high_risk_mcl_criteria" />);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit MCL inputs' }));
+    expect(screen.getByRole('alert')).toHaveTextContent('MCL clinical review required.');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit MIPI inputs' }));
+    const dialog = screen.getByRole('dialog', { name: 'MIPI' });
+    expect(within(dialog).getByText('Date of birth:')).toBeVisible();
+    expect(within(dialog).getByText('LDH upper limit normal:')).toBeVisible();
+    expect(dialog.querySelectorAll('input,select,textarea')).toHaveLength(0);
+    expect(dialog).toHaveTextContent('Saving or updating this result is unavailable here.');
+    expect(dialog).not.toHaveTextContent('No reviewed PROMOP field binding');
+    await act(async () => { await store.flush(); });
     expect(patch).not.toHaveBeenCalled();
   });
   it('fails closed on missing bindings and cycles, with a route-aware Your Info link', async () => {
