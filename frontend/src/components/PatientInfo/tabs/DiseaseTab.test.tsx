@@ -118,6 +118,30 @@ function renderMyeloma(
 // Tests
 // ---------------------------------------------------------------------------
 
+describe('MyelomaSection — labels and marker fields', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setupVocabMock();
+  });
+
+  it('uses the PROMOP labels for the disease controls', () => {
+    renderMyeloma();
+    expect(screen.getByText('M-Protein Type')).toBeInTheDocument();
+    expect(screen.getByText('Recorded ISS / R-ISS Stage')).toBeInTheDocument();
+    expect(screen.getByText('Bone Marrow Plasma Cells (%)')).toBeInTheDocument();
+    expect(screen.getByText('Legacy cytogenetic summary')).toBeInTheDocument();
+  });
+
+  it('renders individual kappa and lambda free light chains', () => {
+    renderMyeloma({ kappa_flc: 1.87, lambda_flc: 0.92 });
+    expect(screen.getByText('Kappa Free Light Chains')).toBeInTheDocument();
+    expect(screen.getByText('Lambda Free Light Chains')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('1.87')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('0.92')).toBeInTheDocument();
+    expect(screen.getByText('Kappa/Lambda Ratio')).toBeInTheDocument();
+  });
+});
+
 describe('MyelomaSection — SCT fields', () => {
   beforeEach(() => {
     vi.clearAllMocks();

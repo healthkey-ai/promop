@@ -242,8 +242,8 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
     <>
       <Section title="Disease Characteristics">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field label="Myeloma Type" name="myeloma_type" type="select" value={formData?.myeloma_type} options={myelomaTypes} onChange={onChange} vocabSource={myelomaTypeSource} />
-          <Field label="ISS Stage" name="stage" type="select" value={formData?.stage} options={ISS_STAGE_OPTIONS} disabled={/^R-ISS\b/i.test(String(formData?.stage ?? ''))} onChange={onChange} />
+          <Field label="M-Protein Type" name="myeloma_type" type="select" value={formData?.myeloma_type} options={myelomaTypes} onChange={onChange} vocabSource={myelomaTypeSource} />
+          <Field label="Recorded ISS / R-ISS Stage" name="stage" type="select" value={formData?.stage} options={ISS_STAGE_OPTIONS} disabled={/^R-ISS\b/i.test(String(formData?.stage ?? ''))} onChange={onChange} />
           <Field label="Progression Status" name="progression" type="select" value={formData?.progression} options={MM_PROGRESSION_OPTIONS} onChange={onChange} vocabSource={progressionSource} />
           <Field label="Measurable Disease (IMWG)" name="measurable_disease_imwg" type="boolean" value={formData?.measurable_disease_imwg} onChange={onChange} />
           <Field label="MRD Status" name="mrd_status" type="select" value={formData?.mrd_status} options={MRD_STATUS_OPTIONS} onChange={onChange} />
@@ -263,7 +263,9 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <Field label="Serum M-Protein (g/dL)" name="monoclonal_protein_serum" type="number" value={formData?.monoclonal_protein_serum} onChange={onChange} />
           <Field label="Urine M-Protein (mg/24h)" name="monoclonal_protein_urine" type="number" value={formData?.monoclonal_protein_urine} onChange={onChange} />
-          <Field label="Free Light Chain Ratio" name="free_light_chain_ratio" type="number" value={formData?.free_light_chain_ratio} onChange={onChange} />
+          <Field label="Kappa Free Light Chains" name="kappa_flc" type="number" value={formData?.kappa_flc} onChange={onChange} />
+          <Field label="Lambda Free Light Chains" name="lambda_flc" type="number" value={formData?.lambda_flc} onChange={onChange} />
+          <Field label="Kappa/Lambda Ratio" name="free_light_chain_ratio" type="number" value={formData?.free_light_chain_ratio} onChange={onChange} />
           <Field label="Beta-2 Microglobulin (mg/L)" name="beta2_microglobulin" type="number" value={formData?.beta2_microglobulin} onChange={onChange} />
           <Field label="LDH Level (U/L)" name="ldh_level" type="number" value={formData?.ldh_level} onChange={onChange} />
         </div>
@@ -272,14 +274,17 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
       <Section title="Complications">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <Field label="Bone Lesions" name="bone_lesions" type="select" value={formData?.bone_lesions} options={BONE_LESIONS_OPTIONS} onChange={onChange} />
-          <Field label="Plasma Cell Percentage (%)" name="clonal_plasma_cells" type="number" value={formData?.clonal_plasma_cells} onChange={onChange} />
+          <Field label="Bone Marrow Plasma Cells (%)" name="clonal_plasma_cells" type="number" value={formData?.clonal_plasma_cells} onChange={onChange} />
         </div>
       </Section>
 
       <Section title="Cytogenetics">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <div className="sm:col-span-2">
-            <Field label="Cytogenetic Abnormalities" name="cytogenic_markers" type="text" value={formData?.cytogenic_markers} onChange={onChange} />
+            <Field label="Legacy cytogenetic summary" name="cytogenic_markers" type="text" value={formData?.cytogenic_markers} onChange={onChange} readOnly />
+            <p className="mt-1 text-xs text-portal-text-secondary">
+              Record individual findings in Genomics. Original legacy results are available there for review.
+            </p>
           </div>
           <div className="sm:col-span-2">
             <Field label="Genetic Mutations" name="genetic_mutations" type="text" value={formData?.genetic_mutations} onChange={onChange} />

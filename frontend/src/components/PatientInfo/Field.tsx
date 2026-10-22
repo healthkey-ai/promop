@@ -44,13 +44,23 @@ export default function Field({
   const isDisabled = disabled || readOnly || notWritable;
   const optionObjects = useMemo(() => stringsToOptions(options), [options]);
 
-  // Non-editable-here fields: prefer the descriptor's "(computed)" + reason display (matches the
-  // standalone PROMOP UI) over a bare "(read-only)". A field is "computed" when the descriptor
-  // describes it as non-writable (computed / unmapped / set-on-Person / deferred); its `reason`
-  // explains why. Falls back to "(read-only)" only when there is no descriptor entry.
+  // Distinguish genuinely computed fields from fields that merely have no write
+  // mapping yet. Calling both "computed" was misleading: `unmapped` is a
+  // contract gap, not a derivation.
   const descriptorEntry = ctx?.descriptor?.[name];
-  const showAsComputed = readOnly || (notWritable && !!descriptorEntry);
-  const reasonHint = (readOnly || notWritable) ? descriptorEntry?.reason : undefined;
+  const fieldKind = descriptorEntry?.kind;
+  const stateLabel = readOnly
+    ? 'read-only'
+    : fieldKind === 'computed'
+      ? 'computed'
+      : fieldKind === 'unmapped'
+        ? 'unmapped'
+        : notWritable
+          ? 'read-only'
+          : null;
+  const reasonHint = stateLabel === 'computed' || stateLabel === 'read-only'
+    ? descriptorEntry?.reason
+    : undefined;
 
   const selectedValues = useMemo<string[]>(() => {
     const v = value;
@@ -151,10 +161,12 @@ export default function Field({
   return (
     <div className="space-y-1.5">
       <div className="flex items-center gap-1.5">
-        <label className="text-sm font-medium text-portal-text-primary">
+        <label
+          className="text-sm font-medium text-portal-text-primary"
+          title={stateLabel === 'unmapped' ? descriptorEntry?.reason : undefined}
+        >
           {label}
-          {showAsComputed && <span className="ml-1 text-xs font-normal text-portal-text-secondary">(computed)</span>}
-          {!showAsComputed && notWritable && <span className="ml-1 text-xs font-normal text-portal-text-secondary">(read-only)</span>}
+          {stateLabel && <span className="ml-1 text-xs font-normal text-portal-text-secondary">({stateLabel})</span>}
         </label>
         {vocabSource && <VocabularyTooltip name={vocabSource.name} url={vocabSource.url} />}
       </div>

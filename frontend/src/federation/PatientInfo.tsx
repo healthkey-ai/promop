@@ -301,7 +301,7 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated }: Pick<Patien
     .concat(federated ? [] : ["Wearable"]);
   const tabDescriptions: Record<number, string> = {
     0: "Keep patient details up to date for accurate personalisation.",
-    1: "Disease-specific clinical information and genetic details.",
+    1: "Staging and disease-specific clinical information.",
     2: "Therapy history, treatment lines, and planned therapies.",
     3: "Blood counts, electrolytes, coagulation, and cardiac markers.",
     4: "Chemistry panel, liver function tests, and other lab markers.",
