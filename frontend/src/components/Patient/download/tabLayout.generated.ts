@@ -656,6 +656,16 @@ export const TAB_LAYOUT: TabLayout = {
           "refractory_status"
         ]
       ]
+    },
+    {
+      "title": "Planned Therapies",
+      "component": "TreatmentTab",
+      "fields": [
+        [
+          "Planned Therapies",
+          "planned_therapies"
+        ]
+      ]
     }
   ],
   "LabsTab": [
