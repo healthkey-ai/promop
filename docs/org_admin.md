@@ -74,6 +74,11 @@ This is idempotent — safe to run multiple times.
 
 ## Org Admin Permissions
 
+Invitations, access grants, and trust rules require Staff or an active, explicit
+organization-level `org_admin` grant for the target organization. Domain and
+organization trusts do not confer permission to delegate access. Group-scoped
+or expired grants do not qualify.
+
 An org admin (a user with a `GroupAccess` row where `role='org_admin'`) can:
 
 - View their org's settings

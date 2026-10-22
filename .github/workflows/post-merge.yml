@@ -1,0 +1,44 @@
+name: Post-merge checks
+
+on:
+  push:
+    branches: [dev]
+
+permissions:
+  contents: read
+
+jobs:
+  migration-conflicts:
+    name: Migration conflict check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check for migration conflicts
+        env:
+          DATABASE_URL: sqlite:///unused
+          SECRET_KEY: ci-migration-check
+          DEBUG: 'True'
+          DJANGO_SETTINGS_MODULE: promop.settings
+        run: |
+          python - <<'PYCHECK'
+          import django, sys; django.setup()
+          from django.db.migrations.loader import MigrationLoader
+          loader = MigrationLoader(None, ignore_no_migrations=True)
+          conflicts = loader.detect_conflicts()
+          if conflicts:
+              for app, names in conflicts.items():
+                  print(f"CONFLICT in {app}: {', '.join(names)}")
+              print("Fix with: python manage.py makemigrations --merge")
+              sys.exit(1)
+          print("No migration conflicts detected.")
+          PYCHECK

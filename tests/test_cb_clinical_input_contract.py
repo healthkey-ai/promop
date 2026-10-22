@@ -36,7 +36,6 @@ def patient():
     ('activated_partial_thromboplastin_time_uln', Decimal('1.5')),
     ('able_to_swallow_tablets_capsules', False),
     ('able_to_swallow_tablets_capsules', True),
-    ('sct_date', date(2026, 1, 2)),
 ])
 def test_host_and_field_applier_round_trip_and_clear(patient, field, value):
     d = build_writable_field_descriptor()[field]
@@ -76,16 +75,16 @@ def test_same_day_import_survives_correction_and_clear(patient):
     imported = Observation(
         observation_id=9900001, person=patient, observation_concept_id=0,
         observation_type_concept_id=32817, observation_date=date.today(),
-        observation_source_value='mm-sct-date', value_as_string='2026-01-01',
+        observation_source_value='cb:swallow-tablets', value_as_string='true',
     )
     imported._skip_patient_record_refresh = True
     imported.save()
-    assert refresh_patient_record(patient).sct_date == date(2026, 1, 1)
-    record = write_clinical_inputs(patient, {'sct_date': date(2026, 1, 2)})
-    assert record.sct_date == date(2026, 1, 2)
-    assert write_clinical_inputs(patient, {'sct_date': None}).sct_date is None
+    assert refresh_patient_record(patient).able_to_swallow_tablets_capsules is True
+    record = write_clinical_inputs(patient, {'able_to_swallow_tablets_capsules': False})
+    assert record.able_to_swallow_tablets_capsules is False
+    assert write_clinical_inputs(patient, {'able_to_swallow_tablets_capsules': None}).able_to_swallow_tablets_capsules is None
     imported.refresh_from_db()
-    assert imported.value_as_string == '2026-01-01'
+    assert imported.value_as_string == 'true'
     assert imported.observation_type_concept_id == 32817
     assert Observation.objects.filter(person=patient).count() == 3
 
@@ -93,7 +92,7 @@ def test_same_day_import_survives_correction_and_clear(patient):
 def test_bad_type_vocabulary_cannot_be_used_as_self_report(patient):
     vocab = VocabularyFactory(vocabulary_id='Wrong type')
     Concept.objects.filter(pk=32865).update(vocabulary=vocab)
-    assert not build_writable_field_descriptor()['sct_date']['writable']
+    assert not build_writable_field_descriptor()['prothrombin_time_uln']['writable']
     with pytest.raises(ValueError, match='Type Concept'):
         write_clinical_inputs(patient, {'able_to_swallow_tablets_capsules': False})
     assert Observation.objects.filter(person=patient).count() == 0
@@ -127,13 +126,13 @@ def test_smallest_positive_ratio_keeps_decimal_precision(patient):
 def test_only_explicit_contract_fields_are_writable_here(patient):
     with pytest.raises(ValueError, match='Unsupported'):
         write_clinical_inputs(patient, {'hepatic_adequacy_status': True})
-    assert len(CLINICAL_INPUT_FIELDS) == 4
+    assert len(CLINICAL_INPUT_FIELDS) == 3
 
 
 def test_new_inputs_have_source_provenance(patient):
     from omop_core.services.provenance_registry import get_registry
     registry = get_registry()
-    for field in CLINICAL_INPUT_FIELDS - {'sct_date'}:
+    for field in CLINICAL_INPUT_FIELDS:
         provenance = registry[field]
         assert provenance.omop_table == 'Observation'
         assert provenance.source_values == [RECIPES[field][0]]

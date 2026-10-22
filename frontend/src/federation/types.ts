@@ -1,3 +1,4 @@
+import type { NormalizedMeasurement } from '@/utils/normalizedLabs';
 import type { AxiosInstance } from "axios";
 import type { QueryClient } from "@tanstack/react-query";
 
@@ -20,6 +21,9 @@ export interface LabsBaseProps {
 }
 
 export interface LabResultsProps extends LabsBaseProps {
+  /** Render the component's own "Lab Results" heading. Hosts that supply a page
+   *  title of their own pass false, so the screen does not show two. */
+  showHeading?: boolean;
   selectedTest?: string;
   onNavigateToDetail?: (conceptCode: string) => void;
   onBack?: () => void;
@@ -34,6 +38,8 @@ export interface UploadProvenance {
 }
 
 export interface LabResultValue {
+  normalized?: NormalizedMeasurement | null;
+  original?: LabResultValue;
   measurement_id: number;
   value: number | null;
   value_string: string | null;

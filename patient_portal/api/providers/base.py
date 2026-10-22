@@ -38,6 +38,7 @@ class TokenClaims:
     email: str
     name: str | None
     raw: dict[str, Any]
+    email_verified: bool = False
 
 
 class TokenProvider(abc.ABC):

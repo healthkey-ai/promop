@@ -1,3 +1,4 @@
+import PageTitle from '@/components/Branding/PageTitle';
 import { useState } from 'react';
 import api from '@/api/axios';
 
@@ -55,7 +56,7 @@ export default function ChangePassword({ onChanged, onLogout }: Props) {
     <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-8 max-w-md w-full space-y-6">
         <div>
-          <h1 className="text-2xl font-semibold text-gray-900">Choose a new password</h1>
+          <PageTitle className="text-2xl font-semibold text-gray-900">Choose a new password</PageTitle>
           <p className="mt-2 text-sm text-gray-600">
             Your account requires a password change before you can continue.
           </p>

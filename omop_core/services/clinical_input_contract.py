@@ -17,8 +17,8 @@ RECIPES = {
     'prothrombin_time_uln': ('cb:pt-uln', 'number', '1'),
     'activated_partial_thromboplastin_time_uln': ('cb:aptt-uln', 'number', '1'),
     'able_to_swallow_tablets_capsules': ('cb:swallow-tablets', 'boolean', None),
-    # Same source as existing FHIR SCT date; date remains an input, not a verdict.
-    'sct_date': ('mm-sct-date', 'date', None),
+    # The SDK's fourth input, sct_date, is not here: it already writes through
+    # its FieldConceptMapping (mm-sct-date) on the PatientRecord-first path.
 }
 CLINICAL_INPUT_FIELDS = frozenset(RECIPES)
 
@@ -104,9 +104,12 @@ def write_clinical_inputs(person, changes):
     from omop_core.services.patient_record_service import refresh_patient_record
     values = _validated_values(changes)
     with transaction.atomic():
-        # Same lock order as the existing field applier: Person then projection.
+        # Same lock order as the field applier, therapy authoring and refresh:
+        # projection first, then Person. The other way round deadlocks against
+        # a concurrent federated profile PATCH.
+        record, _ = PatientRecord.objects.get_or_create(person=person)
+        PatientRecord.objects.select_for_update().get(pk=record.pk)
         Person.objects.select_for_update().get(pk=person.pk)
-        list(PatientRecord.objects.select_for_update().filter(person=person))
         if values:
             _append_inputs(person, values)
         record = refresh_patient_record(person)
@@ -120,8 +123,7 @@ def write_clinical_inputs(person, changes):
 def values_from_snapshot(snapshot):
     """Latest date/PK for each explicit source; null/invalid is never default yes.
 
-    Invalid latest facts and tombstones suppress older values. SCT dates also
-    accept existing imported facts on the same source key, regardless of type.
+    Invalid latest facts and tombstones suppress older values.
     """
     result = {}
     for field, (source, kind, _unit) in RECIPES.items():

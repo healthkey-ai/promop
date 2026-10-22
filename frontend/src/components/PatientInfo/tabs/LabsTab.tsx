@@ -1,8 +1,20 @@
 import { useState } from 'react';
+import { LineChart } from 'lucide-react';
 import ClinicalField from '../ClinicalField';
 import Section from '../Section';
 import { useWritableFields } from '@/hooks/useWritableFields';
+import { useLabMeasurements } from '@/hooks/useLabMeasurements';
+import { LabTrendChart } from '@/components/labs/LabTrendChart';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from '@/components/ui-labs/dialog';
 import { today } from '@/api/clinicalFacts';
+import type { FieldDescriptor } from '@/hooks/useWritableFields';
+import type { LabMeasurementGroup } from '@/hooks/useLabMeasurements';
 
 interface Props {
   formData: Record<string, unknown>;
@@ -43,13 +55,21 @@ const LIVER: Array<[string, string]> = [
   ['Direct Bilirubin (mg/dL)', 'serum_bilirubin_level_direct'],
 ];
 
+// Prognostic and inflammatory. LDH is a tumour-burden marker here — it sits in
+// the R-IPI for DLBCL — which is why it is not filed under "cardiac" anything.
+//
+// Beta-2 microglobulin lives here, not on DiseaseTab. It is an ISS staging
+// parameter, but DiseaseTab's disease sections are mutually exclusive, so
+// rendering it there left it unreachable for breast, CLL and unknown-disease
+// patients; and its always-rendered section already holds
+// serum_beta2_microglobulin_level (LOINC 32731-2), a different fact that would
+// have sat beside this one (1952-1) as two indistinguishable mg/L boxes. Labs
+// renders for every patient and is where a lab value belongs.
 const MARKERS: Array<[string, string]> = [
   ['LDH (U/L)', 'ldh_u_l'],
   ['Beta-2 Microglobulin (mg/L)', 'beta2_microglobulin'],
   ['C-Reactive Protein (mg/L)', 'c_reactive_protein'],
   ['ESR (mm/hr)', 'esr'],
-  ['Troponin (ng/mL)', 'troponin_ng_ml'],
-  ['BNP (pg/mL)', 'bnp_pg_ml'],
   ['HbA1c (%)', 'hba1c_percent'],
 ];
 
@@ -65,14 +85,63 @@ const TUMOR_MARKERS: Array<[string, string]> = [
   ['PSA (ng/mL)', 'psa_ng_ml'],
 ];
 
+// Split out of "Other Markers": these are cardiac, and grouping them with
+// tumour-burden markers said the wrong thing about why an oncology record
+// tracks them. They matter here for anthracycline and HER2-therapy
+// cardiotoxicity monitoring.
+const CARDIAC: Array<[string, string]> = [
+  ['Troponin (ng/mL)', 'troponin_ng_ml'],
+  ['BNP (pg/mL)', 'bnp_pg_ml'],
+];
+
 const DIAGNOSTIC: Array<[string, string]> = [
   ['Pulmonary Function Test Normal', 'pulmonary_function_test_result'],
   ['Bone Imaging Normal', 'bone_imaging_result'],
 ];
 
+const MIN_CHART_POINTS = 3;
+
+function ChartIconButton({
+  label,
+  group,
+  onClick,
+}: {
+  label: string;
+  group: LabMeasurementGroup;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={`View trend (${group.values.length} data points)`}
+      className="ml-1 inline-flex items-center rounded p-0.5 text-portal-brand hover:bg-muted transition-colors"
+      aria-label={`View trend chart for ${label}`}
+    >
+      <LineChart className="h-4 w-4" />
+    </button>
+  );
+}
+
 export default function LabsTab({ formData, onChange }: Props) {
-  const { descriptors, loading } = useWritableFields();
+  // Ask about *this* patient: whether a field may be edited depends on who is
+  // asking and whose record it is, not only on whether the field is mapped.
+  const personId = (formData?.person_id ?? formData?.person) as number | undefined;
+  const { descriptors, loading } = useWritableFields(personId);
+  const { grouped: measurementGroups } = useLabMeasurements(personId);
   const [date, setDate] = useState(today());
+  const [chartDialog, setChartDialog] = useState<{
+    label: string;
+    group: LabMeasurementGroup;
+  } | null>(null);
+
+  /** Look up measurement group for a field by its descriptor's source_value. */
+  const getGroup = (name: string): LabMeasurementGroup | undefined => {
+    const desc: FieldDescriptor | undefined = descriptors[name];
+    const sv = desc?.projection?.source_value ?? desc?.source_value;
+    if (!sv) return undefined;
+    return measurementGroups.get(sv);
+  };
 
   const section = (
     title: string,
@@ -81,19 +150,37 @@ export default function LabsTab({ formData, onChange }: Props) {
   ) => (
     <Section title={title}>
       <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-        {fields.map(([label, name]) => (
-          <ClinicalField
-            key={name}
-            label={label}
-            name={name}
-            type={type}
-            value={formData?.[name]}
-            descriptor={descriptors[name]}
-            onChange={onChange}
-            date={date}
-            onDateChange={setDate}
-          />
-        ))}
+        {fields.map(([label, name]) => {
+          const group = getGroup(name);
+          const hasChart = !!group && group.values.length >= MIN_CHART_POINTS;
+          return (
+            <div key={name} className="relative">
+              <div className="flex items-start gap-1">
+                <div className="flex-1 min-w-0">
+                  <ClinicalField
+                    label={label}
+                    name={name}
+                    type={type}
+                    value={formData?.[name]}
+                    descriptor={descriptors[name]}
+                    onChange={onChange}
+                    date={date}
+                    onDateChange={setDate}
+                  />
+                </div>
+                {hasChart && (
+                  <div className="mt-6 shrink-0">
+                    <ChartIconButton
+                      label={label}
+                      group={group}
+                      onClick={() => setChartDialog({ label: group.values[0]?.normalized ? `${label.split(" (")[0]} (${group.unit})` : label, group })}
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
       </div>
     </Section>
   );
@@ -102,17 +189,32 @@ export default function LabsTab({ formData, onChange }: Props) {
     <div>
       {!loading && (
         <p className="mb-4 text-xs text-muted-foreground">
-          Lab values are stored as OMOP measurements. Editing one records a new
-          result dated below and re-derives the record; a field without an editable
-          box explains why underneath it.
+          Edits are saved to the patient record first and, where a mapping exists,
+          projected to a dated OMOP measurement. Computed fields explain why they
+          are read-only.
         </p>
       )}
       {section('Chemistry Panel', CHEMISTRY)}
       {section('Liver Function', LIVER)}
       {section('Coagulation', COAGULATION)}
       {section('Other Markers', MARKERS)}
+      {section('Cardiac', CARDIAC)}
       {section('Tumor Markers', TUMOR_MARKERS)}
       {section('Diagnostic Tests', DIAGNOSTIC, 'boolean')}
+
+      <Dialog open={!!chartDialog} onOpenChange={(open) => { if (!open) setChartDialog(null); }}>
+        <DialogContent className="max-w-[40rem]">
+          <DialogHeader>
+            <DialogTitle>{chartDialog?.label}</DialogTitle>
+            <DialogDescription>
+              {chartDialog ? `${chartDialog.group.values.length} measurements over time` : ''}
+            </DialogDescription>
+          </DialogHeader>
+          {chartDialog && (
+            <LabTrendChart values={chartDialog.group.values} unit={chartDialog.group.unit} />
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

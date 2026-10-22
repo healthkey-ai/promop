@@ -1,16 +1,5 @@
-"""
-ASGI config for ctomop project.
+"""Compatibility alias for :mod:`promop.asgi`."""
+import sys
+from importlib import import_module
 
-It exposes the ASGI callable as a module-level variable named ``application``.
-
-For more information on this file, see
-https://docs.djangoproject.com/en/5.2/howto/deployment/asgi/
-"""
-
-import os
-
-from django.core.asgi import get_asgi_application
-
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'ctomop.settings')
-
-application = get_asgi_application()
+sys.modules[__name__] = import_module('promop.asgi')

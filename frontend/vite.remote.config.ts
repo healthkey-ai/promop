@@ -36,6 +36,9 @@ export default defineConfig(({ mode }) => {
         exposes: {
           "./LabResults": "./src/federation/LabResults.tsx",
           "./PatientInfo": "./src/federation/PatientInfo.tsx",
+          // Framework-agnostic mounts for non-React hosts (HealthTree ONE).
+          "./LabResultsBridge": "./src/federation/LabResultsBridge.tsx",
+          "./PatientInfoBridge": "./src/federation/PatientInfoBridge.tsx",
           "./types": "./src/federation/types.ts",
         },
         shared: {

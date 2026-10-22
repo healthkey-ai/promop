@@ -43,7 +43,7 @@ git checkout -b your-feature-branch
 ### 2. Set up your local environment
 
 Follow the [local setup instructions](README.md#local-setup) in the README, or use
-[Docker](BUILDING_WITH_DOCKER.md) if you prefer.
+[Docker](docs/BUILDING_WITH_DOCKER.md) if you prefer.
 
 ### 3. Make your changes
 
@@ -63,7 +63,7 @@ A few conventions to follow:
 
 ```bash
 # Backend — Django runner (omop_core + patient_portal)
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" DEBUG=True \
   .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput
 
 # Backend — pytest (the tests/ package)
@@ -95,7 +95,7 @@ production deployment.
 
 ```bash
 # One-liner: both backend runners + frontend
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" DEBUG=True \
   .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput \
   && DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" DEBUG=True \
      .venv/bin/python -m pytest -q \
@@ -123,7 +123,7 @@ PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U postgres -d postgres \
 PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U postgres -d template1 \
   -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
 
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" DEBUG=True \
   .venv/bin/python manage.py migrate --noinput
 ```
 

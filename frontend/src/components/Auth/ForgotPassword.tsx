@@ -1,3 +1,4 @@
+import PageTitle from '@/components/Branding/PageTitle';
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { publicApi } from "@/api/publicAxios";
@@ -34,7 +35,7 @@ export default function ForgotPassword() {
     return (
       <div className="flex min-h-screen items-center justify-center bg-muted/40">
         <div className="w-full max-w-md space-y-6 rounded-lg bg-background p-8 shadow-lg text-center">
-          <h2 className="text-2xl font-semibold text-foreground">Check your email</h2>
+          <PageTitle className="text-2xl font-semibold text-foreground">Check your email</PageTitle>
           <p className="text-sm text-muted-foreground">
             If an account exists with that email, we've sent a link to reset your password.
           </p>
@@ -53,9 +54,9 @@ export default function ForgotPassword() {
     <div className="flex min-h-screen items-center justify-center bg-muted/40">
       <div className="w-full max-w-md space-y-8 rounded-lg bg-background p-8 shadow-lg">
         <div>
-          <h2 className="mt-6 text-center text-3xl font-extrabold text-foreground">
+          <PageTitle className="text-left text-3xl font-extrabold text-foreground">
             Forgot password?
-          </h2>
+          </PageTitle>
           <p className="mt-2 text-center text-sm text-muted-foreground">
             Enter your email and we'll send you a reset link.
           </p>
