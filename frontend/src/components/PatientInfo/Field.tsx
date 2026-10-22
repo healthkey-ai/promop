@@ -58,9 +58,10 @@ export default function Field({
         : notWritable
           ? 'read-only'
           : null;
-  const reasonHint = stateLabel === 'computed' || stateLabel === 'read-only'
-    ? descriptorEntry?.reason
-    : undefined;
+  // Explain computed values inline (as PRomop does), but keep mapping/read-only
+  // explanations in the hover title so the form does not repeat a paragraph on
+  // every field.
+  const reasonHint = stateLabel === 'computed' ? descriptorEntry?.reason : undefined;
 
   const selectedValues = useMemo<string[]>(() => {
     const v = value;
@@ -163,7 +164,7 @@ export default function Field({
       <div className="flex items-center gap-1.5">
         <label
           className="text-sm font-medium text-portal-text-primary"
-          title={stateLabel === 'unmapped' ? descriptorEntry?.reason : undefined}
+          title={stateLabel ? descriptorEntry?.reason : undefined}
         >
           {label}
           {stateLabel && <span className="ml-1 text-xs font-normal text-portal-text-secondary">({stateLabel})</span>}
