@@ -11,14 +11,14 @@ from drf_spectacular.utils import OpenApiParameter, extend_schema, inline_serial
 from rest_framework import serializers, status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.exceptions import PermissionDenied, ValidationError
-from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from omop_core.models import Concept, Person, RelevanceSignal
 from omop_core.services import disease_relevance
 from omop_core.services.genomics_catalog import disease_code
 from patient_portal.api.permissions import (
-    EtlWritePermission, VocabReadPermission, is_service_token, service_token_scopes,
+    EtlWritePermission, ScopedTokenPermission, VocabReadPermission, is_service_token,
+    service_token_scopes,
 )
 
 # Reads the patient's diseases and nothing else, so an extractor need not hold
@@ -110,17 +110,18 @@ def _requested_diseases(request):
 @permission_classes([RelevanceReadPermission])
 def disease_relevance_view(request):
     person_id, codes = _requested_diseases(request)
-    version = disease_relevance.current_version()
-    etag = _etag(f'{version}-{"+".join(codes)}')
+    # The version is a hash of the content, so the content is built either way;
+    # a match saves the transfer, not the work.
+    payload = disease_relevance.relevance(codes)
+    etag = _etag(f'{payload["version"]}-{"+".join(codes)}')
     if _etag_matches(request.META.get('HTTP_IF_NONE_MATCH', ''), etag):
         response = HttpResponseNotModified()
         response['ETag'] = etag
         return response
-    payload = disease_relevance.relevance(codes)
     if person_id is not None:
         payload['person_id'] = person_id
     response = Response(payload)
-    response['ETag'] = _etag(f'{payload["version"]}-{"+".join(codes)}')
+    response['ETag'] = etag
     response['Cache-Control'] = 'private, no-cache'
     return response
 
@@ -234,7 +235,7 @@ def relevance_signals(request):
         choices=['proposed', 'accepted', 'rejected'])}),
 )
 @api_view(['PATCH'])
-@permission_classes([IsAuthenticated])
+@permission_classes([ScopedTokenPermission])
 def relevance_signal_review(request, signal_id):
     from patient_portal.api.views import _can_approve_mappings
     if is_service_token(request) or not _can_approve_mappings(request.user):
