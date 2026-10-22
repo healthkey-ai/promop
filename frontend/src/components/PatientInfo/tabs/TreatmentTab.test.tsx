@@ -11,8 +11,12 @@ import TreatmentTab from './TreatmentTab';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
 
 const mockGet = vi.fn();
+const mockDelete = vi.fn();
 vi.mock('@/api/axios', () => ({
-  default: { get: (...a: unknown[]) => mockGet(...a), post: vi.fn(), patch: vi.fn() },
+  default: {
+    get: (...a: unknown[]) => mockGet(...a), post: vi.fn(), patch: vi.fn(),
+    delete: (...a: unknown[]) => mockDelete(...a),
+  },
 }));
 
 const AUTHORED_REASON =
@@ -40,13 +44,14 @@ const DESCRIPTORS: Record<string, unknown> = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockDelete.mockResolvedValue({ data: { episode_id: 901, retracted: true, patient_info: {} } });
   __resetWritableFieldsCache();
   mockGet.mockImplementation((url: string) => Promise.resolve({ data: url.includes('writable-fields') ? DESCRIPTORS : [] }));
 });
 
-function renderTab(formData: Record<string, unknown> = {}) {
+function renderTab(formData: Record<string, unknown> = {}, readOnly = false) {
   return render(
-    <TreatmentTab formData={formData} onChange={vi.fn()} diseaseType="myeloma" />,
+    <TreatmentTab formData={formData} onChange={vi.fn()} diseaseType="myeloma" readOnly={readOnly} />,
   );
 }
 
@@ -147,6 +152,19 @@ describe('TreatmentTab', () => {
  * The tab offers the one write that moves the fields it displays.
  */
 describe('TreatmentTab - authoring a line', () => {
+  it('withholds the authoring controls when the host mounts it read-only', async () => {
+    // A federated host whose writes are disabled must not offer a button whose
+    // request the server would refuse.
+    renderTab({ ...THREE_LINES, person_id: 262, lines_of_therapy: STRUCTURED_LINES }, true);
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    expect(screen.queryByRole('button', { name: /add therapy line/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^edit$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /add supportive therapy/i })).not.toBeInTheDocument();
+    // The history itself is still shown.
+    expect(screen.getByText(/Line 1: VRd/i)).toBeInTheDocument();
+  });
+
   it('offers the add-line action', async () => {
     renderTab({ ...THREE_LINES, person_id: 262 });
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
@@ -212,4 +230,53 @@ it('offers editable relapse and refractory fields from the descriptor', async ()
   renderTab({ relapse_count: 2, refractory_status: 'Primary Refractory' });
   await waitFor(() => expect(screen.getByText('Relapse Count').parentElement?.parentElement?.querySelector('input')).toBeEnabled());
   expect(screen.getByText('Refractory Status').parentElement?.parentElement?.querySelector('[role="combobox"]')).toBeEnabled();
+});
+
+
+describe('TreatmentTab — retracting a line', () => {
+  it('withdraws the line instead of clearing its drugs', async () => {
+    const refreshed = vi.fn();
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(
+      <TreatmentTab
+        formData={{ ...THREE_LINES, person_id: 262, lines_of_therapy: STRUCTURED_LINES }}
+        onChange={vi.fn()}
+        diseaseType="myeloma"
+        onRecordRefreshed={refreshed}
+      />,
+    );
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    fireEvent.click(screen.getAllByRole('button', { name: /remove/i })[0]);
+    await waitFor(() => expect(mockDelete).toHaveBeenCalledWith('/v1/therapy-lines/901/'));
+    expect(refreshed).toHaveBeenCalled();
+  });
+
+  it('does nothing when the confirmation is declined', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(false);
+    renderTab({ ...THREE_LINES, person_id: 262, lines_of_therapy: STRUCTURED_LINES });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    fireEvent.click(screen.getAllByRole('button', { name: /remove/i })[0]);
+    expect(mockDelete).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('TreatmentTab — unknown composition', () => {
+  it('names a line recorded without drugs instead of showing Unknown', async () => {
+    renderTab({
+      ...THREE_LINES,
+      person_id: 262,
+      lines_of_therapy: [{
+        ...STRUCTURED_LINES[1],
+        line: 3,
+        regimen: 'Unknown',
+        composition_known: false,
+        drugs: [],
+      }],
+    });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+    expect(screen.getByText(/Line 3: Drugs unknown/i)).toBeInTheDocument();
+  });
 });

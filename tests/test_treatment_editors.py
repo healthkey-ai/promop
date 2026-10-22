@@ -10,7 +10,7 @@ from omop_core.models import Death, Observation, PatientRecord, SupportiveTherap
 from omop_core.services.patient_record_service import refresh_patient_record
 from omop_core.services.write_descriptor import build_writable_field_descriptor
 from patient_portal.models import Identity, PatientUser
-from tests.factories import PatientRecordFactory
+from tests.factories import ConceptFactory, PatientRecordFactory
 
 pytestmark = pytest.mark.django_db
 
@@ -223,7 +223,7 @@ def test_line_outcome_is_validated_for_patient_disease(editor, catalog, disease,
     record.disease = disease
     record.save()
     serializer = TherapyLineWriteSerializer(data={'person': record.person_id,
-        'line_number': 1, 'drugs': [{'concept_id': 0}], 'outcome': outcome})
+        'line_number': 1, 'drugs': [{'concept_id': ConceptFactory().pk}], 'outcome': outcome})
     assert serializer.is_valid() is valid
     if valid:
         assert serializer.validated_data['outcome'] == normalized

@@ -8,6 +8,40 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **A recorded line no longer has to name its drugs, and a wrong line can be
+  withdrawn** — the therapy editor offers "I don't know which drugs were given",
+  which records that the line happened with an unknown composition instead of
+  refusing to save. That is a deliberate choice, not an empty form: a payload
+  with no drugs, no regimen and no such statement is still rejected. Separately,
+  each line has a Remove action that retracts the claim it happened; the line
+  leaves the history and its imported drug exposures are kept, which is a
+  different action from ticking "drugs unknown" on an existing line, where the
+  line stays and only its composition is cleared. The write payload carries
+  `composition_unknown` and `DELETE /v1/therapy-lines/<id>/` performs the
+  retraction (#1924).
+
+- **The patient-info widget ships with the therapy editor** — `npm run
+  build:widget` produces the self-contained bundle a host on another React
+  version mounts, and that bundle now includes the treatment editor, so a
+  federated patient can author and correct lines instead of reading a
+  read-only history. The build entry exposes `mount`/`unmount` with
+  `{apiBase, token, readOnly}`, hands the base to the clinical transport and
+  hides tabs whose endpoints only the standalone product provides. The
+  treatment tab withholds its authoring controls when the host mounts
+  read-only, instead of offering a write the server will refuse. Structured
+  `lines_of_therapy` moved into `omop_core.api` so a host can project the same
+  per-line payload the standalone record uses (#1924).
+
+- **The therapy editor's endpoints ship in the package** — `omop_core.api`
+  serves the five calls the patient widget makes (`therapy-lines`,
+  `therapy-outcomes`, `therapy-regimens` list and detail, `concepts/search`)
+  from the installed wheel, so an embedding host can run the editor instead of
+  only deriving from data it cannot author. Host policy stays out: permissions,
+  the per-person write check and the `PatientRecord` payload shape are seams a
+  host overrides. The in-place API now imports the same serializers, queries and
+  viewset, so the two surfaces cannot drift. Requires the `api` extra
+  (`djangorestframework`) (#1924).
+
 - **Download a patient record as PDF or FHIR** — the patient record view has a
   Download button beside the patient's name and number, for every role that can
   open the record (patients included; it used to be patient-only and FHIR-only).
@@ -64,6 +98,35 @@ All notable changes to PRomop are documented here.
   omits redundant coding counts, explains value types outside the three extract
   categories, and labels grouped section totals and same-description record
   counts explicitly (#1691).
+
+### Fixed
+
+- **A known line of therapy is no longer lost when its drugs are unknown** —
+  the canonical writer now records that a line happened, independently of the
+  exposures that describe it. A line named without a drug list (a mapped
+  regimen, or a patient-reported line whose drugs were never recorded) counts
+  as one prior line instead of reading as "no prior therapy", and reports an
+  unknown composition rather than an empty one: the per-line payload now says
+  `composition_known: false`. A header row that no writer asserted is still
+  ignored, so a partial import cannot invent treatment. Retracting a line
+  entered in error withdraws it without deleting imported exposures, and saving
+  the line again restores it; clearing composition keeps the line with unknown
+  drugs (#1924).
+
+- **Editing a line of therapy no longer rewrites unrelated administrations** —
+  every drug exposure now belongs to one line and is addressed by its own id,
+  with its own dates, instead of being re-identified by patient, drug name and
+  date. Correcting a drug or its dates updates only the exposure the line owns;
+  exposures shared with another line or imported from an EHR are copied before
+  an edit and never retracted. Saving the form again, or editing only the
+  outcome, keeps the existing ids and individual administration periods, and a
+  line's dates no longer overwrite them. Repeated administrations of the same
+  drug are preserved, an ambiguous legacy name is refused instead of guessed,
+  and a future-dated administration is refused because the history records
+  treatment received rather than planned. The write is one transaction with a
+  bounded retry on lock contention, so a concurrent bulk edit cannot leave a
+  partially written line; ARTEMIS materialization uses the same boundary
+  (#1926).
 
 ### Added
 

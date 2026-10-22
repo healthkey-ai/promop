@@ -4,7 +4,12 @@
 # standalone product that also uses these apps in place (this pyproject packages
 # them from the repo root WITHOUT moving them — omop_core structure is unchanged).
 #
-# Scope: this packages the MODELS + migration graph + derivation services. It does
+# Scope: this packages the MODELS + migration graph + derivation services, plus
+# the small API surface the patient widget calls (omop_core.api). Host policy --
+# permissions, the per-person write check, the PatientRecord payload shape --
+# stays out: a host subclasses the viewset. The API needs djangorestframework, so
+# it is an optional extra (`pip install promop-omop[api]`) rather than a hard
+# dependency for hosts that only import the models. It does
 # NOT package the patient_portal-coupled runtime utilities (authorization.py,
 # organization_cleanup, signed fhir_export, some management commands) — those stay
 # PROMOP-service-only and must not be called from a host lacking patient_portal.
@@ -41,6 +46,9 @@ requires-python = ">=3.12"
 dependencies = ["Django>=5.0", "django-oauth-toolkit>=3.0"]
 
 [project.optional-dependencies]
+# The packaged API (omop_core.api) imports DRF. Hosts that only use the models
+# and derivation do not need it; a host serving the patient widget does.
+api = ["djangorestframework>=3.14"]
 # The patient-matching contract test (tests/test_patient_matching.py) exercises the
 # adapter against the REAL matcher. Install this extra to run it (it is otherwise
 # importorskip-guarded so it does not gate the PROMOP suite). Pin the SHA CancerBot pins.

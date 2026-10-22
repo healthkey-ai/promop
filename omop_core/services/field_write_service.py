@@ -18,7 +18,7 @@ import logging
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
-from omop_core.models import Concept, Location, Measurement, Observation, Person
+from omop_core.models import Concept, Location, Measurement, Observation, PatientRecord, Person
 from omop_core.services.patient_record_service import _ASSERTION_FIELDS, refresh_patient_record
 from omop_core.services.pk import next_pk
 from omop_core.services.write_descriptor import (
@@ -225,6 +225,10 @@ def apply_field_writes(person, changes, today=None, descriptor=None):
     # transaction. Only meaningful inside one — the applier's documented contract — so guard on it.
     from django.db import connection
     if changes and connection.in_atomic_block:
+        # Therapy authoring and refresh take the projection lock first. Taking
+        # Person first here would deadlock a concurrent federated profile PATCH.
+        record, _ = PatientRecord.objects.get_or_create(person=person)
+        PatientRecord.objects.select_for_update().get(pk=record.pk)
         list(Person.objects.select_for_update().filter(pk=person.pk))
 
     for field, value in changes.items():
