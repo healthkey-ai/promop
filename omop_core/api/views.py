@@ -5,6 +5,8 @@ shell. Host policy is a seam, not a copy: a host subclasses the viewset to add i
 permission classes, its per-person write check, and its own ``PatientRecord``
 payload shape.
 """
+import logging
+
 from django.db import transaction
 from rest_framework import status, viewsets
 from rest_framework.permissions import IsAuthenticated
@@ -14,6 +16,8 @@ from omop_core.api.serializers import TherapyLineWriteSerializer
 from omop_core.models import PatientRecord
 from omop_core.signals import suppress_patient_record_refresh
 from omop_oncology.models import Episode
+
+logger = logging.getLogger(__name__)
 
 
 class TherapyLineViewSet(viewsets.ViewSet):
@@ -73,9 +77,23 @@ class TherapyLineViewSet(viewsets.ViewSet):
                         **submitted,
                     )
         except TherapyLineWriteConflict as exc:
-            return Response({'detail': str(exc)}, status=status.HTTP_409_CONFLICT)
+            logger.warning(
+                'Therapy line write conflicted (%s); details withheld from the client',
+                type(exc).__name__,
+            )
+            return Response(
+                {'detail': 'This therapy line conflicts with an existing therapy line.'},
+                status=status.HTTP_409_CONFLICT,
+            )
         except ValueError as exc:
-            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            logger.warning(
+                'Therapy line write rejected (%s); details withheld from the client',
+                type(exc).__name__,
+            )
+            return Response(
+                {'detail': 'The therapy line could not be saved as submitted.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         if result.episode is None:
             return Response(
@@ -137,7 +155,14 @@ class TherapyLineViewSet(viewsets.ViewSet):
         try:
             retract_therapy_line(episode.person, episode)
         except ValueError as exc:
-            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            logger.warning(
+                'Therapy line retract rejected (%s); details withheld from the client',
+                type(exc).__name__,
+            )
+            return Response(
+                {'detail': 'The therapy line could not be retracted.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         record = refresh_patient_record(episode.person)
         return Response({
