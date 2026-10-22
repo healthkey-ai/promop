@@ -213,10 +213,11 @@ class TestCost:
 
         # One batch lookup per source table (LOINC codes, UCUM units, attributed
         # codes), plus the approved-mapping table and one read per *distinct*
-        # answer vocabulary those mappings name — four fields sharing a set cost
+        # answer vocabulary those mappings name, plus one
+        # readiness probe for the source-input descriptor concepts (0 and 32865) — four fields sharing a set cost
         # one query, not four. Constant in the number of fields either way; the
         # bound guards the shape, not the exact number.
-        assert len(ctx) <= 6, [q['sql'][:80] for q in ctx]
+        assert len(ctx) <= 7, [q['sql'][:80] for q in ctx]
 
 
 class TestEndpoint:

@@ -565,7 +565,12 @@ def build_writable_field_descriptor():
     curated = _curated_writes(choice_options, genomics_recipes)
 
     descriptor = {}
+    from omop_core.services.clinical_input_contract import descriptors
+    clinical_inputs = descriptors()
     for field in sorted(PATIENT_RECORD_OMOP_MAPPED_FIELDS - _LIFECYCLE_FIELDS):
+        if field in clinical_inputs:
+            descriptor[field] = clinical_inputs[field]
+            continue
         if field.startswith('genomics_'):
             # The recipe decides whether a finding can be stored; approval only
             # decides whether its concept flows forward. So review status is

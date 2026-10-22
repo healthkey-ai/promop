@@ -132,6 +132,47 @@ def apply_field_writes(person, changes, today=None, descriptor=None):
         descriptor = build_writable_field_descriptor()
 
     result = FieldWriteResult()
+    from omop_core.services.clinical_input_contract import CLINICAL_INPUT_FIELDS, write_clinical_inputs
+    # A curated DIRECT descriptor owns the generic projection path (the SCT
+    # fields are the production example). Let it fall through instead of
+    # rejecting it for not being the contract's editable shape: callers that
+    # pass a restricted descriptor still cannot write a contract field that
+    # descriptor omits or marks read-only.
+    clinical_fields = [
+        field for field in changes
+        if field in CLINICAL_INPUT_FIELDS
+        and (descriptor.get(field) or {}).get('kind') != KIND_DIRECT
+    ]
+    if clinical_fields:
+        # The descriptor is the write contract for every field, including the
+        # #5440 source inputs. A caller that passes a restricted descriptor must
+        # not be able to write a clinical field it omitted or marked read-only.
+        clinical_changes = {}
+        for field in clinical_fields:
+            d = descriptor.get(field)
+            if d is None:
+                result.rejected[field] = 'Unknown field; not part of the writable record.'
+            elif d.get('kind') != KIND_EDITABLE or not d.get('writable'):
+                result.rejected[field] = (
+                    d.get('reason') or f'{field} ({d.get("kind")}) has no direct write path.'
+                )
+            else:
+                clinical_changes[field] = changes[field]
+        # Enclose the whole mixed batch: a later validation/write failure must
+        # roll back earlier clinical facts too, even for non-HTTP callers.
+        from django.db import transaction
+        with transaction.atomic():
+            other = apply_field_writes(
+                person, {field: value for field, value in changes.items() if field not in clinical_fields},
+                today=today, descriptor=descriptor,
+            )
+            result.applied = other.applied
+            result.profile = other.profile
+            result.rejected.update(other.rejected)
+            if clinical_changes:
+                write_clinical_inputs(person, clinical_changes)
+                result.applied.extend(clinical_changes)
+        return result
     person_dirty = set()      # Person columns changed by demographic writes
     location_updates = {}     # OMOP Location column -> value, applied once as an upsert
 
