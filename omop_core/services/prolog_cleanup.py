@@ -12,6 +12,7 @@ because organisation cleanup deletes `Person` with raw SQL, where Django's
 `on_delete` does not apply and the database's own constraints are enforced.
 """
 
+from django.apps import apps
 from django.db import connection
 
 # Every PROlog table that ends up referencing a Person, leaf-first.
@@ -56,6 +57,11 @@ def delete_prolog_data_for_persons(person_ids) -> None:
     """Delete the PROlog rows for these people. Safe to call when there are none."""
     ids = list(person_ids)
     if not ids:
+        return
+    if not apps.is_installed('prolog_surveys'):
+        # An embedder that does not install PROMOP's survey app (CancerBot) has
+        # none of these tables, so the raw SQL below would fail on the first
+        # statement and take patient deletion with it. Nothing to delete there.
         return
     with connection.cursor() as cursor:
         for sql in prolog_delete_statements('SELECT unnest(%s::bigint[])'):

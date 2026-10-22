@@ -7,6 +7,7 @@ from pathlib import Path
 from django.core.management.base import BaseCommand, CommandError
 
 from omop_core.models import LoincClass, LoincCodeClass
+from omop_core.services.loinc_release import AXIS_COLUMNS
 
 csv.field_size_limit(sys.maxsize)
 BATCH = 2000
@@ -167,8 +168,8 @@ class Command(BaseCommand):
                     loinc_num=loinc_num,
                     loinc_class_id=loinc_class,
                     example_units=example_units,
-                    property=row.get('PROPERTY', '').strip(),
-                    scale_type=row.get('SCALE_TYP', '').strip(),
+                    **{field: (row.get(column) or '').strip()
+                       for column, field in AXIS_COLUMNS.items()},
                 ))
                 count += 1
                 if len(batch) >= BATCH:
@@ -176,7 +177,7 @@ class Command(BaseCommand):
                         batch, ignore_conflicts=False,
                         update_conflicts=True,
                         unique_fields=['loinc_num'],
-                        update_fields=['loinc_class_id', 'example_units', 'property', 'scale_type'],
+                        update_fields=['loinc_class_id', 'example_units', *AXIS_COLUMNS.values()],
                     )
                     batch = []
         if batch:
@@ -184,7 +185,7 @@ class Command(BaseCommand):
                 batch, ignore_conflicts=False,
                 update_conflicts=True,
                 unique_fields=['loinc_num'],
-                update_fields=['loinc_class_id', 'example_units', 'property', 'scale_type'],
+                update_fields=['loinc_class_id', 'example_units', *AXIS_COLUMNS.values()],
             )
         self.stdout.write(
             f'Loaded {count} LOINC code → class mappings '

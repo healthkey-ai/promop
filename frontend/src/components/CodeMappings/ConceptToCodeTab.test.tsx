@@ -5,7 +5,12 @@ import ConceptToCodeTab from './ConceptToCodeTab';
 
 const get = vi.fn();
 const post = vi.fn();
-vi.mock('@/api/axios', () => ({ default: { get: (...args: unknown[]) => get(...args), post: (...args: unknown[]) => post(...args) } }));
+const remove = vi.fn(() => Promise.resolve({ data: {} }));
+const patch = vi.fn(() => Promise.resolve({ data: {} }));
+vi.mock('@/api/axios', () => ({ default: {
+  get: (...args: unknown[]) => get(...args), post: (...args: unknown[]) => post(...args),
+  delete: (...args: unknown[]) => remove(...args), patch: (...args: unknown[]) => patch(...args),
+} }));
 const concept = {
   concept_id: 123, concept_name: 'Serum albumin', concept_code: 'A1', vocabulary_id: 'LOINC', domain_id: 'Measurement',
   fields: [{ field_name: 'albumin', status: 'approved', omop_table: 'measurement' }],
@@ -130,7 +135,7 @@ describe('concept-first curation', () => {
     fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: 'drug_exposure' } });
     fireEvent.change(screen.getByLabelText('Search standard concepts'), { target: { value: 'codeine' } });
     await waitFor(() => expect(get).toHaveBeenCalledWith('/v1/concept-to-code/', expect.objectContaining({ params: {
-      domain: 'drug_exposure', scope: 'all', search: 'codeine', page: 1,
+      domain: 'drug_exposure', scope: 'all', search: 'codeine', page: 1, page_size: 50,
     } })));
   });
 
@@ -156,31 +161,6 @@ describe('concept-first curation', () => {
     expect(post).toHaveBeenCalledWith('/v1/concept-to-code/123/mappings/7/', {
       status: 'approved', expected_updated_at: source.updated_at,
     });
-  });
-
-  it('confirms unit evidence before retrying concept-first approval', async () => {
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
-    post
-      .mockRejectedValueOnce({ response: { data: {
-        code: 'unit_mismatch_confirmation_required',
-        unit_consistency: {
-          source_code: 'S1', destination_concept_name: 'Serum albumin', property: 'MCnc',
-          expected_units: ['g/dL'],
-          observed_units: [{ unit: 'mmol/L', count: 8, compatible: false }],
-        },
-      } } })
-      .mockResolvedValueOnce({ data: { ...source, destination_concept_id: 123, status: 'approved' } });
-    await selectConcept();
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Select SNOMED S1' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Approve selected (1)' }));
-
-    await screen.findByText('Approved 1 of 1 selected mappings.');
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('mmol/L (8 results)'));
-    expect(post).toHaveBeenLastCalledWith('/v1/concept-to-code/123/mappings/7/', {
-      status: 'approved', expected_updated_at: source.updated_at,
-      confirm_unit_mismatch: true,
-    });
-    confirm.mockRestore();
   });
 
   it('allows proposals but hides approval for non-admin curators', async () => {
@@ -436,5 +416,314 @@ describe('opening a linked concept', () => {
   it('opens a concept clicked in the list on its existing mappings', async () => {
     await selectConcept();
     expect(screen.getByRole('button', { name: 'Existing mappings' })).toHaveAttribute('aria-pressed', 'true');
+  });
+});
+
+describe('editing a source code from a concept (#1915)', () => {
+  const mappingRow = {
+    mapping_id: 7, domain_id: 'Measurement', source_vocabulary_id: 'SNOMED', source_code: 'S1',
+    source_code_description: 'Albumin in blood', destination_concept_id: null, destination_concept_name: '',
+    destination_concept_code: '', destination_vocabulary_id: '', destination_concept_class_id: '',
+    destination_omop_table: 'measurement', status: 'proposed', notes: '', origin: '', origin_system: 'HT-One',
+    suggest_strategy: '', umls_cui: '', created_by: '', occurrence_count: 8, destination_count: 0, has_mapping: true,
+  };
+  const examples = [
+    { person_id: 11, omop_table: 'measurement', occurrence_count: 4, source_unit: 'g/dL', example_quantity: '4.1',
+      source_metadata: { category: 'laboratory', specimen: 'serum' }, last_seen: null },
+    { person_id: 12, omop_table: 'measurement', occurrence_count: 2, source_unit: '', example_quantity: '',
+      source_metadata: { category: 'vital-signs', specimen: 'plasma' }, last_seen: null },
+  ];
+  const routes = (overrides: Record<string, () => Promise<unknown>> = {}) => (url: string) => {
+    if (overrides[url]) return overrides[url]();
+    if (url === '/v1/concept-to-code/') return Promise.resolve({ data: page([concept]) });
+    if (url === '/v1/code-mappings/reference/') return Promise.resolve({ data: {} });
+    if (url === '/v1/code-mappings/7/') return Promise.resolve({ data: { ...mappingRow, destination_options: [] } });
+    if (url === '/v1/concept-to-code/source-examples/') return Promise.resolve({ data: { examples } });
+    return Promise.resolve({ data: page([source]) });
+  };
+
+  beforeEach(() => {
+    get.mockImplementation(routes());
+    post.mockResolvedValue({ data: {} });
+  });
+
+  it('opens the code in Edit Mapping with the concept as destination, over the concept dialog', async () => {
+    await selectConcept();
+    fireEvent.click(screen.getByRole('button', { name: 'SNOMED:S1' }));
+
+    const editor = await screen.findByRole('dialog', { name: 'Edit Mapping' });
+    expect(get).toHaveBeenCalledWith('/v1/code-mappings/7/');
+    // The row had no destination: the concept being curated is offered.
+    await waitFor(() => expect(within(editor).getByLabelText('Destination Concept ID')).toHaveValue(123));
+    expect(screen.getByRole('dialog', { name: 'Source codes for Serum albumin' })).toBeInTheDocument();
+
+    fireEvent.click(within(editor).getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Edit Mapping' })).not.toBeInTheDocument());
+    expect(screen.getByRole('dialog', { name: 'Source codes for Serum albumin' })).toBeInTheDocument();
+  });
+
+  it('opens from a click anywhere on the row, but not from its checkbox', async () => {
+    await selectConcept();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select SNOMED S1' }));
+    expect(screen.queryByRole('dialog', { name: 'Edit Mapping' })).not.toBeInTheDocument();
+    expect(get).not.toHaveBeenCalledWith('/v1/code-mappings/7/');
+
+    fireEvent.click(screen.getByText('Albumin in blood'));
+    expect(await screen.findByRole('dialog', { name: 'Edit Mapping' })).toBeInTheDocument();
+  });
+
+  it('shows the selected example patient\'s Source Metadata and switches patients without writing', async () => {
+    await selectConcept();
+    fireEvent.click(screen.getByRole('button', { name: 'SNOMED:S1' }));
+    const editor = await screen.findByRole('dialog', { name: 'Edit Mapping' });
+
+    const picker = await within(editor).findByRole('combobox', { name: 'Example patient' });
+    expect(get).toHaveBeenCalledWith('/v1/concept-to-code/source-examples/', {
+      params: { source_vocabulary_id: 'SNOMED', source_code: 'S1', omop_table: 'measurement' },
+    });
+    expect(within(picker).getAllByRole('option').map(option => option.textContent))
+      .toEqual(['Patient 11 · Seen 4', 'Patient 12 · Seen 2']);
+    expect(within(editor).getByText(/"specimen": "serum"/)).toBeInTheDocument();
+
+    fireEvent.change(picker, { target: { value: '12' } });
+    expect(await within(editor).findByText(/"specimen": "plasma"/)).toBeInTheDocument();
+    expect(within(editor).queryByText(/"specimen": "serum"/)).not.toBeInTheDocument();
+    // Viewing a patient never writes to that patient.
+    expect([...post.mock.calls, ...patch.mock.calls].filter(([url]) => String(url).includes('source-codes'))).toEqual([]);
+  });
+
+  it('says so when no patient carries the code, and when examples are not allowed', async () => {
+    get.mockImplementation(routes({ '/v1/concept-to-code/source-examples/': () => Promise.resolve({ data: { examples: [] } }) }));
+    await selectConcept();
+    fireEvent.click(screen.getByRole('button', { name: 'SNOMED:S1' }));
+    expect(await screen.findByTestId('source-examples-empty')).toBeInTheDocument();
+  });
+
+  it('explains a forbidden example lookup', async () => {
+    get.mockImplementation(routes({
+      '/v1/concept-to-code/source-examples/': () => Promise.reject({ response: { status: 403 } }),
+    }));
+    await selectConcept();
+    fireEvent.click(screen.getByRole('button', { name: 'SNOMED:S1' }));
+    const editor = await screen.findByRole('dialog', { name: 'Edit Mapping' });
+    expect(await within(editor).findByText('Patient Source Metadata is limited to administrators.')).toBeInTheDocument();
+  });
+
+  it('opens a suggested code with no mapping row as a New Mapping for this concept', async () => {
+    post.mockImplementation((url: string) => Promise.resolve({ data: url === '/v1/concept-to-code/suggest/'
+      ? { ...run(), activity: [{ concept: { concept_id: 123 }, candidates: [
+        { ...source, mapping_id: null, source_code: 'NEW1', status: 'unmapped', confidence: 0.9 }] }] }
+      : {} }));
+    await selectConcept();
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'SNOMED:NEW1' }));
+
+    const editor = await screen.findByRole('dialog', { name: 'New Mapping' });
+    expect(get).not.toHaveBeenCalledWith('/v1/code-mappings/null/');
+    await waitFor(() => expect(within(editor).getByLabelText('Destination Concept ID')).toHaveValue(123));
+  });
+});
+
+describe('suggestions without a confidence score (#1915)', () => {
+  const candidates = [
+    { ...source, source_code: 'SCORED', confidence: 0.72 },
+    { ...source, source_code: 'UNSCORED', confidence: null },
+  ];
+  const suggest = (ranking_model: string) => {
+    post.mockResolvedValue({ data: { ...run(), selection: { limit: 25, include_zero_seen: false, ranking_model },
+      activity: [{ concept: { concept_id: 123 }, candidates }] } });
+  };
+
+  it('hides unscored suggestions after a ranked run', async () => {
+    suggest('jev');
+    await selectConcept();
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
+    expect(await screen.findByText('SNOMED:SCORED')).toBeInTheDocument();
+    expect(screen.queryByText('SNOMED:UNSCORED')).not.toBeInTheDocument();
+    expect(screen.getByText(/1 without a confidence score hidden/)).toBeInTheDocument();
+  });
+
+  it('shows every suggestion after an unranked run', async () => {
+    suggest('none');
+    await selectConcept();
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
+    expect(await screen.findByText('SNOMED:SCORED')).toBeInTheDocument();
+    expect(screen.getByText('SNOMED:UNSCORED')).toBeInTheDocument();
+    expect(screen.queryByText(/without a confidence score hidden/)).not.toBeInTheDocument();
+  });
+
+  it('leaves existing mappings visible whether or not they were scored', async () => {
+    get.mockImplementation((url: string) => Promise.resolve({ data: url === '/v1/concept-to-code/'
+      ? page([concept]) : page(candidates) }));
+    render(<ConceptToCodeTab canApprove />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Serum albumin' }));
+    expect(await screen.findByText('SNOMED:SCORED')).toBeInTheDocument();
+    expect(screen.getByText('SNOMED:UNSCORED')).toBeInTheDocument();
+  });
+});
+
+describe('concept priority (#1914)', () => {
+  const named = (id: number, name: string, priority: number | null = null) => ({ ...concept, concept_id: id, concept_name: name, priority });
+  let list: ReturnType<typeof named>[];
+  beforeEach(() => {
+    list = [named(1, 'Albumin', 1), named(2, 'Bilirubin', 2), named(3, 'Calcium'), named(4, 'Creatinine')];
+    get.mockImplementation((url: string) => Promise.resolve({ data: url === '/v1/concept-to-code/'
+      ? { ...page(list), prioritized: 2 } : page([source]) }));
+    post.mockImplementation((_url: string, body: { position: number | null }) => Promise.resolve({ data: { position: body.position } }));
+  });
+  const moved = () => post.mock.calls.filter(([url]) => url === '/v1/concept-to-code/priority/').map(([, body]) => body);
+
+  it('shows each concept\'s priority and ranks one by typing its number', async () => {
+    render(<ConceptToCodeTab canApprove />);
+    const calcium = await screen.findByLabelText('Priority for Calcium');
+    expect(screen.getByLabelText('Priority for Albumin')).toHaveValue(1);
+    expect(calcium).toHaveValue(null);
+
+    fireEvent.change(calcium, { target: { value: '1' } });
+    fireEvent.keyDown(calcium, { key: 'Enter' });
+
+    await waitFor(() => expect(moved()).toEqual([{ concept_id: 3, position: 1 }]));
+    expect(await screen.findByText('Moved Calcium to priority 1.')).toBeInTheDocument();
+    // The list is reloaded in the server's new order.
+    await waitFor(() => expect(get.mock.calls.filter(([url]) => url === '/v1/concept-to-code/').length).toBeGreaterThan(1));
+  });
+
+  it('unranks a concept when its number is cleared, and ignores an invalid number', async () => {
+    render(<ConceptToCodeTab canApprove />);
+    const albumin = await screen.findByLabelText('Priority for Albumin');
+    fireEvent.change(albumin, { target: { value: '0' } });
+    fireEvent.blur(albumin);
+    expect(moved()).toEqual([]);
+    expect(albumin).toHaveValue(1);
+
+    fireEvent.change(albumin, { target: { value: '' } });
+    fireEvent.blur(albumin);
+    await waitFor(() => expect(moved()).toEqual([{ concept_id: 1, position: null }]));
+    expect(await screen.findByText('Removed Albumin from the priority list.')).toBeInTheDocument();
+  });
+
+  it('moves one step with the arrow buttons, and an unranked concept up to the end of the list', async () => {
+    render(<ConceptToCodeTab canApprove />);
+    expect(await screen.findByRole('button', { name: 'Move Albumin up' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Move Bilirubin down' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Move Calcium down' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Move Albumin down' }));
+    await waitFor(() => expect(moved()).toEqual([{ concept_id: 1, position: 2 }]));
+    fireEvent.click(await screen.findByRole('button', { name: 'Move Calcium up' }));
+    await waitFor(() => expect(moved()).toEqual([{ concept_id: 1, position: 2 }, { concept_id: 3, position: 3 }]));
+  });
+
+  it('drops a dragged concept at the position of the ranked concept it lands on', async () => {
+    render(<ConceptToCodeTab canApprove />);
+    const creatinine = await screen.findByTestId('concept-row-4');
+    const albumin = screen.getByTestId('concept-row-1');
+    fireEvent.dragStart(creatinine);
+    fireEvent.dragOver(albumin);
+    fireEvent.drop(albumin);
+    await waitFor(() => expect(moved()).toEqual([{ concept_id: 4, position: 1 }]));
+  });
+
+  it('drops onto an unranked concept at the end of the priority list', async () => {
+    render(<ConceptToCodeTab canApprove />);
+    const albumin = await screen.findByTestId('concept-row-1');
+    fireEvent.dragStart(albumin);
+    fireEvent.drop(screen.getByTestId('concept-row-3'));
+    await waitFor(() => expect(moved()).toEqual([{ concept_id: 1, position: 3 }]));
+  });
+
+  it('shows more concepts per page and only ranked ones on request', async () => {
+    render(<ConceptToCodeTab canApprove />);
+    await screen.findByLabelText('Priority for Albumin');
+    fireEvent.change(screen.getByRole('combobox', { name: 'Concepts per page' }), { target: { value: '250' } });
+    await waitFor(() => expect(get).toHaveBeenCalledWith('/v1/concept-to-code/', expect.objectContaining({
+      params: expect.objectContaining({ page_size: 250, page: 1 }) })));
+    fireEvent.click(screen.getByRole('checkbox', { name: /Ranked only/ }));
+    await waitFor(() => expect(get).toHaveBeenCalledWith('/v1/concept-to-code/', expect.objectContaining({
+      params: expect.objectContaining({ prioritized: '1' }) })));
+  });
+
+  it('reports a failed move and keeps the list as it was', async () => {
+    post.mockRejectedValue({ response: { status: 403, data: { detail: 'Professional access required.' } } });
+    render(<ConceptToCodeTab canApprove />);
+    const calcium = await screen.findByLabelText('Priority for Calcium');
+    fireEvent.change(calcium, { target: { value: '1' } });
+    fireEvent.blur(calcium);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not change the priority of Calcium.');
+  });
+
+  it('estimates below Suggest how many source codes it could find and how many runs that takes (#1953)', async () => {
+    const estimates: Record<string, unknown>[] = [];
+    get.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
+      if (url === '/v1/concept-to-code/') return Promise.resolve({ data: page([concept]) });
+      if (url.endsWith('/estimate/')) {
+        estimates.push(config?.params ?? {});
+        return Promise.resolve({ data: config?.params?.strategies === 'umls'
+          ? { total: 0, seen: 0, umls: 0, lexical: 0, capped: false, timed_out: false }
+          : { total: 60, seen: 58, umls: 4, lexical: 57, capped: false, timed_out: false } });
+      }
+      return Promise.resolve({ data: page([source]) });
+    });
+    await selectConcept();
+    const estimate = await screen.findByTestId('source-estimate');
+    expect(estimate).toHaveTextContent('About 60 candidate source codes (57 by name, 4 by UMLS) · about 3 runs of 25.');
+    expect(estimates[0]).toEqual({ strategies: 'umls,lexical', include_zero_seen: '0' });
+    // The run count follows the limit as it is typed.
+    fireEvent.change(screen.getByLabelText('Maximum source candidates'), { target: { value: '60' } });
+    expect(estimate).toHaveTextContent('about 1 run of 60.');
+    // And the estimate follows the search settings.
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Names and synonyms' }));
+    await waitFor(() => expect(screen.getByTestId('source-estimate'))
+      .toHaveTextContent('Suggest source codes would find no candidate source codes with these settings.'));
+    expect(estimates.at(-1)).toEqual({ strategies: 'umls', include_zero_seen: '0' });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Only source codes with Seen greater than zero' }));
+    await waitFor(() => expect(estimates.at(-1)).toEqual({ strategies: 'umls', include_zero_seen: '1' }));
+  });
+
+  it('marks a capped estimate as a floor and says when the estimate timed out', async () => {
+    let response: Record<string, unknown> = { total: 1000, seen: 1000, umls: 0, lexical: 1000, capped: true, timed_out: false };
+    get.mockImplementation((url: string) => url === '/v1/concept-to-code/' ? Promise.resolve({ data: page([concept]) })
+      : url.endsWith('/estimate/') ? Promise.resolve({ data: response }) : Promise.resolve({ data: page([source]) }));
+    await selectConcept();
+    expect(await screen.findByTestId('source-estimate'))
+      .toHaveTextContent('About 1,000+ candidate source codes (1,000+ by name) · about 40+ runs of 25.');
+    response = { total: 12, umls: 0, lexical: 12, capped: true, partial: true, timed_out: false };
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Only source codes with Seen greater than zero' }));
+    await waitFor(() => expect(screen.getByTestId('source-estimate'))
+      .toHaveTextContent('About 12+ candidate source codes (12+ by name) · about 1+ runs of 25. Vocabulary codes never seen were not all counted in time.'));
+    response = { total: null, timed_out: true };
+    fireEvent.click(screen.getByRole('checkbox', { name: 'UMLS' }));
+    await waitFor(() => expect(screen.getByTestId('source-estimate')).toHaveTextContent(/search took too long/));
+  });
+
+  it('labels an earlier or sampled estimate as approximate', async () => {
+    let response: Record<string, unknown> = { total: 6767, umls: 0, lexical: 6767, capped: false, partial: false, approximate: 'earlier', timed_out: false };
+    get.mockImplementation((url: string) => url === '/v1/concept-to-code/' ? Promise.resolve({ data: page([concept]) })
+      : url.endsWith('/estimate/') ? Promise.resolve({ data: response }) : Promise.resolve({ data: page([source]) }));
+    await selectConcept();
+    expect(await screen.findByTestId('source-estimate')).toHaveTextContent(
+      'About 6,767 candidate source codes (6,767 by name) · about 271 runs of 25. From an earlier count: this one took too long, so codes handled since may still be counted.');
+    response = { total: 6400, umls: 0, lexical: 6400, capped: false, partial: true, approximate: 'sample', timed_out: false };
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Only source codes with Seen greater than zero' }));
+    await waitFor(() => expect(screen.getByTestId('source-estimate')).toHaveTextContent(
+      'Roughly 6,400 candidate source codes (6,400 by name) · about 256 runs of 25. Estimated from a sample: the full count took too long. Vocabulary codes never seen were not counted.'));
+    response = { total: 0, umls: 0, lexical: 0, capped: false, partial: false, approximate: 'sample', timed_out: false };
+    fireEvent.click(screen.getByRole('checkbox', { name: 'UMLS' }));
+    await waitFor(() => expect(screen.getByTestId('source-estimate'))
+      .toHaveTextContent('A sample found no candidate source codes; the full count took too long, so there may be a few.'));
+  });
+
+  it('has no Refresh button; a failed load offers Retry', async () => {
+    let fail = true;
+    get.mockImplementation((url: string) => url === '/v1/concept-to-code/' ? Promise.resolve({ data: page([concept]) })
+      : url.endsWith('/estimate/') ? Promise.resolve({ data: { total: 1, timed_out: false } })
+        : fail ? Promise.reject(new Error('Unavailable')) : Promise.resolve({ data: page([source]) }));
+    render(<ConceptToCodeTab canApprove />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Serum albumin' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not load source codes.');
+    expect(screen.queryByRole('button', { name: 'Refresh' })).not.toBeInTheDocument();
+    fail = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByText('SNOMED:S1')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 });

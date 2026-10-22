@@ -89,6 +89,14 @@ _CODE_MAPPING_FIELDS = (
     'destination_vocabulary_id', 'omop_table', 'source', 'status', 'notes',
     'origin', 'origin_system', 'suggest_strategy', 'umls_cui', 'reviewed_at',
 )
+# Added after the payload format settled, so a payload written before them
+# still applies: a missing key takes the model default.
+_CODE_MAPPING_OPTIONAL_FIELDS: dict[str, object] = {
+    # LOINC axis entries and the variant count variant routing is gated on.
+    'loinc_axes': dict,
+    'snomed_attributes': dict,
+    'axis_variant_count': 0,
+}
 _CODE_MAPPING_CONCEPT_FKS = (
     'source_concept', 'target_concept', 'suggested_target_concept',
 )
@@ -265,6 +273,7 @@ def _code_mapping_row(m: SourceCodeConceptMapping, people: frozenset[str] = froz
             for c in (getattr(m, fk),)
         },
         **{name: getattr(m, name) for name in _CODE_MAPPING_FIELDS},
+        **{name: getattr(m, name) for name in _CODE_MAPPING_OPTIONAL_FIELDS},
         # Approval stamps the approver as origin_system (#1708). Like the
         # cleared reviewer it names a person on this instance only (#1719).
         'origin_system': CURATOR_PROVENANCE if '@' in origin or origin in people else m.origin_system,
@@ -652,6 +661,8 @@ def _write_code_mapping(
     """Create the row, or overwrite mapping with it, spelling included."""
     label = f"{row['source_vocabulary_id'] or '(uncoded)'}:{row['source_code']}"
     values = {name: row[name] for name in _CODE_MAPPING_FIELDS}
+    for name, default in _CODE_MAPPING_OPTIONAL_FIELDS.items():
+        values[name] = row.get(name, default() if callable(default) else default)
     organization_slug = row.get('organization_slug') or ''
     if organization_slug:
         values['organization'] = organizations.get(organization_slug)

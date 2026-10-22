@@ -67,6 +67,75 @@ source value according to your normal unmapped-data policy and do not write the
 }
 ```
 
+### Text terms from documents
+
+A document extractor has wording, not a code: "Hemoglobin 10.2 g/dL". Send
+the wording as the code with an **empty** `source_vocabulary_id` (the Uncoded
+vocabulary), and whatever context the document gives:
+
+```json
+{
+  "codes": [
+    {
+      "source_vocabulary_id": "",
+      "source_code": "Hemoglobin",
+      "omop_table": "measurement",
+      "source_unit": "g/dL",
+      "quantity": 10.2,
+      "specimen": "blood"
+    }
+  ]
+}
+```
+
+A term goes through the same resolver as every code, so there is one matcher,
+not two: a curated mapping for the term wins; a term with an approved **axis
+variant** in that unit resolves to the variant's LOINC, keyed `"|term|unit"`
+like a hospital code; a new term is offered to Suggest, whose candidates are
+filtered by the LOINC axes the unit, value and specimen settle (a term in
+mmol/L is never offered a mass-concentration code); and the term is queued
+for curators under the **Uncoded** tab with the unit and context stored as
+evidence. Once a curator approves it, every later document resolves.
+
+Entries are keyed `"|term"` after whitespace is collapsed and the term cut to
+100 characters, and matched case-insensitively, so "M-Protein, Serum" and
+"M-PROTEIN,  SERUM" are one queue row. Terms are global, not per
+organization.
+
+What a text entry adds to the answer:
+
+```json
+{
+  "status": "proposed",
+  "resolved": false,
+  "match": "ambiguous",
+  "candidates": [
+    {"concept_id": 3020491, "concept_name": "Glucose [Moles/volume] in Serum or Plasma",
+     "concept_code": "14749-6", "vocabulary_id": "LOINC", "domain_id": "Measurement",
+     "lexical_score": 0.42, "axes_matched": 2,
+     "loinc_axes": {"component": "Glucose", "property": "SCnc", "time_aspect": "Pt",
+                    "system": "Ser/Plas", "scale_type": "Qn", "method_type": ""}}
+  ]
+}
+```
+
+| `match` | Meaning |
+|---|---|
+| `resolved` | A curated mapping (or its variant for this unit) answered; `resolved` is `true`. |
+| `ambiguous` | Nothing curated yet. `candidates` are the axis-filtered options, best first, for a reviewer. |
+| `unresolved` | Nothing curated and nothing retrieved. |
+
+Only `resolved: true` permits a write. `candidates` are review aids, like
+`proposed_target_concept_id`. A term nothing matched is queued with **no**
+destination: no placeholder concept is minted for a document phrasing.
+
+The response carries `matcher_version`; record it on each run so a later
+re-run is explainable. A term seen in a second unit is flagged with axis
+variants in the queue, exactly as a hospital code is, and a curator can give
+each unit its own LOINC.
+
+The term is never written to a log.
+
 The endpoint is an ingest encounter operation, not a cacheable reference GET:
 responses include `Cache-Control: no-store`. Send one entry for each distinct
 code encounter that should count toward review priority. Clients must avoid

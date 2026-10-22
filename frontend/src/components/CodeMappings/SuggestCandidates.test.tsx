@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import SuggestCandidates, { type CandidateActivity } from "./SuggestCandidates";
 
@@ -276,5 +276,87 @@ describe("mint new concept from suggest results", () => {
     await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
     expect(patch).toHaveBeenCalledWith("/v1/code-mappings/7/", { destination_concept_id: 999, status: "proposed" });
     expect(screen.getByText(/Saved: LOCAL/)).toBeInTheDocument();
+  });
+});
+
+describe("LOINC axes in suggestion candidates", () => {
+  const glucoseAxes = { component: "Glucose", property: "MCnc", time_aspect: "Pt", system: "Ser/Plas", scale_type: "Qn", method_type: "" };
+  const mass = { concept_id: 11, concept_name: "Glucose [Mass/volume] in Serum or Plasma", concept_code: "2345-7", vocabulary_id: "LOINC",
+    loinc_axes: glucoseAxes, axis_match: { component: "match", property: "match", time_aspect: "unknown", system: "compatible", scale_type: "match", method_type: "unknown" } as const,
+    axes_matched: 3, axes_compatible: 1 };
+  const moles = { concept_id: 12, concept_name: "Glucose [Moles/volume] in Serum or Plasma", concept_code: "14749-6", vocabulary_id: "LOINC" };
+  const blood = { concept_id: 13, concept_name: "Glucose [Mass/volume] in Blood", concept_code: "2339-0", vocabulary_id: "LOINC" };
+  const glucoseSource = { mapping_id: 21, source_code: "GLU", source_vocabulary_id: "Local" };
+  const activity: CandidateActivity[] = [
+    { ...glucoseSource, stage: "candidates", strategy: "lexical", candidates: [moles, blood] },
+    { ...glucoseSource, stage: "candidates", strategy: "axes", candidates: [mass] },
+    { ...glucoseSource, stage: "ranked", suggested: mass, candidates: [mass],
+      source_axes: { axes: { component: { value: "Glucose", basis: "source_code", evidence: "GLU" }, property: { value: "MCnc", basis: "unit", evidence: "valueQuantity.unit = mg/dL" } }, hints: {} },
+      axis_excluded: [
+        { concept_id: 12, concept_name: moles.concept_name, concept_code: moles.concept_code, vocabulary_id: "LOINC",
+          loinc_axes: { ...glucoseAxes, property: "SCnc" }, axis_match: { property: "conflict" }, axis_conflicts: ["property"], retrieval: "lexical" },
+        { concept_id: 13, concept_name: blood.concept_name, concept_code: blood.concept_code, vocabulary_id: "LOINC",
+          loinc_axes: { ...glucoseAxes, system: "Bld" }, axis_match: { system: "conflict" }, axis_conflicts: ["system"], retrieval: "lexical" },
+      ] },
+    { ...glucoseSource, stage: "result", suggested: mass, updated: true },
+  ];
+
+  it("shows axis chips, the source's settled axes, and the candidates hidden by an axis conflict", () => {
+    render(<SuggestCandidates activity={activity} finished />);
+    const table = screen.getByRole("table");
+    // Conflicting retrieval candidates leave the list; the axes find is labelled X.
+    expect(within(table).queryByText(/Moles\/volume/)).not.toBeInTheDocument();
+    expect(within(table).getByText("X")).toBeInTheDocument();
+    const chips = within(table).getByLabelText("LOINC axes");
+    expect(chips).toHaveTextContent("Glucose");
+    expect(chips).toHaveTextContent("3/6 axes");
+    expect(chips.querySelector('[data-axis="system"]')).toHaveTextContent("≈Ser/Plas");
+    expect(chips.querySelector('[data-axis="system"]')).toHaveAttribute("data-verdict", "compatible");
+    expect(chips.querySelector('[data-axis="property"]')).toHaveAttribute("data-verdict", "match");
+    expect(screen.getByLabelText("Source LOINC axes")).toHaveTextContent("Component Glucose · Property MCnc");
+    const disclosure = screen.getByRole("button", { name: "2 candidates hidden: conflict on Property, System" });
+    expect(screen.queryByRole("list", { name: "Candidates hidden by LOINC axes" })).not.toBeInTheDocument();
+    fireEvent.click(disclosure);
+    const hidden = screen.getByRole("list", { name: "Candidates hidden by LOINC axes" });
+    expect(hidden).toHaveTextContent("Glucose [Moles/volume] in Serum or Plasma");
+    expect(hidden.querySelector('[data-verdict="conflict"]')).toHaveTextContent("SCnc");
+  });
+});
+
+describe("SNOMED candidates in a batch run", () => {
+  it("shows the source meaning, chips, laterality warning and split disclosure without Use anyway", () => {
+    const exact = { concept_id: 31, concept_name: "Fracture of right femur", concept_code: "1000001", vocabulary_id: "SNOMED",
+      snomed: { hierarchy: "Disorder", semantic_tag: "disorder", status: "Defined" as const, laterality: "Right" as const, relation: "exact" as const, levels: 0,
+        attributes: [{ relationship_id: "Has finding site", label: "Finding site", values: ["Right femur"], verdict: "match" as const }] } };
+    const general = { concept_id: 32, concept_name: "Fracture of femur", concept_code: "71620000", vocabulary_id: "SNOMED",
+      snomed: { hierarchy: "Disorder", semantic_tag: "disorder", status: "Primitive" as const, laterality: null, relation: "general" as const, levels: 2,
+        laterality_not_captured: "Right", attributes: [] } };
+    const specific = { concept_id: 33, concept_name: "Fracture of neck of right femur", concept_code: "1000002", vocabulary_id: "SNOMED" };
+    const other = { concept_id: 34, concept_name: "Femur structure", concept_code: "71341001", vocabulary_id: "SNOMED" };
+    const activity: CandidateActivity[] = [
+      { ...source, stage: "candidates", strategy: "hierarchy", candidates: [general, exact, specific, other] },
+      { ...source, stage: "ranked", suggested: exact, candidates: [exact, general],
+        source_snomed: { references: [{ concept_id: 32, concept_name: "Fracture of femur", concept_code: "71620000" }], reference_basis: "curator",
+          hierarchy: { value: "Disorder", basis: "curator" }, laterality: { value: "Right", basis: "text" }, attributes: [] },
+        axis_excluded: [
+          { ...other, exclusion_reason: "conflict", snomed_conflicts: ["Hierarchy"] },
+          { ...specific, exclusion_reason: "more_specific" },
+        ] },
+      { ...source, stage: "result", suggested: exact, updated: true },
+    ];
+    render(<SuggestCandidates activity={activity} finished />);
+    expect(screen.getByLabelText("Source SNOMED meaning")).toHaveTextContent("Fracture of femur (chosen by curator) · Disorder · Right");
+    const rows = within(screen.getByRole("table")).getAllByRole("row").slice(1);
+    expect(rows.map(row => row.textContent)).toEqual([expect.stringContaining("Fracture of right femur"), expect.stringContaining("Fracture of femur")]);
+    expect(rows[0].querySelector('[data-relation="exact"]')).toBeInTheDocument();
+    expect(rows[0].querySelector('[data-attribute="Has finding site"]')).toHaveAttribute("data-verdict", "match");
+    expect(rows[1].querySelector('[data-relation="general"]')).toHaveTextContent("↑ 2 more general");
+    expect(within(rows[1]).getByRole("note")).toHaveTextContent("Source says Right; this concept has no side");
+    fireEvent.click(screen.getByRole("button", { name: "1 contradict the source: Hierarchy" }));
+    expect(screen.getByRole("list", { name: "SNOMED candidates that contradict the source" })).toHaveTextContent("Femur structure");
+    fireEvent.click(screen.getByRole("button", { name: /1 more specific than the source supports/ }));
+    const held = screen.getByRole("list", { name: "SNOMED candidates more specific than the source" });
+    expect(held).toHaveTextContent("Fracture of neck of right femur");
+    expect(within(held).queryByRole("button", { name: /anyway/ })).not.toBeInTheDocument();
   });
 });

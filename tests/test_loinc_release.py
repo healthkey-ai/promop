@@ -24,11 +24,11 @@ PART_CSV = '''"PartNumber","PartTypeName","PartName","PartDisplayName","Status"
 "LP1234-5","COMPONENT","Albumin","Albumin","ACTIVE"
 '''
 
-LOINC_CSV = '''"LOINC_NUM","CLASS","EXAMPLE_UNITS","PROPERTY","SCALE_TYP"
-"1751-7","CHEM","g/dL","MCnc","Qn"
-"718-7","HEM/BC","g/dL","MCnc","Qn"
-"26453-1","HEM/BC","10*6/uL","NCnc","Qn"
-"9999-9","RETIRED/X","","MCnc","Qn"
+LOINC_CSV = '''"LOINC_NUM","COMPONENT","PROPERTY","TIME_ASPCT","SYSTEM","SCALE_TYP","METHOD_TYP","CLASS","EXAMPLE_UNITS"
+"1751-7","Albumin","MCnc","Pt","Ser/Plas","Qn","","CHEM","g/dL"
+"718-7","Hemoglobin","MCnc","Pt","Bld","Qn","","HEM/BC","g/dL"
+"26453-1","Erythrocytes","NCnc","Pt","Bld","Qn","","HEM/BC","10*6/uL"
+"9999-9","Retired","MCnc","Pt","Ser","Qn","Manual","RETIRED/X",""
 '''
 
 
@@ -78,6 +78,32 @@ def test_property_and_scale_type_are_populated():
     assert not LoincCodeClass.objects.filter(scale_type='').exists()
 
 
+def test_all_six_axes_are_loaded():
+    """Component, property, time, system, scale and method define a LOINC
+    code; Suggest compares all six, so the loader keeps all six."""
+    lr.load_from_archive(archive())
+
+    row = LoincCodeClass.objects.get(loinc_num='9999-9')
+    assert (row.component, row.property, row.time_aspect, row.system,
+            row.scale_type, row.method_type) == (
+        'Retired', 'MCnc', 'Pt', 'Ser', 'Qn', 'Manual')
+
+
+def test_a_load_without_axes_is_stale_at_the_same_version():
+    """A release loaded before the axis columns existed has to load again,
+    or component, time, system and method stay empty -- the #1624 trap."""
+    lr.load_from_archive(archive())
+    LoincRelease.objects.create(release_version='2.83', release_url='https://x')
+    with mock.patch.object(lr, 'current_release', return_value=published('2.83')):
+        assert lr.is_out_of_date()[0] is False
+        # One stray row the reload never touched is not a stale release...
+        LoincCodeClass.objects.filter(loinc_num='718-7').update(component='')
+        assert lr.is_out_of_date()[0] is False
+        # ...a load from before the column existed is.
+        LoincCodeClass.objects.update(component='')
+        assert lr.is_out_of_date()[0] is True
+
+
 def test_classes_load_even_when_the_part_file_comes_last():
     """stream_unzip yields members in archive order, and a code whose class is
     unknown is dropped -- so the loader cannot assume Part.csv comes first."""
@@ -105,7 +131,7 @@ def test_only_class_parts_become_classes():
 
 def test_a_code_whose_class_is_missing_is_reported_not_silently_dropped():
     """Silence is how the stale load went unnoticed for a release cycle."""
-    orphan = LOINC_CSV + '"5555-5","NOSUCHCLASS","","MCnc","Qn"\n'
+    orphan = LOINC_CSV + '"5555-5","Orphan","MCnc","Pt","Ser","Qn","","NOSUCHCLASS",""\n'
     said = []
     _, codes = lr.load_from_archive(
         archive({lr.PART_FILE_MEMBER: PART_CSV, lr.LOINC_TABLE_MEMBER: orphan}),
@@ -126,7 +152,7 @@ def test_an_archive_missing_either_member_is_an_error(missing):
 
 def test_reloading_updates_rather_than_duplicating():
     lr.load_from_archive(archive())
-    changed = LOINC_CSV.replace('"1751-7","CHEM","g/dL"', '"1751-7","CHEM","mg/dL"')
+    changed = LOINC_CSV.replace('"CHEM","g/dL"', '"CHEM","mg/dL"')
     lr.load_from_archive(archive({lr.PART_FILE_MEMBER: PART_CSV, lr.LOINC_TABLE_MEMBER: changed}))
 
     assert LoincCodeClass.objects.count() == 4
@@ -295,7 +321,7 @@ def test_a_worker_load_is_logged_even_with_no_stdout(caplog):
 def test_a_dropped_code_is_logged_as_a_warning(caplog):
     import logging as _logging
 
-    orphan = LOINC_CSV + '"5555-5","NOSUCHCLASS","","MCnc","Qn"\n'
+    orphan = LOINC_CSV + '"5555-5","Orphan","MCnc","Pt","Ser","Qn","","NOSUCHCLASS",""\n'
     with caplog.at_level(_logging.WARNING, logger='omop_core.services.loinc_release'):
         lr.load_from_archive(
             archive({lr.PART_FILE_MEMBER: PART_CSV, lr.LOINC_TABLE_MEMBER: orphan}))

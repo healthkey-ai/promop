@@ -162,6 +162,20 @@ async function evaluate(github, owner, repo, pr) {
 
 async function run({ github, context, core }) {
   const { owner, repo } = context.repo;
+  // A status-write failure is only actionable for the pull request this run is
+  // about. Failing the whole run for a different pull request turned one stale
+  // commit into a red `review` check on every other PR (the scheduled
+  // reconciliation evaluates them all).
+  const triggering = new Set();
+  if (context.payload?.pull_request?.head?.sha) {
+    triggering.add(context.payload.pull_request.head.sha);
+  }
+  if (context.payload?.workflow_run?.head_sha) {
+    triggering.add(context.payload.workflow_run.head_sha);
+  }
+  for (const linked of context.payload?.workflow_run?.pull_requests || []) {
+    if (linked?.head?.sha) triggering.add(linked.head.sha);
+  }
   const groups = new Map();
   try {
     const prs = await github.paginate(github.rest.pulls.list, { owner, repo, state: 'open', per_page: 100 });
@@ -223,9 +237,11 @@ async function run({ github, context, core }) {
       } catch (statusError) {
         // A failed status write must not skip the remaining commits — but it
         // leaves this commit carrying whatever verdict it already had, which
-        // may now be wrong. Keep going, and fail the run so the gap is visible.
+        // may now be wrong. Keep going; fail the run only when the gap is on
+        // the pull request this run is about, so one stale commit cannot break
+        // every other PR's check.
         core.warning(`Security review status for ${sha}: ${statusError.message}`);
-        unwritten.push(sha);
+        if (triggering.has(sha)) unwritten.push(sha);
       }
     }
   }

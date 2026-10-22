@@ -6,7 +6,91 @@ All notable changes to PRomop are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **A recorded line no longer has to name its drugs, and a wrong line can be
+  withdrawn** — the therapy editor offers "I don't know which drugs were given",
+  which records that the line happened with an unknown composition instead of
+  refusing to save. That is a deliberate choice, not an empty form: a payload
+  with no drugs, no regimen and no such statement is still rejected. Separately,
+  each line has a Remove action that retracts the claim it happened; the line
+  leaves the history and its imported drug exposures are kept, which is a
+  different action from ticking "drugs unknown" on an existing line, where the
+  line stays and only its composition is cleared. The write payload carries
+  `composition_unknown` and `DELETE /v1/therapy-lines/<id>/` performs the
+  retraction (#1924).
+
+- **The patient-info widget ships with the therapy editor** — `npm run
+  build:widget` produces the self-contained bundle a host on another React
+  version mounts, and that bundle now includes the treatment editor, so a
+  federated patient can author and correct lines instead of reading a
+  read-only history. The build entry exposes `mount`/`unmount` with
+  `{apiBase, token, readOnly}`, hands the base to the clinical transport and
+  hides tabs whose endpoints only the standalone product provides. The
+  treatment tab withholds its authoring controls when the host mounts
+  read-only, instead of offering a write the server will refuse. Structured
+  `lines_of_therapy` moved into `omop_core.api` so a host can project the same
+  per-line payload the standalone record uses (#1924).
+
+- **The therapy editor's endpoints ship in the package** — `omop_core.api`
+  serves the five calls the patient widget makes (`therapy-lines`,
+  `therapy-outcomes`, `therapy-regimens` list and detail, `concepts/search`)
+  from the installed wheel, so an embedding host can run the editor instead of
+  only deriving from data it cannot author. Host policy stays out: permissions,
+  the per-person write check and the `PatientRecord` payload shape are seams a
+  host overrides. The in-place API now imports the same serializers, queries and
+  viewset, so the two surfaces cannot drift. Requires the `api` extra
+  (`djangorestframework`) (#1924).
+
+- **Download a patient record as PDF or FHIR** — the patient record view has a
+  Download button beside the patient's name and number, for every role that can
+  open the record (patients included; it used to be patient-only and FHIR-only).
+  *PDF report* prints the tabs in order under their own labels, holding only
+  fields with a value, plus therapy lines, supportive therapy, genomic findings
+  and, for a patient's own copy, allergies and immunizations. It is generated in
+  the browser from the loaded record, so it reflects unsaved edits and needs no
+  new endpoint or dependency. Its layout is extracted from the tab components
+  (`node scripts/tab-layout.mjs`), and a test fails when the generated layout is
+  stale or misses a field the tabs render. *FHIR R4 bundle* now saves the signed
+  export byte for byte, keeping its digest and signature valid (#1961).
+
+- **Concept mapping priority** — on Code Mapping → Concept to Code, curators
+  rank concepts by dragging rows, typing a priority (1 is first; clear it to
+  unrank) or the up/down buttons. Ranked concepts come first on every page and
+  under every filter; a page-size selector (50/100/250/500) and *Ranked only*
+  bring concepts from later pages within reach. `POST
+  /api/v1/concept-to-code/priority/` moves one concept and renumbers the list.
+  Code-to-concept Suggest keeps a ranked concept that lexical search matched but
+  cut, marks ranked candidates for the ranker as a tie-breaker between equally
+  good matches, and notes when the winner is ranked. `copy_reference_data`
+  carries the ranking by concept key (#1914).
+
+- **Edit Mapping from Concept to Code, with example patients' Source
+  Metadata** — every source code listed under a concept opens the Edit Mapping
+  dialog (a code with no mapping row opens as a New Mapping), with the concept
+  offered as the destination when the code has none. The dialog lists up to
+  three patients whose source inventory carries the exact source system and
+  code, and shows the chosen patient's Source Metadata
+  (`GET /api/v1/concept-to-code/source-examples/`, administrators only, limited
+  to patients the curator can open, read-only). After a Suggest run with a
+  ranker, suggestions without a confidence score are hidden; unranked runs and
+  the Existing mappings and Find source codes lists are unchanged (#1915, #1911).
+
 ### Changed
+
+- **Mapping saves return immediately** — approving or re-pointing a code
+  mapping (Concept to Code, Code to Concept, group approve, CSV upload) writes the mapping
+  and returns; the stored clinical rows move to the new concept in a background
+  job (`omop_core.repoint_mapping_rows`, Celery when `CELERY_BROKER_URL` is set,
+  inline after commit otherwise). The destinations still to move are kept in
+  `deferred_repoint_concept_ids`, so a lost or duplicate task loses nothing. The
+  save response's `repoint` is now `{"queued": true, "from_concept_ids": [...]}`
+  rather than row counts. The approval-time unit-mismatch confirmation (`409
+  unit_mismatch_confirmation_required`, `confirm_unit_mismatch`) is removed:
+  values are normalized when clinical rows are loaded from codes. A failed job
+  is retried three times; `manage.py run_queued_repoints <id>…|--all` moves
+  whatever is still queued. A CSV upload queues one job per approved mapping
+  (#1952).
 
 - **Clearer source-code curation evidence** — Edit Mapping now keeps Source
   Code Value beside Source Description, only loads publisher terminology for
@@ -14,6 +98,35 @@ All notable changes to PRomop are documented here.
   omits redundant coding counts, explains value types outside the three extract
   categories, and labels grouped section totals and same-description record
   counts explicitly (#1691).
+
+### Fixed
+
+- **A known line of therapy is no longer lost when its drugs are unknown** —
+  the canonical writer now records that a line happened, independently of the
+  exposures that describe it. A line named without a drug list (a mapped
+  regimen, or a patient-reported line whose drugs were never recorded) counts
+  as one prior line instead of reading as "no prior therapy", and reports an
+  unknown composition rather than an empty one: the per-line payload now says
+  `composition_known: false`. A header row that no writer asserted is still
+  ignored, so a partial import cannot invent treatment. Retracting a line
+  entered in error withdraws it without deleting imported exposures, and saving
+  the line again restores it; clearing composition keeps the line with unknown
+  drugs (#1924).
+
+- **Editing a line of therapy no longer rewrites unrelated administrations** —
+  every drug exposure now belongs to one line and is addressed by its own id,
+  with its own dates, instead of being re-identified by patient, drug name and
+  date. Correcting a drug or its dates updates only the exposure the line owns;
+  exposures shared with another line or imported from an EHR are copied before
+  an edit and never retracted. Saving the form again, or editing only the
+  outcome, keeps the existing ids and individual administration periods, and a
+  line's dates no longer overwrite them. Repeated administrations of the same
+  drug are preserved, an ambiguous legacy name is refused instead of guessed,
+  and a future-dated administration is refused because the history records
+  treatment received rather than planned. The write is one transaction with a
+  bounded retry on lock contention, so a concurrent bulk edit cannot leave a
+  partially written line; ARTEMIS materialization uses the same boundary
+  (#1926).
 
 ### Added
 

@@ -411,13 +411,58 @@ def _identity_for_table(mapping, table):
 
 
 def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
-                        source_text='', source_system='fhir-upload', organization=None):
+                        source_text='', source_system='fhir-upload', organization=None,
+                        source_unit=None):
     """Resolve an inbound source code to a destination concept.
 
     Implements the four rules in the module docstring. Returns
     ``(concept, mapping_or_None)``; ``concept`` is None only when there is
     nothing to resolve (no code at all).
+
+    *source_unit* is the record's unit. A code whose units imply more than one
+    set of LOINC axes has an approved variant per set, and a record in one of
+    those units resolves to that variant's concept instead of the mapping's
+    (:mod:`omop_core.mapping.axis_variants`).
     """
+    concept, mapping, _variant = resolve_source_code_variant(
+        source_code=source_code, omop_table=omop_table,
+        source_vocabulary_id=source_vocabulary_id, source_text=source_text,
+        source_system=source_system, organization=organization,
+        source_unit=source_unit,
+    )
+    return concept, mapping
+
+
+def resolve_source_code_variant(*, source_code, omop_table, source_vocabulary_id='',
+                                source_text='', source_system='fhir-upload',
+                                organization=None, source_unit=None, metadata=None,
+                                mint=True):
+    """:func:`resolve_source_code`, also returning the axis variant that
+    routed the record (``None`` when the mapping's own concept applies).
+
+    *metadata* is what the caller knows about the record (unit, value,
+    specimen) in the shape :mod:`loinc_axes` reads; it steers the suggestion
+    made for a new code. *mint* False queues a code nothing matched with no
+    destination instead of a placeholder concept: right for a document term
+    (:mod:`text_terms`), where a placeholder per phrasing would be noise.
+    """
+    concept, mapping = _resolve_source_code(
+        source_code=source_code, omop_table=omop_table,
+        source_vocabulary_id=source_vocabulary_id, source_text=source_text,
+        source_system=source_system, organization=organization,
+        metadata=metadata, mint=mint,
+    )
+    if mapping is not None and source_unit:
+        from omop_core.mapping.axis_variants import variant_for
+        variant = variant_for(mapping, source_unit)
+        if variant is not None:
+            return variant.target_concept, mapping, variant
+    return concept, mapping, None
+
+
+def _resolve_source_code(*, source_code, omop_table, source_vocabulary_id,
+                         source_text, source_system, organization,
+                         metadata=None, mint=True):
     source_code = (source_code or '').strip()
     if not source_code:
         return None, None
@@ -510,6 +555,7 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
         source_code=source_code,
         source_text=source_text,
         omop_table=table,
+        metadata=metadata,
     )
     if suggested is not None:
         mapping = _record_proposal(
@@ -526,6 +572,17 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
         return None, mapping
 
     # Rule 5 — mint only after direct resolution and suggestion both fail.
+    if not mint:
+        return None, _record_proposal(
+            source_vocabulary_id=source_vocabulary_id,
+            source_code=source_code,
+            source_text=source_text,
+            concept=None,
+            omop_table=table,
+            source_system=source_system,
+            organization=mapping_organization,
+            notes=note,
+        )
     target = _QUARANTINE_TARGETS.get(table)
     if target is None:
         logger.warning(
@@ -602,7 +659,7 @@ def _source_value_match(model, source_col, mapping, include_description=True):
 
 def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
                           apply_changes=True, match_description=True,
-                          person_id=None):
+                          person_id=None, units=None):
     """Move stored clinical rows from one destination concept to another.
 
     Approving a mapping that a curator re-pointed has to rewrite the rows
@@ -619,6 +676,10 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
     affected records are marked stale (``derivation_version=0``) and left for
     ``backfill_patient_records``, the same trade ``remap_shadow_concepts``
     makes.
+
+    *units* limits the move to rows whose ``unit_source_value`` normalizes to
+    one of them -- an axis variant (``mapping.axis_variants``) owns only the
+    records in its units. Tables without a unit column move nothing then.
 
     Returns ``{'rows_updated', 'persons_marked_stale', 'rows_collapsed'}``.
     """
@@ -647,6 +708,16 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
     qs = model.objects.filter(match, **{concept_col: old_concept_id})
     if person_id is not None:
         qs = qs.filter(person_id=person_id)
+    if units is not None:
+        if not any(f.name == 'unit_source_value' for f in model._meta.concrete_fields):
+            return result
+        from omop_core.services.canonical_units import unit_code
+        wanted = set(units)
+        spellings = [
+            raw for raw in qs.values_list('unit_source_value', flat=True).distinct()
+            if raw and unit_code(raw) in wanted
+        ]
+        qs = qs.filter(unit_source_value__in=spellings)
     if mapping.organization_id:
         # A shared Epic flowsheet code can mean different things at two
         # hospitals.  Only rows whose write provenance names this mapping's

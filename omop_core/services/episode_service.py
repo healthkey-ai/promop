@@ -17,6 +17,9 @@ per line of therapy per person. Previously the FHIR/enrich paths keyed on
 ``(person, episode_number, start_date)``; both collapse to this.
 """
 import logging
+from datetime import date
+from time import sleep as _sleep
+from django.db import transaction
 
 from omop_core.models import Concept, Observation
 from omop_core.services.pk import next_pk
@@ -26,6 +29,9 @@ from omop_core.services.mappings import (
     CONCEPT_DRUG_EXPOSURE_FIELD,
 )
 from omop_oncology.models import Episode, EpisodeEvent
+from omop_core.services.therapy_transactions import (
+    lock_therapy_patients, run_therapy_write,
+)
 
 logger = logging.getLogger('audit')
 
@@ -77,16 +83,19 @@ def upsert_therapy_line_episode(
     start_date=_UNSET,
     end_date=_UNSET,
     drug_exposure_ids=(),
-    outcome=None,
-    intent=None,
-    discontinuation_reason=None,
+    outcome=_UNSET,
+    intent=_UNSET,
+    discontinuation_reason=_UNSET,
     source_value=None,
     today=None,
     replace_events=False,
+    replace_metadata=None,
     disease=None,
     episode=None,
     preserve_end_date_when_none=False,
     overwrite_source_concept=False,
+    assert_line=True,
+    asserted_by='authoring',
 ):
     """Upsert one line-of-therapy Episode and its links; return the Episode.
 
@@ -120,6 +129,11 @@ def upsert_therapy_line_episode(
         today: fallback for episode_start_date when start_date is None.
         replace_events: when True, the supplied drug_exposure_ids are the full
             membership of the episode and stale EpisodeEvent links are removed.
+        assert_line: record that this line happened, even when no composition
+            is supplied (#1924). Every canonical authoring path keeps the default;
+            a caller that only maintains an existing header may turn it off.
+        asserted_by: provenance of the assertion ('authoring', 'reverse-sync',
+            'import'), stored, never used for clinical decisions.
 
     Returns a TherapyLineEpisodeResult; result.episode is None if the required
     Treatment Regimen concept is absent.
@@ -203,6 +217,9 @@ def upsert_therapy_line_episode(
         if dirty:
             episode.save(update_fields=dirty)
 
+    if assert_line:
+        _assert_therapy_line(episode, asserted_by)
+
     field_concept = _concept(CONCEPT_DRUG_EXPOSURE_FIELD) or tx_regimen_concept
     event_ids = []
     desired_exposure_ids = {de_id for de_id in drug_exposure_ids if de_id is not None}
@@ -217,39 +234,89 @@ def upsert_therapy_line_episode(
         )
         stale.delete()
 
-    for de_id in drug_exposure_ids:
-        if de_id is None:
-            continue
+    for de_id in sorted(desired_exposure_ids):
         ee, _ = EpisodeEvent.objects.get_or_create(
             episode_id=episode.episode_id,
             event_id=de_id,
-            defaults={'episode_event_field_concept': field_concept},
+            episode_event_field_concept=field_concept,
         )
         event_ids.append(ee.pk)
 
-    if outcome:
+    if replace_metadata is None:
+        replace_metadata = replace_events
+    if outcome is not _UNSET and outcome:
         _upsert_outcome_observation(person, line_number, outcome, ehr_type_concept, no_match_concept,
                                     obs_date=effective_end or effective_start or today,
                                     line=episode, adopt=adopts_unparented)
-    elif replace_events:
+    elif outcome is not _UNSET and replace_metadata:
         _delete_outcome_observation(person, line_number, line=episode, adopt=adopts_unparented)
 
     obs_date = effective_end or effective_start or today
-    if intent:
+    if intent is not _UNSET and intent:
         _upsert_line_observation(person, line_number, 'intent', intent,
                                  ehr_type_concept, no_match_concept, obs_date=obs_date,
                                  line=episode, adopt=adopts_unparented)
-    elif replace_events:
+    elif intent is not _UNSET and replace_metadata:
         _delete_line_observation(person, line_number, 'intent', line=episode, adopt=adopts_unparented)
 
-    if discontinuation_reason:
+    if discontinuation_reason is not _UNSET and discontinuation_reason:
         _upsert_line_observation(person, line_number, 'discontinuation', discontinuation_reason,
                                  ehr_type_concept, no_match_concept, obs_date=obs_date,
                                  line=episode, adopt=adopts_unparented)
-    elif replace_events:
+    elif discontinuation_reason is not _UNSET and replace_metadata:
         _delete_line_observation(person, line_number, 'discontinuation', line=episode, adopt=adopts_unparented)
 
     return TherapyLineEpisodeResult(episode, created, event_ids)
+
+
+def _assert_therapy_line(episode, source):
+    """Record that this Episode is a therapy line that happened (#1924).
+
+    Saving the line again undoes a retraction: the writer is asserting it now.
+    Composition is deliberately not recorded here; it is read from the line's
+    typed links, so an unstated composition stays unknown.
+    """
+    from django.utils import timezone
+    from omop_oncology.models import TherapyLineAssertion
+
+    assertion, created = TherapyLineAssertion.objects.get_or_create(
+        episode=episode, defaults={'source': source},
+    )
+    if created:
+        return assertion
+    updates = {}
+    if assertion.state != TherapyLineAssertion.ASSERTED:
+        updates = {'state': TherapyLineAssertion.ASSERTED, 'retracted_at': None}
+    if source and assertion.source != source:
+        updates['source'] = source
+    if updates:
+        for field, value in updates.items():
+            setattr(assertion, field, value)
+        assertion.save(update_fields=list(updates))
+    return assertion
+
+
+def retract_therapy_line(person, episode):
+    """Withdraw the assertion that this line happened, keeping the row for audit.
+
+    A patient or clinician correcting a line entered in error retracts it; the
+    composition may also be cleared without retracting, when treatment happened
+    but the drugs are unknown. Retracting does not delete exposures: they may be
+    imported facts that outlive this line's claim about them.
+    """
+    from django.utils import timezone
+    from omop_oncology.models import TherapyLineAssertion
+
+    if episode is None or episode.person_id != person.pk:
+        raise ValueError('The therapy line must belong to this patient.')
+    assertion, _ = TherapyLineAssertion.objects.get_or_create(
+        episode=episode, defaults={'source': 'authoring'},
+    )
+    if assertion.state != TherapyLineAssertion.RETRACTED:
+        assertion.state = TherapyLineAssertion.RETRACTED
+        assertion.retracted_at = timezone.now()
+        assertion.save(update_fields=['state', 'retracted_at'])
+    return assertion
 
 
 def _line_parent(person, disease, episode):
@@ -425,18 +492,33 @@ def _delete_line_observation(person, line_number, suffix, line=None, adopt=True)
     _line_observations(person, f'LOT-{line_number}-{suffix}', line, adopt).delete()
 
 
-def author_therapy_line(
+def author_therapy_line(person, *, line_number, drugs=_UNSET, **kwargs):
+    """Atomically author a line; retry only PostgreSQL lock conflicts in full.
+
+    Bulk clinical updates may acquire a fact before refreshing PatientRecord.
+    Never wait for that fact while holding the projection lock: NOWAIT causes
+    a full savepoint rollback, releasing this attempt's locks before backoff.
+    """
+    if drugs is not _UNSET:
+        drugs = list(drugs)  # A generator must describe the same intent on retry.
+    return run_therapy_write(
+        lambda: _author_therapy_line_once(person, line_number=line_number, drugs=drugs, **kwargs),
+        backoff=_sleep,
+    )
+
+
+def _author_therapy_line_once(
     person,
     *,
     line_number,
-    drugs=(),
-    start_date=None,
-    end_date=None,
-    regimen_concept_id=None,
-    outcome=None,
-    intent=None,
-    discontinuation_reason=None,
-    source_value=None,
+    drugs=_UNSET,
+    start_date=_UNSET,
+    end_date=_UNSET,
+    regimen_concept_id=_UNSET,
+    outcome=_UNSET,
+    intent=_UNSET,
+    discontinuation_reason=_UNSET,
+    source_value=_UNSET,
     replace=False,
     disease=None,
     episode=None,
@@ -456,11 +538,12 @@ def author_therapy_line(
     -- and the CDM tagging stays identical to every other path, because the
     grouping still goes through ``upsert_therapy_line_episode``.
 
-    Idempotent in both halves. The Episode keys on ``(person, cancer, line_number)``
-    (the cancer is ``disease``, the primary one when omitted; #1739), and
-    a drug exposure keys on ``(drug_source_value, drug_exposure_start_date)`` --
-    the same identity the bulk write path and FHIR ingest use, so re-sending a
-    line converges instead of stacking duplicates.
+    Idempotent in both halves. The Episode keys on ``(person, cancer, line_number)``.
+    Private TherapyLineExposure metadata proves which facts this writer owns.
+    Existing administrations are identified by drug_exposure_id; legacy source
+    names resolve only when unambiguous within this line. Concept/date edits
+    update only exclusive owned facts. Imports are never adopted, and shared
+    facts are copied before edits.
 
     Signal suppression is internalised: every DrugExposure save and Observation
     delete fires post_save/post_delete, each of which would trigger a full
@@ -470,15 +553,19 @@ def author_therapy_line(
     Args:
         person: OMOP Person.
         line_number: LOT number (1, 2, 3…).
-        drugs: iterable of ``{'concept_id': int, 'source_value': str|None}``.
-        start_date / end_date: ``date`` objects or None.
+        drugs: iterable of concept_id/source_value, with drug_exposure_id for
+            existing administrations and optional individual start_date/end_date.
+            Omitted drug dates preserve existing facts; only new facts default
+            to the line's dates. A line-date edit never rewrites administration dates.
+        start_date / end_date: dates; omission preserves, None clears end_date.
+            A new line must have a known start_date: no clinical date is invented.
         regimen_concept_id: resolved regimen concept, used as
             ``episode_object_concept`` and asserted via ``episode_source_concept``.
         outcome: optional outcome string → ``LOT-{n}-outcome`` Observation.
         source_value: ``episode_source_value``; defaults to ``LOT-{n}``.
-        replace: when True, the submitted drugs and outcome are the complete
-            edited state of the line, so stale EpisodeEvent/outcome rows are
-            removed.
+        replace: submitted fields replace their previous state; omitted fields
+            are preserved. Removed exclusive owned facts are retained as
+            entered-in-error, never deleted. Imported/shared facts are untouched.
         disease: the cancer the line treats (name or slug); None = primary.
         episode: the line being edited, updated in place rather than re-found
             by number (which another cancer's line may share).
@@ -486,11 +573,13 @@ def author_therapy_line(
     Returns a TherapyLineEpisodeResult with two extra attributes attached:
     ``drug_exposure_ids`` and ``drugs_created``.
     """
-    from omop_core.models import DrugExposure
     from omop_core.signals import suppress_patient_record_refresh
 
     with suppress_patient_record_refresh():
-        return _author_therapy_line_inner(
+        # Match the projection-before-person order of patient edits. Serializing
+        # all authoring for one person also protects the find/create line key.
+        lock_therapy_patients([person.pk])
+        result = _author_therapy_line_inner(
             person,
             line_number=line_number,
             drugs=drugs,
@@ -505,83 +594,229 @@ def author_therapy_line(
             disease=disease,
             episode=episode,
         )
+        if result.episode is None:
+            transaction.set_rollback(True)
+        return result
 
 
 def _author_therapy_line_inner(
     person,
     *,
     line_number,
-    drugs=(),
-    start_date=None,
-    end_date=None,
-    regimen_concept_id=None,
-    outcome=None,
-    intent=None,
-    discontinuation_reason=None,
-    source_value=None,
+    drugs=_UNSET,
+    start_date=_UNSET,
+    end_date=_UNSET,
+    regimen_concept_id=_UNSET,
+    outcome=_UNSET,
+    intent=_UNSET,
+    discontinuation_reason=_UNSET,
+    source_value=_UNSET,
     replace=False,
     disease=None,
     episode=None,
 ):
     from omop_core.models import DrugExposure
+    from omop_oncology.models import TherapyLineExposure
 
+    if _concept(CONCEPT_TREATMENT_REGIMEN) is None:
+        return TherapyLineEpisodeResult(None, False, [])
     ehr_type = _concept(CONCEPT_EHR_TYPE)
+    if ehr_type is None or _concept(CONCEPT_DRUG_EXPOSURE_FIELD) is None:
+        raise ValueError('The EHR type and drug-exposure field vocabulary must be loaded.')
+    if not isinstance(line_number, int) or line_number < 1:
+        raise ValueError('line_number must be a positive integer.')
+
+    if episode is not None:
+        try:
+            episode = Episode.objects.select_for_update(nowait=True).get(
+                pk=episode.pk, person=person, episode_concept_id=CONCEPT_TREATMENT_REGIMEN,
+                episode_number=line_number,
+            )
+        except Episode.DoesNotExist as exc:
+            raise ValueError('The therapy line must belong to this person and line number.') from exc
+    else:
+        parent, primary = _line_parent(person, disease, None)
+        episode = _find_line(person, line_number, parent, primary)
+        if episode is not None:
+            episode = Episode.objects.select_for_update(nowait=True).get(pk=episode.pk)
+
+    start = (episode.episode_start_date if episode else None) if start_date is _UNSET else start_date
+    end = (episode.episode_end_date if episode else None) if end_date is _UNSET else end_date
+    if start and end and end < start:
+        raise ValueError('end_date cannot precede start_date.')
+    if source_value is _UNSET:
+        source_value = episode.episode_source_value if episode else None
+    if regimen_concept_id is _UNSET:
+        regimen = episode.episode_source_concept if episode else None
+        object_regimen = episode.episode_object_concept if episode else None
+    else:
+        if regimen_concept_id is not None and regimen_concept_id <= 0:
+            raise ValueError(f'Unknown regimen concept_id {regimen_concept_id}')
+        regimen = _concept(regimen_concept_id) if regimen_concept_id else None
+        if regimen_concept_id and regimen is None:
+            raise ValueError(f'Unknown regimen concept_id {regimen_concept_id}')
+        if regimen is None and episode is not None and (
+            episode.episode_source_concept_id or episode.episode_object_concept_id not in (
+                None, 0, CONCEPT_EHR_TYPE, CONCEPT_TREATMENT_REGIMEN,
+            )
+        ):
+            # Unknown-regimen assertions need #1924's explicit representation.
+            # Until then refuse, rather than silently retain A or invent a code.
+            raise ValueError('Clearing a regimen requires the unknown-regimen assertion workflow.')
+        object_regimen = regimen
+
+    linked = list(DrugExposure.objects.filter(
+        person=person, is_erroneous=False,
+        drug_exposure_id__in=EpisodeEvent.objects.filter(
+            episode_id=episode.pk if episode else None,
+            episode_event_field_concept_id=CONCEPT_DRUG_EXPOSURE_FIELD,
+        ).values('event_id'),
+    ))
+    composition_supplied = drugs is not _UNSET
+    validated = {}
+    for drug in drugs if composition_supplied else ():
+        concept_id = drug.get('concept_id') if isinstance(drug, dict) else drug
+        concept = _concept(concept_id)
+        if concept is None or concept_id <= 0:
+            raise ValueError(f'Unknown drug concept_id {concept_id}')
+        values = drug if isinstance(drug, dict) else {'concept_id': drug}
+        ref = values.get('drug_exposure_id')
+        if ref is not None and (not isinstance(ref, int) or isinstance(ref, bool) or ref <= 0):
+            raise ValueError('drug_exposure_id must be a positive integer.')
+        raw = values.get('source_value')
+        raw = (raw or concept.concept_name or '')[:50]
+        key = ('id', ref) if ref is not None else ('source', raw)
+        if key in validated and (ref is not None or validated[key][0] != values):
+            raise ValueError(f'Duplicate drug source_value {raw!r}; use distinct administration IDs.')
+        validated[key] = (values, concept, raw)
+    if not start:
+        raise ValueError('A therapy line requires a known start_date; no date is fabricated.')
+    if start > date.today():
+        raise ValueError('A future therapy line is planned, not received treatment.')
+
+    # Establish the line before exposures. Any later failure rolls back this
+    # whole service call, including direct (non-HTTP) callers.
+    result = upsert_therapy_line_episode(
+        person, line_number=line_number, regimen_concept=object_regimen,
+        regimen_source_concept=regimen, overwrite_source_concept=True,
+        start_date=start, end_date=end, outcome=outcome, intent=intent,
+        discontinuation_reason=discontinuation_reason, source_value=source_value,
+        disease=disease, episode=episode,
+        replace_events=replace and composition_supplied,
+        replace_metadata=replace,
+    )
+    if result.episode is None:
+        raise ValueError('The treatment-regimen vocabulary disappeared during authoring.')
+    line = result.episode
+    if not composition_supplied:
+        # A line interval is not every administration's interval. Preserve exact
+        # links/IDs/dates on metadata-only edits, including imported repeat doses.
+        result.drug_exposure_ids = [de.pk for de in linked]
+        result.drugs_created = 0
+        return result
+    # Link INSERT/UPDATE takes the same fact-row lock via the migration trigger,
+    # including bulk imports and the generic EpisodeEvent API. Lock in PK order
+    # before checking exclusivity; a link cannot appear between check and edit.
+    fact_ids = set(TherapyLineExposure.objects.filter(episode=line).values_list('drug_exposure_id', flat=True))
+    fact_ids.update(de.pk for de in linked)
+    locked_facts = {de.pk: de for de in DrugExposure.objects.select_for_update(nowait=True).filter(
+        pk__in=fact_ids,
+    ).order_by('pk')}
+    linked = [locked_facts[de.pk] for de in linked
+              if de.pk in locked_facts and not locked_facts[de.pk].is_erroneous]
     exposure_ids = []
     created = 0
 
-    for drug in drugs:
-        concept_id = drug.get('concept_id') if isinstance(drug, dict) else drug
-        concept = _concept(concept_id)
-        if concept is None:
-            # A drug whose concept is not loaded cannot be written, and silently
-            # dropping it would produce a line that looks complete and infers the
-            # wrong regimen. Refuse the whole line instead.
-            raise ValueError(f'Unknown drug concept_id {concept_id}')
-
-        raw = (drug.get('source_value') if isinstance(drug, dict) else None)
-        raw = (raw or concept.concept_name or '')[:50]
-
-        existing = DrugExposure.objects.filter(
-            person=person,
-            drug_source_value=raw,
-            drug_exposure_start_date=start_date,
-        ).order_by('drug_exposure_id').first()
+    used_ids = set()
+    for values, concept, raw in validated.values():
+        ref = values.get('drug_exposure_id')
+        if ref is not None:
+            existing = next((de for de in linked if de.pk == ref), None)
+            if existing is None:
+                raise ValueError('drug_exposure_id must identify an active drug already linked to this line.')
+        else:
+            candidates = [de for de in linked if de.drug_source_value == raw]
+            if not candidates:
+                candidates = [entry.drug_exposure for entry in
+                    TherapyLineExposure.objects.filter(episode=line, source_value=raw)
+                    .select_related('drug_exposure')]
+            if len(candidates) > 1:
+                raise ValueError('Ambiguous drug source_value; supply drug_exposure_id for each administration.')
+            existing = candidates[0] if candidates else None
         if existing is not None:
-            exposure_ids.append(existing.drug_exposure_id)
+            if existing.pk in used_ids:
+                raise ValueError('Duplicate drug_exposure_id in the submitted composition.')
+            used_ids.add(existing.pk)
+            if ref is not None:
+                raw = values.get('source_value', existing.drug_source_value)
+            elif 'source_value' not in values:
+                raw = existing.drug_source_value
+        owned = TherapyLineExposure.objects.filter(
+            episode=line, drug_exposure_id=existing.pk if existing else None).first()
+        drug_start = values.get('start_date', existing.drug_exposure_start_date if existing else start)
+        drug_end = values.get('end_date', existing.drug_exposure_end_date if existing else end)
+        if not drug_start or (drug_end and drug_end < drug_start):
+            raise ValueError('Drug dates require a known start_date and end_date cannot precede it.')
+        if drug_start > date.today():
+            raise ValueError('A future drug administration is planned, not received treatment.')
+        shared = existing is not None and EpisodeEvent.objects.filter(
+            event_id=existing.pk, episode_event_field_concept_id=CONCEPT_DRUG_EXPOSURE_FIELD,
+        ).exclude(episode_id=line.pk).exists()
+        if existing is not None and existing.person_id != person.pk:
+            raise ValueError('Exposure ownership does not match the patient.')
+        if existing is not None and (existing.drug_concept_id == concept.pk
+                       and existing.drug_source_value == raw
+                       and existing.drug_exposure_start_date == drug_start
+                       and existing.drug_exposure_end_date == drug_end
+                       and not existing.is_erroneous):
+            exposure_ids.append(existing.pk)
             continue
+        if existing is None or shared or owned is None:
+            existing = DrugExposure.objects.create(
+                drug_exposure_id=next_pk(DrugExposure, 'drug_exposure_id'), person=person,
+                drug_concept=concept, drug_exposure_start_date=drug_start, drug_exposure_end_date=drug_end,
+                drug_type_concept=ehr_type, drug_source_value=raw,
+            )
+            if owned is not None:
+                owned.drug_exposure = existing
+                owned.source_value = raw or ''
+                owned.save(update_fields=['drug_exposure', 'source_value'])
+            else:
+                TherapyLineExposure.objects.create(episode=line, source_value=raw or '', drug_exposure=existing)
+            created += 1
+        else:
+            updates = dict(drug_concept_id=concept.pk, drug_source_value=raw,
+                           drug_exposure_start_date=drug_start, drug_exposure_end_date=drug_end,
+                           is_erroneous=False, erroneous_reason=None)
+            dirty = [key for key, value in updates.items() if getattr(existing, key) != value]
+            if dirty:
+                for key, value in updates.items():
+                    setattr(existing, key, value)
+                existing.save(update_fields=dirty)
+            if owned.source_value != (raw or ''):
+                owned.source_value = raw or ''
+                owned.save(update_fields=['source_value'])
+        exposure_ids.append(existing.pk)
 
-        exposure = DrugExposure(
-            drug_exposure_id=next_pk(DrugExposure, 'drug_exposure_id'),
-            person=person,
-            drug_concept=concept,
-            drug_exposure_start_date=start_date,
-            drug_exposure_end_date=end_date,
-            drug_type_concept=ehr_type,
-            drug_source_value=raw,
-        )
-        exposure.save()
-        exposure_ids.append(exposure.drug_exposure_id)
-        created += 1
-
-    regimen_concept = _concept(regimen_concept_id) if regimen_concept_id else None
-    result = upsert_therapy_line_episode(
-        person,
-        line_number=line_number,
-        regimen_concept=regimen_concept,
-        # Asserted, not inferred: the caller named this regimen, and derivation
-        # reads episode_source_concept to decide which of the two it is.
-        regimen_source_concept=regimen_concept,
-        start_date=start_date,
-        end_date=end_date,
-        drug_exposure_ids=exposure_ids,
-        outcome=outcome,
-        intent=intent,
-        discontinuation_reason=discontinuation_reason,
-        source_value=source_value,
-        replace_events=replace,
-        disease=disease,
-        episode=episode,
+    links = upsert_therapy_line_episode(
+        person, line_number=line_number, episode=line, source_value=line.episode_source_value,
+        drug_exposure_ids=exposure_ids, replace_events=replace,
     )
+    if replace:
+        for owned in TherapyLineExposure.objects.filter(episode=line).exclude(
+            drug_exposure_id__in=exposure_ids,
+        ).select_related('drug_exposure'):
+            old = owned.drug_exposure
+            shared = EpisodeEvent.objects.filter(
+                event_id=old.pk, episode_event_field_concept_id=CONCEPT_DRUG_EXPOSURE_FIELD,
+            ).exclude(episode_id=line.pk).exists()
+            if old.person_id != person.pk:
+                raise ValueError('Exposure ownership does not match the patient.')
+            if not shared and not old.is_erroneous:
+                old.is_erroneous = True
+                old.erroneous_reason = 'Superseded by an explicit therapy-line edit.'
+                old.save(update_fields=['is_erroneous', 'erroneous_reason'])
+    result.event_ids = links.event_ids
     result.drug_exposure_ids = exposure_ids
     result.drugs_created = created
     return result

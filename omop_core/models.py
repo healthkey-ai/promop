@@ -2211,6 +2211,36 @@ class SourceCodeConceptMapping(models.Model):
             'coverage. It informs curation and is not clinical reference data.'
         ),
     )
+    loinc_axes = models.JSONField(
+        default=dict, db_default={}, blank=True,
+        help_text=(
+            "A curator's entries for the six LOINC axes of this source code "
+            '(component, property, time_aspect, system, scale_type, '
+            'method_type). Inferred axes are computed at read time from the '
+            'source code and its metadata; an entry here overrides one, and '
+            'null clears it. Suggest never offers a LOINC that conflicts with '
+            'a settled axis (omop_core.mapping.loinc_axes).'
+        ),
+    )
+    snomed_attributes = models.JSONField(
+        default=dict, db_default={}, blank=True,
+        help_text=(
+            "A curator's SNOMED evidence for this source code: "
+            '{reference_concept_id, hierarchy, laterality}. The reference '
+            'concept is what the source means at least; Suggest offers it and '
+            'its ancestors, never a descendant the evidence does not support '
+            '(omop_core.mapping.snomed_attributes).'
+        ),
+    )
+    axis_variant_count = models.PositiveSmallIntegerField(
+        default=0, db_default=0,
+        help_text=(
+            'How many distinct sets of LOINC axis values the source units of '
+            'this code imply -- 2 when one hospital code arrives in both mg/dL '
+            'and mmol/L. Two or more means the code needs one LOINC per '
+            'variant (SourceCodeAxisVariant). Refreshed by axis_variants.refresh.'
+        ),
+    )
     source_unit_evidence = models.JSONField(
         default=list, db_default=[], blank=True,
         help_text=(
@@ -2388,6 +2418,47 @@ class MappingSuggestionReview(models.Model):
         db_table = 'mapping_suggestion_review'
 
 
+class RelevanceSignal(models.Model):
+    """A concept an extractor kept meeting for a disease outside its relevance set (#1942).
+
+    Aggregate only: how many documents of the period mentioned the concept,
+    never which patient or document. A curator accepts or rejects it; accepted
+    concepts join the disease's set at the ``curated`` tier
+    (``omop_core.services.disease_relevance``). A later period's signal for a
+    pair already decided inherits that decision, so a rejection stays rejected.
+    """
+    STATUS_CHOICES = [
+        ('proposed', 'Proposed'),
+        ('accepted', 'Accepted'),
+        ('rejected', 'Rejected'),
+    ]
+
+    source = models.CharField(max_length=100, help_text='The service that reported it.')
+    disease = models.CharField(max_length=10)
+    # A snapshot id, like MappingSuggestionReview: a vocabulary reload must not
+    # cascade into or block the curation record.
+    concept_id = models.BigIntegerField()
+    period = models.CharField(max_length=32, help_text='The reporting window, e.g. 2026-10.')
+    document_count = models.PositiveIntegerField()
+    document_total = models.PositiveIntegerField(null=True, blank=True)
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='proposed')
+    reviewer = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='+',
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'relevance_signal'
+        constraints = [
+            models.UniqueConstraint(fields=['source', 'disease', 'concept_id', 'period'],
+                                    name='uniq_relevance_signal'),
+        ]
+        indexes = [models.Index(fields=['disease', 'status'])]
+
+
 class MappingDestinationCandidate(models.Model):
     """An imported alternative; it does not change the chosen clinical mapping."""
 
@@ -2410,6 +2481,66 @@ class MappingDestinationCandidate(models.Model):
                 name='uq_mapping_destination_candidate',
             ),
         ]
+
+
+class SourceCodeAxisVariant(models.Model):
+    """One set of LOINC axis values a single source code arrives with.
+
+    A hospital lab code is one code to the sender, but when its results come
+    in both mg/dL and mmol/L it is two LOINC tests: mass and substance
+    concentration differ on the property axis, so each needs its own
+    destination. A variant groups the source units that imply the same axis
+    values and carries the destination for records in those units.
+
+    Ingest routes by unit (``axis_variants.variant_for``): a record whose unit
+    belongs to an approved variant takes that variant's concept; any other
+    record takes the mapping's own. Units are the discriminator because they
+    are the one per-record value every ingest path has.
+    """
+
+    STATUS_CHOICES = [
+        ('proposed', 'Proposed'),
+        ('approved', 'Approved'),
+    ]
+
+    mapping = models.ForeignKey(
+        SourceCodeConceptMapping, on_delete=models.CASCADE,
+        related_name='axis_variants',
+    )
+    axis_key = models.CharField(
+        max_length=255,
+        help_text="Canonical form of axis_values, e.g. 'property=SCnc', or 'unit=%' "
+                  'for a unit that implies no single property.',
+    )
+    axis_values = models.JSONField(default=dict, blank=True)
+    units = models.JSONField(
+        default=list, blank=True,
+        help_text='Source units (UCUM-normalized) whose records belong to this variant.',
+    )
+    occurrence_count = models.IntegerField(default=0)
+    target_concept = models.ForeignKey(
+        Concept, on_delete=models.DO_NOTHING, null=True, blank=True,
+        related_name='+', db_constraint=False,
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='proposed')
+    reviewer = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'source_code_axis_variant'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['mapping', 'axis_key'], name='uq_source_code_axis_variant',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.mapping_id} [{self.axis_key}] -> {self.target_concept_id}'
 
 
 class RegimenMappingGap(models.Model):
@@ -2524,7 +2655,14 @@ class LoincClass(models.Model):
 
 
 class LoincCodeClass(models.Model):
-    """Maps LOINC codes to their CLASS value and example units (from Loinc.csv)."""
+    """One LOINC code's CLASS, example units and six axes (from Loinc.csv).
+
+    The six axes -- component, property, time aspect, system, scale and
+    method -- are what define a LOINC code: two tests that differ on any one
+    of them get different codes. Code to Concept Suggest compares them with
+    the source code's axes, so a candidate that disagrees on an axis the
+    source has settled is never offered.
+    """
     loinc_num = models.CharField(max_length=20, primary_key=True)
     loinc_class = models.ForeignKey(
         LoincClass, on_delete=models.CASCADE,
@@ -2535,8 +2673,12 @@ class LoincCodeClass(models.Model):
         help_text='EXAMPLE_UNITS from Loinc.csv; empty when LOINC defines no unit.',
     )
 
+    component = models.CharField(max_length=255, blank=True, default='')
     property = models.CharField(max_length=40, blank=True, default='')
+    time_aspect = models.CharField(max_length=20, blank=True, default='')
+    system = models.CharField(max_length=120, blank=True, default='')
     scale_type = models.CharField(max_length=20, blank=True, default='')
+    method_type = models.CharField(max_length=150, blank=True, default='')
 
     class Meta:
         db_table = 'loinc_code_class'
@@ -3915,11 +4057,18 @@ class PatientRecord(models.Model):
         if self.later_therapy:
             text_lines += 1
 
-        self.therapy_lines_count = max(text_lines, self.therapy_lines_count or 0)
+        # `None` means "no evidence either way"; `0` is the assertion "no prior
+        # therapy". Collapsing the former into the latter turns an unknown
+        # history into a clinical claim, and downstream matchers compare it as a
+        # value. Leave both fields unknown when there is nothing to count (#1925).
+        if self.therapy_lines_count is not None or text_lines:
+            self.therapy_lines_count = max(text_lines, self.therapy_lines_count or 0)
         lines_count = self.therapy_lines_count
 
         # Set prior_therapy using the vocabulary expected by EXACT and CB matchers
-        if lines_count == 0:
+        if lines_count is None:
+            self.prior_therapy = None
+        elif lines_count == 0:
             self.prior_therapy = 'None'
         elif lines_count == 1:
             self.prior_therapy = 'One line'
@@ -4115,6 +4264,36 @@ class FieldConceptMapping(models.Model):
 
     def __str__(self):
         return f"{self.field_name} → {self.vocabulary_id}:{self.concept_code} ({self.status})"
+
+
+class ConceptMappingPriority(models.Model):
+    """A curator's ranking of a standard concept for code-mapping work (#1914).
+
+    One row per ranked concept; concepts without one are unranked. The Concept
+    to Code list shows ranked concepts first, by position, and Suggest prefers a
+    ranked concept over an equally good unranked match. Positions are global
+    across filters and pages, and `services.concept_priority.move` renumbers
+    them 1..N under a table lock, so they stay dense and unique.
+
+    Reference data: copy_reference_data moves it, matched on the concept's
+    (vocabulary_id, concept_code).
+    """
+    concept = models.OneToOneField(
+        Concept, on_delete=models.CASCADE, related_name='mapping_priority',
+    )
+    position = models.PositiveIntegerField()
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'concept_mapping_priority'
+        ordering = ['position', 'concept_id']
+
+    def __str__(self):
+        return f'{self.position}: concept {self.concept_id}'
 
 
 class CustomPatientField(models.Model):

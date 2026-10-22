@@ -122,7 +122,7 @@ def _apply_group_action(mapping_ids, action, destination_id, *, run, actor, sele
     for position, mapping_id in enumerate(mapping_ids):
         # A 2,557-member approval can outlive the ordinary 15-minute edit lock.
         # Refresh the batch periodically so another curator cannot enter halfway
-        # through the per-row repoint loop.
+        # through the per-row loop.
         if timezone.now() - refreshed_at >= refresh_interval:
             SourceCodeConceptMapping.objects.filter(
                 pk__in=mapping_ids[position:], locked_by=actor,

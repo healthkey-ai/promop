@@ -372,3 +372,38 @@ def test_upload_limits_are_atomic(staff_client, monkeypatch):
     assert too_large.status_code == 400
     assert 'upload limit' in too_large.data['detail']
     assert not SourceCodeConceptMapping.objects.exists()
+
+
+@pytest.mark.django_db
+def test_approvals_move_stored_rows_after_the_upload_commits(staff_client, django_capture_on_commit_callbacks):
+    """The upload writes mappings and returns; a job per mapping moves rows (#1952)."""
+    from omop_core.models import Measurement
+    from tests.factories import MeasurementFactory
+    client, _ = staff_client
+    old, new, other = (ConceptFactory(domain_id='Measurement', vocabulary_id='LOINC') for _ in range(3))
+    SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id='VendorLab', source_code='A01', source_code_description='Albumin',
+        target_concept=old, status='approved', domain_id='Measurement', omop_table='measurement',
+    )
+    moved = MeasurementFactory(measurement_concept=old, measurement_source_value='A01')
+    unresolved = MeasurementFactory(measurement_concept_id=0, measurement_source_value='B02')
+
+    with django_capture_on_commit_callbacks() as callbacks:
+        response = client.post(URL, {
+            'file': csv_file(
+                'source code,source description,destination concept ID,state\n'
+                f'A01,Albumin,{new.pk},Approved\nB02,Bilirubin,{other.pk},Approved\n'
+            ),
+            'source_vocabulary_id': 'VendorLab', 'provenance': 'catalogue',
+        }, format='multipart')
+    assert response.status_code == 201, response.data
+    assert Measurement.objects.get(pk=moved.pk).measurement_concept_id == old.pk
+    queued = dict(SourceCodeConceptMapping.objects.filter(source_vocabulary_id='VendorLab')
+                  .values_list('source_code', 'deferred_repoint_concept_ids'))
+    assert queued == {'A01': [old.pk], 'B02': [0]}
+
+    for callback in callbacks:
+        callback()
+    assert Measurement.objects.get(pk=moved.pk).measurement_concept_id == new.pk
+    assert Measurement.objects.get(pk=unresolved.pk).measurement_concept_id == other.pk
+    assert not SourceCodeConceptMapping.objects.exclude(deferred_repoint_concept_ids=[]).exists()

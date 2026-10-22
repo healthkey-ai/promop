@@ -19,6 +19,9 @@ interface Props {
   onNameChange: (name: string) => void;
   onZipcodeChange: (zip: string) => void;
   patientMode?: boolean;
+  /** Precise coordinates are matched from the host's own address data; a federated
+   *  host that withholds them must not be offered inputs whose save it refuses. */
+  showCoordinates?: boolean;
 }
 
 /**
@@ -42,6 +45,7 @@ interface Props {
 export default function GeneralTab({
   formData, onChange, editedName, onNameChange, onZipcodeChange,
   patientMode = false,
+  showCoordinates = true,
 }: Props) {
   // Ask about *this* patient: whether a field may be edited depends on who is
   // asking and whose record it is, not only on whether the field is mapped.
@@ -151,9 +155,10 @@ export default function GeneralTab({
 
           {/* Normally filled in by the zip lookup above, but writable: trial
               matching measures distance to sites from these, so a wrong pair is
-              worth being able to correct by hand. */}
-          {field('Latitude', 'latitude', 'number')}
-          {field('Longitude', 'longitude', 'number')}
+              worth being able to correct by hand. A federated host that does not
+              send precise location passes showCoordinates={false}. */}
+          {showCoordinates && field('Latitude', 'latitude', 'number')}
+          {showCoordinates && field('Longitude', 'longitude', 'number')}
         </div>
       </Section>
 

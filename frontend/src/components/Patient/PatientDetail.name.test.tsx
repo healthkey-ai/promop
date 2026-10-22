@@ -117,6 +117,16 @@ describe("PatientDetail - renaming a patient", () => {
   });
 });
 
+describe("PatientDetail - download", () => {
+  it("puts Download beside the patient's name and number for staff", async () => {
+    await renderAndWaitForLoad();
+    const number = screen.getByText("#3542");
+    const download = screen.getByRole("button", { name: /download/i });
+    // Same header group as the name and number, not somewhere else on the page.
+    expect(number.parentElement).toContainElement(download);
+  });
+});
+
 function render(ui: React.ReactElement) {
   return baseRender(<MemoryRouter>{ui}</MemoryRouter>);
 }

@@ -86,6 +86,53 @@ async function addDrug(name: string, text = 'lena') {
 }
 
 describe('TherapyLineDialog', () => {
+  it('does not submit a future administration as received treatment', async () => {
+    render(<TherapyLineDialog personId={262} defaultLineNumber={1}
+      line={{ episode_id: 98, line: 1, start_date: '2025-01-01',
+        drugs: [{ ...LENALIDOMIDE, drug_exposure_id: 101, start_date: '2025-02-01' }] }}
+      onClose={onClose} onAuthored={onAuthored} />);
+    fireEvent.change(screen.getByLabelText('lenalidomide start date (1)'), { target: { value: '2099-01-01' } });
+    fireEvent.click(screen.getByRole('button', { name: /update line/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('planned, not received');
+    expect(mockPatch).not.toHaveBeenCalled();
+  });
+
+  it('preserves administration IDs and individual dates on a full-form save', async () => {
+    const drugs = [1, 2].map((day) => ({
+      ...LENALIDOMIDE, drug_exposure_id: 100 + day, source_value: 'repeat',
+      start_date: `2025-02-0${day}`, end_date: '2025-03-01',
+    }));
+    render(<TherapyLineDialog personId={262} defaultLineNumber={1}
+      line={{ episode_id: 98, line: 1, start_date: '2025-01-01', end_date: '2025-04-01', drugs }}
+      onClose={onClose} onAuthored={onAuthored} />);
+    fireEvent.change(screen.getByLabelText(/^end date$/i), { target: { value: '2025-05-01' } });
+    fireEvent.click(screen.getByRole('button', { name: /update line/i }));
+    await waitFor(() => expect(mockPatch).toHaveBeenCalled());
+    expect(mockPatch.mock.calls[0][1]).toMatchObject({
+      end_date: '2025-05-01',
+      drugs: drugs.map((d) => ({ drug_exposure_id: d.drug_exposure_id,
+        concept_id: d.concept_id, source_value: 'repeat', start_date: d.start_date, end_date: d.end_date })),
+    });
+  });
+
+  it('removes only the selected administration and sends an explicit drug-date clear', async () => {
+    const drugs = [1, 2].map((day) => ({
+      ...LENALIDOMIDE, drug_exposure_id: 100 + day, source_value: 'repeat',
+      start_date: `2025-02-0${day}`, end_date: '2025-03-01',
+    }));
+    render(<TherapyLineDialog personId={262} defaultLineNumber={1}
+      line={{ episode_id: 98, line: 1, start_date: '2025-01-01', drugs }}
+      onClose={onClose} onAuthored={onAuthored} />);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Remove lenalidomide' })[0]);
+    fireEvent.change(screen.getByLabelText('lenalidomide end date (1)'), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: /update line/i }));
+    await waitFor(() => expect(mockPatch).toHaveBeenCalled());
+    expect(mockPatch.mock.calls[0][1].drugs).toEqual([{
+      drug_exposure_id: 102, concept_id: LENALIDOMIDE.concept_id, source_value: 'repeat',
+      start_date: '2025-02-02', end_date: null,
+    }]);
+  });
+
   it('searches RxNorm ingredients only', async () => {
     // A line is the drugs given, not their branded pack sizes.
     open();
@@ -110,7 +157,7 @@ describe('TherapyLineDialog', () => {
   it('sends the clinician vocabulary, never CDM ids', async () => {
     open(2);
     await addDrug('lenalidomide');
-    fireEvent.change(screen.getByLabelText(/start date/i), { target: { value: '2025-03-01' } });
+    fireEvent.change(screen.getByLabelText(/^start date$/i), { target: { value: '2025-03-01' } });
     fireEvent.click(screen.getByRole('button', { name: /record line/i }));
 
     await waitFor(() => expect(mockPost).toHaveBeenCalled());
@@ -415,4 +462,27 @@ it('loads disease-specific outcomes and submits the selected response', async ()
   fireEvent.change(screen.getByLabelText(/outcome/i), { target: { value: 'Very Good Partial Response' } });
   fireEvent.click(screen.getByRole('button', { name: /record line/i }));
   await waitFor(() => expect(mockPost).toHaveBeenCalledWith('/v1/therapy-lines/', expect.objectContaining({ outcome: 'Very Good Partial Response' })));
+});
+
+
+describe('TherapyLineDialog — unknown composition', () => {
+  it('records the line without drugs when the clinician says they are unknown', async () => {
+    open();
+    fireEvent.click(screen.getByLabelText('Drugs unknown'));
+    fireEvent.change(screen.getByLabelText(/^start date$/i), { target: { value: '2025-03-01' } });
+    fireEvent.click(screen.getByRole('button', { name: /record line/i }));
+
+    await waitFor(() => expect(mockPost).toHaveBeenCalled());
+    const [, body] = mockPost.mock.calls.at(-1)!;
+    expect(body).toMatchObject({ drugs: [], composition_unknown: true, start_date: '2025-03-01' });
+  });
+
+  it('still refuses an empty line when the clinician has not said so', async () => {
+    open();
+    fireEvent.change(screen.getByLabelText(/^start date$/i), { target: { value: '2025-03-01' } });
+    fireEvent.click(screen.getByRole('button', { name: /record line/i }));
+
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(mockPost).not.toHaveBeenCalled();
+  });
 });
