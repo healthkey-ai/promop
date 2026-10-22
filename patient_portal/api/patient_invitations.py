@@ -274,6 +274,10 @@ def accept_patient_invitation(request):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+            # The token reached the invited mailbox; holding it proves the address.
+            if (identity.email or '').lower() == email.lower():
+                identity.mark_email_verified()
+
             try:
                 PatientUser.objects.update_or_create(
                     person=invitation.person,

@@ -1,0 +1,187 @@
+# Hospital source-code backfill architecture
+
+The Code Mapping Epic and Cerner tabs are data-driven. They appear when
+`SourceCodeConceptMapping` contains an exact hospital-local source system. The
+browse API rolls those rows up to vendor tabs; resolution continues to use the
+full Epic OID or Cerner tenant URI so opaque codes from different tenants never
+share a resolver key.
+
+## Import contract
+
+`import_hospital_source_codes` imports an internal HealthTree unmapped-code
+snapshot. The source artifacts are internal and are never committed: they
+contain provider-channel labels and sample Firestore document addresses.
+
+```shell
+python manage.py import_hospital_source_codes \
+  --codes-file /secure/path/unmapped_source_codes_v2.parquet \
+  --units-file /secure/path/unmapped_source_code_value_distribution_v2.parquet \
+  --supplemental-csv /secure/path/hospital_codes_with_units.csv \
+  --expected-keys 690569
+```
+
+The invoking environment needs `pyarrow`; it is intentionally not an
+application runtime dependency. `--dry-run` performs parsing, reconciliation,
+and an existing-row scan without writing. `--expected-keys` stops before any
+write when the artifact does not reconcile to the reviewed inventory size.
+
+The importer:
+
+- accepts only systems positively recognized as Epic or Cerner;
+- retains the exact system URI and truncates codes exactly as runtime lookup
+  does;
+- collapses repeated resource/path rows to the SCCM natural key;
+- treats v2 as primary and adds only keys absent from the supplemental CSV;
+- takes the maximum existing/imported occurrence count instead of adding
+  overlapping snapshots;
+- never changes an existing curator label, status, destination, or domain; and
+- is idempotent.
+
+The v2 code extract also carries curation evidence. The importer retains its
+record/patient/coding summary, category and value-type mix, reference-range
+coverage, and median reference-range bounds in `source_metadata`. It retains
+the extract's `label_group_records_if_mapped` separately: several Epic sibling
+codings can coexist on one Observation, so their individually correct Seen
+counts must not be added together in grouped review. The supplied deduplicated
+label count is used when present; ordinary mappings without it keep the summed
+Seen fallback.
+
+## Units
+
+The v2 `(code, unit)` distribution is stored as raw `source_unit_evidence` on
+the mapping. Display and sender-supplied UCUM code remain separate. Counts,
+patient/value totals, suppression state, and the supplied min/p5/p25/p50/p75/
+p95/max distribution are retained; suppressed cohorts never acquire invented
+quantiles. Approval checks normalize units at read time and take the larger
+count per unit across imported and live `Measurement` evidence, avoiding
+double-counting records that occur in both datasets.
+
+The older CSV is useful for code coverage but its unit rows are a label-level
+join repeated for each code, not direct per-code observations. It therefore
+supplements missing code keys but does not supply unit evidence.
+
+## Organization scope
+
+The extracts identify vendor tenant systems and broad ingestion channels, not
+trustworthy hospital `Organization` records. Backfilled rows remain global
+(`organization_id = NULL`) while retaining their exact tenant URI. When ETL
+supplies an actual organization identity, it can create organization-scoped
+rows without inventing hospital names from `OPEN_EPIC`, `CERNER`, or
+`HEALTHEX` channel labels.
+
+The mapping browse response stays compact. `GET /api/v1/code-mappings/{id}/`
+adds the structured source evidence only when the curator opens Edit Mapping.
+The dialog labels median reference bounds as recognition evidence, not an
+authoritative clinical range, and displays a null organization as
+`Global / unattributed`.
+
+## Governed asynchronous seed
+
+Migration `0276_hospital_code_import` records durable intent to install the
+checksum-pinned `healthtree_hospital_codes_20261002_v1.zip` from the governed
+HealthTree Drive folder. It does not access the network or write mapping rows.
+A Celery worker running the new application revision discovers the queued row
+at worker startup and performs the download and import outside deployment.
+
+The artifact contains 691,800 source keys from Alex's bounded unmapped cohort:
+621,497 Epic and 70,303 Cerner. It is a ZIP containing a manifest and one
+pre-aggregated JSONL member, so production needs no Parquet or `pyarrow`
+dependency. Before the first mapping write the worker verifies:
+
+- the migration-pinned archive SHA-256;
+- artifact identity and schema version;
+- manifest-declared and actual row counts;
+- the JSONL member checksum; and
+- every row's required shape and Epic/Cerner source identity.
+
+Imports use bounded transactions and a PostgreSQL advisory lock. A receipt in
+`hospital_code_import` records queued/running/applied/failed state, task ID,
+counts and failure details. Re-delivery is safe: the ordinary hospital-code
+upsert preserves curator destinations, status, notes, reviewer and curator
+labels while refreshing source evidence. The Celery task acknowledges only
+after completion and rejects on worker loss, so replacing a worker redelivers
+the idempotent import. Migration `0277` narrowly requeues the v1 receipt that
+was interrupted during its first Render staging deployment; it is a no-op for
+queued, applied, or explicitly failed receipts.
+
+`scripts/build_hospital_code_seed.py` reproducibly builds the deployment
+artifact from Alex's source-name ZIP and Nikita's FHIR code inventory. Nikita's
+larger inventory only enriches matching Alex keys; it does not expand the
+curation queue.
+
+## Facility context in the governed seed
+
+Alex's code-to-facility evidence is retained in `source_metadata.facilities`,
+including facility and parent names, attribution level and method, confidence,
+low-confidence reason, and record/patient counts. These are contextual
+observations on a global mapping, not PRomop `Organization` foreign keys:
+Alex's identifiers mix sites, Epic brands and tenants, attached facilities,
+and patient-entered aliases. Treating them all as authoritative hospitals
+would create false organization scope and multiply the mapping queue.
+
+For consumers that need a cross-code lookup, `source_system_facility` records
+distinct observed names per exact `source_vocabulary_id`, with the source
+facility identifier, level, confidence, attribution method, and seed
+provenance. It is intentionally many-to-many: one OID can have several sites,
+brands, or aliases, and a name is not verified ownership. The governed seed
+populates the table idempotently alongside SCCM; migration 0291 requeues the
+already-applied v2 seed for asynchronous registry backfill in existing
+deployments. No row creates an `Organization` foreign key or changes mapping
+resolution. Consumers should filter confidence and level for their own display
+needs, and retain the exact FHIR `Coding.system` URI as identity.
+
+Curators can manage associations at **Code Mapping → Source systems /
+hospitals**, or follow the exact FHIR system and observed-facility links in
+Edit Mapping. The system-first page groups every observed facility under its
+exact URI, supports sorting by URI, and includes custom URIs that have source
+codes but no registry association. It filters by exact URI and facility name,
+shows confidence and provenance, and reports the latest hospital seed receipt
+plus the number of codes under an exact system with per-code facility evidence.
+Curators may add a facility association or confirm/reject an imported one.
+These decisions are stored separately from the imported evidence: rejection
+does not delete the original observation, and confirmation does not establish
+verified `Organization` ownership or change mapping resolution. Empty
+registry results do not mean the URI should be replaced with a name: check
+whether the asynchronous seed replay is queued, running, or failed.
+
+The detail API moves that list to `source_evidence.facilities`. Bounded list
+pages expose only a compact `source_system_context` display hint, never the
+full facility list. Edit Mapping shows the names with level and confidence so
+a curator can distinguish, for example, an individual Cerner site from a broad
+Epic tenant or a low-confidence connection alias.
+
+The v2 seed has 690,147 of 691,800 code rows with facility evidence. A
+read-only reconciliation found 568,108 code rows under 8,169 distinct
+`urn:oid:` systems. Of those systems, 3,306 span multiple observed facility
+names (399,989 rows). An OID is therefore not a hospital-name key. The display
+hint is derived **per code row**: a verified PRomop `Organization` takes
+precedence; otherwise exactly one distinct high-confidence site, brand, or
+tenant name is labelled *observed*. Multiple such names are labelled
+*multiple observed facilities*, and alias-only, attached-only, low-confidence,
+or missing evidence is left unverified. The browse column and Source Code
+System picker distinguish these cases and keep the exact FHIR `Coding.system`
+visible. No inferred name changes the persisted system URI, mapping key, or
+`organization_id`.
+
+On that seed, this rule produces one observed name for 498,392 code rows,
+multiple names for 7,408, and no defensible name for 186,000 rows. Those
+counts describe contextual labels, not verified organization assignments.
+
+Nikita's matching unit evidence preserves raw display, raw quantity code and
+system, normalized UCUM when available, validation verdict/reason, and counts.
+Alex's per-unit percentiles and suppression state are merged onto the matching
+untouched display/code pair. The dialog displays both the original and
+normalized forms and retains the percentile mini-graph.
+
+Migration `0280_corrected_hospital_code_units` queues v2 of the same 691,800-key
+cohort, using Nikita's `fhir_code_inventory_20261005b.csv`. The refresh retains
+the original FHIR unit strings while adding explicit normalization-table
+results for malformed coded units such as `k/uL` to `10*3/uL`. It uses the same
+idempotent importer, so unit evidence is refreshed without changing curator
+destinations or review state.
+
+The Cloud Run deployment applies database migrations before updating its worker
+pool to the same image. Consequently, a downstream HealthTree GCP instance
+tracking `dev` records the v2 import intent first, then starts a worker that
+knows how to dispatch and safely redeliver it; no operator-only load command is
+required.

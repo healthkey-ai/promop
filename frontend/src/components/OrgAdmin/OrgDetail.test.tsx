@@ -1,6 +1,7 @@
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { vi, describe, it, expect, beforeEach } from "vitest";
 import OrgDetail from "./OrgDetail";
+import { MemoryRouter } from "react-router-dom";
 
 // Mock api
 const mockGet = vi.fn();
@@ -23,6 +24,7 @@ const ORG_DATA = {
   is_active: true,
   allows_public_aggregated_data: false,
   allows_patient_signup: false,
+  can_manage_access: true,
   created_at: "2024-01-01T00:00:00Z",
 };
 
@@ -104,7 +106,7 @@ function setupMocks(overrides: Partial<typeof ORG_DATA> = {}) {
 
 function renderOrgDetail(props: Partial<React.ComponentProps<typeof OrgDetail>> = {}) {
   return render(
-    <OrgDetail slug="acme" isStaff={true} onBack={vi.fn()} {...props} />
+    <MemoryRouter><OrgDetail slug="acme" isStaff={true} onBack={vi.fn()} {...props} /></MemoryRouter>
   );
 }
 
@@ -119,7 +121,7 @@ describe("OrgDetail — Settings", () => {
     await waitFor(() => {
       expect(screen.getByText("Acme Clinic")).toBeInTheDocument();
     });
-    const toggle = screen.getByLabelText("Allow direct patient signup");
+    const toggle = screen.getByLabelText("Allow public demo access");
     expect(toggle).toBeInTheDocument();
     expect(toggle).toBeChecked();
   });
@@ -130,7 +132,7 @@ describe("OrgDetail — Settings", () => {
     await waitFor(() => {
       expect(screen.getByText("Acme Clinic")).toBeInTheDocument();
     });
-    const toggle = screen.getByLabelText("Allow direct patient signup");
+    const toggle = screen.getByLabelText("Allow public demo access");
     expect(toggle).not.toBeChecked();
   });
 
@@ -140,7 +142,7 @@ describe("OrgDetail — Settings", () => {
     await waitFor(() => {
       expect(screen.getByText("Acme Clinic")).toBeInTheDocument();
     });
-    fireEvent.click(screen.getByLabelText("Allow direct patient signup"));
+    fireEvent.click(screen.getByLabelText("Allow public demo access"));
     await waitFor(() => {
       expect(mockPatch).toHaveBeenCalledWith("/orgs/acme/", { allows_patient_signup: true });
     });
@@ -313,5 +315,21 @@ describe("OrgDetail — Invitations list", () => {
     expect(screen.getByText("#42")).toBeInTheDocument();
     // Doctor invite does not show person_id
     expect(screen.queryByText("#null")).not.toBeInTheDocument();
+  });
+});
+
+
+describe('OrgDetail access administration permissions', () => {
+  it.each([false, undefined])('hides access administration and skips restricted requests when permission is %s', async (canManageAccess) => {
+    setupMocks({ can_manage_access: canManageAccess });
+    renderOrgDetail({ isStaff: false });
+    await screen.findByText('Acme Clinic');
+    for (const label of ['Access Rules', 'Access Grants', 'Invitations']) {
+      expect(screen.queryByText(label)).not.toBeInTheDocument();
+    }
+    for (const resource of ['trusts', 'access', 'invitations']) {
+      expect(mockGet).not.toHaveBeenCalledWith(`/orgs/acme/${resource}/`);
+    }
+    expect(screen.queryByRole('button', { name: /send invite/i })).not.toBeInTheDocument();
   });
 });

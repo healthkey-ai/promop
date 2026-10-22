@@ -501,8 +501,8 @@ class Command(BaseCommand):
                 }],
                 "code": {
                     "coding": [{
-                        "system": "http://loinc.org",
-                        "code": "92837-4",
+                        "system": "https://healthkey.ai/fhir/CodeSystem/demo",
+                        "code": "lymph-node-status",
                         "display": "Lymph nodes involvement"
                     }],
                     "text": "Lymph node status"
@@ -675,7 +675,7 @@ class Command(BaseCommand):
                 "status": "final",
                 "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "imaging"}]}],
                 "code": {
-                    "coding": [{"system": "http://loinc.org", "code": "85319-2", "display": "Staging modality"}],
+                    "coding": [{"system": "https://healthkey.ai/fhir/CodeSystem/demo", "code": "staging-imaging-modality", "display": "Staging imaging modality"}],
                     "text": "Staging modality"
                 },
                 "subject": {"reference": f"Patient/{patient_id}"},
@@ -700,7 +700,7 @@ class Command(BaseCommand):
                     "status": "final",
                     "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "imaging"}]}],
                     "code": {
-                        "coding": [{"system": "http://loinc.org", "code": "21908-9", "display": "Measurable disease RECIST"}],
+                        "coding": [{"system": "http://healthkey.ai/fhir/CodeSystem/synthetic", "code": "measurable-disease-recist", "display": "Measurable disease RECIST"}],
                         "text": "Measurable disease RECIST"
                     },
                     "subject": {"reference": f"Patient/{patient_id}"},
@@ -889,8 +889,8 @@ class Command(BaseCommand):
                 "code": {
                     "coding": [{
                         "system": "http://loinc.org",
-                        "code": "85337-4",
-                        "display": "Ki-67 [Interpretation] in Tissue"
+                        "code": "29593-1",
+                        "display": "Cells.Ki-67 nuclear Ag/cells in Tissue by Immune stain"
                     }],
                     "text": "Ki67 Proliferation Index"
                 },

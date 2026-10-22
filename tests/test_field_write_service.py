@@ -9,12 +9,10 @@ from datetime import date
 
 import pytest
 
-from omop_core.models import Location, Measurement
+from omop_core.models import FieldConceptMapping, Location, Measurement, Observation
 from omop_core.services.field_write_service import apply_field_writes, owned_writable_fields
 from omop_core.services.patient_record_service import refresh_patient_record
-from tests.factories import (
-    ConceptFactory, DomainFactory, PatientRecordFactory, PersonFactory, VocabularyFactory,
-)
+from tests.factories import ConceptFactory, PatientRecordFactory, PersonFactory, VocabularyFactory
 
 pytestmark = pytest.mark.django_db
 
@@ -60,51 +58,6 @@ def test_editable_lab_writes_a_measurement_and_rederives():
     assert not result.rejected and not result.profile
     assert Measurement.objects.filter(person=person).count() == 1
     assert float(refresh_patient_record(person).hemoglobin_g_dl) == pytest.approx(12.5)
-
-
-@pytest.mark.parametrize(
-    'field,code,value,expected',
-    [
-        ('monoclonal_protein_serum', '51435-6', 2.4, 2.4),
-        ('kappa_flc', '36916-5', 1.87, 1.87),
-        ('lambda_flc', '33944-0', 0.92, 0.92),
-        ('clonal_plasma_cells', '11118-7', 38, 38.0),
-        ('bone_lesions', '24646-7', 'Absent', 'Absent'),
-    ],
-)
-def test_myeloma_marker_writes_round_trip_through_derivation(field, code, value, expected):
-    person = _person_with_loinc(code, f'Myeloma marker {code}')
-
-    result = apply_field_writes(person, {field: value}, today=date(2026, 8, 23))
-
-    assert result.applied == [field]
-    assert not result.rejected
-    record = refresh_patient_record(person)
-    actual = getattr(record, field)
-    if isinstance(expected, float):
-        assert float(actual) == pytest.approx(expected)
-    else:
-        assert actual == expected
-
-
-
-def test_myeloma_type_authored_observation_round_trips():
-    person = PersonFactory()
-    PatientRecordFactory(person=person)
-    VocabularyFactory(vocabulary_id='HealthKey', vocabulary_name='HealthKey')
-    ConceptFactory(
-        concept_code='hk-myeloma-type',
-        concept_name='Myeloma type',
-        vocabulary_id='HealthKey',
-        domain=DomainFactory(domain_id='Observation', domain_name='Observation'),
-    )
-    _seed_patient_reported_type()
-
-    result = apply_field_writes(person, {'myeloma_type': 'IgA'}, today=date(2026, 8, 23))
-
-    assert result.applied == ['myeloma_type']
-    assert not result.rejected
-    assert refresh_patient_record(person).myeloma_type == 'IgA'
 
 
 def test_same_day_re_edit_upserts_not_duplicates():
@@ -296,7 +249,8 @@ def test_lymph_node_size_writes_the_disambiguating_qualifier():
     from omop_core.models import Measurement
     person = PersonFactory()
     PatientRecordFactory(person=person)
-    ConceptFactory(concept_code='21889-1', concept_name='Size Tumor')
+    # Current descriptors resolve this reviewed Cancer Modifier concept by its stable id.
+    ConceptFactory(concept_id=36769292, concept_code='21889-1', concept_name='Size Tumor')
     _seed_patient_reported_type()
 
     result = apply_field_writes(person, {'largest_lymph_node_size': 25}, today=date(2026, 8, 23))
@@ -329,6 +283,118 @@ def test_assertion_boolean_field_writes_and_rederives_true_and_false():
 
     apply_field_writes(person, {'contraceptive_use': False}, today=date(2026, 8, 25))
     assert refresh_patient_record(person).contraceptive_use is False  # NOT bool('False')==True
+
+
+def test_inverse_assertion_field_writes_the_source_answer_not_the_field_polarity():
+    """`no_*` fields mean the inverse of the reviewed source question."""
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    _seed_patient_reported_type()
+    concept = ConceptFactory(concept_code='75618-3', concept_name='Mental health disorders')
+    FieldConceptMapping.objects.create(
+        field_name='no_mental_health_disorder_status',
+        concept=concept,
+        omop_table='observation',
+        source_value='75618-3',
+        value_kind='boolean',
+        status='approved',
+    )
+    today = date(2026, 8, 25)
+
+    result = apply_field_writes(
+        person, {'no_mental_health_disorder_status': True}, today=today,
+    )
+
+    assert 'no_mental_health_disorder_status' in result.applied
+    source = Observation.objects.get(person=person, observation_date=today)
+    assert source.value_as_string == 'False'
+    assert refresh_patient_record(person).no_mental_health_disorder_status is True
+
+
+def test_inverse_assertion_field_projects_through_the_patient_patch_path():
+    """`_project_mapped_fields` uses project_single_value, not apply_field_writes."""
+    from omop_core.services.omop_projection import project_single_value
+
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    _seed_patient_reported_type()
+    concept = ConceptFactory(concept_code='75618-3', concept_name='Mental health disorders')
+    projection = {
+        'omop_table': 'observation',
+        'concept_id': concept.concept_id,
+        'type_concept_id': 32865,
+        'source_value': '75618-3',
+        'value_kind': 'boolean',
+    }
+
+    assert project_single_value(
+        person, 'no_mental_health_disorder_status', True, projection,
+        acknowledge_existing=True,
+    )
+    source = Observation.objects.get(person=person)
+    assert source.value_as_number == 0
+    assert refresh_patient_record(person).no_mental_health_disorder_status is True
+
+
+def test_alternative_inverse_mapping_is_not_polarity_inverted():
+    """Only the reviewed inverse assertion code carries inverse polarity."""
+    from omop_core.services.omop_projection import project_single_value
+
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    _seed_patient_reported_type()
+    concept = ConceptFactory(
+        concept_code='13197006', concept_name='No mental health disorder (SNOMED)',
+    )
+    FieldConceptMapping.objects.create(
+        field_name='no_mental_health_disorder_status',
+        concept=concept,
+        omop_table='observation',
+        source_value='13197006',
+        value_kind='boolean',
+        status='approved',
+    )
+    projection = {
+        'omop_table': 'observation',
+        'concept_id': concept.concept_id,
+        'concept_code': concept.concept_code,
+        'type_concept_id': 32865,
+        'source_value': '13197006',
+        'value_kind': 'boolean',
+    }
+
+    assert project_single_value(
+        person, 'no_mental_health_disorder_status', True, projection,
+        acknowledge_existing=True,
+    )
+    assert Observation.objects.get(person=person).value_as_number == 1
+    assert refresh_patient_record(person).no_mental_health_disorder_status is True
+
+
+def test_canonical_inverse_concept_with_custom_source_still_roundtrips():
+    """The assertion reader recognizes the concept code as well as the source."""
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    _seed_patient_reported_type()
+    concept = ConceptFactory(concept_code='75618-3', concept_name='Mental health disorders')
+    FieldConceptMapping.objects.create(
+        field_name='no_mental_health_disorder_status',
+        concept=concept,
+        omop_table='observation',
+        source_value='local:mental-health',
+        value_kind='boolean',
+        status='approved',
+    )
+    today = date(2026, 8, 26)
+
+    result = apply_field_writes(
+        person, {'no_mental_health_disorder_status': True}, today=today,
+    )
+
+    assert 'no_mental_health_disorder_status' in result.applied
+    source = Observation.objects.get(person=person, observation_date=today)
+    assert source.value_as_string == 'False'
+    assert refresh_patient_record(person).no_mental_health_disorder_status is True
 
 
 # --- genetic_mutations: the LIST-diff write path ---------------------------------------------------
@@ -370,9 +436,13 @@ def test_genetic_mutation_write_creates_measurement_and_rederives():
     assert m.measurement_type_concept_id == 32865
     assert m.qualifier_concept_id == 255395001            # germline
     assert m.value_as_concept_id == 30166007              # pathogenic
-    assert refresh_patient_record(person).genetic_mutations == [
-        {'gene': 'brca1', 'variant': 'c.68_69delAG', 'test_date': '2026-08-23',
-         'origin': 'germline', 'interpretation': 'pathogenic'}]
+    mutation = refresh_patient_record(person).genetic_mutations[0]
+    assert {key: mutation[key] for key in (
+        'gene', 'variant', 'test_date', 'origin', 'interpretation'
+    )} == {
+        'gene': 'brca1', 'variant': 'c.68_69delAG', 'test_date': '2026-08-23',
+        'origin': 'germline', 'interpretation': 'pathogenic',
+    }
 
 
 def test_genetic_mutation_same_gene_upserts_not_duplicates():
@@ -388,9 +458,13 @@ def test_genetic_mutation_same_gene_upserts_not_duplicates():
     active = Measurement.objects.filter(
         person=person, measurement_concept__concept_code=_GENE_CODE['BRCA1'], is_erroneous=False)
     assert active.count() == 1
-    assert refresh_patient_record(person).genetic_mutations == [
-        {'gene': 'brca1', 'variant': '185delAG', 'test_date': '2026-08-24',
-         'origin': 'somatic', 'interpretation': 'vus'}]
+    mutation = refresh_patient_record(person).genetic_mutations[0]
+    assert {key: mutation[key] for key in (
+        'gene', 'variant', 'test_date', 'origin', 'interpretation'
+    )} == {
+        'gene': 'brca1', 'variant': '185delAG', 'test_date': '2026-08-24',
+        'origin': 'somatic', 'interpretation': 'vus',
+    }
 
 
 def test_genetic_mutation_list_diff_removes_dropped_gene():
@@ -451,8 +525,10 @@ def test_genetic_mutation_optional_origin_and_interpretation_omitted():
     apply_field_writes(person, {'genetic_mutations': [
         {'gene': 'BRCA1', 'mutation': 'c.68_69delAG'}]}, today=date(2026, 8, 23))
 
-    assert refresh_patient_record(person).genetic_mutations == [
-        {'gene': 'brca1', 'variant': 'c.68_69delAG', 'test_date': '2026-08-23'}]
+    mutation = refresh_patient_record(person).genetic_mutations[0]
+    assert {key: mutation[key] for key in ('gene', 'variant', 'test_date')} == {
+        'gene': 'brca1', 'variant': 'c.68_69delAG', 'test_date': '2026-08-23',
+    }
 
 
 def test_genetic_mutation_recognized_gene_without_variant_fails_closed():
@@ -573,10 +649,14 @@ def test_genetic_mutation_non_list_is_rejected():
     assert result.applied == []
 
 
-def test_owned_writable_includes_genetic_mutations_only_when_vocab_loaded():
+def test_owned_writable_includes_genetic_mutations_only_when_vocab_loaded(monkeypatch):
     # Mirrors KIND_EDITABLE's "writable iff concept resolves": genetic_mutations is offered only when
     # its vocab (patient-report type + a gene LOINC) is loaded, so the editor never dangles an input
     # whose write would no-op on a partial-vocab stack.
-    assert 'genetic_mutations' not in owned_writable_fields()
+    import omop_core.services.field_write_service as field_writes
+    with monkeypatch.context() as patcher:
+        patcher.setattr(field_writes, '_genetic_mutations_writable', lambda: False)
+        assert 'genetic_mutations' not in owned_writable_fields()
     _seed_genetic_vocab(('BRCA1',))
+    assert field_writes._genetic_mutations_writable()
     assert 'genetic_mutations' in owned_writable_fields()

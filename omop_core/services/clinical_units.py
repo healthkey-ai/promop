@@ -1,7 +1,7 @@
 """Organization-selectable clinical unit policy for derived compatibility fields."""
 
 import logging
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 logger = logging.getLogger(__name__)
 
@@ -39,28 +39,95 @@ def wbc_to_canonical(
     return None
 
 
+def blood_count_to_canonical(value, source_unit):
+    """ANC/platelets in 10^3/uL. Unknown scale or invalid counts stay unknown.
+
+    Keep Decimal precision until the destination field applies its declared
+    precision. Uppercase G/L is a legacy giga-count spelling; lowercase g/L
+    denotes mass and is deliberately not accepted for cell counts.
+    """
+    unit = (source_unit or '').strip().replace('μ', 'u').replace('µ', 'u')
+    unit = unit.replace(' ', '').replace('³', '^3').replace('⁹', '^9')
+    if unit == 'G/L':
+        unit = '10^9/L'
+    unit = unit.lower()
+    factors = {
+        'cells/ul': '0.001', 'cell/ul': '0.001', '/ul': '0.001',
+        '{cells}/ul': '0.001', '#/ul': '0.001',
+        'cells/l': '0.000000001', 'cell/l': '0.000000001', '/l': '0.000000001',
+        '{cells}/l': '0.000000001', '#/l': '0.000000001',
+        '10*3/ul': '1', '10^3/ul': '1', 'k/ul': '1',
+        '10*9/l': '1', '10^9/l': '1',
+    }
+    if unit not in factors or value is None or isinstance(value, bool):
+        return None
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    if not number.is_finite() or number < 0:
+        return None
+    return number * Decimal(factors[unit])
+
+
+def count_in_cells_per_ul(value):
+    """Convert a canonical count in thousands/µL to legacy cells/µL."""
+    return Decimal(str(value)) * 1000 if value is not None else None
+
+
+def measurement_count_unit(row):
+    """Prefer explicit source units; use a UCUM concept only when text is absent."""
+    if row.unit_source_value and row.unit_source_value.strip():
+        return row.unit_source_value
+    unit = row.unit_concept
+    if unit is not None and unit.vocabulary_id == 'UCUM':
+        return unit.concept_code
+    return None
+
+
+def blood_count_projection(field, row):
+    """Return coherent canonical and legacy pairs, including explicit unknowns."""
+    unit = measurement_count_unit(row)
+    value = blood_count_to_canonical(row.value_as_number, unit)
+    if value is None:
+        logger.warning('%s projection skipped: unsupported/absent unit or invalid count (unit=%r)', field, unit)
+    if field == 'anc_thousand_per_ul':
+        return {
+            field: value,
+            'absolute_neutrophile_count': count_in_cells_per_ul(value),
+            'absolute_neutrophile_count_units': 'CELLS/UL' if value is not None else None,
+        }
+    # The legacy platelet column is integer-valued. Reporting cells/uL retains
+    # fractional thousands and matches the downstream compatibility contract.
+    cells = value * 1000 if value is not None else None
+    if cells is not None and (cells != cells.to_integral_value() or cells > 2_147_483_647):
+        cells = None
+    return {
+        field: value,
+        'platelet_count': int(cells) if cells is not None else None,
+        'platelet_count_units': 'CELLS/UL' if cells is not None else None,
+    }
+
+
 FLC_CANONICAL_UNIT = 'mg/L'
 
 _FLC_FACTOR_TO_MG_L = {
-    'mg/l': Decimal('1'),
-    'mg/dl': Decimal('10'),       # 1 mg/dL = 10 mg/L
-    'mg/100ml': Decimal('10'),
-    'ug/ml': Decimal('1'),        # 1 ug/mL = 1 mg/L
-    'mcg/ml': Decimal('1'),
-    'g/l': Decimal('1000'),
+    'mg/l': 1.0,
+    'mg/dl': 10.0,       # 1 mg/dL = 10 mg/L
+    'mg/100ml': 10.0,
+    'ug/ml': 1.0,        # 1 ug/mL = 1 mg/L
+    'mcg/ml': 1.0,
+    'g/l': 1000.0,
 }
 
 
 def flc_to_canonical(
     value: Decimal | float | None, source_unit: str | None,
-) -> Decimal | None:
+) -> float | None:
     """Convert a free light chain result to mg/L, None if the unit is unknown.
 
     None means "cannot be established", not "zero". Labs report these in mg/L
-    and mg/dL, so guessing is a 10x error half the time. Decimal arithmetic is
-    deliberate: the IMWG window is inclusive at 0.26/1.65, and a binary-float
-    conversion such as 10.23 mg/dL -> 102.30000000000001 would move an exact
-    boundary result outside that window.
+    and mg/dL, so guessing is a 10x error half the time.
     """
     if value is None:
         return None
@@ -71,51 +138,4 @@ def flc_to_canonical(
     factor = _FLC_FACTOR_TO_MG_L.get(normalized)
     if factor is None:
         return None
-    return Decimal(str(value)) * factor
-
-
-# Legacy chemistry feeds use display names (`Creatinine`, `Calcium`,
-# `Albumin`) and may report SI units. The canonical PatientRecord columns are
-# US conventional (`mg/dL`, `g/dL`); copying an SI value straight into them is
-# a 10-100x error and feeds renal-adequacy/eligibility calculations.
-_CHEMISTRY_UNITS = {
-    'serum_creatinine_mg_dl': {
-        'mg/dl': (Decimal('1'), 'mg/dL'),
-        'umol/l': (Decimal('1') / Decimal('88.4'), 'mg/dL'),
-    },
-    'serum_calcium_mg_dl': {
-        'mg/dl': (Decimal('1'), 'mg/dL'),
-        'mmol/l': (Decimal('4.008'), 'mg/dL'),
-    },
-    'albumin_g_dl': {
-        'g/dl': (Decimal('1'), 'g/dL'),
-        'g/l': (Decimal('0.1'), 'g/dL'),
-    },
-}
-
-CHEMISTRY_CANONICAL_FIELDS = frozenset(_CHEMISTRY_UNITS)
-
-
-def chemistry_to_canonical(
-    field: str, value: Decimal | float | None, source_unit: str | None,
-):
-    """Convert a legacy chemistry result to its canonical unit.
-
-    Returns ``(value, canonical_unit)``. A missing unit is accepted as already
-    canonical for backward compatibility; a present but unsupported unit
-    returns ``(None, None)`` so the caller treats the result as unknown instead
-    of silently mixing units. Non-chemistry fields pass through unchanged.
-    """
-    if field not in _CHEMISTRY_UNITS:
-        return value, source_unit
-    if value is None:
-        return None, None
-    if not source_unit:
-        return float(value), None
-    normalized = (
-        source_unit.lower().replace('μ', 'u').replace('µ', 'u').replace(' ', '')
-    )
-    factor, unit = _CHEMISTRY_UNITS[field].get(normalized, (None, None))
-    if factor is None:
-        return None, None
-    return float(Decimal(str(value)) * factor), unit
+    return float(value) * factor

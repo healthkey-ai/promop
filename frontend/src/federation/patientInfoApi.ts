@@ -36,10 +36,23 @@ export function usePatchPatientInfo(apiClient?: AxiosInstance, apiBasePath = "")
       // the serializer.save() and the GET response (e.g. disease gets cleared by
       // refresh_patient_info and not restored correctly).  Merging the PATCH result
       // directly avoids a round-trip and keeps editedInfo in sync with the cache.
+      //
+      // The /me/ PATCH response wraps the record under `patient_info`, exactly
+      // like GET.  Unwrap before merging so the field values land at the right
+      // nesting level — spreading the wrapper itself would bury them under a
+      // spurious `patient_info.patient_info` key and leave the top-level values
+      // stale, which is what caused the input to "clear" after save (#1083).
       queryClient.setQueryData(KEYS.me, (old: PatientInfoData | undefined) => {
         if (!old) return old;
-        const { previous_values: _pv, ...fields } = result;
-        return { ...old, patient_info: { ...old.patient_info, ...fields } };
+        const pi = result.patient_info as Record<string, unknown> | undefined;
+        const merged = pi ? { ...old.patient_info, ...pi } : old.patient_info;
+        return {
+          ...old,
+          patient_info: merged,
+          ...(typeof result.patient_name === 'string'
+            ? { patient_name: result.patient_name }
+            : {}),
+        };
       });
     },
   });

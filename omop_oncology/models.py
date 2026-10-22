@@ -11,7 +11,9 @@ class Episode(models.Model):
     episode_start_datetime = models.DateTimeField(null=True, blank=True)
     episode_end_date = models.DateField(null=True, blank=True)
     episode_end_datetime = models.DateTimeField(null=True, blank=True)
-    episode_parent_id = models.IntegerField(null=True, blank=True)
+    # The Disease Episode a Treatment Regimen (line of therapy) belongs to
+    # (#1739). BigInteger, like episode_id: ids no longer fit in 32 bits.
+    episode_parent_id = models.BigIntegerField(null=True, blank=True)
     episode_number = models.IntegerField(null=True, blank=True)
     episode_object_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='episode_objects', db_column='episode_object_concept_id')
     episode_type_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='episode_types', db_column='episode_type_concept_id')
@@ -20,6 +22,15 @@ class Episode(models.Model):
 
     class Meta:
         db_table = 'episode'
+        constraints = [
+            # One Disease Episode (32528) per person and cancer: two writers
+            # creating the same cancer's first line at once must not split it.
+            models.UniqueConstraint(
+                fields=['person', 'episode_source_value'],
+                condition=models.Q(episode_concept_id=32528),
+                name='uniq_disease_episode_per_cancer',
+            ),
+        ]
 
     def __str__(self):
         return f"Episode {self.episode_id} for Person {self.person_id}"
@@ -37,6 +48,54 @@ class EpisodeEvent(models.Model):
 
     def __str__(self):
         return f"Episode {self.episode_id} Event {self.event_id}"
+
+
+class TherapyLineExposure(models.Model):
+    """Private authoring ownership, not inferred from an EpisodeEvent link.
+
+    Historical/imported exposures are deliberately not adopted. Only the
+    canonical writer creates these rows, when it creates the corresponding fact.
+    """
+    episode = models.ForeignKey(Episode, on_delete=models.CASCADE, related_name='authored_exposures')
+    drug_exposure = models.OneToOneField('omop_core.DrugExposure', on_delete=models.CASCADE)
+    source_value = models.CharField(max_length=50)
+
+    class Meta:
+        db_table = 'therapy_line_exposure'
+        indexes = [models.Index(
+            fields=['episode', 'source_value'], name='therapy_exposure_source_idx',
+        )]
+
+
+class TherapyLineAssertion(models.Model):
+    """That a line of therapy happened, independent of its composition (#1924).
+
+    An Episode alone is not evidence: a header row can be created by a partial
+    import or a direct caller and carry no clinical fact. This row is written by
+    the canonical authoring writer, so the projection can tell an asserted line
+    whose composition is unknown from a dangling header.
+
+    Composition is not stored here. It is read from the line's typed links, so
+    "no drugs recorded" stays unknown rather than becoming "no drugs given".
+    ``state='retracted'`` withdraws the assertion itself (a line entered in
+    error); clearing the composition keeps the assertion and drops the links.
+    """
+    ASSERTED, RETRACTED = 'asserted', 'retracted'
+    STATES = [(ASSERTED, 'Asserted'), (RETRACTED, 'Retracted')]
+
+    episode = models.OneToOneField(Episode, on_delete=models.CASCADE, related_name='assertion')
+    state = models.CharField(max_length=10, choices=STATES, default=ASSERTED)
+    # Who supplied the assertion: the patient-facing authoring path, a reverse
+    # sync from an embedding product, or an import. Kept for provenance only.
+    source = models.CharField(max_length=20, default='authoring')
+    asserted_at = models.DateTimeField(auto_now_add=True)
+    retracted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'therapy_line_assertion'
+
+    def __str__(self):
+        return f'Episode {self.episode_id} therapy line {self.state}'
 
 
 class CancerModifier(models.Model):

@@ -1,9 +1,13 @@
 import uuid
 
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
+from django.core.exceptions import ValidationError
+from django.core.validators import RegexValidator
 from django.db import models
 from django.db.models import Q
 from django.utils import timezone
+
+from patient_portal.service_tokens import validate_service_scopes
 
 
 class IdentityManager(BaseUserManager):
@@ -22,6 +26,11 @@ class IdentityManager(BaseUserManager):
             raise ValueError("Email is required")
         email = self.normalize_email(email)
         extra_fields.pop("sub", None)
+        # A staff account is made by an operator at a shell, who vouches for the
+        # address. Everyone else proves theirs by following an emailed link.
+        if extra_fields.get("is_staff") and "email_verified_at" not in extra_fields:
+            from django.utils import timezone
+            extra_fields["email_verified_at"] = timezone.now()
         identity = self.model(
             issuer="urn:local",
             sub=str(uuid.uuid4()),
@@ -66,6 +75,16 @@ class Identity(AbstractBaseUser, PermissionsMixin):
     must_change_password = models.BooleanField(
         default=False, help_text="Force a password change on next successful login (e.g. after an admin reset).",
     )
+    email_verified_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text=(
+            "When this account proved it receives mail at `email`: by following an "
+            "emailed verification, invitation or password-reset link. Null for a "
+            "local account that only typed the address in. Anything that grants "
+            "access because of the address (a domain trust, a pending invitation, "
+            "matching a person by email) must go through `has_verified_email`."
+        ),
+    )
     failed_login_count = models.PositiveIntegerField(default=0)
     locked_until = models.DateTimeField(
         null=True, blank=True, help_text="If set and in the future, local logins are refused (lockout).",
@@ -91,6 +110,13 @@ class Identity(AbstractBaseUser, PermissionsMixin):
         ]
 
     def save(self, *args, **kwargs):
+        fields = kwargs.get('update_fields')
+        if self.pk and self.email_verified_at is not None and (fields is None or 'email' in fields):
+            previous_email = type(self).objects.filter(pk=self.pk).values_list('email', flat=True).first()
+            if previous_email is not None and previous_email.lower() != self.email.lower():
+                self.email_verified_at = None
+                if fields is not None:
+                    kwargs['update_fields'] = list(fields) + ['email_verified_at']
         self.uid = f"{self.issuer}:{self.sub}"
         if kwargs.get("update_fields") is not None and "uid" not in kwargs["update_fields"]:
             kwargs["update_fields"] = list(kwargs["update_fields"]) + ["uid"]
@@ -99,6 +125,29 @@ class Identity(AbstractBaseUser, PermissionsMixin):
     @property
     def is_local(self) -> bool:
         return self.issuer == "urn:local"
+
+    @property
+    def has_verified_email(self) -> bool:
+        """Whether `email` may be used to decide what this account can reach.
+
+        Federated logins record the provider's verified claim explicitly too;
+        a stored address alone is never evidence of mailbox ownership.
+        """
+        return bool(self.email) and self.email_verified_at is not None
+
+    @property
+    def verified_email_domain(self) -> str:
+        """The lowercased domain of a verified email, else ''."""
+        if not self.has_verified_email:
+            return ''
+        return self.email.rpartition('@')[2].lower()
+
+    def mark_email_verified(self, save=True):
+        if self.email_verified_at is None:
+            from django.utils import timezone
+            self.email_verified_at = timezone.now()
+            if save:
+                self.save(update_fields=['email_verified_at'])
 
     @property
     def username(self):
@@ -413,3 +462,267 @@ class BreakGlassGrant(models.Model):
 
     def __str__(self):
         return f"BreakGlass({self.identity_id} -> Person {self.person_id})"
+
+
+class ServiceApplication(models.Model):
+    """An editable application record with a stable service principal."""
+    name = models.CharField(max_length=160)
+    service_id = models.CharField(max_length=128, unique=True, validators=[
+        RegexValidator(
+            r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$', 'Use letters, numbers, dots, underscores, or hyphens.',
+        ),
+    ])
+    description = models.TextField(blank=True)
+    owner_contact = models.CharField(max_length=255, blank=True)
+    scopes = models.CharField(max_length=512, default='patient/*.read', blank=True,
+                              validators=[validate_service_scopes])
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name', 'pk']
+
+    SCOPES_IN_USE = ('Clearing scopes would leave this application\'s live tokens '
+                     'granting nothing. Revoke them first, or choose scopes.')
+
+    def live_tokens(self):
+        """Tokens that can still authenticate: not revoked, not past their expiry.
+
+        An expired token is refused by stored_credential already, so counting it
+        would make an operator revoke credentials that are dead anyway.
+        """
+        return self.tokens.filter(revoked_at__isnull=True).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()))
+
+    def clean(self):
+        """Blank scopes are storable, but not while a live token depends on them.
+
+        The field validator cannot express this — it sees a value, not the row —
+        and the serializer's copy of the rule does not reach Django admin, which
+        edits `scopes` as free text for any staff user. That is the same gap the
+        scope cap fell through before it moved onto the field.
+        """
+        super().clean()
+        if (self.scopes or '').split() or not self.pk:
+            return
+        if self.live_tokens().exists():
+            raise ValidationError({'scopes': [self.SCOPES_IN_USE]})
+
+    def __str__(self):
+        return self.name
+
+
+class ServiceAccessToken(models.Model):
+    """Only the SHA-256 digest of a high-entropy bearer secret is persisted."""
+    application = models.ForeignKey(ServiceApplication, on_delete=models.PROTECT, related_name='tokens')
+    label = models.CharField(max_length=160)
+    digest = models.CharField(max_length=64, unique=True, editable=False)
+    suffix = models.CharField(max_length=4, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(Identity, null=True, blank=True, on_delete=models.SET_NULL,
+                                   related_name='issued_service_tokens')
+    expires_at = models.DateTimeField(null=True, blank=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_by = models.ForeignKey(Identity, null=True, blank=True, on_delete=models.SET_NULL,
+                                   related_name='revoked_service_tokens')
+
+    class Meta:
+        ordering = ['-created_at', '-pk']
+
+    def __str__(self):
+        return f'{self.application.name}: {self.label} (…{self.suffix})'
+
+
+class LabMarker(models.Model):
+    """How the Personal Health Record ranks and groups one lab test.
+
+    The PHR lists labs "most important first" and filters them by panel and by
+    cancer. Those labels belong to HealthTree's clinical admins, not to code, so
+    they live here and are edited in the Django admin. The seeded rows are a
+    starting point until the CureHub observation labels are imported.
+    """
+
+    loinc_code = models.CharField(max_length=20, unique=True)
+    label = models.CharField(
+        max_length=120, blank=True, default='',
+        help_text='Display name; blank uses the LOINC concept name.',
+    )
+    rank = models.PositiveIntegerField(
+        help_text='Lower is more important. Unranked tests sort after ranked ones.',
+    )
+    panels = models.JSONField(
+        default=list, blank=True,
+        help_text='Panels this test belongs to, e.g. ["CBC"] or ["BMP", "CMP"].',
+    )
+    disease_slugs = models.JSONField(
+        default=list, blank=True,
+        help_text='Cancers this test is a disease marker for (PatientRecord.disease_slug values).',
+    )
+
+    class Meta:
+        ordering = ['rank', 'loinc_code']
+
+    def __str__(self):
+        return f'{self.loinc_code} (rank {self.rank})'
+
+
+class PatientStatement(models.Model):
+    """What a patient says about an item in their record, kept beside it.
+
+    Record data is never changed by the patient: confirming a prescription,
+    saying they stopped it, or giving the reason a line of therapy ended is a
+    statement here, keyed to the item it is about. Deleting the statement is
+    the undo. One statement per item and subject.
+    """
+
+    SUBJECT_MEDICATION = 'medication'
+    SUBJECT_MEDICATION_NOTE = 'medication_note'
+    SUBJECT_THERAPY_LINE = 'therapy_line'
+    SUBJECT_CONDITION = 'condition'
+    SUBJECT_PROCEDURE = 'procedure'
+    SUBJECTS = [
+        (SUBJECT_MEDICATION, 'Medication'), (SUBJECT_MEDICATION_NOTE, 'Note on a medication'),
+        (SUBJECT_THERAPY_LINE, 'Line of therapy'), (SUBJECT_CONDITION, 'Condition the patient added'),
+        (SUBJECT_PROCEDURE, 'Procedure the patient added'),
+    ]
+
+    # Medication answers. taking/not_taking are for a current prescription,
+    # took/not_taken for one that has ended; stopped follows a confirmation.
+    TAKING, NOT_TAKING, TOOK, NOT_TAKEN, STOPPED = 'taking', 'not_taking', 'took', 'not_taken', 'stopped'
+    END_REASON = 'end_reason'
+    # The patient's own words about an item, and the form details of an item
+    # they added (an OMOP row has no column for "where it was done").
+    NOTE, ENTRY = 'note', 'entry'
+    STATUSES = [
+        (TAKING, "I'm taking it"), (NOT_TAKING, 'Not taking'), (TOOK, 'I took it'),
+        (NOT_TAKEN, 'Not taken'), (STOPPED, 'I stopped taking this'), (END_REASON, 'Why the line ended'),
+        (NOTE, 'Note'), (ENTRY, 'Added by the patient'),
+    ]
+
+    person = models.ForeignKey('omop_core.Person', on_delete=models.CASCADE, related_name='patient_statements')
+    subject = models.CharField(max_length=20, choices=SUBJECTS)
+    # The PHR's id for the item: a medication group key, a therapy line's
+    # episode id, or the id of the OMOP row a patient added.
+    subject_key = models.CharField(max_length=120)
+    status = models.CharField(max_length=20, choices=STATUSES)
+    reason = models.CharField(max_length=40, blank=True, default='')
+    note = models.TextField(blank=True, default='')
+    stopped_on = models.DateField(null=True, blank=True)
+    details = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey(Identity, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['person', 'subject', 'subject_key'], name='uq_patient_statement_item'),
+        ]
+
+    def __str__(self):
+        return f'{self.person_id} {self.subject}:{self.subject_key} = {self.status}'
+
+
+class RecordShare(models.Model):
+    """View-only access to part of a patient's record, granted by the patient.
+
+    The holder of the link (or QR code) reads the record without an account,
+    so the link itself is the credential: it is never stored. It is derived
+    from ``public_id`` with a server-side key (see
+    ``patient_portal.api.phr.sharing``), which lets the patient see their link
+    again while a copy of the database alone opens nothing.
+    """
+    CHECKIN, DOCTOR, FAMILY, OTHER = 'checkin', 'doctor', 'family', 'other'
+    RECIPIENTS = [
+        (CHECKIN, 'Appointment check-in (care center)'), (DOCTOR, 'Doctor'),
+        (FAMILY, 'Caregiver or family member'), (OTHER, 'Other'),
+    ]
+    EMAIL, LINK, QR = 'email', 'link', 'qr'
+    METHODS = [(EMAIL, 'Email invite'), (LINK, 'Private link'), (QR, 'QR code')]
+
+    person = models.ForeignKey('omop_core.Person', on_delete=models.CASCADE, related_name='record_shares')
+    public_id = models.CharField(max_length=16, unique=True)
+    recipient = models.CharField(max_length=10, choices=RECIPIENTS)
+    name = models.CharField(max_length=100)
+    email = models.EmailField(blank=True, default='')
+    method = models.CharField(max_length=5, choices=METHODS)
+    # {section: {"all": true}} shares the whole section, including records
+    # that arrive later; {section: {"items": [...]}} only the items chosen.
+    selection = models.JSONField(default=dict)
+    created_by = models.ForeignKey(Identity, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    last_sent_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['person', '-created_at'], name='record_share_person_idx')]
+
+    def __str__(self):
+        return f'{self.person_id} → {self.name} ({self.recipient}, {self.method})'
+
+    @property
+    def is_expired(self) -> bool:
+        return self.expires_at <= timezone.now()
+
+    @property
+    def is_active(self) -> bool:
+        return self.revoked_at is None and not self.is_expired
+
+
+class ShareScan(models.Model):
+    """One opening of a shared record: when, and roughly where.
+
+    The place comes from the opener's IP as resolved at the edge; the IP itself
+    is never stored.
+    """
+    share = models.ForeignKey(RecordShare, on_delete=models.CASCADE, related_name='scans')
+    scanned_at = models.DateTimeField(default=timezone.now)
+    city = models.CharField(max_length=100, blank=True, default='')
+    region = models.CharField(max_length=100, blank=True, default='')
+    country = models.CharField(max_length=100, blank=True, default='')
+
+    class Meta:
+        ordering = ['-scanned_at']
+
+    def __str__(self):
+        return f'{self.share_id} @ {self.scanned_at:%Y-%m-%d %H:%M}'
+
+
+class AiExplanation(models.Model):
+    """A plain-language explanation of one item in a patient's record.
+
+    ONE writes it: its admins approve the prompt, it calls the model and stores
+    the text here, so the explanation (PHI) never sits in ONE. PRomop only
+    stores and serves it. ``source_hash`` is what ONE hashed the item, prompt
+    version and model into; a mismatch tells ONE to write a fresh one.
+    """
+    DIAGNOSIS, LAB_TEST, LAB_RESULT, GENETIC_TEST, IMAGING_STUDY = (
+        'diagnosis', 'lab_test', 'lab_result', 'genetic_test', 'imaging_study',
+    )
+    KINDS = [
+        (DIAGNOSIS, 'About your diagnosis'), (LAB_TEST, 'What the test measures'),
+        (LAB_RESULT, 'What your results mean'), (GENETIC_TEST, 'What a genetic result means'),
+        (IMAGING_STUDY, 'What a scan showed'),
+    ]
+
+    person = models.ForeignKey('omop_core.Person', on_delete=models.CASCADE, related_name='ai_explanations')
+    kind = models.CharField(max_length=20, choices=KINDS)
+    # The PHR's id for the item: a diagnosis id, a lab test's concept id, a
+    # genetic test id, an imaging study id.
+    target_key = models.CharField(max_length=120)
+    text = models.TextField()
+    prompt_version = models.CharField(max_length=64)
+    model = models.CharField(max_length=100)
+    source_hash = models.CharField(max_length=64)
+    generated_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['person', 'kind', 'target_key'], name='uq_ai_explanation_item'),
+        ]
+
+    def __str__(self):
+        return f'{self.person_id} {self.kind}:{self.target_key} ({self.model}, {self.prompt_version})'

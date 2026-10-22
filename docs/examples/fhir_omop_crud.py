@@ -25,6 +25,10 @@ HEADERS = {
     "X-Provenance-Source": os.environ.get("PROMOP_PROVENANCE_SOURCE", "FHIR_IMPORT"),
     "X-Provenance-User-ID": os.environ.get("PROMOP_PROVENANCE_USER_ID", "fhir-crud-example"),
 }
+# A machine credential that reads several hospitals names the source of each
+# write, so a hospital-scoped mapping can repoint these rows once approved.
+if os.environ.get("PROMOP_PROVENANCE_ORGANIZATION_ID"):
+    HEADERS["X-Provenance-Organization-ID"] = os.environ["PROMOP_PROVENANCE_ORGANIZATION_ID"]
 PERSON_ID = int(os.environ["PROMOP_PERSON_ID"])
 
 # Resolve these from /concepts/lookup in a real client.  They are kept in one

@@ -9,6 +9,13 @@ export interface PatientInfoProps {
   className?: string;
   theme?: Partial<LabsThemeTokens>;
   readOnly?: boolean;
+  /** The host serves this record through a federation adapter: hide tabs whose
+   *  endpoints only the standalone product provides (wearable uploads). */
+  federated?: boolean;
+  /** Render the component's own "Health Profile" heading. Hosts that supply a
+   *  page title of their own (see ht-one's clinical routes) pass false, so the
+   *  screen does not show two. */
+  showHeading?: boolean;
   onPatientUpdated?: (data: unknown) => void;
 }
 

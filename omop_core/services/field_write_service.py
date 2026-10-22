@@ -1,41 +1,145 @@
-"""Descriptor-driven single-field OMOP write (CB #2omop-federated-UI Phase 2 / A2).
+"""Write-side validation and descriptor-driven OMOP writes.
 
-`build_writable_field_descriptor()` says WHAT a PatientRecord field is and HOW it is
-written; this module APPLIES it. It is the clean, projection-name-keyed write path the
-federated PatientInfo editor uses, distinct from the CB-interim `omop_write_service`
-(`sync_to_omop`, keyed on CB field names) which it will eventually replace (Phase 4d).
+The read path (_assertion_value in patient_record_service.py) silently drops
+values it cannot parse as boolean for boolean/inverse_boolean assertion fields.
+That means a write of ``value_as_string='maybe'`` succeeds at the OMOP layer
+but disappears on the next PatientRecord derivation -- the edit does not
+round-trip.
 
-- KIND_EDITABLE  → write the OMOP Measurement/Observation fact the descriptor names
-  (its own `concept_id` / `unit_concept_id` / `type_concept_id` / `source_value` /
-  `target`), then re-derive the PatientRecord once. This is the new code here.
-- KIND_PROFILE   → a Person attribute (not a clinical fact). The demographic
-  (gender/race/ethnicity, concept-resolved) and location (city/region/postal_code/
-  country/latitude/longitude → the Person's OMOP Location row) groups are written here,
-  mirroring the persons endpoint's own logic (`patient_portal` PersonViewSet), so the
-  federated editor saves them in one PATCH. The remaining `_PROFILE_REPLACEABLE`
-  identity/admin fields (email/phone/validated/…) are surfaced in `result.profile` for a
-  caller that wants to route them elsewhere — this clinical applier does not write them.
-- everything else (computed / alias / authored / unmapped / unit picker / a field the
-  descriptor marks `writable: False`) is rejected with the descriptor's own reason, so
-  the caller can report exactly why rather than guessing.
+This module exposes ``coerce_assertion_value`` which normalises recognised
+boolean inputs to their canonical storage form and rejects everything else,
+so an "applied" write always survives read-back.
 
-Call inside the caller's `transaction.atomic()`: a failed fact write must roll back the
-whole PATCH so the read model never diverges from the OMOP source of truth.
+The descriptor-driven applier below writes supported PatientRecord fields to
+their OMOP source facts and refreshes the projection once per batch.
 """
+
 import logging
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
-from omop_core.models import Concept, Location, Measurement, Observation, Person
+from omop_core.models import Concept, Location, Measurement, Observation, PatientRecord, Person
+from omop_core.services.patient_record_service import _ASSERTION_FIELDS, refresh_patient_record
 from omop_core.services.pk import next_pk
-from omop_core.services.patient_record_service import refresh_patient_record
 from omop_core.services.write_descriptor import (
     build_writable_field_descriptor,
     KIND_EDITABLE,
     KIND_PROFILE,
 )
 
-logger = logging.getLogger('omop.ops')
+logger = logging.getLogger('audit')
+
+# Build a lookup from concept_code -> value_kind for boolean assertion fields.
+# Only boolean and inverse_boolean kinds need coercion; string kinds accept
+# anything and round-trip as-is.
+_BOOLEAN_ASSERTION_CODES: dict[str, str] = {
+    code: kind
+    for code, (_field, kind) in _ASSERTION_FIELDS.items()
+    if kind in ('boolean', 'inverse_boolean')
+}
+
+_TRUTHY = frozenset({'true', 'yes', '1'})
+_FALSY = frozenset({'false', 'no', '0'})
+
+# These fields mean the inverse of their source question only when the mapped
+# source is the corresponding reviewed assertion code. An alternative approved
+# concept may already describe the `no_*` field directly.
+def _invert_inverse_assertion(field, value, source_value=None, concept_code=None):
+    spec = _ASSERTION_FIELDS.get(source_value)
+    if spec != (field, 'inverse_boolean'):
+        spec = _ASSERTION_FIELDS.get(concept_code)
+    if spec != (field, 'inverse_boolean') or value is None:
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in _TRUTHY:
+            return False
+        if normalized in _FALSY:
+            return True
+        raise ValueError(
+            f'{field} requires a boolean value; got {value!r}')
+    return not bool(value)
+
+
+def is_boolean_assertion_code(source_value: str | None) -> bool:
+    """Whether this source value makes the two value columns one boolean answer."""
+    return source_value in _BOOLEAN_ASSERTION_CODES
+
+
+def coerce_assertion_value(source_value, value_as_number, value_as_string):
+    """Validate and coerce a write to a boolean assertion field.
+
+    Parameters
+    ----------
+    source_value : str or None
+        The measurement_source_value or observation_source_value. Used to
+        decide whether this write targets a boolean assertion field.
+    value_as_number : any
+        The numeric value being written (may be None).
+    value_as_string : str or None
+        The string value being written (may be None).
+
+    Returns
+    -------
+    tuple (value_as_number, value_as_string, error)
+        On success, returns the coerced (number, string, None).
+        On failure, returns (None, None, error_message).
+        If the source_value is not a boolean assertion code, returns the
+        inputs unchanged with no error.
+    """
+    if source_value not in _BOOLEAN_ASSERTION_CODES:
+        return value_as_number, value_as_string, None
+
+    # Determine the raw value from whichever column carries it.
+    # value_as_string takes precedence (matches _assertion_value read order).
+    raw = None
+    if value_as_string not in (None, ''):
+        raw = value_as_string
+    elif value_as_number is not None:
+        raw = value_as_number
+
+    if raw is None:
+        # No value provided -- nothing to coerce; let the write proceed
+        # (an assertion with no answer is valid and means "unknown").
+        return value_as_number, value_as_string, None
+
+    # Python bool is a subclass of int, so check it before numeric.
+    if isinstance(raw, bool):
+        canonical = raw
+    # Decimal, because a DecimalField hands one back and a numeric write would
+    # otherwise be rejected as a non-boolean type.
+    elif isinstance(raw, (int, float, Decimal)):
+        if raw == 1:
+            canonical = True
+        elif raw == 0:
+            canonical = False
+        else:
+            return None, None, (
+                f'Boolean assertion field (code {source_value}) '
+                f'requires a boolean value. Got numeric {raw!r}; '
+                f'only 0 and 1 are accepted.'
+            )
+    elif isinstance(raw, str):
+        normalised = raw.strip().casefold()
+        if normalised in _TRUTHY:
+            canonical = True
+        elif normalised in _FALSY:
+            canonical = False
+        else:
+            return None, None, (
+                f'Boolean assertion field (code {source_value}) '
+                f'requires a boolean value. Got {raw!r}; '
+                f'accepted values are: true, false, yes, no, 1, 0.'
+            )
+    else:
+        return None, None, (
+            f'Boolean assertion field (code {source_value}) '
+            f'requires a boolean value. Got {type(raw).__name__}.'
+        )
+
+    # Store as canonical string 'True'/'False' in value_as_string,
+    # and 1.0/0.0 in value_as_number (matching FHIR valueBoolean convention).
+    return (1.0 if canonical else 0.0), str(canonical), None
 
 # KIND_PROFILE groups this applier writes directly on Person (the rest — email/phone/
 # validated/… — are identity/admin fields it leaves for result.profile).
@@ -140,6 +244,10 @@ def apply_field_writes(person, changes, today=None, descriptor=None):
     # transaction. Only meaningful inside one — the applier's documented contract — so guard on it.
     from django.db import connection
     if changes and connection.in_atomic_block:
+        # Therapy authoring and refresh take the projection lock first. Taking
+        # Person first here would deadlock a concurrent federated profile PATCH.
+        record, _ = PatientRecord.objects.get_or_create(person=person)
+        PatientRecord.objects.select_for_update().get(pk=record.pk)
         list(Person.objects.select_for_update().filter(pk=person.pk))
 
     for field, value in changes.items():
@@ -147,9 +255,11 @@ def apply_field_writes(person, changes, today=None, descriptor=None):
             # A LIST field (one Measurement per gene), so it takes the list-diff path rather than the
             # scalar descriptor kinds below. An empty list is a valid "no mutations" (clears our rows),
             # so it is handled here BEFORE the None/'' clear-guard that rejects scalar clears.
-            if isinstance(value, list):
+            if isinstance(value, list) and _genetic_mutations_writable():
                 _write_genetic_mutations(person, value, today)
                 result.applied.append(field)
+            elif isinstance(value, list):
+                result.rejected[field] = 'Required genetic mutation vocabularies are not loaded.'
             else:
                 result.rejected[field] = 'genetic_mutations must be a list of mutations.'
             continue
@@ -166,7 +276,28 @@ def apply_field_writes(person, changes, today=None, descriptor=None):
             result.rejected[field] = 'Clearing a value is not supported yet (#4833).'
             continue
         kind = d.get('kind')
-        if kind == KIND_EDITABLE and d.get('writable'):
+        if d.get('writable') and (
+                kind == KIND_PROFILE or d.get('projection_target') in ('person', 'location')):
+            if _stage_profile_write(person, field, value, person_dirty, location_updates):
+                result.applied.append(field)
+            else:
+                result.profile[field] = value
+            continue
+        projection = d.get('projection')
+        if d.get('writable') and (kind == KIND_EDITABLE or projection):
+            if projection:
+                # Current descriptors classify projected PatientRecord fields as
+                # KIND_DIRECT and nest OMOP metadata under `projection`; older
+                # PROMOP descriptors used KIND_EDITABLE with top-level metadata.
+                d = {
+                    **d,
+                    'concept_id': projection.get('concept_id'),
+                    'concept_code': projection.get('concept_code'),
+                    'unit_concept_id': projection.get('unit_concept_id'),
+                    'source_value': projection.get('source_value'),
+                    'unit': projection.get('unit'),
+                    'target': projection.get('omop_table', 'measurement'),
+                }
             _write_editable_fact(person, field, d, value, today)
             result.applied.append(field)
             continue
@@ -203,7 +334,11 @@ def owned_writable_fields(descriptor=None):
     owned = set(_DEMOGRAPHIC_FIELDS) | set(_LOCATION_COLUMN)
     fields = {
         f for f, e in descriptor.items()
-        if e.get('writable') and (e.get('kind') == KIND_EDITABLE or f in owned)
+        if f != 'genetic_mutations' and e.get('writable') and (
+            e.get('kind') == KIND_EDITABLE
+            or (e.get('kind') == 'direct' and e.get('projection'))
+            or f in owned
+        )
     }
     # genetic_mutations is a list field written via the list-diff path (not a descriptor kind), so add
     # it here — but only when its vocab is loaded, mirroring KIND_EDITABLE's "writable iff concept resolves".
@@ -219,8 +354,9 @@ def _genetic_mutations_writable():
     if not Concept.objects.filter(
             concept_id=PATIENT_REPORTED_TYPE_CONCEPT_ID, vocabulary_id='Type Concept').exists():
         return False
+    reviewed_gene_codes = [code for code, gene in _GENETIC_MUTATION_LOINCS.items() if gene]
     return Concept.objects.filter(
-        concept_code__in=list(_GENETIC_MUTATION_LOINCS), vocabulary_id='LOINC').exists()
+        concept_code__in=reviewed_gene_codes, vocabulary_id='LOINC').exists()
 
 
 def _stage_profile_write(person, field, value, person_dirty, location_updates):
@@ -345,6 +481,8 @@ def _write_editable_fact(person, field, d, value, today):
         Concept.objects.filter(concept_id=d['unit_concept_id']).first()
         if d.get('unit_concept_id') is not None else None
     )
+    value = _invert_inverse_assertion(
+        field, value, d.get('source_value'), d.get('concept_code'))
     num, string = _coerce_value(value, d.get('value_kind', 'number'))
 
     # Upsert key scopes to OUR rows only: (person, concept, date, is_erroneous=False, type=Patient
@@ -403,7 +541,10 @@ def _write_genetic_mutations(person, mutations, today):
     A mutation whose gene is not one of the reviewed genes, or whose gene LOINC is not loaded, is skipped.
     Returns the genes written."""
     from omop_core.services.patient_record_service import _GENETIC_MUTATION_LOINCS
-    gene_to_code = {gene.upper(): code for code, gene in _GENETIC_MUTATION_LOINCS.items()}
+    gene_to_code = {
+        gene.upper(): code for code, gene in _GENETIC_MUTATION_LOINCS.items()
+        if gene
+    }
     all_gene_codes = set(_GENETIC_MUTATION_LOINCS)
     type_concept = _patient_reported_type()
 

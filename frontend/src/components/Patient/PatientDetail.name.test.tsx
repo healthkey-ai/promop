@@ -1,3 +1,4 @@
+import { MemoryRouter } from 'react-router-dom';
 /**
  * Renaming a patient must actually persist and re-render the header.
  *
@@ -7,7 +8,7 @@
  * the old name because Person.given_name/family_name had never changed.
  */
 
-import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
+import { render as baseRender, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 import PatientDetail from "./PatientDetail";
 
@@ -15,7 +16,8 @@ vi.mock("@/api/axios", () => ({
   default: { get: vi.fn(), patch: vi.fn(), post: vi.fn() },
 }));
 
-vi.mock("react-router-dom", () => ({
+vi.mock("react-router-dom", async importOriginal => ({
+  ...await importOriginal<typeof import("react-router-dom")>(),
   useParams: () => ({ personId: "3542" }),
   useNavigate: () => vi.fn(),
 }));
@@ -114,3 +116,17 @@ describe("PatientDetail - renaming a patient", () => {
     expect(body).not.toHaveProperty("patient_name");
   });
 });
+
+describe("PatientDetail - download", () => {
+  it("puts Download beside the patient's name and number for staff", async () => {
+    await renderAndWaitForLoad();
+    const number = screen.getByText("#3542");
+    const download = screen.getByRole("button", { name: /download/i });
+    // Same header group as the name and number, not somewhere else on the page.
+    expect(number.parentElement).toContainElement(download);
+  });
+});
+
+function render(ui: React.ReactElement) {
+  return baseRender(<MemoryRouter>{ui}</MemoryRouter>);
+}

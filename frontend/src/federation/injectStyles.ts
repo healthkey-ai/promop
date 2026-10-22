@@ -1,4 +1,5 @@
 import css from "./labs.css?inline";
+import { layerRemoteCss } from "./cssLayer";
 
 let injected = false;
 
@@ -21,6 +22,6 @@ export function injectStyles() {
 
   const style = document.createElement("style");
   style.setAttribute("data-mf", "labs-results-remote");
-  style.textContent = rest;
+  style.textContent = layerRemoteCss(rest);
   document.head.appendChild(style);
 }

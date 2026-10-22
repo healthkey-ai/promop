@@ -51,6 +51,24 @@ _VOCABULARIES = [
          vocabulary_reference='HealthKey local mint',
          vocabulary_version='v1',
          vocabulary_concept_id=0),
+    # Locally-authored clinical assertions with no Athena code (#785, migration
+    # 0180). Same quarantine rules as HK-Wearable: source='HealthKey',
+    # standard_concept=None, concept_id in the OHDSI custom range.
+    dict(vocabulary_id='HK-Observation',
+         vocabulary_name='HealthKey local observation source concepts',
+         vocabulary_reference='https://healthkey.ai',
+         vocabulary_version='1.0',
+         vocabulary_concept_id=0),
+    # Locally-authored codes for the four language capabilities (#827). SNOMED
+    # has no value set for them: its nearest concepts are speech-pathology
+    # findings ('Able to speak', 'Unable to speak') asserting something
+    # clinically different, and nothing codes "understand" as a language skill.
+    # Same quarantine rules as the other HK-* vocabularies.
+    dict(vocabulary_id='HK-Language',
+         vocabulary_name='HealthKey language capability concepts',
+         vocabulary_reference='https://healthkey.ai',
+         vocabulary_version='1.0',
+         vocabulary_concept_id=0),
     dict(vocabulary_id='Episode',
          vocabulary_name='OMOP Episode',
          vocabulary_reference='OMOP generated',
@@ -96,12 +114,14 @@ _CONCEPT_CLASSES = [
     dict(concept_class_id='Qualifier Value',     concept_class_name='Qualifier Value',      concept_class_concept_id=0),
     dict(concept_class_id='Field',               concept_class_name='Field',                concept_class_concept_id=0),
     dict(concept_class_id='Treatment',           concept_class_name='Treatment',            concept_class_concept_id=0),
+    dict(concept_class_id='Disease Episode',     concept_class_name='Disease Episode',      concept_class_concept_id=0),
     dict(concept_class_id='Gender',              concept_class_name='Gender',               concept_class_concept_id=0),
     dict(concept_class_id='Regimen',             concept_class_name='Regimen',              concept_class_concept_id=0),
     dict(concept_class_id='Undefined',           concept_class_name='Undefined',            concept_class_concept_id=0),
     dict(concept_class_id='Clinical Finding',    concept_class_name='Clinical Finding',     concept_class_concept_id=0),
     dict(concept_class_id='Context-dependent',   concept_class_name='Context-dependent',    concept_class_concept_id=0),
     dict(concept_class_id='Answer',              concept_class_name='Answer',               concept_class_concept_id=0),
+    dict(concept_class_id='Observable Entity',   concept_class_name='Observable Entity',    concept_class_concept_id=0),
 ]
 
 
@@ -188,6 +208,11 @@ _CONCEPTS = [
     _c(32865, 'Patient self-report', 'Type Concept', 'Type Concept', 'Type Concept', 'S', 'OMOP4976938'),
     _c(32869, 'Pharmacy claim',    'Type Concept', 'Type Concept', 'Type Concept', 'S', 'OMOP4976942'),
     _c(32531, 'Treatment Regimen', 'Episode',       'Episode',       'Treatment',    'S', 'OMOP4822256'),
+    # The cancer a line of therapy treats: Treatment Regimens hang off it via
+    # episode_parent_id (#1739). Tests key on the id; the concept_code is not
+    # verified against Athena (deployments load the real row, 'Episode' is in
+    # VOCAB_SCOPE).
+    _c(32528, 'Disease First Occurrence', 'Episode', 'Episode',   'Disease Episode', 'S', 'OMOP4822253'),
 
     # CDM metadata concept used in DrugExposure FK lookups
     _c(1147094, 'drug_exposure.drug_exposure_id', 'Metadata', 'CDM', 'Field', 'S', 'CDM150'),
@@ -225,6 +250,10 @@ _CONCEPTS = [
 
     # Categorical Positive / Negative values stored in value_as_concept_id
     _c(9191, 'Positive', 'Meas Value', 'SNOMED', 'Qualifier Value', 'S', '10828004'),
+    # Social history. _get_social_data reads employment_status back from an
+    # Observation carrying this concept, so a UI round-trip test cannot write one
+    # without it — added for exactly that (mapping seeded by migration 0157).
+    _c(4073163, 'Employment status', 'Observation', 'SNOMED', 'Observable Entity', 'S', '224362002'),
     _c(9189, 'Negative', 'Meas Value', 'SNOMED', 'Qualifier Value', 'S', '260385009'),
 
     # ------------------------------------------------------------------
@@ -406,6 +435,39 @@ _CONCEPTS = [
     # standard-deviation form, and filing RMSSD under it is the same defect
     # class as the pre-#413 walking_speed → BMI mapping. See #438.
     _hk(4, 'R-R interval RMSSD (heart rate variability)', 'Measurement', 'Clinical Observation', 'HK-WEAR-HRV-RMSSD'),
+
+    # Clinical assertions with no Athena code (#785). Duplicated from migration
+    # 0180 so a test database has them; omop_core/tests.py asserts the two do
+    # not drift. Two of the three are mapped by 0181 and read back as curated
+    # assertions; ecog-assessment-date is minted but deliberately unmapped —
+    # it is the event date of the ECOG score row, not a fact of its own.
+    _c(2_100_007_850, 'ECOG performance status assessment date', 'Observation',
+       'HK-Observation', 'Clinical Observation', None, 'hko:ecog-assessment-date',
+       source='HealthKey'),
+    _c(2_100_007_851, 'BCL-2 inhibitor refractory disease status', 'Observation',
+       'HK-Observation', 'Clinical Observation', None, 'hko:bcl2-inhibitor-refractory',
+       source='HealthKey'),
+    _c(2_100_007_852, 'BTK inhibitor refractory disease status', 'Observation',
+       'HK-Observation', 'Clinical Observation', None, 'hko:btk-inhibitor-refractory',
+       source='HealthKey'),
+
+    # Language capabilities (#827). Domain is 'Meas Value' because these are
+    # answers, not attributes: they are what a person's skill in a language IS,
+    # so they belong where OMOP puts value concepts. The language itself stays
+    # a 'Language'-domain SNOMED concept -- the two are different axes, and
+    # filing a language under 'Meas Value' is the mistake manage_language_skills
+    # made (#812).
+    #
+    # Duplicated from migration 0187 so a test database has them; the drift test
+    # in omop_core/tests.py asserts the two definitions stay identical.
+    _c(2_100_007_853, 'Speaks language', 'Meas Value',
+       'HK-Language', 'Qualifier Value', None, 'hkl:speak', source='HealthKey'),
+    _c(2_100_007_854, 'Reads language', 'Meas Value',
+       'HK-Language', 'Qualifier Value', None, 'hkl:read', source='HealthKey'),
+    _c(2_100_007_855, 'Writes language', 'Meas Value',
+       'HK-Language', 'Qualifier Value', None, 'hkl:write', source='HealthKey'),
+    _c(2_100_007_856, 'Understands language', 'Meas Value',
+       'HK-Language', 'Qualifier Value', None, 'hkl:understand', source='HealthKey'),
 
     # ------------------------------------------------------------------
     # HemOnc therapy regimen concepts — required for first_line_therapy_id

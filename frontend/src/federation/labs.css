@@ -1,5 +1,26 @@
 @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap');
-@import "tailwindcss";
+/*
+ * NOT the full "tailwindcss" import: this stylesheet is injected into the
+ * HOST document head (see injectStyles.ts), and the full import ships
+ * preflight, whose `html { font-family: ... }` re-themes the entire host
+ * app (ht-phr flipped Poppins → Manrope). Theme + utilities only; the host
+ * page's own preflight covers resets, and our base font is applied under
+ * .promop-root below. (Same fix as hk-labs fix/scope-federation-css.)
+ */
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+/* Everything the remote renders lives under .promop-root (LabsProvider /
+ * PatientInfoProvider), so the Manrope base applies there — never to the
+ * host's elements. */
+@layer base {
+  .promop-root {
+    font-family: var(--hk-font-family, "Manrope", -apple-system, "Roboto", "Helvetica", sans-serif);
+  }
+  .promop-root :is(button, input, select, textarea) {
+    font: inherit;
+  }
+}
 
 @source "./**/*.tsx";
 @source "../components/labs/**/*.tsx";

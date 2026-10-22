@@ -25,7 +25,7 @@ from omop_core.services.mappings import (
     get_gender_concept,
 )
 
-logger = logging.getLogger('omop.ops')
+logger = logging.getLogger('audit')
 
 
 def _today():

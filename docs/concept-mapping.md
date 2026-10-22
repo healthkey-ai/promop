@@ -20,7 +20,7 @@ PRomop relies on three Athena vocabulary tables loaded into PostgreSQL:
 
 These tables are populated by downloading vocabulary files from [OHDSI Athena](https://athena.ohdsi.org)
 and loading them with the `load_athena_vocabularies` management command. See
-[SYNTHETIC_PATIENT_GENERATION.md](../SYNTHETIC_PATIENT_GENERATION.md) for instructions.
+[SYNTHETIC_PATIENT_GENERATION.md](SYNTHETIC_PATIENT_GENERATION.md) for instructions.
 
 ### Key concept fields
 
@@ -35,30 +35,34 @@ standard_concept char(1)    'S' = standard OMOP concept; NULL = non-standard sou
 
 ### Indexes on `concept`
 
-Two indexes make concept lookups fast:
+Three indexes make concept lookups fast:
 
 ```sql
--- Primary path: exact vocabulary + code match (covers LOINC, SNOMED, RxNorm lookups)
-CREATE INDEX ix_concept_vocab_code ON concept (vocabulary_id, concept_code);
+-- Exact vocabulary + code match (LOINC, SNOMED, RxNorm lookups); also the uniqueness rule
+CREATE UNIQUE INDEX uq_concept_vocabulary_code ON concept (vocabulary_id, concept_code);
 
--- Fallback path: name-based search
-CREATE INDEX ix_concept_name_trgm ON concept USING gin (concept_name gin_trgm_ops);
+-- Name search. On UPPER(...) because Django compiles `icontains` to UPPER(col) LIKE UPPER(...)
+CREATE INDEX ix_concept_name_upper_trgm ON concept USING gin (upper(concept_name) gin_trgm_ops);
+
+-- Case-insensitive code search (#1466). Without it the code branch of concepts/search is
+-- unindexable, and the planner then drops the trigram index for the whole OR
+CREATE INDEX ix_concept_code_upper ON concept (upper(concept_code));
 ```
 
 ### Concept search API
 
 The supported API for searching and browsing OMOP concepts is documented in
-[API_SURFACE.md](../API_SURFACE.md#vocabulary--concept-lookup-endpoints):
+[API_SURFACE.md](API_SURFACE.md#vocabulary--concept-lookup-endpoints):
 
 | Endpoint | Use |
 |---|---|
-| `GET /api/v1/concepts/search/?q=creatinine` | Case-insensitive substring search on `concept_name`, with optional exact filters for `vocabulary_id`, `domain_id`, `concept_class_id`, and `standard_concept` |
+| `GET /api/v1/concepts/search/?q=creatinine` | Case-insensitive search on `concept_name`, exact `concept_code` or `concept_id`, best match first. Returns active, standard (or locally minted) concepts unless `include_retired` / `include_non_standard` is passed. Optional exact filters for `vocabulary_id`, `domain_id`, `concept_class_id`, and `standard_concept` |
 | `GET /api/v1/concepts/?domain_id=Measurement&concept_class_id=Lab%20Test` | Filtered concept browsing without a text query |
 | `GET /api/v1/concepts/lookup/?lookup=LOINC:2160-0` | Batch translation from `(vocabulary_id, concept_code)` to OMOP `concept_id` |
 
 Search and browse responses are paginated, default to 25 results, cap `page_size` at 100, and
 return the same concept fields listed above. The search endpoint requires `q` to be at least
-two characters; the browse endpoint requires at least one of `vocabulary_id`, `domain_id`, or
+three characters (a trigram); the browse endpoint requires at least one of `vocabulary_id`, `domain_id`, or
 `concept_class_id` so production deployments do not accidentally page across the full Athena
 concept table.
 
@@ -91,7 +95,7 @@ Common HemOnc patterns:
 | Component drug → class | `GET /api/v1/concepts/{drug_id}/ancestors/?max_levels=1&vocabulary_id=HemOnc` |
 | Batch expand multiple trial regimen ids | `GET /api/v1/concepts/graph/?direction=descendants&concept_id=...&relationship_id=...` |
 
-The canonical endpoint contract is documented in [API_SURFACE.md](../API_SURFACE.md#concept-graph-endpoints).
+The canonical endpoint contract is documented in [API_SURFACE.md](API_SURFACE.md#concept-graph-endpoints).
 
 ---
 
@@ -316,12 +320,12 @@ name-based matching, which is functional but loses semantic precision.
 unzip athena_download.zip -d /tmp/athena_vocab
 
 # Run the loader (uses PostgreSQL COPY for fast bulk insert)
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py load_athena_vocabularies \
     --path /tmp/athena_vocab
 
 # Verify
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py shell -c "
 from omop_core.models import Concept
 print('LOINC:', Concept.objects.filter(vocabulary_id='LOINC').count())
@@ -406,3 +410,20 @@ Labs with no matching LOINC Concept still land in the `measurement` table (with
 `measurement_concept_id = 0`) and can be retrieved by
 `measurement_source_value`. PatientRecord fields for unmatched labs will be null
 until a matching Concept is loaded.
+
+
+### Code mapping list pagination
+
+The curation screen requests `GET /api/v1/code-mappings/?browse=1` and displays
+100 codes per page in each section (Unmapped, Mapped, and Athena Mapped).
+`page_0`, `page_1`, and `page_2` select each section's page. Sorting and filtering
+happen in the database before pages are loaded.
+
+The plain-list endpoint without `browse=1` preserves its JSON array response,
+but returns at most 100 codes. Use `?page=2` or follow the response's `Link`
+header (`rel="next"` / `rel="prev"`) to traverse results. `X-Total-Count`,
+`X-Page`, and `X-Page-Size` report the filtered count and page metadata.
+Source, search, and status filters apply before pagination. The page size is
+fixed; `page_size` cannot request an unbounded response.
+The four pagination headers are exposed to configured CORS origins so browser
+clients can read navigation and totals across origins.

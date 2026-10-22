@@ -21,23 +21,10 @@ from omop_core.services.pk import next_pk
 # mapping-inventory catalog, not a declaration that every PatientRecord field
 # is derived: unmapped projection-owned fields remain writable and are outside
 # this command entirely.
-_NUMERIC_FIELD_TYPES = {
-    'DecimalField', 'FloatField', 'IntegerField', 'SmallIntegerField',
-    'BigIntegerField', 'PositiveIntegerField', 'PositiveSmallIntegerField',
-}
-_NUMERIC_MODEL_FIELDS = {
-    model_field.name
-    for model_field in PatientRecord._meta.fields
-    if model_field.get_internal_type() in _NUMERIC_FIELD_TYPES
-}
-
-# This command reconstructs numeric Measurements only. A string-valued lab
-# fact (e.g. bone_lesions) is not a numeric projection and must not reach
-# Decimal(str(value)).
 RECONCILABLE_FIELDS = {
     field: mapping
     for field, mapping in LAB_FIELD_TO_LOINC.items()
-    if field in _NUMERIC_MODEL_FIELDS
+    if field in {model_field.name for model_field in PatientRecord._meta.fields}
 }
 
 
