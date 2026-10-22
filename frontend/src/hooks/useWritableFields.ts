@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useContext, useEffect, useState, useSyncExternalStore } from 'react';
+import { PatientFormContext } from '@/federation/PatientFormContext';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 
 /**
@@ -144,7 +145,13 @@ export function fetchWritableFields(
   return pending;
 }
 
+const noSubscription = () => () => {};
+const noSnapshot = () => null;
+
 export function useWritableFields(personId?: number | string) {
+  const formStore = useContext(PatientFormContext);
+  const scoped = useSyncExternalStore(formStore?.subscribe ?? noSubscription,
+    formStore?.getSnapshot ?? noSnapshot, formStore?.getSnapshot ?? noSnapshot);
   const key = keyFor(personId);
   const [descriptors, setDescriptors] = useState<FieldDescriptors>(
     () => cached.get(key) ?? {},
@@ -153,6 +160,7 @@ export function useWritableFields(personId?: number | string) {
   const [error, setError] = useState(false);
 
   useEffect(() => {
+    if (formStore) return;
     let alive = true;
     const ready = cached.get(key);
     if (ready) {
@@ -180,7 +188,8 @@ export function useWritableFields(personId?: number | string) {
     return () => {
       alive = false;
     };
-  }, [key, personId]);
+  }, [key, personId, formStore]);
 
-  return { descriptors, loading, error };
+  return scoped ? { descriptors: scoped.fields, loading: scoped.loading, error: Boolean(scoped.error) }
+    : { descriptors, loading, error };
 }

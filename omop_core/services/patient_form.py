@@ -1,0 +1,243 @@
+"""Portable patient-field form contract; no host auth or clinical formulas.
+
+Bindings name existing fields, never translate answer codes or clinical units.
+Unknown bindings are intentionally not inferred from casing/display labels.
+Computed dependencies are navigation metadata, not permission to write a verdict.
+"""
+from django.core.exceptions import ValidationError
+from django.db import transaction
+from django.utils import timezone
+from datetime import datetime
+
+from omop_core.models import PatientRecord
+from omop_core.services.field_write_service import apply_field_writes, FieldWriteResult
+from omop_core.services.patient_record_service import refresh_patient_record
+from omop_core.services.write_descriptor import build_writable_field_descriptor
+
+
+FIELD_BINDINGS = {
+    'bmi': ['bmi', 'bmiMin', 'bmiMax'],
+    'weight': ['weight'], 'height': ['height'],
+    'disease': ['disease'], 'gender': ['gender'],
+    'date_of_birth': ['dateOfBirth'], 'patient_age': ['patientAge', 'ageMin', 'ageMax'],
+    'ecog_performance_status': ['ecogPerformanceStatus'],
+    'karnofsky_performance_score': ['karnofskyPerformanceScore'],
+    'planned_therapies': ['plannedTherapies'],
+    'meets_slim': ['meetsSLIM'], 'meets_crab': ['meetsCRAB'],
+    'clonal_plasma_cells': ['clonalPlasmaCells'],
+    'kappa_flc': ['kappaFLC'], 'lambda_flc': ['lambdaFLC'],
+    'bone_lesions': ['boneLesions'],
+    'hemoglobin_g_dl': ['hemoglobinLevel'],
+    'platelet_count_thousand_per_ul': ['plateletCount'],
+    'wbc_count_thousand_per_ul': ['whiteBloodCellCount'],
+    'anc_thousand_per_ul': ['absoluteNeutrophileCount'],
+    'serum_calcium_mg_dl': ['serumCalciumLevel'],
+    'creatinine_clearance_rate': ['creatinineClearanceRate'],
+    'serum_creatinine_mg_dl': ['serumCreatinineLevel'],
+    'estrogen_receptor_status': ['estrogenReceptorStatus'],
+    'progesterone_receptor_status': ['progesteroneReceptorStatus'],
+    'her2_status': ['her2Status'], 'hr_status': ['hrStatus'],
+    'tnbc_status': ['tnbcStatus'], 'ki67_proliferation_index': ['ki67ProliferationIndex'],
+    'monoclonal_protein_serum': ['monoclonalProteinSerum'],
+    'monoclonal_protein_urine': ['monoclonalProteinUrine'],
+    'measurable_disease_imwg': ['measurableDiseaseImwg', 'measurableDiseaseImwgRequired'],
+    'flipi_score': ['flipiScore'], 'gelf_criteria_status': ['gelfCriteriaStatus'],
+    'tumor_grade': ['tumorGrade'], 'stage': ['stage'],
+    'peripheral_neuropathy_grade': ['peripheralNeuropathyGrade'],
+    'largest_lymph_node_size': ['largestLymphNodeSize'], 'spleen_size': ['spleenSize'],
+    'mipi_risk': ['mipiRisk', 'mipiRisksRequired'],
+    'mipi_c_risk': ['mipiCRisk', 'mipiCRisksRequired'],
+    'ldh_u_l': ['lactateDehydrogenaseLevel'],
+    'ldh_uln': ['lactateDehydrogenaseLevelUln'],
+    'high_risk_mcl_criteria': ['highRiskMclCriteriaRequired', 'highRiskMclCriteriaExcluded',
+                               'highRiskMclCriteriaSufficientAny'],
+}
+
+# Ported navigation from CB SUBFORM_ATTRS_MAPPING/DERIVED_SUBFORM_INPUTS.
+# Unreviewed result equivalence is explicit, rather than silently replacing the
+# CB rule or allowing an input change to appear to establish that verdict.
+FORM_INPUTS = {
+    'bmi': ['weight', 'height'],
+    'meets_slim': ['clonal_plasma_cells', 'kappa_flc', 'lambda_flc', 'bone_lesions'],
+    'meets_crab': ['serum_calcium_mg_dl', 'creatinine_clearance_rate',
+                   'serum_creatinine_mg_dl', 'hemoglobin_g_dl', 'bone_lesions'],
+    'tnbc_status': ['estrogen_receptor_status', 'progesterone_receptor_status', 'her2_status'],
+    'hr_status': ['estrogen_receptor_status', 'progesterone_receptor_status'],
+    'mipi_risk': ['patient_age', 'ecog_performance_status', 'ldh_u_l', 'ldh_uln', 'wbc_count_thousand_per_ul'],
+    'mipi_c_risk': ['patient_age', 'ecog_performance_status', 'ldh_u_l', 'ldh_uln',
+                    'wbc_count_thousand_per_ul', 'ki67_proliferation_index'],
+    'high_risk_mcl_criteria': ['mipi_risk', 'mipi_c_risk', 'ki67_proliferation_index'],
+}
+COMPATIBILITY_GATES = {
+    'meets_slim': 'SLiM input/result compatibility is pending clinical review: CB includes MRI lesions; '
+                  'PROMOP currently derives marrow/FLC criteria with different unknown/history semantics.',
+    'meets_crab': 'CRAB input/result compatibility with Trial Details is pending clinical review.',
+    'mipi_risk': 'MIPI is not yet exposed as a reviewed PROMOP PatientRecord result.',
+    'mipi_c_risk': 'MIPI-c is not yet exposed as a reviewed PROMOP PatientRecord result.',
+    'high_risk_mcl_criteria': 'The complete MCL result and source-field bindings require review.',
+}
+DEDICATED_WRITES = {
+    'death_date': 'Use the dedicated dated assertion workflow; the scalar form writer cannot safely author this field.',
+    'relapse_count': 'Use the treatment editor that preserves therapy overrides.',
+    'treatment_refractory_status': 'Use the treatment editor that preserves therapy overrides.',
+}
+
+
+def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=True, record=None):
+    """Enrich the existing descriptor, without granting any additional writes."""
+    descriptor = build_writable_field_descriptor() if descriptor is None else descriptor
+    model_fields = {field.name: field for field in PatientRecord._meta.fields}
+    result = {}
+    descriptor = dict(descriptor)
+    descriptor['patient_name'] = {'kind': 'direct', 'writable': True, 'target': 'patient_record', 'value_kind': 'string'}
+    names = set(descriptor) | set(FORM_INPUTS)
+    if readable_fields is not None:
+        # Synthetic blocked computed nodes may expose input navigation, never
+        # model data withheld by the embedding host.
+        names &= set(readable_fields) | (set(FORM_INPUTS) - set(model_fields))
+    for name in sorted(names):
+        entry = dict(descriptor.get(name) or {
+            'kind': 'computed', 'writable': False, 'reason': 'Computed result; edit its source inputs.',
+        })
+        field = model_fields.get(name)
+        entry['label'] = str(field.verbose_name).replace('_', ' ').capitalize() if field else name.replace('_', ' ').capitalize()
+        entry['bindings'] = FIELD_BINDINGS.get(name, [])
+        kind = field.get_internal_type() if field else ''
+        entry['control'] = ('boolean' if kind == 'BooleanField' else 'number'
+                            if kind in ('FloatField', 'DecimalField', 'IntegerField', 'PositiveIntegerField')
+                            else 'date' if kind == 'DateField' else 'text')
+        if name in FORM_INPUTS:
+            entry['inputs'] = list(FORM_INPUTS[name])
+            entry.update(kind='computed', writable=False)
+        if name == 'planned_therapies':
+            entry.update(options_source='therapy_regimens', multiple=True)
+        if name in COMPATIBILITY_GATES:
+            entry['compatibility_reason'] = COMPATIBILITY_GATES[name]
+        projection = entry.get('projection') or {}
+        unsupported = DEDICATED_WRITES.get(name)
+        if projection and (projection.get('omop_table') not in ('measurement', 'observation')
+                           or entry.get('value_kind') == 'json'):
+            unsupported = 'This field requires its dedicated OMOP resource editor.'
+        if entry.get('kind') == 'editable' and not projection and 'concept_id' not in entry:
+            unsupported = 'This field requires its dedicated structured-data editor.'
+        if record is not None and name in ('height', 'weight'):
+            unit = getattr(record, f'{name}_units')
+            canonical_unit = 'cm' if name == 'height' else 'kg'
+            if unit and unit != canonical_unit and getattr(record, name) is not None:
+                unsupported = f'This value uses {unit}; canonical-unit editing requires a reviewed conversion.'
+            entry['unit'] = unit or canonical_unit
+        if unsupported:
+            entry.update(writable=False, reason=unsupported)
+        if not writable and entry.get('writable'):
+            entry.update(writable=False, read_only_for_caller=True,
+                         reason='Editing is not available for this patient in the current session.')
+        result[name] = entry
+    return result
+
+
+@transaction.atomic
+def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor=None):
+    """Shared form write, with explicit acknowledgements and no no-op success.
+
+    The host must authorize the person first. Existing OMOP mapping/provenance
+    and clear restrictions remain owned by apply_field_writes. Direct columns
+    retain their existing PatientRecord-only behavior (e.g. planned_therapies).
+    """
+    result = FieldWriteResult()
+    record, _ = PatientRecord.objects.get_or_create(person=person)
+    record = PatientRecord.objects.select_for_update().get(pk=record.pk)
+    descriptor = patient_form_descriptors(descriptor, readable_fields=allowed_fields, record=record)
+    facts, direct, person_changes = {}, {}, set()
+    dob_changed = False
+    for name, value in changes.items():
+        entry = descriptor.get(name, {})
+        if not entry.get('writable') or entry.get('target') != 'patient_record':
+            result.rejected[name] = entry.get('reason') or 'No supported patient-record write path.'
+            continue
+        # Existing profile writes belong to Person, not clinical OMOP facts.
+        # Keep identity handling here portable; a host may also synchronize its
+        # own login/display-name account within the outer transaction.
+        if name == 'patient_name':
+            if not isinstance(value, str) or not value.strip():
+                result.rejected[name] = 'Provide a non-empty patient name.'
+                continue
+            parts = value.strip().split(None, 1)
+            for key, text in [('given_name', parts[0]), ('family_name', parts[1] if len(parts) > 1 else '')]:
+                try:
+                    person._meta.get_field(key).clean(text, person)
+                except ValidationError as exc:
+                    raise ValueError(f'{name}: {"; ".join(exc.messages)}') from exc
+                setattr(person, key, text)
+                person_changes.add(key)
+            result.applied.append(name)
+            continue
+        if name in ('phone_number', 'email', 'date_of_birth'):
+            try:
+                value = record._meta.get_field(name).clean(None if value == '' else value, record)
+            except ValidationError as exc:
+                raise ValueError(f'{name}: {"; ".join(exc.messages)}') from exc
+            if name == 'date_of_birth':
+                updates = {'year_of_birth': value.year if value else None,
+                           'month_of_birth': value.month if value else None,
+                           'day_of_birth': value.day if value else None,
+                           'birth_datetime': timezone.make_aware(datetime.combine(value, datetime.min.time())) if value else None}
+                # Full external derivation deliberately preserves DOB. Clear
+                # the read model too, as the native profile writer does.
+                record.person = person
+                record.date_of_birth = value
+                record.patient_age = None
+                dob_changed = True
+            else:
+                updates = {name: value.strip() if isinstance(value, str) else value}
+            for key, item in updates.items():
+                setattr(person, key, item)
+                person_changes.add(key)
+            result.applied.append(name)
+            continue
+        if (not entry.get('projection')
+                and entry.get('projection_target') not in ('person', 'location')
+                and entry.get('kind') == 'direct'):
+            field = record._meta.get_field(name)
+            if not field.concrete or field.is_relation or field.primary_key:
+                result.rejected[name] = 'Not an editable patient-record column.'
+                continue
+            try:
+                direct[name] = field.clean(None if value == '' else value, record)
+            except ValidationError as exc:
+                raise ValueError(f'{name}: {"; ".join(exc.messages)}') from exc
+        else:
+            # The legacy scalar applier's string column is 60 characters. A
+            # rejected edit is preferable to a successful, silently truncated
+            # clinical assertion. Do not change its provenance or projector.
+            if ((entry.get('projection') or entry.get('kind') == 'editable')
+                    and entry.get('value_kind') != 'number'
+                    and value is not None and len(str(value)) > 60):
+                raise ValueError(f'{name}: this scalar write supports at most 60 characters; no value was saved.')
+            facts[name] = value
+    if person_changes:
+        person.save(update_fields=sorted(person_changes))
+    if dob_changed:
+        record.save(update_fields=['date_of_birth', 'patient_age'])
+    if direct:
+        for name, value in direct.items():
+            setattr(record, name, value)
+        record.user_edited_fields = sorted(set(record.user_edited_fields or []) | set(direct))
+        record.save(update_fields=sorted(direct) + ['user_edited_fields'])
+        result.applied.extend(direct)
+    if facts:
+        fact_result = apply_field_writes(person, facts, descriptor=descriptor)
+        result.applied.extend(fact_result.applied)
+        result.rejected.update(fact_result.rejected)
+        result.profile.update(fact_result.profile)
+        # A previously direct edit must stop masking the successfully projected
+        # fact once an approved mapping exists. Remove only acknowledged fields.
+        pending = set(record.user_edited_fields or []) & set(fact_result.applied)
+        if pending:
+            record.refresh_from_db()
+            record.user_edited_fields = sorted(set(record.user_edited_fields or []) - pending)
+            record.save(update_fields=['user_edited_fields'])
+            refresh_patient_record(person)
+    if (direct or person_changes) and not (facts and fact_result.applied):
+        refresh_patient_record(person)
+    record.refresh_from_db()
+    return record, result
