@@ -4,6 +4,7 @@ export interface MappingStats {
   field_mappings: { total: number; approved: number; proposed: number; unmapped: number };
   code_mappings: { total: number; approved: number; proposed: number };
   therapy: { regimens: number; components: number; classes: number; disease_links: number };
+  relevance_signals?: { proposed: number; accepted: number; rejected: number };
 }
 
 export interface TherapyRegimenItem {

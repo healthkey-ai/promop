@@ -4,7 +4,7 @@
  * PatientSourceCodesTab can reuse it.
  *
  * The component manages all internal dialog state (form, concept search,
- * suggest-one, destination options, repointing progress) and communicates
+ * suggest-one, destination options) and communicates
  * with its parent through props:
  *
  *   open / onClose      -- visibility
@@ -20,12 +20,15 @@
 
 import CanonicalUnitEditor from "./CanonicalUnitEditor";
 import IndividualSuggestCandidates from "./IndividualSuggestCandidates";
+import LoincAxesPanel from "./LoincAxesPanel";
+import type { LoincAxisOverrides } from "./loincAxes";
+import SnomedEvidencePanel from "./SnomedEvidencePanel";
+import type { SnomedSettings } from "./snomed";
 import SourceVocabularyLookup from "./SourceVocabularyLookup";
-import { searchDestinationConcepts } from "./destinationSearch";
+import { destinationError as describeDestinationError, searchDestinationConcepts } from "./destinationSearch";
 import MintConceptDialog from "./MintConceptDialog";
 import ConceptInputDetails from "@/components/UI/ConceptInputDetails";
 import { HelpTip, Field, ReadOnlyField, INPUT_CLASS } from "@/components/UI/MappingFormPrimitives";
-import { confirmUnitOverride, unitConfirmation } from "./unitConfirmation";
 import SourceEvidencePanel, { type SourceEvidence } from "./SourceEvidencePanel";
 import { hospitalContextDetails, hospitalContextText, sourceSystemManagementUrl } from "./sourceSystemContext";
 import api from "@/api/axios";
@@ -147,9 +150,14 @@ export default function EditMappingDialog({
   const [sourceEvidenceError, setSourceEvidenceError] = useState("");
   const [searchingConcepts, setSearchingConcepts] = useState(false);
   const [suggestionMessage, setSuggestionMessage] = useState("");
-  const [individualSuggestion, setIndividualSuggestion] = useState<{ request: number; activity: CandidateActivity[]; running: boolean } | null>(null);
-  const [repointing, setRepointing] = useState<{ from: string; to: string } | null>(null);
-  const [repointResult, setRepointResult] = useState<RepointResult | null>(null);
+  const [individualSuggestion, setIndividualSuggestion] = useState<{ request: number; activity: CandidateActivity[]; running: boolean; axisKey?: string } | null>(null);
+  // LOINC axes (#loinc-axes): the panel's current overrides, sent with Suggest.
+  // Keyed by mapping: overrides belong to the code they were made for, and
+  // must never ride along with a Suggest for another row or an edited code.
+  const [loincAxes, setLoincAxes] = useState<{ mappingId: number; overrides: LoincAxisOverrides } | null>(null);
+  const [loincAxesReload, setLoincAxesReload] = useState(0);
+  // SNOMED evidence: the panel's current settings, under the same guard.
+  const [snomedSettings, setSnomedSettings] = useState<{ mappingId: number; settings: SnomedSettings } | null>(null);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [mintOpen, setMintOpen] = useState(false);
@@ -230,8 +238,6 @@ export default function EditMappingDialog({
       setError("");
       setSearchingConcepts(false);
       setSuggestionMessage("");
-      setRepointResult(null);
-      setRepointing(null);
       setSaving(false);
       setMintOpen(false);
       setIndividualSuggestion(null);
@@ -380,8 +386,6 @@ export default function EditMappingDialog({
       api.delete(`/v1/code-mappings/${selectedRow.mapping_id}/lock/`).catch(() => {});
     }
     setSaving(false);
-    setRepointing(null);
-    setRepointResult(null);
     onClose();
   }, [selectedRow?.mapping_id, onClose]);
 
@@ -504,11 +508,11 @@ export default function EditMappingDialog({
     }, CONCEPT_SEARCH_DEBOUNCE_MS);
   }, [searchVocabulary, searchScope]);
 
-  const suggestCurrentCode = useCallback(async () => {
+  const suggestCurrentCode = useCallback(async (axisKey?: string) => {
     setSuggestionMessage("");
     const request = ++dialogRequest.current;
     dialogChoice.current = null;
-    setIndividualSuggestion({ request, activity: [], running: true });
+    setIndividualSuggestion({ request, activity: [], running: true, axisKey });
     setError("");
     setSearchingConcepts(true);
     try {
@@ -520,12 +524,20 @@ export default function EditMappingDialog({
         // rankers, and only while it still describes the code being suggested.
         source_metadata: sourceIdentityUnchanged ? selectedRow?.source_metadata || undefined : undefined,
         strategies: enabled, ranking_model: rankingModel, async: true,
+        // The row this dialog shows, so the server never takes another
+        // hospital's mapping of the same code for its axes and variants.
+        ...(sourceIdentityUnchanged && selectedRow?.mapping_id ? { mapping_id: selectedRow.mapping_id } : {}),
+        ...(loincAxes && sourceIdentityUnchanged && loincAxes.mappingId === selectedRow?.mapping_id
+          ? { loinc_axes: loincAxes.overrides } : {}),
+        ...(snomedSettings && sourceIdentityUnchanged && snomedSettings.mappingId === selectedRow?.mapping_id
+          ? { snomed_attributes: snomedSettings.settings } : {}),
+        ...(axisKey ? { axis_key: axisKey } : {}),
       });
       let current = started;
       const deadline = Date.now() + SUGGEST_POLL_TIMEOUT_MS;
       let failures = 0;
       while (request === dialogRequest.current) {
-        setIndividualSuggestion({ request, activity: current.activity ?? [], running: current.state === "queued" || current.state === "running" });
+        setIndividualSuggestion({ request, activity: current.activity ?? [], running: current.state === "queued" || current.state === "running", axisKey });
         if (current.state !== "queued" && current.state !== "running") break;
         if (Date.now() > deadline) throw new Error("Suggestion timed out");
         await new Promise(resolve => setTimeout(resolve, SUGGEST_POLL_INTERVAL_MS));
@@ -546,7 +558,10 @@ export default function EditMappingDialog({
         return;
       }
       const result = current.activity?.filter(event => event.stage === "result").at(-1);
-      if (result?.suggested && dialogChoice.current !== request) {
+      if (axisKey) {
+        // A variant's winner belongs to the variant, not the mapping's destination.
+        setSuggestionMessage("Variant candidates shown. Choose one to set that variant's destination.");
+      } else if (result?.suggested && dialogChoice.current !== request) {
         applyConcept(result.suggested as ConceptResult);
         setSuggestionMessage("Winner filled in. You can choose another candidate before saving.");
       } else if (!result?.suggested && dialogChoice.current !== request) {
@@ -560,7 +575,7 @@ export default function EditMappingDialog({
         setIndividualSuggestion(cur => cur?.request === request ? { ...cur, running: false } : cur);
       }
     }
-  }, [strategies, rankingModel, form.source_code, form.source_vocabulary_id, form.source_code_description, form.omop_table, selectedRow?.source_metadata, sourceIdentityUnchanged, applyConcept]);
+  }, [strategies, rankingModel, form.source_code, form.source_vocabulary_id, form.source_code_description, form.omop_table, selectedRow?.source_metadata, selectedRow?.mapping_id, sourceIdentityUnchanged, applyConcept, loincAxes, snomedSettings]);
 
   const sourceContextDirty = Boolean(patientId && selectedRow?.source_code_id && (
     sourceUnit.trim() !== savedSourceUnit
@@ -605,12 +620,6 @@ export default function EditMappingDialog({
     event.preventDefault();
     setSaving(true);
     setError("");
-    if (willRepoint && selectedRow) {
-      setRepointing({
-        from: String(selectedRow.destination_concept_id || ""),
-        to: form.destination_concept_id,
-      });
-    }
     try {
       if (sourceContextDirty) await persistSourceContext();
       const payload = {
@@ -623,32 +632,11 @@ export default function EditMappingDialog({
         destination_unit_concept_id: form.destination_unit_concept_id
           ? Number(form.destination_unit_concept_id) : null,
       };
-      let resp;
-      try {
-        resp = selectedRow?.mapping_id
-          ? await api.patch(`/v1/code-mappings/${selectedRow.mapping_id}/`, payload)
-          : await api.post("/v1/code-mappings/", payload);
-      } catch (err) {
-        const warning = unitConfirmation(err);
-        if (!warning || !selectedRow?.mapping_id) throw err;
-        if (!confirmUnitOverride(warning)) {
-          setRepointing(null);
-          setSaving(false);
-          return;
-        }
-        resp = await api.patch(`/v1/code-mappings/${selectedRow.mapping_id}/`, {
-          ...payload, confirm_unit_mismatch: true,
-        });
-      }
+      const resp = selectedRow?.mapping_id
+        ? await api.patch(`/v1/code-mappings/${selectedRow.mapping_id}/`, payload)
+        : await api.post("/v1/code-mappings/", payload);
+      // Stored rows move in a background job; the parent says so.
       const repoint: RepointResult | null = resp.data?.repoint ?? null;
-      // Hold the dialog open on a re-point so the curator sees what moved.
-      if (repoint && repoint.rows_updated) {
-        setRepointResult(repoint);
-        setRepointing(null);
-        setSaving(false);
-        onSaved(resp.data, repoint);
-        return;
-      }
       onSaved(resp.data, repoint);
       closeDialog();
     } catch (err) {
@@ -663,7 +651,6 @@ export default function EditMappingDialog({
       setError(message || (sourceContextDirty
         ? "Failed to save source context or code mapping. Please retry."
         : "Failed to save code mapping."));
-      setRepointing(null);
       setSaving(false);
     }
   };
@@ -999,10 +986,28 @@ export default function EditMappingDialog({
                     </button>
                   </div>
                 </div>
+                {mode === "edit" && selectedRow?.mapping_id && <LoincAxesPanel
+                  key={selectedRow.mapping_id} mappingId={selectedRow.mapping_id} canEdit canApprove={canApprove}
+                  reloadToken={loincAxesReload}
+                  onAxesChange={overrides => setLoincAxes({ mappingId: selectedRow.mapping_id!, overrides })}
+                  onSuggestVariant={axisKey => void suggestCurrentCode(axisKey)} />}
+                {mode === "edit" && selectedRow?.mapping_id && <SnomedEvidencePanel
+                  key={`snomed-${selectedRow.mapping_id}`} mappingId={selectedRow.mapping_id} canEdit
+                  onSettingsChange={settings => setSnomedSettings({ mappingId: selectedRow.mapping_id!, settings })} />}
                 {individualSuggestion?.request === dialogRequest.current && <IndividualSuggestCandidates
                   activity={individualSuggestion.activity} running={individualSuggestion.running}
-                  selectedId={form.destination_concept_id}
+                  selectedId={individualSuggestion.axisKey ? "" : form.destination_concept_id}
                   onSelect={candidate => {
+                    const axisKey = individualSuggestion.axisKey;
+                    if (axisKey && selectedRow?.mapping_id) {
+                      api.post(`/v1/code-mappings/${selectedRow.mapping_id}/axis-variants/`, {
+                        axis_key: axisKey, target_concept_id: candidate.concept_id, approve: false,
+                      }).then(() => {
+                        setLoincAxesReload(n => n + 1);
+                        setSuggestionMessage(`Variant destination set to ${candidate.concept_name}.`);
+                      }).catch(failure => setError(`Could not set the variant's destination. ${describeDestinationError(failure)}`));
+                      return;
+                    }
                     applyConcept(candidate as ConceptResult);
                     setSuggestionMessage("Candidate selected. Save the mapping to keep your choice.");
                   }} />}
@@ -1267,29 +1272,6 @@ export default function EditMappingDialog({
               />
             </div>
 
-            {repointing && (
-              <div
-                role="status"
-                className="mt-4 rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900"
-              >
-                <div className="flex items-center gap-2 font-medium">
-                  <span className="h-3 w-3 animate-spin rounded-full border-2 border-blue-600 border-t-transparent" />
-                  Updating concept {repointing.from} &rarr; {repointing.to}
-                </div>
-                <p className="mt-1 text-xs text-blue-800">Rewriting clinical rows already stored...</p>
-              </div>
-            )}
-            {repointResult && (
-              <div
-                role="status"
-                className="mt-4 rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-900"
-              >
-                Updated {repointResult.rows_updated} row(s) across{" "}
-                {repointResult.persons_marked_stale} patient(s).
-                {repointResult.rows_collapsed > 0 && ` ${repointResult.rows_collapsed} duplicate(s) collapsed.`}{" "}
-                Patient records queued for re-derivation.
-              </div>
-            )}
           </div>
 
           <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-3 border-t border-slate-200 px-5 py-4">
@@ -1334,7 +1316,7 @@ export default function EditMappingDialog({
                 onClick={closeDialog}
                 className="rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100"
               >
-                {repointResult ? "Close" : "Cancel"}
+                Cancel
               </button>
               <button
                 type="submit"

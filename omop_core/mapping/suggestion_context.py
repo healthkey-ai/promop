@@ -129,4 +129,11 @@ def candidate_context(candidate):
         # Rank in the curators' Concept to Code priority list (#1914); a
         # tie-breaker the prompt explains, not evidence.
         **({'curator_priority': candidate['curator_priority']} if candidate.get('curator_priority') else {}),
+        # The six LOINC axes and how each compares with the source's
+        # (omop_core.mapping.loinc_axes); only when the source domain has them.
+        **({'loinc_axes': candidate['loinc_axes']} if candidate.get('loinc_axes') else {}),
+        **({'axis_match': candidate['axis_match']} if candidate.get('axis_match') else {}),
+        # SNOMED hierarchy, defining attributes with verdicts, and subsumption
+        # relative to the source's reference concept (mapping.snomed_attributes).
+        **({'snomed': candidate['snomed']} if candidate.get('snomed') else {}),
     }

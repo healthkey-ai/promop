@@ -1,7 +1,7 @@
 """Concept-first review using the existing SCCM approval semantics."""
 from uuid import UUID
 
-from django.db import transaction
+from django.db import OperationalError, transaction
 from django.db.models import Count, F, Q
 from django.shortcuts import get_object_or_404
 from rest_framework.decorators import api_view, permission_classes
@@ -219,6 +219,25 @@ def concept_to_code_source_examples(request):
     return Response({'examples': examples})
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def concept_to_code_estimate(request, concept_id):
+    """How many source codes Suggest could find for one concept, before running it."""
+    from omop_core.mapping.reverse_suggestions import estimate_source_count
+    _authorize(request.user)
+    concept = get_object_or_404(standard_destinations(), pk=concept_id)
+    strategies = [s for s in request.query_params.get('strategies', 'umls,lexical').split(',') if s]
+    if not strategies or any(s not in ('umls', 'lexical') for s in strategies):
+        raise ValidationError({'strategies': 'Choose umls, lexical, or both.'})
+    include_zero = request.query_params.get('include_zero_seen', '0') == '1'
+    try:
+        estimate = estimate_source_count(concept, strategies=strategies, include_zero_seen=include_zero)
+    except (TimeoutError, OperationalError):
+        # Even the approximation outran its budget; the page says so.
+        return Response({'total': None, 'timed_out': True})
+    return Response({**estimate, 'timed_out': False})
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def concept_to_code_suggest(request):
@@ -335,8 +354,7 @@ def concept_to_code_propose(request, concept_id):
 def concept_to_code_apply(request, concept_id, mapping_id):
     """One reviewed source per transaction, with an exact revision precondition."""
     from patient_portal.api.views import (
-        _can_approve_mappings, _check_mapping_lock, _unit_confirmation_response,
-        _upsert_source_code_mapping, MappingLocked,
+        _check_mapping_lock, _upsert_source_code_mapping, MappingLocked,
     )
     _authorize(request.user)
     if not isinstance(request.data, dict):
@@ -357,12 +375,6 @@ def concept_to_code_apply(request, concept_id, mapping_id):
     selected_status = request.data.get('status', 'proposed')
     if selected_status not in ('proposed', 'approved'):
         raise ValidationError({'status': 'Choose proposed or approved.'})
-    unit_warning = (
-        _unit_confirmation_response(row, concept, request.data)
-        if _can_approve_mappings(request.user) else None
-    )
-    if unit_warning is not None:
-        return unit_warning
     row, repoint = _upsert_source_code_mapping(concept, {
         'status': selected_status, 'domain_id': concept.domain_id, 'omop_table': table,
         'destination_vocabulary_id': concept.vocabulary_id,

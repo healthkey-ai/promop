@@ -1,9 +1,13 @@
 from .canonical_units import canonical_unit
 from django.urls import include, path
+from .loinc_axes import (
+    code_mapping_axis_variant, code_mapping_loinc_axes, code_mapping_snomed_attributes, loinc_axis_values,
+)
+from .relevance import disease_relevance_view, relevance_signal_review, relevance_signals
 from .concept_to_code import (
     concept_to_code_list, concept_to_code_detail, concept_to_code_suggest,
     concept_to_code_run, concept_to_code_apply, concept_to_code_propose,
-    concept_to_code_source_examples, concept_to_code_priority,
+    concept_to_code_source_examples, concept_to_code_priority, concept_to_code_estimate,
 )
 from rest_framework.routers import DefaultRouter
 from .concept_mint import mint_destination
@@ -179,6 +183,7 @@ urlpatterns = [
     path('concept-to-code/source-examples/', concept_to_code_source_examples, name='v1-concept-to-code-source-examples'),
     path('concept-to-code/<int:concept_id>/', concept_to_code_detail, name='v1-concept-to-code-detail'),
     path('concept-to-code/<int:concept_id>/mappings/<int:mapping_id>/', concept_to_code_apply, name='v1-concept-to-code-apply'),
+    path('concept-to-code/<int:concept_id>/estimate/', concept_to_code_estimate, name='v1-concept-to-code-estimate'),
     path('concept-to-code/<int:concept_id>/mappings/', concept_to_code_propose, name='v1-concept-to-code-propose'),
     path('code-mappings/', code_mapping_list, name='v1-code-mapping-list'),
     path('code-mappings/upload/', code_mapping_upload, name='v1-code-mapping-upload'),
@@ -195,12 +200,19 @@ urlpatterns = [
     path('code-mappings/source-systems/', source_system_facilities, name='v1-source-system-facilities'),
     path('code-mappings/check-umls/', code_mapping_check_umls, name='v1-code-mapping-check-umls'),
     path('code-mappings/lookup/', code_mapping_lookup, name='v1-code-mapping-lookup'),
+    path('relevance/', disease_relevance_view, name='v1-disease-relevance'),
+    path('relevance/signals/', relevance_signals, name='v1-relevance-signals'),
+    path('relevance/signals/<int:signal_id>/', relevance_signal_review, name='v1-relevance-signal-review'),
     path('code-mappings/accuracy/', code_mapping_accuracy, name='v1-code-mapping-accuracy'),
     path('code-mappings/accuracy/dashboard/', code_mapping_accuracy_dashboard, name='v1-code-mapping-accuracy-dashboard'),
     path('code-mappings/unit-search/', code_mapping_unit_search, name='v1-code-mapping-unit-search'),
     path('code-mappings/vocabularies/', code_mapping_vocabularies, name='v1-code-mapping-vocabularies'),
     path('code-mappings/<int:mapping_id>/', code_mapping_detail, name='v1-code-mapping-detail'),
     path('code-mappings/<int:mapping_id>/lock/', code_mapping_lock, name='v1-code-mapping-lock'),
+    path('code-mappings/<int:mapping_id>/loinc-axes/', code_mapping_loinc_axes, name='v1-code-mapping-loinc-axes'),
+    path('code-mappings/<int:mapping_id>/axis-variants/', code_mapping_axis_variant, name='v1-code-mapping-axis-variant'),
+    path('code-mappings/<int:mapping_id>/snomed-attributes/', code_mapping_snomed_attributes, name='v1-code-mapping-snomed-attributes'),
+    path('loinc/axis-values/', loinc_axis_values, name='v1-loinc-axis-values'),
     path('custom-patient-fields/', custom_patient_field_list, name='v1-custom-patient-field-list'),
     path('field-mappings/propose-all/', propose_all_mappings, name='v1-field-mapping-propose-all'),
     path('field-mappings/<int:pk>/', field_mapping_detail, name='v1-field-mapping-detail'),

@@ -86,6 +86,9 @@ def _grouped(queryset):
             # aggregate inside a FILTER, so a Case(When(members=1, ...)) here
             # will not compile.
             max_id=Max('id'),
+            # The most LOINC axis variants any member's units imply: a group
+            # holding one such code needs the same blue flag the row has.
+            axis_variant_count=Max('axis_variant_count'),
         )
         .annotate(
             seen=Coalesce('supplied_group_seen', 'summed_seen', Value(0)),
@@ -134,6 +137,7 @@ def group_entries(queryset, page, page_size, order='-occurrence_count'):
                 entry['suggested_action'] if entry['suggested_actions'] == 1 else ''
             ),
             'mapping_id': entry['max_id'] if entry['members'] == 1 else None,
+            'axis_variant_count': entry['axis_variant_count'] or 0,
         }
         for entry in grouped[start:start + page_size]
     ]

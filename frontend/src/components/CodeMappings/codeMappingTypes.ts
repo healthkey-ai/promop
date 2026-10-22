@@ -64,6 +64,12 @@ export interface CodeMappingRow {
   example_quantity_override?: string | null;
   source_metadata?: Record<string, unknown>;
   destination_unit_concept_id?: number | null;
+  /** 0, or how many LOINC axis sets this code's units imply (>= 2). */
+  axis_variant_count?: number;
+  /** Curator LOINC axis overrides: a value settles an axis, null lifts it. */
+  loinc_axes?: Partial<Record<"component" | "property" | "time_aspect" | "system" | "scale_type" | "method_type", string | null>>;
+  /** Curator SNOMED settings: key absent = inferred, null = do not constrain / no side. */
+  snomed_attributes?: { reference_concept_id?: number; hierarchy?: string | null; laterality?: string | null };
 }
 
 export interface ConceptResult {
@@ -127,10 +133,17 @@ export interface Reference {
   source_vocabulary_tabs?: SourceVocabularyTab[];
 }
 
+/** An approval queued the move of stored clinical rows; a job does it. */
 export interface RepointResult {
-  rows_updated: number;
-  persons_marked_stale: number;
-  rows_collapsed: number;
+  queued: boolean;
+  from_concept_ids: number[];
+}
+
+/** What to tell the curator after a save that queued a re-point, if anything. */
+export function repointBanner(sourceCode: string, repoint: RepointResult | null): string | null {
+  return repoint?.queued
+    ? `${sourceCode}: saved. Patient records with this code are being updated to the new concept in the background.`
+    : null;
 }
 
 export interface MappingForm {

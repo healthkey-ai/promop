@@ -8,8 +8,9 @@ from dataclasses import dataclass
 from django.db import connection, transaction
 from django.utils import timezone
 
-from omop_core.mapping.code_resolution import repoint_clinical_rows
+from omop_core.mapping.code_resolution import NO_MATCHING_CONCEPT_ID
 from omop_core.models import CodeMappingUpload, Concept, SourceCodeConceptMapping
+from omop_core.services.repoint_jobs import queue_repoints
 from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE
 
 
@@ -408,18 +409,14 @@ def import_upload(*, upload, vocabulary, provenance, actor, can_approve=True):
                     source_code__in=[item[0] for item in approval_repoints],
                 )
             }
-            for source_code, was_approved, old_concept_ids, new_concept_id in approval_repoints:
-                mapping = approved[source_code]
-                if not was_approved:
-                    repoint_clinical_rows(
-                        mapping=mapping, old_concept_id=0,
-                        new_concept_id=new_concept_id, match_description=False,
-                    )
-                for old_concept_id in sorted(old_concept_ids - {new_concept_id}):
-                    repoint_clinical_rows(
-                        mapping=mapping, old_concept_id=old_concept_id,
-                        new_concept_id=new_concept_id,
-                    )
+            # The rows move in background jobs after commit, as a dialog save's
+            # do (#1952): a file approving common codes no longer holds the
+            # upload open while every stored row is rewritten.
+            queue_repoints([
+                (approved[source_code], (old_concept_ids | ({NO_MATCHING_CONCEPT_ID} if not was_approved else set()))
+                 - {new_concept_id})
+                for source_code, was_approved, old_concept_ids, new_concept_id in approval_repoints
+            ])
         receipt.total_rows = len(rows)
         receipt.inserted_rows = len(inserts)
         receipt.updated_rows = len(updates)

@@ -163,31 +163,6 @@ describe('concept-first curation', () => {
     });
   });
 
-  it('confirms unit evidence before retrying concept-first approval', async () => {
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
-    post
-      .mockRejectedValueOnce({ response: { data: {
-        code: 'unit_mismatch_confirmation_required',
-        unit_consistency: {
-          source_code: 'S1', destination_concept_name: 'Serum albumin', property: 'MCnc',
-          expected_units: ['g/dL'],
-          observed_units: [{ unit: 'mmol/L', count: 8, compatible: false }],
-        },
-      } } })
-      .mockResolvedValueOnce({ data: { ...source, destination_concept_id: 123, status: 'approved' } });
-    await selectConcept();
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Select SNOMED S1' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Approve selected (1)' }));
-
-    await screen.findByText('Approved 1 of 1 selected mappings.');
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('mmol/L (8 results)'));
-    expect(post).toHaveBeenLastCalledWith('/v1/concept-to-code/123/mappings/7/', {
-      status: 'approved', expected_updated_at: source.updated_at,
-      confirm_unit_mismatch: true,
-    });
-    confirm.mockRestore();
-  });
-
   it('allows proposals but hides approval for non-admin curators', async () => {
     await selectConcept(false);
     expect(screen.queryByRole('button', { name: /Approve selected/ })).not.toBeInTheDocument();
@@ -674,5 +649,81 @@ describe('concept priority (#1914)', () => {
     fireEvent.change(calcium, { target: { value: '1' } });
     fireEvent.blur(calcium);
     expect(await screen.findByRole('alert')).toHaveTextContent('Could not change the priority of Calcium.');
+  });
+
+  it('estimates below Suggest how many source codes it could find and how many runs that takes (#1953)', async () => {
+    const estimates: Record<string, unknown>[] = [];
+    get.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
+      if (url === '/v1/concept-to-code/') return Promise.resolve({ data: page([concept]) });
+      if (url.endsWith('/estimate/')) {
+        estimates.push(config?.params ?? {});
+        return Promise.resolve({ data: config?.params?.strategies === 'umls'
+          ? { total: 0, seen: 0, umls: 0, lexical: 0, capped: false, timed_out: false }
+          : { total: 60, seen: 58, umls: 4, lexical: 57, capped: false, timed_out: false } });
+      }
+      return Promise.resolve({ data: page([source]) });
+    });
+    await selectConcept();
+    const estimate = await screen.findByTestId('source-estimate');
+    expect(estimate).toHaveTextContent('About 60 candidate source codes (57 by name, 4 by UMLS) · about 3 runs of 25.');
+    expect(estimates[0]).toEqual({ strategies: 'umls,lexical', include_zero_seen: '0' });
+    // The run count follows the limit as it is typed.
+    fireEvent.change(screen.getByLabelText('Maximum source candidates'), { target: { value: '60' } });
+    expect(estimate).toHaveTextContent('about 1 run of 60.');
+    // And the estimate follows the search settings.
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Names and synonyms' }));
+    await waitFor(() => expect(screen.getByTestId('source-estimate'))
+      .toHaveTextContent('Suggest source codes would find no candidate source codes with these settings.'));
+    expect(estimates.at(-1)).toEqual({ strategies: 'umls', include_zero_seen: '0' });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Only source codes with Seen greater than zero' }));
+    await waitFor(() => expect(estimates.at(-1)).toEqual({ strategies: 'umls', include_zero_seen: '1' }));
+  });
+
+  it('marks a capped estimate as a floor and says when the estimate timed out', async () => {
+    let response: Record<string, unknown> = { total: 1000, seen: 1000, umls: 0, lexical: 1000, capped: true, timed_out: false };
+    get.mockImplementation((url: string) => url === '/v1/concept-to-code/' ? Promise.resolve({ data: page([concept]) })
+      : url.endsWith('/estimate/') ? Promise.resolve({ data: response }) : Promise.resolve({ data: page([source]) }));
+    await selectConcept();
+    expect(await screen.findByTestId('source-estimate'))
+      .toHaveTextContent('About 1,000+ candidate source codes (1,000+ by name) · about 40+ runs of 25.');
+    response = { total: 12, umls: 0, lexical: 12, capped: true, partial: true, timed_out: false };
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Only source codes with Seen greater than zero' }));
+    await waitFor(() => expect(screen.getByTestId('source-estimate'))
+      .toHaveTextContent('About 12+ candidate source codes (12+ by name) · about 1+ runs of 25. Vocabulary codes never seen were not all counted in time.'));
+    response = { total: null, timed_out: true };
+    fireEvent.click(screen.getByRole('checkbox', { name: 'UMLS' }));
+    await waitFor(() => expect(screen.getByTestId('source-estimate')).toHaveTextContent(/search took too long/));
+  });
+
+  it('labels an earlier or sampled estimate as approximate', async () => {
+    let response: Record<string, unknown> = { total: 6767, umls: 0, lexical: 6767, capped: false, partial: false, approximate: 'earlier', timed_out: false };
+    get.mockImplementation((url: string) => url === '/v1/concept-to-code/' ? Promise.resolve({ data: page([concept]) })
+      : url.endsWith('/estimate/') ? Promise.resolve({ data: response }) : Promise.resolve({ data: page([source]) }));
+    await selectConcept();
+    expect(await screen.findByTestId('source-estimate')).toHaveTextContent(
+      'About 6,767 candidate source codes (6,767 by name) · about 271 runs of 25. From an earlier count: this one took too long, so codes handled since may still be counted.');
+    response = { total: 6400, umls: 0, lexical: 6400, capped: false, partial: true, approximate: 'sample', timed_out: false };
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Only source codes with Seen greater than zero' }));
+    await waitFor(() => expect(screen.getByTestId('source-estimate')).toHaveTextContent(
+      'Roughly 6,400 candidate source codes (6,400 by name) · about 256 runs of 25. Estimated from a sample: the full count took too long. Vocabulary codes never seen were not counted.'));
+    response = { total: 0, umls: 0, lexical: 0, capped: false, partial: false, approximate: 'sample', timed_out: false };
+    fireEvent.click(screen.getByRole('checkbox', { name: 'UMLS' }));
+    await waitFor(() => expect(screen.getByTestId('source-estimate'))
+      .toHaveTextContent('A sample found no candidate source codes; the full count took too long, so there may be a few.'));
+  });
+
+  it('has no Refresh button; a failed load offers Retry', async () => {
+    let fail = true;
+    get.mockImplementation((url: string) => url === '/v1/concept-to-code/' ? Promise.resolve({ data: page([concept]) })
+      : url.endsWith('/estimate/') ? Promise.resolve({ data: { total: 1, timed_out: false } })
+        : fail ? Promise.reject(new Error('Unavailable')) : Promise.resolve({ data: page([source]) }));
+    render(<ConceptToCodeTab canApprove />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Serum albumin' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not load source codes.');
+    expect(screen.queryByRole('button', { name: 'Refresh' })).not.toBeInTheDocument();
+    fail = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByText('SNOMED:S1')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 });

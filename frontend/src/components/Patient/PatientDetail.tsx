@@ -1,7 +1,7 @@
 import BrandLogo from '@/components/Branding/BrandLogo';
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { ArrowLeft, Check, AlertCircle, ChevronDown, Download, ShieldCheck } from "lucide-react";
+import { ArrowLeft, Check, AlertCircle, ChevronDown, ShieldCheck } from "lucide-react";
 import api from "@/api/axios";
 import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
 // Profile fields now write through PatientRecord PATCH alongside clinical fields.
@@ -9,6 +9,7 @@ import type { User } from "@/hooks/useAuth";
 import DeleteAccountDialog from "./DeleteAccountDialog";
 import AllergyList from "./AllergyList";
 import ImmunizationList from "./ImmunizationList";
+import DownloadRecordMenu from "./download/DownloadRecordMenu";
 import PatientSurveys from "./PatientSurveys";
 import PatientConsents from "./PatientConsents";
 import AdvanceDirectives from "./AdvanceDirectives";
@@ -339,8 +340,6 @@ export default function PatientDetail({
   const [activeTab, setActiveTab] = useState(0);
   const [patientView, setPatientView] = useState<PatientView>("tabs");
 
-  const [downloading, setDownloading] = useState(false);
-  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   type InviteState = "idle" | "sending" | "sent" | "error";
   const [inviteState, setInviteState] = useState<InviteState>("idle");
@@ -708,28 +707,6 @@ export default function PatientDetail({
     }
   }, [handleFieldChange, scheduleAutoSave]);
 
-  const handleDownloadFhir = useCallback(async () => {
-    if (!personId) return;
-    setDownloading(true);
-    setDownloadError(null);
-    try {
-      const response = await api.get(`/v1/patient-records/${personId}/export-fhir/`);
-      const blob = new Blob([JSON.stringify(response.data, null, 2)], { type: "application/fhir+json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "my-health-record.fhir.json";
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch {
-      setDownloadError("Failed to download your health record. Please try again.");
-    } finally {
-      setDownloading(false);
-    }
-  }, [personId]);
-
   const getDiseaseType = (): "breast" | "lymphoma" | "myeloma" | "cll" | "mcl" | "other" => {
     const d = (typeof editedInfo?.disease === "string" ? editedInfo.disease : "").toLowerCase();
     if (d.includes("breast")) return "breast";
@@ -808,6 +785,16 @@ export default function PatientDetail({
 
   const initials = getInitials(patientName);
   const avatarBg = getAvatarBg(patientName);
+  const downloadMenu = personId ? (
+    <DownloadRecordMenu
+      personId={Number(personId)}
+      patientMode={patientMode}
+      record={editedInfo}
+      name={patientName}
+      diseaseType={diseaseType}
+      diseaseLabel={getDiseaseTabLabel()}
+    />
+  ) : null;
 
   return (
     <FieldMappingLinksProvider value={canViewOmop}>
@@ -828,14 +815,7 @@ export default function PatientDetail({
             {patientMode && (
               <div className="flex items-center gap-3">
                 <span className="text-sm font-semibold text-foreground">My Health Record</span>
-                <button
-                  onClick={handleDownloadFhir}
-                  disabled={downloading}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-[#eef0f4] hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  <Download className="h-3.5 w-3.5" />
-                  {downloading ? "Downloading..." : "Download"}
-                </button>
+                {downloadMenu}
               </div>
             )}
           </div>
@@ -859,6 +839,7 @@ export default function PatientDetail({
                       {editedInfo.disease}
                     </span>
                   )}
+                  {downloadMenu}
                 </div>
               </>
             )}
@@ -1036,9 +1017,6 @@ export default function PatientDetail({
 
       {saveErrorMsg && (
         <ErrorToast message={saveErrorMsg} onDismiss={() => setSaveErrorMsg(null)} />
-      )}
-      {downloadError && (
-        <ErrorToast message={downloadError} onDismiss={() => setDownloadError(null)} />
       )}
     </div>
     </FieldMappingLinksProvider>

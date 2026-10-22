@@ -49,6 +49,8 @@ SYSTEM: frozenset[str] = frozenset({
     'omop_core.SuggestEmbeddingSnapshot', 'omop_core.SuggestRun',
     # Historical model-quality feedback for this instance, not a live mapping.
     'omop_core.CodeMappingUpload', 'omop_core.MappingSuggestionReview',
+    # Counts from this instance's own documents, and its curators' decisions on them.
+    'omop_core.RelevanceSignal',
     # Derived from concept + concept_synonym; rebuilt locally, never copied.
     # AI explanations are regenerated on demand, and their item ids would not
     # point at the same rows on another instance.
@@ -102,6 +104,7 @@ _REFERENCE_COPIED_EXPLICIT: frozenset[str] = frozenset({
     'omop_core.CustomPatientField', 'omop_core.FieldChoice', 'omop_core.FieldChoiceCode',
     'omop_core.FieldConceptMapping', 'omop_core.FieldFormula', 'omop_core.FieldSynonym',
     'omop_core.MappingDestinationCandidate',
+    'omop_core.SourceCodeAxisVariant',
     'omop_core.SourceCodeConceptMapping', 'omop_core.DiseaseTherapyRegimen',
     'omop_core.TherapyComponentClassLink', 'omop_core.TherapyOutcome',
     'omop_core.TherapyOutcome_diseases', 'omop_core.TherapyRegimenComponent',
@@ -131,6 +134,11 @@ PATIENT: frozenset[str] = frozenset({
     'omop_oncology.AILineOfTherapySummary', 'omop_oncology.CancerModifier',
     'omop_oncology.Episode', 'omop_oncology.EpisodeEvent', 'omop_oncology.Histology',
     'omop_oncology.StemTable',
+    # Which exposures a line authored: kept with the patient so an edit on a
+    # copy corrects that copy's own facts instead of leaving them unowned.
+    'omop_oncology.TherapyLineExposure',
+    # Whether a line happened, and whether that claim was retracted (#1924).
+    'omop_oncology.TherapyLineAssertion',
     'prolog_surveys.MintedParticipant', 'prolog_surveys.SurveyAnswer',
     'prolog_surveys.SurveyConsent', 'prolog_surveys.SurveyResponse',
     # An address kept beside a response, and the consents given with one:
