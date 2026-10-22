@@ -186,6 +186,58 @@ class TherapyLineViewSet(viewsets.ViewSet):
         )
 
 
+class TherapyHistoryCompletenessViewSet(viewsets.ViewSet):
+    """Confirm, or withdraw the confirmation, that the recorded lines are complete.
+
+    ``POST /v1/therapy-history/completeness/`` ``{"person": <id>, "complete": true|false}``.
+
+    A confirmation is what turns ``therapy_lines_count`` from a lower bound into an
+    exact count, so it is a deliberate statement rather than a side effect of
+    saving a line (#1924). Hosts apply the same write gate and per-person
+    authorization as authoring through ``patient_write_denied``.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def patient_write_denied(self, request, person):
+        return None
+
+    def patient_info_payload(self, record):
+        return None
+
+    def create(self, request):
+        from omop_core.models import Person
+        from omop_core.services.patient_record_service import refresh_patient_record
+        from omop_core.services.therapy_history import (
+            confirm_therapy_history, withdraw_therapy_history,
+        )
+
+        person_id = request.data.get('person')
+        try:
+            person = Person.objects.get(pk=int(person_id))
+        except (TypeError, ValueError, Person.DoesNotExist):
+            return Response({'detail': 'A valid person is required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        denied = self.patient_write_denied(request, person)
+        if denied is not None:
+            return denied
+
+        complete = request.data.get('complete', True)
+        if isinstance(complete, str):
+            complete = complete.strip().lower() not in {'0', 'false', 'no', ''}
+        if complete:
+            confirm_therapy_history(person, source=request.data.get('source') or 'patient')
+        else:
+            withdraw_therapy_history(person)
+
+        record = refresh_patient_record(person)
+        return Response({
+            'therapy_history_complete': record.therapy_history_complete,
+            'patient_info': self.patient_info_payload(record),
+        })
+
+
 def therapy_outcomes(request):
     """The disease's response-assessment catalog for the editor."""
     from rest_framework.response import Response as _Response
