@@ -199,3 +199,36 @@ def test_clearing_composition_keeps_the_line(api, person):
 @override_settings(**PACKAGED)
 def test_retracting_an_unknown_line_is_404(api):
     assert api.delete('/federation/v1/therapy-lines/999999/').status_code == 404
+
+
+@override_settings(**PACKAGED)
+def test_history_is_not_complete_until_the_patient_says_so(api, person):
+    record = refresh_patient_record(person)
+    assert record.therapy_history_complete is None
+
+    response = api.post('/federation/v1/therapy-history/completeness/',
+                        {'person': person.pk, 'complete': True}, format='json')
+
+    assert response.status_code == 200, response.data
+    assert response.data['therapy_history_complete'] is True
+    assert PatientRecord.objects.get(person=person).therapy_history_complete is True
+
+
+@override_settings(**PACKAGED)
+def test_withdrawing_the_confirmation_returns_to_a_lower_bound(api, person):
+    api.post('/federation/v1/therapy-history/completeness/',
+             {'person': person.pk, 'complete': True}, format='json')
+
+    response = api.post('/federation/v1/therapy-history/completeness/',
+                        {'person': person.pk, 'complete': False}, format='json')
+
+    assert response.status_code == 200
+    assert response.data['therapy_history_complete'] is None
+    assert PatientRecord.objects.get(person=person).therapy_history_complete is None
+
+
+@override_settings(**PACKAGED)
+def test_a_confirmation_needs_a_known_patient(api):
+    response = api.post('/federation/v1/therapy-history/completeness/',
+                        {'person': 999999, 'complete': True}, format='json')
+    assert response.status_code == 400, response.data
