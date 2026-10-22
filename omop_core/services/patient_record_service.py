@@ -2886,6 +2886,16 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
                 return False
         return None
 
+    for obs in snapshot.observations:
+        if (
+            obs.observation_source_value == 'hk-myeloma-type'
+            or getattr(obs.observation_concept, 'concept_code', None) == 'hk-myeloma-type'
+        ):
+            value = _coded_value(obs)
+            if value:
+                data['myeloma_type'] = value[:50]
+                break
+
     mm_rows = []
     for m in snapshot.measurements:
         field = MM_LOINC_CODES.get(m.measurement_source_value)

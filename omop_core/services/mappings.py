@@ -325,6 +325,9 @@ DERIVED_FIELD_TO_CODE = {
     'distant_metastasis_stage':      ('21901-4',   'LOINC',  '_get_staging_data'),
     'nodes_stage':                   ('21906-3',   'LOINC',  '_get_staging_data'),
     'stage':                         ('21908-9',   'LOINC',  '_get_staging_data'),
+    # Myeloma subtype is an authored assessment. The demo vocabulary carries
+    # the HealthKey concept; the writer and reader use the same code.
+    'myeloma_type':                  ('hk-myeloma-type', 'HealthKey', '_get_mm_specific_data'),
     'tumor_stage':                   ('21905-5',   'LOINC',  '_get_staging_data'),
     # CLL — _get_cll_data. 21889-1 is 'Size Tumor'; a lymph-node row carries
     # qualifier_source_value='lymph-node' to separate it from tumor_size.

@@ -12,7 +12,9 @@ import pytest
 from omop_core.models import Location, Measurement
 from omop_core.services.field_write_service import apply_field_writes, owned_writable_fields
 from omop_core.services.patient_record_service import refresh_patient_record
-from tests.factories import ConceptFactory, PatientRecordFactory, PersonFactory, VocabularyFactory
+from tests.factories import (
+    ConceptFactory, DomainFactory, PatientRecordFactory, PersonFactory, VocabularyFactory,
+)
 
 pytestmark = pytest.mark.django_db
 
@@ -83,6 +85,26 @@ def test_myeloma_marker_writes_round_trip_through_derivation(field, code, value,
         assert float(actual) == pytest.approx(expected)
     else:
         assert actual == expected
+
+
+
+def test_myeloma_type_authored_observation_round_trips():
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    VocabularyFactory(vocabulary_id='HealthKey', vocabulary_name='HealthKey')
+    ConceptFactory(
+        concept_code='hk-myeloma-type',
+        concept_name='Myeloma type',
+        vocabulary_id='HealthKey',
+        domain=DomainFactory(domain_id='Observation', domain_name='Observation'),
+    )
+    _seed_patient_reported_type()
+
+    result = apply_field_writes(person, {'myeloma_type': 'IgA'}, today=date(2026, 8, 23))
+
+    assert result.applied == ['myeloma_type']
+    assert not result.rejected
+    assert refresh_patient_record(person).myeloma_type == 'IgA'
 
 
 def test_same_day_re_edit_upserts_not_duplicates():
