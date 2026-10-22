@@ -60,6 +60,31 @@ def test_editable_lab_writes_a_measurement_and_rederives():
     assert float(refresh_patient_record(person).hemoglobin_g_dl) == pytest.approx(12.5)
 
 
+@pytest.mark.parametrize(
+    'field,code,value,expected',
+    [
+        ('monoclonal_protein_serum', '51435-6', 2.4, 2.4),
+        ('kappa_flc', '36916-5', 1.87, 1.87),
+        ('lambda_flc', '33944-0', 0.92, 0.92),
+        ('clonal_plasma_cells', '11118-7', 38, 38.0),
+        ('bone_lesions', '24646-7', 'Absent', 'Absent'),
+    ],
+)
+def test_myeloma_marker_writes_round_trip_through_derivation(field, code, value, expected):
+    person = _person_with_loinc(code, f'Myeloma marker {code}')
+
+    result = apply_field_writes(person, {field: value}, today=date(2026, 8, 23))
+
+    assert result.applied == [field]
+    assert not result.rejected
+    record = refresh_patient_record(person)
+    actual = getattr(record, field)
+    if isinstance(expected, float):
+        assert float(actual) == pytest.approx(expected)
+    else:
+        assert actual == expected
+
+
 def test_same_day_re_edit_upserts_not_duplicates():
     # A same-day correction updates the existing dated fact rather than appending a second row.
     person = _person_with_loinc('718-7', 'Hemoglobin [Mass/volume] in Blood')

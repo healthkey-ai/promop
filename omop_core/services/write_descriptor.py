@@ -507,7 +507,7 @@ def build_writable_field_descriptor():
             'code': code,
             'vocabulary': 'LOINC',
             'display': display,
-            'value_kind': 'number',
+            'value_kind': _value_kind(field),
             'unit': unit,
             'unit_concept_id': unit_ids.get(unit),
             'type_concept_id': CONCEPT_LAB_TYPE,

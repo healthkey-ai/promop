@@ -63,6 +63,15 @@ LAB_FIELD_TO_LOINC = {
     'c_reactive_protein':             ('1988-5',   'mg/L',            'C reactive protein [Mass/volume] in Serum or Plasma'),
     'esr':                            ('30341-2',  'mm/h',            'Erythrocyte sedimentation rate'),
     'ki67_proliferation_index':       ('85319-2',  '%',               'Ki-67 Ag [Presence] in Tissue by Immune stain'),
+    # Myeloma disease markers. The read path already understands these
+    # LOINC/source values; mapping them here gives the federated editor the
+    # same write recipe the standalone PROMOP form uses.
+    'monoclonal_protein_serum':       ('51435-6',  'g/dL',            'M-protein serum spike'),
+    'monoclonal_protein_urine':       ('32730-5',  'mg/24h',          'M-protein urine 24h'),
+    'kappa_flc':                      ('36916-5',  'mg/L',            'Free Kappa Light Chains'),
+    'lambda_flc':                     ('33944-0',  'mg/L',            'Free Lambda Light Chains'),
+    'clonal_plasma_cells':            ('11118-7',  '%',               'Clonal plasma cells in bone marrow (%)'),
+    'bone_lesions':                   ('24646-7',  None,              'Bone lesions'),
     # Vital signs
     'weight':                         ('29463-7',  'kg',              'Body weight'),
     'height':                         ('8302-2',   'cm',              'Body height'),
