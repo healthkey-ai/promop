@@ -167,7 +167,10 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
                 >
                   <div className="min-w-0 flex-1">
                     <p className="font-medium text-portal-text-primary">
-                      Line {line.line}: {line.regimen || 'Unnamed regimen'}
+                      Line {line.line}:{' '}
+                      {line.composition_known === false
+                        ? (line.regimen && line.regimen !== 'Unknown' ? line.regimen : 'Drugs unknown')
+                        : (line.regimen || 'Unnamed regimen')}
                       {line.intent && (
                         <span className="ml-2 font-normal text-portal-text-secondary">
                           {line.intent}

@@ -261,3 +261,22 @@ describe('TreatmentTab — retracting a line', () => {
     expect(mockDelete).not.toHaveBeenCalled();
   });
 });
+
+
+describe('TreatmentTab — unknown composition', () => {
+  it('names a line recorded without drugs instead of showing Unknown', async () => {
+    renderTab({
+      ...THREE_LINES,
+      person_id: 262,
+      lines_of_therapy: [{
+        ...STRUCTURED_LINES[1],
+        line: 3,
+        regimen: 'Unknown',
+        composition_known: false,
+        drugs: [],
+      }],
+    });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+    expect(screen.getByText(/Line 3: Drugs unknown/i)).toBeInTheDocument();
+  });
+});
