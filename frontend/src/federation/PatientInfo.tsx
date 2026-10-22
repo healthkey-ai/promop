@@ -104,6 +104,40 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
   const [activeTab, setActiveTab] = useState(0);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
 
+  // The CB header links to `/info?tab=<key>` (the same keys its native form
+  // understands). The widget owns its own tabs, so consume the parameter once
+  // instead of always landing on General. Disease keys all select the one
+  // disease tab; `blood` is the native name for the merged Labs tab.
+  const deepLinkAppliedRef = useRef(false);
+  useEffect(() => {
+    if (deepLinkAppliedRef.current || !data) return;
+    deepLinkAppliedRef.current = true;
+    const requested = new URLSearchParams(window.location.search).get("tab");
+    if (!requested) return;
+    const disease = String(data.patient_info?.disease ?? "").toLowerCase();
+    const diseaseTab = disease.includes("breast") || disease.includes("lymphoma")
+      || disease.includes("myeloma") || disease.includes("cll")
+      || disease.includes("chronic lymphocytic");
+    const keys = [
+      "general",
+      ...(diseaseTab ? ["disease"] : []),
+      "treatment", "labs", "behavior",
+      ...(federated ? [] : ["wearable"]),
+      "genomics", "history",
+    ];
+    const aliases: Record<string, string> = {
+      blood: "labs",
+      breast_cancer: "disease",
+      multiple_myeloma: "disease",
+      follicular_lymphoma: "disease",
+      chronic_lymphocytic_leukemia: "disease",
+      mantle_cell_lymphoma: "disease",
+    };
+    const key = aliases[requested] ?? requested;
+    const index = keys.indexOf(key);
+    if (index >= 0) setActiveTab(index);
+  }, [data, federated]);
+
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingDataRef = useRef<Record<string, unknown> | null>(null);
   const dirtyFieldsRef = useRef(new Set<string>());
@@ -310,9 +344,10 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
     }
   }, [handleFieldChange]);
 
-  const getDiseaseType = (): "breast" | "lymphoma" | "myeloma" | "cll" | "other" => {
+  const getDiseaseType = (): "breast" | "lymphoma" | "myeloma" | "cll" | "mcl" | "other" => {
     const d = (typeof editedInfo?.disease === "string" ? editedInfo.disease : "").toLowerCase();
     if (d.includes("breast")) return "breast";
+    if (d.includes("mantle")) return "mcl";
     if (d.includes("lymphoma")) return "lymphoma";
     if (d.includes("myeloma")) return "myeloma";
     if (d.includes("cll") || d.includes("chronic lymphocytic")) return "cll";
@@ -320,7 +355,7 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
   };
 
   const getDiseaseTabLabel = () =>
-    ({ breast: "Breast Cancer", lymphoma: "Follicular Lymphoma", myeloma: "Multiple Myeloma", cll: "CLL", other: "Disease Specific" })[getDiseaseType()];
+    ({ breast: "Breast Cancer", lymphoma: "Follicular Lymphoma", myeloma: "Multiple Myeloma", cll: "CLL", mcl: "Mantle Cell Lymphoma", other: "Disease Specific" })[getDiseaseType()];
 
   if (isLoading) return <PatientInfoSkeleton />;
 
