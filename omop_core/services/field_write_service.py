@@ -41,6 +41,25 @@ _BOOLEAN_ASSERTION_CODES: dict[str, str] = {
 _TRUTHY = frozenset({'true', 'yes', '1'})
 _FALSY = frozenset({'false', 'no', '0'})
 
+# These fields mean the inverse of their source question only when the mapped
+# source is the corresponding reviewed assertion code. An alternative approved
+# concept may already describe the `no_*` field directly.
+def _invert_inverse_assertion(field, value, source_value=None, concept_code=None):
+    spec = _ASSERTION_FIELDS.get(source_value)
+    if spec != (field, 'inverse_boolean'):
+        spec = _ASSERTION_FIELDS.get(concept_code)
+    if spec != (field, 'inverse_boolean') or value is None:
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in _TRUTHY:
+            return False
+        if normalized in _FALSY:
+            return True
+        raise ValueError(
+            f'{field} requires a boolean value; got {value!r}')
+    return not bool(value)
+
 
 def is_boolean_assertion_code(source_value: str | None) -> bool:
     """Whether this source value makes the two value columns one boolean answer."""
@@ -273,6 +292,7 @@ def apply_field_writes(person, changes, today=None, descriptor=None):
                 d = {
                     **d,
                     'concept_id': projection.get('concept_id'),
+                    'concept_code': projection.get('concept_code'),
                     'unit_concept_id': projection.get('unit_concept_id'),
                     'source_value': projection.get('source_value'),
                     'unit': projection.get('unit'),
@@ -461,6 +481,8 @@ def _write_editable_fact(person, field, d, value, today):
         Concept.objects.filter(concept_id=d['unit_concept_id']).first()
         if d.get('unit_concept_id') is not None else None
     )
+    value = _invert_inverse_assertion(
+        field, value, d.get('source_value'), d.get('concept_code'))
     num, string = _coerce_value(value, d.get('value_kind', 'number'))
 
     # Upsert key scopes to OUR rows only: (person, concept, date, is_erroneous=False, type=Patient

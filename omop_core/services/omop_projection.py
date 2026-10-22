@@ -1,5 +1,6 @@
 """Project PatientRecord edits into today's OMOP facts, retaining earlier days."""
 import logging
+from datetime import date
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
@@ -72,10 +73,12 @@ def curated_values_from_snapshot(snapshot):
     All facts come from the snapshot already loaded by that external refresh.
     """
     from omop_core.services.patient_record_service import (
-        PATIENT_RECORD_OMOP_MAPPED_FIELDS, _latest_blood_count_measurements,
+        PATIENT_RECORD_OMOP_MAPPED_FIELDS, _ASSERTION_DETAIL_FIELDS,
+        _latest_assertion_rows, _latest_blood_count_measurements,
         _latest_loinc_measurement,
     )
     from omop_core.services.clinical_units import blood_count_projection
+    from omop_core.services.field_write_service import _invert_inverse_assertion
     from omop_core.services.write_descriptor import (
         _LIFECYCLE_FIELDS, _WRITE_RECIPE_INCOMPLETE,
         get_serializer_read_only_fields, mapping_target_for,
@@ -98,6 +101,16 @@ def curated_values_from_snapshot(snapshot):
             by_key.setdefault((getattr(row, concept_field), getattr(row, source_field)), row)
         indexed[target] = by_key
     values = {}
+    # Assertion fields are answered across both OMOP tables: the latest row
+    # wins, and a newer unusable answer deliberately leaves the field unknown.
+    # An exact mapping reads only one table, so use the same selected row as
+    # the assertion extractor for precedence. A reviewed mapping to another
+    # concept is still read when no assertion-code row answers the field.
+    assertion_rows = dict(_latest_assertion_rows(snapshot))
+    for field, selected in list(assertion_rows.items()):
+        detail_field = _ASSERTION_DETAIL_FIELDS.get(selected[2])
+        if detail_field:
+            assertion_rows.setdefault(detail_field, selected)
     count_dates = {
         field: (row.measurement_date, row.pk)
         for field, row in _latest_blood_count_measurements(snapshot).items()
@@ -119,6 +132,17 @@ def curated_values_from_snapshot(snapshot):
         row = indexed[target].get((mapping['concept_id'], source_value))
         if row is None:
             continue
+        selected = assertion_rows.get(name)
+        if selected is not None:
+            row_date = (getattr(row, 'measurement_date', None)
+                        or getattr(row, 'observation_date', None))
+            # Only a strictly older approved mapping is suppressed. A mapped
+            # row and the selected assertion can share a date on different
+            # tables, and their table-local ids are not comparable (separate
+            # sequences); deferring to the other table there would silently
+            # undo a reviewed same-day edit on the next refresh.
+            if (row_date or date.min) < (selected[0] or date.min):
+                continue
         question = {
             'ki67_proliferation_index': '29593-1',
             'test_methodology': '85069-3',
@@ -146,6 +170,11 @@ def curated_values_from_snapshot(snapshot):
         if value is None:
             continue
         try:
+            # The stored row carries the source answer. Invert only when the
+            # mapping is the reviewed inverse code for this field; another
+            # approved concept already describes the field directly.
+            value = _invert_inverse_assertion(
+                name, value, source_value, mapping['concept__concept_code'])
             value = readable_fields[name].to_python(value)
             if name == 'cytogenetic_markers':
                 from omop_core.services.cytogenetics import (
@@ -220,6 +249,11 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
     source_value = projection.get('source_value')
     if target not in _TARGET_CONFIG or concept_id is None or not source_value:
         return False
+    # This path carries the PatientRecord value. A reviewed inverse assertion
+    # code stores the opposite answer; other approved concepts keep their own.
+    from omop_core.services.field_write_service import _invert_inverse_assertion
+    value = _invert_inverse_assertion(
+        field_name, value, source_value, projection.get('concept_code'))
     model, pk_field, concept_field, date_field, type_field, src_field, val_num, val_str = _TARGET_CONFIG[target]
     # Occurrence tables cannot encode a null/negative answer. Leave that edit
     # pending on PatientRecord instead of inventing an affirmative occurrence.
