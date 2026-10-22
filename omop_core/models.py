@@ -4057,11 +4057,18 @@ class PatientRecord(models.Model):
         if self.later_therapy:
             text_lines += 1
 
-        self.therapy_lines_count = max(text_lines, self.therapy_lines_count or 0)
+        # `None` means "no evidence either way"; `0` is the assertion "no prior
+        # therapy". Collapsing the former into the latter turns an unknown
+        # history into a clinical claim, and downstream matchers compare it as a
+        # value. Leave both fields unknown when there is nothing to count (#1925).
+        if self.therapy_lines_count is not None or text_lines:
+            self.therapy_lines_count = max(text_lines, self.therapy_lines_count or 0)
         lines_count = self.therapy_lines_count
 
         # Set prior_therapy using the vocabulary expected by EXACT and CB matchers
-        if lines_count == 0:
+        if lines_count is None:
+            self.prior_therapy = None
+        elif lines_count == 0:
             self.prior_therapy = 'None'
         elif lines_count == 1:
             self.prior_therapy = 'One line'
