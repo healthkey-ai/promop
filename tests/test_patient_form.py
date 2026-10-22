@@ -33,6 +33,20 @@ def test_slim_compatibility_gate_is_explicit_without_a_new_formula():
     assert 'meetsSLIM' in descriptors['meets_slim']['bindings']
 
 
+def test_crab_navigation_uses_readable_canonical_clearance_without_lifting_gate():
+    inputs = {'serum_calcium_mg_dl', 'creatinine_clearance_ml_min',
+              'serum_creatinine_mg_dl', 'hemoglobin_g_dl', 'bone_lesions'}
+    descriptors = patient_form_descriptors({
+        name: {'kind': 'direct', 'writable': True, 'target': 'patient_record'}
+        for name in inputs
+    }, readable_fields=inputs | {'meets_crab'})
+    crab = descriptors['meets_crab']
+    assert set(crab['inputs']) == inputs
+    assert all(name in descriptors for name in crab['inputs'])
+    assert crab['writable'] is False
+    assert 'clinical review' in crab['compatibility_reason']
+
+
 def test_unsupported_projectors_and_special_assertions_are_not_advertised():
     descriptor = patient_form_descriptors({
         'a': {'kind': 'direct', 'writable': True, 'target': 'patient_record',
