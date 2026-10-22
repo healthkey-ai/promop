@@ -101,7 +101,9 @@ only and carry no PHI.
 - Re-sending the same `(source, disease, concept, period)` updates the counts.
 - An unknown concept or an unsupported disease is rejected with 400.
 
-Curators work the queue at:
+Curators work the queue on **Mapping Administration → Disease Relevance**
+(`/relevance-signals`). The page shows one row per disease and concept, with the
+latest period's counts. Behind it:
 
 - `GET /api/v1/relevance/signals/?status=proposed&disease=MM`, for any
   professional role;
