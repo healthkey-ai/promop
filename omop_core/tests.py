@@ -4962,8 +4962,14 @@ class RefreshQueryCountTest(TestCase):
     """Ensure refresh_patient_record stays within a bounded query budget.
 
     The prefetch refactor (issue #541) reduced queries from ~80 to ~10.
-    This test catches regressions by asserting the total stays under 20.
+    This test catches regressions by asserting the total stays under the
+    budget below. Bump it only for a deliberate new lookup, and name that
+    lookup in the breakdown comment.
     """
+
+    #: 21 for the derivation itself plus the #1924 therapy-history
+    #: attestation existence check.
+    QUERY_BUDGET = 22
 
     @classmethod
     def setUpTestData(cls):
@@ -5007,16 +5013,16 @@ class RefreshQueryCountTest(TestCase):
             )
 
     def test_query_count_under_budget(self):
-        """refresh_patient_record must not exceed 21 SQL queries."""
+        """refresh_patient_record must not exceed QUERY_BUDGET SQL queries."""
         from django.test.utils import CaptureQueriesContext
         with CaptureQueriesContext(connection) as ctx:
             refresh_patient_record(self.person)
         # Budget: ~6 snapshot queries + PatientRecord SELECT FOR UPDATE + save
         # + a few ancillary lookups (Episode, concept cache, genomics OMOP
-        # projections, etc.)
+        # projections, the #1924 therapy-history attestation check, etc.)
         self.assertLessEqual(
-            len(ctx.captured_queries), 21,
-            f'Expected ≤20 queries, got {len(ctx.captured_queries)}. '
+            len(ctx.captured_queries), self.QUERY_BUDGET,
+            f'Expected ≤{self.QUERY_BUDGET} queries, got {len(ctx.captured_queries)}. '
             f'Query breakdown:\n'
             + '\n'.join(
                 f'  [{i}] {q["sql"][:120]}'
