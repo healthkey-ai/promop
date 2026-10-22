@@ -212,3 +212,34 @@ def test_accepted_signal_joins_the_set_and_decisions_carry_to_later_periods(djan
                                     'document_count': 12, 'period': '2026-10'}], format='json')
     assert set(RelevanceSignal.objects.values_list('status', flat=True)) == {'accepted'}
     assert curator.get(SIGNALS).data['results'] == []
+
+
+@pytest.mark.parametrize('role,can_accept,can_reject', (
+    ('org_admin', True, True), ('doctor', False, True), ('analyst', False, False),
+))
+def test_signal_rights_follow_the_mapping_page_roles(django_user_model, role, can_accept, can_reject):
+    user = django_user_model.objects.create_user(email=f'{role}@test.com')
+    GroupAccess.objects.create(identity=user, org=OrganizationFactory(), role=role)
+    proposed = RelevanceSignal.objects.create(source='cdew', disease='MM', concept_id=ConceptFactory().concept_id,
+                                              period='2026-10', document_count=5)
+    accepted = RelevanceSignal.objects.create(source='cdew', disease='MM', concept_id=ConceptFactory().concept_id,
+                                              period='2026-10', document_count=5, status='accepted')
+    api = APIClient()
+    api.force_authenticate(user)
+
+    queue = api.get(SIGNALS, {'status': 'all'})
+    assert queue.status_code == 200
+    assert queue.data['permissions'] == {'can_accept': can_accept, 'can_reject': can_reject}
+
+    def patch(signal, status):
+        return api.patch(f'{SIGNALS}{signal.id}/', {'status': status}, format='json').status_code
+
+    assert patch(proposed, 'accepted') == (200 if can_accept else 403)
+    proposed.refresh_from_db()
+    if proposed.status == 'accepted':
+        proposed.status = 'proposed'
+        proposed.save()
+    assert patch(proposed, 'rejected') == (200 if can_reject else 403)
+    if can_reject:
+        assert patch(proposed, 'proposed') == 200
+    assert patch(accepted, 'proposed') == (200 if can_accept else 403)

@@ -20,7 +20,7 @@ from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
 from django.db import IntegrityError, models, transaction
 from django.db.models import Case, CharField, Count, F, IntegerField, Prefetch, Q, Value, When
-from django.db.models.functions import Concat, Length
+from django.db.models.functions import Cast, Concat, Length
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
@@ -10177,7 +10177,15 @@ def mapping_stats(request):
     code_proposed = SourceCodeConceptMapping.objects.filter(status='proposed').count()
     code_total = code_approved + code_proposed
 
+    from omop_core.models import RelevanceSignal
+    # Decisions are per (disease, concept) pair, so count pairs, not period rows.
+    signal_pairs = dict(
+        RelevanceSignal.objects.values('status')
+        .annotate(n=Count(Concat('disease', Value(':'), Cast('concept_id', CharField())), distinct=True))
+        .values_list('status', 'n'))
+
     return Response({
+        'relevance_signals': {s: signal_pairs.get(s, 0) for s in ('proposed', 'accepted', 'rejected')},
         'field_mappings': {'total': field_total, 'approved': field_approved, 'proposed': field_proposed, 'unmapped': field_unmapped},
         'code_mappings': {'total': code_total, 'approved': code_approved, 'proposed': code_proposed},
         'therapy': {
