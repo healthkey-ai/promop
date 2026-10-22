@@ -78,6 +78,7 @@ function renderTab(
   formData: Record<string, unknown> = {},
   onChange: (field: string, value: unknown) => void = vi.fn(),
   showCoordinates = true,
+  patientMode = false,
 ) {
   return render(
     <GeneralTab
@@ -87,6 +88,7 @@ function renderTab(
       onNameChange={vi.fn()}
       onZipcodeChange={vi.fn()}
       showCoordinates={showCoordinates}
+      patientMode={patientMode}
     />,
   );
 }
@@ -268,6 +270,13 @@ describe('GeneralTab — previously unreachable Person fields', () => {
 
     expect(screen.getByText('Clinician Validation')).toBeInTheDocument();
     expect(screen.getByDisplayValue('Dr Chen')).toBeInTheDocument();
+  });
+
+  it('hides clinician validation from the patient-facing view', async () => {
+    renderTab({ validated_by: 'Dr Chen' }, vi.fn(), true, true);
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+    expect(screen.queryByText('Clinician Validation')).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue('Dr Chen')).not.toBeInTheDocument();
   });
 
   it('offers no result date for a Person attribute', async () => {

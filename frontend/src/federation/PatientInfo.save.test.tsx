@@ -106,6 +106,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   resetClinicalTransport();
+  window.history.replaceState({}, '', '/');
 });
 
 async function renderAndLoad() {
@@ -127,6 +128,27 @@ async function editAndSave(displayValue: string, next: string) {
 }
 
 describe('federated PatientInfo save', () => {
+  it('labels mantle cell lymphoma as its own disease tab', async () => {
+    (client.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url.includes('writable-fields')) return Promise.resolve({ data: DESCRIPTORS });
+      if (url.includes('/patient-info/me/')) return Promise.resolve({ data: {
+        patient_info: { ...PATIENT_INFO, disease: 'mantle cell lymphoma' },
+        user: { name: 'Alishia Howell', email: 'howell@example.org' },
+        patient_name: 'Alishia Tawny Howell',
+      } });
+      return Promise.resolve({ data: [] });
+    });
+    await renderAndLoad();
+    expect(screen.getByRole('button', { name: 'Mantle Cell Lymphoma' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Follicular Lymphoma' })).not.toBeInTheDocument();
+  });
+
+  it('opens the tab named by the host deep link', async () => {
+    window.history.replaceState({}, '', '/info?tab=labs');
+    render(<PatientInfo apiClient={client} apiBasePath="/api" queryClient={qc} />);
+    await waitFor(() => expect(screen.getByText('Blood Counts')).toBeInTheDocument());
+  });
+
   it('fetches the descriptor through the host client, not the app singleton', async () => {
     await renderAndLoad();
     await openLabsTab();

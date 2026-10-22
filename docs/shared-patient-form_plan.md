@@ -23,6 +23,14 @@ submitted field. Computed results remain read-only.
 
 ## Remaining acceptance gates
 
+The CB integration lane targets `cb-v2`, not `dev`. This branch is based on
+`cb-v2` at `12606c9` and ports only the shared form plus its profile-parity
+regressions; it does not bring the unrelated `dev`-side medical changes along.
+The CI trigger includes `cb-v2` so the normal application/security jobs run on
+the integration PR. CB records any pre-merge pin as an exact-SHA, expiring
+exception naming the actual published feature branch. Integration does not wait
+for promotion to `dev`, and no ancestry or security check is disabled.
+
 - BMI is verified end to end on synthetic local data. SLiM/CRAB and MIPI/MCL
   input/result compatibility remains blocked on clinical review and complete
   reviewed bindings. Do not change formulas to make the extraction appear done.
