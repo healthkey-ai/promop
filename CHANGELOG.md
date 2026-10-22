@@ -8,6 +8,18 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **A recorded line no longer has to name its drugs, and a wrong line can be
+  withdrawn** — the therapy editor offers "I don't know which drugs were given",
+  which records that the line happened with an unknown composition instead of
+  refusing to save. That is a deliberate choice, not an empty form: a payload
+  with no drugs, no regimen and no such statement is still rejected. Separately,
+  each line has a Remove action that retracts the claim it happened; the line
+  leaves the history and its imported drug exposures are kept, which is a
+  different action from ticking "drugs unknown" on an existing line, where the
+  line stays and only its composition is cleared. The write payload carries
+  `composition_unknown` and `DELETE /v1/therapy-lines/<id>/` performs the
+  retraction (#1924).
+
 - **The patient-info widget ships with the therapy editor** — `npm run
   build:widget` produces the self-contained bundle a host on another React
   version mounts, and that bundle now includes the treatment editor, so a

@@ -25,6 +25,8 @@ export interface TherapyLinePayload {
   start_date?: string | null;
   end_date?: string | null;
   drugs: TherapyLineDrug[];
+  /** Record/keep the line without claiming which drugs were given. */
+  composition_unknown?: boolean;
   regimen_concept_id?: number | null;
   outcome?: string | null;
   intent?: string | null;
@@ -50,6 +52,8 @@ export interface EditableTherapyLine {
   discontinuation_reason?: string | null;
   regimen?: string | null;
   regimen_concept_id?: number | null;
+  /** False when the line is recorded without its drug composition (#1924). */
+  composition_known?: boolean;
   drugs?: Array<DrugConcept & TherapyLineDrug>;
 }
 
@@ -143,5 +147,11 @@ export async function updateTherapyLine(
     clinicalUrl(`/v1/therapy-lines/${episodeId}/`),
     payload,
   );
+  return resp.data as TherapyLineResult;
+}
+
+/** Withdraw the claim that this line happened (not the same as clearing its drugs). */
+export async function retractTherapyLine(episodeId: number): Promise<TherapyLineResult> {
+  const resp = await clinicalClient().delete(clinicalUrl(`/v1/therapy-lines/${episodeId}/`));
   return resp.data as TherapyLineResult;
 }
