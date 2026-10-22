@@ -216,10 +216,24 @@ async function run({ github, context, core }) {
     try {
       // An event means something that feeds the verdict may just have changed
       // (a label, a review, the PR body), so the old verdict is marked pending
-      // while it is rechecked. The five-minute reconciliation changes nothing by
-      // itself, so it only needs `pending` on a commit that has no status yet.
+      // while it is rechecked. Only the triggering PR can have changed; every
+      // other open PR is just being reconciled by this run, like the
+      // five-minute schedule. Marking all of them pending burns two statuses per
+      // PR per event and can freeze a SHA at `pending` once GitHub's 1000-status
+      // cap is reached.
+      //
+      // Issues events have no PR SHA. A security label change there can still
+      // flip any PR referencing the issue, so invalidate all existing verdicts
+      // for that case; other issue edits cannot change a PR's verdict.
+      const changesSecurityIssueLabel =
+        context.eventName === 'issues' &&
+        ['labeled', 'unlabeled'].includes(context.payload?.action) &&
+        securityLabels([context.payload?.label].filter(Boolean));
+      const onlyIfMissingPending =
+        !changesSecurityIssueLabel &&
+        (context.eventName === 'schedule' || !triggering.has(sha));
       await publish('pending', 'Checking security scope and required approval',
-        { onlyIfMissing: context.eventName === 'schedule' });
+        { onlyIfMissing: onlyIfMissingPending });
       const results = [];
       for (const pr of group) {
         const { data: snapshot } = await github.rest.pulls.get({ owner, repo, pull_number: pr.number });
